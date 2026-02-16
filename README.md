@@ -1,6 +1,6 @@
 # yo-agent 🦀
 
-Simple, effective agent loop with tool execution and event streaming. Rust port of [pi-agent-core](https://github.com/badlogic/pi-mono/tree/main/packages/agent).
+Simple, effective agent loop with tool execution and event streaming in Rust. Inspired by [pi-agent-core](https://github.com/badlogic/pi-mono/tree/main/packages/agent).
 
 ## Philosophy
 
