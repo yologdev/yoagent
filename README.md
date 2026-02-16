@@ -1,7 +1,7 @@
 <div align="center">
 
 <picture>
-  <img alt="yoagent" src="docs/images/banner.jpg" width="100%" height="auto">
+  <img alt="yoagent" src="docs/images/banner.png" width="100%" height="auto">
 </picture>
 
 <a href="https://yologdev.github.io/yoagent/">Docs</a> · <a href="https://github.com/yologdev/yoagent">GitHub</a> · <a href="https://deepwiki.com/yologdev/yoagent">DeepWiki</a> · <a href="https://github.com/yologdev/yoagent/issues">Issues</a> · <a href="https://github.com/yologdev/yoagent/releases">Releases</a>
