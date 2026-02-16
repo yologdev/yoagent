@@ -44,56 +44,73 @@ High-level stateful wrapper around the agent loop.
 ### Construction
 
 ```rust
-let agent = Agent::new(provider)
-    .with_system_prompt("You are helpful.")
-    .with_model("claude-sonnet-4-20250514")
-    .with_api_key("sk-...")
-    .with_tools(default_tools())
-    .with_thinking(ThinkingLevel::Medium)
-    .with_max_tokens(4096)
-    .with_context_config(ContextConfig::default())
-    .with_execution_limits(ExecutionLimits::default());
+let agent = Agent::new(provider);
 ```
+
+| Signature | Description |
+|-----------|-------------|
+| `Agent::new(provider: impl StreamProvider + 'static) -> Self` | Create a new agent with the given provider |
+
+### Builder Methods
+
+All return `Self` for chaining.
+
+| Method | Description |
+|--------|-------------|
+| `with_system_prompt(prompt: impl Into<String>) -> Self` | Set the system prompt |
+| `with_model(model: impl Into<String>) -> Self` | Set the model identifier |
+| `with_api_key(key: impl Into<String>) -> Self` | Set the API key |
+| `with_thinking(level: ThinkingLevel) -> Self` | Set thinking level (`Off`, `Minimal`, `Low`, `Medium`, `High`) |
+| `with_tools(tools: Vec<Box<dyn AgentTool>>) -> Self` | Set tools |
+| `with_max_tokens(max: u32) -> Self` | Set max output tokens |
+| `with_context_config(config: ContextConfig) -> Self` | Set context compaction config |
+| `with_execution_limits(limits: ExecutionLimits) -> Self` | Set execution limits (max turns, tokens, duration) |
+| `without_context_management() -> Self` | Disable automatic context compaction and execution limits |
+| `async with_mcp_server_stdio(command, args, env) -> Result<Self, McpError>` | Connect to MCP server via stdio and add its tools |
+| `async with_mcp_server_http(url) -> Result<Self, McpError>` | Connect to MCP server via HTTP and add its tools |
 
 ### Prompting
 
-```rust
-// Text prompt
-let rx: UnboundedReceiver<AgentEvent> = agent.prompt("Hello").await;
+| Method | Description |
+|--------|-------------|
+| `async prompt(text: impl Into<String>) -> UnboundedReceiver<AgentEvent>` | Send a text prompt, returns event stream |
+| `async prompt_messages(messages: Vec<AgentMessage>) -> UnboundedReceiver<AgentEvent>` | Send messages as prompt |
+| `async continue_loop() -> UnboundedReceiver<AgentEvent>` | Resume from current context (for retries) |
 
-// Message prompt
-let rx = agent.prompt_messages(vec![msg]).await;
+### State Access
 
-// Continue from current state
-let rx = agent.continue_loop().await;
-```
+| Method | Description |
+|--------|-------------|
+| `messages() -> &[AgentMessage]` | Get the full message history |
+| `is_streaming() -> bool` | Whether the agent is currently running |
 
-### Steering & Follow-Ups
+### State Mutation
 
-```rust
-// Interrupt agent mid-execution
-agent.steer(AgentMessage::Llm(Message::user("Stop, do this instead")));
+| Method | Description |
+|--------|-------------|
+| `set_tools(tools: Vec<Box<dyn AgentTool>>)` | Replace the tool set |
+| `clear_messages()` | Clear all messages |
+| `append_message(msg: AgentMessage)` | Add a message to history |
+| `replace_messages(msgs: Vec<AgentMessage>)` | Replace all messages |
 
-// Queue work for after agent finishes
-agent.follow_up(AgentMessage::Llm(Message::user("Also do this")));
+### Steering & Follow-Up Queues
 
-// Queue delivery modes
-agent.set_steering_mode(QueueMode::All);       // Deliver all at once
-agent.set_follow_up_mode(QueueMode::OneAtATime); // One per turn
-```
+| Method | Description |
+|--------|-------------|
+| `steer(msg: AgentMessage)` | Queue a steering message (interrupts mid-tool-execution) |
+| `follow_up(msg: AgentMessage)` | Queue a follow-up message (processed after agent finishes) |
+| `clear_steering_queue()` | Clear pending steering messages |
+| `clear_follow_up_queue()` | Clear pending follow-up messages |
+| `clear_all_queues()` | Clear both queues |
+| `set_steering_mode(mode: QueueMode)` | Set delivery mode: `OneAtATime` or `All` |
+| `set_follow_up_mode(mode: QueueMode)` | Set delivery mode: `OneAtATime` or `All` |
 
-### State Management
+### Control
 
-```rust
-agent.messages()          // &[AgentMessage]
-agent.is_streaming()      // bool
-agent.abort()             // Cancel current run
-agent.reset()             // Clear all state
-agent.clear_messages()    // Clear message history
-agent.append_message(msg) // Add a message
-agent.replace_messages(msgs) // Replace all messages
-agent.set_tools(tools)    // Replace tools
-```
+| Method | Description |
+|--------|-------------|
+| `abort()` | Cancel the current run via `CancellationToken` |
+| `reset()` | Clear all state (messages, queues, streaming flag) |
 
 ## Re-exports
 

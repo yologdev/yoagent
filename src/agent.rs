@@ -3,8 +3,10 @@
 
 use crate::agent_loop::{agent_loop, agent_loop_continue, AgentLoopConfig};
 use crate::context::{ContextConfig, ExecutionLimits};
+use crate::mcp::{McpClient, McpError, McpToolAdapter};
 use crate::provider::StreamProvider;
 use crate::types::*;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -116,6 +118,35 @@ impl Agent {
         self.context_config = None;
         self.execution_limits = None;
         self
+    }
+
+    // -- MCP integration --
+
+    /// Connect to an MCP server via stdio and add its tools to the agent.
+    pub async fn with_mcp_server_stdio(
+        mut self,
+        command: &str,
+        args: &[&str],
+        env: Option<HashMap<String, String>>,
+    ) -> Result<Self, McpError> {
+        let client = McpClient::connect_stdio(command, args, env).await?;
+        let client = Arc::new(tokio::sync::Mutex::new(client));
+        let adapters = McpToolAdapter::from_client(client).await?;
+        for adapter in adapters {
+            self.tools.push(Box::new(adapter));
+        }
+        Ok(self)
+    }
+
+    /// Connect to an MCP server via HTTP and add its tools to the agent.
+    pub async fn with_mcp_server_http(mut self, url: &str) -> Result<Self, McpError> {
+        let client = McpClient::connect_http(url).await?;
+        let client = Arc::new(tokio::sync::Mutex::new(client));
+        let adapters = McpToolAdapter::from_client(client).await?;
+        for adapter in adapters {
+            self.tools.push(Box::new(adapter));
+        }
+        Ok(self)
     }
 
     // -- State access --

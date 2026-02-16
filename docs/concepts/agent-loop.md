@@ -99,8 +99,66 @@ pub struct AgentLoopConfig<'a> {
 
 ## Steering & Follow-Ups
 
-**Steering messages** interrupt the agent between tool executions. If a steering message arrives while tools are running, remaining tool calls are skipped with "Skipped due to queued user message."
+### Steering
 
-**Follow-up messages** are checked after the agent would normally stop (no more tool calls). If follow-ups exist, the loop continues with them as new input.
+**Steering messages** interrupt the agent between tool executions. When the agent is executing multiple tool calls from a single LLM response, steering is checked after each tool completes. If a steering message is found:
 
-Both are provided via callback functions that return `Vec<AgentMessage>`.
+1. The current tool finishes normally
+2. All remaining tool calls are **skipped** with `is_error: true` and "Skipped due to queued user message"
+3. The steering message is injected into context
+4. The loop continues with a new LLM call that sees the interruption
+
+```rust
+// While agent is running tools, redirect it:
+agent.steer(AgentMessage::Llm(Message::user("Stop that. Instead, explain what you found.")));
+```
+
+### Follow-Ups
+
+**Follow-up messages** are checked after the agent would normally stop (no more tool calls, no steering). If follow-ups exist, the loop continues with them as new input — the agent doesn't need to be re-prompted.
+
+```rust
+// Queue work for after the agent finishes its current task:
+agent.follow_up(AgentMessage::Llm(Message::user("Now run the tests.")));
+agent.follow_up(AgentMessage::Llm(Message::user("Then commit the changes.")));
+```
+
+### Queue Modes
+
+Both queues support two delivery modes:
+
+| Mode | Behavior |
+|------|----------|
+| `QueueMode::OneAtATime` | Delivers one message per turn (default) |
+| `QueueMode::All` | Delivers all queued messages at once |
+
+```rust
+agent.set_steering_mode(QueueMode::All);
+agent.set_follow_up_mode(QueueMode::OneAtATime);
+```
+
+### Queue Management
+
+```rust
+agent.clear_steering_queue();   // Drop all pending steers
+agent.clear_follow_up_queue();  // Drop all pending follow-ups
+agent.clear_all_queues();       // Drop everything
+```
+
+### Low-Level API
+
+When using `agent_loop()` directly, steering and follow-ups are provided via callback functions:
+
+```rust
+let config = AgentLoopConfig {
+    get_steering_messages: Some(Box::new(|| {
+        // Return Vec<AgentMessage> — checked between tool calls
+        vec![]
+    })),
+    get_follow_up_messages: Some(Box::new(|| {
+        // Return Vec<AgentMessage> — checked when agent would stop
+        vec![]
+    })),
+    // ...
+};
+```

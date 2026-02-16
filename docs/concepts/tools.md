@@ -111,6 +111,27 @@ tools.push(Box::new(WeatherTool));
 let agent = Agent::new(provider).with_tools(tools);
 ```
 
+## Error Handling
+
+**Return `Err(ToolError)` on failure, not `Ok` with error text.** When a tool returns `Err`, the agent loop converts it to a `Message::ToolResult` with `is_error: true` and sends it to the LLM. The LLM sees the error and can self-correct — retry with different arguments, try a different approach, or explain the failure to the user.
+
+```rust
+async fn execute(&self, _id: &str, params: serde_json::Value, _cancel: CancellationToken) -> Result<ToolResult, ToolError> {
+    let path = params["path"].as_str()
+        .ok_or(ToolError::InvalidArgs("missing 'path'".into()))?;
+
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| ToolError::Failed(format!("Cannot read {}: {}", path, e)))?;
+
+    Ok(ToolResult {
+        content: vec![Content::Text { text: content }],
+        details: serde_json::Value::Null,
+    })
+}
+```
+
+**Exception: BashTool.** The built-in `BashTool` returns `Ok` even on non-zero exit codes, with both stdout and stderr in the result. This is intentional — the LLM needs to see the actual error output (compilation errors, test failures, etc.) to diagnose and fix issues. Only truly exceptional failures (e.g., command not found, cancellation) return `Err`.
+
 ## Tool Execution Flow
 
 1. LLM returns `Content::ToolCall` blocks in its response

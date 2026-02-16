@@ -14,6 +14,10 @@
 - [Tools](concepts/tools.md)
 - [Context Management](concepts/context-management.md)
 
+# Guides
+
+- [MCP Integration](guides/mcp.md)
+
 # Providers
 
 - [Overview](providers/overview.md)

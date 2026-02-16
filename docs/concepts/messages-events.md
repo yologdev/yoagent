@@ -122,3 +122,25 @@ pub enum StreamDelta {
     ToolCallDelta { delta: String },
 }
 ```
+
+## Agent State
+
+The `Agent` struct provides access to its current state:
+
+```rust
+// Check if the agent is currently streaming a response
+if agent.is_streaming() {
+    // Use steer() or follow_up() instead of prompt()
+    agent.steer(AgentMessage::Llm(Message::user("New instruction")));
+}
+
+// Access the full message history
+let messages: &[AgentMessage] = agent.messages();
+
+// Check the last message
+if let Some(last) = messages.last() {
+    println!("Last message role: {}", last.role());
+}
+```
+
+The `is_streaming()` flag is `true` between `prompt()`/`continue_loop()` call and completion. While streaming, calling `prompt()` will panic — use `steer()` or `follow_up()` instead.

@@ -49,7 +49,7 @@ For OpenAI, xAI, Groq, or any compatible API, use `OpenAiCompatProvider` with a 
 
 ```rust
 use yo_agent::{Agent, AgentEvent};
-use yo_agent::provider::{OpenAiCompatProvider, ModelConfig};
+use yo_agent::provider::OpenAiCompatProvider;
 use yo_agent::tools::default_tools;
 
 #[tokio::main]
