@@ -1,7 +1,7 @@
 //! Anthropic Claude provider (Messages API with streaming)
 
-use crate::types::*;
 use super::traits::*;
+use crate::types::*;
 use async_trait::async_trait;
 use futures::StreamExt;
 use reqwest_eventsource::{Event, EventSource};
@@ -33,8 +33,8 @@ impl StreamProvider for AnthropicProvider {
             .header("content-type", "application/json")
             .json(&body);
 
-        let mut es = EventSource::new(request)
-            .map_err(|e| ProviderError::Network(e.to_string()))?;
+        let mut es =
+            EventSource::new(request).map_err(|e| ProviderError::Network(e.to_string()))?;
 
         let mut content: Vec<Content> = Vec::new();
         let mut usage = Usage::default();
@@ -189,7 +189,9 @@ impl StreamProvider for AnthropicProvider {
             }
         }
 
-        let has_tool_calls = content.iter().any(|c| matches!(c, Content::ToolCall { .. }));
+        let has_tool_calls = content
+            .iter()
+            .any(|c| matches!(c, Content::ToolCall { .. }));
         if has_tool_calls {
             stop_reason = StopReason::ToolUse;
         }
@@ -204,7 +206,9 @@ impl StreamProvider for AnthropicProvider {
             error_message: None,
         };
 
-        let _ = tx.send(StreamEvent::Done { message: message.clone() });
+        let _ = tx.send(StreamEvent::Done {
+            message: message.clone(),
+        });
         Ok(message)
     }
 }
@@ -230,11 +234,19 @@ fn build_request_body(config: &StreamConfig) -> serde_json::Value {
                     "content": content_to_anthropic(content),
                 }));
             }
-            Message::ToolResult { tool_call_id, content, is_error, .. } => {
-                let text = content.iter().find_map(|c| match c {
-                    Content::Text { text } => Some(text.clone()),
-                    _ => None,
-                }).unwrap_or_default();
+            Message::ToolResult {
+                tool_call_id,
+                content,
+                is_error,
+                ..
+            } => {
+                let text = content
+                    .iter()
+                    .find_map(|c| match c {
+                        Content::Text { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
 
                 messages.push(serde_json::json!({
                     "role": "user",
@@ -278,13 +290,17 @@ fn build_request_body(config: &StreamConfig) -> serde_json::Value {
     }
 
     if !config.tools.is_empty() {
-        let tools: Vec<serde_json::Value> = config.tools.iter().map(|t| {
-            serde_json::json!({
-                "name": t.name,
-                "description": t.description,
-                "input_schema": t.parameters,
+        let tools: Vec<serde_json::Value> = config
+            .tools
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "input_schema": t.parameters,
+                })
             })
-        }).collect();
+            .collect();
         body["tools"] = serde_json::json!(tools);
     }
 
@@ -310,24 +326,34 @@ fn build_request_body(config: &StreamConfig) -> serde_json::Value {
 }
 
 fn content_to_anthropic(content: &[Content]) -> Vec<serde_json::Value> {
-    content.iter().filter_map(|c| match c {
-        Content::Text { text } => Some(serde_json::json!({"type": "text", "text": text})),
-        Content::Image { data, mime_type } => Some(serde_json::json!({
-            "type": "image",
-            "source": {"type": "base64", "media_type": mime_type, "data": data},
-        })),
-        Content::Thinking { thinking, signature } => Some(serde_json::json!({
-            "type": "thinking",
-            "thinking": thinking,
-            "signature": signature.as_deref().unwrap_or(""),
-        })),
-        Content::ToolCall { id, name, arguments } => Some(serde_json::json!({
-            "type": "tool_use",
-            "id": id,
-            "name": name,
-            "input": arguments,
-        })),
-    }).collect()
+    content
+        .iter()
+        .map(|c| match c {
+            Content::Text { text } => serde_json::json!({"type": "text", "text": text}),
+            Content::Image { data, mime_type } => serde_json::json!({
+                "type": "image",
+                "source": {"type": "base64", "media_type": mime_type, "data": data},
+            }),
+            Content::Thinking {
+                thinking,
+                signature,
+            } => serde_json::json!({
+                "type": "thinking",
+                "thinking": thinking,
+                "signature": signature.as_deref().unwrap_or(""),
+            }),
+            Content::ToolCall {
+                id,
+                name,
+                arguments,
+            } => serde_json::json!({
+                "type": "tool_use",
+                "id": id,
+                "name": name,
+                "input": arguments,
+            }),
+        })
+        .collect()
 }
 
 // Anthropic SSE event types
@@ -363,9 +389,15 @@ struct AnthropicContentBlockStart {
 #[serde(tag = "type")]
 enum AnthropicContentBlock {
     #[serde(rename = "text")]
-    Text { text: String },
+    Text {
+        #[allow(dead_code)]
+        text: String,
+    },
     #[serde(rename = "thinking")]
-    Thinking { thinking: String },
+    Thinking {
+        #[allow(dead_code)]
+        thinking: String,
+    },
     #[serde(rename = "tool_use")]
     ToolUse { id: String, name: String },
 }
@@ -378,6 +410,7 @@ struct AnthropicContentBlockDelta {
 
 #[derive(Deserialize)]
 #[serde(tag = "type")]
+#[allow(clippy::enum_variant_names)]
 enum AnthropicDelta {
     #[serde(rename = "text_delta")]
     TextDelta { text: String },

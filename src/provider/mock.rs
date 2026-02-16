@@ -1,7 +1,7 @@
 //! Mock provider for testing. No real API calls.
 
-use crate::types::*;
 use super::traits::*;
+use crate::types::*;
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
@@ -37,7 +37,12 @@ impl MockProvider {
 
     /// Convenience: sequence of text responses
     pub fn texts(texts: Vec<impl Into<String>>) -> Self {
-        Self::new(texts.into_iter().map(|t| MockResponse::Text(t.into())).collect())
+        Self::new(
+            texts
+                .into_iter()
+                .map(|t| MockResponse::Text(t.into()))
+                .collect(),
+        )
     }
 }
 
@@ -112,7 +117,9 @@ impl StreamProvider for MockProvider {
             }
         };
 
-        let _ = tx.send(StreamEvent::Done { message: message.clone() });
+        let _ = tx.send(StreamEvent::Done {
+            message: message.clone(),
+        });
         Ok(message)
     }
 }

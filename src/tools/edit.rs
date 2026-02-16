@@ -1,5 +1,5 @@
 //! Edit tool — surgical search/replace edits on files.
-//! 
+//!
 //! This is the most important tool for coding agents. Instead of rewriting
 //! entire files, the agent specifies exact text to find and replace.
 //! Modeled after Claude Code's Edit tool and Aider's search/replace blocks.
@@ -9,6 +9,12 @@ use async_trait::async_trait;
 
 /// Surgical file editing via exact text search/replace.
 pub struct EditFileTool;
+
+impl Default for EditFileTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl EditFileTool {
     pub fn new() -> Self {
@@ -72,11 +78,12 @@ impl AgentTool for EditFileTool {
         }
 
         // Read existing file
-        let content = tokio::fs::read_to_string(path)
-            .await
-            .map_err(|e| ToolError::Failed(format!(
-                "Cannot read {}: {}. Use write_file to create new files.", path, e
-            )))?;
+        let content = tokio::fs::read_to_string(path).await.map_err(|e| {
+            ToolError::Failed(format!(
+                "Cannot read {}: {}. Use write_file to create new files.",
+                path, e
+            ))
+        })?;
 
         // Find the old text
         let match_count = content.matches(old_text).count();

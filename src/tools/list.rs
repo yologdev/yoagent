@@ -2,8 +2,8 @@
 
 use crate::types::*;
 use async_trait::async_trait;
-use tokio::process::Command;
 use std::time::Duration;
+use tokio::process::Command;
 
 /// List files and directories. Uses `find` or `fd` for efficient traversal.
 pub struct ListFilesTool {
@@ -77,7 +77,8 @@ impl AgentTool for ListFilesTool {
         // Check path exists
         if !std::path::Path::new(path).exists() {
             return Err(ToolError::Failed(format!(
-                "Directory not found: {}. Check the path and try again.", path
+                "Directory not found: {}. Check the path and try again.",
+                path
             )));
         }
 
@@ -121,7 +122,12 @@ impl AgentTool for ListFilesTool {
         let text = if lines.is_empty() {
             format!("No files found in {}", path)
         } else if truncated {
-            format!("{}\n\n... ({} files, showing first {})", lines.join("\n"), total, self.max_results)
+            format!(
+                "{}\n\n... ({} files, showing first {})",
+                lines.join("\n"),
+                total,
+                self.max_results
+            )
         } else {
             format!("{}\n\n({} files)", lines.join("\n"), total)
         };

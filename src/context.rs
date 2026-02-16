@@ -17,7 +17,7 @@ use crate::types::*;
 /// Rough token estimate: ~4 chars per token for English text.
 /// Good enough for context budgeting. Use tiktoken-rs for precision.
 pub fn estimate_tokens(text: &str) -> usize {
-    (text.len() + 3) / 4
+    text.len().div_ceil(4)
 }
 
 /// Estimate tokens for a single message
@@ -26,9 +26,9 @@ pub fn message_tokens(msg: &AgentMessage) -> usize {
         AgentMessage::Llm(m) => match m {
             Message::User { content, .. } => content_tokens(content) + 4,
             Message::Assistant { content, .. } => content_tokens(content) + 4,
-            Message::ToolResult { content, tool_name, .. } => {
-                content_tokens(content) + estimate_tokens(tool_name) + 8
-            }
+            Message::ToolResult {
+                content, tool_name, ..
+            } => content_tokens(content) + estimate_tokens(tool_name) + 8,
         },
         AgentMessage::Extension { data, .. } => estimate_tokens(&data.to_string()) + 4,
     }
@@ -41,9 +41,9 @@ fn content_tokens(content: &[Content]) -> usize {
             Content::Text { text } => estimate_tokens(text),
             Content::Image { .. } => 1000,
             Content::Thinking { thinking, .. } => estimate_tokens(thinking),
-            Content::ToolCall { name, arguments, .. } => {
-                estimate_tokens(name) + estimate_tokens(&arguments.to_string()) + 8
-            }
+            Content::ToolCall {
+                name, arguments, ..
+            } => estimate_tokens(name) + estimate_tokens(&arguments.to_string()) + 8,
         })
         .sum()
 }
@@ -95,11 +95,10 @@ impl Default for ContextConfig {
 /// - Level 3: Drop old messages (keep first + recent only)
 ///
 /// Each level is tried in order. Returns as soon as messages fit.
-pub fn compact_messages(
-    messages: Vec<AgentMessage>,
-    config: &ContextConfig,
-) -> Vec<AgentMessage> {
-    let budget = config.max_context_tokens.saturating_sub(config.system_prompt_tokens);
+pub fn compact_messages(messages: Vec<AgentMessage>, config: &ContextConfig) -> Vec<AgentMessage> {
+    let budget = config
+        .max_context_tokens
+        .saturating_sub(config.system_prompt_tokens);
 
     // Already fits?
     if total_tokens(&messages) <= budget {
@@ -127,43 +126,36 @@ pub fn compact_messages(
 /// This is the cheapest compaction — preserves conversation structure,
 /// just removes verbose tool output middles. In practice this saves
 /// 50-70% of context in coding sessions.
-fn level1_truncate_tool_outputs(
-    messages: &[AgentMessage],
-    max_lines: usize,
-) -> Vec<AgentMessage> {
+fn level1_truncate_tool_outputs(messages: &[AgentMessage], max_lines: usize) -> Vec<AgentMessage> {
     messages
         .iter()
-        .map(|msg| {
-            match msg {
-                AgentMessage::Llm(Message::ToolResult {
-                    tool_call_id,
-                    tool_name,
-                    content,
-                    is_error,
-                    timestamp,
-                }) => {
-                    let truncated_content: Vec<Content> = content
-                        .iter()
-                        .map(|c| match c {
-                            Content::Text { text } => {
-                                Content::Text {
-                                    text: truncate_text_head_tail(text, max_lines),
-                                }
-                            }
-                            other => other.clone(),
-                        })
-                        .collect();
-
-                    AgentMessage::Llm(Message::ToolResult {
-                        tool_call_id: tool_call_id.clone(),
-                        tool_name: tool_name.clone(),
-                        content: truncated_content,
-                        is_error: *is_error,
-                        timestamp: *timestamp,
+        .map(|msg| match msg {
+            AgentMessage::Llm(Message::ToolResult {
+                tool_call_id,
+                tool_name,
+                content,
+                is_error,
+                timestamp,
+            }) => {
+                let truncated_content: Vec<Content> = content
+                    .iter()
+                    .map(|c| match c {
+                        Content::Text { text } => Content::Text {
+                            text: truncate_text_head_tail(text, max_lines),
+                        },
+                        other => other.clone(),
                     })
-                }
-                other => other.clone(),
+                    .collect();
+
+                AgentMessage::Llm(Message::ToolResult {
+                    tool_call_id: tool_call_id.clone(),
+                    tool_name: tool_name.clone(),
+                    content: truncated_content,
+                    is_error: *is_error,
+                    timestamp: *timestamp,
+                })
             }
+            other => other.clone(),
         })
         .collect()
 }
@@ -190,10 +182,7 @@ fn truncate_text_head_tail(text: &str, max_lines: usize) -> String {
 /// Keeps the last `keep_recent` messages in full detail.
 /// For older messages: assistant messages with tool calls get replaced
 /// with a short summary, and their tool results get dropped.
-fn level2_summarize_old_turns(
-    messages: &[AgentMessage],
-    keep_recent: usize,
-) -> Vec<AgentMessage> {
+fn level2_summarize_old_turns(messages: &[AgentMessage], keep_recent: usize) -> Vec<AgentMessage> {
     let len = messages.len();
     if len <= keep_recent {
         return messages.to_vec();
@@ -435,10 +424,13 @@ mod tests {
 
     #[test]
     fn test_truncate_head_tail() {
-        let text = (1..=100).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
+        let text = (1..=100)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
         let result = truncate_text_head_tail(&text, 10);
         assert!(result.contains("line 1"));
-        assert!(result.contains("line 5"));   // head
+        assert!(result.contains("line 5")); // head
         assert!(result.contains("line 100")); // tail
         assert!(result.contains("truncated"));
         assert!(!result.contains("line 50")); // middle removed
@@ -446,7 +438,10 @@ mod tests {
 
     #[test]
     fn test_level1_truncation() {
-        let big_output = (1..=200).map(|i| format!("output line {}", i)).collect::<Vec<_>>().join("\n");
+        let big_output = (1..=200)
+            .map(|i| format!("output line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
         let messages = vec![
             AgentMessage::Llm(Message::user("do something")),
             AgentMessage::Llm(Message::ToolResult {
@@ -463,7 +458,7 @@ mod tests {
         if let AgentMessage::Llm(Message::ToolResult { content, .. }) = tool_msg {
             if let Content::Text { text } = &content[0] {
                 assert!(text.contains("truncated"));
-                assert!(text.contains("output line 1"));   // head
+                assert!(text.contains("output line 1")); // head
                 assert!(text.contains("output line 200")); // tail
                 assert!(text.lines().count() < 50);
             } else {
@@ -489,9 +484,11 @@ mod tests {
     fn test_compact_drops_middle_when_needed() {
         let mut messages = Vec::new();
         for i in 0..100 {
-            messages.push(AgentMessage::Llm(Message::user(
-                format!("Message {} {}", i, "x".repeat(200)),
-            )));
+            messages.push(AgentMessage::Llm(Message::user(format!(
+                "Message {} {}",
+                i,
+                "x".repeat(200)
+            ))));
         }
 
         let config = ContextConfig {

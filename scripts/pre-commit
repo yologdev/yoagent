@@ -1,0 +1,25 @@
+#!/bin/sh
+# Pre-commit hook: fmt + clippy check
+
+if ! command -v cargo >/dev/null 2>&1; then
+  if [ -f "$HOME/.cargo/env" ]; then
+    . "$HOME/.cargo/env"
+  else
+    echo "cargo not found, skipping checks"
+    exit 0
+  fi
+fi
+
+echo "Running cargo fmt..."
+cargo fmt -- --check || {
+  echo "❌ Format check failed. Run 'cargo fmt' to fix."
+  exit 1
+}
+
+echo "Running cargo clippy..."
+cargo clippy --all-targets -- -D warnings || {
+  echo "❌ Clippy found issues."
+  exit 1
+}
+
+echo "✅ Pre-commit checks passed."

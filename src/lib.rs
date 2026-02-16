@@ -1,9 +1,9 @@
-pub mod types;
-pub mod provider;
-pub mod agent_loop;
 pub mod agent;
-pub mod tools;
+pub mod agent_loop;
 pub mod context;
+pub mod provider;
+pub mod tools;
+pub mod types;
 
 pub use agent::Agent;
 pub use agent_loop::{agent_loop, agent_loop_continue};

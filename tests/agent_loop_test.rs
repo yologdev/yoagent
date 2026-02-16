@@ -1,11 +1,11 @@
 //! Tests for the core agent loop using MockProvider.
 
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+use yo_agent::agent_loop::{agent_loop, agent_loop_continue, AgentLoopConfig};
 use yo_agent::provider::mock::*;
 use yo_agent::provider::MockProvider;
 use yo_agent::*;
-use yo_agent::agent_loop::{agent_loop, agent_loop_continue, AgentLoopConfig};
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 
 fn make_config(provider: &MockProvider) -> AgentLoopConfig<'_> {
     AgentLoopConfig {
@@ -53,18 +53,21 @@ async fn test_simple_text_response() {
 
     // Should have: AgentStart, TurnStart, MessageStart(user), MessageEnd(user),
     //              MessageStart(assistant), MessageEnd(assistant), TurnEnd, AgentEnd
-    let event_types: Vec<&str> = events.iter().map(|e| match e {
-        AgentEvent::AgentStart => "AgentStart",
-        AgentEvent::AgentEnd { .. } => "AgentEnd",
-        AgentEvent::TurnStart => "TurnStart",
-        AgentEvent::TurnEnd { .. } => "TurnEnd",
-        AgentEvent::MessageStart { .. } => "MessageStart",
-        AgentEvent::MessageEnd { .. } => "MessageEnd",
-        AgentEvent::MessageUpdate { .. } => "MessageUpdate",
-        AgentEvent::ToolExecutionStart { .. } => "ToolExecStart",
-        AgentEvent::ToolExecutionUpdate { .. } => "ToolExecUpdate",
-        AgentEvent::ToolExecutionEnd { .. } => "ToolExecEnd",
-    }).collect();
+    let event_types: Vec<&str> = events
+        .iter()
+        .map(|e| match e {
+            AgentEvent::AgentStart => "AgentStart",
+            AgentEvent::AgentEnd { .. } => "AgentEnd",
+            AgentEvent::TurnStart => "TurnStart",
+            AgentEvent::TurnEnd { .. } => "TurnEnd",
+            AgentEvent::MessageStart { .. } => "MessageStart",
+            AgentEvent::MessageEnd { .. } => "MessageEnd",
+            AgentEvent::MessageUpdate { .. } => "MessageUpdate",
+            AgentEvent::ToolExecutionStart { .. } => "ToolExecStart",
+            AgentEvent::ToolExecutionUpdate { .. } => "ToolExecUpdate",
+            AgentEvent::ToolExecutionEnd { .. } => "ToolExecEnd",
+        })
+        .collect();
 
     assert!(event_types.contains(&"AgentStart"));
     assert!(event_types.contains(&"AgentEnd"));
@@ -96,9 +99,15 @@ async fn test_tool_call_and_response() {
 
     #[async_trait::async_trait]
     impl AgentTool for ReadFileTool {
-        fn name(&self) -> &str { "read_file" }
-        fn label(&self) -> &str { "Read File" }
-        fn description(&self) -> &str { "Read a file" }
+        fn name(&self) -> &str {
+            "read_file"
+        }
+        fn label(&self) -> &str {
+            "Read File"
+        }
+        fn description(&self) -> &str {
+            "Read a file"
+        }
         fn parameters_schema(&self) -> serde_json::Value {
             serde_json::json!({
                 "type": "object",
@@ -114,7 +123,9 @@ async fn test_tool_call_and_response() {
             _cancel: tokio_util::sync::CancellationToken,
         ) -> Result<ToolResult, ToolError> {
             Ok(ToolResult {
-                content: vec![Content::Text { text: "hello".into() }],
+                content: vec![Content::Text {
+                    text: "hello".into(),
+                }],
                 details: serde_json::Value::Null,
             })
         }
@@ -136,18 +147,21 @@ async fn test_tool_call_and_response() {
 
     let events = collect_events(rx);
 
-    let event_types: Vec<&str> = events.iter().map(|e| match e {
-        AgentEvent::AgentStart => "AgentStart",
-        AgentEvent::AgentEnd { .. } => "AgentEnd",
-        AgentEvent::TurnStart => "TurnStart",
-        AgentEvent::TurnEnd { .. } => "TurnEnd",
-        AgentEvent::MessageStart { .. } => "MessageStart",
-        AgentEvent::MessageEnd { .. } => "MessageEnd",
-        AgentEvent::MessageUpdate { .. } => "MessageUpdate",
-        AgentEvent::ToolExecutionStart { .. } => "ToolExecStart",
-        AgentEvent::ToolExecutionUpdate { .. } => "ToolExecUpdate",
-        AgentEvent::ToolExecutionEnd { .. } => "ToolExecEnd",
-    }).collect();
+    let event_types: Vec<&str> = events
+        .iter()
+        .map(|e| match e {
+            AgentEvent::AgentStart => "AgentStart",
+            AgentEvent::AgentEnd { .. } => "AgentEnd",
+            AgentEvent::TurnStart => "TurnStart",
+            AgentEvent::TurnEnd { .. } => "TurnEnd",
+            AgentEvent::MessageStart { .. } => "MessageStart",
+            AgentEvent::MessageEnd { .. } => "MessageEnd",
+            AgentEvent::MessageUpdate { .. } => "MessageUpdate",
+            AgentEvent::ToolExecutionStart { .. } => "ToolExecStart",
+            AgentEvent::ToolExecutionUpdate { .. } => "ToolExecUpdate",
+            AgentEvent::ToolExecutionEnd { .. } => "ToolExecEnd",
+        })
+        .collect();
 
     // Should have tool execution events
     assert!(event_types.contains(&"ToolExecStart"));
@@ -174,7 +188,7 @@ async fn test_abort_cancels_loop() {
     };
 
     let prompt = AgentMessage::Llm(Message::user("Hi"));
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (tx, _rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
     // Cancel immediately
@@ -199,7 +213,9 @@ async fn test_continue_from_tool_result() {
             AgentMessage::Llm(Message::ToolResult {
                 tool_call_id: "tc-1".into(),
                 tool_name: "test_tool".into(),
-                content: vec![Content::Text { text: "result".into() }],
+                content: vec![Content::Text {
+                    text: "result".into(),
+                }],
                 is_error: false,
                 timestamp: 0,
             }),
@@ -207,7 +223,7 @@ async fn test_continue_from_tool_result() {
         tools: Vec::new(),
     };
 
-    let (tx, rx) = mpsc::unbounded_channel();
+    let (tx, _rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
     let new_messages = agent_loop_continue(&mut context, &config, tx, cancel).await;
@@ -230,10 +246,18 @@ async fn test_tool_error_is_reported() {
 
     #[async_trait::async_trait]
     impl AgentTool for FailingTool {
-        fn name(&self) -> &str { "failing_tool" }
-        fn label(&self) -> &str { "Failing Tool" }
-        fn description(&self) -> &str { "Always fails" }
-        fn parameters_schema(&self) -> serde_json::Value { serde_json::json!({}) }
+        fn name(&self) -> &str {
+            "failing_tool"
+        }
+        fn label(&self) -> &str {
+            "Failing Tool"
+        }
+        fn description(&self) -> &str {
+            "Always fails"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
         async fn execute(
             &self,
             _id: &str,
@@ -260,7 +284,10 @@ async fn test_tool_error_is_reported() {
     let events = collect_events(rx);
 
     // Tool error should be reported
-    let tool_end_events: Vec<_> = events.iter().filter(|e| matches!(e, AgentEvent::ToolExecutionEnd { is_error: true, .. })).collect();
+    let tool_end_events: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e, AgentEvent::ToolExecutionEnd { is_error: true, .. }))
+        .collect();
     assert_eq!(tool_end_events.len(), 1);
 
     // Should still get a final assistant response
@@ -288,9 +315,12 @@ async fn test_unknown_tool_reports_error() {
     let (tx, rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
-    let new_messages = agent_loop(vec![prompt], &mut context, &config, tx, cancel).await;
+    let _new_messages = agent_loop(vec![prompt], &mut context, &config, tx, cancel).await;
 
     let events = collect_events(rx);
-    let tool_errors: Vec<_> = events.iter().filter(|e| matches!(e, AgentEvent::ToolExecutionEnd { is_error: true, .. })).collect();
+    let tool_errors: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e, AgentEvent::ToolExecutionEnd { is_error: true, .. }))
+        .collect();
     assert_eq!(tool_errors.len(), 1);
 }

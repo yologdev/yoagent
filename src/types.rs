@@ -214,15 +214,40 @@ pub enum ToolError {
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
     AgentStart,
-    AgentEnd { messages: Vec<AgentMessage> },
+    AgentEnd {
+        messages: Vec<AgentMessage>,
+    },
     TurnStart,
-    TurnEnd { message: AgentMessage, tool_results: Vec<Message> },
-    MessageStart { message: AgentMessage },
-    MessageUpdate { message: AgentMessage, delta: StreamDelta },
-    MessageEnd { message: AgentMessage },
-    ToolExecutionStart { tool_call_id: String, tool_name: String, args: serde_json::Value },
-    ToolExecutionUpdate { tool_call_id: String, tool_name: String, partial_result: ToolResult },
-    ToolExecutionEnd { tool_call_id: String, tool_name: String, result: ToolResult, is_error: bool },
+    TurnEnd {
+        message: AgentMessage,
+        tool_results: Vec<Message>,
+    },
+    MessageStart {
+        message: AgentMessage,
+    },
+    MessageUpdate {
+        message: AgentMessage,
+        delta: StreamDelta,
+    },
+    MessageEnd {
+        message: AgentMessage,
+    },
+    ToolExecutionStart {
+        tool_call_id: String,
+        tool_name: String,
+        args: serde_json::Value,
+    },
+    ToolExecutionUpdate {
+        tool_call_id: String,
+        tool_name: String,
+        partial_result: ToolResult,
+    },
+    ToolExecutionEnd {
+        tool_call_id: String,
+        tool_name: String,
+        result: ToolResult,
+        is_error: bool,
+    },
 }
 
 #[derive(Debug, Clone)]

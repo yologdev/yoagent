@@ -2,8 +2,8 @@
 
 use crate::types::*;
 use async_trait::async_trait;
-use tokio::process::Command;
 use std::time::Duration;
+use tokio::process::Command;
 
 /// Search files using grep (or ripgrep if available).
 pub struct SearchTool {
@@ -100,9 +100,21 @@ impl AgentTool for SearchTool {
 
         // Try ripgrep first, fall back to grep
         let (cmd_name, args) = if which_exists("rg") {
-            build_rg_args(pattern, &search_path, include, case_sensitive, self.max_results)
+            build_rg_args(
+                pattern,
+                &search_path,
+                include,
+                case_sensitive,
+                self.max_results,
+            )
         } else {
-            build_grep_args(pattern, &search_path, include, case_sensitive, self.max_results)
+            build_grep_args(
+                pattern,
+                &search_path,
+                include,
+                case_sensitive,
+                self.max_results,
+            )
         };
 
         let mut cmd = Command::new(&cmd_name);
@@ -128,7 +140,9 @@ impl AgentTool for SearchTool {
         let stderr = String::from_utf8_lossy(&result.stderr).to_string();
 
         // grep returns exit code 1 for "no matches" — that's not an error
-        if result.status.code() == Some(2) || (!stderr.is_empty() && result.status.code() != Some(1)) {
+        if result.status.code() == Some(2)
+            || (!stderr.is_empty() && result.status.code() != Some(1))
+        {
             return Err(ToolError::Failed(format!("Search error: {}", stderr)));
         }
 
@@ -143,7 +157,11 @@ impl AgentTool for SearchTool {
 
         let match_count = stdout.lines().count();
         let text = if match_count >= self.max_results {
-            format!("{}\n... (showing first {} matches)", stdout.trim(), self.max_results)
+            format!(
+                "{}\n... (showing first {} matches)",
+                stdout.trim(),
+                self.max_results
+            )
         } else {
             format!("{}\n({} matches)", stdout.trim(), match_count)
         };
@@ -197,11 +215,7 @@ fn build_grep_args(
     case_sensitive: bool,
     max_results: usize,
 ) -> (String, Vec<String>) {
-    let mut args = vec![
-        "-r".into(),
-        "-n".into(),
-        format!("-m{}", max_results),
-    ];
+    let mut args = vec!["-r".into(), "-n".into(), format!("-m{}", max_results)];
 
     if !case_sensitive {
         args.push("-i".into());

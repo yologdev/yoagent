@@ -1,8 +1,8 @@
 //! Tests for the Agent struct (stateful wrapper).
 
+use yo_agent::agent::Agent;
 use yo_agent::provider::mock::*;
 use yo_agent::provider::MockProvider;
-use yo_agent::agent::{Agent, QueueMode};
 use yo_agent::*;
 
 #[tokio::test]
@@ -48,9 +48,15 @@ async fn test_agent_with_tools() {
 
     #[async_trait::async_trait]
     impl AgentTool for EchoTool {
-        fn name(&self) -> &str { "echo" }
-        fn label(&self) -> &str { "Echo" }
-        fn description(&self) -> &str { "Echoes input" }
+        fn name(&self) -> &str {
+            "echo"
+        }
+        fn label(&self) -> &str {
+            "Echo"
+        }
+        fn description(&self) -> &str {
+            "Echoes input"
+        }
         fn parameters_schema(&self) -> serde_json::Value {
             serde_json::json!({"type": "object", "properties": {"text": {"type": "string"}}})
         }

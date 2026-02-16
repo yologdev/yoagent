@@ -12,7 +12,11 @@ pub enum StreamEvent {
     /// Thinking content delta
     ThinkingDelta { content_index: usize, delta: String },
     /// Tool call started
-    ToolCallStart { content_index: usize, id: String, name: String },
+    ToolCallStart {
+        content_index: usize,
+        id: String,
+        name: String,
+    },
     /// Tool call argument delta
     ToolCallDelta { content_index: usize, delta: String },
     /// Tool call ended

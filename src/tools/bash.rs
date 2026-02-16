@@ -1,9 +1,12 @@
 //! Bash tool — execute shell commands with timeout and output capture.
 
 use crate::types::*;
+
+/// Type alias for command confirmation callback.
+pub type ConfirmFn = Box<dyn Fn(&str) -> bool + Send + Sync>;
 use async_trait::async_trait;
-use tokio::process::Command;
 use std::time::Duration;
+use tokio::process::Command;
 
 /// Execute shell commands. Captures stdout + stderr.
 pub struct BashTool {
@@ -16,7 +19,7 @@ pub struct BashTool {
     /// Commands/patterns that are always blocked (e.g., "rm -rf /")
     pub deny_patterns: Vec<String>,
     /// Optional callback for confirming dangerous commands
-    pub confirm_fn: Option<Box<dyn Fn(&str) -> bool + Send + Sync>>,
+    pub confirm_fn: Option<ConfirmFn>,
 }
 
 impl Default for BashTool {
@@ -114,7 +117,7 @@ impl AgentTool for BashTool {
         if let Some(ref confirm) = self.confirm_fn {
             if !confirm(command) {
                 return Err(ToolError::Failed(
-                    "Command was not confirmed by the user.".into()
+                    "Command was not confirmed by the user.".into(),
                 ));
             }
         }
@@ -167,7 +170,10 @@ impl AgentTool for BashTool {
         let output = if stderr.is_empty() {
             format!("Exit code: {}\n{}", exit_code, stdout)
         } else {
-            format!("Exit code: {}\nSTDOUT:\n{}\nSTDERR:\n{}", exit_code, stdout, stderr)
+            format!(
+                "Exit code: {}\nSTDOUT:\n{}\nSTDERR:\n{}",
+                exit_code, stdout, stderr
+            )
         };
 
         // Return output even on failure — LLMs need error output to self-correct

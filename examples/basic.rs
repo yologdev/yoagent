@@ -17,11 +17,16 @@ async fn main() {
 
     println!("Sending prompt...");
 
-    let mut rx = agent.prompt("What is Rust's ownership model in 2 sentences?").await;
+    let mut rx = agent
+        .prompt("What is Rust's ownership model in 2 sentences?")
+        .await;
 
     while let Some(event) = rx.recv().await {
         match event {
-            AgentEvent::MessageUpdate { delta: StreamDelta::Text { delta }, .. } => {
+            AgentEvent::MessageUpdate {
+                delta: StreamDelta::Text { delta },
+                ..
+            } => {
                 print!("{}", delta);
             }
             AgentEvent::AgentEnd { .. } => {

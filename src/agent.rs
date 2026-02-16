@@ -195,10 +195,7 @@ impl Agent {
     // -- Prompting --
 
     /// Send a text prompt. Returns a stream of AgentEvents.
-    pub async fn prompt(
-        &mut self,
-        text: impl Into<String>,
-    ) -> mpsc::UnboundedReceiver<AgentEvent> {
+    pub async fn prompt(&mut self, text: impl Into<String>) -> mpsc::UnboundedReceiver<AgentEvent> {
         let msg = AgentMessage::Llm(Message::user(text));
         self.prompt_messages(vec![msg]).await
     }
@@ -208,7 +205,10 @@ impl Agent {
         &mut self,
         messages: Vec<AgentMessage>,
     ) -> mpsc::UnboundedReceiver<AgentEvent> {
-        assert!(!self.is_streaming, "Agent is already streaming. Use steer() or follow_up().");
+        assert!(
+            !self.is_streaming,
+            "Agent is already streaming. Use steer() or follow_up()."
+        );
 
         let (tx, rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();

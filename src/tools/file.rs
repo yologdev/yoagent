@@ -138,6 +138,12 @@ impl AgentTool for ReadFileTool {
 /// Write content to a file. Creates parent directories if needed.
 pub struct WriteFileTool;
 
+impl Default for WriteFileTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WriteFileTool {
     pub fn new() -> Self {
         Self
