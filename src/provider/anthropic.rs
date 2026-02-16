@@ -22,16 +22,35 @@ impl StreamProvider for AnthropicProvider {
         tx: mpsc::UnboundedSender<StreamEvent>,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<Message, ProviderError> {
-        let body = build_request_body(&config);
-        debug!("Anthropic request: model={}", config.model);
+        let is_oauth = config.api_key.contains("sk-ant-oat");
+        let body = build_request_body(&config, is_oauth);
+        debug!(
+            "Anthropic request: model={}, oauth={}",
+            config.model, is_oauth
+        );
 
         let client = reqwest::Client::new();
-        let request = client
+        let mut builder = client
             .post(API_URL)
-            .header("x-api-key", &config.api_key)
             .header("anthropic-version", API_VERSION)
-            .header("content-type", "application/json")
-            .json(&body);
+            .header("content-type", "application/json");
+
+        if is_oauth {
+            // OAuth token — Bearer auth with Claude Code identity headers
+            builder = builder
+                .header("authorization", format!("Bearer {}", config.api_key))
+                .header(
+                    "anthropic-beta",
+                    "claude-code-20250219,oauth-2025-04-20,fine-grained-tool-streaming-2025-05-14",
+                )
+                .header("anthropic-dangerous-direct-browser-access", "true")
+                .header("user-agent", "claude-cli/2.1.2 (external, cli)")
+                .header("x-app", "cli");
+        } else {
+            builder = builder.header("x-api-key", &config.api_key);
+        }
+
+        let request = builder.json(&body);
 
         let mut es =
             EventSource::new(request).map_err(|e| ProviderError::Network(e.to_string()))?;
@@ -115,6 +134,19 @@ impl StreamProvider for AnthropicProvider {
                                                 });
                                             }
                                             AnthropicDelta::InputJsonDelta { partial_json } => {
+                                                // Accumulate JSON into a buffer for this tool call
+                                                if let Some(Content::ToolCall { ref mut arguments, .. }) = content.get_mut(idx) {
+                                                    // Append to string buffer stored in arguments
+                                                    // We accumulate the raw JSON string and parse it at content_block_stop
+                                                    let buf = arguments
+                                                        .as_object_mut()
+                                                        .and_then(|o| o.get_mut("__partial_json"))
+                                                        .and_then(|v| v.as_str().map(|s| s.to_string()));
+                                                    let new_buf = format!("{}{}", buf.unwrap_or_default(), partial_json);
+                                                    if let Some(obj) = arguments.as_object_mut() {
+                                                        obj.insert("__partial_json".into(), serde_json::Value::String(new_buf));
+                                                    }
+                                                }
                                                 let _ = tx.send(StreamEvent::ToolCallDelta {
                                                     content_index: idx,
                                                     delta: partial_json,
@@ -132,8 +164,19 @@ impl StreamProvider for AnthropicProvider {
                                     if let Ok(data) = serde_json::from_str::<serde_json::Value>(&msg.data) {
                                         let idx = data["index"].as_u64().unwrap_or(0) as usize;
                                         // Parse accumulated JSON for tool calls
-                                        if let Some(Content::ToolCall { arguments: _, .. }) = content.get_mut(idx) {
-                                            // Arguments will be accumulated from deltas
+                                        if let Some(Content::ToolCall { ref mut arguments, .. }) = content.get_mut(idx) {
+                                            if let Some(partial) = arguments.as_object()
+                                                .and_then(|o| o.get("__partial_json"))
+                                                .and_then(|v| v.as_str())
+                                                .map(|s| s.to_string())
+                                            {
+                                                if let Ok(parsed) = serde_json::from_str(&partial) {
+                                                    *arguments = parsed;
+                                                } else {
+                                                    warn!("Failed to parse tool call JSON: {}", partial);
+                                                    *arguments = serde_json::Value::Object(Default::default());
+                                                }
+                                            }
                                         }
                                         let _ = tx.send(StreamEvent::ToolCallEnd { content_index: idx });
                                     }
@@ -217,7 +260,7 @@ impl StreamProvider for AnthropicProvider {
 // Anthropic API request/response types
 // ---------------------------------------------------------------------------
 
-fn build_request_body(config: &StreamConfig) -> serde_json::Value {
+fn build_request_body(config: &StreamConfig, is_oauth: bool) -> serde_json::Value {
     let mut messages: Vec<serde_json::Value> = Vec::new();
 
     for msg in &config.messages {
@@ -280,8 +323,22 @@ fn build_request_body(config: &StreamConfig) -> serde_json::Value {
         "messages": messages,
     });
 
-    if !config.system_prompt.is_empty() {
-        // Use cache_control on system prompt — same every call, big savings
+    if is_oauth {
+        // OAuth requires Claude Code identity prefix
+        let mut system_blocks = vec![serde_json::json!({
+            "type": "text",
+            "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+            "cache_control": {"type": "ephemeral"}
+        })];
+        if !config.system_prompt.is_empty() {
+            system_blocks.push(serde_json::json!({
+                "type": "text",
+                "text": config.system_prompt,
+                "cache_control": {"type": "ephemeral"}
+            }));
+        }
+        body["system"] = serde_json::json!(system_blocks);
+    } else if !config.system_prompt.is_empty() {
         body["system"] = serde_json::json!([{
             "type": "text",
             "text": config.system_prompt,
