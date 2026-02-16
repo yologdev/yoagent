@@ -358,6 +358,7 @@ mod tests {
             max_tokens: Some(1024),
             temperature: Some(0.7),
             model_config: None,
+            cache_config: CacheConfig::default(),
         };
 
         let body = build_request_body(&config);

@@ -304,10 +304,31 @@ fn build_request_body(config: &StreamConfig, is_oauth: bool) -> serde_json::Valu
         }
     }
 
-    // Add cache_control to the second-to-last message's last content block.
-    // This creates a cache breakpoint — Anthropic caches everything before it.
-    // On subsequent calls, only the new message is processed at full price.
-    if messages.len() >= 2 {
+    // -----------------------------------------------------------------------
+    // Prompt caching — place cache_control breakpoints based on CacheConfig.
+    //
+    // Anthropic caches the full prefix (tools → system → messages) up to each
+    // breakpoint. We use up to 3 breakpoints:
+    //   1. System prompt (stable across turns)
+    //   2. Last tool definition (tools rarely change)
+    //   3. Second-to-last message (conversation history grows, cache the prefix)
+    //
+    // When caching is disabled or strategy is Disabled, no markers are added.
+    // -----------------------------------------------------------------------
+    let cache = &config.cache_config;
+    let caching_enabled = cache.enabled && cache.strategy != CacheStrategy::Disabled;
+    let (cache_system, cache_tools, cache_messages) = match &cache.strategy {
+        CacheStrategy::Auto => (true, true, true),
+        CacheStrategy::Disabled => (false, false, false),
+        CacheStrategy::Manual {
+            cache_system,
+            cache_tools,
+            cache_messages,
+        } => (*cache_system, *cache_tools, *cache_messages),
+    };
+
+    // Breakpoint 3: second-to-last message (cache conversation prefix)
+    if caching_enabled && cache_messages && messages.len() >= 2 {
         let cache_idx = messages.len() - 2;
         if let Some(content) = messages[cache_idx]["content"].as_array_mut() {
             if let Some(last_block) = content.last_mut() {
@@ -323,31 +344,39 @@ fn build_request_body(config: &StreamConfig, is_oauth: bool) -> serde_json::Valu
         "messages": messages,
     });
 
+    // Breakpoint 1: system prompt
     if is_oauth {
-        // OAuth requires Claude Code identity prefix
         let mut system_blocks = vec![serde_json::json!({
             "type": "text",
             "text": "You are Claude Code, Anthropic's official CLI for Claude.",
-            "cache_control": {"type": "ephemeral"}
         })];
         if !config.system_prompt.is_empty() {
             system_blocks.push(serde_json::json!({
                 "type": "text",
                 "text": config.system_prompt,
-                "cache_control": {"type": "ephemeral"}
             }));
+        }
+        // Cache the last system block
+        if caching_enabled && cache_system {
+            if let Some(last) = system_blocks.last_mut() {
+                last["cache_control"] = serde_json::json!({"type": "ephemeral"});
+            }
         }
         body["system"] = serde_json::json!(system_blocks);
     } else if !config.system_prompt.is_empty() {
-        body["system"] = serde_json::json!([{
+        let mut block = serde_json::json!({
             "type": "text",
             "text": config.system_prompt,
-            "cache_control": {"type": "ephemeral"}
-        }]);
+        });
+        if caching_enabled && cache_system {
+            block["cache_control"] = serde_json::json!({"type": "ephemeral"});
+        }
+        body["system"] = serde_json::json!([block]);
     }
 
+    // Breakpoint 2: last tool definition (tools are stable between turns)
     if !config.tools.is_empty() {
-        let tools: Vec<serde_json::Value> = config
+        let mut tools: Vec<serde_json::Value> = config
             .tools
             .iter()
             .map(|t| {
@@ -358,6 +387,11 @@ fn build_request_body(config: &StreamConfig, is_oauth: bool) -> serde_json::Valu
                 })
             })
             .collect();
+        if caching_enabled && cache_tools {
+            if let Some(last_tool) = tools.last_mut() {
+                last_tool["cache_control"] = serde_json::json!({"type": "ephemeral"});
+            }
+        }
         body["tools"] = serde_json::json!(tools);
     }
 
@@ -488,4 +522,130 @@ struct AnthropicMessageDelta {
 #[derive(Deserialize)]
 struct AnthropicMessageDeltaInner {
     stop_reason: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::traits::ToolDefinition;
+
+    fn make_config(cache: CacheConfig) -> StreamConfig {
+        StreamConfig {
+            model: "claude-sonnet-4-20250514".into(),
+            system_prompt: "You are helpful.".into(),
+            messages: vec![
+                Message::user("Hello"),
+                Message::User {
+                    content: vec![Content::Text {
+                        text: "What is 2+2?".into(),
+                    }],
+                    timestamp: 0,
+                },
+            ],
+            tools: vec![ToolDefinition {
+                name: "bash".into(),
+                description: "Run commands".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            }],
+            thinking_level: ThinkingLevel::Off,
+            api_key: "test-key".into(),
+            max_tokens: Some(1024),
+            temperature: None,
+            model_config: None,
+            cache_config: cache,
+        }
+    }
+
+    #[test]
+    fn test_cache_auto_places_all_breakpoints() {
+        let body = build_request_body(&make_config(CacheConfig::default()), false);
+
+        // System prompt should have cache_control
+        let system = &body["system"][0];
+        assert_eq!(system["cache_control"]["type"], "ephemeral");
+
+        // Last tool should have cache_control
+        let tools = body["tools"].as_array().unwrap();
+        let last_tool = tools.last().unwrap();
+        assert_eq!(last_tool["cache_control"]["type"], "ephemeral");
+
+        // Second-to-last message should have cache_control
+        let msgs = body["messages"].as_array().unwrap();
+        let second_to_last = &msgs[msgs.len() - 2];
+        let content = second_to_last["content"].as_array().unwrap();
+        let last_block = content.last().unwrap();
+        assert_eq!(last_block["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn test_cache_disabled_no_breakpoints() {
+        let config = CacheConfig {
+            enabled: false,
+            strategy: CacheStrategy::Auto,
+        };
+        let body = build_request_body(&make_config(config), false);
+
+        // System prompt should NOT have cache_control
+        let system = &body["system"][0];
+        assert!(system.get("cache_control").is_none());
+
+        // Tools should NOT have cache_control
+        let tools = body["tools"].as_array().unwrap();
+        assert!(tools.last().unwrap().get("cache_control").is_none());
+
+        // Messages should NOT have cache_control on any block
+        let msgs = body["messages"].as_array().unwrap();
+        for msg in msgs {
+            if let Some(content) = msg["content"].as_array() {
+                for block in content {
+                    assert!(block.get("cache_control").is_none());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_cache_manual_system_only() {
+        let config = CacheConfig {
+            enabled: true,
+            strategy: CacheStrategy::Manual {
+                cache_system: true,
+                cache_tools: false,
+                cache_messages: false,
+            },
+        };
+        let body = build_request_body(&make_config(config), false);
+
+        // System: cached
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+        // Tools: not cached
+        assert!(body["tools"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()
+            .get("cache_control")
+            .is_none());
+        // Messages: not cached
+        let msgs = body["messages"].as_array().unwrap();
+        let second = &msgs[msgs.len() - 2];
+        let content = second["content"].as_array().unwrap();
+        assert!(content.last().unwrap().get("cache_control").is_none());
+    }
+
+    #[test]
+    fn test_usage_cache_hit_rate() {
+        let usage = Usage {
+            input: 100,
+            output: 50,
+            cache_read: 900,
+            cache_write: 0,
+            total_tokens: 1050,
+        };
+        let rate = usage.cache_hit_rate();
+        assert!((rate - 0.9).abs() < 0.001); // 900 / (100 + 900 + 0) = 0.9
+
+        let empty = Usage::default();
+        assert_eq!(empty.cache_hit_rate(), 0.0);
+    }
 }

@@ -485,6 +485,7 @@ mod tests {
             max_tokens: None,
             temperature: None,
             model_config: Some(model_config.clone()),
+            cache_config: CacheConfig::default(),
         };
 
         let body = build_request_body(&config, &model_config, &OpenAiCompat::openai());
@@ -515,6 +516,7 @@ mod tests {
             max_tokens: Some(1024),
             temperature: Some(0.5),
             model_config: Some(model_config.clone()),
+            cache_config: CacheConfig::default(),
         };
 
         let body = build_request_body(&config, &model_config, &compat);

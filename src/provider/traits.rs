@@ -43,6 +43,8 @@ pub struct StreamConfig {
     /// Optional model configuration for multi-provider support.
     /// When set, providers use this for base_url, compat flags, headers, etc.
     pub model_config: Option<ModelConfig>,
+    /// Prompt caching configuration. Default: enabled with auto strategy.
+    pub cache_config: CacheConfig,
 }
 
 /// Tool definition sent to the LLM (schema only, no execute fn)

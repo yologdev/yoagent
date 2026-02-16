@@ -21,6 +21,7 @@ fn make_config(provider: &MockProvider) -> AgentLoopConfig<'_> {
         get_follow_up_messages: None,
         context_config: None,
         execution_limits: None,
+        cache_config: CacheConfig::default(),
     }
 }
 

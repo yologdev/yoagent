@@ -47,6 +47,9 @@ pub struct AgentLoopConfig<'a> {
 
     /// Execution limits (max turns, tokens, duration).
     pub execution_limits: Option<ExecutionLimits>,
+
+    /// Prompt caching configuration.
+    pub cache_config: CacheConfig,
 }
 
 /// Default convert_to_llm: keep only user/assistant/toolResult messages.
@@ -373,6 +376,7 @@ async fn stream_assistant_response(
         max_tokens: config.max_tokens,
         temperature: config.temperature,
         model_config: None,
+        cache_config: config.cache_config.clone(),
     };
 
     // Stream from provider

@@ -13,6 +13,7 @@
 - [Messages & Events](concepts/messages-events.md)
 - [Tools](concepts/tools.md)
 - [Context Management](concepts/context-management.md)
+- [Prompt Caching](concepts/prompt-caching.md)
 
 # Guides
 

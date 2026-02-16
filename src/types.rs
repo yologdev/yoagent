@@ -149,6 +149,66 @@ pub struct Usage {
     pub total_tokens: u64,
 }
 
+impl Usage {
+    /// Fraction of input tokens served from cache (0.0–1.0).
+    /// Returns 0.0 if no input tokens were processed.
+    pub fn cache_hit_rate(&self) -> f64 {
+        let total_input = self.input + self.cache_read + self.cache_write;
+        if total_input == 0 {
+            return 0.0;
+        }
+        self.cache_read as f64 / total_input as f64
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cache configuration
+// ---------------------------------------------------------------------------
+
+/// Controls prompt caching behavior for providers that support it.
+///
+/// By default, caching is enabled with automatic breakpoint placement.
+/// This gives optimal cost savings without any user configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheConfig {
+    /// Master switch — set to false to disable all caching hints.
+    /// Default: true.
+    pub enabled: bool,
+    /// How cache breakpoints are placed.
+    pub strategy: CacheStrategy,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            strategy: CacheStrategy::Auto,
+        }
+    }
+}
+
+/// Strategy for placing cache breakpoints (Anthropic-specific; other providers
+/// handle caching automatically regardless of this setting).
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum CacheStrategy {
+    /// Automatic breakpoint placement (recommended).
+    /// Caches: system prompt, tool definitions, and recent conversation history.
+    #[default]
+    Auto,
+    /// Disable caching entirely.
+    Disabled,
+    /// Fine-grained control over what gets cached.
+    Manual {
+        /// Cache the system prompt.
+        cache_system: bool,
+        /// Cache tool definitions.
+        cache_tools: bool,
+        /// Cache conversation history (second-to-last message).
+        cache_messages: bool,
+    },
+}
+
 // ---------------------------------------------------------------------------
 // Thinking level
 // ---------------------------------------------------------------------------

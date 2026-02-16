@@ -385,6 +385,7 @@ mod tests {
             max_tokens: Some(1024),
             temperature: None,
             model_config: None,
+            cache_config: CacheConfig::default(),
         };
 
         let body = build_bedrock_body(&config);

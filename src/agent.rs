@@ -39,9 +39,10 @@ pub struct Agent {
     steering_mode: QueueMode,
     follow_up_mode: QueueMode,
 
-    // Context & limits
+    // Context, limits & caching
     pub context_config: Option<ContextConfig>,
     pub execution_limits: Option<ExecutionLimits>,
+    pub cache_config: CacheConfig,
 
     // Control
     cancel: Option<CancellationToken>,
@@ -66,6 +67,7 @@ impl Agent {
             follow_up_mode: QueueMode::OneAtATime,
             context_config: Some(ContextConfig::default()),
             execution_limits: Some(ExecutionLimits::default()),
+            cache_config: CacheConfig::default(),
             cancel: None,
             is_streaming: false,
         }
@@ -105,6 +107,11 @@ impl Agent {
 
     pub fn with_context_config(mut self, config: ContextConfig) -> Self {
         self.context_config = Some(config);
+        self
+    }
+
+    pub fn with_cache_config(mut self, config: CacheConfig) -> Self {
+        self.cache_config = config;
         self
     }
 
@@ -331,6 +338,7 @@ impl Agent {
             })),
             context_config: self.context_config.clone(),
             execution_limits: self.execution_limits.clone(),
+            cache_config: self.cache_config.clone(),
             get_follow_up_messages: Some(Box::new(move || {
                 let mut queue = follow_up_queue.lock().unwrap();
                 match follow_up_mode {
