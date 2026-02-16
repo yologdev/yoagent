@@ -57,6 +57,8 @@ impl StreamProvider for AnthropicProvider {
                                 "message_start" => {
                                     if let Ok(data) = serde_json::from_str::<AnthropicMessageStart>(&msg.data) {
                                         usage.input = data.message.usage.input_tokens;
+                                        usage.cache_read = data.message.usage.cache_read_input_tokens;
+                                        usage.cache_write = data.message.usage.cache_creation_input_tokens;
                                     }
                                 }
                                 "content_block_start" => {
@@ -247,6 +249,18 @@ fn build_request_body(config: &StreamConfig) -> serde_json::Value {
         }
     }
 
+    // Add cache_control to the second-to-last message's last content block.
+    // This creates a cache breakpoint — Anthropic caches everything before it.
+    // On subsequent calls, only the new message is processed at full price.
+    if messages.len() >= 2 {
+        let cache_idx = messages.len() - 2;
+        if let Some(content) = messages[cache_idx]["content"].as_array_mut() {
+            if let Some(last_block) = content.last_mut() {
+                last_block["cache_control"] = serde_json::json!({"type": "ephemeral"});
+            }
+        }
+    }
+
     let mut body = serde_json::json!({
         "model": config.model,
         "max_tokens": config.max_tokens.unwrap_or(8192),
@@ -255,7 +269,12 @@ fn build_request_body(config: &StreamConfig) -> serde_json::Value {
     });
 
     if !config.system_prompt.is_empty() {
-        body["system"] = serde_json::json!(config.system_prompt);
+        // Use cache_control on system prompt — same every call, big savings
+        body["system"] = serde_json::json!([{
+            "type": "text",
+            "text": config.system_prompt,
+            "cache_control": {"type": "ephemeral"}
+        }]);
     }
 
     if !config.tools.is_empty() {
@@ -324,9 +343,14 @@ struct AnthropicMessageInfo {
 
 #[derive(Deserialize)]
 struct AnthropicUsage {
+    #[serde(default)]
     input_tokens: u64,
     #[serde(default)]
     output_tokens: u64,
+    #[serde(default)]
+    cache_read_input_tokens: u64,
+    #[serde(default)]
+    cache_creation_input_tokens: u64,
 }
 
 #[derive(Deserialize)]
