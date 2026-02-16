@@ -5,6 +5,7 @@
 //! - `agent_loop_continue()` resumes from existing context
 //! Both return a stream of `AgentEvent`s.
 
+use crate::context::{self, ContextConfig, ExecutionLimits, ExecutionTracker};
 use crate::provider::{StreamConfig, StreamEvent, StreamProvider, ToolDefinition};
 use crate::types::*;
 use tokio::sync::mpsc;
@@ -31,6 +32,12 @@ pub struct AgentLoopConfig<'a> {
 
     /// Get follow-up messages (queued work after agent finishes).
     pub get_follow_up_messages: Option<Box<dyn Fn() -> Vec<AgentMessage> + Send + Sync>>,
+
+    /// Context window configuration (auto-compaction).
+    pub context_config: Option<ContextConfig>,
+
+    /// Execution limits (max turns, tokens, duration).
+    pub execution_limits: Option<ExecutionLimits>,
 }
 
 /// Default convert_to_llm: keep only user/assistant/toolResult messages.
@@ -107,6 +114,10 @@ async fn run_loop(
     cancel: &tokio_util::sync::CancellationToken,
 ) {
     let mut first_turn = true;
+    let mut tracker = config
+        .execution_limits
+        .as_ref()
+        .map(|limits| ExecutionTracker::new(limits.clone()));
 
     // Check for steering messages at start
     let mut pending: Vec<AgentMessage> = config
@@ -143,6 +154,32 @@ async fn run_loop(
                     context.messages.push(msg.clone());
                     new_messages.push(msg);
                 }
+            }
+
+            // Check execution limits
+            if let Some(ref tracker) = tracker {
+                if let Some(reason) = tracker.check_limits() {
+                    warn!("Execution limit reached: {}", reason);
+                    let limit_msg = AgentMessage::Llm(Message::User {
+                        content: vec![Content::Text {
+                            text: format!("[Agent stopped: {}]", reason),
+                        }],
+                        timestamp: now_ms(),
+                    });
+                    tx.send(AgentEvent::MessageStart { message: limit_msg.clone() }).ok();
+                    tx.send(AgentEvent::MessageEnd { message: limit_msg.clone() }).ok();
+                    context.messages.push(limit_msg.clone());
+                    new_messages.push(limit_msg);
+                    return;
+                }
+            }
+
+            // Compact context if configured (tiered: tool outputs → summarize → drop)
+            if let Some(ref ctx_config) = config.context_config {
+                context.messages = context::compact_messages(
+                    std::mem::take(&mut context.messages),
+                    ctx_config,
+                );
             }
 
             // Stream assistant response
@@ -197,6 +234,17 @@ async fn run_loop(
                     context.messages.push(am.clone());
                     new_messages.push(am);
                 }
+            }
+
+            // Track turn for execution limits
+            if let Some(ref mut tracker) = tracker {
+                let turn_tokens = match &message {
+                    Message::Assistant { usage, .. } => {
+                        (usage.input + usage.output) as usize
+                    }
+                    _ => context::message_tokens(&agent_msg),
+                };
+                tracker.record_turn(turn_tokens);
             }
 
             tx.send(AgentEvent::TurnEnd {

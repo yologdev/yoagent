@@ -19,6 +19,8 @@ fn make_config(provider: &MockProvider) -> AgentLoopConfig<'_> {
         transform_context: None,
         get_steering_messages: None,
         get_follow_up_messages: None,
+        context_config: None,
+        execution_limits: None,
     }
 }
 

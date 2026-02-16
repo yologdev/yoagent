@@ -2,6 +2,7 @@
 //! steering/follow-up queues, and abort support.
 
 use crate::agent_loop::{agent_loop, agent_loop_continue, AgentLoopConfig};
+use crate::context::{ContextConfig, ExecutionLimits};
 use crate::provider::StreamProvider;
 use crate::types::*;
 use std::sync::{Arc, Mutex};
@@ -36,6 +37,10 @@ pub struct Agent {
     steering_mode: QueueMode,
     follow_up_mode: QueueMode,
 
+    // Context & limits
+    pub context_config: Option<ContextConfig>,
+    pub execution_limits: Option<ExecutionLimits>,
+
     // Control
     cancel: Option<CancellationToken>,
     is_streaming: bool,
@@ -57,6 +62,8 @@ impl Agent {
             follow_up_queue: Arc::new(Mutex::new(Vec::new())),
             steering_mode: QueueMode::OneAtATime,
             follow_up_mode: QueueMode::OneAtATime,
+            context_config: Some(ContextConfig::default()),
+            execution_limits: Some(ExecutionLimits::default()),
             cancel: None,
             is_streaming: false,
         }
@@ -91,6 +98,23 @@ impl Agent {
 
     pub fn with_max_tokens(mut self, max: u32) -> Self {
         self.max_tokens = Some(max);
+        self
+    }
+
+    pub fn with_context_config(mut self, config: ContextConfig) -> Self {
+        self.context_config = Some(config);
+        self
+    }
+
+    pub fn with_execution_limits(mut self, limits: ExecutionLimits) -> Self {
+        self.execution_limits = Some(limits);
+        self
+    }
+
+    /// Disable automatic context compaction
+    pub fn without_context_management(mut self) -> Self {
+        self.context_config = None;
+        self.execution_limits = None;
         self
     }
 
@@ -274,6 +298,8 @@ impl Agent {
                     QueueMode::All => queue.drain(..).collect(),
                 }
             })),
+            context_config: self.context_config.clone(),
+            execution_limits: self.execution_limits.clone(),
             get_follow_up_messages: Some(Box::new(move || {
                 let mut queue = follow_up_queue.lock().unwrap();
                 match follow_up_mode {
