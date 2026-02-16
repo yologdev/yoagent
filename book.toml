@@ -1,0 +1,22 @@
+[book]
+authors = ["Yolog Team"]
+language = "en"
+src = "docs"
+title = "yo-agent Documentation"
+description = "Documentation for yo-agent - simple, effective agent loop in Rust"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/yologdev/yo-agent"
+edit-url-template = "https://github.com/yologdev/yo-agent/edit/main/{path}"
+site-url = "/yo-agent/"
+additional-css = ["docs/theme/custom.css"]
+
+[output.html.search]
+enable = true
+limit-results = 20
