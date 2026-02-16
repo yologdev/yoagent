@@ -372,6 +372,7 @@ async fn stream_assistant_response(
         api_key: config.api_key.clone(),
         max_tokens: config.max_tokens,
         temperature: config.temperature,
+        model_config: None,
     };
 
     // Stream from provider

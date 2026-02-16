@@ -2,6 +2,8 @@ use crate::types::*;
 use async_trait::async_trait;
 use tokio::sync::mpsc;
 
+use super::model::ModelConfig;
+
 /// Events emitted during LLM streaming
 #[derive(Debug, Clone)]
 pub enum StreamEvent {
@@ -38,6 +40,9 @@ pub struct StreamConfig {
     pub api_key: String,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
+    /// Optional model configuration for multi-provider support.
+    /// When set, providers use this for base_url, compat flags, headers, etc.
+    pub model_config: Option<ModelConfig>,
 }
 
 /// Tool definition sent to the LLM (schema only, no execute fn)
