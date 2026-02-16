@@ -29,6 +29,7 @@ fn make_config(provider: &AnthropicProvider) -> AgentLoopConfig<'_> {
         context_config: None,
         execution_limits: None,
         cache_config: CacheConfig::default(),
+        tool_execution: ToolExecutionStrategy::default(),
     }
 }
 

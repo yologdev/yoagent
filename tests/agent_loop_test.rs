@@ -22,6 +22,7 @@ fn make_config(provider: &MockProvider) -> AgentLoopConfig<'_> {
         context_config: None,
         execution_limits: None,
         cache_config: CacheConfig::default(),
+        tool_execution: ToolExecutionStrategy::default(),
     }
 }
 
@@ -324,4 +325,250 @@ async fn test_unknown_tool_reports_error() {
         .filter(|e| matches!(e, AgentEvent::ToolExecutionEnd { is_error: true, .. }))
         .collect();
     assert_eq!(tool_errors.len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Parallel tool execution tests
+// ---------------------------------------------------------------------------
+
+/// A tool that records execution timestamps to verify parallelism.
+struct TimedTool {
+    name: String,
+    delay_ms: u64,
+}
+
+#[async_trait::async_trait]
+impl AgentTool for TimedTool {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn label(&self) -> &str {
+        &self.name
+    }
+    fn description(&self) -> &str {
+        "Timed tool"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({})
+    }
+    async fn execute(
+        &self,
+        _id: &str,
+        _params: serde_json::Value,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<ToolResult, ToolError> {
+        tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
+        Ok(ToolResult {
+            content: vec![Content::Text {
+                text: format!("done:{}", self.name),
+            }],
+            details: serde_json::Value::Null,
+        })
+    }
+}
+
+#[tokio::test]
+async fn test_parallel_tool_execution_faster_than_sequential() {
+    // 3 tools each taking 50ms. Sequential = 150ms+, Parallel = ~50ms.
+    let provider = MockProvider::new(vec![
+        MockResponse::ToolCalls(vec![
+            MockToolCall {
+                name: "tool_a".into(),
+                arguments: serde_json::json!({}),
+            },
+            MockToolCall {
+                name: "tool_b".into(),
+                arguments: serde_json::json!({}),
+            },
+            MockToolCall {
+                name: "tool_c".into(),
+                arguments: serde_json::json!({}),
+            },
+        ]),
+        MockResponse::Text("All done.".into()),
+    ]);
+
+    let mut config = make_config(&provider);
+    config.tool_execution = ToolExecutionStrategy::Parallel;
+
+    let mut context = AgentContext {
+        system_prompt: "test".into(),
+        messages: Vec::new(),
+        tools: vec![
+            Box::new(TimedTool {
+                name: "tool_a".into(),
+                delay_ms: 50,
+            }),
+            Box::new(TimedTool {
+                name: "tool_b".into(),
+                delay_ms: 50,
+            }),
+            Box::new(TimedTool {
+                name: "tool_c".into(),
+                delay_ms: 50,
+            }),
+        ],
+    };
+
+    let prompt = AgentMessage::Llm(Message::user("Run all tools"));
+    let (tx, rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+
+    let start = std::time::Instant::now();
+    let new_messages = agent_loop(vec![prompt], &mut context, &config, tx, cancel).await;
+    let elapsed = start.elapsed();
+
+    let events = collect_events(rx);
+
+    // All 3 tool results should be present
+    let tool_results: Vec<_> = new_messages
+        .iter()
+        .filter(|m| m.role() == "toolResult")
+        .collect();
+    assert_eq!(tool_results.len(), 3);
+
+    // Should complete in roughly 50-100ms, not 150ms+
+    assert!(
+        elapsed.as_millis() < 130,
+        "Parallel execution took {}ms, expected <130ms",
+        elapsed.as_millis()
+    );
+
+    // Should have 3 ToolExecutionStart and 3 ToolExecutionEnd events
+    let starts = events
+        .iter()
+        .filter(|e| matches!(e, AgentEvent::ToolExecutionStart { .. }))
+        .count();
+    let ends = events
+        .iter()
+        .filter(|e| matches!(e, AgentEvent::ToolExecutionEnd { .. }))
+        .count();
+    assert_eq!(starts, 3);
+    assert_eq!(ends, 3);
+}
+
+#[tokio::test]
+async fn test_sequential_tool_execution_is_slower() {
+    let provider = MockProvider::new(vec![
+        MockResponse::ToolCalls(vec![
+            MockToolCall {
+                name: "tool_a".into(),
+                arguments: serde_json::json!({}),
+            },
+            MockToolCall {
+                name: "tool_b".into(),
+                arguments: serde_json::json!({}),
+            },
+        ]),
+        MockResponse::Text("Done.".into()),
+    ]);
+
+    let mut config = make_config(&provider);
+    config.tool_execution = ToolExecutionStrategy::Sequential;
+
+    let mut context = AgentContext {
+        system_prompt: "test".into(),
+        messages: Vec::new(),
+        tools: vec![
+            Box::new(TimedTool {
+                name: "tool_a".into(),
+                delay_ms: 50,
+            }),
+            Box::new(TimedTool {
+                name: "tool_b".into(),
+                delay_ms: 50,
+            }),
+        ],
+    };
+
+    let prompt = AgentMessage::Llm(Message::user("Run tools"));
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+
+    let start = std::time::Instant::now();
+    let _new_messages = agent_loop(vec![prompt], &mut context, &config, tx, cancel).await;
+    let elapsed = start.elapsed();
+
+    // Sequential should take 100ms+ (2 × 50ms)
+    assert!(
+        elapsed.as_millis() >= 95,
+        "Sequential execution took {}ms, expected >=95ms",
+        elapsed.as_millis()
+    );
+}
+
+#[tokio::test]
+async fn test_batched_tool_execution() {
+    // 4 tools, batch size 2: two batches of 2
+    let provider = MockProvider::new(vec![
+        MockResponse::ToolCalls(vec![
+            MockToolCall {
+                name: "tool_a".into(),
+                arguments: serde_json::json!({}),
+            },
+            MockToolCall {
+                name: "tool_b".into(),
+                arguments: serde_json::json!({}),
+            },
+            MockToolCall {
+                name: "tool_c".into(),
+                arguments: serde_json::json!({}),
+            },
+            MockToolCall {
+                name: "tool_d".into(),
+                arguments: serde_json::json!({}),
+            },
+        ]),
+        MockResponse::Text("All done.".into()),
+    ]);
+
+    let mut config = make_config(&provider);
+    config.tool_execution = ToolExecutionStrategy::Batched { size: 2 };
+
+    let mut context = AgentContext {
+        system_prompt: "test".into(),
+        messages: Vec::new(),
+        tools: vec![
+            Box::new(TimedTool {
+                name: "tool_a".into(),
+                delay_ms: 50,
+            }),
+            Box::new(TimedTool {
+                name: "tool_b".into(),
+                delay_ms: 50,
+            }),
+            Box::new(TimedTool {
+                name: "tool_c".into(),
+                delay_ms: 50,
+            }),
+            Box::new(TimedTool {
+                name: "tool_d".into(),
+                delay_ms: 50,
+            }),
+        ],
+    };
+
+    let prompt = AgentMessage::Llm(Message::user("Run all tools"));
+    let (tx, rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+
+    let start = std::time::Instant::now();
+    let new_messages = agent_loop(vec![prompt], &mut context, &config, tx, cancel).await;
+    let elapsed = start.elapsed();
+
+    let _events = collect_events(rx);
+
+    // All 4 results present
+    let tool_results: Vec<_> = new_messages
+        .iter()
+        .filter(|m| m.role() == "toolResult")
+        .collect();
+    assert_eq!(tool_results.len(), 4);
+
+    // 2 batches × 50ms = ~100ms (not 200ms sequential, not 50ms full parallel)
+    assert!(
+        elapsed.as_millis() >= 90 && elapsed.as_millis() < 160,
+        "Batched execution took {}ms, expected 90-160ms",
+        elapsed.as_millis()
+    );
 }

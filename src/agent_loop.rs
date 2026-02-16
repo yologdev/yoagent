@@ -50,6 +50,9 @@ pub struct AgentLoopConfig<'a> {
 
     /// Prompt caching configuration.
     pub cache_config: CacheConfig,
+
+    /// Tool execution strategy (sequential, parallel, or batched).
+    pub tool_execution: ToolExecutionStrategy,
 }
 
 /// Default convert_to_llm: keep only user/assistant/toolResult messages.
@@ -270,6 +273,7 @@ async fn run_loop(
                     tx,
                     cancel,
                     config.get_steering_messages.as_ref(),
+                    &config.tool_execution,
                 )
                 .await;
 
@@ -486,81 +490,70 @@ async fn execute_tool_calls(
     tx: &mpsc::UnboundedSender<AgentEvent>,
     cancel: &tokio_util::sync::CancellationToken,
     get_steering: Option<&GetMessagesFn>,
+    strategy: &ToolExecutionStrategy,
+) -> ToolExecutionResult {
+    match strategy {
+        ToolExecutionStrategy::Sequential => {
+            execute_sequential(tools, tool_calls, tx, cancel, get_steering).await
+        }
+        ToolExecutionStrategy::Parallel => {
+            execute_batch(tools, tool_calls, tx, cancel, get_steering).await
+        }
+        ToolExecutionStrategy::Batched { size } => {
+            let mut results: Vec<Message> = Vec::new();
+            let mut steering_messages: Option<Vec<AgentMessage>> = None;
+
+            for (batch_idx, batch) in tool_calls.chunks(*size).enumerate() {
+                let batch_result = execute_batch(tools, batch, tx, cancel, None).await;
+                results.extend(batch_result.tool_results);
+
+                // Check steering between batches
+                if let Some(get_steering_fn) = get_steering {
+                    let steering = get_steering_fn();
+                    if !steering.is_empty() {
+                        steering_messages = Some(steering);
+                        // Skip remaining batches
+                        let executed = (batch_idx + 1) * *size;
+                        if executed < tool_calls.len() {
+                            for (skip_id, skip_name, _) in &tool_calls[executed..] {
+                                results.push(skip_tool_call(skip_id, skip_name, tx));
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+
+            ToolExecutionResult {
+                tool_results: results,
+                steering_messages,
+            }
+        }
+    }
+}
+
+/// Execute tool calls one at a time, checking steering between each.
+async fn execute_sequential(
+    tools: &[Box<dyn AgentTool>],
+    tool_calls: &[(String, String, serde_json::Value)],
+    tx: &mpsc::UnboundedSender<AgentEvent>,
+    cancel: &tokio_util::sync::CancellationToken,
+    get_steering: Option<&GetMessagesFn>,
 ) -> ToolExecutionResult {
     let mut results: Vec<Message> = Vec::new();
     let mut steering_messages: Option<Vec<AgentMessage>> = None;
 
     for (index, (id, name, args)) in tool_calls.iter().enumerate() {
-        let tool = tools.iter().find(|t| t.name() == name);
-
-        tx.send(AgentEvent::ToolExecutionStart {
-            tool_call_id: id.clone(),
-            tool_name: name.clone(),
-            args: args.clone(),
-        })
-        .ok();
-
-        let (result, is_error) = match tool {
-            Some(tool) => match tool.execute(id, args.clone(), cancel.child_token()).await {
-                Ok(r) => (r, false),
-                Err(e) => (
-                    ToolResult {
-                        content: vec![Content::Text {
-                            text: e.to_string(),
-                        }],
-                        details: serde_json::Value::Null,
-                    },
-                    true,
-                ),
-            },
-            None => (
-                ToolResult {
-                    content: vec![Content::Text {
-                        text: format!("Tool {} not found", name),
-                    }],
-                    details: serde_json::Value::Null,
-                },
-                true,
-            ),
-        };
-
-        tx.send(AgentEvent::ToolExecutionEnd {
-            tool_call_id: id.clone(),
-            tool_name: name.clone(),
-            result: result.clone(),
-            is_error,
-        })
-        .ok();
-
-        let tool_result_msg = Message::ToolResult {
-            tool_call_id: id.clone(),
-            tool_name: name.clone(),
-            content: result.content,
-            is_error,
-            timestamp: now_ms(),
-        };
-
-        tx.send(AgentEvent::MessageStart {
-            message: tool_result_msg.clone().into(),
-        })
-        .ok();
-        tx.send(AgentEvent::MessageEnd {
-            message: tool_result_msg.clone().into(),
-        })
-        .ok();
-
-        results.push(tool_result_msg);
+        let (result_msg, _is_error) = execute_single_tool(tools, id, name, args, tx, cancel).await;
+        results.push(result_msg);
 
         // Check for steering — skip remaining tools if user interrupted
         if let Some(get_steering_fn) = get_steering {
             let steering = get_steering_fn();
             if !steering.is_empty() {
                 steering_messages = Some(steering);
-
-                // Skip remaining tool calls
                 for (skip_id, skip_name, _) in &tool_calls[index + 1..] {
-                    let skipped = skip_tool_call(skip_id, skip_name, tx);
-                    results.push(skipped);
+                    results.push(skip_tool_call(skip_id, skip_name, tx));
                 }
                 break;
             }
@@ -571,6 +564,113 @@ async fn execute_tool_calls(
         tool_results: results,
         steering_messages,
     }
+}
+
+/// Execute a batch of tool calls concurrently using futures::join_all.
+async fn execute_batch(
+    tools: &[Box<dyn AgentTool>],
+    tool_calls: &[(String, String, serde_json::Value)],
+    tx: &mpsc::UnboundedSender<AgentEvent>,
+    cancel: &tokio_util::sync::CancellationToken,
+    get_steering: Option<&GetMessagesFn>,
+) -> ToolExecutionResult {
+    use futures::future::join_all;
+
+    let futures: Vec<_> = tool_calls
+        .iter()
+        .map(|(id, name, args)| execute_single_tool(tools, id, name, args, tx, cancel))
+        .collect();
+
+    let batch_results = join_all(futures).await;
+
+    let results: Vec<Message> = batch_results.into_iter().map(|(msg, _)| msg).collect();
+
+    // Check steering after batch completes
+    let steering_messages = if let Some(get_steering_fn) = get_steering {
+        let steering = get_steering_fn();
+        if steering.is_empty() {
+            None
+        } else {
+            Some(steering)
+        }
+    } else {
+        None
+    };
+
+    ToolExecutionResult {
+        tool_results: results,
+        steering_messages,
+    }
+}
+
+/// Execute a single tool call and emit events.
+async fn execute_single_tool(
+    tools: &[Box<dyn AgentTool>],
+    id: &str,
+    name: &str,
+    args: &serde_json::Value,
+    tx: &mpsc::UnboundedSender<AgentEvent>,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> (Message, bool) {
+    let tool = tools.iter().find(|t| t.name() == name);
+
+    tx.send(AgentEvent::ToolExecutionStart {
+        tool_call_id: id.to_string(),
+        tool_name: name.to_string(),
+        args: args.clone(),
+    })
+    .ok();
+
+    let (result, is_error) = match tool {
+        Some(tool) => match tool.execute(id, args.clone(), cancel.child_token()).await {
+            Ok(r) => (r, false),
+            Err(e) => (
+                ToolResult {
+                    content: vec![Content::Text {
+                        text: e.to_string(),
+                    }],
+                    details: serde_json::Value::Null,
+                },
+                true,
+            ),
+        },
+        None => (
+            ToolResult {
+                content: vec![Content::Text {
+                    text: format!("Tool {} not found", name),
+                }],
+                details: serde_json::Value::Null,
+            },
+            true,
+        ),
+    };
+
+    tx.send(AgentEvent::ToolExecutionEnd {
+        tool_call_id: id.to_string(),
+        tool_name: name.to_string(),
+        result: result.clone(),
+        is_error,
+    })
+    .ok();
+
+    let tool_result_msg = Message::ToolResult {
+        tool_call_id: id.to_string(),
+        tool_name: name.to_string(),
+        content: result.content,
+        is_error,
+        timestamp: now_ms(),
+    };
+
+    tx.send(AgentEvent::MessageStart {
+        message: tool_result_msg.clone().into(),
+    })
+    .ok();
+    tx.send(AgentEvent::MessageEnd {
+        message: tool_result_msg.clone().into(),
+    })
+    .ok();
+
+    (tool_result_msg, is_error)
 }
 
 fn skip_tool_call(

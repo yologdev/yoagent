@@ -187,6 +187,28 @@ impl Default for CacheConfig {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Tool execution strategy
+// ---------------------------------------------------------------------------
+
+/// Controls how multiple tool calls from a single LLM response are executed.
+///
+/// When the LLM returns multiple tool calls (e.g., "read file A, read file B,
+/// run bash C"), this determines whether they run sequentially or in parallel.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ToolExecutionStrategy {
+    /// Run tools one at a time, check steering between each.
+    /// Use for debugging or tools with shared mutable state.
+    Sequential,
+    /// Run all tool calls concurrently, check steering after all complete.
+    /// Default — most tool calls are independent and this gives the best latency.
+    #[default]
+    Parallel,
+    /// Run in batches of N, check steering between batches.
+    /// Balances speed with human-in-the-loop control.
+    Batched { size: usize },
+}
+
 /// Strategy for placing cache breakpoints (Anthropic-specific; other providers
 /// handle caching automatically regardless of this setting).
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
