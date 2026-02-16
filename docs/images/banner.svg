@@ -52,7 +52,7 @@
   <rect x="480" y="145" width="240" height="3" rx="1.5" fill="url(#accent)"/>
 
   <!-- Tagline -->
-  <text x="600" y="185" text-anchor="middle" font-family="'Inter', system-ui, sans-serif" font-size="20" font-weight="400" fill="#94A3B8">Simple, effective agent loop in Rust</text>
+  <text x="600" y="185" text-anchor="middle" font-family="'Inter', system-ui, sans-serif" font-size="20" font-weight="400" fill="#94A3B8">The agent loop is the product.</text>
 
   <!-- Feature pills -->
   <g font-family="'JetBrains Mono', 'Fira Code', monospace" font-size="12" font-weight="500">
