@@ -1,5 +1,5 @@
 [package]
-name = "yo-agent"
+name = "yoagent"
 version = "0.1.0"
 edition = "2021"
 description = "Simple, effective agent loop with tool execution and event streaming"

@@ -3,7 +3,7 @@
 ## Module Layout
 
 ```
-yo-agent/
+yoagent/
 ├── src/
 │   ├── lib.rs              # Public re-exports
 │   ├── types.rs            # Core types: Message, Content, AgentTool, AgentEvent
@@ -70,7 +70,7 @@ Events flow back via mpsc::UnboundedSender<AgentEvent>
 3. Set `ModelConfig.api` to match that protocol
 4. The registry dispatches `stream()` calls to the right provider
 
-Each provider translates between yo-agent's `Message`/`Content` types and the provider's native API format. All providers emit `StreamEvent`s through the channel for real-time updates.
+Each provider translates between yoagent's `Message`/`Content` types and the provider's native API format. All providers emit `StreamEvent`s through the channel for real-time updates.
 
 ## How Tools Plug In
 

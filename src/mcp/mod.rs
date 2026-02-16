@@ -1,13 +1,13 @@
 //! MCP (Model Context Protocol) client support.
 //!
-//! Connect to MCP tool servers and use their tools seamlessly within yo-agent.
+//! Connect to MCP tool servers and use their tools seamlessly within yoagent.
 //!
 //! # Example
 //!
 //! ```rust,no_run
-//! use yo_agent::mcp::McpClient;
+//! use yoagent::mcp::McpClient;
 //!
-//! # async fn example() -> Result<(), yo_agent::mcp::McpError> {
+//! # async fn example() -> Result<(), yoagent::mcp::McpError> {
 //! // Connect to an MCP server via stdio
 //! let client = McpClient::connect_stdio("npx", &["-y", "@modelcontextprotocol/server-filesystem", "/tmp"], None).await?;
 //! # Ok(())

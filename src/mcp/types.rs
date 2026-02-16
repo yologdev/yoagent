@@ -66,7 +66,7 @@ pub struct ClientInfo {
 impl Default for ClientInfo {
     fn default() -> Self {
         Self {
-            name: "yo-agent".into(),
+            name: "yoagent".into(),
             version: env!("CARGO_PKG_VERSION").into(),
         }
     }

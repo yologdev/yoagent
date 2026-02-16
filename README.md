@@ -1,10 +1,10 @@
 <div align="center">
 
 <picture>
-  <img alt="yo-agent" src="docs/images/banner.jpg" width="100%" height="auto">
+  <img alt="yoagent" src="docs/images/banner.jpg" width="100%" height="auto">
 </picture>
 
-<a href="https://yologdev.github.io/yo-agent/">Docs</a> · <a href="https://github.com/yologdev/yo-agent">GitHub</a> · <a href="https://deepwiki.com/yologdev/yo-agent">DeepWiki</a> · <a href="https://github.com/yologdev/yo-agent/issues">Issues</a> · <a href="https://github.com/yologdev/yo-agent/releases">Releases</a>
+<a href="https://yologdev.github.io/yoagent/">Docs</a> · <a href="https://github.com/yologdev/yoagent">GitHub</a> · <a href="https://deepwiki.com/yologdev/yoagent">DeepWiki</a> · <a href="https://github.com/yologdev/yoagent/issues">Issues</a> · <a href="https://github.com/yologdev/yoagent/releases">Releases</a>
 
 [![][ci-shield]][ci-link]
 [![][license-shield]][license-link]
@@ -17,7 +17,7 @@
 
 ## Overview
 
-yo-agent is a simple, effective agent loop with tool execution and event streaming in Rust. Inspired by [pi-agent-core](https://github.com/badlogic/pi-mono/tree/main/packages/agent).
+yoagent is a simple, effective agent loop with tool execution and event streaming in Rust. Inspired by [pi-agent-core](https://github.com/badlogic/pi-mono/tree/main/packages/agent).
 
 The loop is the product. No over-engineered planning/reflection/RAG layers — just:
 
@@ -59,16 +59,16 @@ Everything is observable via events. Supports 7 API protocols covering 20+ LLM p
 
 ```toml
 [dependencies]
-yo-agent = { git = "https://github.com/yologdev/yo-agent.git" }
+yoagent = { git = "https://github.com/yologdev/yoagent.git" }
 tokio = { version = "1", features = ["full"] }
 ```
 
 ### Basic Usage
 
 ```rust
-use yo_agent::agent::Agent;
-use yo_agent::provider::AnthropicProvider;
-use yo_agent::types::*;
+use yoagent::agent::Agent;
+use yoagent::provider::AnthropicProvider;
+use yoagent::types::*;
 
 #[tokio::main]
 async fn main() {
@@ -95,7 +95,7 @@ async fn main() {
 <summary>OpenAI-compatible provider example</summary>
 
 ```rust
-use yo_agent::provider::{ModelConfig, ApiProtocol, ProviderRegistry};
+use yoagent::provider::{ModelConfig, ApiProtocol, ProviderRegistry};
 
 // Use any OpenAI-compatible provider
 let model = ModelConfig::openai_compat("groq", "llama-3.3-70b", "https://api.groq.com/openai/v1");
@@ -130,7 +130,7 @@ OpenAI-compatible providers share one implementation with per-provider quirk fla
 ## Architecture
 
 ```
-yo-agent/
+yoagent/
 ├── src/
 │   ├── types.rs            # Message, AgentMessage, AgentEvent, AgentTool trait
 │   ├── agent_loop.rs       # Core loop (agent_loop + agent_loop_continue)
@@ -168,15 +168,15 @@ MIT License — see [LICENSE](LICENSE) for details.
 
 ## Links
 
-- [Documentation](https://yologdev.github.io/yo-agent/) — Full reference
+- [Documentation](https://yologdev.github.io/yoagent/) — Full reference
 - [pi-agent-core](https://github.com/badlogic/pi-mono/tree/main/packages/agent) — Original inspiration (TypeScript)
 
 <!-- Badge link definitions -->
-[ci-shield]: https://img.shields.io/github/actions/workflow/status/yologdev/yo-agent/ci.yml?labelColor=black&style=flat-square&logo=github&label=CI
-[ci-link]: https://github.com/yologdev/yo-agent/actions/workflows/ci.yml
+[ci-shield]: https://img.shields.io/github/actions/workflow/status/yologdev/yoagent/ci.yml?labelColor=black&style=flat-square&logo=github&label=CI
+[ci-link]: https://github.com/yologdev/yoagent/actions/workflows/ci.yml
 [license-shield]: https://img.shields.io/badge/license-MIT-white?labelColor=black&style=flat-square
-[license-link]: https://github.com/yologdev/yo-agent/blob/main/LICENSE
+[license-link]: https://github.com/yologdev/yoagent/blob/main/LICENSE
 [docs-shield]: https://img.shields.io/badge/docs-mdBook-blue?labelColor=black&style=flat-square
-[docs-link]: https://yologdev.github.io/yo-agent/
-[last-commit-shield]: https://img.shields.io/github/last-commit/yologdev/yo-agent?color=c4f042&labelColor=black&style=flat-square
-[last-commit-link]: https://github.com/yologdev/yo-agent/commits/main
+[docs-link]: https://yologdev.github.io/yoagent/
+[last-commit-shield]: https://img.shields.io/github/last-commit/yologdev/yoagent?color=c4f042&labelColor=black&style=flat-square
+[last-commit-link]: https://github.com/yologdev/yoagent/commits/main

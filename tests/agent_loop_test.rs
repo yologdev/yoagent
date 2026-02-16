@@ -2,10 +2,10 @@
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use yo_agent::agent_loop::{agent_loop, agent_loop_continue, AgentLoopConfig};
-use yo_agent::provider::mock::*;
-use yo_agent::provider::MockProvider;
-use yo_agent::*;
+use yoagent::agent_loop::{agent_loop, agent_loop_continue, AgentLoopConfig};
+use yoagent::provider::mock::*;
+use yoagent::provider::MockProvider;
+use yoagent::*;
 
 fn make_config(provider: &MockProvider) -> AgentLoopConfig<'_> {
     AgentLoopConfig {

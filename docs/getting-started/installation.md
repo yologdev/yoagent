@@ -9,12 +9,12 @@
 
 ```toml
 [dependencies]
-yo-agent = { git = "https://github.com/yologdev/yo-agent.git" }
+yoagent = { git = "https://github.com/yologdev/yoagent.git" }
 ```
 
 ## Dependencies
 
-yo-agent brings in these key dependencies automatically:
+yoagent brings in these key dependencies automatically:
 
 | Crate | Purpose |
 |-------|---------|
@@ -29,4 +29,4 @@ yo-agent brings in these key dependencies automatically:
 
 ## Feature Flags
 
-yo-agent currently has no optional feature flags — all providers and tools are included by default.
+yoagent currently has no optional feature flags — all providers and tools are included by default.

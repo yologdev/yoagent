@@ -1,6 +1,6 @@
 # Providers Overview
 
-yo-agent supports multiple LLM providers through the `StreamProvider` trait and `ApiProtocol` dispatch.
+yoagent supports multiple LLM providers through the `StreamProvider` trait and `ApiProtocol` dispatch.
 
 ## Supported Protocols
 

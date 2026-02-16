@@ -14,8 +14,8 @@ The [Model Context Protocol (MCP)](https://modelcontextprotocol.io) is a JSON-RP
 Use `with_mcp_server_stdio()` to spawn an MCP server process and register its tools:
 
 ```rust
-use yo_agent::Agent;
-use yo_agent::provider::AnthropicProvider;
+use yoagent::Agent;
+use yoagent::provider::AnthropicProvider;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -61,7 +61,7 @@ let agent = Agent::new(provider)
 
 ## How MCP Tools Work
 
-When you call `with_mcp_server_stdio()` or `with_mcp_server_http()`, yo-agent:
+When you call `with_mcp_server_stdio()` or `with_mcp_server_http()`, yoagent:
 
 1. Connects to the MCP server and performs the `initialize` handshake
 2. Calls `tools/list` to discover available tools
@@ -73,7 +73,7 @@ MCP tools appear alongside built-in tools. The LLM sees them with their original
 ## Mixing Built-in and MCP Tools
 
 ```rust
-use yo_agent::tools::default_tools;
+use yoagent::tools::default_tools;
 
 let agent = Agent::new(provider)
     .with_tools(default_tools())  // bash, read, write, edit, list, search
@@ -87,7 +87,7 @@ let agent = Agent::new(provider)
 For lower-level control, use `McpClient` directly:
 
 ```rust
-use yo_agent::mcp::{McpClient, McpToolAdapter};
+use yoagent::mcp::{McpClient, McpToolAdapter};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 

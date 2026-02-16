@@ -2,9 +2,9 @@
 //!
 //! Run with: ANTHROPIC_API_KEY=sk-... cargo run --example basic
 
-use yo_agent::agent::Agent;
-use yo_agent::provider::AnthropicProvider;
-use yo_agent::*;
+use yoagent::agent::Agent;
+use yoagent::provider::AnthropicProvider;
+use yoagent::*;
 
 #[tokio::main]
 async fn main() {

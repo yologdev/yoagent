@@ -1,9 +1,9 @@
 //! Tests for the Agent struct (stateful wrapper).
 
-use yo_agent::agent::Agent;
-use yo_agent::provider::mock::*;
-use yo_agent::provider::MockProvider;
-use yo_agent::*;
+use yoagent::agent::Agent;
+use yoagent::provider::mock::*;
+use yoagent::provider::MockProvider;
+use yoagent::*;
 
 #[tokio::test]
 async fn test_agent_simple_prompt() {

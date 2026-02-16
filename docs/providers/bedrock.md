@@ -5,7 +5,7 @@
 ## Usage
 
 ```rust
-use yo_agent::provider::BedrockProvider;
+use yoagent::provider::BedrockProvider;
 
 let agent = Agent::new(BedrockProvider)
     .with_model("anthropic.claude-3-sonnet-20240229-v1:0")
@@ -33,7 +33,7 @@ Alternatively, provide pre-computed auth headers via `ModelConfig.headers` or us
 
 Bedrock uses its own content block format:
 
-| yo-agent | Bedrock API |
+| yoagent | Bedrock API |
 |----------|-------------|
 | `Content::Text` | `{"text": "..."}` |
 | `Content::Image` | `{"image": {"format": "...", "source": {"bytes": "..."}}}` |

@@ -140,7 +140,7 @@ mod tests {
     #[test]
     fn test_client_info_default() {
         let info = ClientInfo::default();
-        assert_eq!(info.name, "yo-agent");
+        assert_eq!(info.name, "yoagent");
         assert!(!info.version.is_empty());
     }
 }

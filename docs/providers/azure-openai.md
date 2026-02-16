@@ -5,7 +5,7 @@
 ## Usage
 
 ```rust
-use yo_agent::provider::AzureOpenAiProvider;
+use yoagent::provider::AzureOpenAiProvider;
 
 let agent = Agent::new(AzureOpenAiProvider)
     .with_model("gpt-4o")
@@ -44,7 +44,7 @@ Set this as `ModelConfig.base_url`. The provider appends `/responses?api-version
 
 Uses the Responses API input format:
 
-| yo-agent | Azure Responses API |
+| yoagent | Azure Responses API |
 |----------|-------------------|
 | User message | `{"role": "user", "content": "..."}` |
 | Assistant text | `{"type": "message", "role": "assistant", "content": [{"type": "output_text", ...}]}` |

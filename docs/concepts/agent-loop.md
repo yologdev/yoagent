@@ -1,6 +1,6 @@
 # The Agent Loop
 
-The agent loop is the core of yo-agent. It implements the fundamental cycle:
+The agent loop is the core of yoagent. It implements the fundamental cycle:
 
 ```
 User prompt → LLM call → Tool execution → LLM call → ... → Final response

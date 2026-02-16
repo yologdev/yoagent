@@ -7,7 +7,7 @@
 Requires a `ModelConfig` with `compat` flags set in `StreamConfig.model_config`:
 
 ```rust
-use yo_agent::provider::{OpenAiCompatProvider, ModelConfig};
+use yoagent::provider::{OpenAiCompatProvider, ModelConfig};
 
 let agent = Agent::new(OpenAiCompatProvider)
     .with_model("gpt-4o")

@@ -55,7 +55,7 @@ Errors are converted to `ToolResult` with `is_error: true` and sent back to the 
 ## Implementing a Custom Tool
 
 ```rust
-use yo_agent::types::*;
+use yoagent::types::*;
 use async_trait::async_trait;
 
 pub struct WeatherTool;
@@ -104,7 +104,7 @@ impl AgentTool for WeatherTool {
 Register custom tools alongside defaults:
 
 ```rust
-use yo_agent::tools::default_tools;
+use yoagent::tools::default_tools;
 
 let mut tools = default_tools();
 tools.push(Box::new(WeatherTool));

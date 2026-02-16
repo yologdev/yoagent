@@ -1,10 +1,10 @@
 //! Tests for built-in tools.
 
 use tokio_util::sync::CancellationToken;
-use yo_agent::tools::edit::EditFileTool;
-use yo_agent::tools::list::ListFilesTool;
-use yo_agent::tools::*;
-use yo_agent::types::*;
+use yoagent::tools::edit::EditFileTool;
+use yoagent::tools::list::ListFilesTool;
+use yoagent::tools::*;
+use yoagent::types::*;
 
 #[tokio::test]
 async fn test_bash_echo() {
@@ -96,7 +96,7 @@ async fn test_bash_cancel() {
 
 #[tokio::test]
 async fn test_read_write_file() {
-    let tmp = std::env::temp_dir().join("yo-agent-test-rw.txt");
+    let tmp = std::env::temp_dir().join("yoagent-test-rw.txt");
     let path = tmp.to_str().unwrap();
 
     // Write
@@ -104,7 +104,7 @@ async fn test_read_write_file() {
     let result = write_tool
         .execute(
             "t1",
-            serde_json::json!({"path": path, "content": "hello from yo-agent"}),
+            serde_json::json!({"path": path, "content": "hello from yoagent"}),
             CancellationToken::new(),
         )
         .await
@@ -131,7 +131,7 @@ async fn test_read_write_file() {
         Content::Text { text } => text,
         _ => panic!("expected text"),
     };
-    assert!(text.contains("hello from yo-agent"));
+    assert!(text.contains("hello from yoagent"));
 
     // Cleanup
     let _ = std::fs::remove_file(tmp);
@@ -139,7 +139,7 @@ async fn test_read_write_file() {
 
 #[tokio::test]
 async fn test_read_file_with_offset_limit() {
-    let tmp = std::env::temp_dir().join("yo-agent-test-lines.txt");
+    let tmp = std::env::temp_dir().join("yoagent-test-lines.txt");
     let path = tmp.to_str().unwrap();
 
     let content = (1..=20)
@@ -185,7 +185,7 @@ async fn test_read_file_not_found() {
 
 #[tokio::test]
 async fn test_write_creates_directories() {
-    let tmp = std::env::temp_dir().join("yo-agent-test-nested/deep/dir/file.txt");
+    let tmp = std::env::temp_dir().join("yoagent-test-nested/deep/dir/file.txt");
     let path = tmp.to_str().unwrap();
 
     let tool = WriteFileTool::new();
@@ -201,12 +201,12 @@ async fn test_write_creates_directories() {
     assert!(tmp.exists());
 
     // Cleanup
-    let _ = std::fs::remove_dir_all(std::env::temp_dir().join("yo-agent-test-nested"));
+    let _ = std::fs::remove_dir_all(std::env::temp_dir().join("yoagent-test-nested"));
 }
 
 #[tokio::test]
 async fn test_search_pattern() {
-    let tmp_dir = std::env::temp_dir().join("yo-agent-test-search");
+    let tmp_dir = std::env::temp_dir().join("yoagent-test-search");
     let _ = std::fs::create_dir_all(&tmp_dir);
     std::fs::write(tmp_dir.join("a.txt"), "hello world\nfoo bar\nhello again").unwrap();
     std::fs::write(tmp_dir.join("b.txt"), "no match here\nhello there").unwrap();
@@ -233,7 +233,7 @@ async fn test_search_pattern() {
 
 #[tokio::test]
 async fn test_search_no_matches() {
-    let tmp_dir = std::env::temp_dir().join("yo-agent-test-search-empty");
+    let tmp_dir = std::env::temp_dir().join("yoagent-test-search-empty");
     let _ = std::fs::create_dir_all(&tmp_dir);
     std::fs::write(tmp_dir.join("a.txt"), "nothing interesting").unwrap();
 
@@ -260,7 +260,7 @@ async fn test_search_no_matches() {
 
 #[tokio::test]
 async fn test_edit_file() {
-    let tmp = std::env::temp_dir().join("yo-agent-test-edit.txt");
+    let tmp = std::env::temp_dir().join("yoagent-test-edit.txt");
     let path = tmp.to_str().unwrap();
     std::fs::write(&tmp, "fn main() {\n    println!(\"hello\");\n}\n").unwrap();
 
@@ -290,7 +290,7 @@ async fn test_edit_file() {
 
 #[tokio::test]
 async fn test_edit_file_no_match() {
-    let tmp = std::env::temp_dir().join("yo-agent-test-edit-nomatch.txt");
+    let tmp = std::env::temp_dir().join("yoagent-test-edit-nomatch.txt");
     let path = tmp.to_str().unwrap();
     std::fs::write(&tmp, "hello world\n").unwrap();
     let tool = EditFileTool::new();
@@ -307,7 +307,7 @@ async fn test_edit_file_no_match() {
 
 #[tokio::test]
 async fn test_list_files_tool() {
-    let tmp_dir = std::env::temp_dir().join("yo-agent-test-list2");
+    let tmp_dir = std::env::temp_dir().join("yoagent-test-list2");
     let _ = std::fs::create_dir_all(tmp_dir.join("sub"));
     std::fs::write(tmp_dir.join("a.rs"), "").unwrap();
     std::fs::write(tmp_dir.join("sub/c.rs"), "").unwrap();
@@ -330,7 +330,7 @@ async fn test_list_files_tool() {
 
 #[tokio::test]
 async fn test_read_file_line_numbers() {
-    let tmp = std::env::temp_dir().join("yo-agent-test-lineno2.txt");
+    let tmp = std::env::temp_dir().join("yoagent-test-lineno2.txt");
     let path = tmp.to_str().unwrap();
     std::fs::write(&tmp, "first\nsecond\nthird\n").unwrap();
     let tool = ReadFileTool::new();
@@ -367,7 +367,7 @@ async fn test_bash_blocked_command() {
 
 #[tokio::test]
 async fn test_default_tools_complete() {
-    let tools = yo_agent::tools::default_tools();
+    let tools = yoagent::tools::default_tools();
     let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
     assert_eq!(names.len(), 6);
     assert!(names.contains(&"bash"));

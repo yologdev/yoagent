@@ -5,7 +5,7 @@
 ## Usage
 
 ```rust
-use yo_agent::provider::AnthropicProvider;
+use yoagent::provider::AnthropicProvider;
 
 let agent = Agent::new(AnthropicProvider)
     .with_model("claude-sonnet-4-20250514")

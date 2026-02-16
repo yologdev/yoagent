@@ -3,9 +3,9 @@
 ## Basic Example with Anthropic
 
 ```rust
-use yo_agent::{Agent, AgentEvent, StreamDelta};
-use yo_agent::provider::AnthropicProvider;
-use yo_agent::tools::default_tools;
+use yoagent::{Agent, AgentEvent, StreamDelta};
+use yoagent::provider::AnthropicProvider;
+use yoagent::tools::default_tools;
 
 #[tokio::main]
 async fn main() {
@@ -48,9 +48,9 @@ async fn main() {
 For OpenAI, xAI, Groq, or any compatible API, use `OpenAiCompatProvider` with a `ModelConfig`:
 
 ```rust
-use yo_agent::{Agent, AgentEvent};
-use yo_agent::provider::OpenAiCompatProvider;
-use yo_agent::tools::default_tools;
+use yoagent::{Agent, AgentEvent};
+use yoagent::provider::OpenAiCompatProvider;
+use yoagent::tools::default_tools;
 
 #[tokio::main]
 async fn main() {
@@ -65,7 +65,7 @@ async fn main() {
     while let Some(event) = rx.recv().await {
         match event {
             AgentEvent::MessageUpdate { delta, .. } => {
-                if let yo_agent::StreamDelta::Text { delta } = delta {
+                if let yoagent::StreamDelta::Text { delta } = delta {
                     print!("{}", delta);
                 }
             }
@@ -81,9 +81,9 @@ async fn main() {
 For more control, use `agent_loop()` directly:
 
 ```rust
-use yo_agent::agent_loop::{agent_loop, AgentLoopConfig};
-use yo_agent::provider::AnthropicProvider;
-use yo_agent::types::*;
+use yoagent::agent_loop::{agent_loop, AgentLoopConfig};
+use yoagent::provider::AnthropicProvider;
+use yoagent::types::*;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -95,7 +95,7 @@ async fn main() {
     let mut context = AgentContext {
         system_prompt: "You are helpful.".into(),
         messages: Vec::new(),
-        tools: yo_agent::tools::default_tools(),
+        tools: yoagent::tools::default_tools(),
     };
 
     let config = AgentLoopConfig {

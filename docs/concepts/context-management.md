@@ -1,6 +1,6 @@
 # Context Management
 
-Long-running agents accumulate messages that exceed the model's context window. yo-agent handles this automatically with tiered compaction.
+Long-running agents accumulate messages that exceed the model's context window. yoagent handles this automatically with tiered compaction.
 
 ## Token Estimation
 
