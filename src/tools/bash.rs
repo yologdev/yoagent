@@ -13,6 +13,10 @@ pub struct BashTool {
     pub timeout: Duration,
     /// Max output bytes to capture (prevents OOM on huge outputs)
     pub max_output_bytes: usize,
+    /// Commands/patterns that are always blocked (e.g., "rm -rf /")
+    pub deny_patterns: Vec<String>,
+    /// Optional callback for confirming dangerous commands
+    pub confirm_fn: Option<Box<dyn Fn(&str) -> bool + Send + Sync>>,
 }
 
 impl Default for BashTool {
@@ -21,6 +25,14 @@ impl Default for BashTool {
             cwd: None,
             timeout: Duration::from_secs(120),
             max_output_bytes: 256 * 1024, // 256KB
+            deny_patterns: vec![
+                "rm -rf /".into(),
+                "rm -rf /*".into(),
+                "mkfs".into(),
+                "dd if=".into(),
+                ":(){:|:&};:".into(), // fork bomb
+            ],
+            confirm_fn: None,
         }
     }
 }
@@ -37,6 +49,16 @@ impl BashTool {
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    pub fn with_deny_patterns(mut self, patterns: Vec<String>) -> Self {
+        self.deny_patterns = patterns;
+        self
+    }
+
+    pub fn with_confirm(mut self, f: impl Fn(&str) -> bool + Send + Sync + 'static) -> Self {
+        self.confirm_fn = Some(Box::new(f));
         self
     }
 }
@@ -77,6 +99,25 @@ impl AgentTool for BashTool {
         let command = params["command"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArgs("missing 'command' parameter".into()))?;
+
+        // Check deny patterns
+        for pattern in &self.deny_patterns {
+            if command.contains(pattern.as_str()) {
+                return Err(ToolError::Failed(format!(
+                    "Command blocked by safety policy: contains '{}'. This pattern is denied for safety.",
+                    pattern
+                )));
+            }
+        }
+
+        // Check confirmation callback
+        if let Some(ref confirm) = self.confirm_fn {
+            if !confirm(command) {
+                return Err(ToolError::Failed(
+                    "Command was not confirmed by the user.".into()
+                ));
+            }
+        }
 
         let mut cmd = Command::new("bash");
         cmd.arg("-c").arg(command);
@@ -129,13 +170,10 @@ impl AgentTool for BashTool {
             format!("Exit code: {}\nSTDOUT:\n{}\nSTDERR:\n{}", exit_code, stdout, stderr)
         };
 
-        if exit_code != 0 {
-            return Err(ToolError::Failed(output));
-        }
-
+        // Return output even on failure — LLMs need error output to self-correct
         Ok(ToolResult {
             content: vec![Content::Text { text: output }],
-            details: serde_json::json!({ "exit_code": exit_code }),
+            details: serde_json::json!({ "exit_code": exit_code, "success": exit_code == 0 }),
         })
     }
 }

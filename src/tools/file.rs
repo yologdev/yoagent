@@ -7,12 +7,15 @@ use async_trait::async_trait;
 pub struct ReadFileTool {
     /// Max file size to read (prevents OOM)
     pub max_bytes: usize,
+    /// Allowed directory roots (empty = no restriction)
+    pub allowed_paths: Vec<String>,
 }
 
 impl Default for ReadFileTool {
     fn default() -> Self {
         Self {
             max_bytes: 1024 * 1024, // 1MB
+            allowed_paths: Vec::new(),
         }
     }
 }
@@ -92,31 +95,36 @@ impl AgentTool for ReadFileTool {
         let offset = params["offset"].as_u64().map(|v| v.max(1) as usize);
         let limit = params["limit"].as_u64().map(|v| v as usize);
 
-        let output = match (offset, limit) {
+        // Always show line numbers — helps agent reference exact lines for edit_file
+        let lines: Vec<&str> = content.lines().collect();
+        let total = lines.len();
+
+        let (start, end) = match (offset, limit) {
             (Some(off), Some(lim)) => {
-                let lines: Vec<&str> = content.lines().collect();
-                let start = (off - 1).min(lines.len());
-                let end = (start + lim).min(lines.len());
-                let total = lines.len();
-                let slice = lines[start..end].join("\n");
-                format!("[Lines {}-{} of {}]\n{}", start + 1, end, total, slice)
+                let s = (off - 1).min(total);
+                (s, (s + lim).min(total))
             }
             (Some(off), None) => {
-                let lines: Vec<&str> = content.lines().collect();
-                let start = (off - 1).min(lines.len());
-                let total = lines.len();
-                let slice = lines[start..].join("\n");
-                format!("[Lines {}-{} of {}]\n{}", start + 1, total, total, slice)
+                let s = (off - 1).min(total);
+                (s, total)
             }
-            (None, Some(lim)) => {
-                let lines: Vec<&str> = content.lines().collect();
-                let end = lim.min(lines.len());
-                let total = lines.len();
-                let slice = lines[..end].join("\n");
-                format!("[Lines 1-{} of {}]\n{}", end, total, slice)
-            }
-            (None, None) => content,
+            (None, Some(lim)) => (0, lim.min(total)),
+            (None, None) => (0, total),
         };
+
+        let numbered: Vec<String> = lines[start..end]
+            .iter()
+            .enumerate()
+            .map(|(i, line)| format!("{:>4} | {}", start + i + 1, line))
+            .collect();
+
+        let header = if start > 0 || end < total {
+            format!("[Lines {}-{} of {}]", start + 1, end, total)
+        } else {
+            format!("[{} lines]", total)
+        };
+
+        let output = format!("{}\n{}", header, numbered.join("\n"));
 
         Ok(ToolResult {
             content: vec![Content::Text { text: output }],
