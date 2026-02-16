@@ -43,13 +43,61 @@ async fn main() {
 
 ```
 src/
-├── types.rs          # Core types: Message, AgentMessage, AgentEvent, AgentTool trait
-├── agent_loop.rs     # The core loop (agent_loop + agent_loop_continue)
-├── agent.rs          # Stateful Agent with steering/follow-up queues
+├── types.rs            # Core types: Message, AgentMessage, AgentEvent, AgentTool trait
+├── agent_loop.rs       # The core loop (agent_loop + agent_loop_continue)
+├── agent.rs            # Stateful Agent with steering/follow-up queues
+├── context.rs          # Context management, token estimation, smart truncation
+├── tools/
+│   ├── bash.rs         # Shell execution (timeout, output truncation, deny patterns)
+│   ├── file.rs         # Read/write files (line numbers, path restrictions)
+│   ├── edit.rs         # Surgical search/replace editing
+│   ├── list.rs         # Directory listing via find
+│   └── search.rs       # Pattern search via ripgrep/grep
 └── provider/
-    ├── traits.rs     # StreamProvider trait
-    ├── anthropic.rs  # Anthropic Claude (streaming)
-    └── mock.rs       # Mock provider for testing
+    ├── traits.rs           # StreamProvider trait, StreamEvent, ProviderError
+    ├── model.rs            # ModelConfig, ApiProtocol, CostConfig, OpenAiCompat
+    ├── registry.rs         # ProviderRegistry — dispatch by API protocol
+    ├── anthropic.rs        # Anthropic Messages API (Claude)
+    ├── openai_compat.rs    # OpenAI Chat Completions (OpenAI, xAI, Groq, Mistral, etc.)
+    ├── openai_responses.rs # OpenAI Responses API
+    ├── azure_openai.rs     # Azure OpenAI
+    ├── google.rs           # Google Generative AI (Gemini)
+    ├── google_vertex.rs    # Google Vertex AI
+    ├── bedrock.rs          # Amazon Bedrock (ConverseStream)
+    ├── sse.rs              # Shared SSE parsing utility
+    └── mock.rs             # Mock provider for testing
+```
+
+## Providers
+
+yo-agent supports **7 API protocols** covering **20+ providers** through a modular registry:
+
+| Protocol | Providers |
+|---|---|
+| Anthropic Messages | Anthropic (Claude) |
+| OpenAI Completions | OpenAI, xAI, Groq, Cerebras, OpenRouter, Mistral, MiniMax, HuggingFace, Kimi, DeepSeek |
+| OpenAI Responses | OpenAI (newer API) |
+| Azure OpenAI | Azure OpenAI |
+| Google Generative AI | Google Gemini |
+| Google Vertex | Google Vertex AI |
+| Bedrock ConverseStream | Amazon Bedrock |
+
+OpenAI-compatible providers share one implementation with per-provider quirk flags (`OpenAiCompat`) for differences in auth, reasoning format, tool handling, etc.
+
+```rust
+use yo_agent::provider::{ModelConfig, ApiProtocol, ProviderRegistry};
+
+// Anthropic
+let model = ModelConfig::anthropic("claude-sonnet-4-20250514");
+
+// Any OpenAI-compatible provider
+let model = ModelConfig::openai_compat("groq", "llama-3.3-70b", "https://api.groq.com/openai/v1");
+
+// Google Gemini
+let model = ModelConfig::google("gemini-2.5-pro");
+
+// Registry dispatches to the right provider
+let registry = ProviderRegistry::default();
 ```
 
 ## Key Concepts
