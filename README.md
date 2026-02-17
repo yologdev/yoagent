@@ -95,19 +95,48 @@ async fn main() {
 }
 ```
 
+### Skills ([AgentSkills](https://agentskills.io) compatible)
+
+Skills extend the agent with domain expertise. A skill is a directory with a `SKILL.md`:
+
+```
+skills/
+└── git/
+    ├── SKILL.md       # YAML frontmatter + instructions
+    └── scripts/       # Optional resources
+```
+
+```rust
+use yoagent::SkillSet;
+
+let skills = SkillSet::load(&["./skills"])?;
+
+let agent = Agent::new(AnthropicProvider)
+    .with_system_prompt("You are a coding assistant.")
+    .with_skills(skills)   // Injects skill index into system prompt
+    .with_tools(tools);
+```
+
+The agent sees a compact index of available skills. When a task matches, it reads the full SKILL.md using the `read_file` tool — no special infrastructure needed. Skills are cross-compatible with Claude Code, Codex CLI, Gemini CLI, Cursor, and other AgentSkills-compatible agents.
+
+See [docs/concepts/skills.md](docs/concepts/skills.md) for the full guide.
+
 ### Interactive CLI (mini coding agent)
 
 ```bash
 ANTHROPIC_API_KEY=sk-... cargo run --example cli
+# With skills:
+ANTHROPIC_API_KEY=sk-... cargo run --example cli -- --skills ./skills
 ```
 
-A ~200-line interactive coding agent with all built-in tools, streaming output, and colored tool feedback. Like a baby Claude Code.
+A ~230-line interactive coding agent with all built-in tools, skills support, streaming output, and colored tool feedback. Like a baby Claude Code.
 
 ```
   yoagent cli — mini coding agent
   Type /quit to exit, /clear to reset
 
   model: claude-sonnet-4-20250514
+  skills: 3 loaded
   cwd:   /home/user/my-project
 
 > find all TODO comments in src/
