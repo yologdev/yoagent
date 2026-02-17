@@ -14,6 +14,7 @@
 - [Tools](concepts/tools.md)
 - [Context Management](concepts/context-management.md)
 - [Prompt Caching](concepts/prompt-caching.md)
+- [Retry with Backoff](concepts/retry.md)
 
 # Guides
 

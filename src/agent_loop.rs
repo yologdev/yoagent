@@ -54,6 +54,9 @@ pub struct AgentLoopConfig<'a> {
 
     /// Tool execution strategy (sequential, parallel, or batched).
     pub tool_execution: ToolExecutionStrategy,
+
+    /// Retry configuration for transient provider errors.
+    pub retry_config: crate::retry::RetryConfig,
 }
 
 /// Default convert_to_llm: keep only user/assistant/toolResult messages.
@@ -371,29 +374,44 @@ async fn stream_assistant_response(
         })
         .collect();
 
-    let stream_config = StreamConfig {
-        model: config.model.clone(),
-        system_prompt: context.system_prompt.clone(),
-        messages: llm_messages,
-        tools: tool_defs,
-        thinking_level: config.thinking_level,
-        api_key: config.api_key.clone(),
-        max_tokens: config.max_tokens,
-        temperature: config.temperature,
-        model_config: None,
-        cache_config: config.cache_config.clone(),
+    // Retry loop for transient provider errors
+    let retry = &config.retry_config;
+    let mut attempt = 0;
+    let (result, mut stream_rx) = loop {
+        let stream_config = StreamConfig {
+            model: config.model.clone(),
+            system_prompt: context.system_prompt.clone(),
+            messages: llm_messages.clone(),
+            tools: tool_defs.clone(),
+            thinking_level: config.thinking_level,
+            api_key: config.api_key.clone(),
+            max_tokens: config.max_tokens,
+            temperature: config.temperature,
+            model_config: None,
+            cache_config: config.cache_config.clone(),
+        };
+
+        let (stream_tx, stream_rx) = mpsc::unbounded_channel();
+        let provider_cancel = cancel.clone();
+
+        let result = config
+            .provider
+            .stream(stream_config, stream_tx, provider_cancel)
+            .await;
+
+        match &result {
+            Err(e) if e.is_retryable() && attempt < retry.max_retries && !cancel.is_cancelled() => {
+                attempt += 1;
+                let delay = e
+                    .retry_after()
+                    .unwrap_or_else(|| retry.delay_for_attempt(attempt));
+                crate::retry::log_retry(attempt, retry.max_retries, &delay, e);
+                tokio::time::sleep(delay).await;
+                continue;
+            }
+            _ => break (result, stream_rx),
+        }
     };
-
-    // Stream from provider
-    let (stream_tx, mut stream_rx) = mpsc::unbounded_channel();
-    let provider_cancel = cancel.clone();
-
-    let provider = config.provider;
-    // We need to handle this carefully — spawn the provider stream
-    // Run provider inline (avoids lifetime issues with &dyn references)
-    let result = provider
-        .stream(stream_config, stream_tx, provider_cancel)
-        .await;
 
     // Process any events that were sent
     let mut partial_message: Option<AgentMessage> = None;

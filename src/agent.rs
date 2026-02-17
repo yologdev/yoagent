@@ -44,6 +44,7 @@ pub struct Agent {
     pub execution_limits: Option<ExecutionLimits>,
     pub cache_config: CacheConfig,
     pub tool_execution: ToolExecutionStrategy,
+    pub retry_config: crate::retry::RetryConfig,
 
     // Control
     cancel: Option<CancellationToken>,
@@ -70,6 +71,7 @@ impl Agent {
             execution_limits: Some(ExecutionLimits::default()),
             cache_config: CacheConfig::default(),
             tool_execution: ToolExecutionStrategy::default(),
+            retry_config: crate::retry::RetryConfig::default(),
             cancel: None,
             is_streaming: false,
         }
@@ -119,6 +121,11 @@ impl Agent {
 
     pub fn with_tool_execution(mut self, strategy: ToolExecutionStrategy) -> Self {
         self.tool_execution = strategy;
+        self
+    }
+
+    pub fn with_retry_config(mut self, config: crate::retry::RetryConfig) -> Self {
+        self.retry_config = config;
         self
     }
 
@@ -347,6 +354,7 @@ impl Agent {
             execution_limits: self.execution_limits.clone(),
             cache_config: self.cache_config.clone(),
             tool_execution: self.tool_execution.clone(),
+            retry_config: self.retry_config.clone(),
             get_follow_up_messages: Some(Box::new(move || {
                 let mut queue = follow_up_queue.lock().unwrap();
                 match follow_up_mode {

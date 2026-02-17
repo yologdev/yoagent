@@ -23,6 +23,7 @@ fn make_config(provider: &MockProvider) -> AgentLoopConfig<'_> {
         execution_limits: None,
         cache_config: CacheConfig::default(),
         tool_execution: ToolExecutionStrategy::default(),
+        retry_config: yoagent::RetryConfig::default(),
     }
 }
 
@@ -665,4 +666,270 @@ async fn test_tool_execution_update_events_emitted() {
         .collect();
 
     assert_eq!(updates, vec!["step 1/3", "step 2/3", "step 3/3"]);
+}
+
+// ---------------------------------------------------------------------------
+// Retry with backoff tests
+// ---------------------------------------------------------------------------
+
+/// A provider that fails N times with a given error, then delegates to a MockProvider.
+struct FailThenSucceedProvider {
+    fail_count: std::sync::atomic::AtomicUsize,
+    max_failures: usize,
+    error: ProviderError,
+    inner: MockProvider,
+}
+
+use yoagent::provider::{ProviderError, StreamConfig, StreamEvent, StreamProvider};
+
+#[async_trait::async_trait]
+impl StreamProvider for FailThenSucceedProvider {
+    async fn stream(
+        &self,
+        config: StreamConfig,
+        tx: tokio::sync::mpsc::UnboundedSender<StreamEvent>,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<yoagent::Message, ProviderError> {
+        let attempt = self
+            .fail_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if attempt < self.max_failures {
+            return Err(match &self.error {
+                ProviderError::RateLimited { retry_after_ms } => ProviderError::RateLimited {
+                    retry_after_ms: *retry_after_ms,
+                },
+                ProviderError::Network(msg) => ProviderError::Network(msg.clone()),
+                ProviderError::Auth(msg) => ProviderError::Auth(msg.clone()),
+                other => ProviderError::Other(other.to_string()),
+            });
+        }
+        self.inner.stream(config, tx, cancel).await
+    }
+}
+
+#[tokio::test]
+async fn test_retry_on_rate_limit_succeeds() {
+    let provider = FailThenSucceedProvider {
+        fail_count: std::sync::atomic::AtomicUsize::new(0),
+        max_failures: 2,
+        error: ProviderError::RateLimited {
+            retry_after_ms: Some(10), // 10ms for fast tests
+        },
+        inner: MockProvider::text("Success after retries"),
+    };
+
+    let config = AgentLoopConfig {
+        provider: &provider,
+        model: "mock".into(),
+        api_key: "test".into(),
+        thinking_level: ThinkingLevel::Off,
+        max_tokens: None,
+        temperature: None,
+        convert_to_llm: None,
+        transform_context: None,
+        get_steering_messages: None,
+        get_follow_up_messages: None,
+        context_config: None,
+        execution_limits: None,
+        cache_config: CacheConfig::default(),
+        tool_execution: ToolExecutionStrategy::default(),
+        retry_config: yoagent::RetryConfig {
+            max_retries: 3,
+            initial_delay_ms: 10,
+            backoff_multiplier: 2.0,
+            max_delay_ms: 100,
+        },
+    };
+
+    let mut context = AgentContext {
+        system_prompt: "test".into(),
+        messages: Vec::new(),
+        tools: Vec::new(),
+    };
+
+    let prompt = AgentMessage::Llm(Message::user("hi"));
+    let (tx, rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+
+    let new_messages = agent_loop(vec![prompt], &mut context, &config, tx, cancel).await;
+
+    // Should have succeeded after 2 failures + 1 success
+    assert_eq!(new_messages.len(), 2); // user + assistant
+    let events = collect_events(rx);
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::AgentEnd { .. })));
+
+    // Verify the provider was called 3 times (2 failures + 1 success)
+    assert_eq!(
+        provider
+            .fail_count
+            .load(std::sync::atomic::Ordering::SeqCst),
+        3
+    );
+}
+
+#[tokio::test]
+async fn test_retry_exhausted_returns_error() {
+    let provider = FailThenSucceedProvider {
+        fail_count: std::sync::atomic::AtomicUsize::new(0),
+        max_failures: 10, // more failures than retries
+        error: ProviderError::Network("connection reset".into()),
+        inner: MockProvider::text("never reached"),
+    };
+
+    let config = AgentLoopConfig {
+        provider: &provider,
+        model: "mock".into(),
+        api_key: "test".into(),
+        thinking_level: ThinkingLevel::Off,
+        max_tokens: None,
+        temperature: None,
+        convert_to_llm: None,
+        transform_context: None,
+        get_steering_messages: None,
+        get_follow_up_messages: None,
+        context_config: None,
+        execution_limits: None,
+        cache_config: CacheConfig::default(),
+        tool_execution: ToolExecutionStrategy::default(),
+        retry_config: yoagent::RetryConfig {
+            max_retries: 2,
+            initial_delay_ms: 10,
+            backoff_multiplier: 2.0,
+            max_delay_ms: 100,
+        },
+    };
+
+    let mut context = AgentContext {
+        system_prompt: "test".into(),
+        messages: Vec::new(),
+        tools: Vec::new(),
+    };
+
+    let prompt = AgentMessage::Llm(Message::user("hi"));
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+
+    let new_messages = agent_loop(vec![prompt], &mut context, &config, tx, cancel).await;
+
+    // Should have an error message (StopReason::Error)
+    let last = new_messages.last().unwrap();
+    if let AgentMessage::Llm(Message::Assistant {
+        stop_reason,
+        error_message,
+        ..
+    }) = last
+    {
+        assert_eq!(*stop_reason, StopReason::Error);
+        assert!(error_message.as_ref().unwrap().contains("connection reset"));
+    } else {
+        panic!("Expected error assistant message");
+    }
+
+    // 1 initial + 2 retries = 3 attempts
+    assert_eq!(
+        provider
+            .fail_count
+            .load(std::sync::atomic::Ordering::SeqCst),
+        3
+    );
+}
+
+#[tokio::test]
+async fn test_no_retry_on_auth_error() {
+    let provider = FailThenSucceedProvider {
+        fail_count: std::sync::atomic::AtomicUsize::new(0),
+        max_failures: 1,
+        error: ProviderError::Auth("invalid key".into()),
+        inner: MockProvider::text("never reached"),
+    };
+
+    let config = AgentLoopConfig {
+        provider: &provider,
+        model: "mock".into(),
+        api_key: "test".into(),
+        thinking_level: ThinkingLevel::Off,
+        max_tokens: None,
+        temperature: None,
+        convert_to_llm: None,
+        transform_context: None,
+        get_steering_messages: None,
+        get_follow_up_messages: None,
+        context_config: None,
+        execution_limits: None,
+        cache_config: CacheConfig::default(),
+        tool_execution: ToolExecutionStrategy::default(),
+        retry_config: yoagent::RetryConfig::default(), // 3 retries, but auth is not retryable
+    };
+
+    let mut context = AgentContext {
+        system_prompt: "test".into(),
+        messages: Vec::new(),
+        tools: Vec::new(),
+    };
+
+    let prompt = AgentMessage::Llm(Message::user("hi"));
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+
+    agent_loop(vec![prompt], &mut context, &config, tx, cancel).await;
+
+    // Should have been called exactly once — no retries for auth errors
+    assert_eq!(
+        provider
+            .fail_count
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+}
+
+#[tokio::test]
+async fn test_retry_none_disables_retries() {
+    let provider = FailThenSucceedProvider {
+        fail_count: std::sync::atomic::AtomicUsize::new(0),
+        max_failures: 1,
+        error: ProviderError::RateLimited {
+            retry_after_ms: None,
+        },
+        inner: MockProvider::text("never reached"),
+    };
+
+    let config = AgentLoopConfig {
+        provider: &provider,
+        model: "mock".into(),
+        api_key: "test".into(),
+        thinking_level: ThinkingLevel::Off,
+        max_tokens: None,
+        temperature: None,
+        convert_to_llm: None,
+        transform_context: None,
+        get_steering_messages: None,
+        get_follow_up_messages: None,
+        context_config: None,
+        execution_limits: None,
+        cache_config: CacheConfig::default(),
+        tool_execution: ToolExecutionStrategy::default(),
+        retry_config: yoagent::RetryConfig::none(), // disabled
+    };
+
+    let mut context = AgentContext {
+        system_prompt: "test".into(),
+        messages: Vec::new(),
+        tools: Vec::new(),
+    };
+
+    let prompt = AgentMessage::Llm(Message::user("hi"));
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+
+    agent_loop(vec![prompt], &mut context, &config, tx, cancel).await;
+
+    // Only 1 attempt — no retries
+    assert_eq!(
+        provider
+            .fail_count
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
 }
