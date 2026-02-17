@@ -142,4 +142,38 @@ async fn execute(&self, _id: &str, params: serde_json::Value, _cancel: Cancellat
 6. All tool results are added to context
 7. Loop continues with another LLM call
 
-Tools execute **sequentially** (not in parallel). Between tools, steering messages are checked — if a user interrupts, remaining tools are skipped.
+## Execution Strategies
+
+When the LLM returns multiple tool calls in a single response (e.g., "read file A, read file B, run bash C"), `ToolExecutionStrategy` controls how they run:
+
+| Strategy | Behavior |
+|----------|----------|
+| `Sequential` | One at a time. Steering checked between each tool. Use for debugging or tools with shared mutable state. |
+| **`Parallel`** (default) | All tool calls run concurrently via `futures::join_all`. Steering checked after all complete. Best latency for independent tools. |
+| `Batched { size }` | Run in groups of N. Steering checked between batches. Balances speed with human-in-the-loop control. |
+
+### Configuration
+
+```rust
+use yoagent::agent::Agent;
+use yoagent::types::ToolExecutionStrategy;
+
+// Default — parallel (fastest)
+let agent = Agent::new(provider);
+
+// Sequential (debug / shared state)
+let agent = Agent::new(provider)
+    .with_tool_execution(ToolExecutionStrategy::Sequential);
+
+// Batched — 3 at a time
+let agent = Agent::new(provider)
+    .with_tool_execution(ToolExecutionStrategy::Batched { size: 3 });
+```
+
+### When to use each
+
+- **Parallel** (default): Most tool calls are independent — file reads, searches, API calls. Running them concurrently can cut latency dramatically (3 tools × 50ms = ~50ms instead of ~150ms).
+- **Sequential**: When tools have side effects that depend on order, or when you need fine-grained steering control between each tool.
+- **Batched**: When you want parallelism but also want steering checkpoints. For example, `Batched { size: 3 }` runs 3 tools concurrently, checks for user interrupts, then runs the next 3.
+
+Steering messages are always checked between execution units (between each tool in Sequential, after all tools in Parallel, between batches in Batched). If a user interrupts, remaining tools are skipped.
