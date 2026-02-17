@@ -62,11 +62,17 @@ Everything is observable via events. Supports 7 API protocols covering 20+ LLM p
 
 ## Quick Start
 
-### Add to Cargo.toml
+### Install
+
+```bash
+cargo add yoagent tokio --features tokio/full
+```
+
+Or add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-yoagent = { git = "https://github.com/yologdev/yoagent.git" }
+yoagent = "0.2"
 tokio = { version = "1", features = ["full"] }
 ```
 
