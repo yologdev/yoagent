@@ -54,6 +54,81 @@ pub fn total_tokens(messages: &[AgentMessage]) -> usize {
 }
 
 // ---------------------------------------------------------------------------
+// Context tracking (real usage + estimates)
+// ---------------------------------------------------------------------------
+
+/// Tracks context size using real token counts from provider responses
+/// combined with estimates for messages added after the last response.
+///
+/// This gives more accurate context size tracking than pure estimation,
+/// since providers report actual token counts in their usage data.
+///
+/// # Example
+///
+/// ```rust
+/// use yoagent::context::ContextTracker;
+/// use yoagent::types::Usage;
+///
+/// let mut tracker = ContextTracker::new();
+/// // After receiving an assistant response with usage data:
+/// tracker.record_usage(&Usage { input: 1500, output: 200, ..Default::default() }, 3);
+/// ```
+pub struct ContextTracker {
+    /// Last known total token count from provider usage
+    last_usage_tokens: Option<usize>,
+    /// Index of the message that had the last usage
+    last_usage_index: Option<usize>,
+}
+
+impl ContextTracker {
+    pub fn new() -> Self {
+        Self {
+            last_usage_tokens: None,
+            last_usage_index: None,
+        }
+    }
+
+    /// Record usage from an assistant response.
+    ///
+    /// Call this after each assistant message to update the tracker
+    /// with real token counts from the provider.
+    pub fn record_usage(&mut self, usage: &Usage, message_index: usize) {
+        let total = usage.input + usage.output + usage.cache_read + usage.cache_write;
+        if total > 0 {
+            self.last_usage_tokens = Some(total as usize);
+            self.last_usage_index = Some(message_index);
+        }
+    }
+
+    /// Estimate current context size.
+    ///
+    /// Uses real usage from the last assistant response as a baseline,
+    /// then adds estimates (chars/4) for any messages added since.
+    /// Falls back to pure estimation if no usage data is available.
+    pub fn estimate_context_tokens(&self, messages: &[AgentMessage]) -> usize {
+        match (self.last_usage_tokens, self.last_usage_index) {
+            (Some(usage_tokens), Some(idx)) if idx < messages.len() => {
+                let trailing: usize = messages[idx + 1..].iter().map(message_tokens).sum();
+                usage_tokens + trailing
+            }
+            _ => total_tokens(messages),
+        }
+    }
+
+    /// Reset tracking (e.g. after compaction replaces messages).
+    pub fn reset(&mut self) {
+        self.last_usage_tokens = None;
+        self.last_usage_index = None;
+    }
+}
+
+impl Default for ContextTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Context configuration
 // ---------------------------------------------------------------------------
 
@@ -502,6 +577,76 @@ mod tests {
         let result = compact_messages(messages, &config);
         assert!(result.len() < 100);
         assert!(result.len() >= 2);
+    }
+
+    #[test]
+    fn test_context_tracker_no_usage() {
+        let tracker = ContextTracker::new();
+        let messages = vec![
+            AgentMessage::Llm(Message::user("Hello")),
+            AgentMessage::Llm(Message::user("World")),
+        ];
+        // Without usage data, falls back to estimation
+        let tokens = tracker.estimate_context_tokens(&messages);
+        assert!(tokens > 0);
+        assert_eq!(tokens, total_tokens(&messages));
+    }
+
+    #[test]
+    fn test_context_tracker_with_usage() {
+        let mut tracker = ContextTracker::new();
+        let messages = vec![
+            AgentMessage::Llm(Message::user("Hello")),
+            AgentMessage::Llm(Message::Assistant {
+                content: vec![Content::Text {
+                    text: "Hi there!".into(),
+                }],
+                stop_reason: StopReason::Stop,
+                model: "test".into(),
+                provider: "test".into(),
+                usage: Usage {
+                    input: 100,
+                    output: 50,
+                    ..Default::default()
+                },
+                timestamp: 0,
+                error_message: None,
+            }),
+            AgentMessage::Llm(Message::user("Follow up question here")),
+        ];
+        // Record usage at index 1 (assistant message)
+        tracker.record_usage(
+            &Usage {
+                input: 100,
+                output: 50,
+                ..Default::default()
+            },
+            1,
+        );
+        let tokens = tracker.estimate_context_tokens(&messages);
+        // Should be 150 (real usage) + estimate for the trailing user message
+        let trailing_estimate = message_tokens(&messages[2]);
+        assert_eq!(tokens, 150 + trailing_estimate);
+    }
+
+    #[test]
+    fn test_context_tracker_reset() {
+        let mut tracker = ContextTracker::new();
+        tracker.record_usage(
+            &Usage {
+                input: 1000,
+                output: 500,
+                ..Default::default()
+            },
+            5,
+        );
+        tracker.reset();
+        let messages = vec![AgentMessage::Llm(Message::user("test"))];
+        // After reset, should fall back to estimation
+        assert_eq!(
+            tracker.estimate_context_tokens(&messages),
+            total_tokens(&messages)
+        );
     }
 
     #[test]

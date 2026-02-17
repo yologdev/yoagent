@@ -53,10 +53,10 @@ impl StreamProvider for GoogleProvider {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(ProviderError::Api(format!(
-                "Google API error {}: {}",
-                status, body
-            )));
+            return Err(ProviderError::classify(
+                status.as_u16(),
+                &format!("Google API error {}: {}", status, body),
+            ));
         }
 
         let mut content: Vec<Content> = Vec::new();

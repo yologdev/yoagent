@@ -72,10 +72,10 @@ impl StreamProvider for BedrockProvider {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(ProviderError::Api(format!(
-                "Bedrock error {}: {}",
-                status, body
-            )));
+            return Err(ProviderError::classify(
+                status.as_u16(),
+                &format!("Bedrock error {}: {}", status, body),
+            ));
         }
 
         let mut content: Vec<Content> = Vec::new();

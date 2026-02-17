@@ -73,10 +73,10 @@ impl StreamProvider for GoogleVertexProvider {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(ProviderError::Api(format!(
-                "Vertex AI error {}: {}",
-                status, body
-            )));
+            return Err(ProviderError::classify(
+                status.as_u16(),
+                &format!("Vertex AI error {}: {}", status, body),
+            ));
         }
 
         // Delegate SSE parsing to the Google provider's streaming logic.

@@ -83,6 +83,22 @@ impl Message {
             Self::ToolResult { .. } => "toolResult",
         }
     }
+
+    /// Check if this assistant message represents a context overflow error.
+    ///
+    /// Some providers (SSE-based: Anthropic, OpenAI) return overflow as a
+    /// `StopReason::Error` message rather than an HTTP error. This method
+    /// checks the `error_message` field against known overflow patterns.
+    pub fn is_context_overflow(&self) -> bool {
+        match self {
+            Self::Assistant {
+                stop_reason: StopReason::Error,
+                error_message: Some(msg),
+                ..
+            } => crate::provider::is_context_overflow_message(msg),
+            _ => false,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
