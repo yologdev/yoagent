@@ -4,6 +4,15 @@ version = "0.1.0"
 edition = "2021"
 description = "Simple, effective agent loop with tool execution and event streaming"
 license = "MIT"
+repository = "https://github.com/yologdev/yoagent"
+homepage = "https://yologdev.github.io/yoagent/"
+documentation = "https://yologdev.github.io/yoagent/"
+readme = "README.md"
+keywords = ["agent", "llm", "ai", "tools", "streaming"]
+categories = ["api-bindings", "asynchronous"]
+authors = ["Yuanhao <yuanhao@yolog.dev>"]
+rust-version = "1.75"
+exclude = ["docs/images/*", "docs/theme/*", ".github/*", "scripts/*"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
