@@ -14,6 +14,7 @@ async fn test_bash_echo() {
             "t1",
             serde_json::json!({"command": "echo hello"}),
             CancellationToken::new(),
+            None,
         )
         .await
         .unwrap();
@@ -35,6 +36,7 @@ async fn test_bash_failure() {
             "t1",
             serde_json::json!({"command": "false"}),
             CancellationToken::new(),
+            None,
         )
         .await
         .unwrap();
@@ -54,6 +56,7 @@ async fn test_bash_deny_pattern() {
             "t1",
             serde_json::json!({"command": "rm -rf /"}),
             CancellationToken::new(),
+            None,
         )
         .await;
 
@@ -69,6 +72,7 @@ async fn test_bash_timeout() {
             "t1",
             serde_json::json!({"command": "sleep 10"}),
             CancellationToken::new(),
+            None,
         )
         .await;
 
@@ -88,6 +92,7 @@ async fn test_bash_cancel() {
             "t1",
             serde_json::json!({"command": "echo should not run"}),
             cancel,
+            None,
         )
         .await;
 
@@ -106,6 +111,7 @@ async fn test_read_write_file() {
             "t1",
             serde_json::json!({"path": path, "content": "hello from yoagent"}),
             CancellationToken::new(),
+            None,
         )
         .await
         .unwrap();
@@ -123,6 +129,7 @@ async fn test_read_write_file() {
             "t2",
             serde_json::json!({"path": path}),
             CancellationToken::new(),
+            None,
         )
         .await
         .unwrap();
@@ -154,6 +161,7 @@ async fn test_read_file_with_offset_limit() {
             "t1",
             serde_json::json!({"path": path, "offset": 5, "limit": 3}),
             CancellationToken::new(),
+            None,
         )
         .await
         .unwrap();
@@ -177,6 +185,7 @@ async fn test_read_file_not_found() {
             "t1",
             serde_json::json!({"path": "/nonexistent/file.txt"}),
             CancellationToken::new(),
+            None,
         )
         .await;
 
@@ -194,6 +203,7 @@ async fn test_write_creates_directories() {
             "t1",
             serde_json::json!({"path": path, "content": "nested!"}),
             CancellationToken::new(),
+            None,
         )
         .await;
 
@@ -217,6 +227,7 @@ async fn test_search_pattern() {
             "t1",
             serde_json::json!({"pattern": "hello"}),
             CancellationToken::new(),
+            None,
         )
         .await
         .unwrap();
@@ -243,6 +254,7 @@ async fn test_search_no_matches() {
             "t1",
             serde_json::json!({"pattern": "zzzznotfound"}),
             CancellationToken::new(),
+            None,
         )
         .await
         .unwrap();
@@ -274,6 +286,7 @@ async fn test_edit_file() {
                 "new_text": "println!(\"goodbye\")"
             }),
             CancellationToken::new(),
+            None,
         )
         .await
         .unwrap();
@@ -299,6 +312,7 @@ async fn test_edit_file_no_match() {
             "t1",
             serde_json::json!({"path": path, "old_text": "nonexistent", "new_text": "bar"}),
             CancellationToken::new(),
+            None,
         )
         .await;
     assert!(result.is_err());
@@ -317,6 +331,7 @@ async fn test_list_files_tool() {
             "t1",
             serde_json::json!({"path": tmp_dir.to_str().unwrap()}),
             CancellationToken::new(),
+            None,
         )
         .await
         .unwrap();
@@ -339,6 +354,7 @@ async fn test_read_file_line_numbers() {
             "t1",
             serde_json::json!({"path": path}),
             CancellationToken::new(),
+            None,
         )
         .await
         .unwrap();
@@ -359,6 +375,7 @@ async fn test_bash_blocked_command() {
             "t1",
             serde_json::json!({"command": "rm -rf /"}),
             CancellationToken::new(),
+            None,
         )
         .await;
     assert!(result.is_err());

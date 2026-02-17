@@ -80,6 +80,7 @@ impl AgentTool for SearchTool {
         _tool_call_id: &str,
         params: serde_json::Value,
         cancel: tokio_util::sync::CancellationToken,
+        _on_update: Option<ToolUpdateFn>,
     ) -> Result<ToolResult, ToolError> {
         let pattern = params["pattern"]
             .as_str()

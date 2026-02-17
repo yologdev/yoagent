@@ -66,6 +66,7 @@ impl AgentTool for ReadFileTool {
         _tool_call_id: &str,
         params: serde_json::Value,
         cancel: tokio_util::sync::CancellationToken,
+        _on_update: Option<ToolUpdateFn>,
     ) -> Result<ToolResult, ToolError> {
         let path = params["path"]
             .as_str()
@@ -186,6 +187,7 @@ impl AgentTool for WriteFileTool {
         _tool_call_id: &str,
         params: serde_json::Value,
         cancel: tokio_util::sync::CancellationToken,
+        _on_update: Option<ToolUpdateFn>,
     ) -> Result<ToolResult, ToolError> {
         let path = params["path"]
             .as_str()

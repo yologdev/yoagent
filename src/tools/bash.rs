@@ -98,6 +98,7 @@ impl AgentTool for BashTool {
         _tool_call_id: &str,
         params: serde_json::Value,
         cancel: tokio_util::sync::CancellationToken,
+        _on_update: Option<ToolUpdateFn>,
     ) -> Result<ToolResult, ToolError> {
         let command = params["command"]
             .as_str()

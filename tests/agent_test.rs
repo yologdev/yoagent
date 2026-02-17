@@ -65,6 +65,7 @@ async fn test_agent_with_tools() {
             _id: &str,
             params: serde_json::Value,
             _cancel: tokio_util::sync::CancellationToken,
+            _on_update: Option<ToolUpdateFn>,
         ) -> Result<ToolResult, ToolError> {
             let text = params["text"].as_str().unwrap_or("").to_string();
             Ok(ToolResult {

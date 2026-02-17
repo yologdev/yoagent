@@ -16,6 +16,7 @@ pub trait AgentTool: Send + Sync {
         tool_call_id: &str,
         params: serde_json::Value,
         cancel: CancellationToken,
+        on_update: Option<ToolUpdateFn>,
     ) -> Result<ToolResult, ToolError>;
 }
 ```
@@ -26,7 +27,7 @@ pub trait AgentTool: Send + Sync {
 | `label()` | Human-readable name for UI (e.g., `"Run Command"`) |
 | `description()` | Tells the LLM what the tool does |
 | `parameters_schema()` | JSON Schema for the tool's parameters |
-| `execute()` | Runs the tool, returns `ToolResult` or `ToolError` |
+| `execute()` | Runs the tool, returns `ToolResult` or `ToolError`. Optionally receives an `on_update` callback for streaming progress. |
 
 ## ToolResult
 
@@ -86,6 +87,7 @@ impl AgentTool for WeatherTool {
         _tool_call_id: &str,
         params: serde_json::Value,
         _cancel: tokio_util::sync::CancellationToken,
+        _on_update: Option<ToolUpdateFn>,
     ) -> Result<ToolResult, ToolError> {
         let city = params["city"].as_str()
             .ok_or(ToolError::InvalidArgs("missing city".into()))?;
@@ -116,7 +118,7 @@ let agent = Agent::new(provider).with_tools(tools);
 **Return `Err(ToolError)` on failure, not `Ok` with error text.** When a tool returns `Err`, the agent loop converts it to a `Message::ToolResult` with `is_error: true` and sends it to the LLM. The LLM sees the error and can self-correct — retry with different arguments, try a different approach, or explain the failure to the user.
 
 ```rust
-async fn execute(&self, _id: &str, params: serde_json::Value, _cancel: CancellationToken) -> Result<ToolResult, ToolError> {
+async fn execute(&self, _id: &str, params: serde_json::Value, _cancel: CancellationToken, _on_update: Option<ToolUpdateFn>) -> Result<ToolResult, ToolError> {
     let path = params["path"].as_str()
         .ok_or(ToolError::InvalidArgs("missing 'path'".into()))?;
 
@@ -141,6 +143,102 @@ async fn execute(&self, _id: &str, params: serde_json::Value, _cancel: Cancellat
 5. `ToolExecutionEnd` is emitted
 6. All tool results are added to context
 7. Loop continues with another LLM call
+
+## Streaming Tool Output
+
+Long-running tools can stream progress updates to the UI via the `on_update` callback. Each call emits a `ToolExecutionUpdate` event. Partial results are **for UI/logging only** — they are not sent to the LLM. Only the final `ToolResult` returned from `execute()` becomes part of the conversation.
+
+### The `ToolUpdateFn` type
+
+```rust
+pub type ToolUpdateFn = Arc<dyn Fn(ToolResult) + Send + Sync>;
+```
+
+### Basic usage
+
+Call `on_update` whenever you have progress to report:
+
+```rust
+use yoagent::types::*;
+
+struct DataProcessorTool;
+
+#[async_trait]
+impl AgentTool for DataProcessorTool {
+    // ... name, label, description, parameters_schema ...
+
+    async fn execute(
+        &self,
+        _id: &str,
+        params: serde_json::Value,
+        cancel: CancellationToken,
+        on_update: Option<ToolUpdateFn>,
+    ) -> Result<ToolResult, ToolError> {
+        let rows = fetch_rows(&params)?;
+        let total = rows.len();
+
+        for (i, row) in rows.iter().enumerate() {
+            // Check for cancellation
+            if cancel.is_cancelled() {
+                return Err(ToolError::Cancelled);
+            }
+
+            process_row(row);
+
+            // Stream progress every 100 rows
+            if i % 100 == 0 {
+                if let Some(ref cb) = on_update {
+                    cb(ToolResult {
+                        content: vec![Content::Text {
+                            text: format!("Processed {}/{} rows", i, total),
+                        }],
+                        details: serde_json::json!({"progress": i as f64 / total as f64}),
+                    });
+                }
+            }
+        }
+
+        Ok(ToolResult {
+            content: vec![Content::Text {
+                text: format!("Processed all {} rows", total),
+            }],
+            details: serde_json::Value::Null,
+        })
+    }
+}
+```
+
+### Consuming updates in your UI
+
+Updates arrive as `AgentEvent::ToolExecutionUpdate` events on the same event stream as all other agent events:
+
+```rust
+while let Some(event) = rx.recv().await {
+    match event {
+        AgentEvent::ToolExecutionStart { tool_name, .. } => {
+            println!("⏳ {} started", tool_name);
+        }
+        AgentEvent::ToolExecutionUpdate { tool_name, partial_result, .. } => {
+            // Show progress in your UI
+            if let Some(Content::Text { text }) = partial_result.content.first() {
+                println!("  📊 {}: {}", tool_name, text);
+            }
+        }
+        AgentEvent::ToolExecutionEnd { tool_name, is_error, .. } => {
+            println!("{} {}", if is_error { "❌" } else { "✅" }, tool_name);
+        }
+        _ => {}
+    }
+}
+```
+
+### Guidelines
+
+- **Call `on_update` as often as useful** — there's no rate limit. The callback is synchronous and cheap.
+- **Always check `on_update.is_some()`** before building the `ToolResult`. If `None`, the loop isn't interested in updates (e.g., testing).
+- **Use `details` for structured data** — `content` is for human-readable text, `details` can carry progress percentages, byte counts, etc.
+- **Don't rely on updates reaching the LLM** — they won't. Only the final return value is added to context.
+- **Simple tools don't need it** — if your tool completes in <1 second, just ignore `on_update` (add `_on_update` to suppress the warning).
 
 ## Execution Strategies
 

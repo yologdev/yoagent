@@ -10,6 +10,7 @@
 use crate::context::{self, ContextConfig, ExecutionLimits, ExecutionTracker};
 use crate::provider::{StreamConfig, StreamEvent, StreamProvider, ToolDefinition};
 use crate::types::*;
+use std::sync::Arc;
 
 /// Type alias for convert_to_llm callback.
 pub type ConvertToLlmFn = Box<dyn Fn(&[AgentMessage]) -> Vec<Message> + Send + Sync>;
@@ -621,8 +622,25 @@ async fn execute_single_tool(
     })
     .ok();
 
+    let on_update: Option<ToolUpdateFn> = {
+        let tx = tx.clone();
+        let id = id.to_string();
+        let name = name.to_string();
+        Some(Arc::new(move |partial: ToolResult| {
+            tx.send(AgentEvent::ToolExecutionUpdate {
+                tool_call_id: id.clone(),
+                tool_name: name.clone(),
+                partial_result: partial,
+            })
+            .ok();
+        }))
+    };
+
     let (result, is_error) = match tool {
-        Some(tool) => match tool.execute(id, args.clone(), cancel.child_token()).await {
+        Some(tool) => match tool
+            .execute(id, args.clone(), cancel.child_token(), on_update)
+            .await
+        {
             Ok(r) => (r, false),
             Err(e) => (
                 ToolResult {

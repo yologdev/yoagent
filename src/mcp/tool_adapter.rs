@@ -2,7 +2,7 @@
 
 use super::client::McpClient;
 use super::types::{McpContent, McpError, McpToolInfo};
-use crate::types::{AgentTool, Content, ToolError, ToolResult};
+use crate::types::{AgentTool, Content, ToolError, ToolResult, ToolUpdateFn};
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -86,6 +86,7 @@ impl AgentTool for McpToolAdapter {
         _tool_call_id: &str,
         params: serde_json::Value,
         _cancel: tokio_util::sync::CancellationToken,
+        _on_update: Option<ToolUpdateFn>,
     ) -> Result<ToolResult, ToolError> {
         let client = self.client.lock().await;
         let result = client
@@ -205,7 +206,12 @@ mod tests {
 
         let cancel = tokio_util::sync::CancellationToken::new();
         let result = adapter
-            .execute("tc-1", serde_json::json!({"path": "/tmp/test"}), cancel)
+            .execute(
+                "tc-1",
+                serde_json::json!({"path": "/tmp/test"}),
+                cancel,
+                None,
+            )
             .await
             .unwrap();
 
@@ -240,7 +246,9 @@ mod tests {
         assert_eq!(adapter.description(), "MCP tool (no description)");
 
         let cancel = tokio_util::sync::CancellationToken::new();
-        let result = adapter.execute("tc-1", serde_json::json!({}), cancel).await;
+        let result = adapter
+            .execute("tc-1", serde_json::json!({}), cancel, None)
+            .await;
         assert!(result.is_err());
     }
 

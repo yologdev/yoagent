@@ -123,6 +123,7 @@ async fn test_tool_call_and_response() {
             _tool_call_id: &str,
             _params: serde_json::Value,
             _cancel: tokio_util::sync::CancellationToken,
+            _on_update: Option<ToolUpdateFn>,
         ) -> Result<ToolResult, ToolError> {
             Ok(ToolResult {
                 content: vec![Content::Text {
@@ -265,6 +266,7 @@ async fn test_tool_error_is_reported() {
             _id: &str,
             _params: serde_json::Value,
             _cancel: tokio_util::sync::CancellationToken,
+            _on_update: Option<ToolUpdateFn>,
         ) -> Result<ToolResult, ToolError> {
             Err(ToolError::Failed("Something went wrong".into()))
         }
@@ -356,6 +358,7 @@ impl AgentTool for TimedTool {
         _id: &str,
         _params: serde_json::Value,
         _cancel: tokio_util::sync::CancellationToken,
+        _on_update: Option<ToolUpdateFn>,
     ) -> Result<ToolResult, ToolError> {
         tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
         Ok(ToolResult {
@@ -571,4 +574,95 @@ async fn test_batched_tool_execution() {
         "Batched execution took {}ms, expected 90-160ms",
         elapsed.as_millis()
     );
+}
+
+// ---------------------------------------------------------------------------
+// Streaming tool output (on_update callback) tests
+// ---------------------------------------------------------------------------
+
+/// A tool that emits progress updates via on_update callback.
+struct ProgressTool;
+
+#[async_trait::async_trait]
+impl AgentTool for ProgressTool {
+    fn name(&self) -> &str {
+        "progress_tool"
+    }
+    fn label(&self) -> &str {
+        "Progress"
+    }
+    fn description(&self) -> &str {
+        "A tool that streams progress"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({})
+    }
+
+    async fn execute(
+        &self,
+        _id: &str,
+        _params: serde_json::Value,
+        _cancel: tokio_util::sync::CancellationToken,
+        on_update: Option<ToolUpdateFn>,
+    ) -> Result<ToolResult, ToolError> {
+        for i in 1..=3 {
+            if let Some(ref cb) = on_update {
+                cb(ToolResult {
+                    content: vec![Content::Text {
+                        text: format!("step {}/3", i),
+                    }],
+                    details: serde_json::Value::Null,
+                });
+            }
+        }
+        Ok(ToolResult {
+            content: vec![Content::Text {
+                text: "done".into(),
+            }],
+            details: serde_json::Value::Null,
+        })
+    }
+}
+
+#[tokio::test]
+async fn test_tool_execution_update_events_emitted() {
+    let provider = MockProvider::new(vec![
+        MockResponse::ToolCalls(vec![MockToolCall {
+            name: "progress_tool".into(),
+            arguments: serde_json::json!({}),
+        }]),
+        MockResponse::Text("All done.".into()),
+    ]);
+
+    let config = make_config(&provider);
+
+    let mut context = AgentContext {
+        system_prompt: "test".into(),
+        messages: Vec::new(),
+        tools: vec![Box::new(ProgressTool)],
+    };
+
+    let prompt = AgentMessage::Llm(Message::user("go"));
+    let (tx, rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+
+    agent_loop(vec![prompt], &mut context, &config, tx, cancel).await;
+
+    let events = collect_events(rx);
+
+    let updates: Vec<String> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::ToolExecutionUpdate { partial_result, .. } => {
+                if let Some(Content::Text { text }) = partial_result.content.first() {
+                    Some(text.clone())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(updates, vec!["step 1/3", "step 2/3", "step 3/3"]);
 }

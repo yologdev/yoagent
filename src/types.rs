@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Content types
@@ -250,6 +251,13 @@ pub enum ThinkingLevel {
 // Tool definition
 // ---------------------------------------------------------------------------
 
+/// Callback for streaming partial results during tool execution.
+///
+/// Tools call this to emit progress updates (e.g., partial output, status messages)
+/// that are forwarded as `AgentEvent::ToolExecutionUpdate` events for UI consumption.
+/// Partial results are **not** sent to the LLM — only the final `ToolResult` is.
+pub type ToolUpdateFn = Arc<dyn Fn(ToolResult) + Send + Sync>;
+
 /// A tool the agent can call. Implement this trait for your tools.
 #[async_trait::async_trait]
 pub trait AgentTool: Send + Sync {
@@ -261,12 +269,18 @@ pub trait AgentTool: Send + Sync {
     fn description(&self) -> &str;
     /// JSON Schema for parameters
     fn parameters_schema(&self) -> serde_json::Value;
-    /// Execute the tool
+    /// Execute the tool.
+    ///
+    /// `on_update` is an optional callback for streaming partial results during
+    /// long-running operations. Call it as often as needed — each invocation
+    /// emits a `ToolExecutionUpdate` event. The final return value is what gets
+    /// sent to the LLM; partial results are for UI/logging only.
     async fn execute(
         &self,
         tool_call_id: &str,
         params: serde_json::Value,
         cancel: tokio_util::sync::CancellationToken,
+        on_update: Option<ToolUpdateFn>,
     ) -> Result<ToolResult, ToolError>;
 }
 
