@@ -129,6 +129,23 @@ impl Agent {
         self
     }
 
+    /// Load skills and append their index to the system prompt.
+    ///
+    /// The skills index is appended as XML per the [AgentSkills standard](https://agentskills.io).
+    /// The agent can then read individual SKILL.md files using the `read_file` tool
+    /// when it decides a skill is relevant.
+    pub fn with_skills(mut self, skills: crate::skills::SkillSet) -> Self {
+        let prompt_fragment = skills.format_for_prompt();
+        if !prompt_fragment.is_empty() {
+            if self.system_prompt.is_empty() {
+                self.system_prompt = prompt_fragment;
+            } else {
+                self.system_prompt = format!("{}\n\n{}", self.system_prompt, prompt_fragment);
+            }
+        }
+        self
+    }
+
     pub fn with_execution_limits(mut self, limits: ExecutionLimits) -> Self {
         self.execution_limits = Some(limits);
         self

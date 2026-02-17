@@ -36,6 +36,7 @@ Everything is observable via events. Supports 7 API protocols covering 20+ LLM p
 - Streaming tool output — tools emit real-time progress via `on_update` callback
 - Automatic retry with exponential backoff and jitter for rate limits and network errors
 - Custom message types via `AgentMessage::Extension` — app-specific messages that don't pollute LLM context
+- [AgentSkills](https://agentskills.io)-compatible skills — load skill directories, inject into system prompt, agent activates on demand
 
 **Multi-Provider**
 - 7 API protocols, 20+ providers through a modular registry
