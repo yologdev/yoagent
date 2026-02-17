@@ -94,6 +94,33 @@ async fn main() {
 }
 ```
 
+### Interactive CLI (mini coding agent)
+
+```bash
+ANTHROPIC_API_KEY=sk-... cargo run --example cli
+```
+
+A ~200-line interactive coding agent with all built-in tools, streaming output, and colored tool feedback. Like a baby Claude Code.
+
+```
+  yoagent cli — mini coding agent
+  Type /quit to exit, /clear to reset
+
+  model: claude-sonnet-4-20250514
+  cwd:   /home/user/my-project
+
+> find all TODO comments in src/
+
+  ▶ search 'TODO' ✓
+
+Found 3 TODOs:
+  src/main.rs:42: // TODO: handle edge case
+  src/lib.rs:15:  // TODO: add tests
+  src/utils.rs:8: // TODO: optimize this
+
+  tokens: 1250 in / 89 out
+```
+
 <details>
 <summary>OpenAI-compatible provider example</summary>
 
