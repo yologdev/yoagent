@@ -142,7 +142,7 @@ This isn't a feature — it's a foundation. pi-agent-core is TypeScript. yoagent
 
 Credit where it's due:
 
-- **Maturity.** pi-agent-core is at v0.52 with battle-tested production usage (it powers Claude Code's agent infrastructure). yoagent is v0.1.
+- **Maturity.** pi-agent-core is at v0.52 with extensive iteration and real-world usage. yoagent is v0.1.
 - **Declaration merging for custom messages.** TypeScript's structural typing makes custom message types more ergonomic than Rust's enum approach.
 - **Streaming architecture.** pi-agent-core uses `for await (const event of response)` which is more natural for progressive streaming. yoagent collects all events after the provider call completes (we fixed the delta bug, but the architecture differs).
 - **Dynamic API key resolution.** `getApiKey` per-call is elegant for rotating OAuth tokens (e.g., GitHub Copilot). yoagent has a static API key per agent.

@@ -85,7 +85,7 @@ The 210-line CLI example is a working coding agent. Try it.
 
 ⚖️ What pi-agent-core does better:
 
-• Battle-tested (v0.52, powers real production systems)
+• Battle-tested (v0.52, extensively iterated)
 • More natural streaming (async iterators vs event collection)
 • Dynamic API key rotation per-call
 • TypeScript ecosystem compatibility
