@@ -4,8 +4,9 @@
   <img alt="yoagent" src="docs/images/banner.png" width="100%" height="auto">
 </picture>
 
-<a href="https://yologdev.github.io/yoagent/">Docs</a> · <a href="https://github.com/yologdev/yoagent">GitHub</a> · <a href="https://deepwiki.com/yologdev/yoagent">DeepWiki</a> · <a href="https://github.com/yologdev/yoagent/issues">Issues</a> · <a href="https://github.com/yologdev/yoagent/releases">Releases</a>
+<a href="https://crates.io/crates/yoagent">crates.io</a> · <a href="https://yologdev.github.io/yoagent/">Docs</a> · <a href="https://github.com/yologdev/yoagent">GitHub</a> · <a href="https://deepwiki.com/yologdev/yoagent">DeepWiki</a> · <a href="https://github.com/yologdev/yoagent/issues">Issues</a> · <a href="https://github.com/yologdev/yoagent/releases">Releases</a>
 
+[![][crates-shield]][crates-link]
 [![][ci-shield]][ci-link]
 [![][license-shield]][license-link]
 [![][docs-shield]][docs-link]
@@ -234,6 +235,8 @@ MIT License — see [LICENSE](LICENSE) for details.
 - [pi-agent-core](https://github.com/badlogic/pi-mono/tree/main/packages/agent) — Original inspiration (TypeScript)
 
 <!-- Badge link definitions -->
+[crates-shield]: https://img.shields.io/crates/v/yoagent?labelColor=black&style=flat-square&logo=rust&color=orange
+[crates-link]: https://crates.io/crates/yoagent
 [ci-shield]: https://img.shields.io/github/actions/workflow/status/yologdev/yoagent/ci.yml?labelColor=black&style=flat-square&logo=github&label=CI
 [ci-link]: https://github.com/yologdev/yoagent/actions/workflows/ci.yml
 [license-shield]: https://img.shields.io/badge/license-MIT-white?labelColor=black&style=flat-square
