@@ -1,18 +1,90 @@
 # Context Management
 
-Long-running agents accumulate messages that exceed the model's context window. yoagent handles this automatically with tiered compaction.
+Long-running agents accumulate messages that exceed the model's context window. yoagent provides token tracking, overflow detection, tiered compaction, and execution limits.
 
 ## Token Estimation
 
 Fast estimation without external tokenizer dependencies:
 
 ```rust
-pub fn estimate_tokens(text: &str) -> usize {
-    text.len().div_ceil(4)  // ~4 chars per token for English
+use yoagent::context::{estimate_tokens, message_tokens, total_tokens};
+
+estimate_tokens("Hello world");          // ~3 tokens (chars / 4)
+message_tokens(&agent_message);          // estimate for a single message
+total_tokens(&messages);                 // estimate for all messages
+```
+
+## Context Tracking
+
+`ContextTracker` combines real token counts from provider responses with estimation for new messages — more accurate than pure estimation:
+
+```rust
+use yoagent::context::ContextTracker;
+
+let mut tracker = ContextTracker::new();
+
+// After each assistant response, record the real usage:
+tracker.record_usage(&assistant_usage, message_index);
+
+// Get current context size (real usage + estimated trailing):
+let tokens = tracker.estimate_context_tokens(agent.messages());
+
+// After compaction, reset the tracker:
+tracker.reset();
+```
+
+When no usage data is available, it falls back to chars/4 estimation.
+
+## Context Overflow Detection
+
+When the context exceeds a model's window, providers return overflow errors. yoagent detects these automatically across all major providers.
+
+### HTTP-level detection
+
+Providers that check before streaming (Google, Bedrock, Vertex) return `ProviderError::ContextOverflow`:
+
+```rust
+use yoagent::provider::ProviderError;
+
+match agent.prompt("...").await {
+    // The loop already handles this — but you can also match it:
+    Err(ProviderError::ContextOverflow { message }) => {
+        // Compact and retry
+    }
+    _ => {}
 }
 ```
 
-Also available: `message_tokens(&AgentMessage)` and `total_tokens(&[AgentMessage])`.
+`ProviderError::classify()` auto-detects overflow from error messages covering Anthropic, OpenAI, Google, AWS Bedrock, xAI, Groq, OpenRouter, llama.cpp, LM Studio, MiniMax, Kimi, GitHub Copilot, and generic patterns.
+
+### Message-level detection
+
+SSE-based providers (Anthropic, OpenAI) return overflow as a `StopReason::Error` message. Check with:
+
+```rust
+if message.is_context_overflow() {
+    // Compact and retry
+}
+```
+
+### Handling overflow in your application
+
+yoagent provides the detection and building blocks. Your application wires the compaction strategy:
+
+```rust
+// Proactive: check before each prompt
+let tokens = tracker.estimate_context_tokens(agent.messages());
+if tokens > context_window - reserve {
+    let compacted = compact_messages(agent.messages().to_vec(), &config);
+    agent.replace_messages(compacted);
+}
+
+// Reactive: catch overflow errors
+// ... on ContextOverflow or message.is_context_overflow():
+//   compact, then retry with agent.continue_loop()
+```
+
+For LLM-based summarization (asking the model to summarize old messages), implement that in your application layer — yoagent provides `replace_messages()` and `compact_messages()` as building blocks.
 
 ## ContextConfig
 
@@ -21,7 +93,7 @@ pub struct ContextConfig {
     pub max_context_tokens: usize,      // Default: 100,000
     pub system_prompt_tokens: usize,    // Default: 4,000
     pub keep_recent: usize,             // Default: 10
-    pub keep_first: usize,             // Default: 2
+    pub keep_first: usize,              // Default: 2
     pub tool_output_max_lines: usize,   // Default: 50
 }
 ```

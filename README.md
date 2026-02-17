@@ -51,9 +51,11 @@ Everything is observable via events. Supports 7 API protocols covering 20+ LLM p
 - `search` — Pattern search via ripgrep/grep with context lines
 
 **Context Management**
-- Token estimation and smart truncation (keep first + last, drop middle)
+- Context overflow detection across all major providers (Anthropic, OpenAI, Google, Bedrock, xAI, Groq, OpenRouter, llama.cpp, and more)
+- `ContextTracker` — hybrid real-usage + estimation for accurate token tracking
+- Tiered compaction: truncate tool outputs → summarize old turns → drop middle
 - Execution limits (max turns, max tokens, timeout)
-- Configurable context transforms and LLM message conversion
+- Building blocks for LLM-based summarization (`replace_messages()`, `compact_messages()`)
 
 ---
 
