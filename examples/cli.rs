@@ -9,6 +9,7 @@
 //! Run:
 //!   ANTHROPIC_API_KEY=sk-... cargo run --example cli
 //!   ANTHROPIC_API_KEY=sk-... cargo run --example cli -- --model claude-sonnet-4-20250514
+//!   ANTHROPIC_API_KEY=sk-... cargo run --example cli -- --skills ./skills
 //!
 //! Commands:
 //!   /quit, /exit    Exit the agent
@@ -18,6 +19,7 @@
 use std::io::{self, BufRead, Write};
 use yoagent::agent::Agent;
 use yoagent::provider::AnthropicProvider;
+use yoagent::skills::SkillSet;
 use yoagent::tools::default_tools;
 use yoagent::*;
 
@@ -56,19 +58,41 @@ async fn main() {
         .or_else(|_| std::env::var("API_KEY"))
         .expect("Set ANTHROPIC_API_KEY or API_KEY");
 
-    let model = std::env::args()
-        .skip_while(|a| a != "--model")
-        .nth(1)
+    let args: Vec<String> = std::env::args().collect();
+
+    let model = args
+        .iter()
+        .position(|a| a == "--model")
+        .and_then(|i| args.get(i + 1))
+        .cloned()
         .unwrap_or_else(|| "claude-sonnet-4-20250514".into());
+
+    // Collect --skills directories (can be specified multiple times)
+    let skill_dirs: Vec<String> = args
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| a.as_str() == "--skills")
+        .filter_map(|(i, _)| args.get(i + 1).cloned())
+        .collect();
+
+    let skills = if skill_dirs.is_empty() {
+        SkillSet::empty()
+    } else {
+        SkillSet::load(&skill_dirs).expect("Failed to load skills")
+    };
 
     let mut agent = Agent::new(AnthropicProvider)
         .with_system_prompt(SYSTEM_PROMPT)
         .with_model(&model)
         .with_api_key(&api_key)
+        .with_skills(skills.clone())
         .with_tools(default_tools());
 
     print_banner();
     println!("{DIM}  model: {model}{RESET}");
+    if !skills.is_empty() {
+        println!("{DIM}  skills: {} loaded{RESET}", skills.len());
+    }
     println!(
         "{DIM}  cwd:   {}{RESET}\n",
         std::env::current_dir().unwrap().display()
@@ -100,6 +124,7 @@ async fn main() {
                     .with_system_prompt(SYSTEM_PROMPT)
                     .with_model(&model)
                     .with_api_key(&api_key)
+                    .with_skills(skills.clone())
                     .with_tools(default_tools());
                 println!("{DIM}  (conversation cleared){RESET}\n");
                 continue;
@@ -110,6 +135,7 @@ async fn main() {
                     .with_system_prompt(SYSTEM_PROMPT)
                     .with_model(new_model)
                     .with_api_key(&api_key)
+                    .with_skills(skills.clone())
                     .with_tools(default_tools());
                 println!("{DIM}  (switched to {new_model}, conversation cleared){RESET}\n");
                 continue;
