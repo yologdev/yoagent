@@ -240,6 +240,141 @@ while let Some(event) = rx.recv().await {
 - **Don't rely on updates reaching the LLM** — they won't. Only the final return value is added to context.
 - **Simple tools don't need it** — if your tool completes in <1 second, just ignore `on_update` (add `_on_update` to suppress the warning).
 
+### End-to-end example
+
+Here's a complete example: a CLI agent with a deploy tool that streams progress. The human sees real-time output while the LLM only gets the final result.
+
+```rust
+use yoagent::agent::Agent;
+use yoagent::provider::AnthropicProvider;
+use yoagent::types::*;
+
+/// A tool that deploys an app and streams each step.
+struct DeployTool;
+
+#[async_trait]
+impl AgentTool for DeployTool {
+    fn name(&self) -> &str { "deploy" }
+    fn label(&self) -> &str { "Deploy App" }
+    fn description(&self) -> &str { "Deploy the application to production." }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "env": { "type": "string", "description": "Target environment" }
+            },
+            "required": ["env"]
+        })
+    }
+
+    async fn execute(
+        &self,
+        _id: &str,
+        params: serde_json::Value,
+        cancel: CancellationToken,
+        on_update: Option<ToolUpdateFn>,
+    ) -> Result<ToolResult, ToolError> {
+        let env = params["env"].as_str().unwrap_or("staging");
+
+        let steps = ["Building image", "Running tests", "Pushing to registry", "Rolling out"];
+        for (i, step) in steps.iter().enumerate() {
+            if cancel.is_cancelled() {
+                return Err(ToolError::Cancelled);
+            }
+
+            // Stream each step to the UI
+            if let Some(ref cb) = on_update {
+                cb(ToolResult {
+                    content: vec![Content::Text {
+                        text: format!("[{}/{}] {}...", i + 1, steps.len(), step),
+                    }],
+                    details: serde_json::json!({
+                        "step": i + 1,
+                        "total": steps.len(),
+                        "phase": step,
+                    }),
+                });
+            }
+
+            // Simulate work
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+
+        // Only this final result is sent to the LLM
+        Ok(ToolResult {
+            content: vec![Content::Text {
+                text: format!("Successfully deployed to {}", env),
+            }],
+            details: serde_json::json!({"env": env, "status": "success"}),
+        })
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    let mut agent = Agent::new(AnthropicProvider)
+        .with_system_prompt("You are a deployment assistant.")
+        .with_model("claude-sonnet-4-20250514")
+        .with_api_key(std::env::var("ANTHROPIC_API_KEY").unwrap())
+        .with_tools(vec![Box::new(DeployTool)]);
+
+    let mut rx = agent.prompt("Deploy to production").await;
+
+    while let Some(event) = rx.recv().await {
+        match event {
+            // LLM text streaming
+            AgentEvent::MessageUpdate {
+                delta: StreamDelta::Text { delta }, ..
+            } => print!("{}", delta),
+
+            // Tool progress streaming
+            AgentEvent::ToolExecutionStart { tool_name, .. } => {
+                println!("\n🚀 Starting {}...", tool_name);
+            }
+            AgentEvent::ToolExecutionUpdate { partial_result, .. } => {
+                if let Some(Content::Text { text }) = partial_result.content.first() {
+                    println!("  {}", text);
+                }
+            }
+            AgentEvent::ToolExecutionEnd { tool_name, is_error, .. } => {
+                if is_error {
+                    println!("  ❌ {} failed", tool_name);
+                } else {
+                    println!("  ✅ {} complete", tool_name);
+                }
+            }
+
+            AgentEvent::AgentEnd { .. } => break,
+            _ => {}
+        }
+    }
+}
+```
+
+Running this produces:
+
+```
+🚀 Starting deploy...
+  [1/4] Building image...
+  [2/4] Running tests...
+  [3/4] Pushing to registry...
+  [4/4] Rolling out...
+  ✅ deploy complete
+Successfully deployed to production. The deployment completed all 4 stages.
+```
+
+The human sees each step as it happens. The LLM only sees "Successfully deployed to production" and can continue the conversation from there.
+
+### How agents benefit
+
+When an AI agent (like a coding assistant) uses yoagent, streaming tool output helps in two ways:
+
+1. **Human oversight** — The human watching the agent work sees real-time progress instead of waiting for a tool to finish. A bash command running `cargo build` can stream compiler output as it happens, so the human can interrupt early if something is wrong.
+
+2. **Agent UIs** — Tools like web dashboards, IDE extensions, or chat interfaces can render live progress bars, log tails, or status indicators. The `details` field in `ToolResult` carries structured data (progress percentage, byte counts, etc.) that UIs can render however they want.
+
+The LLM itself doesn't see updates — it works with final results only. This is intentional: partial output would waste context tokens and confuse the model. The streaming is purely a **human-facing** feature.
+
 ## Execution Strategies
 
 When the LLM returns multiple tool calls in a single response (e.g., "read file A, read file B, run bash C"), `ToolExecutionStrategy` controls how they run:

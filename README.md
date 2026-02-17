@@ -33,6 +33,7 @@ Everything is observable via events. Supports 7 API protocols covering 20+ LLM p
 - Stateful agent with steering (interrupt mid-run) and follow-up (queue work after completion)
 - Full event stream: `AgentStart` → `TurnStart` → `MessageUpdate` (deltas) → `ToolExecution` → `TurnEnd` → `AgentEnd`
 - Parallel tool execution by default — sequential and batched strategies also available
+- Streaming tool output — tools emit real-time progress via `on_update` callback
 - Custom message types via `AgentMessage::Extension` — app-specific messages that don't pollute LLM context
 
 **Multi-Provider**
