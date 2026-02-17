@@ -418,7 +418,22 @@ async fn stream_assistant_response(
     while let Ok(event) = stream_rx.try_recv() {
         match &event {
             StreamEvent::Start => {
-                // Will be set when Done arrives
+                // Create a placeholder so deltas have a message to attach to.
+                // It will be replaced by the real message on Done.
+                let placeholder = AgentMessage::Llm(Message::Assistant {
+                    content: Vec::new(),
+                    stop_reason: StopReason::Stop,
+                    model: config.model.clone(),
+                    provider: String::new(),
+                    usage: Usage::default(),
+                    timestamp: now_ms(),
+                    error_message: None,
+                });
+                partial_message = Some(placeholder.clone());
+                tx.send(AgentEvent::MessageStart {
+                    message: placeholder,
+                })
+                .ok();
             }
             StreamEvent::TextDelta { delta, .. } => {
                 if let Some(ref msg) = partial_message {
@@ -456,19 +471,19 @@ async fn stream_assistant_response(
             StreamEvent::Done { message } => {
                 let am: AgentMessage = message.clone().into();
                 partial_message = Some(am.clone());
-                tx.send(AgentEvent::MessageStart {
-                    message: am.clone(),
-                })
-                .ok();
+                // MessageStart was already emitted on StreamEvent::Start
                 tx.send(AgentEvent::MessageEnd { message: am }).ok();
             }
             StreamEvent::Error { message } => {
                 let am: AgentMessage = message.clone().into();
+                // Only emit MessageStart if Start wasn't received
+                if partial_message.is_none() {
+                    tx.send(AgentEvent::MessageStart {
+                        message: am.clone(),
+                    })
+                    .ok();
+                }
                 partial_message = Some(am.clone());
-                tx.send(AgentEvent::MessageStart {
-                    message: am.clone(),
-                })
-                .ok();
                 tx.send(AgentEvent::MessageEnd { message: am }).ok();
             }
             _ => {}

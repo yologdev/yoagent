@@ -933,3 +933,79 @@ async fn test_retry_none_disables_retries() {
         1
     );
 }
+
+// ---------------------------------------------------------------------------
+// Event streaming bug fix test
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_message_update_events_emitted_during_streaming() {
+    // This test verifies the fix for: text deltas not emitted because
+    // partial_message was None when deltas arrived (MessageStart was only
+    // emitted on Done, after all deltas had already been processed).
+    let provider = MockProvider::text("Hello, world!");
+    let config = make_config(&provider);
+
+    let mut context = AgentContext {
+        system_prompt: "test".into(),
+        messages: Vec::new(),
+        tools: Vec::new(),
+    };
+
+    let prompt = AgentMessage::Llm(Message::user("hi"));
+    let (tx, rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+
+    agent_loop(vec![prompt], &mut context, &config, tx, cancel).await;
+
+    let events = collect_events(rx);
+
+    // Collect MessageUpdate text deltas
+    let deltas: Vec<String> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::MessageUpdate {
+                delta: StreamDelta::Text { delta },
+                ..
+            } => Some(delta.clone()),
+            _ => None,
+        })
+        .collect();
+
+    // Should have at least one text delta with "Hello, world!"
+    assert!(
+        !deltas.is_empty(),
+        "Expected MessageUpdate events with text deltas, got none"
+    );
+    let full_text: String = deltas.into_iter().collect();
+    assert_eq!(full_text, "Hello, world!");
+
+    // Verify event ordering: MessageStart before MessageUpdate before MessageEnd
+    let event_types: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::MessageStart { .. } => Some("Start"),
+            AgentEvent::MessageUpdate { .. } => Some("Update"),
+            AgentEvent::MessageEnd { .. } => Some("End"),
+            _ => None,
+        })
+        .collect();
+
+    // Should be: Start (user), End (user), Start (assistant), Update(s), End (assistant)
+    // Find the assistant sequence
+    let assistant_start = event_types.iter().rposition(|&e| e == "Start").unwrap();
+    let assistant_end = event_types.iter().rposition(|&e| e == "End").unwrap();
+
+    // All Updates should be between the last Start and last End
+    for (i, &et) in event_types.iter().enumerate() {
+        if et == "Update" {
+            assert!(
+                i > assistant_start && i < assistant_end,
+                "MessageUpdate at index {} should be between MessageStart ({}) and MessageEnd ({})",
+                i,
+                assistant_start,
+                assistant_end
+            );
+        }
+    }
+}
