@@ -220,14 +220,26 @@ fn build_request_body(config: &StreamConfig) -> serde_json::Value {
                         _ => None,
                     })
                     .unwrap_or_default();
+
+                let mut parts = vec![serde_json::json!({
+                    "functionResponse": {
+                        "name": tool_name,
+                        "response": {"result": text},
+                    }
+                })];
+
+                // Append image parts if present
+                for c in content {
+                    if let Content::Image { data, mime_type } = c {
+                        parts.push(serde_json::json!({
+                            "inlineData": {"mimeType": mime_type, "data": data},
+                        }));
+                    }
+                }
+
                 contents.push(serde_json::json!({
                     "role": "user",
-                    "parts": [{
-                        "functionResponse": {
-                            "name": tool_name,
-                            "response": {"result": text},
-                        }
-                    }],
+                    "parts": parts,
                 }));
             }
         }

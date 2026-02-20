@@ -2,6 +2,37 @@
 
 use crate::types::*;
 use async_trait::async_trait;
+use base64::Engine;
+use std::path::Path;
+
+/// 20 MB limit for image files
+const MAX_IMAGE_SIZE_BYTES: u64 = 20 * 1024 * 1024;
+
+fn is_image_file(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase())
+            .as_deref(),
+        Some("jpg" | "jpeg" | "png" | "webp" | "gif" | "bmp")
+    )
+}
+
+fn get_image_mime_type(path: &Path) -> Option<&'static str> {
+    match path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .as_deref()
+    {
+        Some("jpg" | "jpeg") => Some("image/jpeg"),
+        Some("png") => Some("image/png"),
+        Some("webp") => Some("image/webp"),
+        Some("gif") => Some("image/gif"),
+        Some("bmp") => Some("image/bmp"),
+        _ => None,
+    }
+}
 
 /// Read a file's contents. Supports line range for large files.
 pub struct ReadFileTool {
@@ -37,7 +68,7 @@ impl AgentTool for ReadFileTool {
     }
 
     fn description(&self) -> &str {
-        "Read a file's contents. Optionally specify offset (1-indexed line) and limit (number of lines) for large files."
+        "Read a file's contents. Supports text files with optional offset/limit, and image files (jpg, png, webp, gif, bmp) which are returned as base64-encoded images."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -81,6 +112,31 @@ impl AgentTool for ReadFileTool {
             .await
             .map_err(|e| ToolError::Failed(format!("Cannot access {}: {}", path, e)))?;
 
+        // Handle image files: read as binary, return base64-encoded Content::Image
+        let file_path = Path::new(path);
+        if is_image_file(file_path) {
+            if metadata.len() > MAX_IMAGE_SIZE_BYTES {
+                return Err(ToolError::Failed(format!(
+                    "Image too large ({}MB, max 20MB)",
+                    metadata.len() / (1024 * 1024)
+                )));
+            }
+            let mime_type = get_image_mime_type(file_path)
+                .ok_or_else(|| ToolError::Failed("Unknown image format".into()))?;
+            let bytes = tokio::fs::read(path)
+                .await
+                .map_err(|e| ToolError::Failed(format!("Cannot read {}: {}", path, e)))?;
+            let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            return Ok(ToolResult {
+                content: vec![Content::Image {
+                    data,
+                    mime_type: mime_type.to_string(),
+                }],
+                details: serde_json::json!({ "path": path, "bytes": bytes.len() }),
+            });
+        }
+
+        // Text files: check size limit and apply line offset/limit
         if metadata.len() as usize > self.max_bytes {
             return Err(ToolError::Failed(format!(
                 "File too large ({} bytes, max {}). Use offset/limit for partial reads.",

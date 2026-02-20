@@ -283,20 +283,27 @@ fn build_request_body(config: &StreamConfig, is_oauth: bool) -> serde_json::Valu
                 is_error,
                 ..
             } => {
-                let text = content
-                    .iter()
-                    .find_map(|c| match c {
-                        Content::Text { text } => Some(text.clone()),
-                        _ => None,
-                    })
-                    .unwrap_or_default();
+                let result_content = if content.iter().any(|c| matches!(c, Content::Image { .. })) {
+                    // Multi-content with images: use array format
+                    serde_json::json!(content_to_anthropic(content))
+                } else {
+                    // Text-only: use string shorthand
+                    let text = content
+                        .iter()
+                        .find_map(|c| match c {
+                            Content::Text { text } => Some(text.clone()),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    serde_json::json!(text)
+                };
 
                 messages.push(serde_json::json!({
                     "role": "user",
                     "content": [{
                         "type": "tool_result",
                         "tool_use_id": tool_call_id,
-                        "content": text,
+                        "content": result_content,
                         "is_error": is_error,
                     }],
                 }));
@@ -647,5 +654,113 @@ mod tests {
 
         let empty = Usage::default();
         assert_eq!(empty.cache_hit_rate(), 0.0);
+    }
+
+    #[test]
+    fn test_tool_result_with_image() {
+        let config = StreamConfig {
+            model: "claude-sonnet-4-20250514".into(),
+            system_prompt: "".into(),
+            messages: vec![
+                Message::Assistant {
+                    content: vec![Content::ToolCall {
+                        id: "tc-1".into(),
+                        name: "read_file".into(),
+                        arguments: serde_json::json!({"path": "test.png"}),
+                    }],
+                    stop_reason: StopReason::ToolUse,
+                    model: "test".into(),
+                    provider: "test".into(),
+                    usage: Usage::default(),
+                    timestamp: 0,
+                    error_message: None,
+                },
+                Message::ToolResult {
+                    tool_call_id: "tc-1".into(),
+                    tool_name: "read_file".into(),
+                    content: vec![
+                        Content::Text {
+                            text: "screenshot".into(),
+                        },
+                        Content::Image {
+                            data: "aW1hZ2VkYXRh".into(),
+                            mime_type: "image/png".into(),
+                        },
+                    ],
+                    is_error: false,
+                    timestamp: 0,
+                },
+            ],
+            tools: vec![],
+            thinking_level: ThinkingLevel::Off,
+            api_key: "test-key".into(),
+            max_tokens: Some(1024),
+            temperature: None,
+            model_config: None,
+            cache_config: CacheConfig {
+                enabled: false,
+                strategy: CacheStrategy::Disabled,
+            },
+        };
+
+        let body = build_request_body(&config, false);
+        let msgs = body["messages"].as_array().unwrap();
+        // The ToolResult message (second message)
+        let tool_msg = &msgs[1];
+        let tool_result = &tool_msg["content"][0];
+        assert_eq!(tool_result["type"], "tool_result");
+        // content should be an array (not a string) since it has images
+        let content = tool_result["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+    }
+
+    #[test]
+    fn test_tool_result_text_only_uses_string() {
+        let config = StreamConfig {
+            model: "claude-sonnet-4-20250514".into(),
+            system_prompt: "".into(),
+            messages: vec![
+                Message::Assistant {
+                    content: vec![Content::ToolCall {
+                        id: "tc-1".into(),
+                        name: "bash".into(),
+                        arguments: serde_json::json!({"command": "echo hi"}),
+                    }],
+                    stop_reason: StopReason::ToolUse,
+                    model: "test".into(),
+                    provider: "test".into(),
+                    usage: Usage::default(),
+                    timestamp: 0,
+                    error_message: None,
+                },
+                Message::ToolResult {
+                    tool_call_id: "tc-1".into(),
+                    tool_name: "bash".into(),
+                    content: vec![Content::Text {
+                        text: "hello".into(),
+                    }],
+                    is_error: false,
+                    timestamp: 0,
+                },
+            ],
+            tools: vec![],
+            thinking_level: ThinkingLevel::Off,
+            api_key: "test-key".into(),
+            max_tokens: Some(1024),
+            temperature: None,
+            model_config: None,
+            cache_config: CacheConfig {
+                enabled: false,
+                strategy: CacheStrategy::Disabled,
+            },
+        };
+
+        let body = build_request_body(&config, false);
+        let msgs = body["messages"].as_array().unwrap();
+        let tool_result = &msgs[1]["content"][0];
+        // Text-only: content should be a plain string
+        assert_eq!(tool_result["content"], "hello");
     }
 }

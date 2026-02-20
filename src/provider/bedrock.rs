@@ -226,19 +226,33 @@ fn build_bedrock_body(config: &StreamConfig) -> serde_json::Value {
                 is_error,
                 ..
             } => {
-                let text = content
+                // Build content blocks for tool result (text + images)
+                let tool_content: Vec<serde_json::Value> = content
                     .iter()
-                    .find_map(|c| match c {
-                        Content::Text { text } => Some(text.clone()),
+                    .filter_map(|c| match c {
+                        Content::Text { text } => Some(serde_json::json!({"text": text})),
+                        Content::Image { data, mime_type } => Some(serde_json::json!({
+                            "image": {
+                                "format": mime_type.split('/').nth(1).unwrap_or("png"),
+                                "source": {"bytes": data},
+                            }
+                        })),
                         _ => None,
                     })
-                    .unwrap_or_default();
+                    .collect();
+
+                let tool_content = if tool_content.is_empty() {
+                    vec![serde_json::json!({"text": ""})]
+                } else {
+                    tool_content
+                };
+
                 messages.push(serde_json::json!({
                     "role": "user",
                     "content": [{
                         "toolResult": {
                             "toolUseId": tool_call_id,
-                            "content": [{"text": text}],
+                            "content": tool_content,
                             "status": if *is_error { "error" } else { "success" },
                         }
                     }],
