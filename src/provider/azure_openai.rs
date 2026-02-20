@@ -216,14 +216,35 @@ fn build_azure_request_body(config: &StreamConfig) -> serde_json::Value {
     for msg in &config.messages {
         match msg {
             Message::User { content, .. } => {
-                let text = content
+                // Build content array for user message (supports text + images)
+                let user_content: Vec<serde_json::Value> = content
                     .iter()
-                    .find_map(|c| match c {
-                        Content::Text { text } => Some(text.clone()),
+                    .filter_map(|c| match c {
+                        Content::Text { text } => Some(serde_json::json!({
+                            "type": "input_text",
+                            "text": text,
+                        })),
+                        Content::Image { data, mime_type } => Some(serde_json::json!({
+                            "type": "input_image",
+                            "image_url": format!("data:{};base64,{}", mime_type, data),
+                        })),
                         _ => None,
                     })
-                    .unwrap_or_default();
-                input.push(serde_json::json!({"role": "user", "content": text}));
+                    .collect();
+
+                if user_content.len() == 1 && user_content[0]["type"] == "input_text" {
+                    // Simple text-only message can use shorthand format
+                    input.push(serde_json::json!({
+                        "role": "user",
+                        "content": user_content[0]["text"].as_str().unwrap_or(""),
+                    }));
+                } else {
+                    // Multi-modal content uses array format
+                    input.push(serde_json::json!({
+                        "role": "user",
+                        "content": user_content,
+                    }));
+                }
             }
             Message::Assistant { content, .. } => {
                 for c in content {
