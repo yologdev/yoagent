@@ -39,7 +39,13 @@ fn content_tokens(content: &[Content]) -> usize {
         .iter()
         .map(|c| match c {
             Content::Text { text } => estimate_tokens(text),
-            Content::Image { .. } => 1000,
+            Content::Image { data, .. } => {
+                // Estimate tokens from base64 data length:
+                // base64 len * 3/4 = raw bytes; ~750 bytes per token for images.
+                // Floor at 85 (Anthropic minimum), cap at 16000.
+                let raw_bytes = data.len() * 3 / 4;
+                (raw_bytes / 750).clamp(85, 16_000)
+            }
             Content::Thinking { thinking, .. } => estimate_tokens(thinking),
             Content::ToolCall {
                 name, arguments, ..

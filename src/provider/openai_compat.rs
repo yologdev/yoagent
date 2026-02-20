@@ -310,18 +310,25 @@ fn build_request_body(
                 content,
                 ..
             } => {
-                let text = content
-                    .iter()
-                    .find_map(|c| match c {
-                        Content::Text { text } => Some(text.clone()),
-                        _ => None,
-                    })
-                    .unwrap_or_default();
+                let content_val = if content.iter().any(|c| matches!(c, Content::Image { .. })) {
+                    // Images present: use array format for multimodal tool results
+                    content_to_openai(content)
+                } else {
+                    // Text-only: use plain string for maximum compat
+                    let text = content
+                        .iter()
+                        .find_map(|c| match c {
+                            Content::Text { text } => Some(text.clone()),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    serde_json::json!(text)
+                };
 
                 let mut msg_obj = serde_json::json!({
                     "role": "tool",
                     "tool_call_id": tool_call_id,
-                    "content": text,
+                    "content": content_val,
                 });
                 if compat.requires_tool_result_name {
                     msg_obj["name"] = serde_json::json!(tool_name);
@@ -549,5 +556,92 @@ mod tests {
         assert!(result.is_array());
         assert_eq!(result[0]["type"], "text");
         assert_eq!(result[1]["type"], "image_url");
+    }
+
+    #[test]
+    fn test_tool_result_with_image() {
+        let model_config = ModelConfig::openai("gpt-4o", "GPT-4o");
+        let compat = OpenAiCompat::openai();
+        let config = StreamConfig {
+            model: "gpt-4o".into(),
+            system_prompt: String::new(),
+            messages: vec![
+                Message::Assistant {
+                    content: vec![Content::ToolCall {
+                        id: "call-1".into(),
+                        name: "read_file".into(),
+                        arguments: serde_json::json!({"path": "img.png"}),
+                    }],
+                    stop_reason: StopReason::ToolUse,
+                    model: "test".into(),
+                    provider: "test".into(),
+                    usage: Usage::default(),
+                    timestamp: 0,
+                    error_message: None,
+                },
+                Message::ToolResult {
+                    tool_call_id: "call-1".into(),
+                    tool_name: "read_file".into(),
+                    content: vec![Content::Image {
+                        data: "aW1hZ2VkYXRh".into(),
+                        mime_type: "image/png".into(),
+                    }],
+                    is_error: false,
+                    timestamp: 0,
+                },
+            ],
+            tools: vec![],
+            thinking_level: ThinkingLevel::Off,
+            api_key: "test".into(),
+            max_tokens: None,
+            temperature: None,
+            model_config: Some(model_config.clone()),
+            cache_config: CacheConfig::default(),
+        };
+
+        let body = build_request_body(&config, &model_config, &compat);
+        let msgs = body["messages"].as_array().unwrap();
+        // tool result is the last message (after system + assistant)
+        let tool_msg = msgs.last().unwrap();
+        assert_eq!(tool_msg["role"], "tool");
+        // content should be an array with image_url
+        let content = tool_msg["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "image_url");
+        assert!(content[0]["image_url"]["url"]
+            .as_str()
+            .unwrap()
+            .starts_with("data:image/png;base64,"));
+    }
+
+    #[test]
+    fn test_tool_result_text_only_uses_string() {
+        let model_config = ModelConfig::openai("gpt-4o", "GPT-4o");
+        let compat = OpenAiCompat::openai();
+        let config = StreamConfig {
+            model: "gpt-4o".into(),
+            system_prompt: String::new(),
+            messages: vec![Message::ToolResult {
+                tool_call_id: "call-1".into(),
+                tool_name: "bash".into(),
+                content: vec![Content::Text {
+                    text: "hello".into(),
+                }],
+                is_error: false,
+                timestamp: 0,
+            }],
+            tools: vec![],
+            thinking_level: ThinkingLevel::Off,
+            api_key: "test".into(),
+            max_tokens: None,
+            temperature: None,
+            model_config: Some(model_config.clone()),
+            cache_config: CacheConfig::default(),
+        };
+
+        let body = build_request_body(&config, &model_config, &compat);
+        let msgs = body["messages"].as_array().unwrap();
+        let tool_msg = msgs.last().unwrap();
+        // Text-only: content should be a plain string
+        assert_eq!(tool_msg["content"], "hello");
     }
 }

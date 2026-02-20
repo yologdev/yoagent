@@ -300,17 +300,37 @@ fn build_request_body(config: &StreamConfig, _model_config: &ModelConfig) -> ser
                 content,
                 ..
             } => {
-                let text = content
-                    .iter()
-                    .find_map(|c| match c {
-                        Content::Text { text } => Some(text.clone()),
-                        _ => None,
-                    })
-                    .unwrap_or_default();
+                let output_val = if content.iter().any(|c| matches!(c, Content::Image { .. })) {
+                    // Images present: build content array
+                    let parts: Vec<serde_json::Value> = content
+                        .iter()
+                        .filter_map(|c| match c {
+                            Content::Text { text } => Some(serde_json::json!({
+                                "type": "input_text",
+                                "text": text,
+                            })),
+                            Content::Image { data, mime_type } => Some(serde_json::json!({
+                                "type": "input_image",
+                                "image_url": format!("data:{};base64,{}", mime_type, data),
+                            })),
+                            _ => None,
+                        })
+                        .collect();
+                    serde_json::json!(parts)
+                } else {
+                    let text = content
+                        .iter()
+                        .find_map(|c| match c {
+                            Content::Text { text } => Some(text.clone()),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    serde_json::json!(text)
+                };
                 input.push(serde_json::json!({
                     "type": "function_call_output",
                     "call_id": tool_call_id,
-                    "output": text,
+                    "output": output_val,
                 }));
             }
         }
