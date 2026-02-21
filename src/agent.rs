@@ -151,6 +151,12 @@ impl Agent {
         self
     }
 
+    /// Add a sub-agent tool. The sub-agent runs its own `agent_loop()` when invoked.
+    pub fn with_sub_agent(mut self, sub: crate::sub_agent::SubAgentTool) -> Self {
+        self.tools.push(Box::new(sub));
+        self
+    }
+
     /// Disable automatic context compaction
     pub fn without_context_management(mut self) -> Self {
         self.context_config = None;
