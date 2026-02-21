@@ -81,6 +81,12 @@ pub struct AgentLoopConfig<'a> {
     pub get_follow_up_messages: Option<GetMessagesFn>,
     pub context_config: Option<ContextConfig>,
     pub execution_limits: Option<ExecutionLimits>,
+    pub cache_config: CacheConfig,
+    pub tool_execution: ToolExecutionStrategy,
+    pub retry_config: RetryConfig,
+    pub before_turn: Option<BeforeTurnFn>,
+    pub after_turn: Option<AfterTurnFn>,
+    pub on_error: Option<OnErrorFn>,
 }
 ```
 
@@ -96,6 +102,12 @@ pub struct AgentLoopConfig<'a> {
 | `get_follow_up_messages` | Returns queued work after agent would stop |
 | `context_config` | Token budget and compaction settings |
 | `execution_limits` | Max turns, tokens, duration |
+| `cache_config` | Prompt caching behavior (see [Prompt Caching](prompt-caching.md)) |
+| `tool_execution` | Parallel, Sequential, or Batched (see [Tools](tools.md#execution-strategies)) |
+| `retry_config` | Retry behavior for transient errors (see [Retry](retry.md)) |
+| `before_turn` | Called before each LLM call; return `false` to abort (see [Callbacks](callbacks.md)) |
+| `after_turn` | Called after each turn with messages and usage (see [Callbacks](callbacks.md)) |
+| `on_error` | Called on `StopReason::Error` with the error string (see [Callbacks](callbacks.md)) |
 
 ## Steering & Follow-Ups
 

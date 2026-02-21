@@ -241,6 +241,9 @@ impl AgentTool for SubAgentTool {
             cache_config: self.cache_config.clone(),
             tool_execution: self.tool_execution.clone(),
             retry_config: self.retry_config.clone(),
+            before_turn: None,
+            after_turn: None,
+            on_error: None,
         };
 
         // Channel for sub-agent events

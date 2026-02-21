@@ -6,7 +6,7 @@ use std::sync::Arc;
 // Content types
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Content {
     #[serde(rename = "text")]
@@ -35,7 +35,7 @@ pub enum Content {
 // Messages
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "role")]
 pub enum Message {
     #[serde(rename = "user")]
@@ -105,31 +105,44 @@ impl Message {
 // AgentMessage — LLM messages + extensible custom types
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExtensionMessage {
+    pub role: String,
+    pub kind: String,
+    pub data: serde_json::Value,
+}
+
+impl ExtensionMessage {
+    pub fn new(kind: impl Into<String>, data: impl Serialize) -> Self {
+        Self {
+            role: "extension".into(),
+            kind: kind.into(),
+            data: serde_json::to_value(data).unwrap_or(serde_json::Value::Null),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum AgentMessage {
     /// Standard LLM message
     Llm(Message),
     /// App-specific message (UI-only, notifications, etc.)
-    Extension {
-        role: String,
-        #[serde(flatten)]
-        data: serde_json::Value,
-    },
+    Extension(ExtensionMessage),
 }
 
 impl AgentMessage {
     pub fn role(&self) -> &str {
         match self {
             Self::Llm(m) => m.role(),
-            Self::Extension { role, .. } => role,
+            Self::Extension(ext) => &ext.role,
         }
     }
 
     pub fn as_llm(&self) -> Option<&Message> {
         match self {
             Self::Llm(m) => Some(m),
-            _ => None,
+            Self::Extension(_) => None,
         }
     }
 }
@@ -154,7 +167,7 @@ pub enum StopReason {
     Aborted,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Usage {
     pub input: u64,
     pub output: u64,
@@ -186,7 +199,7 @@ impl Usage {
 ///
 /// By default, caching is enabled with automatic breakpoint placement.
 /// This gives optimal cost savings without any user configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CacheConfig {
     /// Master switch — set to false to disable all caching hints.
     /// Default: true.
@@ -212,7 +225,8 @@ impl Default for CacheConfig {
 ///
 /// When the LLM returns multiple tool calls (e.g., "read file A, read file B,
 /// run bash C"), this determines whether they run sequentially or in parallel.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "camelCase")]
 pub enum ToolExecutionStrategy {
     /// Run tools one at a time, check steering between each.
     /// Use for debugging or tools with shared mutable state.
@@ -300,7 +314,7 @@ pub trait AgentTool: Send + Sync {
     ) -> Result<ToolResult, ToolError>;
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolResult {
     pub content: Vec<Content>,
     #[serde(default)]

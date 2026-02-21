@@ -34,9 +34,14 @@ Everything is observable via events. Supports 7 API protocols covering 20+ LLM p
 - Stateful agent with steering (interrupt mid-run) and follow-up (queue work after completion)
 - Full event stream: `AgentStart` → `TurnStart` → `MessageUpdate` (deltas) → `ToolExecution` → `TurnEnd` → `AgentEnd`
 - Parallel tool execution by default — sequential and batched strategies also available
+- Sub-agents via `SubAgentTool` — delegate tasks to child agent loops with their own tools and system prompts
 - Streaming tool output — tools emit real-time progress via `on_update` callback
+- Multimodal support — `Content::Image` flows through tool results across all providers
 - Automatic retry with exponential backoff and jitter for rate limits and network errors
 - Custom message types via `AgentMessage::Extension` — app-specific messages that don't pollute LLM context
+- State persistence — `save_messages()` / `restore_messages()` for pause/resume workflows
+- Lifecycle callbacks — `before_turn`, `after_turn`, `on_error` for observability and control
+- Full serde support — all core types implement `Serialize`/`Deserialize`/`PartialEq`
 - [AgentSkills](https://agentskills.io)-compatible skills — load skill directories, inject into system prompt, agent activates on demand
 
 **Multi-Provider**

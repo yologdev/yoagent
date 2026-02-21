@@ -9,6 +9,7 @@
 //! then summarize conversation if needed.
 
 use crate::types::*;
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // Token estimation
@@ -30,7 +31,7 @@ pub fn message_tokens(msg: &AgentMessage) -> usize {
                 content, tool_name, ..
             } => content_tokens(content) + estimate_tokens(tool_name) + 8,
         },
-        AgentMessage::Extension { data, .. } => estimate_tokens(&data.to_string()) + 4,
+        AgentMessage::Extension(ext) => estimate_tokens(&ext.data.to_string()) + 4,
     }
 }
 
@@ -139,7 +140,7 @@ impl Default for ContextTracker {
 // ---------------------------------------------------------------------------
 
 /// Configuration for context management
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextConfig {
     /// Maximum context tokens (leave room for response)
     pub max_context_tokens: usize,
@@ -419,7 +420,7 @@ fn keep_within_budget(messages: &[AgentMessage], budget: usize) -> Vec<AgentMess
 // ---------------------------------------------------------------------------
 
 /// Execution limits for the agent loop
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionLimits {
     /// Maximum number of turns (LLM calls)
     pub max_turns: usize,

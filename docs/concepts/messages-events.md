@@ -44,14 +44,26 @@ Wraps `Message` with support for extension messages (UI-only, notifications, etc
 ```rust
 pub enum AgentMessage {
     Llm(Message),
-    Extension {
-        role: String,
-        data: serde_json::Value,
-    },
+    Extension(ExtensionMessage),
+}
+
+pub struct ExtensionMessage {
+    pub role: String,
+    pub kind: String,
+    pub data: serde_json::Value,
 }
 ```
 
-Use `as_llm()` to extract the `Message` if it's an LLM message. The default `convert_to_llm` function filters out `Extension` messages before sending to the provider.
+Create extension messages with the convenience constructor:
+
+```rust
+let ext = ExtensionMessage::new("status_update", serde_json::json!({"status": "running"}));
+let msg = AgentMessage::Extension(ext);
+```
+
+The `kind` field categorizes the extension (e.g., `"status_update"`, `"ui_event"`, `"notification"`). Use `as_llm()` to extract the `Message` if it's an LLM message. The default `convert_to_llm` function filters out `Extension` messages before sending to the provider.
+
+All core message types implement `Serialize`, `Deserialize`, `Clone`, and `PartialEq`, enabling state persistence and test assertions.
 
 ## Content
 
