@@ -85,6 +85,7 @@ Loop iteration:
   4. Compact context
   5. Stream LLM response
   6. Check for error/abort → on_error(message) if StopReason::Error
+     → after_turn(messages, usage) even on error/abort
   7. Execute tool calls
   8. Track turn
   9. after_turn(messages, usage)

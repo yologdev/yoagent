@@ -240,16 +240,6 @@ async fn run_loop(
             // before_turn callback — abort if it returns false
             if let Some(ref before_turn) = config.before_turn {
                 if !before_turn(&context.messages, turn_number) {
-                    tx.send(AgentEvent::TurnEnd {
-                        message: AgentMessage::Llm(Message::User {
-                            content: vec![Content::Text {
-                                text: "[Agent stopped: before_turn returned false]".into(),
-                            }],
-                            timestamp: now_ms(),
-                        }),
-                        tool_results: vec![],
-                    })
-                    .ok();
                     return;
                 }
             }
@@ -272,6 +262,7 @@ async fn run_loop(
             if let Message::Assistant {
                 ref stop_reason,
                 ref error_message,
+                ref usage,
                 ..
             } = message
             {
@@ -281,6 +272,10 @@ async fn run_loop(
                             let err_str = error_message.as_deref().unwrap_or("Unknown error");
                             on_error(err_str);
                         }
+                    }
+                    // Call after_turn even on error/abort so callers tracking usage don't miss this turn
+                    if let Some(ref after_turn) = config.after_turn {
+                        after_turn(&context.messages, usage);
                     }
                     tx.send(AgentEvent::TurnEnd {
                         message: agent_msg,
