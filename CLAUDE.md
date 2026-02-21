@@ -55,7 +55,7 @@ The loop: stream assistant response → extract tool calls → execute tools (pa
 
 - **`Content`** — enum: `Text`, `Image`, `Thinking`, `ToolCall`
 - **`Message`** — enum: `User`, `Assistant`, `ToolResult` — each variant carries its own fields
-- **`AgentMessage`** — `Llm(Message)` | `Extension { role, data }` — extension messages don't enter LLM context
+- **`AgentMessage`** — `Llm(Message)` | `Extension(ExtensionMessage)` — extension messages (`role`, `kind`, `data`) don't enter LLM context
 - **`AgentEvent`** — full event stream emitted to callers: `AgentStart`, `TurnStart`, `MessageStart/Update/End`, `ToolExecutionStart/Update/End`, `TurnEnd`, `AgentEnd`
 - **`StopReason`** — `Stop`, `Length`, `ToolUse`, `Error`, `Aborted`
 

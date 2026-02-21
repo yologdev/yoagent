@@ -16,6 +16,9 @@
 - [Prompt Caching](concepts/prompt-caching.md)
 - [Retry with Backoff](concepts/retry.md)
 - [Skills](concepts/skills.md)
+- [Sub-Agents](concepts/sub-agents.md)
+- [State Persistence](concepts/persistence.md)
+- [Lifecycle Callbacks](concepts/callbacks.md)
 
 # Guides
 

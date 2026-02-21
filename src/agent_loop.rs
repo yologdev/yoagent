@@ -18,6 +18,12 @@ pub type ConvertToLlmFn = Box<dyn Fn(&[AgentMessage]) -> Vec<Message> + Send + S
 pub type TransformContextFn = Box<dyn Fn(Vec<AgentMessage>) -> Vec<AgentMessage> + Send + Sync>;
 /// Type alias for steering/follow-up message callbacks.
 pub type GetMessagesFn = Box<dyn Fn() -> Vec<AgentMessage> + Send + Sync>;
+/// Called before each LLM turn. Return `false` to abort the loop.
+pub type BeforeTurnFn = Arc<dyn Fn(&[AgentMessage], usize) -> bool + Send + Sync>;
+/// Called after each LLM turn with the current messages and the turn's usage.
+pub type AfterTurnFn = Arc<dyn Fn(&[AgentMessage], &Usage) + Send + Sync>;
+/// Called when the LLM returns a `StopReason::Error`.
+pub type OnErrorFn = Arc<dyn Fn(&str) + Send + Sync>;
 use tokio::sync::mpsc;
 use tracing::warn;
 
@@ -57,6 +63,13 @@ pub struct AgentLoopConfig<'a> {
 
     /// Retry configuration for transient provider errors.
     pub retry_config: crate::retry::RetryConfig,
+
+    /// Called before each LLM turn. Return `false` to abort the loop.
+    pub before_turn: Option<BeforeTurnFn>,
+    /// Called after each LLM turn with the current messages and the turn's usage.
+    pub after_turn: Option<AfterTurnFn>,
+    /// Called when the LLM returns a `StopReason::Error`.
+    pub on_error: Option<OnErrorFn>,
 }
 
 /// Default convert_to_llm: keep only user/assistant/toolResult messages.
@@ -151,6 +164,7 @@ async fn run_loop(
     cancel: &tokio_util::sync::CancellationToken,
 ) {
     let mut first_turn = true;
+    let mut turn_number: usize = 0;
     let mut tracker = config
         .execution_limits
         .as_ref()
@@ -223,6 +237,14 @@ async fn run_loop(
                 }
             }
 
+            // before_turn callback — abort if it returns false
+            if let Some(ref before_turn) = config.before_turn {
+                if !before_turn(&context.messages, turn_number) {
+                    return;
+                }
+            }
+            turn_number += 1;
+
             // Compact context if configured (tiered: tool outputs → summarize → drop)
             if let Some(ref ctx_config) = config.context_config {
                 context.messages =
@@ -238,10 +260,23 @@ async fn run_loop(
 
             // Check for error/abort
             if let Message::Assistant {
-                ref stop_reason, ..
+                ref stop_reason,
+                ref error_message,
+                ref usage,
+                ..
             } = message
             {
                 if *stop_reason == StopReason::Error || *stop_reason == StopReason::Aborted {
+                    if *stop_reason == StopReason::Error {
+                        if let Some(ref on_error) = config.on_error {
+                            let err_str = error_message.as_deref().unwrap_or("Unknown error");
+                            on_error(err_str);
+                        }
+                    }
+                    // Call after_turn even on error/abort so callers tracking usage don't miss this turn
+                    if let Some(ref after_turn) = config.after_turn {
+                        after_turn(&context.messages, usage);
+                    }
                     tx.send(AgentEvent::TurnEnd {
                         message: agent_msg,
                         tool_results: vec![],
@@ -298,6 +333,15 @@ async fn run_loop(
                     _ => context::message_tokens(&agent_msg),
                 };
                 tracker.record_turn(turn_tokens);
+            }
+
+            // after_turn callback
+            if let Some(ref after_turn) = config.after_turn {
+                let usage = match &message {
+                    Message::Assistant { usage, .. } => usage.clone(),
+                    _ => Usage::default(),
+                };
+                after_turn(&context.messages, &usage);
             }
 
             tx.send(AgentEvent::TurnEnd {

@@ -1,7 +1,9 @@
 //! Stateful Agent struct — wraps the agent loop with state management,
 //! steering/follow-up queues, and abort support.
 
-use crate::agent_loop::{agent_loop, agent_loop_continue, AgentLoopConfig};
+use crate::agent_loop::{
+    agent_loop, agent_loop_continue, AfterTurnFn, AgentLoopConfig, BeforeTurnFn, OnErrorFn,
+};
 use crate::context::{ContextConfig, ExecutionLimits};
 use crate::mcp::{McpClient, McpError, McpToolAdapter};
 use crate::provider::StreamProvider;
@@ -46,6 +48,11 @@ pub struct Agent {
     pub tool_execution: ToolExecutionStrategy,
     pub retry_config: crate::retry::RetryConfig,
 
+    // Lifecycle callbacks
+    before_turn: Option<BeforeTurnFn>,
+    after_turn: Option<AfterTurnFn>,
+    on_error: Option<OnErrorFn>,
+
     // Control
     cancel: Option<CancellationToken>,
     is_streaming: bool,
@@ -72,6 +79,9 @@ impl Agent {
             cache_config: CacheConfig::default(),
             tool_execution: ToolExecutionStrategy::default(),
             retry_config: crate::retry::RetryConfig::default(),
+            before_turn: None,
+            after_turn: None,
+            on_error: None,
             cancel: None,
             is_streaming: false,
         }
@@ -151,6 +161,32 @@ impl Agent {
         self
     }
 
+    pub fn with_messages(mut self, msgs: Vec<AgentMessage>) -> Self {
+        self.messages = msgs;
+        self
+    }
+
+    pub fn on_before_turn(
+        mut self,
+        f: impl Fn(&[AgentMessage], usize) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.before_turn = Some(Arc::new(f));
+        self
+    }
+
+    pub fn on_after_turn(
+        mut self,
+        f: impl Fn(&[AgentMessage], &Usage) + Send + Sync + 'static,
+    ) -> Self {
+        self.after_turn = Some(Arc::new(f));
+        self
+    }
+
+    pub fn on_error(mut self, f: impl Fn(&str) + Send + Sync + 'static) -> Self {
+        self.on_error = Some(Arc::new(f));
+        self
+    }
+
     /// Add a sub-agent tool. The sub-agent runs its own `agent_loop()` when invoked.
     pub fn with_sub_agent(mut self, sub: crate::sub_agent::SubAgentTool) -> Self {
         self.tools.push(Box::new(sub));
@@ -217,6 +253,16 @@ impl Agent {
 
     pub fn replace_messages(&mut self, msgs: Vec<AgentMessage>) {
         self.messages = msgs;
+    }
+
+    pub fn save_messages(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(&self.messages)
+    }
+
+    pub fn restore_messages(&mut self, json: &str) -> Result<(), serde_json::Error> {
+        let msgs: Vec<AgentMessage> = serde_json::from_str(json)?;
+        self.messages = msgs;
+        Ok(())
     }
 
     // -- Queue management --
@@ -391,6 +437,9 @@ impl Agent {
                     QueueMode::All => queue.drain(..).collect(),
                 }
             })),
+            before_turn: self.before_turn.clone(),
+            after_turn: self.after_turn.clone(),
+            on_error: self.on_error.clone(),
         }
     }
 }
