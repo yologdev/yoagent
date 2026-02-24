@@ -62,11 +62,10 @@ impl AgentTool for ListFilesTool {
 
     async fn execute(
         &self,
-        _tool_call_id: &str,
         params: serde_json::Value,
-        cancel: tokio_util::sync::CancellationToken,
-        _on_update: Option<ToolUpdateFn>,
+        ctx: ToolContext,
     ) -> Result<ToolResult, ToolError> {
+        let cancel = ctx.cancel;
         let path = params["path"].as_str().unwrap_or(".");
         let pattern = params["pattern"].as_str();
         let max_depth = params["max_depth"].as_u64().unwrap_or(3);

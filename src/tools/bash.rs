@@ -95,11 +95,10 @@ impl AgentTool for BashTool {
 
     async fn execute(
         &self,
-        _tool_call_id: &str,
         params: serde_json::Value,
-        cancel: tokio_util::sync::CancellationToken,
-        _on_update: Option<ToolUpdateFn>,
+        ctx: ToolContext,
     ) -> Result<ToolResult, ToolError> {
+        let cancel = ctx.cancel;
         let command = params["command"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArgs("missing 'command' parameter".into()))?;

@@ -94,16 +94,14 @@ impl AgentTool for ReadFileTool {
 
     async fn execute(
         &self,
-        _tool_call_id: &str,
         params: serde_json::Value,
-        cancel: tokio_util::sync::CancellationToken,
-        _on_update: Option<ToolUpdateFn>,
+        ctx: ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let path = params["path"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArgs("missing 'path' parameter".into()))?;
 
-        if cancel.is_cancelled() {
+        if ctx.cancel.is_cancelled() {
             return Err(ToolError::Cancelled);
         }
 
@@ -240,10 +238,8 @@ impl AgentTool for WriteFileTool {
 
     async fn execute(
         &self,
-        _tool_call_id: &str,
         params: serde_json::Value,
-        cancel: tokio_util::sync::CancellationToken,
-        _on_update: Option<ToolUpdateFn>,
+        ctx: ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let path = params["path"]
             .as_str()
@@ -252,7 +248,7 @@ impl AgentTool for WriteFileTool {
             .as_str()
             .ok_or_else(|| ToolError::InvalidArgs("missing 'content' parameter".into()))?;
 
-        if cancel.is_cancelled() {
+        if ctx.cancel.is_cancelled() {
             return Err(ToolError::Cancelled);
         }
 

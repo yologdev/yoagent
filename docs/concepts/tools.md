@@ -13,10 +13,8 @@ pub trait AgentTool: Send + Sync {
     fn parameters_schema(&self) -> serde_json::Value;
     async fn execute(
         &self,
-        tool_call_id: &str,
         params: serde_json::Value,
-        cancel: CancellationToken,
-        on_update: Option<ToolUpdateFn>,
+        ctx: ToolContext,
     ) -> Result<ToolResult, ToolError>;
 }
 ```
@@ -27,7 +25,29 @@ pub trait AgentTool: Send + Sync {
 | `label()` | Human-readable name for UI (e.g., `"Run Command"`) |
 | `description()` | Tells the LLM what the tool does |
 | `parameters_schema()` | JSON Schema for the tool's parameters |
-| `execute()` | Runs the tool, returns `ToolResult` or `ToolError`. Optionally receives an `on_update` callback for streaming progress. |
+| `execute()` | Runs the tool, returns `ToolResult` or `ToolError`. Receives a `ToolContext` with cancellation, update, and progress callbacks. |
+
+## ToolContext
+
+All execution context is bundled into a single struct, making the trait easier to extend in the future:
+
+```rust
+pub struct ToolContext {
+    pub tool_call_id: String,
+    pub tool_name: String,
+    pub cancel: CancellationToken,
+    pub on_update: Option<ToolUpdateFn>,
+    pub on_progress: Option<ProgressFn>,
+}
+```
+
+| Field | Purpose |
+|-------|---------|
+| `tool_call_id` | Unique ID for this tool call (for correlating events) |
+| `tool_name` | Name of the tool being executed |
+| `cancel` | Cancellation token — check `ctx.cancel.is_cancelled()` in long-running tools |
+| `on_update` | Callback for streaming partial `ToolResult` updates to the UI (emits `ToolExecutionUpdate`) |
+| `on_progress` | Callback for emitting user-facing progress messages (emits `ProgressMessage`) |
 
 ## ToolResult
 
@@ -84,10 +104,8 @@ impl AgentTool for WeatherTool {
 
     async fn execute(
         &self,
-        _tool_call_id: &str,
         params: serde_json::Value,
-        _cancel: tokio_util::sync::CancellationToken,
-        _on_update: Option<ToolUpdateFn>,
+        _ctx: ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let city = params["city"].as_str()
             .ok_or(ToolError::InvalidArgs("missing city".into()))?;
@@ -118,7 +136,7 @@ let agent = Agent::new(provider).with_tools(tools);
 **Return `Err(ToolError)` on failure, not `Ok` with error text.** When a tool returns `Err`, the agent loop converts it to a `Message::ToolResult` with `is_error: true` and sends it to the LLM. The LLM sees the error and can self-correct — retry with different arguments, try a different approach, or explain the failure to the user.
 
 ```rust
-async fn execute(&self, _id: &str, params: serde_json::Value, _cancel: CancellationToken, _on_update: Option<ToolUpdateFn>) -> Result<ToolResult, ToolError> {
+async fn execute(&self, params: serde_json::Value, _ctx: ToolContext) -> Result<ToolResult, ToolError> {
     let path = params["path"].as_str()
         .ok_or(ToolError::InvalidArgs("missing 'path'".into()))?;
 
@@ -169,17 +187,15 @@ impl AgentTool for DataProcessorTool {
 
     async fn execute(
         &self,
-        _id: &str,
         params: serde_json::Value,
-        cancel: CancellationToken,
-        on_update: Option<ToolUpdateFn>,
+        ctx: ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let rows = fetch_rows(&params)?;
         let total = rows.len();
 
         for (i, row) in rows.iter().enumerate() {
             // Check for cancellation
-            if cancel.is_cancelled() {
+            if ctx.cancel.is_cancelled() {
                 return Err(ToolError::Cancelled);
             }
 
@@ -187,7 +203,7 @@ impl AgentTool for DataProcessorTool {
 
             // Stream progress every 100 rows
             if i % 100 == 0 {
-                if let Some(ref cb) = on_update {
+                if let Some(ref cb) = &ctx.on_update {
                     cb(ToolResult {
                         content: vec![Content::Text {
                             text: format!("Processed {}/{} rows", i, total),
@@ -227,18 +243,43 @@ while let Some(event) = rx.recv().await {
         AgentEvent::ToolExecutionEnd { tool_name, is_error, .. } => {
             println!("{} {}", if is_error { "❌" } else { "✅" }, tool_name);
         }
+        AgentEvent::ProgressMessage { tool_name, text, .. } => {
+            println!("  💬 {}: {}", tool_name, text);
+        }
         _ => {}
     }
 }
 ```
 
+### Progress Messages
+
+In addition to `on_update` (which streams partial `ToolResult` values), tools can emit lightweight text-only progress messages via `ctx.on_progress`. These appear as `AgentEvent::ProgressMessage` events:
+
+```rust
+async fn execute(&self, params: serde_json::Value, ctx: ToolContext) -> Result<ToolResult, ToolError> {
+    if let Some(ref progress) = &ctx.on_progress {
+        progress("Starting analysis...".into());
+    }
+
+    // ... do work ...
+
+    if let Some(ref progress) = &ctx.on_progress {
+        progress("Almost done...".into());
+    }
+
+    Ok(ToolResult { /* ... */ })
+}
+```
+
+Use `on_progress` for simple status text. Use `on_update` when you need structured data (progress percentages, partial results).
+
 ### Guidelines
 
 - **Call `on_update` as often as useful** — there's no rate limit. The callback is synchronous and cheap.
-- **Always check `on_update.is_some()`** before building the `ToolResult`. If `None`, the loop isn't interested in updates (e.g., testing).
+- **Always check `ctx.on_update.is_some()`** before building the `ToolResult`. If `None`, the loop isn't interested in updates (e.g., testing).
 - **Use `details` for structured data** — `content` is for human-readable text, `details` can carry progress percentages, byte counts, etc.
 - **Don't rely on updates reaching the LLM** — they won't. Only the final return value is added to context.
-- **Simple tools don't need it** — if your tool completes in <1 second, just ignore `on_update` (add `_on_update` to suppress the warning).
+- **Simple tools don't need it** — if your tool completes in <1 second, just ignore `ctx` (prefix with `_ctx` to suppress the warning).
 
 ### End-to-end example
 
@@ -269,21 +310,19 @@ impl AgentTool for DeployTool {
 
     async fn execute(
         &self,
-        _id: &str,
         params: serde_json::Value,
-        cancel: CancellationToken,
-        on_update: Option<ToolUpdateFn>,
+        ctx: ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let env = params["env"].as_str().unwrap_or("staging");
 
         let steps = ["Building image", "Running tests", "Pushing to registry", "Rolling out"];
         for (i, step) in steps.iter().enumerate() {
-            if cancel.is_cancelled() {
+            if ctx.cancel.is_cancelled() {
                 return Err(ToolError::Cancelled);
             }
 
             // Stream each step to the UI
-            if let Some(ref cb) = on_update {
+            if let Some(ref cb) = &ctx.on_update {
                 cb(ToolResult {
                     content: vec![Content::Text {
                         text: format!("[{}/{}] {}...", i + 1, steps.len(), step),
@@ -342,6 +381,9 @@ async fn main() {
                 } else {
                     println!("  ✅ {} complete", tool_name);
                 }
+            }
+            AgentEvent::ProgressMessage { text, .. } => {
+                println!("  💬 {}", text);
             }
 
             AgentEvent::AgentEnd { .. } => break,

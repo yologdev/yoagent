@@ -77,7 +77,7 @@ Or add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-yoagent = "0.2"
+yoagent = "0.5"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -210,6 +210,7 @@ yoagent/
 │   ├── agent_loop.rs       # Core loop (agent_loop + agent_loop_continue)
 │   ├── agent.rs            # Stateful Agent with steering/follow-up queues
 │   ├── context.rs          # Token estimation, smart truncation, execution limits
+│   ├── sub_agent.rs        # SubAgentTool — delegate tasks to child agent loops
 │   ├── tools/
 │   │   ├── bash.rs         # Shell execution (timeout, deny patterns, confirm_fn)
 │   │   ├── file.rs         # Read/write files (line numbers, path restrictions)

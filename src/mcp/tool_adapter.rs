@@ -2,7 +2,7 @@
 
 use super::client::McpClient;
 use super::types::{McpContent, McpError, McpToolInfo};
-use crate::types::{AgentTool, Content, ToolError, ToolResult, ToolUpdateFn};
+use crate::types::{AgentTool, Content, ToolContext, ToolError, ToolResult};
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -83,10 +83,8 @@ impl AgentTool for McpToolAdapter {
 
     async fn execute(
         &self,
-        _tool_call_id: &str,
         params: serde_json::Value,
-        _cancel: tokio_util::sync::CancellationToken,
-        _on_update: Option<ToolUpdateFn>,
+        _ctx: ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let client = self.client.lock().await;
         let result = client
@@ -204,13 +202,16 @@ mod tests {
         let schema = adapter.parameters_schema();
         assert_eq!(schema["type"], "object");
 
-        let cancel = tokio_util::sync::CancellationToken::new();
         let result = adapter
             .execute(
-                "tc-1",
                 serde_json::json!({"path": "/tmp/test"}),
-                cancel,
-                None,
+                ToolContext {
+                    tool_call_id: "tc-1".into(),
+                    tool_name: "read_file".into(),
+                    cancel: tokio_util::sync::CancellationToken::new(),
+                    on_update: None,
+                    on_progress: None,
+                },
             )
             .await
             .unwrap();
@@ -245,9 +246,17 @@ mod tests {
         let adapter = McpToolAdapter::new(client, tool_info);
         assert_eq!(adapter.description(), "MCP tool (no description)");
 
-        let cancel = tokio_util::sync::CancellationToken::new();
         let result = adapter
-            .execute("tc-1", serde_json::json!({}), cancel, None)
+            .execute(
+                serde_json::json!({}),
+                ToolContext {
+                    tool_call_id: "tc-1".into(),
+                    tool_name: "fail_tool".into(),
+                    cancel: tokio_util::sync::CancellationToken::new(),
+                    on_update: None,
+                    on_progress: None,
+                },
+            )
             .await;
         assert!(result.is_err());
     }

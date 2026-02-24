@@ -122,6 +122,7 @@ Events emitted during the agent loop for real-time UI updates:
 | `ToolExecutionStart { tool_call_id, tool_name, args }` | Tool about to run |
 | `ToolExecutionUpdate { tool_call_id, tool_name, partial_result }` | Tool progress |
 | `ToolExecutionEnd { tool_call_id, tool_name, result, is_error }` | Tool finished |
+| `ProgressMessage { tool_call_id, tool_name, text }` | User-facing progress text from a tool |
 
 ## StreamDelta
 

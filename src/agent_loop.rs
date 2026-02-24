@@ -70,6 +70,10 @@ pub struct AgentLoopConfig<'a> {
     pub after_turn: Option<AfterTurnFn>,
     /// Called when the LLM returns a `StopReason::Error`.
     pub on_error: Option<OnErrorFn>,
+
+    /// Input filters applied to user messages before the LLM call.
+    /// Filters run in order; first `Reject` wins, `Warn` messages accumulate.
+    pub input_filters: Vec<Arc<dyn InputFilter>>,
 }
 
 /// Default convert_to_llm: keep only user/assistant/toolResult messages.
@@ -93,6 +97,60 @@ pub async fn agent_loop(
     // Add prompts to context
     for prompt in &prompts {
         context.messages.push(prompt.clone());
+    }
+
+    // Apply input filters to user text from prompts
+    if !config.input_filters.is_empty() {
+        let user_text: String = prompts
+            .iter()
+            .filter_map(|m| {
+                if let AgentMessage::Llm(Message::User { content, .. }) = m {
+                    Some(
+                        content
+                            .iter()
+                            .filter_map(|c| {
+                                if let Content::Text { text } = c {
+                                    Some(text.as_str())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    )
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let mut warnings: Vec<String> = Vec::new();
+        for filter in &config.input_filters {
+            match filter.filter(&user_text) {
+                FilterResult::Pass => {}
+                FilterResult::Warn(w) => warnings.push(w),
+                FilterResult::Reject(_reason) => {
+                    tx.send(AgentEvent::AgentEnd { messages: vec![] }).ok();
+                    return vec![];
+                }
+            }
+        }
+
+        // Inject warnings as a synthetic user message before entering the loop
+        if !warnings.is_empty() {
+            let warning_text = warnings
+                .iter()
+                .map(|w| format!("[Warning: {}]", w))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let warning_msg = AgentMessage::Llm(Message::User {
+                content: vec![Content::Text { text: warning_text }],
+                timestamp: now_ms(),
+            });
+            context.messages.push(warning_msg.clone());
+            new_messages.push(warning_msg);
+        }
     }
 
     tx.send(AgentEvent::AgentStart).ok();
@@ -713,11 +771,30 @@ async fn execute_single_tool(
         }))
     };
 
+    let on_progress: Option<ProgressFn> = {
+        let tx = tx.clone();
+        let id = id.to_string();
+        let name = name.to_string();
+        Some(Arc::new(move |text: String| {
+            tx.send(AgentEvent::ProgressMessage {
+                tool_call_id: id.clone(),
+                tool_name: name.clone(),
+                text,
+            })
+            .ok();
+        }))
+    };
+
+    let ctx = ToolContext {
+        tool_call_id: id.to_string(),
+        tool_name: name.to_string(),
+        cancel: cancel.child_token(),
+        on_update,
+        on_progress,
+    };
+
     let (result, is_error) = match tool {
-        Some(tool) => match tool
-            .execute(id, args.clone(), cancel.child_token(), on_update)
-            .await
-        {
+        Some(tool) => match tool.execute(args.clone(), ctx).await {
             Ok(r) => (r, false),
             Err(e) => (
                 ToolResult {

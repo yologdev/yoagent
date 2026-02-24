@@ -9,7 +9,7 @@
 
 ```toml
 [dependencies]
-yoagent = { git = "https://github.com/yologdev/yoagent.git" }
+yoagent = "0.5"
 ```
 
 ## Dependencies

@@ -153,14 +153,10 @@ impl AgentTool for ArcToolWrapper {
     }
     async fn execute(
         &self,
-        tool_call_id: &str,
         params: serde_json::Value,
-        cancel: tokio_util::sync::CancellationToken,
-        on_update: Option<ToolUpdateFn>,
+        ctx: ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        self.0
-            .execute(tool_call_id, params, cancel, on_update)
-            .await
+        self.0.execute(params, ctx).await
     }
 }
 
@@ -193,11 +189,11 @@ impl AgentTool for SubAgentTool {
 
     async fn execute(
         &self,
-        _tool_call_id: &str,
         params: serde_json::Value,
-        cancel: tokio_util::sync::CancellationToken,
-        on_update: Option<ToolUpdateFn>,
+        ctx: ToolContext,
     ) -> Result<ToolResult, ToolError> {
+        let cancel = ctx.cancel;
+        let on_update = ctx.on_update;
         // Extract the task parameter
         let task = params
             .get("task")
@@ -244,6 +240,7 @@ impl AgentTool for SubAgentTool {
             before_turn: None,
             after_turn: None,
             on_error: None,
+            input_filters: vec![],
         };
 
         // Channel for sub-agent events

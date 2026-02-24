@@ -77,11 +77,10 @@ impl AgentTool for SearchTool {
 
     async fn execute(
         &self,
-        _tool_call_id: &str,
         params: serde_json::Value,
-        cancel: tokio_util::sync::CancellationToken,
-        _on_update: Option<ToolUpdateFn>,
+        ctx: ToolContext,
     ) -> Result<ToolResult, ToolError> {
+        let cancel = ctx.cancel;
         let pattern = params["pattern"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArgs("missing 'pattern' parameter".into()))?;
