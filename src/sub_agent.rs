@@ -194,6 +194,7 @@ impl AgentTool for SubAgentTool {
     ) -> Result<ToolResult, ToolError> {
         let cancel = ctx.cancel;
         let on_update = ctx.on_update;
+        let on_progress = ctx.on_progress;
         // Extract the task parameter
         let task = params
             .get("task")
@@ -246,28 +247,37 @@ impl AgentTool for SubAgentTool {
         // Channel for sub-agent events
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        // Forward sub-agent events to parent via on_update callback
-        let forward_handle = if let Some(on_update) = on_update {
+        // Forward sub-agent events to parent via on_update and on_progress callbacks
+        let forward_handle = if on_update.is_some() || on_progress.is_some() {
             let tool_name = self.tool_name.clone();
             Some(tokio::spawn(async move {
                 while let Some(event) = rx.recv().await {
-                    // Convert interesting events to ToolResult updates for the parent
-                    let update_text = match &event {
-                        AgentEvent::MessageUpdate {
-                            delta: StreamDelta::Text { delta },
-                            ..
-                        } => Some(delta.clone()),
-                        AgentEvent::ToolExecutionStart { tool_name, .. } => {
-                            Some(format!("[sub-agent calling tool: {}]", tool_name))
+                    // Forward progress messages via on_progress
+                    if let AgentEvent::ProgressMessage { text, .. } = &event {
+                        if let Some(ref cb) = on_progress {
+                            cb(text.clone());
                         }
-                        _ => None,
-                    };
+                    }
 
-                    if let Some(text) = update_text {
-                        on_update(ToolResult {
-                            content: vec![Content::Text { text }],
-                            details: serde_json::json!({ "sub_agent": tool_name }),
-                        });
+                    // Convert interesting events to ToolResult updates for the parent
+                    if let Some(ref on_update) = on_update {
+                        let update_text = match &event {
+                            AgentEvent::MessageUpdate {
+                                delta: StreamDelta::Text { delta },
+                                ..
+                            } => Some(delta.clone()),
+                            AgentEvent::ToolExecutionStart { tool_name, .. } => {
+                                Some(format!("[sub-agent calling tool: {}]", tool_name))
+                            }
+                            _ => None,
+                        };
+
+                        if let Some(text) = update_text {
+                            on_update(ToolResult {
+                                content: vec![Content::Text { text }],
+                                details: serde_json::json!({ "sub_agent": tool_name }),
+                            });
+                        }
                     }
                 }
             }))

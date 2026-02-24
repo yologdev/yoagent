@@ -72,7 +72,8 @@ pub struct AgentLoopConfig<'a> {
     pub on_error: Option<OnErrorFn>,
 
     /// Input filters applied to user messages before the LLM call.
-    /// Filters run in order; first `Reject` wins, `Warn` messages accumulate.
+    /// Filters run in order; first `Reject` wins and discards any accumulated
+    /// warnings. `Warn` messages accumulate and are appended to the user message.
     pub input_filters: Vec<Arc<dyn InputFilter>>,
 }
 
@@ -92,15 +93,10 @@ pub async fn agent_loop(
     tx: mpsc::UnboundedSender<AgentEvent>,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Vec<AgentMessage> {
-    let mut new_messages: Vec<AgentMessage> = prompts.clone();
+    tx.send(AgentEvent::AgentStart).ok();
 
-    // Add prompts to context
-    for prompt in &prompts {
-        context.messages.push(prompt.clone());
-    }
-
-    // Apply input filters to user text from prompts
-    if !config.input_filters.is_empty() {
+    // Apply input filters before adding prompts to context
+    let prompts = if !config.input_filters.is_empty() {
         let user_text: String = prompts
             .iter()
             .filter_map(|m| {
@@ -130,30 +126,48 @@ pub async fn agent_loop(
             match filter.filter(&user_text) {
                 FilterResult::Pass => {}
                 FilterResult::Warn(w) => warnings.push(w),
-                FilterResult::Reject(_reason) => {
+                FilterResult::Reject(reason) => {
+                    tx.send(AgentEvent::InputRejected {
+                        reason: reason.clone(),
+                    })
+                    .ok();
                     tx.send(AgentEvent::AgentEnd { messages: vec![] }).ok();
                     return vec![];
                 }
             }
         }
 
-        // Inject warnings as a synthetic user message before entering the loop
+        // Append warnings to the last user message's content (avoids consecutive user messages)
         if !warnings.is_empty() {
             let warning_text = warnings
                 .iter()
                 .map(|w| format!("[Warning: {}]", w))
                 .collect::<Vec<_>>()
                 .join("\n");
-            let warning_msg = AgentMessage::Llm(Message::User {
-                content: vec![Content::Text { text: warning_text }],
-                timestamp: now_ms(),
-            });
-            context.messages.push(warning_msg.clone());
-            new_messages.push(warning_msg);
+
+            let mut modified = prompts;
+            // Find and extend the last user message
+            for msg in modified.iter_mut().rev() {
+                if let AgentMessage::Llm(Message::User { content, .. }) = msg {
+                    content.push(Content::Text { text: warning_text });
+                    break;
+                }
+            }
+            modified
+        } else {
+            prompts
         }
+    } else {
+        prompts
+    };
+
+    let mut new_messages: Vec<AgentMessage> = prompts.clone();
+
+    // Add prompts to context
+    for prompt in &prompts {
+        context.messages.push(prompt.clone());
     }
 
-    tx.send(AgentEvent::AgentStart).ok();
     tx.send(AgentEvent::TurnStart).ok();
 
     // Emit events for each prompt message

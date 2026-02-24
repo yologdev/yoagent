@@ -304,12 +304,39 @@ pub struct ToolContext {
     pub tool_call_id: String,
     /// The name of the tool being invoked.
     pub tool_name: String,
-    /// Cancellation token — check `cancel.is_cancelled()` in long-running tools.
+    /// Cancellation token — check `is_cancelled()` in long-running tools.
     pub cancel: tokio_util::sync::CancellationToken,
     /// Optional callback for streaming partial `ToolResult`s (UI/logging only).
     pub on_update: Option<ToolUpdateFn>,
     /// Optional callback for emitting user-facing progress messages.
     pub on_progress: Option<ProgressFn>,
+}
+
+impl Clone for ToolContext {
+    fn clone(&self) -> Self {
+        Self {
+            tool_call_id: self.tool_call_id.clone(),
+            tool_name: self.tool_name.clone(),
+            cancel: self.cancel.clone(),
+            on_update: self.on_update.clone(),
+            on_progress: self.on_progress.clone(),
+        }
+    }
+}
+
+impl std::fmt::Debug for ToolContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolContext")
+            .field("tool_call_id", &self.tool_call_id)
+            .field("tool_name", &self.tool_name)
+            .field("cancel", &self.cancel)
+            .field("on_update", &self.on_update.as_ref().map(|_| "<callback>"))
+            .field(
+                "on_progress",
+                &self.on_progress.as_ref().map(|_| "<callback>"),
+            )
+            .finish()
+    }
 }
 
 /// A tool the agent can call. Implement this trait for your tools.
@@ -325,12 +352,11 @@ pub trait AgentTool: Send + Sync {
     fn parameters_schema(&self) -> serde_json::Value;
     /// Execute the tool.
     ///
-    /// `ctx.on_update` is an optional callback for streaming partial results during
-    /// long-running operations. Call it as often as needed — each invocation
-    /// emits a `ToolExecutionUpdate` event. The final return value is what gets
-    /// sent to the LLM; partial results are for UI/logging only.
-    ///
-    /// `ctx.on_progress` emits user-facing progress messages as `AgentEvent::ProgressMessage`.
+    /// The `ctx` parameter provides per-invocation context:
+    /// - `ctx.tool_call_id` / `ctx.tool_name` — for correlation and logging
+    /// - `ctx.cancel` — cancellation token; check `is_cancelled()` in long-running tools
+    /// - `ctx.on_update` — optional callback for streaming partial `ToolResult`s (UI/logging only)
+    /// - `ctx.on_progress` — optional callback for user-facing progress text (`ProgressMessage`)
     async fn execute(
         &self,
         params: serde_json::Value,
@@ -402,6 +428,9 @@ pub enum AgentEvent {
         tool_call_id: String,
         tool_name: String,
         text: String,
+    },
+    InputRejected {
+        reason: String,
     },
 }
 

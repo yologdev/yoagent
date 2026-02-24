@@ -74,6 +74,7 @@ async fn test_simple_text_response() {
             AgentEvent::ToolExecutionUpdate { .. } => "ToolExecUpdate",
             AgentEvent::ToolExecutionEnd { .. } => "ToolExecEnd",
             AgentEvent::ProgressMessage { .. } => "ProgressMessage",
+            AgentEvent::InputRejected { .. } => "InputRejected",
         })
         .collect();
 
@@ -168,6 +169,7 @@ async fn test_tool_call_and_response() {
             AgentEvent::ToolExecutionUpdate { .. } => "ToolExecUpdate",
             AgentEvent::ToolExecutionEnd { .. } => "ToolExecEnd",
             AgentEvent::ProgressMessage { .. } => "ProgressMessage",
+            AgentEvent::InputRejected { .. } => "InputRejected",
         })
         .collect();
 
@@ -1550,17 +1552,18 @@ async fn test_filter_warn_injects_warning_message() {
 
     let new_messages = agent_loop(vec![prompt], &mut context, &config, tx, cancel).await;
 
-    // user + warning + assistant = 3
-    assert_eq!(new_messages.len(), 3);
-    // The warning message should be the second one
-    if let AgentMessage::Llm(Message::User { content, .. }) = &new_messages[1] {
-        let text = match &content[0] {
+    // user (with appended warning) + assistant = 2
+    assert_eq!(new_messages.len(), 2);
+    // The warning should be appended to the user message's content
+    if let AgentMessage::Llm(Message::User { content, .. }) = &new_messages[0] {
+        assert_eq!(content.len(), 2, "expected original text + warning");
+        let warning = match &content[1] {
             Content::Text { text } => text.as_str(),
             _ => panic!("expected text"),
         };
-        assert!(text.contains("[Warning: danger]"), "got: {}", text);
+        assert!(warning.contains("[Warning: danger]"), "got: {}", warning);
     } else {
-        panic!("Expected warning user message at index 1");
+        panic!("Expected user message at index 0");
     }
 }
 
@@ -1587,7 +1590,18 @@ async fn test_filter_reject_returns_empty() {
 
     // Rejected — empty messages returned
     assert!(new_messages.is_empty());
-    // AgentEnd should have been emitted
+    // Context should NOT contain the rejected prompt
+    assert!(
+        context.messages.is_empty(),
+        "Rejected prompts should not leak into context, got {} messages",
+        context.messages.len()
+    );
+    // InputRejected event should carry the reason
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::InputRejected { reason } if reason == "blocked")));
+    // AgentStart + InputRejected + AgentEnd
+    assert!(events.iter().any(|e| matches!(e, AgentEvent::AgentStart)));
     assert!(events
         .iter()
         .any(|e| matches!(e, AgentEvent::AgentEnd { messages } if messages.is_empty())));
@@ -1676,17 +1690,19 @@ async fn test_filter_multiple_warns_accumulate() {
 
     let new_messages = agent_loop(vec![prompt], &mut context, &config, tx, cancel).await;
 
-    // user + warning + assistant = 3
-    assert_eq!(new_messages.len(), 3);
-    if let AgentMessage::Llm(Message::User { content, .. }) = &new_messages[1] {
-        let text = match &content[0] {
+    // user (with appended warnings) + assistant = 2
+    assert_eq!(new_messages.len(), 2);
+    if let AgentMessage::Llm(Message::User { content, .. }) = &new_messages[0] {
+        // Original text + appended warning block
+        assert!(content.len() >= 2, "expected original text + warning");
+        let warning = match content.last().unwrap() {
             Content::Text { text } => text.as_str(),
             _ => panic!("expected text"),
         };
-        assert!(text.contains("[Warning: warn1]"), "got: {}", text);
-        assert!(text.contains("[Warning: warn2]"), "got: {}", text);
+        assert!(warning.contains("[Warning: warn1]"), "got: {}", warning);
+        assert!(warning.contains("[Warning: warn2]"), "got: {}", warning);
     } else {
-        panic!("Expected warning user message");
+        panic!("Expected user message");
     }
 }
 

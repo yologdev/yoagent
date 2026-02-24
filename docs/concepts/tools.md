@@ -49,6 +49,8 @@ pub struct ToolContext {
 | `on_update` | Callback for streaming partial `ToolResult` updates to the UI (emits `ToolExecutionUpdate`) |
 | `on_progress` | Callback for emitting user-facing progress messages (emits `ProgressMessage`) |
 
+`ToolContext` implements `Clone` and `Debug`.
+
 ## ToolResult
 
 ```rust
