@@ -53,6 +53,9 @@ pub struct Agent {
     after_turn: Option<AfterTurnFn>,
     on_error: Option<OnErrorFn>,
 
+    // Input filters
+    input_filters: Vec<Arc<dyn InputFilter>>,
+
     // Control
     cancel: Option<CancellationToken>,
     is_streaming: bool,
@@ -82,6 +85,7 @@ impl Agent {
             before_turn: None,
             after_turn: None,
             on_error: None,
+            input_filters: Vec::new(),
             cancel: None,
             is_streaming: false,
         }
@@ -184,6 +188,12 @@ impl Agent {
 
     pub fn on_error(mut self, f: impl Fn(&str) + Send + Sync + 'static) -> Self {
         self.on_error = Some(Arc::new(f));
+        self
+    }
+
+    /// Add an input filter. Filters run in order on user messages before the LLM call.
+    pub fn with_input_filter(mut self, filter: impl InputFilter + 'static) -> Self {
+        self.input_filters.push(Arc::new(filter));
         self
     }
 
@@ -440,6 +450,7 @@ impl Agent {
             before_turn: self.before_turn.clone(),
             after_turn: self.after_turn.clone(),
             on_error: self.on_error.clone(),
+            input_filters: self.input_filters.clone(),
         }
     }
 }

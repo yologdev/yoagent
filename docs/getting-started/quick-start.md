@@ -111,6 +111,13 @@ async fn main() {
         get_follow_up_messages: None,
         context_config: None,
         execution_limits: None,
+        cache_config: CacheConfig::default(),
+        tool_execution: ToolExecutionStrategy::default(),
+        retry_config: yoagent::RetryConfig::default(),
+        before_turn: None,
+        after_turn: None,
+        on_error: None,
+        input_filters: vec![],
     };
 
     let prompts = vec![AgentMessage::Llm(Message::user("Hello!"))];

@@ -70,6 +70,11 @@ pub struct AgentLoopConfig<'a> {
     pub after_turn: Option<AfterTurnFn>,
     /// Called when the LLM returns a `StopReason::Error`.
     pub on_error: Option<OnErrorFn>,
+
+    /// Input filters applied to user messages before the LLM call.
+    /// Filters run in order; first `Reject` wins and discards any accumulated
+    /// warnings. `Warn` messages accumulate and are appended to the user message.
+    pub input_filters: Vec<Arc<dyn InputFilter>>,
 }
 
 /// Default convert_to_llm: keep only user/assistant/toolResult messages.
@@ -88,6 +93,74 @@ pub async fn agent_loop(
     tx: mpsc::UnboundedSender<AgentEvent>,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Vec<AgentMessage> {
+    tx.send(AgentEvent::AgentStart).ok();
+
+    // Apply input filters before adding prompts to context
+    let prompts = if !config.input_filters.is_empty() {
+        let user_text: String = prompts
+            .iter()
+            .filter_map(|m| {
+                if let AgentMessage::Llm(Message::User { content, .. }) = m {
+                    Some(
+                        content
+                            .iter()
+                            .filter_map(|c| {
+                                if let Content::Text { text } = c {
+                                    Some(text.as_str())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    )
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let mut warnings: Vec<String> = Vec::new();
+        for filter in &config.input_filters {
+            match filter.filter(&user_text) {
+                FilterResult::Pass => {}
+                FilterResult::Warn(w) => warnings.push(w),
+                FilterResult::Reject(reason) => {
+                    tx.send(AgentEvent::InputRejected {
+                        reason: reason.clone(),
+                    })
+                    .ok();
+                    tx.send(AgentEvent::AgentEnd { messages: vec![] }).ok();
+                    return vec![];
+                }
+            }
+        }
+
+        // Append warnings to the last user message's content (avoids consecutive user messages)
+        if !warnings.is_empty() {
+            let warning_text = warnings
+                .iter()
+                .map(|w| format!("[Warning: {}]", w))
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            let mut modified = prompts;
+            // Find and extend the last user message
+            for msg in modified.iter_mut().rev() {
+                if let AgentMessage::Llm(Message::User { content, .. }) = msg {
+                    content.push(Content::Text { text: warning_text });
+                    break;
+                }
+            }
+            modified
+        } else {
+            prompts
+        }
+    } else {
+        prompts
+    };
+
     let mut new_messages: Vec<AgentMessage> = prompts.clone();
 
     // Add prompts to context
@@ -95,7 +168,6 @@ pub async fn agent_loop(
         context.messages.push(prompt.clone());
     }
 
-    tx.send(AgentEvent::AgentStart).ok();
     tx.send(AgentEvent::TurnStart).ok();
 
     // Emit events for each prompt message
@@ -713,11 +785,30 @@ async fn execute_single_tool(
         }))
     };
 
+    let on_progress: Option<ProgressFn> = {
+        let tx = tx.clone();
+        let id = id.to_string();
+        let name = name.to_string();
+        Some(Arc::new(move |text: String| {
+            tx.send(AgentEvent::ProgressMessage {
+                tool_call_id: id.clone(),
+                tool_name: name.clone(),
+                text,
+            })
+            .ok();
+        }))
+    };
+
+    let ctx = ToolContext {
+        tool_call_id: id.to_string(),
+        tool_name: name.to_string(),
+        cancel: cancel.child_token(),
+        on_update,
+        on_progress,
+    };
+
     let (result, is_error) = match tool {
-        Some(tool) => match tool
-            .execute(id, args.clone(), cancel.child_token(), on_update)
-            .await
-        {
+        Some(tool) => match tool.execute(args.clone(), ctx).await {
             Ok(r) => (r, false),
             Err(e) => (
                 ToolResult {

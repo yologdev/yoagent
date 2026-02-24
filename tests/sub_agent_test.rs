@@ -29,6 +29,7 @@ fn make_config(provider: &MockProvider) -> AgentLoopConfig<'_> {
         before_turn: None,
         after_turn: None,
         on_error: None,
+        input_filters: vec![],
     }
 }
 
@@ -56,11 +57,19 @@ async fn test_sub_agent_basic() {
         .with_api_key("test");
 
     // Execute the sub-agent tool directly
-    let cancel = CancellationToken::new();
     let params = serde_json::json!({"task": "Tell me about Rust"});
 
     let result = sub_agent
-        .execute("tc-1", params, cancel, None)
+        .execute(
+            params,
+            ToolContext {
+                tool_call_id: "tc-1".into(),
+                tool_name: "researcher".into(),
+                cancel: CancellationToken::new(),
+                on_update: None,
+                on_progress: None,
+            },
+        )
         .await
         .expect("sub-agent should succeed");
 
@@ -102,10 +111,8 @@ impl AgentTool for EchoTool {
     }
     async fn execute(
         &self,
-        _id: &str,
         params: serde_json::Value,
-        _cancel: tokio_util::sync::CancellationToken,
-        _on_update: Option<ToolUpdateFn>,
+        _ctx: ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let text = params["text"].as_str().unwrap_or("(empty)");
         Ok(ToolResult {
@@ -137,11 +144,19 @@ async fn test_sub_agent_with_tools() {
         .with_api_key("test")
         .with_tools(vec![echo_tool]);
 
-    let cancel = CancellationToken::new();
     let params = serde_json::json!({"task": "Echo hello"});
 
     let result = sub_agent
-        .execute("tc-1", params, cancel, None)
+        .execute(
+            params,
+            ToolContext {
+                tool_call_id: "tc-1".into(),
+                tool_name: "echo_agent".into(),
+                cancel: CancellationToken::new(),
+                on_update: None,
+                on_progress: None,
+            },
+        )
         .await
         .expect("sub-agent should succeed");
 
@@ -171,7 +186,16 @@ async fn test_sub_agent_cancellation() {
     let params = serde_json::json!({"task": "Do something"});
 
     let result = sub_agent
-        .execute("tc-1", params, cancel, None)
+        .execute(
+            params,
+            ToolContext {
+                tool_call_id: "tc-1".into(),
+                tool_name: "cancelled_agent".into(),
+                cancel,
+                on_update: None,
+                on_progress: None,
+            },
+        )
         .await
         .expect("should return a result even when cancelled");
 
@@ -214,11 +238,19 @@ async fn test_sub_agent_max_turns() {
         .with_tools(vec![echo_tool])
         .with_max_turns(1); // Only 1 turn allowed
 
-    let cancel = CancellationToken::new();
     let params = serde_json::json!({"task": "Keep going"});
 
     let result = sub_agent
-        .execute("tc-1", params, cancel, None)
+        .execute(
+            params,
+            ToolContext {
+                tool_call_id: "tc-1".into(),
+                tool_name: "limited_agent".into(),
+                cancel: CancellationToken::new(),
+                on_update: None,
+                on_progress: None,
+            },
+        )
         .await
         .expect("sub-agent should succeed");
 
@@ -361,7 +393,6 @@ async fn test_sub_agent_event_forwarding() {
         .with_model("mock")
         .with_api_key("test");
 
-    let cancel = CancellationToken::new();
     let params = serde_json::json!({"task": "Do work"});
 
     // Collect on_update calls
@@ -374,7 +405,16 @@ async fn test_sub_agent_event_forwarding() {
     });
 
     let result = sub_agent
-        .execute("tc-1", params, cancel, Some(on_update))
+        .execute(
+            params,
+            ToolContext {
+                tool_call_id: "tc-1".into(),
+                tool_name: "streaming_agent".into(),
+                cancel: CancellationToken::new(),
+                on_update: Some(on_update),
+                on_progress: None,
+            },
+        )
         .await
         .expect("sub-agent should succeed");
 
@@ -411,10 +451,20 @@ async fn test_sub_agent_missing_task_parameter() {
         .with_model("mock")
         .with_api_key("test");
 
-    let cancel = CancellationToken::new();
     let params = serde_json::json!({}); // Missing "task"
 
-    let result = sub_agent.execute("tc-1", params, cancel, None).await;
+    let result = sub_agent
+        .execute(
+            params,
+            ToolContext {
+                tool_call_id: "tc-1".into(),
+                tool_name: "test_agent".into(),
+                cancel: CancellationToken::new(),
+                on_update: None,
+                on_progress: None,
+            },
+        )
+        .await;
     assert!(result.is_err());
 
     match result.unwrap_err() {

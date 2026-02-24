@@ -18,6 +18,13 @@ pub struct AgentLoopConfig<'a> {
     pub get_follow_up_messages: Option<GetMessagesFn>,
     pub context_config: Option<ContextConfig>,
     pub execution_limits: Option<ExecutionLimits>,
+    pub cache_config: CacheConfig,
+    pub tool_execution: ToolExecutionStrategy,
+    pub retry_config: RetryConfig,
+    pub before_turn: Option<BeforeTurnFn>,
+    pub after_turn: Option<AfterTurnFn>,
+    pub on_error: Option<OnErrorFn>,
+    pub input_filters: Vec<Arc<dyn InputFilter>>,
 }
 ```
 
@@ -36,6 +43,7 @@ pub struct StreamConfig {
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
     pub model_config: Option<ModelConfig>,
+    pub cache_config: CacheConfig,
 }
 ```
 

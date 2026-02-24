@@ -56,10 +56,8 @@ async fn main() {
         }
         async fn execute(
             &self,
-            _id: &str,
             params: serde_json::Value,
-            _cancel: tokio_util::sync::CancellationToken,
-            _on_update: Option<ToolUpdateFn>,
+            _ctx: ToolContext,
         ) -> Result<ToolResult, ToolError> {
             let name = params["name"].as_str().unwrap_or("stranger");
             Ok(ToolResult {

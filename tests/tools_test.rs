@@ -7,16 +7,32 @@ use yoagent::tools::list::ListFilesTool;
 use yoagent::tools::*;
 use yoagent::types::*;
 
+/// Helper to build a ToolContext for tests.
+fn ctx(name: &str) -> ToolContext {
+    ToolContext {
+        tool_call_id: "t1".into(),
+        tool_name: name.into(),
+        cancel: CancellationToken::new(),
+        on_update: None,
+        on_progress: None,
+    }
+}
+
+fn ctx_with_cancel(name: &str, cancel: CancellationToken) -> ToolContext {
+    ToolContext {
+        tool_call_id: "t1".into(),
+        tool_name: name.into(),
+        cancel,
+        on_update: None,
+        on_progress: None,
+    }
+}
+
 #[tokio::test]
 async fn test_bash_echo() {
     let tool = BashTool::new();
     let result = tool
-        .execute(
-            "t1",
-            serde_json::json!({"command": "echo hello"}),
-            CancellationToken::new(),
-            None,
-        )
+        .execute(serde_json::json!({"command": "echo hello"}), ctx("bash"))
         .await
         .unwrap();
 
@@ -33,12 +49,7 @@ async fn test_bash_failure() {
     // Non-zero exit codes return Ok with exit code in output (for LLM self-correction)
     let tool = BashTool::new();
     let result = tool
-        .execute(
-            "t1",
-            serde_json::json!({"command": "false"}),
-            CancellationToken::new(),
-            None,
-        )
+        .execute(serde_json::json!({"command": "false"}), ctx("bash"))
         .await
         .unwrap();
 
@@ -53,12 +64,7 @@ async fn test_bash_failure() {
 async fn test_bash_deny_pattern() {
     let tool = BashTool::new();
     let result = tool
-        .execute(
-            "t1",
-            serde_json::json!({"command": "rm -rf /"}),
-            CancellationToken::new(),
-            None,
-        )
+        .execute(serde_json::json!({"command": "rm -rf /"}), ctx("bash"))
         .await;
 
     assert!(result.is_err());
@@ -69,12 +75,7 @@ async fn test_bash_deny_pattern() {
 async fn test_bash_timeout() {
     let tool = BashTool::new().with_timeout(std::time::Duration::from_millis(100));
     let result = tool
-        .execute(
-            "t1",
-            serde_json::json!({"command": "sleep 10"}),
-            CancellationToken::new(),
-            None,
-        )
+        .execute(serde_json::json!({"command": "sleep 10"}), ctx("bash"))
         .await;
 
     assert!(result.is_err());
@@ -90,10 +91,8 @@ async fn test_bash_cancel() {
 
     let result = tool
         .execute(
-            "t1",
             serde_json::json!({"command": "echo should not run"}),
-            cancel,
-            None,
+            ctx_with_cancel("bash", cancel),
         )
         .await;
 
@@ -109,10 +108,8 @@ async fn test_read_write_file() {
     let write_tool = WriteFileTool::new();
     let result = write_tool
         .execute(
-            "t1",
             serde_json::json!({"path": path, "content": "hello from yoagent"}),
-            CancellationToken::new(),
-            None,
+            ctx("write_file"),
         )
         .await
         .unwrap();
@@ -126,12 +123,7 @@ async fn test_read_write_file() {
     // Read
     let read_tool = ReadFileTool::new();
     let result = read_tool
-        .execute(
-            "t2",
-            serde_json::json!({"path": path}),
-            CancellationToken::new(),
-            None,
-        )
+        .execute(serde_json::json!({"path": path}), ctx("read_file"))
         .await
         .unwrap();
 
@@ -159,10 +151,8 @@ async fn test_read_file_with_offset_limit() {
     let tool = ReadFileTool::new();
     let result = tool
         .execute(
-            "t1",
             serde_json::json!({"path": path, "offset": 5, "limit": 3}),
-            CancellationToken::new(),
-            None,
+            ctx("read_file"),
         )
         .await
         .unwrap();
@@ -183,10 +173,8 @@ async fn test_read_file_not_found() {
     let tool = ReadFileTool::new();
     let result = tool
         .execute(
-            "t1",
             serde_json::json!({"path": "/nonexistent/file.txt"}),
-            CancellationToken::new(),
-            None,
+            ctx("read_file"),
         )
         .await;
 
@@ -201,10 +189,8 @@ async fn test_write_creates_directories() {
     let tool = WriteFileTool::new();
     let result = tool
         .execute(
-            "t1",
             serde_json::json!({"path": path, "content": "nested!"}),
-            CancellationToken::new(),
-            None,
+            ctx("write_file"),
         )
         .await;
 
@@ -224,12 +210,7 @@ async fn test_search_pattern() {
 
     let tool = SearchTool::new().with_root(tmp_dir.to_str().unwrap());
     let result = tool
-        .execute(
-            "t1",
-            serde_json::json!({"pattern": "hello"}),
-            CancellationToken::new(),
-            None,
-        )
+        .execute(serde_json::json!({"pattern": "hello"}), ctx("search"))
         .await
         .unwrap();
 
@@ -252,10 +233,8 @@ async fn test_search_no_matches() {
     let tool = SearchTool::new().with_root(tmp_dir.to_str().unwrap());
     let result = tool
         .execute(
-            "t1",
             serde_json::json!({"pattern": "zzzznotfound"}),
-            CancellationToken::new(),
-            None,
+            ctx("search"),
         )
         .await
         .unwrap();
@@ -280,14 +259,12 @@ async fn test_edit_file() {
     let tool = EditFileTool::new();
     let result = tool
         .execute(
-            "t1",
             serde_json::json!({
                 "path": path,
                 "old_text": "println!(\"hello\")",
                 "new_text": "println!(\"goodbye\")"
             }),
-            CancellationToken::new(),
-            None,
+            ctx("edit_file"),
         )
         .await
         .unwrap();
@@ -310,10 +287,8 @@ async fn test_edit_file_no_match() {
     let tool = EditFileTool::new();
     let result = tool
         .execute(
-            "t1",
             serde_json::json!({"path": path, "old_text": "nonexistent", "new_text": "bar"}),
-            CancellationToken::new(),
-            None,
+            ctx("edit_file"),
         )
         .await;
     assert!(result.is_err());
@@ -329,10 +304,8 @@ async fn test_list_files_tool() {
     let tool = ListFilesTool::new();
     let result = tool
         .execute(
-            "t1",
             serde_json::json!({"path": tmp_dir.to_str().unwrap()}),
-            CancellationToken::new(),
-            None,
+            ctx("list_files"),
         )
         .await
         .unwrap();
@@ -351,12 +324,7 @@ async fn test_read_file_line_numbers() {
     std::fs::write(&tmp, "first\nsecond\nthird\n").unwrap();
     let tool = ReadFileTool::new();
     let result = tool
-        .execute(
-            "t1",
-            serde_json::json!({"path": path}),
-            CancellationToken::new(),
-            None,
-        )
+        .execute(serde_json::json!({"path": path}), ctx("read_file"))
         .await
         .unwrap();
     let text = match &result.content[0] {
@@ -372,12 +340,7 @@ async fn test_read_file_line_numbers() {
 async fn test_bash_blocked_command() {
     let tool = BashTool::new();
     let result = tool
-        .execute(
-            "t1",
-            serde_json::json!({"command": "rm -rf /"}),
-            CancellationToken::new(),
-            None,
-        )
+        .execute(serde_json::json!({"command": "rm -rf /"}), ctx("bash"))
         .await;
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("blocked"));
@@ -415,10 +378,8 @@ async fn test_read_image_file() {
     let tool = ReadFileTool::new();
     let result = tool
         .execute(
-            "t1",
             serde_json::json!({"path": tmp.to_str().unwrap()}),
-            CancellationToken::new(),
-            None,
+            ctx("read_file"),
         )
         .await
         .unwrap();
@@ -447,10 +408,8 @@ async fn test_read_jpeg_file() {
     let tool = ReadFileTool::new();
     let result = tool
         .execute(
-            "t1",
             serde_json::json!({"path": tmp.to_str().unwrap()}),
-            CancellationToken::new(),
-            None,
+            ctx("read_file"),
         )
         .await
         .unwrap();
@@ -474,10 +433,8 @@ async fn test_read_text_file_unchanged() {
     let tool = ReadFileTool::new();
     let result = tool
         .execute(
-            "t1",
             serde_json::json!({"path": tmp.to_str().unwrap()}),
-            CancellationToken::new(),
-            None,
+            ctx("read_file"),
         )
         .await
         .unwrap();

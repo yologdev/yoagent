@@ -288,6 +288,57 @@ pub enum ThinkingLevel {
 /// Partial results are **not** sent to the LLM — only the final `ToolResult` is.
 pub type ToolUpdateFn = Arc<dyn Fn(ToolResult) + Send + Sync>;
 
+/// Callback for emitting user-facing progress messages during tool execution.
+///
+/// Each invocation emits an `AgentEvent::ProgressMessage` event. Unlike `ToolUpdateFn`,
+/// these are simple text messages intended for user-facing display (e.g., status lines,
+/// notifications), not structured tool results.
+pub type ProgressFn = Arc<dyn Fn(String) + Send + Sync>;
+
+/// Context passed to tool execution. Bundles all per-invocation state.
+///
+/// Using a struct instead of individual parameters future-proofs the trait —
+/// adding fields to `ToolContext` is non-breaking.
+pub struct ToolContext {
+    /// The ID of this tool call (for correlation).
+    pub tool_call_id: String,
+    /// The name of the tool being invoked.
+    pub tool_name: String,
+    /// Cancellation token — check `is_cancelled()` in long-running tools.
+    pub cancel: tokio_util::sync::CancellationToken,
+    /// Optional callback for streaming partial `ToolResult`s (UI/logging only).
+    pub on_update: Option<ToolUpdateFn>,
+    /// Optional callback for emitting user-facing progress messages.
+    pub on_progress: Option<ProgressFn>,
+}
+
+impl Clone for ToolContext {
+    fn clone(&self) -> Self {
+        Self {
+            tool_call_id: self.tool_call_id.clone(),
+            tool_name: self.tool_name.clone(),
+            cancel: self.cancel.clone(),
+            on_update: self.on_update.clone(),
+            on_progress: self.on_progress.clone(),
+        }
+    }
+}
+
+impl std::fmt::Debug for ToolContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ToolContext")
+            .field("tool_call_id", &self.tool_call_id)
+            .field("tool_name", &self.tool_name)
+            .field("cancel", &self.cancel)
+            .field("on_update", &self.on_update.as_ref().map(|_| "<callback>"))
+            .field(
+                "on_progress",
+                &self.on_progress.as_ref().map(|_| "<callback>"),
+            )
+            .finish()
+    }
+}
+
 /// A tool the agent can call. Implement this trait for your tools.
 #[async_trait::async_trait]
 pub trait AgentTool: Send + Sync {
@@ -301,16 +352,15 @@ pub trait AgentTool: Send + Sync {
     fn parameters_schema(&self) -> serde_json::Value;
     /// Execute the tool.
     ///
-    /// `on_update` is an optional callback for streaming partial results during
-    /// long-running operations. Call it as often as needed — each invocation
-    /// emits a `ToolExecutionUpdate` event. The final return value is what gets
-    /// sent to the LLM; partial results are for UI/logging only.
+    /// The `ctx` parameter provides per-invocation context:
+    /// - `ctx.tool_call_id` / `ctx.tool_name` — for correlation and logging
+    /// - `ctx.cancel` — cancellation token; check `is_cancelled()` in long-running tools
+    /// - `ctx.on_update` — optional callback for streaming partial `ToolResult`s (UI/logging only)
+    /// - `ctx.on_progress` — optional callback for user-facing progress text (`ProgressMessage`)
     async fn execute(
         &self,
-        tool_call_id: &str,
         params: serde_json::Value,
-        cancel: tokio_util::sync::CancellationToken,
-        on_update: Option<ToolUpdateFn>,
+        ctx: ToolContext,
     ) -> Result<ToolResult, ToolError>;
 }
 
@@ -374,6 +424,14 @@ pub enum AgentEvent {
         result: ToolResult,
         is_error: bool,
     },
+    ProgressMessage {
+        tool_call_id: String,
+        tool_name: String,
+        text: String,
+    },
+    InputRejected {
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -391,6 +449,30 @@ pub struct AgentContext {
     pub system_prompt: String,
     pub messages: Vec<AgentMessage>,
     pub tools: Vec<Box<dyn AgentTool>>,
+}
+
+// ---------------------------------------------------------------------------
+// Input filtering
+// ---------------------------------------------------------------------------
+
+/// Result of applying an input filter to a user message.
+#[derive(Debug, Clone)]
+pub enum FilterResult {
+    /// Message passes unchanged.
+    Pass,
+    /// Message passes, but append a warning to context for the LLM to see.
+    Warn(String),
+    /// Message is rejected. Agent loop returns immediately.
+    Reject(String),
+}
+
+/// Synchronous filter applied to user input before the LLM call.
+///
+/// Implement this for injection detection, content moderation, PII redaction, etc.
+/// Filters run in the hot path and must be fast — use `before_turn` callbacks
+/// for async moderation (external API calls).
+pub trait InputFilter: Send + Sync {
+    fn filter(&self, text: &str) -> FilterResult;
 }
 
 // ---------------------------------------------------------------------------

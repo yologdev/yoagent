@@ -87,6 +87,7 @@ pub struct AgentLoopConfig<'a> {
     pub before_turn: Option<BeforeTurnFn>,
     pub after_turn: Option<AfterTurnFn>,
     pub on_error: Option<OnErrorFn>,
+    pub input_filters: Vec<Arc<dyn InputFilter>>,
 }
 ```
 
@@ -108,6 +109,7 @@ pub struct AgentLoopConfig<'a> {
 | `before_turn` | Called before each LLM call; return `false` to abort (see [Callbacks](callbacks.md)) |
 | `after_turn` | Called after each turn with messages and usage (see [Callbacks](callbacks.md)) |
 | `on_error` | Called on `StopReason::Error` with the error string (see [Callbacks](callbacks.md)) |
+| `input_filters` | Input filters applied to user messages before the LLM call (see [Tools](tools.md)) |
 
 ## Steering & Follow-Ups
 
