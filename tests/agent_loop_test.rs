@@ -20,6 +20,7 @@ fn make_config(provider: &MockProvider) -> AgentLoopConfig<'_> {
         get_steering_messages: None,
         get_follow_up_messages: None,
         context_config: None,
+        compaction_strategy: None,
         execution_limits: None,
         cache_config: CacheConfig::default(),
         tool_execution: ToolExecutionStrategy::default(),
@@ -730,6 +731,7 @@ async fn test_retry_on_rate_limit_succeeds() {
         get_steering_messages: None,
         get_follow_up_messages: None,
         context_config: None,
+        compaction_strategy: None,
         execution_limits: None,
         cache_config: CacheConfig::default(),
         tool_execution: ToolExecutionStrategy::default(),
@@ -794,6 +796,7 @@ async fn test_retry_exhausted_returns_error() {
         get_steering_messages: None,
         get_follow_up_messages: None,
         context_config: None,
+        compaction_strategy: None,
         execution_limits: None,
         cache_config: CacheConfig::default(),
         tool_execution: ToolExecutionStrategy::default(),
@@ -865,6 +868,7 @@ async fn test_no_retry_on_auth_error() {
         get_steering_messages: None,
         get_follow_up_messages: None,
         context_config: None,
+        compaction_strategy: None,
         execution_limits: None,
         cache_config: CacheConfig::default(),
         tool_execution: ToolExecutionStrategy::default(),
@@ -919,6 +923,7 @@ async fn test_retry_none_disables_retries() {
         get_steering_messages: None,
         get_follow_up_messages: None,
         context_config: None,
+        compaction_strategy: None,
         execution_limits: None,
         cache_config: CacheConfig::default(),
         tool_execution: ToolExecutionStrategy::default(),
@@ -1146,6 +1151,7 @@ async fn test_on_error_fires_on_provider_error() {
         get_steering_messages: None,
         get_follow_up_messages: None,
         context_config: None,
+        compaction_strategy: None,
         execution_limits: None,
         cache_config: CacheConfig::default(),
         tool_execution: ToolExecutionStrategy::default(),
@@ -1755,4 +1761,187 @@ async fn test_filter_non_text_content_only_text_extracted() {
     let captured = call_text.lock().unwrap();
     // Filter should have received only the text portion
     assert_eq!(*captured, "Check this image");
+}
+
+// ---------------------------------------------------------------------------
+// CompactionStrategy tests
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_default_compaction_matches_compact_messages() {
+    use yoagent::context::{compact_messages, ContextConfig, DefaultCompaction};
+    use yoagent::CompactionStrategy;
+
+    let mut messages = Vec::new();
+    for i in 0..100 {
+        messages.push(AgentMessage::Llm(Message::user(format!(
+            "Message {} {}",
+            i,
+            "x".repeat(200)
+        ))));
+    }
+
+    let config = ContextConfig {
+        max_context_tokens: 500,
+        system_prompt_tokens: 100,
+        keep_recent: 5,
+        keep_first: 2,
+        tool_output_max_lines: 20,
+    };
+
+    let result_direct = compact_messages(messages.clone(), &config);
+    let result_trait = DefaultCompaction.compact(messages, &config);
+
+    assert_eq!(result_direct.len(), result_trait.len());
+    assert_eq!(result_direct, result_trait);
+}
+
+#[tokio::test]
+async fn test_custom_compaction_strategy_is_called() {
+    use yoagent::context::ContextConfig;
+    use yoagent::CompactionStrategy;
+
+    /// A custom strategy that prepends a marker message, then delegates
+    /// to the default compaction.
+    struct MarkerCompaction;
+
+    impl CompactionStrategy for MarkerCompaction {
+        fn compact(
+            &self,
+            messages: Vec<AgentMessage>,
+            _config: &ContextConfig,
+        ) -> Vec<AgentMessage> {
+            let mut result = vec![AgentMessage::Llm(Message::user("[compacted]"))];
+            // Keep only the last message to prove we ran
+            if let Some(last) = messages.last() {
+                result.push(last.clone());
+            }
+            result
+        }
+    }
+
+    // Provider returns a simple text response
+    let provider = MockProvider::text("Got it.");
+
+    let config = AgentLoopConfig {
+        provider: &provider,
+        model: "test".into(),
+        api_key: "test".into(),
+        thinking_level: ThinkingLevel::Off,
+        max_tokens: None,
+        temperature: None,
+        convert_to_llm: None,
+        transform_context: None,
+        get_steering_messages: None,
+        get_follow_up_messages: None,
+        context_config: Some(ContextConfig {
+            max_context_tokens: 10, // Tiny budget to force compaction
+            system_prompt_tokens: 0,
+            keep_recent: 1,
+            keep_first: 1,
+            tool_output_max_lines: 10,
+        }),
+        compaction_strategy: Some(std::sync::Arc::new(MarkerCompaction)),
+        execution_limits: None,
+        cache_config: CacheConfig::default(),
+        tool_execution: ToolExecutionStrategy::default(),
+        retry_config: yoagent::RetryConfig::none(),
+        before_turn: None,
+        after_turn: None,
+        on_error: None,
+        input_filters: vec![],
+    };
+
+    let prompt = AgentMessage::Llm(Message::user("Hello"));
+    let mut context = AgentContext {
+        system_prompt: String::new(),
+        messages: vec![],
+        tools: vec![],
+    };
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+
+    agent_loop(vec![prompt], &mut context, &config, tx, cancel).await;
+
+    // The custom strategy should have inserted "[compacted]" as the first message
+    assert!(
+        context.messages.iter().any(|m| {
+            if let AgentMessage::Llm(Message::User { content, .. }) = m {
+                content
+                    .iter()
+                    .any(|c| matches!(c, Content::Text { text } if text == "[compacted]"))
+            } else {
+                false
+            }
+        }),
+        "Custom compaction marker not found in context: {:?}",
+        context
+            .messages
+            .iter()
+            .filter_map(|m| {
+                if let AgentMessage::Llm(Message::User { content, .. }) = m {
+                    Some(content)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn test_none_compaction_strategy_uses_default() {
+    use yoagent::context::ContextConfig;
+
+    // Provider returns a simple text response
+    let provider = MockProvider::text("Got it.");
+
+    let config = AgentLoopConfig {
+        provider: &provider,
+        model: "test".into(),
+        api_key: "test".into(),
+        thinking_level: ThinkingLevel::Off,
+        max_tokens: None,
+        temperature: None,
+        convert_to_llm: None,
+        transform_context: None,
+        get_steering_messages: None,
+        get_follow_up_messages: None,
+        context_config: Some(ContextConfig {
+            max_context_tokens: 10, // Tiny budget to force compaction
+            system_prompt_tokens: 0,
+            keep_recent: 1,
+            keep_first: 1,
+            tool_output_max_lines: 10,
+        }),
+        compaction_strategy: None, // Should fall back to DefaultCompaction
+        execution_limits: None,
+        cache_config: CacheConfig::default(),
+        tool_execution: ToolExecutionStrategy::default(),
+        retry_config: yoagent::RetryConfig::none(),
+        before_turn: None,
+        after_turn: None,
+        on_error: None,
+        input_filters: vec![],
+    };
+
+    let prompt = AgentMessage::Llm(Message::user("Hello"));
+    let mut context = AgentContext {
+        system_prompt: String::new(),
+        messages: vec![],
+        tools: vec![],
+    };
+
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+
+    // Should not panic — DefaultCompaction handles everything
+    let new_messages = agent_loop(vec![prompt], &mut context, &config, tx, cancel).await;
+
+    // Agent should have produced at least the user message + assistant response
+    assert!(
+        !new_messages.is_empty(),
+        "Agent should have produced messages"
+    );
 }

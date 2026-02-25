@@ -229,6 +229,7 @@ impl AgentTool for SubAgentTool {
             get_steering_messages: None,
             get_follow_up_messages: None,
             context_config: None,
+            compaction_strategy: None,
             execution_limits: Some(ExecutionLimits {
                 max_turns: self.max_turns,
                 // Generous token/duration limits — turn limit is the primary guard

@@ -7,7 +7,9 @@
 //!
 //! Both return a stream of `AgentEvent`s.
 
-use crate::context::{self, ContextConfig, ExecutionLimits, ExecutionTracker};
+use crate::context::{
+    self, CompactionStrategy, ContextConfig, DefaultCompaction, ExecutionLimits, ExecutionTracker,
+};
 use crate::provider::{StreamConfig, StreamEvent, StreamProvider, ToolDefinition};
 use crate::types::*;
 use std::sync::Arc;
@@ -51,6 +53,10 @@ pub struct AgentLoopConfig<'a> {
 
     /// Context window configuration (auto-compaction).
     pub context_config: Option<ContextConfig>,
+
+    /// Custom compaction strategy. When set, replaces the default
+    /// `compact_messages()` call. Only invoked when `context_config` is `Some`.
+    pub compaction_strategy: Option<Arc<dyn CompactionStrategy>>,
 
     /// Execution limits (max turns, tokens, duration).
     pub execution_limits: Option<ExecutionLimits>,
@@ -319,8 +325,12 @@ async fn run_loop(
 
             // Compact context if configured (tiered: tool outputs → summarize → drop)
             if let Some(ref ctx_config) = config.context_config {
+                let strategy: &dyn CompactionStrategy = config
+                    .compaction_strategy
+                    .as_deref()
+                    .unwrap_or(&DefaultCompaction);
                 context.messages =
-                    context::compact_messages(std::mem::take(&mut context.messages), ctx_config);
+                    strategy.compact(std::mem::take(&mut context.messages), ctx_config);
             }
 
             // Stream assistant response

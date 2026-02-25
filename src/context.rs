@@ -167,6 +167,39 @@ impl Default for ContextConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Compaction strategy
+// ---------------------------------------------------------------------------
+
+/// Strategy for compacting messages when context exceeds budget.
+///
+/// Implement this to customize what happens during compaction:
+/// - Index discarded content into a memory store before removal
+/// - Apply custom preservation rules (e.g., always keep decisions)
+/// - Emit metadata about what was compressed
+///
+/// See the [Custom Compaction](https://yologdev.github.io/yoagent/concepts/agent-loop.html#custom-compaction)
+/// docs for examples.
+pub trait CompactionStrategy: Send + Sync {
+    /// Compact messages to fit within the token budget defined by `config`.
+    ///
+    /// Called before each LLM turn when `context_config` is set.
+    fn compact(&self, messages: Vec<AgentMessage>, config: &ContextConfig) -> Vec<AgentMessage>;
+}
+
+/// Default 3-level compaction: truncate tool outputs → summarize turns → drop middle.
+///
+/// This is used automatically when no custom `CompactionStrategy` is set.
+/// You can also compose it inside a custom strategy — run your logic first,
+/// then delegate to `compact_messages()` for the actual reduction.
+pub struct DefaultCompaction;
+
+impl CompactionStrategy for DefaultCompaction {
+    fn compact(&self, messages: Vec<AgentMessage>, config: &ContextConfig) -> Vec<AgentMessage> {
+        compact_messages(messages, config)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tiered compaction
 // ---------------------------------------------------------------------------
 
