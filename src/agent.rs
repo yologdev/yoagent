@@ -4,7 +4,7 @@
 use crate::agent_loop::{
     agent_loop, agent_loop_continue, AfterTurnFn, AgentLoopConfig, BeforeTurnFn, OnErrorFn,
 };
-use crate::context::{ContextConfig, ExecutionLimits};
+use crate::context::{CompactionStrategy, ContextConfig, ExecutionLimits};
 use crate::mcp::{McpClient, McpError, McpToolAdapter};
 use crate::provider::StreamProvider;
 use crate::types::*;
@@ -56,6 +56,9 @@ pub struct Agent {
     // Input filters
     input_filters: Vec<Arc<dyn InputFilter>>,
 
+    // Custom compaction strategy
+    compaction_strategy: Option<Arc<dyn CompactionStrategy>>,
+
     // Control
     cancel: Option<CancellationToken>,
     is_streaming: bool,
@@ -86,6 +89,7 @@ impl Agent {
             after_turn: None,
             on_error: None,
             input_filters: Vec::new(),
+            compaction_strategy: None,
             cancel: None,
             is_streaming: false,
         }
@@ -194,6 +198,13 @@ impl Agent {
     /// Add an input filter. Filters run in order on user messages before the LLM call.
     pub fn with_input_filter(mut self, filter: impl InputFilter + 'static) -> Self {
         self.input_filters.push(Arc::new(filter));
+        self
+    }
+
+    /// Set a custom compaction strategy. When set, replaces the default
+    /// `compact_messages()` call during context compaction.
+    pub fn with_compaction_strategy(mut self, strategy: impl CompactionStrategy + 'static) -> Self {
+        self.compaction_strategy = Some(Arc::new(strategy));
         self
     }
 
@@ -430,6 +441,7 @@ impl Agent {
                 }
             })),
             context_config: self.context_config.clone(),
+            compaction_strategy: self.compaction_strategy.clone(),
             execution_limits: self.execution_limits.clone(),
             cache_config: self.cache_config.clone(),
             tool_execution: self.tool_execution.clone(),

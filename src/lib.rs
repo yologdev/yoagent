@@ -11,6 +11,7 @@ pub mod types;
 
 pub use agent::Agent;
 pub use agent_loop::{agent_loop, agent_loop_continue};
+pub use context::{CompactionStrategy, DefaultCompaction};
 pub use retry::RetryConfig;
 pub use skills::SkillSet;
 pub use sub_agent::SubAgentTool;

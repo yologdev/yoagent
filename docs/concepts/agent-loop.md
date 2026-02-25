@@ -88,6 +88,7 @@ pub struct AgentLoopConfig<'a> {
     pub after_turn: Option<AfterTurnFn>,
     pub on_error: Option<OnErrorFn>,
     pub input_filters: Vec<Arc<dyn InputFilter>>,
+    pub compaction_strategy: Option<Arc<dyn CompactionStrategy>>,
 }
 ```
 
@@ -110,6 +111,7 @@ pub struct AgentLoopConfig<'a> {
 | `after_turn` | Called after each turn with messages and usage (see [Callbacks](callbacks.md)) |
 | `on_error` | Called on `StopReason::Error` with the error string (see [Callbacks](callbacks.md)) |
 | `input_filters` | Input filters applied to user messages before the LLM call (see [Tools](tools.md)) |
+| `compaction_strategy` | Custom compaction strategy (see [Custom Compaction](#custom-compaction) below) |
 
 ## Steering & Follow-Ups
 
@@ -175,4 +177,120 @@ let config = AgentLoopConfig {
     })),
     // ...
 };
+```
+
+## Custom Compaction
+
+By default, when context exceeds the token budget in `ContextConfig`, yoagent runs a 3-level compaction strategy: truncate tool outputs → summarize old turns → drop middle messages. You can replace this with your own `CompactionStrategy`:
+
+```rust
+use yoagent::context::{CompactionStrategy, ContextConfig, compact_messages};
+use yoagent::types::*;
+
+struct MyCompaction;
+
+impl CompactionStrategy for MyCompaction {
+    fn compact(
+        &self,
+        messages: Vec<AgentMessage>,
+        config: &ContextConfig,
+    ) -> Vec<AgentMessage> {
+        // Your logic here — then optionally delegate to the default:
+        compact_messages(messages, config)
+    }
+}
+
+let agent = Agent::new(provider)
+    .with_compaction_strategy(MyCompaction);
+```
+
+The strategy is called once per turn, right before the LLM call, whenever `context_config` is `Some`. When `compaction_strategy` is `None`, `DefaultCompaction` (which wraps `compact_messages()`) is used automatically.
+
+### Use Cases
+
+**Memory-aware compaction** — Index messages into a vector store before they're dropped, so the agent can recall them later via a search tool:
+
+```rust
+struct MemoryAwareCompaction {
+    memory: Arc<dyn MemoryStore>,
+}
+
+impl CompactionStrategy for MemoryAwareCompaction {
+    fn compact(
+        &self,
+        messages: Vec<AgentMessage>,
+        config: &ContextConfig,
+    ) -> Vec<AgentMessage> {
+        let compacted = compact_messages(messages.clone(), config);
+
+        // Index what was dropped
+        let dropped: Vec<_> = messages.iter()
+            .filter(|m| !compacted.contains(m))
+            .collect();
+        if !dropped.is_empty() {
+            self.memory.index(dropped);
+        }
+
+        compacted
+    }
+}
+```
+
+**Semantic pointer compaction** — Replace dropped messages with a marker so the agent knows context was lost:
+
+```rust
+struct SemanticPointerCompaction;
+
+impl CompactionStrategy for SemanticPointerCompaction {
+    fn compact(
+        &self,
+        messages: Vec<AgentMessage>,
+        config: &ContextConfig,
+    ) -> Vec<AgentMessage> {
+        let compacted = compact_messages(messages.clone(), config);
+        let dropped_count = messages.len() - compacted.len();
+
+        if dropped_count == 0 {
+            return compacted;
+        }
+
+        // Insert a marker after the first kept messages
+        let mut result = compacted;
+        let insert_at = config.keep_first.min(result.len());
+        result.insert(insert_at, AgentMessage::Extension(
+            ExtensionMessage::new("compaction_marker", serde_json::json!({
+                "dropped": dropped_count,
+                "note": format!("{} earlier messages were compacted", dropped_count),
+            }))
+        ));
+        result
+    }
+}
+```
+
+**Priority-preserving compaction** — Never drop messages containing important keywords:
+
+```rust
+struct PriorityPreservingCompaction {
+    preserve_keywords: Vec<String>,
+}
+
+impl CompactionStrategy for PriorityPreservingCompaction {
+    fn compact(
+        &self,
+        messages: Vec<AgentMessage>,
+        config: &ContextConfig,
+    ) -> Vec<AgentMessage> {
+        let (priority, normal): (Vec<_>, Vec<_>) = messages.into_iter()
+            .partition(|m| self.is_priority(m));
+
+        let mut compacted = compact_messages(normal, config);
+
+        // Re-insert priority messages — they're never dropped
+        for msg in priority {
+            compacted.push(msg);
+        }
+        compacted
+    }
+}
 ```

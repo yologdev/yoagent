@@ -25,6 +25,7 @@ pub struct AgentLoopConfig<'a> {
     pub after_turn: Option<AfterTurnFn>,
     pub on_error: Option<OnErrorFn>,
     pub input_filters: Vec<Arc<dyn InputFilter>>,
+    pub compaction_strategy: Option<Arc<dyn CompactionStrategy>>,
 }
 ```
 
