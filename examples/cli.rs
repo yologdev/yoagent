@@ -1,4 +1,4 @@
-//! Mini coding agent CLI — a baby Claude Code in ~150 lines.
+//! Mini coding agent CLI — a baby Claude Code in ~250 lines.
 //!
 //! Features:
 //!   - Interactive REPL with multi-turn conversation
@@ -88,6 +88,13 @@ async fn main() {
         .with_skills(skills.clone())
         .with_tools(default_tools());
 
+    // Graceful Ctrl+C exit
+    tokio::spawn(async {
+        tokio::signal::ctrl_c().await.ok();
+        println!("\n{DIM}  bye 👋{RESET}\n");
+        std::process::exit(0);
+    });
+
     print_banner();
     println!("{DIM}  model: {model}{RESET}");
     if !skills.is_empty() {
@@ -120,12 +127,7 @@ async fn main() {
         match input {
             "/quit" | "/exit" => break,
             "/clear" => {
-                agent = Agent::new(AnthropicProvider)
-                    .with_system_prompt(SYSTEM_PROMPT)
-                    .with_model(&model)
-                    .with_api_key(&api_key)
-                    .with_skills(skills.clone())
-                    .with_tools(default_tools());
+                agent.clear_messages();
                 println!("{DIM}  (conversation cleared){RESET}\n");
                 continue;
             }
@@ -208,6 +210,21 @@ async fn main() {
                     print!("{}", delta);
                     io::stdout().flush().ok();
                 }
+                AgentEvent::MessageEnd {
+                    message:
+                        AgentMessage::Llm(Message::Assistant {
+                            stop_reason: StopReason::Error,
+                            error_message,
+                            ..
+                        }),
+                } => {
+                    if in_text {
+                        println!();
+                        in_text = false;
+                    }
+                    let msg = error_message.as_deref().unwrap_or("unknown error");
+                    println!("{RED}  error: {msg}{RESET}");
+                }
                 AgentEvent::AgentEnd { messages } => {
                     // Extract usage from the last assistant message
                     for msg in messages.iter().rev() {
@@ -235,6 +252,9 @@ fn truncate(s: &str, max: usize) -> &str {
     if s.len() <= max {
         s
     } else {
-        &s[..max]
+        match s.char_indices().nth(max) {
+            Some((idx, _)) => &s[..idx],
+            None => s,
+        }
     }
 }

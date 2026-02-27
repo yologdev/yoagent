@@ -143,7 +143,7 @@ ANTHROPIC_API_KEY=sk-... cargo run --example cli
 ANTHROPIC_API_KEY=sk-... cargo run --example cli -- --skills ./skills
 ```
 
-A ~230-line interactive coding agent with all built-in tools, skills support, streaming output, and colored tool feedback. Like a baby Claude Code.
+A ~250-line interactive coding agent with all built-in tools, skills support, streaming output, and colored tool feedback. Like a baby Claude Code.
 
 ```
   yoagent cli — mini coding agent
