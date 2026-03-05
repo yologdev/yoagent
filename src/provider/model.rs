@@ -236,6 +236,24 @@ impl ModelConfig {
         }
     }
 
+    /// Create a config for a local OpenAI-compatible server (LM Studio, Ollama, etc.).
+    /// No API key required — sends an empty Bearer token.
+    pub fn local(base_url: impl Into<String>, model_id: impl Into<String>) -> Self {
+        Self {
+            id: model_id.into(),
+            name: "Local Model".into(),
+            api: ApiProtocol::OpenAiCompletions,
+            provider: "local".into(),
+            base_url: base_url.into(),
+            reasoning: false,
+            context_window: 128_000,
+            max_tokens: 4096,
+            cost: CostConfig::default(),
+            headers: HashMap::new(),
+            compat: Some(OpenAiCompat::default()),
+        }
+    }
+
     /// Create a new Google Generative AI (Gemini) model config.
     pub fn google(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {

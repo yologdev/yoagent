@@ -62,6 +62,7 @@ All return `Self` for chaining.
 | `with_api_key(key: impl Into<String>) -> Self` | Set the API key |
 | `with_thinking(level: ThinkingLevel) -> Self` | Set thinking level (`Off`, `Minimal`, `Low`, `Medium`, `High`) |
 | `with_tools(tools: Vec<Box<dyn AgentTool>>) -> Self` | Set tools |
+| `with_model_config(config: ModelConfig) -> Self` | Set model config (base URL, headers, compat flags) for multi-provider support |
 | `with_max_tokens(max: u32) -> Self` | Set max output tokens |
 | `with_context_config(config: ContextConfig) -> Self` | Set context compaction config |
 | `with_execution_limits(limits: ExecutionLimits) -> Self` | Set execution limits (max turns, tokens, duration) |

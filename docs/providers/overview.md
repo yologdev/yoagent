@@ -54,6 +54,7 @@ Convenience constructors:
 let anthropic = ModelConfig::anthropic("claude-sonnet-4-20250514", "Claude Sonnet 4");
 let openai = ModelConfig::openai("gpt-4o", "GPT-4o");
 let google = ModelConfig::google("gemini-2.0-flash", "Gemini 2.0 Flash");
+let local = ModelConfig::local("http://localhost:1234/v1", "my-model"); // LM Studio, Ollama, llama.cpp, etc.
 ```
 
 ## ProviderRegistry

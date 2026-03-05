@@ -75,6 +75,7 @@ pub struct AgentLoopConfig<'a> {
     pub thinking_level: ThinkingLevel,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
+    pub model_config: Option<ModelConfig>,
     pub convert_to_llm: Option<ConvertToLlmFn>,
     pub transform_context: Option<TransformContextFn>,
     pub get_steering_messages: Option<GetMessagesFn>,
@@ -98,6 +99,7 @@ pub struct AgentLoopConfig<'a> {
 | `model` | Model identifier (e.g., `"claude-sonnet-4-20250514"`) |
 | `api_key` | API key for the provider |
 | `thinking_level` | `Off`, `Minimal`, `Low`, `Medium`, `High` |
+| `model_config` | Optional `ModelConfig` for multi-provider support (base URL, headers, compat flags) |
 | `convert_to_llm` | Custom `AgentMessage[] → Message[]` conversion |
 | `transform_context` | Pre-processing hook for context pruning |
 | `get_steering_messages` | Returns user interruptions during tool execution |

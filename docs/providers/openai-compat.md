@@ -81,6 +81,26 @@ The `ThinkingFormat` enum controls how reasoning content is parsed from streams:
 - `ThinkingFormat::Xai` — Uses `reasoning` field (Grok)
 - `ThinkingFormat::Qwen` — Uses `reasoning_content` field (Qwen)
 
+## Local Servers (LM Studio, Ollama, llama.cpp, vLLM)
+
+Use `ModelConfig::local()` for any local OpenAI-compatible server. No API key required:
+
+```rust
+use yoagent::agent::Agent;
+use yoagent::provider::{OpenAiCompatProvider, ModelConfig};
+
+let agent = Agent::new(OpenAiCompatProvider)
+    .with_model_config(ModelConfig::local("http://localhost:1234/v1", "my-model"))
+    .with_model("my-model")
+    .with_api_key(""); // empty string OK for local
+```
+
+Or via the CLI example:
+
+```bash
+cargo run --example cli -- --api-url http://localhost:1234/v1 --model my-model
+```
+
 ## Auth
 
 Uses `Authorization: Bearer {api_key}` header. Extra headers can be added via `ModelConfig.headers`.
