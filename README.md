@@ -141,6 +141,8 @@ See [docs/concepts/skills.md](docs/concepts/skills.md) for the full guide.
 ANTHROPIC_API_KEY=sk-... cargo run --example cli
 # With skills:
 ANTHROPIC_API_KEY=sk-... cargo run --example cli -- --skills ./skills
+# With a local server (LM Studio, Ollama, llama.cpp, vLLM):
+cargo run --example cli -- --api-url http://localhost:1234/v1 --model my-model
 ```
 
 A ~250-line interactive coding agent with all built-in tools, skills support, streaming output, and colored tool feedback. Like a baby Claude Code.

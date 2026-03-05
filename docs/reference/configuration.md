@@ -12,6 +12,7 @@ pub struct AgentLoopConfig<'a> {
     pub thinking_level: ThinkingLevel,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
+    pub model_config: Option<ModelConfig>,
     pub convert_to_llm: Option<ConvertToLlmFn>,
     pub transform_context: Option<TransformContextFn>,
     pub get_steering_messages: Option<GetMessagesFn>,
