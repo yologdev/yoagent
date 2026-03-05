@@ -6,7 +6,7 @@ use crate::agent_loop::{
 };
 use crate::context::{CompactionStrategy, ContextConfig, ExecutionLimits};
 use crate::mcp::{McpClient, McpError, McpToolAdapter};
-use crate::provider::StreamProvider;
+use crate::provider::{ModelConfig, StreamProvider};
 use crate::types::*;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -31,6 +31,7 @@ pub struct Agent {
     pub thinking_level: ThinkingLevel,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
+    model_config: Option<ModelConfig>,
     messages: Vec<AgentMessage>,
     tools: Vec<Box<dyn AgentTool>>,
     provider: Box<dyn StreamProvider>,
@@ -73,6 +74,7 @@ impl Agent {
             thinking_level: ThinkingLevel::Off,
             max_tokens: None,
             temperature: None,
+            model_config: None,
             messages: Vec::new(),
             tools: Vec::new(),
             provider: Box::new(provider),
@@ -119,6 +121,11 @@ impl Agent {
 
     pub fn with_tools(mut self, tools: Vec<Box<dyn AgentTool>>) -> Self {
         self.tools = tools;
+        self
+    }
+
+    pub fn with_model_config(mut self, config: ModelConfig) -> Self {
+        self.model_config = Some(config);
         self
     }
 
@@ -425,6 +432,7 @@ impl Agent {
             thinking_level: self.thinking_level,
             max_tokens: self.max_tokens,
             temperature: self.temperature,
+            model_config: self.model_config.clone(),
             convert_to_llm: None,
             transform_context: None,
             get_steering_messages: Some(Box::new(move || {

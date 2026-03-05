@@ -22,6 +22,7 @@ fn make_config(provider: &AnthropicProvider) -> AgentLoopConfig<'_> {
         thinking_level: ThinkingLevel::Off,
         max_tokens: Some(1024),
         temperature: Some(0.0),
+        model_config: None,
         convert_to_llm: None,
         transform_context: None,
         get_steering_messages: None,

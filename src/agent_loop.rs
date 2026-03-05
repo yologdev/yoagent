@@ -10,7 +10,7 @@
 use crate::context::{
     self, CompactionStrategy, ContextConfig, DefaultCompaction, ExecutionLimits, ExecutionTracker,
 };
-use crate::provider::{StreamConfig, StreamEvent, StreamProvider, ToolDefinition};
+use crate::provider::{ModelConfig, StreamConfig, StreamEvent, StreamProvider, ToolDefinition};
 use crate::types::*;
 use std::sync::Arc;
 
@@ -37,6 +37,11 @@ pub struct AgentLoopConfig<'a> {
     pub thinking_level: ThinkingLevel,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
+
+    /// Optional model configuration for multi-provider support.
+    /// When set, passed through to StreamConfig so providers can use
+    /// base_url, headers, compat flags, etc.
+    pub model_config: Option<ModelConfig>,
 
     /// Convert AgentMessage[] → Message[] before each LLM call.
     /// Default: keep only LLM-compatible messages.
@@ -513,7 +518,7 @@ async fn stream_assistant_response(
             api_key: config.api_key.clone(),
             max_tokens: config.max_tokens,
             temperature: config.temperature,
-            model_config: None,
+            model_config: config.model_config.clone(),
             cache_config: config.cache_config.clone(),
         };
 

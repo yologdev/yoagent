@@ -17,6 +17,7 @@ fn make_config(provider: &MockProvider) -> AgentLoopConfig<'_> {
         thinking_level: ThinkingLevel::Off,
         max_tokens: None,
         temperature: None,
+        model_config: None,
         convert_to_llm: None,
         transform_context: None,
         get_steering_messages: None,

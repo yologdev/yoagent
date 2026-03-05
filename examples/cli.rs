@@ -11,6 +11,9 @@
 //!   ANTHROPIC_API_KEY=sk-... cargo run --example cli -- --model claude-sonnet-4-20250514
 //!   ANTHROPIC_API_KEY=sk-... cargo run --example cli -- --skills ./skills
 //!
+//! Run with LM Studio / Ollama / local OpenAI-compatible server:
+//!   cargo run --example cli -- --api-url http://localhost:1234/v1 --model local-model
+//!
 //! Commands:
 //!   /quit, /exit    Exit the agent
 //!   /clear          Clear conversation history
@@ -18,7 +21,7 @@
 
 use std::io::{self, BufRead, Write};
 use yoagent::agent::Agent;
-use yoagent::provider::AnthropicProvider;
+use yoagent::provider::{AnthropicProvider, ModelConfig, OpenAiCompatProvider};
 use yoagent::skills::SkillSet;
 use yoagent::tools::default_tools;
 use yoagent::*;
@@ -54,11 +57,23 @@ fn print_usage(usage: &Usage) {
 
 #[tokio::main]
 async fn main() {
-    let api_key = std::env::var("ANTHROPIC_API_KEY")
-        .or_else(|_| std::env::var("API_KEY"))
-        .expect("Set ANTHROPIC_API_KEY or API_KEY");
-
     let args: Vec<String> = std::env::args().collect();
+
+    let api_url = args
+        .iter()
+        .position(|a| a == "--api-url")
+        .and_then(|i| args.get(i + 1))
+        .cloned();
+
+    let api_key = if api_url.is_some() {
+        std::env::var("ANTHROPIC_API_KEY")
+            .or_else(|_| std::env::var("API_KEY"))
+            .unwrap_or_default() // empty string OK for local
+    } else {
+        std::env::var("ANTHROPIC_API_KEY")
+            .or_else(|_| std::env::var("API_KEY"))
+            .expect("Set ANTHROPIC_API_KEY or API_KEY")
+    };
 
     let model = args
         .iter()
@@ -81,7 +96,12 @@ async fn main() {
         SkillSet::load(&skill_dirs).expect("Failed to load skills")
     };
 
-    let mut agent = Agent::new(AnthropicProvider)
+    let mut agent = if let Some(ref url) = api_url {
+        Agent::new(OpenAiCompatProvider).with_model_config(ModelConfig::local(url, &model))
+    } else {
+        Agent::new(AnthropicProvider)
+    };
+    agent = agent
         .with_system_prompt(SYSTEM_PROMPT)
         .with_model(&model)
         .with_api_key(&api_key)
@@ -133,7 +153,13 @@ async fn main() {
             }
             s if s.starts_with("/model ") => {
                 let new_model = s.trim_start_matches("/model ").trim();
-                agent = Agent::new(AnthropicProvider)
+                agent = if let Some(ref url) = api_url {
+                    Agent::new(OpenAiCompatProvider)
+                        .with_model_config(ModelConfig::local(url, new_model))
+                } else {
+                    Agent::new(AnthropicProvider)
+                };
+                agent = agent
                     .with_system_prompt(SYSTEM_PROMPT)
                     .with_model(new_model)
                     .with_api_key(&api_key)

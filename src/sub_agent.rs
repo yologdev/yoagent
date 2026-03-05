@@ -224,6 +224,7 @@ impl AgentTool for SubAgentTool {
             thinking_level: self.thinking_level,
             max_tokens: self.max_tokens,
             temperature: None,
+            model_config: None,
             convert_to_llm: None,
             transform_context: None,
             get_steering_messages: None,
