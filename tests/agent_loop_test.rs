@@ -1,13 +1,14 @@
 //! Tests for the core agent loop using MockProvider.
 
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use yoagent::agent_loop::{agent_loop, agent_loop_continue, AgentLoopConfig};
 use yoagent::provider::mock::*;
-use yoagent::provider::MockProvider;
+use yoagent::provider::{MockProvider, StreamProvider};
 use yoagent::*;
 
-fn make_config(provider: &MockProvider) -> AgentLoopConfig<'_> {
+fn make_config(provider: Arc<dyn StreamProvider>) -> AgentLoopConfig {
     AgentLoopConfig {
         provider,
         model: "mock".into(),
@@ -44,7 +45,7 @@ fn collect_events(mut rx: mpsc::UnboundedReceiver<AgentEvent>) -> Vec<AgentEvent
 #[tokio::test]
 async fn test_simple_text_response() {
     let provider = MockProvider::text("Hello, world!");
-    let config = make_config(&provider);
+    let config = make_config(Arc::new(provider));
 
     let mut context = AgentContext {
         system_prompt: "You are helpful.".into(),
@@ -141,7 +142,7 @@ async fn test_tool_call_and_response() {
         }
     }
 
-    let config = make_config(&provider);
+    let config = make_config(Arc::new(provider));
 
     let mut context = AgentContext {
         system_prompt: "You are helpful.".into(),
@@ -191,7 +192,7 @@ async fn test_tool_call_and_response() {
 async fn test_abort_cancels_loop() {
     // Provider that returns text — but we cancel before it runs
     let provider = MockProvider::text("Should not appear");
-    let config = make_config(&provider);
+    let config = make_config(Arc::new(provider));
 
     let mut context = AgentContext {
         system_prompt: "test".into(),
@@ -216,7 +217,7 @@ async fn test_abort_cancels_loop() {
 #[tokio::test]
 async fn test_continue_from_tool_result() {
     let provider = MockProvider::text("Done processing.");
-    let config = make_config(&provider);
+    let config = make_config(Arc::new(provider));
 
     let mut context = AgentContext {
         system_prompt: "test".into(),
@@ -279,7 +280,7 @@ async fn test_tool_error_is_reported() {
         }
     }
 
-    let config = make_config(&provider);
+    let config = make_config(Arc::new(provider));
     let mut context = AgentContext {
         system_prompt: "test".into(),
         messages: Vec::new(),
@@ -315,7 +316,7 @@ async fn test_unknown_tool_reports_error() {
         MockResponse::Text("I couldn't find that tool.".into()),
     ]);
 
-    let config = make_config(&provider);
+    let config = make_config(Arc::new(provider));
     let mut context = AgentContext {
         system_prompt: "test".into(),
         messages: Vec::new(),
@@ -396,7 +397,7 @@ async fn test_parallel_tool_execution_faster_than_sequential() {
         MockResponse::Text("All done.".into()),
     ]);
 
-    let mut config = make_config(&provider);
+    let mut config = make_config(Arc::new(provider));
     config.tool_execution = ToolExecutionStrategy::Parallel;
 
     let mut context = AgentContext {
@@ -471,7 +472,7 @@ async fn test_sequential_tool_execution_is_slower() {
         MockResponse::Text("Done.".into()),
     ]);
 
-    let mut config = make_config(&provider);
+    let mut config = make_config(Arc::new(provider));
     config.tool_execution = ToolExecutionStrategy::Sequential;
 
     let mut context = AgentContext {
@@ -530,7 +531,7 @@ async fn test_batched_tool_execution() {
         MockResponse::Text("All done.".into()),
     ]);
 
-    let mut config = make_config(&provider);
+    let mut config = make_config(Arc::new(provider));
     config.tool_execution = ToolExecutionStrategy::Batched { size: 2 };
 
     let mut context = AgentContext {
@@ -637,7 +638,7 @@ async fn test_tool_execution_update_events_emitted() {
         MockResponse::Text("All done.".into()),
     ]);
 
-    let config = make_config(&provider);
+    let config = make_config(Arc::new(provider));
 
     let mut context = AgentContext {
         system_prompt: "test".into(),
@@ -682,7 +683,7 @@ struct FailThenSucceedProvider {
     inner: MockProvider,
 }
 
-use yoagent::provider::{ProviderError, StreamConfig, StreamEvent, StreamProvider};
+use yoagent::provider::{ProviderError, StreamConfig, StreamEvent};
 
 #[async_trait::async_trait]
 impl StreamProvider for FailThenSucceedProvider {
@@ -711,17 +712,17 @@ impl StreamProvider for FailThenSucceedProvider {
 
 #[tokio::test]
 async fn test_retry_on_rate_limit_succeeds() {
-    let provider = FailThenSucceedProvider {
+    let provider: Arc<FailThenSucceedProvider> = Arc::new(FailThenSucceedProvider {
         fail_count: std::sync::atomic::AtomicUsize::new(0),
         max_failures: 2,
         error: ProviderError::RateLimited {
             retry_after_ms: Some(10), // 10ms for fast tests
         },
         inner: MockProvider::text("Success after retries"),
-    };
+    });
 
     let config = AgentLoopConfig {
-        provider: &provider,
+        provider: Arc::clone(&provider) as Arc<dyn StreamProvider>,
         model: "mock".into(),
         api_key: "test".into(),
         thinking_level: ThinkingLevel::Off,
@@ -779,15 +780,15 @@ async fn test_retry_on_rate_limit_succeeds() {
 
 #[tokio::test]
 async fn test_retry_exhausted_returns_error() {
-    let provider = FailThenSucceedProvider {
+    let provider: Arc<FailThenSucceedProvider> = Arc::new(FailThenSucceedProvider {
         fail_count: std::sync::atomic::AtomicUsize::new(0),
         max_failures: 10, // more failures than retries
         error: ProviderError::Network("connection reset".into()),
         inner: MockProvider::text("never reached"),
-    };
+    });
 
     let config = AgentLoopConfig {
-        provider: &provider,
+        provider: Arc::clone(&provider) as Arc<dyn StreamProvider>,
         model: "mock".into(),
         api_key: "test".into(),
         thinking_level: ThinkingLevel::Off,
@@ -852,15 +853,15 @@ async fn test_retry_exhausted_returns_error() {
 
 #[tokio::test]
 async fn test_no_retry_on_auth_error() {
-    let provider = FailThenSucceedProvider {
+    let provider: Arc<FailThenSucceedProvider> = Arc::new(FailThenSucceedProvider {
         fail_count: std::sync::atomic::AtomicUsize::new(0),
         max_failures: 1,
         error: ProviderError::Auth("invalid key".into()),
         inner: MockProvider::text("never reached"),
-    };
+    });
 
     let config = AgentLoopConfig {
-        provider: &provider,
+        provider: Arc::clone(&provider) as Arc<dyn StreamProvider>,
         model: "mock".into(),
         api_key: "test".into(),
         thinking_level: ThinkingLevel::Off,
@@ -906,17 +907,17 @@ async fn test_no_retry_on_auth_error() {
 
 #[tokio::test]
 async fn test_retry_none_disables_retries() {
-    let provider = FailThenSucceedProvider {
+    let provider: Arc<FailThenSucceedProvider> = Arc::new(FailThenSucceedProvider {
         fail_count: std::sync::atomic::AtomicUsize::new(0),
         max_failures: 1,
         error: ProviderError::RateLimited {
             retry_after_ms: None,
         },
         inner: MockProvider::text("never reached"),
-    };
+    });
 
     let config = AgentLoopConfig {
-        provider: &provider,
+        provider: Arc::clone(&provider) as Arc<dyn StreamProvider>,
         model: "mock".into(),
         api_key: "test".into(),
         thinking_level: ThinkingLevel::Off,
@@ -970,7 +971,7 @@ async fn test_message_update_events_emitted_during_streaming() {
     // partial_message was None when deltas arrived (MessageStart was only
     // emitted on Done, after all deltas had already been processed).
     let provider = MockProvider::text("Hello, world!");
-    let config = make_config(&provider);
+    let config = make_config(Arc::new(provider));
 
     let mut context = AgentContext {
         system_prompt: "test".into(),
@@ -1064,7 +1065,7 @@ async fn test_before_turn_can_abort() {
     let turn_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let turn_count_clone = turn_count.clone();
 
-    let mut config = make_config(&provider);
+    let mut config = make_config(Arc::new(provider));
     config.before_turn = Some(std::sync::Arc::new(move |_msgs, _turn| {
         let count = turn_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         count < 2 // Allow turns 0 and 1, abort on turn 2
@@ -1107,7 +1108,7 @@ async fn test_after_turn_receives_messages() {
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let counts_clone = message_counts.clone();
 
-    let mut config = make_config(&provider);
+    let mut config = make_config(Arc::new(provider));
     config.after_turn = Some(std::sync::Arc::new(move |msgs, _usage| {
         counts_clone.lock().unwrap().push(msgs.len());
     }));
@@ -1145,7 +1146,7 @@ async fn test_on_error_fires_on_provider_error() {
     let error_msgs_clone = error_msgs.clone();
 
     let config = AgentLoopConfig {
-        provider: &provider,
+        provider: Arc::new(provider),
         model: "mock".into(),
         api_key: "test".into(),
         thinking_level: ThinkingLevel::Off,
@@ -1191,7 +1192,7 @@ async fn test_on_error_fires_on_provider_error() {
 async fn test_callbacks_are_optional() {
     // Verify the loop works fine with all callbacks set to None (same as before)
     let provider = MockProvider::text("Hello!");
-    let config = make_config(&provider);
+    let config = make_config(Arc::new(provider));
     // make_config already sets all callbacks to None
 
     let mut context = AgentContext {
@@ -1260,7 +1261,7 @@ async fn test_progress_message_event_emitted() {
         }]),
         MockResponse::Text("ok".into()),
     ]);
-    let config = make_config(&provider);
+    let config = make_config(Arc::new(provider));
 
     let mut context = AgentContext {
         system_prompt: "test".into(),
@@ -1333,7 +1334,7 @@ async fn test_tool_ignoring_progress_no_panic() {
         }]),
         MockResponse::Text("ok".into()),
     ]);
-    let config = make_config(&provider);
+    let config = make_config(Arc::new(provider));
 
     let mut context = AgentContext {
         system_prompt: "test".into(),
@@ -1407,7 +1408,7 @@ async fn test_parallel_tools_progress_distinguishable() {
         ]),
         MockResponse::Text("done".into()),
     ]);
-    let config = make_config(&provider);
+    let config = make_config(Arc::new(provider));
 
     let mut context = AgentContext {
         system_prompt: "test".into(),
@@ -1455,7 +1456,7 @@ async fn test_on_update_still_works_after_refactor() {
         }]),
         MockResponse::Text("ok".into()),
     ]);
-    let config = make_config(&provider);
+    let config = make_config(Arc::new(provider));
 
     let mut context = AgentContext {
         system_prompt: "test".into(),
@@ -1491,8 +1492,6 @@ async fn test_on_update_still_works_after_refactor() {
 // InputFilter tests (Addition 2)
 // ---------------------------------------------------------------------------
 
-use std::sync::Arc;
-
 struct PassFilter;
 impl InputFilter for PassFilter {
     fn filter(&self, _text: &str) -> FilterResult {
@@ -1521,7 +1520,7 @@ impl InputFilter for RejectFilter {
 #[tokio::test]
 async fn test_filter_pass_message_goes_through() {
     let provider = MockProvider::text("Hello!");
-    let mut config = make_config(&provider);
+    let mut config = make_config(Arc::new(provider));
     config.input_filters = vec![Arc::new(PassFilter)];
 
     let mut context = AgentContext {
@@ -1547,7 +1546,7 @@ async fn test_filter_pass_message_goes_through() {
 #[tokio::test]
 async fn test_filter_warn_injects_warning_message() {
     let provider = MockProvider::text("Got it.");
-    let mut config = make_config(&provider);
+    let mut config = make_config(Arc::new(provider));
     config.input_filters = vec![Arc::new(WarnFilter {
         warning: "danger".into(),
     })];
@@ -1582,7 +1581,7 @@ async fn test_filter_warn_injects_warning_message() {
 #[tokio::test]
 async fn test_filter_reject_returns_empty() {
     let provider = MockProvider::text("Should not reach");
-    let mut config = make_config(&provider);
+    let mut config = make_config(Arc::new(provider));
     config.input_filters = vec![Arc::new(RejectFilter {
         reason: "blocked".into(),
     })];
@@ -1648,7 +1647,7 @@ async fn test_filter_chain_first_reject_wins() {
 
     let count2 = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-    let mut config = make_config(&provider);
+    let mut config = make_config(Arc::new(provider));
     config.input_filters = vec![
         Arc::new(CountingRejectFilter {
             counter: call_count.clone(),
@@ -1680,7 +1679,7 @@ async fn test_filter_chain_first_reject_wins() {
 #[tokio::test]
 async fn test_filter_multiple_warns_accumulate() {
     let provider = MockProvider::text("Got warnings.");
-    let mut config = make_config(&provider);
+    let mut config = make_config(Arc::new(provider));
     config.input_filters = vec![
         Arc::new(WarnFilter {
             warning: "warn1".into(),
@@ -1736,7 +1735,7 @@ async fn test_filter_non_text_content_only_text_extracted() {
         }
     }
 
-    let mut config = make_config(&provider);
+    let mut config = make_config(Arc::new(provider));
     config.input_filters = vec![Arc::new(CapturingFilter {
         captured: call_text_clone,
     })];
@@ -1839,7 +1838,7 @@ async fn test_custom_compaction_strategy_is_called() {
     let provider = MockProvider::text("Got it.");
 
     let config = AgentLoopConfig {
-        provider: &provider,
+        provider: Arc::new(provider),
         model: "test".into(),
         api_key: "test".into(),
         thinking_level: ThinkingLevel::Off,
@@ -1914,7 +1913,7 @@ async fn test_none_compaction_strategy_uses_default() {
     let provider = MockProvider::text("Got it.");
 
     let config = AgentLoopConfig {
-        provider: &provider,
+        provider: Arc::new(provider),
         model: "test".into(),
         api_key: "test".into(),
         thinking_level: ThinkingLevel::Off,

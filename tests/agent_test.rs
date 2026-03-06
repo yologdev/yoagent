@@ -13,14 +13,16 @@ async fn test_agent_simple_prompt() {
         .with_model("mock")
         .with_api_key("test");
 
-    let rx = agent.prompt("Hi there").await;
+    let mut rx = agent.prompt("Hi there").await;
 
-    // Drain events
+    // Drain events (now streamed from background task)
     let mut events = Vec::new();
-    let mut rx = rx;
-    while let Ok(e) = rx.try_recv() {
+    while let Some(e) = rx.recv().await {
         events.push(e);
     }
+
+    // Restore state from the completed background task
+    agent.finish().await;
 
     assert!(!events.is_empty());
     assert_eq!(agent.messages().len(), 2); // user + assistant
@@ -34,7 +36,9 @@ async fn test_agent_reset() {
         .with_model("mock")
         .with_api_key("test");
 
-    let _ = agent.prompt("Hi").await;
+    let mut rx = agent.prompt("Hi").await;
+    while rx.recv().await.is_some() {}
+    agent.finish().await;
     assert!(!agent.messages().is_empty());
 
     agent.reset();
@@ -87,7 +91,9 @@ async fn test_agent_with_tools() {
         .with_api_key("test")
         .with_tools(vec![Box::new(EchoTool)]);
 
-    let _ = agent.prompt("Echo hello").await;
+    let mut rx = agent.prompt("Echo hello").await;
+    while rx.recv().await.is_some() {}
+    agent.finish().await;
 
     // user + assistant(tool_call) + toolResult + assistant(text)
     assert_eq!(agent.messages().len(), 4);
@@ -149,7 +155,9 @@ async fn test_save_and_restore_messages() {
         .with_model("mock")
         .with_api_key("test");
 
-    let _ = agent.prompt("Hi").await;
+    let mut rx = agent.prompt("Hi").await;
+    while rx.recv().await.is_some() {}
+    agent.finish().await;
     let json = agent.save_messages().expect("save should succeed");
 
     // Create a fresh agent and restore
@@ -167,18 +175,19 @@ async fn test_save_and_restore_messages() {
 
 #[tokio::test]
 async fn test_agent_continues_after_restore() {
-    // First agent: prompt → get response → save
+    // First agent: prompt -> get response -> save
     let provider1 = MockProvider::text("First response");
     let mut agent1 = Agent::new(provider1)
         .with_system_prompt("test")
         .with_model("mock")
         .with_api_key("test");
 
-    let _ = agent1.prompt("Hello").await;
+    let mut rx = agent1.prompt("Hello").await;
+    while rx.recv().await.is_some() {}
+    agent1.finish().await;
     let json = agent1.save_messages().expect("save");
 
-    // Second agent: restore → prompt again
-    // The MockProvider will receive the full restored history + new prompt
+    // Second agent: restore -> prompt again
     let provider2 = MockProvider::text("Second response");
     let mut agent2 = Agent::new(provider2)
         .with_system_prompt("test")
@@ -186,7 +195,9 @@ async fn test_agent_continues_after_restore() {
         .with_api_key("test");
 
     agent2.restore_messages(&json).expect("restore");
-    let _ = agent2.prompt("Follow up").await;
+    let mut rx = agent2.prompt("Follow up").await;
+    while rx.recv().await.is_some() {}
+    agent2.finish().await;
 
     // Should have: original user + original assistant + follow-up user + new assistant
     assert_eq!(agent2.messages().len(), 4);

@@ -34,7 +34,7 @@ pub struct Agent {
     model_config: Option<ModelConfig>,
     messages: Vec<AgentMessage>,
     tools: Vec<Box<dyn AgentTool>>,
-    provider: Box<dyn StreamProvider>,
+    provider: Arc<dyn StreamProvider>,
 
     // Queues (shared with the loop via Arc<Mutex>)
     steering_queue: Arc<Mutex<Vec<AgentMessage>>>,
@@ -63,6 +63,9 @@ pub struct Agent {
     // Control
     cancel: Option<CancellationToken>,
     is_streaming: bool,
+
+    // Background task handle for async prompt execution
+    pending_task: Option<tokio::task::JoinHandle<AgentContext>>,
 }
 
 impl Agent {
@@ -77,7 +80,7 @@ impl Agent {
             model_config: None,
             messages: Vec::new(),
             tools: Vec::new(),
-            provider: Box::new(provider),
+            provider: Arc::new(provider),
             steering_queue: Arc::new(Mutex::new(Vec::new())),
             follow_up_queue: Arc::new(Mutex::new(Vec::new())),
             steering_mode: QueueMode::OneAtATime,
@@ -94,6 +97,7 @@ impl Agent {
             compaction_strategy: None,
             cancel: None,
             is_streaming: false,
+            pending_task: None,
         }
     }
 
@@ -339,6 +343,29 @@ impl Agent {
         self.clear_all_queues();
         self.is_streaming = false;
         self.cancel = None;
+        self.pending_task = None;
+    }
+
+    /// Wait for the current prompt to complete and restore internal state.
+    ///
+    /// Must be called after the receiver returned by [`prompt()`](Self::prompt)
+    /// or [`prompt_messages()`](Self::prompt_messages) has been fully drained
+    /// (or dropped). Restores the agent's messages and tools from the
+    /// completed background task.
+    pub async fn finish(&mut self) {
+        if let Some(handle) = self.pending_task.take() {
+            match handle.await {
+                Ok(context) => {
+                    self.tools = context.tools;
+                    self.messages = context.messages;
+                }
+                Err(e) => {
+                    tracing::error!("Agent loop task panicked: {}", e);
+                }
+            }
+            self.is_streaming = false;
+            self.cancel = None;
+        }
     }
 
     // -- Prompting --
@@ -350,6 +377,10 @@ impl Agent {
     }
 
     /// Send messages as a prompt.
+    ///
+    /// Returns a receiver that streams `AgentEvent`s in real time as the
+    /// agent loop runs on a background task. Call [`finish()`](Self::finish)
+    /// after draining all events to restore internal state (messages, tools).
     pub async fn prompt_messages(
         &mut self,
         messages: Vec<AgentMessage>,
@@ -364,31 +395,29 @@ impl Agent {
         self.cancel = Some(cancel.clone());
         self.is_streaming = true;
 
-        // Build context
+        // Build context — move tools temporarily into the spawned task
         let mut context = AgentContext {
             system_prompt: self.system_prompt.clone(),
             messages: self.messages.clone(),
-            tools: Vec::new(), // Tools stay on Agent, referenced via config
+            tools: std::mem::take(&mut self.tools),
         };
-
-        // Move tools temporarily
-        let tools = std::mem::take(&mut self.tools);
-        context.tools = tools;
 
         let config = self.build_config();
 
-        let _new_messages = agent_loop(messages, &mut context, &config, tx.clone(), cancel).await;
+        // Spawn the agent loop on a background task so events stream in real time
+        let handle = tokio::spawn(async move {
+            agent_loop(messages, &mut context, &config, tx, cancel).await;
+            context
+        });
 
-        // Restore tools and update state
-        self.tools = context.tools;
-        self.messages = context.messages;
-        self.is_streaming = false;
-        self.cancel = None;
-
+        self.pending_task = Some(handle);
         rx
     }
 
     /// Continue from current context (for retries after errors).
+    ///
+    /// Like [`prompt_messages()`](Self::prompt_messages), runs on a background
+    /// task. Call [`finish()`](Self::finish) after draining events.
     pub async fn continue_loop(&mut self) -> mpsc::UnboundedReceiver<AgentEvent> {
         assert!(!self.is_streaming, "Agent is already streaming.");
         assert!(!self.messages.is_empty(), "No messages to continue from.");
@@ -406,19 +435,18 @@ impl Agent {
 
         let config = self.build_config();
 
-        let _new_messages = agent_loop_continue(&mut context, &config, tx.clone(), cancel).await;
+        let handle = tokio::spawn(async move {
+            agent_loop_continue(&mut context, &config, tx, cancel).await;
+            context
+        });
 
-        self.tools = context.tools;
-        self.messages = context.messages;
-        self.is_streaming = false;
-        self.cancel = None;
-
+        self.pending_task = Some(handle);
         rx
     }
 
     // -- Internal --
 
-    fn build_config(&self) -> AgentLoopConfig<'_> {
+    fn build_config(&self) -> AgentLoopConfig {
         let steering_queue = self.steering_queue.clone();
         let steering_mode = self.steering_mode;
 
@@ -426,7 +454,7 @@ impl Agent {
         let follow_up_mode = self.follow_up_mode;
 
         AgentLoopConfig {
-            provider: &*self.provider,
+            provider: Arc::clone(&self.provider),
             model: self.model.clone(),
             api_key: self.api_key.clone(),
             thinking_level: self.thinking_level,

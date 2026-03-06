@@ -5,11 +5,11 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use yoagent::agent_loop::{agent_loop, AgentLoopConfig};
 use yoagent::provider::mock::*;
-use yoagent::provider::MockProvider;
+use yoagent::provider::{MockProvider, StreamProvider};
 use yoagent::sub_agent::SubAgentTool;
 use yoagent::*;
 
-fn make_config(provider: &MockProvider) -> AgentLoopConfig<'_> {
+fn make_config(provider: Arc<dyn StreamProvider>) -> AgentLoopConfig {
     AgentLoopConfig {
         provider,
         model: "mock".into(),
@@ -350,7 +350,7 @@ async fn test_sub_agent_parallel() {
         MockResponse::Text("Both sub-agents completed.".into()),
     ]);
 
-    let config = make_config(&parent_provider);
+    let config = make_config(Arc::new(parent_provider));
 
     let mut context = AgentContext {
         system_prompt: "You are a coordinator.".into(),
@@ -497,7 +497,7 @@ async fn test_sub_agent_in_parent_loop() {
         MockResponse::Text("The calculator says: 42 is the answer".into()),
     ]);
 
-    let config = make_config(&parent_provider);
+    let config = make_config(Arc::new(parent_provider));
 
     let mut context = AgentContext {
         system_prompt: "You are a coordinator.".into(),
