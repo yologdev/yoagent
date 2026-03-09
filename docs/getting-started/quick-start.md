@@ -111,6 +111,7 @@ async fn main() {
         get_steering_messages: None,
         get_follow_up_messages: None,
         context_config: None,
+        compaction_strategy: None,
         execution_limits: None,
         cache_config: CacheConfig::default(),
         tool_execution: ToolExecutionStrategy::default(),

@@ -18,6 +18,7 @@ pub struct AgentLoopConfig<'a> {
     pub get_steering_messages: Option<GetMessagesFn>,
     pub get_follow_up_messages: Option<GetMessagesFn>,
     pub context_config: Option<ContextConfig>,
+    pub compaction_strategy: Option<Arc<dyn CompactionStrategy>>,
     pub execution_limits: Option<ExecutionLimits>,
     pub cache_config: CacheConfig,
     pub tool_execution: ToolExecutionStrategy,

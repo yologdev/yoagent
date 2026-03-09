@@ -53,22 +53,58 @@ let agent = Agent::new(provider);
 
 ### Builder Methods
 
-All return `Self` for chaining.
+All return `Self` for chaining (unless noted as `Result`).
+
+**Core**
 
 | Method | Description |
 |--------|-------------|
-| `with_system_prompt(prompt: impl Into<String>) -> Self` | Set the system prompt |
-| `with_model(model: impl Into<String>) -> Self` | Set the model identifier |
-| `with_api_key(key: impl Into<String>) -> Self` | Set the API key |
+| `with_system_prompt(prompt) -> Self` | Set the system prompt |
+| `with_model(model) -> Self` | Set the model identifier |
+| `with_api_key(key) -> Self` | Set the API key |
 | `with_thinking(level: ThinkingLevel) -> Self` | Set thinking level (`Off`, `Minimal`, `Low`, `Medium`, `High`) |
-| `with_tools(tools: Vec<Box<dyn AgentTool>>) -> Self` | Set tools |
-| `with_model_config(config: ModelConfig) -> Self` | Set model config (base URL, headers, compat flags) for multi-provider support |
 | `with_max_tokens(max: u32) -> Self` | Set max output tokens |
-| `with_context_config(config: ContextConfig) -> Self` | Set context compaction config |
-| `with_execution_limits(limits: ExecutionLimits) -> Self` | Set execution limits (max turns, tokens, duration) |
-| `without_context_management() -> Self` | Disable automatic context compaction and execution limits |
+| `with_model_config(config: ModelConfig) -> Self` | Set model config (base URL, headers, compat flags) for multi-provider support |
+
+**Tools & Integrations**
+
+| Method | Description |
+|--------|-------------|
+| `with_tools(tools: Vec<Box<dyn AgentTool>>) -> Self` | Set tools (replaces existing) |
+| `with_sub_agent(sub: SubAgentTool) -> Self` | Add a sub-agent tool |
+| `with_skills(skills: SkillSet) -> Self` | Load skills and append their index to the system prompt |
 | `async with_mcp_server_stdio(command, args, env) -> Result<Self, McpError>` | Connect to MCP server via stdio and add its tools |
 | `async with_mcp_server_http(url) -> Result<Self, McpError>` | Connect to MCP server via HTTP and add its tools |
+| `async with_openapi_file(path, config, filter) -> Result<Self, OpenApiError>` | Load tools from an OpenAPI spec file *(requires `openapi` feature)* |
+| `async with_openapi_url(url, config, filter) -> Result<Self, OpenApiError>` | Fetch spec from URL and add tools *(requires `openapi` feature)* |
+| `with_openapi_spec(spec_str, config, filter) -> Result<Self, OpenApiError>` | Parse spec string and add tools *(requires `openapi` feature)* |
+
+**Context & Limits**
+
+| Method | Description |
+|--------|-------------|
+| `with_context_config(config: ContextConfig) -> Self` | Set context compaction config |
+| `with_execution_limits(limits: ExecutionLimits) -> Self` | Set execution limits (max turns, tokens, duration) |
+| `with_compaction_strategy(strategy: impl CompactionStrategy) -> Self` | Set a custom compaction strategy |
+| `without_context_management() -> Self` | Disable automatic context compaction and execution limits |
+
+**Behavior**
+
+| Method | Description |
+|--------|-------------|
+| `with_messages(msgs: Vec<AgentMessage>) -> Self` | Pre-load message history |
+| `with_cache_config(config: CacheConfig) -> Self` | Set prompt caching configuration |
+| `with_tool_execution(strategy: ToolExecutionStrategy) -> Self` | Set tool execution strategy (`Parallel`, `Sequential`, `Batched`) |
+| `with_retry_config(config: RetryConfig) -> Self` | Set retry configuration |
+| `with_input_filter(filter: impl InputFilter) -> Self` | Add an input filter (runs on user messages before LLM call) |
+
+**Callbacks**
+
+| Method | Description |
+|--------|-------------|
+| `on_before_turn(f: Fn(&[AgentMessage], usize) -> bool) -> Self` | Called before each LLM call; return `false` to abort |
+| `on_after_turn(f: Fn(&[AgentMessage], &Usage)) -> Self` | Called after each LLM response and tool execution |
+| `on_error(f: Fn(&str)) -> Self` | Called when the LLM returns `StopReason::Error` |
 
 ### Prompting
 
@@ -93,6 +129,8 @@ All return `Self` for chaining.
 | `clear_messages()` | Clear all messages |
 | `append_message(msg: AgentMessage)` | Add a message to history |
 | `replace_messages(msgs: Vec<AgentMessage>)` | Replace all messages |
+| `save_messages() -> Result<String, serde_json::Error>` | Serialize message history to JSON |
+| `restore_messages(json: &str) -> Result<(), serde_json::Error>` | Restore message history from JSON |
 
 ### Steering & Follow-Up Queues
 
