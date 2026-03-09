@@ -228,6 +228,53 @@ impl Agent {
         self
     }
 
+    // -- OpenAPI integration --
+
+    /// Load tools from an OpenAPI spec file and add them to the agent.
+    #[cfg(feature = "openapi")]
+    pub async fn with_openapi_file(
+        mut self,
+        path: impl AsRef<std::path::Path>,
+        config: crate::openapi::OpenApiConfig,
+        filter: &crate::openapi::OperationFilter,
+    ) -> Result<Self, crate::openapi::OpenApiError> {
+        let adapters = crate::openapi::OpenApiToolAdapter::from_file(path, config, filter).await?;
+        for adapter in adapters {
+            self.tools.push(Box::new(adapter));
+        }
+        Ok(self)
+    }
+
+    /// Fetch an OpenAPI spec from a URL and add its tools to the agent.
+    #[cfg(feature = "openapi")]
+    pub async fn with_openapi_url(
+        mut self,
+        url: &str,
+        config: crate::openapi::OpenApiConfig,
+        filter: &crate::openapi::OperationFilter,
+    ) -> Result<Self, crate::openapi::OpenApiError> {
+        let adapters = crate::openapi::OpenApiToolAdapter::from_url(url, config, filter).await?;
+        for adapter in adapters {
+            self.tools.push(Box::new(adapter));
+        }
+        Ok(self)
+    }
+
+    /// Parse an OpenAPI spec string and add its tools to the agent.
+    #[cfg(feature = "openapi")]
+    pub fn with_openapi_spec(
+        mut self,
+        spec_str: &str,
+        config: crate::openapi::OpenApiConfig,
+        filter: &crate::openapi::OperationFilter,
+    ) -> Result<Self, crate::openapi::OpenApiError> {
+        let adapters = crate::openapi::OpenApiToolAdapter::from_str(spec_str, config, filter)?;
+        for adapter in adapters {
+            self.tools.push(Box::new(adapter));
+        }
+        Ok(self)
+    }
+
     // -- MCP integration --
 
     /// Connect to an MCP server via stdio and add its tools to the agent.

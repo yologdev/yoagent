@@ -90,3 +90,9 @@ pub trait StreamProvider: Send + Sync {
 ```
 
 All providers receive a `StreamConfig`, emit `StreamEvent`s through the channel, and return the final `Message`.
+
+## OpenAPI Tool Adapter
+
+In addition to LLM providers, yoagent can auto-generate tools from any OpenAPI 3.0 spec. This is a tool integration (not a provider), but it complements the provider system by letting agents call external APIs.
+
+Enable with `features = ["openapi"]`. See the [OpenAPI Tools guide](../guides/openapi.md) for details.

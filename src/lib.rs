@@ -9,6 +9,9 @@ pub mod sub_agent;
 pub mod tools;
 pub mod types;
 
+#[cfg(feature = "openapi")]
+pub mod openapi;
+
 pub use agent::Agent;
 pub use agent_loop::{agent_loop, agent_loop_continue};
 pub use context::{CompactionStrategy, DefaultCompaction};

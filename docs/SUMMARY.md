@@ -23,6 +23,7 @@
 # Guides
 
 - [MCP Integration](guides/mcp.md)
+- [OpenAPI Tools](guides/openapi.md)
 
 # Providers
 

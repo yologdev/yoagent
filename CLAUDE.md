@@ -72,6 +72,10 @@ The loop: stream assistant response → extract tool calls → execute tools (pa
 - `Sequential` — one at a time, checks steering queue between each
 - `Batched { size }` — concurrent within batch, steering check between batches
 
+### OpenAPI Integration (`openapi/`, feature-gated)
+
+Behind the `openapi` Cargo feature. `OpenApiToolAdapter` parses an OpenAPI 3.0 spec and creates one `AgentTool` per operation. Factory methods: `from_str`, `from_file`, `from_url`, `from_spec`. `OperationFilter` controls which operations become tools. Added to `Agent` via `with_openapi_file()` / `with_openapi_url()` / `with_openapi_spec()`.
+
 ### MCP Integration (`mcp/`)
 
 `McpClient` communicates via `McpTransport` trait (stdio or HTTP). `McpToolAdapter` wraps MCP tools to implement `AgentTool`, making them transparent to the agent loop. Added via `Agent::with_mcp_server_stdio()` / `with_mcp_server_http()`.

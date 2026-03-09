@@ -29,7 +29,13 @@ reqwest-eventsource = "0.6"
 futures = "0.3"
 rand = "0.10.0"
 base64 = "0.22"
+openapiv3 = { version = "2", optional = true }
+serde_yaml = { version = "0.9", optional = true }
+
+[features]
+openapi = ["dep:openapiv3", "dep:serde_yaml"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
 tempfile = "3"
+wiremock = "0.6"

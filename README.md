@@ -56,6 +56,10 @@ Everything is observable via events. Supports 7 API protocols covering 20+ LLM p
 - `list_files` — Directory exploration via `find`
 - `search` — Pattern search via ripgrep/grep with context lines
 
+**Integrations**
+- OpenAPI tool adapter — auto-generate tools from any OpenAPI 3.0 spec (`features = ["openapi"]`)
+- MCP (Model Context Protocol) — connect to MCP tool servers via stdio or HTTP
+
 **Context Management**
 - Context overflow detection across all major providers (Anthropic, OpenAI, Google, Bedrock, xAI, Groq, OpenRouter, llama.cpp, and more)
 - `ContextTracker` — hybrid real-usage + estimation for accurate token tracking
