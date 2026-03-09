@@ -478,12 +478,17 @@ async fn test_execute_missing_path_param_errors() {
             .unwrap();
     let get_item = adapters.iter().find(|a| a.name() == "getItem").unwrap();
 
-    // Missing required path param should error, not send {itemId} literal
-    let result = get_item.execute(serde_json::json!({}), test_ctx()).await;
-    assert!(result.is_err());
-    let err = format!("{}", result.unwrap_err());
-    assert!(err.contains("Missing required path parameter"));
-    assert!(err.contains("itemId"));
+    // Missing required path param returns error as content so LLM can self-correct
+    let result = get_item
+        .execute(serde_json::json!({}), test_ctx())
+        .await
+        .unwrap();
+    let text = match &result.content[0] {
+        yoagent::types::Content::Text { text } => text,
+        _ => panic!("Expected text"),
+    };
+    assert!(text.contains("Missing required path parameter"));
+    assert!(text.contains("itemId"));
 }
 
 #[tokio::test]
@@ -497,12 +502,16 @@ async fn test_execute_rejects_non_object_params() {
             .unwrap();
     let list_items = adapters.iter().find(|a| a.name() == "listItems").unwrap();
 
+    // Non-object params return error as content so LLM can self-correct
     let result = list_items
         .execute(serde_json::json!("not an object"), test_ctx())
-        .await;
-    assert!(result.is_err());
-    let err = format!("{}", result.unwrap_err());
-    assert!(err.contains("string"));
+        .await
+        .unwrap();
+    let text = match &result.content[0] {
+        yoagent::types::Content::Text { text } => text,
+        _ => panic!("Expected text"),
+    };
+    assert!(text.contains("string"));
 }
 
 #[tokio::test]

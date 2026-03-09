@@ -13,7 +13,7 @@
 //! let config = OpenApiConfig::new()
 //!     .with_bearer_token("sk-...");
 //! let tools = OpenApiToolAdapter::from_str(&spec, config, &OperationFilter::All)?;
-//! // Each tool implements AgentTool — add to your agent via with_tools()
+//! // Each tool implements AgentTool — add via Agent::with_openapi_spec() or similar
 //! # Ok(())
 //! # }
 //! ```

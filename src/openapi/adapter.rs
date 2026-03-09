@@ -48,7 +48,11 @@ impl OpenApiToolAdapter {
         config: OpenApiConfig,
         filter: &OperationFilter,
     ) -> Result<Vec<Self>, OpenApiError> {
-        let resp = reqwest::get(url).await?.text().await?;
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(config.timeout_secs))
+            .build()
+            .map_err(OpenApiError::HttpError)?;
+        let resp = client.get(url).send().await?.text().await?;
         Self::from_str(&resp, config, filter)
     }
 
@@ -112,10 +116,6 @@ impl OpenApiToolAdapter {
             });
         }
 
-        if adapters.is_empty() {
-            return Err(OpenApiError::NoOperations);
-        }
-
         Ok(adapters)
     }
 }
@@ -150,33 +150,44 @@ impl AgentTool for OpenApiToolAdapter {
         params: serde_json::Value,
         _ctx: ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        // Issue #10: reject non-object params
+        // Reject non-object params — return as content so LLM can self-correct
         let params = match params {
             serde_json::Value::Object(map) => map,
             serde_json::Value::Null => serde_json::Map::new(),
             other => {
-                return Err(ToolError::InvalidArgs(format!(
-                    "Expected object parameters, got {}",
-                    match &other {
-                        serde_json::Value::Array(_) => "array",
-                        serde_json::Value::String(_) => "string",
-                        serde_json::Value::Number(_) => "number",
-                        serde_json::Value::Bool(_) => "boolean",
-                        _ => "non-object",
-                    }
-                )));
+                let type_name = match &other {
+                    serde_json::Value::Array(_) => "array",
+                    serde_json::Value::String(_) => "string",
+                    serde_json::Value::Number(_) => "number",
+                    serde_json::Value::Bool(_) => "boolean",
+                    _ => "non-object",
+                };
+                return Ok(ToolResult {
+                    content: vec![Content::Text {
+                        text: format!("Error: Expected object parameters, got {}", type_name),
+                    }],
+                    details: serde_json::json!({ "error": "invalid_args" }),
+                });
             }
         };
 
-        // Build URL with path parameters (Issue #2: URL-encode, Issue #5: validate present)
+        // Build URL with path parameters (URL-encode, validate present)
         let mut url_path = self.info.path.clone();
         for name in &self.info.path_params {
-            let val = params.get(name).ok_or_else(|| {
-                ToolError::InvalidArgs(format!(
-                    "Missing required path parameter '{}' for {}",
-                    name, self.info.path
-                ))
-            })?;
+            let val = match params.get(name) {
+                Some(v) => v,
+                None => {
+                    return Ok(ToolResult {
+                        content: vec![Content::Text {
+                            text: format!(
+                                "Error: Missing required path parameter '{}' for {}",
+                                name, self.info.path
+                            ),
+                        }],
+                        details: serde_json::json!({ "error": "missing_path_param" }),
+                    });
+                }
+            };
             let val_str = match val {
                 serde_json::Value::String(s) => s.clone(),
                 other => other.to_string(),
@@ -188,11 +199,17 @@ impl AgentTool for OpenApiToolAdapter {
         let url = format!("{}{}", self.base_url, url_path);
 
         // Build request
-        let method = self
-            .info
-            .method
-            .parse::<reqwest::Method>()
-            .map_err(|e| ToolError::Failed(format!("Invalid HTTP method: {}", e)))?;
+        let method = match self.info.method.parse::<reqwest::Method>() {
+            Ok(m) => m,
+            Err(e) => {
+                return Ok(ToolResult {
+                    content: vec![Content::Text {
+                        text: format!("Error: Invalid HTTP method: {}", e),
+                    }],
+                    details: serde_json::json!({ "error": "invalid_method" }),
+                });
+            }
+        };
 
         let mut req = self.client.request(method.clone(), &url);
 
@@ -236,24 +253,51 @@ impl AgentTool for OpenApiToolAdapter {
 
         // Body
         if self.info.has_body {
-            if let Some(body) = params.get("body") {
+            let body_val = params.get("body").or_else(|| params.get("_request_body"));
+            if let Some(body) = body_val {
                 req = req.json(body);
             }
         }
 
-        // Send
-        let response = req
-            .send()
-            .await
-            .map_err(|e| ToolError::Failed(format!("HTTP request failed: {}", e)))?;
+        // Send — return errors as content so LLM can self-correct
+        let response = match req.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(ToolResult {
+                    content: vec![Content::Text {
+                        text: format!("Error: HTTP request failed: {}", e),
+                    }],
+                    details: serde_json::json!({
+                        "error": "http_error",
+                        "method": method.to_string(),
+                        "url": url,
+                    }),
+                });
+            }
+        };
 
         let status = response.status();
-        let mut body = response
-            .text()
-            .await
-            .map_err(|e| ToolError::Failed(format!("Failed to read response: {}", e)))?;
+        let mut body = match response.text().await {
+            Ok(t) => t,
+            Err(e) => {
+                return Ok(ToolResult {
+                    content: vec![Content::Text {
+                        text: format!(
+                            "{} {} → {}\n\nError reading response: {}",
+                            method, url, status, e
+                        ),
+                    }],
+                    details: serde_json::json!({
+                        "status": status.as_u16(),
+                        "error": "read_error",
+                        "method": method.to_string(),
+                        "url": url,
+                    }),
+                });
+            }
+        };
 
-        // Issue #1: UTF-8 safe truncation
+        // UTF-8 safe truncation
         if body.len() > self.config.max_response_bytes {
             let mut end = self.config.max_response_bytes;
             while end > 0 && !body.is_char_boundary(end) {
@@ -363,22 +407,31 @@ fn build_operation_info(
         if let Some(media) = body.content.get("application/json") {
             if let Some(schema_ref) = &media.schema {
                 let schema_json = resolve_schema_to_json(spec, schema_ref)?;
-                properties.insert("body".to_string(), schema_json);
+                let body_key = if properties.contains_key("body") {
+                    "_request_body".to_string()
+                } else {
+                    "body".to_string()
+                };
+                properties.insert(body_key.clone(), schema_json);
                 if body.required {
-                    required.push("body".to_string());
+                    required.push(body_key);
                 }
             }
+            true
+        } else {
+            false // Non-JSON body types (multipart, form-data) are unsupported
         }
-        true
     } else {
         false
     };
 
-    let parameters_schema = serde_json::json!({
+    let mut parameters_schema = serde_json::json!({
         "type": "object",
         "properties": properties,
-        "required": required,
     });
+    if !required.is_empty() {
+        parameters_schema["required"] = serde_json::json!(required);
+    }
 
     Ok(OperationInfo {
         operation_id: operation_id.to_string(),
@@ -648,6 +701,8 @@ paths:
         let schema = list_pets.parameters_schema();
         assert_eq!(schema["type"], "object");
         assert!(schema["properties"]["limit"].is_object());
+        // No required params → "required" key should be absent
+        assert!(schema.get("required").is_none());
     }
 
     #[test]
@@ -735,11 +790,10 @@ paths:
     }
 
     #[test]
-    fn test_no_operations_error() {
+    fn test_no_operations_returns_empty() {
         let filter = OperationFilter::ByOperationId(vec!["nonExistent".into()]);
         let result = OpenApiToolAdapter::from_str(PETSTORE_JSON, OpenApiConfig::default(), &filter);
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), OpenApiError::NoOperations));
+        assert!(result.unwrap().is_empty());
     }
 
     #[test]

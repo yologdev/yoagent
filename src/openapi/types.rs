@@ -150,14 +150,10 @@ pub enum OpenApiError {
     HttpError(#[from] reqwest::Error),
     #[error("JSON error: {0}")]
     JsonError(#[from] serde_json::Error),
-    #[error("YAML error: {0}")]
-    YamlError(#[from] serde_yaml::Error),
     #[error("I/O error: {0}")]
     IoError(#[from] std::io::Error),
     #[error("No base URL found in spec or config")]
     NoBaseUrl,
-    #[error("No operations matched the filter")]
-    NoOperations,
     #[error("Invalid spec: {0}")]
     InvalidSpec(String),
 }
