@@ -110,9 +110,12 @@ All return `Self` for chaining (unless noted as `Result`).
 
 | Method | Description |
 |--------|-------------|
-| `async prompt(text: impl Into<String>) -> UnboundedReceiver<AgentEvent>` | Send a text prompt, returns event stream |
-| `async prompt_messages(messages: Vec<AgentMessage>) -> UnboundedReceiver<AgentEvent>` | Send messages as prompt |
+| `async prompt(text) -> UnboundedReceiver<AgentEvent>` | Send a text prompt, returns event stream |
+| `async prompt_messages(messages) -> UnboundedReceiver<AgentEvent>` | Send messages as prompt |
+| `async prompt_with_sender(text, tx: UnboundedSender<AgentEvent>)` | Send a text prompt, streaming events to a caller-provided sender for real-time consumption |
+| `async prompt_messages_with_sender(messages, tx)` | Send messages, streaming events to a caller-provided sender |
 | `async continue_loop() -> UnboundedReceiver<AgentEvent>` | Resume from current context (for retries) |
+| `async continue_loop_with_sender(tx: UnboundedSender<AgentEvent>)` | Resume from current context, streaming events to a caller-provided sender |
 
 ### State Access
 

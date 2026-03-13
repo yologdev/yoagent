@@ -396,55 +396,61 @@ impl Agent {
         self.prompt_messages(vec![msg]).await
     }
 
-    /// Send messages as a prompt.
+    /// Send messages as a prompt. Convenience wrapper around
+    /// [`prompt_messages_with_sender()`](Self::prompt_messages_with_sender)
+    /// that creates a channel internally and returns the receiver.
     pub async fn prompt_messages(
         &mut self,
         messages: Vec<AgentMessage>,
     ) -> mpsc::UnboundedReceiver<AgentEvent> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.prompt_messages_with_sender(messages, tx).await;
+        rx
+    }
+
+    /// Send a text prompt, streaming events to a caller-provided sender.
+    ///
+    /// Unlike [`prompt()`](Self::prompt), this accepts an external sender so
+    /// the caller can consume events in real-time on another task:
+    ///
+    /// ```rust,no_run
+    /// # use yoagent::Agent;
+    /// # use yoagent::provider::MockProvider;
+    /// # async fn example() {
+    /// let mut agent = Agent::new(MockProvider::text("hi"))
+    ///     .with_model("mock").with_api_key("test");
+    /// let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    /// tokio::spawn(async move {
+    ///     while let Some(event) = rx.recv().await { /* real-time */ }
+    /// });
+    /// agent.prompt_with_sender("hello", tx).await;
+    /// # }
+    /// ```
+    pub async fn prompt_with_sender(
+        &mut self,
+        text: impl Into<String>,
+        tx: mpsc::UnboundedSender<AgentEvent>,
+    ) {
+        let msg = AgentMessage::Llm(Message::user(text));
+        self.prompt_messages_with_sender(vec![msg], tx).await;
+    }
+
+    /// Send messages as a prompt, streaming events to a caller-provided sender.
+    pub async fn prompt_messages_with_sender(
+        &mut self,
+        messages: Vec<AgentMessage>,
+        tx: mpsc::UnboundedSender<AgentEvent>,
+    ) {
         assert!(
             !self.is_streaming,
             "Agent is already streaming. Use steer() or follow_up()."
         );
 
-        let (tx, rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
         self.cancel = Some(cancel.clone());
         self.is_streaming = true;
 
-        // Build context
-        let mut context = AgentContext {
-            system_prompt: self.system_prompt.clone(),
-            messages: self.messages.clone(),
-            tools: Vec::new(), // Tools stay on Agent, referenced via config
-        };
-
-        // Move tools temporarily
-        let tools = std::mem::take(&mut self.tools);
-        context.tools = tools;
-
-        let config = self.build_config();
-
-        let _new_messages = agent_loop(messages, &mut context, &config, tx.clone(), cancel).await;
-
-        // Restore tools and update state
-        self.tools = context.tools;
-        self.messages = context.messages;
-        self.is_streaming = false;
-        self.cancel = None;
-
-        rx
-    }
-
-    /// Continue from current context (for retries after errors).
-    pub async fn continue_loop(&mut self) -> mpsc::UnboundedReceiver<AgentEvent> {
-        assert!(!self.is_streaming, "Agent is already streaming.");
-        assert!(!self.messages.is_empty(), "No messages to continue from.");
-
-        let (tx, rx) = mpsc::unbounded_channel();
-        let cancel = CancellationToken::new();
-        self.cancel = Some(cancel.clone());
-        self.is_streaming = true;
-
+        // Move tools temporarily into context for the loop; restored after
         let mut context = AgentContext {
             system_prompt: self.system_prompt.clone(),
             messages: self.messages.clone(),
@@ -453,14 +459,46 @@ impl Agent {
 
         let config = self.build_config();
 
-        let _new_messages = agent_loop_continue(&mut context, &config, tx.clone(), cancel).await;
+        let _new_messages = agent_loop(messages, &mut context, &config, tx, cancel).await;
 
         self.tools = context.tools;
         self.messages = context.messages;
         self.is_streaming = false;
         self.cancel = None;
+    }
 
+    /// Continue from current context (for retries after errors). Convenience
+    /// wrapper around [`continue_loop_with_sender()`](Self::continue_loop_with_sender).
+    pub async fn continue_loop(&mut self) -> mpsc::UnboundedReceiver<AgentEvent> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.continue_loop_with_sender(tx).await;
         rx
+    }
+
+    /// Continue from current context, streaming events to a caller-provided sender.
+    pub async fn continue_loop_with_sender(&mut self, tx: mpsc::UnboundedSender<AgentEvent>) {
+        assert!(!self.is_streaming, "Agent is already streaming.");
+        assert!(!self.messages.is_empty(), "No messages to continue from.");
+
+        let cancel = CancellationToken::new();
+        self.cancel = Some(cancel.clone());
+        self.is_streaming = true;
+
+        // Move tools temporarily into context for the loop; restored after
+        let mut context = AgentContext {
+            system_prompt: self.system_prompt.clone(),
+            messages: self.messages.clone(),
+            tools: std::mem::take(&mut self.tools),
+        };
+
+        let config = self.build_config();
+
+        let _new_messages = agent_loop_continue(&mut context, &config, tx, cancel).await;
+
+        self.tools = context.tools;
+        self.messages = context.messages;
+        self.is_streaming = false;
+        self.cancel = None;
     }
 
     // -- Internal --
