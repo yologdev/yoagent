@@ -396,7 +396,9 @@ impl Agent {
         self.prompt_messages(vec![msg]).await
     }
 
-    /// Send messages as a prompt.
+    /// Send messages as a prompt. Convenience wrapper around
+    /// [`prompt_messages_with_sender()`](Self::prompt_messages_with_sender)
+    /// that creates a channel internally and returns the receiver.
     pub async fn prompt_messages(
         &mut self,
         messages: Vec<AgentMessage>,
@@ -448,6 +450,7 @@ impl Agent {
         self.cancel = Some(cancel.clone());
         self.is_streaming = true;
 
+        // Move tools temporarily into context for the loop; restored after
         let mut context = AgentContext {
             system_prompt: self.system_prompt.clone(),
             messages: self.messages.clone(),
@@ -456,7 +459,7 @@ impl Agent {
 
         let config = self.build_config();
 
-        agent_loop(messages, &mut context, &config, tx, cancel).await;
+        let _new_messages = agent_loop(messages, &mut context, &config, tx, cancel).await;
 
         self.tools = context.tools;
         self.messages = context.messages;
@@ -464,7 +467,8 @@ impl Agent {
         self.cancel = None;
     }
 
-    /// Continue from current context (for retries after errors).
+    /// Continue from current context (for retries after errors). Convenience
+    /// wrapper around [`continue_loop_with_sender()`](Self::continue_loop_with_sender).
     pub async fn continue_loop(&mut self) -> mpsc::UnboundedReceiver<AgentEvent> {
         let (tx, rx) = mpsc::unbounded_channel();
         self.continue_loop_with_sender(tx).await;
@@ -480,6 +484,7 @@ impl Agent {
         self.cancel = Some(cancel.clone());
         self.is_streaming = true;
 
+        // Move tools temporarily into context for the loop; restored after
         let mut context = AgentContext {
             system_prompt: self.system_prompt.clone(),
             messages: self.messages.clone(),
@@ -488,7 +493,7 @@ impl Agent {
 
         let config = self.build_config();
 
-        agent_loop_continue(&mut context, &config, tx, cancel).await;
+        let _new_messages = agent_loop_continue(&mut context, &config, tx, cancel).await;
 
         self.tools = context.tools;
         self.messages = context.messages;

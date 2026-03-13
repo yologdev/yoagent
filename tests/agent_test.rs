@@ -231,7 +231,7 @@ async fn test_prompt_with_sender_streams_events() {
     assert!(!agent.is_streaming());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_prompt_with_sender_real_time_streaming() {
     let provider = MockProvider::text("Hello!");
     let mut agent = Agent::new(provider)
@@ -240,23 +240,21 @@ async fn test_prompt_with_sender_real_time_streaming() {
         .with_api_key("test");
 
     let (tx, mut rx) = mpsc::unbounded_channel();
-    let received_before_done = Arc::new(AtomicUsize::new(0));
-    let received_clone = received_before_done.clone();
+    let received_during = Arc::new(AtomicUsize::new(0));
+    let received_clone = received_during.clone();
 
-    // Consumer task receives events as they arrive
+    // On a multi-threaded runtime, the consumer can run concurrently
     let consumer = tokio::spawn(async move {
         while let Some(_event) = rx.recv().await {
             received_clone.fetch_add(1, Ordering::SeqCst);
         }
     });
 
-    // This blocks until the loop finishes
     agent.prompt_with_sender("Hello", tx).await;
     consumer.await.unwrap();
 
-    // Events were consumed by the spawned task
-    assert!(received_before_done.load(Ordering::SeqCst) > 0);
-    // State restored after prompt_with_sender returns
+    // Events were consumed by the concurrent task
+    assert!(received_during.load(Ordering::SeqCst) > 0);
     assert_eq!(agent.messages().len(), 2);
 }
 
