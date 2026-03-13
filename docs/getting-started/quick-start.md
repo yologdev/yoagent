@@ -76,6 +76,48 @@ async fn main() {
 }
 ```
 
+## Real-Time Streaming
+
+By default, `agent.prompt()` blocks until the loop finishes and returns a receiver with all events buffered. To consume events in real-time, use `prompt_with_sender()` with a caller-provided channel:
+
+```rust
+use yoagent::{Agent, AgentEvent, StreamDelta};
+use yoagent::provider::AnthropicProvider;
+use yoagent::tools::default_tools;
+
+#[tokio::main]
+async fn main() {
+    let mut agent = Agent::new(AnthropicProvider)
+        .with_system_prompt("You are a helpful assistant.")
+        .with_model("claude-sonnet-4-20250514")
+        .with_api_key(std::env::var("ANTHROPIC_API_KEY").unwrap())
+        .with_tools(default_tools());
+
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+    // Consume events in real-time on a separate task
+    tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            match event {
+                AgentEvent::MessageUpdate { delta, .. } => {
+                    if let StreamDelta::Text { delta } = delta {
+                        print!("{}", delta);
+                    }
+                }
+                AgentEvent::AgentEnd { .. } => println!(),
+                _ => {}
+            }
+        }
+    });
+
+    // This blocks until the loop finishes; state is restored automatically
+    agent.prompt_with_sender("What is 2 + 2?", tx).await;
+
+    // Agent is ready for another prompt immediately
+    let _rx = agent.prompt("Follow up question").await;
+}
+```
+
 ## Using the Low-Level API
 
 For more control, use `agent_loop()` directly:
