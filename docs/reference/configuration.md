@@ -5,8 +5,8 @@
 The main configuration for the agent loop:
 
 ```rust
-pub struct AgentLoopConfig<'a> {
-    pub provider: &'a dyn StreamProvider,
+pub struct AgentLoopConfig {
+    pub provider: Arc<dyn StreamProvider>,
     pub model: String,
     pub api_key: String,
     pub thinking_level: ThinkingLevel,

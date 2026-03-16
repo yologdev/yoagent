@@ -78,7 +78,7 @@ async fn main() {
 
 ## Real-Time Streaming
 
-By default, `agent.prompt()` blocks until the loop finishes and returns a receiver with all events buffered. To consume events in real-time, use `prompt_with_sender()` with a caller-provided channel:
+`agent.prompt()` spawns the agent loop concurrently and returns a receiver immediately, so events stream in real-time as they're produced. For cases where you want to provide your own channel (e.g., to share a sender across tasks), use `prompt_with_sender()`:
 
 ```rust
 use yoagent::{Agent, AgentEvent, StreamDelta};
@@ -141,7 +141,7 @@ async fn main() {
     };
 
     let config = AgentLoopConfig {
-        provider: &AnthropicProvider,
+        provider: std::sync::Arc::new(AnthropicProvider),
         model: "claude-sonnet-4-20250514".into(),
         api_key: std::env::var("ANTHROPIC_API_KEY").unwrap(),
         thinking_level: ThinkingLevel::Off,

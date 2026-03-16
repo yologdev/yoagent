@@ -8,7 +8,7 @@
 pub async fn agent_loop(
     prompts: Vec<AgentMessage>,
     context: &mut AgentContext,
-    config: &AgentLoopConfig<'_>,
+    config: &AgentLoopConfig,
     tx: mpsc::UnboundedSender<AgentEvent>,
     cancel: CancellationToken,
 ) -> Vec<AgentMessage>
@@ -21,7 +21,7 @@ Start an agent loop with new prompt messages. Returns all messages generated dur
 ```rust
 pub async fn agent_loop_continue(
     context: &mut AgentContext,
-    config: &AgentLoopConfig<'_>,
+    config: &AgentLoopConfig,
     tx: mpsc::UnboundedSender<AgentEvent>,
     cancel: CancellationToken,
 ) -> Vec<AgentMessage>
@@ -110,12 +110,13 @@ All return `Self` for chaining (unless noted as `Result`).
 
 | Method | Description |
 |--------|-------------|
-| `async prompt(text) -> UnboundedReceiver<AgentEvent>` | Send a text prompt, returns event stream |
-| `async prompt_messages(messages) -> UnboundedReceiver<AgentEvent>` | Send messages as prompt |
-| `async prompt_with_sender(text, tx: UnboundedSender<AgentEvent>)` | Send a text prompt, streaming events to a caller-provided sender for real-time consumption |
-| `async prompt_messages_with_sender(messages, tx)` | Send messages, streaming events to a caller-provided sender |
-| `async continue_loop() -> UnboundedReceiver<AgentEvent>` | Resume from current context (for retries) |
-| `async continue_loop_with_sender(tx: UnboundedSender<AgentEvent>)` | Resume from current context, streaming events to a caller-provided sender |
+| `async prompt(text) -> UnboundedReceiver<AgentEvent>` | Send a text prompt; spawns the loop concurrently and returns the event stream immediately for real-time consumption |
+| `async prompt_messages(messages) -> UnboundedReceiver<AgentEvent>` | Send messages as prompt; spawns concurrently, returns event stream immediately |
+| `async prompt_with_sender(text, tx: UnboundedSender<AgentEvent>)` | Send a text prompt, streaming events to a caller-provided sender; blocks until the loop finishes |
+| `async prompt_messages_with_sender(messages, tx)` | Send messages, streaming events to a caller-provided sender; blocks until the loop finishes |
+| `async continue_loop() -> UnboundedReceiver<AgentEvent>` | Resume from current context; spawns concurrently, returns event stream immediately |
+| `async continue_loop_with_sender(tx: UnboundedSender<AgentEvent>)` | Resume from current context, streaming events to a caller-provided sender; blocks until the loop finishes |
+| `async finish()` | Await a pending spawned loop and restore tools/messages/state. Called automatically at the start of each prompt method |
 
 ### State Access
 
@@ -152,7 +153,7 @@ All return `Self` for chaining (unless noted as `Result`).
 | Method | Description |
 |--------|-------------|
 | `abort()` | Cancel the current run via `CancellationToken` |
-| `reset()` | Clear all state (messages, queues, streaming flag) |
+| `async reset()` | Cancel any pending loop, recover tools, clear all state (messages, queues, streaming flag) |
 
 ## Re-exports
 

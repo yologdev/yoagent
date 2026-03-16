@@ -42,7 +42,7 @@ Starts a new agent run with prompt messages:
 pub async fn agent_loop(
     prompts: Vec<AgentMessage>,
     context: &mut AgentContext,
-    config: &AgentLoopConfig<'_>,
+    config: &AgentLoopConfig,
     tx: mpsc::UnboundedSender<AgentEvent>,
     cancel: CancellationToken,
 ) -> Vec<AgentMessage>
@@ -57,7 +57,7 @@ Resumes from existing context (e.g., after an error or retry):
 ```rust
 pub async fn agent_loop_continue(
     context: &mut AgentContext,
-    config: &AgentLoopConfig<'_>,
+    config: &AgentLoopConfig,
     tx: mpsc::UnboundedSender<AgentEvent>,
     cancel: CancellationToken,
 ) -> Vec<AgentMessage>
@@ -68,8 +68,8 @@ Requires that the last message in context is **not** an assistant message.
 ## AgentLoopConfig
 
 ```rust
-pub struct AgentLoopConfig<'a> {
-    pub provider: &'a dyn StreamProvider,
+pub struct AgentLoopConfig {
+    pub provider: Arc<dyn StreamProvider>,
     pub model: String,
     pub api_key: String,
     pub thinking_level: ThinkingLevel,
