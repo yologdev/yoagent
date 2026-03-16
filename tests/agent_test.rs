@@ -42,7 +42,7 @@ async fn test_agent_reset() {
     agent.finish().await;
     assert!(!agent.messages().is_empty());
 
-    agent.reset();
+    agent.reset().await;
     assert!(agent.messages().is_empty());
     assert!(!agent.is_streaming());
 }
