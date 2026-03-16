@@ -11,6 +11,7 @@ use crate::types::*;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 /// Queue mode for steering and follow-up messages
@@ -34,7 +35,7 @@ pub struct Agent {
     model_config: Option<ModelConfig>,
     messages: Vec<AgentMessage>,
     tools: Vec<Box<dyn AgentTool>>,
-    provider: Box<dyn StreamProvider>,
+    provider: Arc<dyn StreamProvider>,
 
     // Queues (shared with the loop via Arc<Mutex>)
     steering_queue: Arc<Mutex<Vec<AgentMessage>>>,
@@ -63,6 +64,10 @@ pub struct Agent {
     // Control
     cancel: Option<CancellationToken>,
     is_streaming: bool,
+
+    // Pending completion from a spawned agent loop
+    #[allow(clippy::type_complexity)]
+    pending_completion: Option<JoinHandle<(Vec<Box<dyn AgentTool>>, Vec<AgentMessage>)>>,
 }
 
 impl Agent {
@@ -77,7 +82,7 @@ impl Agent {
             model_config: None,
             messages: Vec::new(),
             tools: Vec::new(),
-            provider: Box::new(provider),
+            provider: Arc::new(provider),
             steering_queue: Arc::new(Mutex::new(Vec::new())),
             follow_up_queue: Arc::new(Mutex::new(Vec::new())),
             steering_mode: QueueMode::OneAtATime,
@@ -94,6 +99,7 @@ impl Agent {
             compaction_strategy: None,
             cancel: None,
             is_streaming: false,
+            pending_completion: None,
         }
     }
 
@@ -386,32 +392,67 @@ impl Agent {
         self.clear_all_queues();
         self.is_streaming = false;
         self.cancel = None;
+        if let Some(handle) = self.pending_completion.take() {
+            handle.abort();
+        }
     }
 
     // -- Prompting --
 
-    /// Send a text prompt. Returns a stream of AgentEvents.
+    /// Send a text prompt. Returns a receiver of AgentEvents immediately,
+    /// with the agent loop running concurrently so events stream in real-time.
+    ///
+    /// Call [`finish()`](Self::finish) after draining the receiver to restore
+    /// agent state (messages, tools). `finish()` is also called automatically
+    /// at the start of the next `prompt` / `continue_loop` call.
     pub async fn prompt(&mut self, text: impl Into<String>) -> mpsc::UnboundedReceiver<AgentEvent> {
         let msg = AgentMessage::Llm(Message::user(text));
         self.prompt_messages(vec![msg]).await
     }
 
-    /// Send messages as a prompt. Convenience wrapper around
-    /// [`prompt_messages_with_sender()`](Self::prompt_messages_with_sender)
-    /// that creates a channel internally and returns the receiver.
+    /// Send messages as a prompt. Returns a receiver immediately with the
+    /// agent loop running concurrently for true streaming.
+    ///
+    /// Call [`finish()`](Self::finish) after draining events to restore state.
     pub async fn prompt_messages(
         &mut self,
         messages: Vec<AgentMessage>,
     ) -> mpsc::UnboundedReceiver<AgentEvent> {
+        self.finish().await; // restore from previous if needed
+
+        assert!(
+            !self.is_streaming,
+            "Agent is already streaming. Use steer() or follow_up()."
+        );
+
+        let cancel = CancellationToken::new();
+        self.cancel = Some(cancel.clone());
+        self.is_streaming = true;
+
         let (tx, rx) = mpsc::unbounded_channel();
-        self.prompt_messages_with_sender(messages, tx).await;
+
+        let mut context = AgentContext {
+            system_prompt: self.system_prompt.clone(),
+            messages: self.messages.clone(),
+            tools: std::mem::take(&mut self.tools),
+        };
+
+        let config = self.build_config();
+
+        let handle = tokio::spawn(async move {
+            let _new_messages = agent_loop(messages, &mut context, &config, tx, cancel).await;
+            (context.tools, context.messages)
+        });
+
+        self.pending_completion = Some(handle);
         rx
     }
 
     /// Send a text prompt, streaming events to a caller-provided sender.
     ///
     /// Unlike [`prompt()`](Self::prompt), this accepts an external sender so
-    /// the caller can consume events in real-time on another task:
+    /// the caller can consume events in real-time on another task.
+    /// Blocks until the loop finishes and state is restored.
     ///
     /// ```rust,no_run
     /// # use yoagent::Agent;
@@ -436,6 +477,7 @@ impl Agent {
     }
 
     /// Send messages as a prompt, streaming events to a caller-provided sender.
+    /// Blocks until the loop finishes and state is restored.
     pub async fn prompt_messages_with_sender(
         &mut self,
         messages: Vec<AgentMessage>,
@@ -467,15 +509,41 @@ impl Agent {
         self.cancel = None;
     }
 
-    /// Continue from current context (for retries after errors). Convenience
-    /// wrapper around [`continue_loop_with_sender()`](Self::continue_loop_with_sender).
+    /// Continue from current context (for retries after errors). Returns a
+    /// receiver immediately with the loop running concurrently.
+    ///
+    /// Call [`finish()`](Self::finish) after draining events to restore state.
     pub async fn continue_loop(&mut self) -> mpsc::UnboundedReceiver<AgentEvent> {
+        self.finish().await; // restore from previous if needed
+
+        assert!(!self.is_streaming, "Agent is already streaming.");
+        assert!(!self.messages.is_empty(), "No messages to continue from.");
+
+        let cancel = CancellationToken::new();
+        self.cancel = Some(cancel.clone());
+        self.is_streaming = true;
+
         let (tx, rx) = mpsc::unbounded_channel();
-        self.continue_loop_with_sender(tx).await;
+
+        let mut context = AgentContext {
+            system_prompt: self.system_prompt.clone(),
+            messages: self.messages.clone(),
+            tools: std::mem::take(&mut self.tools),
+        };
+
+        let config = self.build_config();
+
+        let handle = tokio::spawn(async move {
+            let _new_messages = agent_loop_continue(&mut context, &config, tx, cancel).await;
+            (context.tools, context.messages)
+        });
+
+        self.pending_completion = Some(handle);
         rx
     }
 
     /// Continue from current context, streaming events to a caller-provided sender.
+    /// Blocks until the loop finishes and state is restored.
     pub async fn continue_loop_with_sender(&mut self, tx: mpsc::UnboundedSender<AgentEvent>) {
         assert!(!self.is_streaming, "Agent is already streaming.");
         assert!(!self.messages.is_empty(), "No messages to continue from.");
@@ -501,9 +569,26 @@ impl Agent {
         self.cancel = None;
     }
 
+    /// Wait for the running agent loop to finish and restore state
+    /// (messages, tools, streaming flag).
+    ///
+    /// Called automatically at the start of [`prompt()`](Self::prompt),
+    /// [`prompt_messages()`](Self::prompt_messages), and
+    /// [`continue_loop()`](Self::continue_loop). Call explicitly when you
+    /// need to access [`messages()`](Self::messages) right after draining events.
+    pub async fn finish(&mut self) {
+        if let Some(handle) = self.pending_completion.take() {
+            let (tools, messages) = handle.await.expect("agent loop task panicked");
+            self.tools = tools;
+            self.messages = messages;
+            self.is_streaming = false;
+            self.cancel = None;
+        }
+    }
+
     // -- Internal --
 
-    fn build_config(&self) -> AgentLoopConfig<'_> {
+    fn build_config(&self) -> AgentLoopConfig {
         let steering_queue = self.steering_queue.clone();
         let steering_mode = self.steering_mode;
 
@@ -511,7 +596,7 @@ impl Agent {
         let follow_up_mode = self.follow_up_mode;
 
         AgentLoopConfig {
-            provider: &*self.provider,
+            provider: self.provider.clone(),
             model: self.model.clone(),
             api_key: self.api_key.clone(),
             thinking_level: self.thinking_level,

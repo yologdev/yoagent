@@ -216,9 +216,9 @@ impl AgentTool for SubAgentTool {
             tools,
         };
 
-        // Config referencing the Arc'd provider
+        // Config with Arc'd provider
         let config = AgentLoopConfig {
-            provider: &*self.provider,
+            provider: self.provider.clone(),
             model: self.model.clone(),
             api_key: self.api_key.clone(),
             thinking_level: self.thinking_level,

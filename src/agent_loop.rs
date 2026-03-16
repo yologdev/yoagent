@@ -30,8 +30,8 @@ use tokio::sync::mpsc;
 use tracing::warn;
 
 /// Configuration for the agent loop
-pub struct AgentLoopConfig<'a> {
-    pub provider: &'a dyn StreamProvider,
+pub struct AgentLoopConfig {
+    pub provider: Arc<dyn StreamProvider>,
     pub model: String,
     pub api_key: String,
     pub thinking_level: ThinkingLevel,
@@ -100,7 +100,7 @@ fn default_convert_to_llm(messages: &[AgentMessage]) -> Vec<Message> {
 pub async fn agent_loop(
     prompts: Vec<AgentMessage>,
     context: &mut AgentContext,
-    config: &AgentLoopConfig<'_>,
+    config: &AgentLoopConfig,
     tx: mpsc::UnboundedSender<AgentEvent>,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Vec<AgentMessage> {
@@ -205,7 +205,7 @@ pub async fn agent_loop(
 /// Continue an agent loop from existing context (for retries).
 pub async fn agent_loop_continue(
     context: &mut AgentContext,
-    config: &AgentLoopConfig<'_>,
+    config: &AgentLoopConfig,
     tx: mpsc::UnboundedSender<AgentEvent>,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Vec<AgentMessage> {
@@ -242,7 +242,7 @@ pub async fn agent_loop_continue(
 async fn run_loop(
     context: &mut AgentContext,
     new_messages: &mut Vec<AgentMessage>,
-    config: &AgentLoopConfig<'_>,
+    config: &AgentLoopConfig,
     tx: &mpsc::UnboundedSender<AgentEvent>,
     cancel: &tokio_util::sync::CancellationToken,
 ) {
@@ -476,7 +476,7 @@ async fn run_loop(
 /// Stream an assistant response from the LLM.
 async fn stream_assistant_response(
     context: &AgentContext,
-    config: &AgentLoopConfig<'_>,
+    config: &AgentLoopConfig,
     tx: &mpsc::UnboundedSender<AgentEvent>,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Message {

@@ -16,15 +16,15 @@ async fn test_agent_simple_prompt() {
         .with_model("mock")
         .with_api_key("test");
 
-    let rx = agent.prompt("Hi there").await;
+    let mut rx = agent.prompt("Hi there").await;
 
     // Drain events
     let mut events = Vec::new();
-    let mut rx = rx;
-    while let Ok(e) = rx.try_recv() {
+    while let Some(e) = rx.recv().await {
         events.push(e);
     }
 
+    agent.finish().await;
     assert!(!events.is_empty());
     assert_eq!(agent.messages().len(), 2); // user + assistant
 }
@@ -37,7 +37,9 @@ async fn test_agent_reset() {
         .with_model("mock")
         .with_api_key("test");
 
-    let _ = agent.prompt("Hi").await;
+    let mut rx = agent.prompt("Hi").await;
+    while rx.recv().await.is_some() {}
+    agent.finish().await;
     assert!(!agent.messages().is_empty());
 
     agent.reset();
@@ -90,7 +92,9 @@ async fn test_agent_with_tools() {
         .with_api_key("test")
         .with_tools(vec![Box::new(EchoTool)]);
 
-    let _ = agent.prompt("Echo hello").await;
+    let mut rx = agent.prompt("Echo hello").await;
+    while rx.recv().await.is_some() {}
+    agent.finish().await;
 
     // user + assistant(tool_call) + toolResult + assistant(text)
     assert_eq!(agent.messages().len(), 4);
@@ -152,7 +156,9 @@ async fn test_save_and_restore_messages() {
         .with_model("mock")
         .with_api_key("test");
 
-    let _ = agent.prompt("Hi").await;
+    let mut rx = agent.prompt("Hi").await;
+    while rx.recv().await.is_some() {}
+    agent.finish().await;
     let json = agent.save_messages().expect("save should succeed");
 
     // Create a fresh agent and restore
@@ -177,7 +183,9 @@ async fn test_agent_continues_after_restore() {
         .with_model("mock")
         .with_api_key("test");
 
-    let _ = agent1.prompt("Hello").await;
+    let mut rx = agent1.prompt("Hello").await;
+    while rx.recv().await.is_some() {}
+    agent1.finish().await;
     let json = agent1.save_messages().expect("save");
 
     // Second agent: restore → prompt again
@@ -189,7 +197,9 @@ async fn test_agent_continues_after_restore() {
         .with_api_key("test");
 
     agent2.restore_messages(&json).expect("restore");
-    let _ = agent2.prompt("Follow up").await;
+    let mut rx = agent2.prompt("Follow up").await;
+    while rx.recv().await.is_some() {}
+    agent2.finish().await;
 
     // Should have: original user + original assistant + follow-up user + new assistant
     assert_eq!(agent2.messages().len(), 4);
@@ -368,8 +378,8 @@ async fn test_prompt_with_sender_tools_restored() {
     // Tools should be restored after the call
     assert!(!agent.is_streaming());
     // Agent should still work for another prompt
-    let rx2 = agent.prompt("Follow up").await;
-    let mut rx2 = rx2;
-    while rx2.try_recv().is_ok() {}
+    let mut rx2 = agent.prompt("Follow up").await;
+    while rx2.recv().await.is_some() {}
+    agent.finish().await;
     assert_eq!(agent.messages().len(), 4); // 2 from first + 2 from second
 }
