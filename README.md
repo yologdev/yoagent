@@ -35,7 +35,7 @@ Everything is observable via events. Supports 7 API protocols covering 20+ LLM p
 - Full event stream: `AgentStart` → `TurnStart` → `MessageUpdate` (deltas) → `ToolExecution` → `TurnEnd` → `AgentEnd`
 - Parallel tool execution by default — sequential and batched strategies also available
 - Sub-agents via `SubAgentTool` — delegate tasks to child agent loops with their own tools and system prompts
-- Real-time event streaming — `prompt_with_sender()` lets callers consume events on a separate task as they arrive
+- Real-time event streaming — `prompt()` spawns the loop concurrently and returns events immediately; `prompt_with_sender()` accepts a caller-provided channel for custom consumption
 - Streaming tool output — tools emit real-time progress via `on_update` callback
 - Multimodal support — `Content::Image` flows through tool results across all providers
 - Automatic retry with exponential backoff and jitter for rate limits and network errors

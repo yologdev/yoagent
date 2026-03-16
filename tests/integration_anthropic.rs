@@ -14,9 +14,9 @@ fn api_key() -> String {
     std::env::var("ANTHROPIC_API_KEY").expect("ANTHROPIC_API_KEY must be set")
 }
 
-fn make_config(provider: &AnthropicProvider) -> AgentLoopConfig<'_> {
+fn make_config(provider: AnthropicProvider) -> AgentLoopConfig {
     AgentLoopConfig {
-        provider,
+        provider: std::sync::Arc::new(provider),
         model: "claude-sonnet-4-20250514".into(),
         api_key: api_key(),
         thinking_level: ThinkingLevel::Off,
@@ -77,7 +77,7 @@ fn has_assistant_message(messages: &[AgentMessage]) -> bool {
 #[ignore]
 async fn test_anthropic_simple_text() {
     let provider = AnthropicProvider;
-    let config = make_config(&provider);
+    let config = make_config(provider);
     let (tx, mut rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
@@ -129,7 +129,7 @@ async fn test_anthropic_simple_text() {
 #[ignore]
 async fn test_anthropic_tool_use() {
     let provider = AnthropicProvider;
-    let config = make_config(&provider);
+    let config = make_config(provider);
     let (tx, mut rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
@@ -191,7 +191,7 @@ async fn test_anthropic_tool_use() {
 #[ignore]
 async fn test_anthropic_multi_turn() {
     let provider = AnthropicProvider;
-    let config = make_config(&provider);
+    let config = make_config(provider);
     let cancel = CancellationToken::new();
 
     let mut context = AgentContext {

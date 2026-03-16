@@ -9,9 +9,9 @@ use yoagent::provider::MockProvider;
 use yoagent::sub_agent::SubAgentTool;
 use yoagent::*;
 
-fn make_config(provider: &MockProvider) -> AgentLoopConfig<'_> {
+fn make_config(provider: MockProvider) -> AgentLoopConfig {
     AgentLoopConfig {
-        provider,
+        provider: std::sync::Arc::new(provider),
         model: "mock".into(),
         api_key: "test".into(),
         thinking_level: ThinkingLevel::Off,
@@ -350,7 +350,7 @@ async fn test_sub_agent_parallel() {
         MockResponse::Text("Both sub-agents completed.".into()),
     ]);
 
-    let config = make_config(&parent_provider);
+    let config = make_config(parent_provider);
 
     let mut context = AgentContext {
         system_prompt: "You are a coordinator.".into(),
@@ -497,7 +497,7 @@ async fn test_sub_agent_in_parent_loop() {
         MockResponse::Text("The calculator says: 42 is the answer".into()),
     ]);
 
-    let config = make_config(&parent_provider);
+    let config = make_config(parent_provider);
 
     let mut context = AgentContext {
         system_prompt: "You are a coordinator.".into(),
