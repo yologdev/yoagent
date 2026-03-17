@@ -24,9 +24,7 @@
 
 use std::io::{self, BufRead, Write};
 use yoagent::agent::Agent;
-use yoagent::provider::{
-    AnthropicProvider, GoogleProvider, ModelConfig, OpenAiCompatProvider,
-};
+use yoagent::provider::{AnthropicProvider, GoogleProvider, ModelConfig, OpenAiCompatProvider};
 use yoagent::skills::SkillSet;
 use yoagent::tools::default_tools;
 use yoagent::*;
@@ -316,9 +314,7 @@ fn make_provider_agent(provider: &str, model: &str) -> Agent {
         "mistral" => {
             Agent::new(OpenAiCompatProvider).with_model_config(ModelConfig::mistral(model, model))
         }
-        "google" => {
-            Agent::new(GoogleProvider).with_model_config(ModelConfig::google(model, model))
-        }
+        "google" => Agent::new(GoogleProvider).with_model_config(ModelConfig::google(model, model)),
         other => {
             eprintln!("Unknown provider: {other}. Supported: zai, openai, xai, groq, deepseek, mistral, google.");
             std::process::exit(1);
