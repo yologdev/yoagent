@@ -169,6 +169,14 @@ impl OpenAiCompat {
             ..Default::default()
         }
     }
+
+    /// Compat flags for Z.ai (Zhipu AI).
+    pub fn zai() -> Self {
+        Self {
+            supports_usage_in_streaming: true,
+            ..Default::default()
+        }
+    }
 }
 
 /// Full model configuration. Knows everything needed to make API calls.
@@ -254,6 +262,25 @@ impl ModelConfig {
         }
     }
 
+    /// Create a new Z.ai (Zhipu AI) model config.
+    ///
+    /// Models: `glm-4.7`, `glm-4.5-air`, `glm-5`, etc.
+    pub fn zai(id: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            api: ApiProtocol::OpenAiCompletions,
+            provider: "zai".into(),
+            base_url: "https://api.z.ai/api/paas/v4".into(),
+            reasoning: false,
+            context_window: 128_000,
+            max_tokens: 4096,
+            cost: CostConfig::default(),
+            headers: HashMap::new(),
+            compat: Some(OpenAiCompat::zai()),
+        }
+    }
+
     /// Create a new Google Generative AI (Gemini) model config.
     pub fn google(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
@@ -309,6 +336,19 @@ mod tests {
             deepseek.max_tokens_field,
             MaxTokensField::MaxCompletionTokens
         );
+
+        let zai = OpenAiCompat::zai();
+        assert!(zai.supports_usage_in_streaming);
+        assert!(!zai.supports_store);
+    }
+
+    #[test]
+    fn test_model_config_zai() {
+        let config = ModelConfig::zai("glm-4.7", "GLM 4.7");
+        assert_eq!(config.api, ApiProtocol::OpenAiCompletions);
+        assert_eq!(config.provider, "zai");
+        assert_eq!(config.base_url, "https://api.z.ai/api/paas/v4");
+        assert!(config.compat.is_some());
     }
 
     #[test]

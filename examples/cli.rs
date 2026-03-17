@@ -11,6 +11,9 @@
 //!   ANTHROPIC_API_KEY=sk-... cargo run --example cli -- --model claude-sonnet-4-20250514
 //!   ANTHROPIC_API_KEY=sk-... cargo run --example cli -- --skills ./skills
 //!
+//! Run with a named provider (zai, openai, xai, groq, deepseek, mistral):
+//!   API_KEY=... cargo run --example cli -- --provider zai --model glm-4.7
+//!
 //! Run with LM Studio / Ollama / local OpenAI-compatible server:
 //!   cargo run --example cli -- --api-url http://localhost:1234/v1 --model local-model
 //!
@@ -65,6 +68,12 @@ async fn main() {
         .and_then(|i| args.get(i + 1))
         .cloned();
 
+    let provider_name = args
+        .iter()
+        .position(|a| a == "--provider")
+        .and_then(|i| args.get(i + 1))
+        .cloned();
+
     let api_key = if api_url.is_some() {
         std::env::var("ANTHROPIC_API_KEY")
             .or_else(|_| std::env::var("API_KEY"))
@@ -75,12 +84,22 @@ async fn main() {
             .expect("Set ANTHROPIC_API_KEY or API_KEY")
     };
 
+    let default_model = match provider_name.as_deref() {
+        Some("zai") => "glm-4.7",
+        Some("openai") => "gpt-4o",
+        Some("xai") => "grok-3-mini",
+        Some("groq") => "llama-3.3-70b-versatile",
+        Some("deepseek") => "deepseek-chat",
+        Some("mistral") => "mistral-large-latest",
+        _ => "claude-sonnet-4-20250514",
+    };
+
     let model = args
         .iter()
         .position(|a| a == "--model")
         .and_then(|i| args.get(i + 1))
         .cloned()
-        .unwrap_or_else(|| "claude-sonnet-4-20250514".into());
+        .unwrap_or_else(|| default_model.into());
 
     // Collect --skills directories (can be specified multiple times)
     let skill_dirs: Vec<String> = args
@@ -98,6 +117,17 @@ async fn main() {
 
     let mut agent = if let Some(ref url) = api_url {
         Agent::new(OpenAiCompatProvider).with_model_config(ModelConfig::local(url, &model))
+    } else if let Some(ref prov) = provider_name {
+        let model_config = match prov.as_str() {
+            "zai" => ModelConfig::zai(&model, &model),
+            "openai" => ModelConfig::openai(&model, &model),
+            "google" => ModelConfig::google(&model, &model),
+            other => {
+                eprintln!("Unknown provider: {other}. Supported: zai, openai, google, or use --api-url for others.");
+                std::process::exit(1);
+            }
+        };
+        Agent::new(OpenAiCompatProvider).with_model_config(model_config)
     } else {
         Agent::new(AnthropicProvider)
     };
@@ -156,6 +186,14 @@ async fn main() {
                 agent = if let Some(ref url) = api_url {
                     Agent::new(OpenAiCompatProvider)
                         .with_model_config(ModelConfig::local(url, new_model))
+                } else if let Some(ref prov) = provider_name {
+                    let model_config = match prov.as_str() {
+                        "zai" => ModelConfig::zai(new_model, new_model),
+                        "openai" => ModelConfig::openai(new_model, new_model),
+                        "google" => ModelConfig::google(new_model, new_model),
+                        _ => unreachable!(),
+                    };
+                    Agent::new(OpenAiCompatProvider).with_model_config(model_config)
                 } else {
                     Agent::new(AnthropicProvider)
                 };
