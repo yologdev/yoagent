@@ -281,6 +281,82 @@ impl ModelConfig {
         }
     }
 
+    /// Create a new xAI (Grok) model config.
+    ///
+    /// Models: `grok-3-mini`, `grok-3`, etc.
+    pub fn xai(id: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            api: ApiProtocol::OpenAiCompletions,
+            provider: "xai".into(),
+            base_url: "https://api.x.ai/v1".into(),
+            reasoning: false,
+            context_window: 131_072,
+            max_tokens: 4096,
+            cost: CostConfig::default(),
+            headers: HashMap::new(),
+            compat: Some(OpenAiCompat::xai()),
+        }
+    }
+
+    /// Create a new Groq model config.
+    ///
+    /// Models: `llama-3.3-70b-versatile`, `mixtral-8x7b-32768`, etc.
+    pub fn groq(id: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            api: ApiProtocol::OpenAiCompletions,
+            provider: "groq".into(),
+            base_url: "https://api.groq.com/openai/v1".into(),
+            reasoning: false,
+            context_window: 128_000,
+            max_tokens: 4096,
+            cost: CostConfig::default(),
+            headers: HashMap::new(),
+            compat: Some(OpenAiCompat::groq()),
+        }
+    }
+
+    /// Create a new DeepSeek model config.
+    ///
+    /// Models: `deepseek-chat`, `deepseek-reasoner`, etc.
+    pub fn deepseek(id: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            api: ApiProtocol::OpenAiCompletions,
+            provider: "deepseek".into(),
+            base_url: "https://api.deepseek.com/v1".into(),
+            reasoning: false,
+            context_window: 128_000,
+            max_tokens: 4096,
+            cost: CostConfig::default(),
+            headers: HashMap::new(),
+            compat: Some(OpenAiCompat::deepseek()),
+        }
+    }
+
+    /// Create a new Mistral model config.
+    ///
+    /// Models: `mistral-large-latest`, `mistral-small-latest`, etc.
+    pub fn mistral(id: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            api: ApiProtocol::OpenAiCompletions,
+            provider: "mistral".into(),
+            base_url: "https://api.mistral.ai/v1".into(),
+            reasoning: false,
+            context_window: 128_000,
+            max_tokens: 4096,
+            cost: CostConfig::default(),
+            headers: HashMap::new(),
+            compat: Some(OpenAiCompat::mistral()),
+        }
+    }
+
     /// Create a new Google Generative AI (Gemini) model config.
     pub fn google(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {

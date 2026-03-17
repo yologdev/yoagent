@@ -11,7 +11,7 @@
 //!   ANTHROPIC_API_KEY=sk-... cargo run --example cli -- --model claude-sonnet-4-20250514
 //!   ANTHROPIC_API_KEY=sk-... cargo run --example cli -- --skills ./skills
 //!
-//! Run with a named provider (zai, openai, xai, groq, deepseek, mistral):
+//! Run with a named provider (zai, openai, xai, groq, deepseek, mistral, google):
 //!   API_KEY=... cargo run --example cli -- --provider zai --model glm-4.7
 //!
 //! Run with LM Studio / Ollama / local OpenAI-compatible server:
@@ -24,7 +24,9 @@
 
 use std::io::{self, BufRead, Write};
 use yoagent::agent::Agent;
-use yoagent::provider::{AnthropicProvider, ModelConfig, OpenAiCompatProvider};
+use yoagent::provider::{
+    AnthropicProvider, GoogleProvider, ModelConfig, OpenAiCompatProvider,
+};
 use yoagent::skills::SkillSet;
 use yoagent::tools::default_tools;
 use yoagent::*;
@@ -91,6 +93,7 @@ async fn main() {
         Some("groq") => "llama-3.3-70b-versatile",
         Some("deepseek") => "deepseek-chat",
         Some("mistral") => "mistral-large-latest",
+        Some("google") => "gemini-2.5-pro",
         _ => "claude-sonnet-4-20250514",
     };
 
@@ -118,16 +121,7 @@ async fn main() {
     let mut agent = if let Some(ref url) = api_url {
         Agent::new(OpenAiCompatProvider).with_model_config(ModelConfig::local(url, &model))
     } else if let Some(ref prov) = provider_name {
-        let model_config = match prov.as_str() {
-            "zai" => ModelConfig::zai(&model, &model),
-            "openai" => ModelConfig::openai(&model, &model),
-            "google" => ModelConfig::google(&model, &model),
-            other => {
-                eprintln!("Unknown provider: {other}. Supported: zai, openai, google, or use --api-url for others.");
-                std::process::exit(1);
-            }
-        };
-        Agent::new(OpenAiCompatProvider).with_model_config(model_config)
+        make_provider_agent(prov, &model)
     } else {
         Agent::new(AnthropicProvider)
     };
@@ -187,13 +181,7 @@ async fn main() {
                     Agent::new(OpenAiCompatProvider)
                         .with_model_config(ModelConfig::local(url, new_model))
                 } else if let Some(ref prov) = provider_name {
-                    let model_config = match prov.as_str() {
-                        "zai" => ModelConfig::zai(new_model, new_model),
-                        "openai" => ModelConfig::openai(new_model, new_model),
-                        "google" => ModelConfig::google(new_model, new_model),
-                        _ => unreachable!(),
-                    };
-                    Agent::new(OpenAiCompatProvider).with_model_config(model_config)
+                    make_provider_agent(prov, new_model)
                 } else {
                     Agent::new(AnthropicProvider)
                 };
@@ -310,6 +298,32 @@ async fn main() {
     }
 
     println!("\n{DIM}  bye 👋{RESET}\n");
+}
+
+fn make_provider_agent(provider: &str, model: &str) -> Agent {
+    match provider {
+        "zai" => Agent::new(OpenAiCompatProvider).with_model_config(ModelConfig::zai(model, model)),
+        "openai" => {
+            Agent::new(OpenAiCompatProvider).with_model_config(ModelConfig::openai(model, model))
+        }
+        "xai" => Agent::new(OpenAiCompatProvider).with_model_config(ModelConfig::xai(model, model)),
+        "groq" => {
+            Agent::new(OpenAiCompatProvider).with_model_config(ModelConfig::groq(model, model))
+        }
+        "deepseek" => {
+            Agent::new(OpenAiCompatProvider).with_model_config(ModelConfig::deepseek(model, model))
+        }
+        "mistral" => {
+            Agent::new(OpenAiCompatProvider).with_model_config(ModelConfig::mistral(model, model))
+        }
+        "google" => {
+            Agent::new(GoogleProvider).with_model_config(ModelConfig::google(model, model))
+        }
+        other => {
+            eprintln!("Unknown provider: {other}. Supported: zai, openai, xai, groq, deepseek, mistral, google.");
+            std::process::exit(1);
+        }
+    }
 }
 
 fn truncate(s: &str, max: usize) -> &str {
