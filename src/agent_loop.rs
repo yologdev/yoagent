@@ -614,11 +614,10 @@ async fn stream_assistant_response(
             .stream(stream_config, stream_tx, provider_cancel)
             .await;
 
-        // Wait for forwarder to finish processing remaining buffered events
-        let _ = forward_handle.await;
-
         match &result {
             Err(e) if e.is_retryable() && attempt < retry.max_retries && !cancel.is_cancelled() => {
+                // Abort forwarder to prevent forwarding events from failed attempt
+                forward_handle.abort();
                 attempt += 1;
                 let delay = e
                     .retry_after()
@@ -627,7 +626,11 @@ async fn stream_assistant_response(
                 tokio::time::sleep(delay).await;
                 continue;
             }
-            _ => break result,
+            _ => {
+                // Final attempt — wait for forwarder to finish processing remaining events
+                let _ = forward_handle.await;
+                break result;
+            }
         }
     };
 
