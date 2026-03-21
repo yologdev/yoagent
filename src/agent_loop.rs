@@ -508,7 +508,7 @@ async fn stream_assistant_response(
     // Retry loop for transient provider errors
     let retry = &config.retry_config;
     let mut attempt = 0;
-    let (result, mut stream_rx) = loop {
+    let result = loop {
         let stream_config = StreamConfig {
             model: config.model.clone(),
             system_prompt: context.system_prompt.clone(),
@@ -522,13 +522,100 @@ async fn stream_assistant_response(
             cache_config: config.cache_config.clone(),
         };
 
-        let (stream_tx, stream_rx) = mpsc::unbounded_channel();
+        let (stream_tx, mut stream_rx) = mpsc::unbounded_channel();
         let provider_cancel = cancel.clone();
 
+        // Spawn a task to forward events in real-time as the provider streams
+        let event_tx = tx.clone();
+        let model_for_events = config.model.clone();
+        let forward_handle = tokio::spawn(async move {
+            let mut partial_message: Option<AgentMessage> = None;
+            while let Some(event) = stream_rx.recv().await {
+                match &event {
+                    StreamEvent::Start => {
+                        let placeholder = AgentMessage::Llm(Message::Assistant {
+                            content: Vec::new(),
+                            stop_reason: StopReason::Stop,
+                            model: model_for_events.clone(),
+                            provider: String::new(),
+                            usage: Usage::default(),
+                            timestamp: now_ms(),
+                            error_message: None,
+                        });
+                        partial_message = Some(placeholder.clone());
+                        event_tx
+                            .send(AgentEvent::MessageStart {
+                                message: placeholder,
+                            })
+                            .ok();
+                    }
+                    StreamEvent::TextDelta { delta, .. } => {
+                        if let Some(ref msg) = partial_message {
+                            event_tx
+                                .send(AgentEvent::MessageUpdate {
+                                    message: msg.clone(),
+                                    delta: StreamDelta::Text {
+                                        delta: delta.clone(),
+                                    },
+                                })
+                                .ok();
+                        }
+                    }
+                    StreamEvent::ThinkingDelta { delta, .. } => {
+                        if let Some(ref msg) = partial_message {
+                            event_tx
+                                .send(AgentEvent::MessageUpdate {
+                                    message: msg.clone(),
+                                    delta: StreamDelta::Thinking {
+                                        delta: delta.clone(),
+                                    },
+                                })
+                                .ok();
+                        }
+                    }
+                    StreamEvent::ToolCallDelta { delta, .. } => {
+                        if let Some(ref msg) = partial_message {
+                            event_tx
+                                .send(AgentEvent::MessageUpdate {
+                                    message: msg.clone(),
+                                    delta: StreamDelta::ToolCallDelta {
+                                        delta: delta.clone(),
+                                    },
+                                })
+                                .ok();
+                        }
+                    }
+                    StreamEvent::Done { message } => {
+                        let am: AgentMessage = message.clone().into();
+                        partial_message = Some(am.clone());
+                        event_tx.send(AgentEvent::MessageEnd { message: am }).ok();
+                    }
+                    StreamEvent::Error { message } => {
+                        let am: AgentMessage = message.clone().into();
+                        if partial_message.is_none() {
+                            event_tx
+                                .send(AgentEvent::MessageStart {
+                                    message: am.clone(),
+                                })
+                                .ok();
+                        }
+                        partial_message = Some(am.clone());
+                        event_tx.send(AgentEvent::MessageEnd { message: am }).ok();
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        // Provider streams concurrently — events are forwarded in real-time
+        // When provider returns, stream_tx is dropped, ending the forwarder
         let result = config
             .provider
             .stream(stream_config, stream_tx, provider_cancel)
             .await;
+
+        // Wait for forwarder to finish processing remaining buffered events
+        let _ = forward_handle.await;
 
         match &result {
             Err(e) if e.is_retryable() && attempt < retry.max_retries && !cancel.is_cancelled() => {
@@ -540,86 +627,9 @@ async fn stream_assistant_response(
                 tokio::time::sleep(delay).await;
                 continue;
             }
-            _ => break (result, stream_rx),
+            _ => break result,
         }
     };
-
-    // Process any events that were sent
-    let mut partial_message: Option<AgentMessage> = None;
-    while let Ok(event) = stream_rx.try_recv() {
-        match &event {
-            StreamEvent::Start => {
-                // Create a placeholder so deltas have a message to attach to.
-                // It will be replaced by the real message on Done.
-                let placeholder = AgentMessage::Llm(Message::Assistant {
-                    content: Vec::new(),
-                    stop_reason: StopReason::Stop,
-                    model: config.model.clone(),
-                    provider: String::new(),
-                    usage: Usage::default(),
-                    timestamp: now_ms(),
-                    error_message: None,
-                });
-                partial_message = Some(placeholder.clone());
-                tx.send(AgentEvent::MessageStart {
-                    message: placeholder,
-                })
-                .ok();
-            }
-            StreamEvent::TextDelta { delta, .. } => {
-                if let Some(ref msg) = partial_message {
-                    tx.send(AgentEvent::MessageUpdate {
-                        message: msg.clone(),
-                        delta: StreamDelta::Text {
-                            delta: delta.clone(),
-                        },
-                    })
-                    .ok();
-                }
-            }
-            StreamEvent::ThinkingDelta { delta, .. } => {
-                if let Some(ref msg) = partial_message {
-                    tx.send(AgentEvent::MessageUpdate {
-                        message: msg.clone(),
-                        delta: StreamDelta::Thinking {
-                            delta: delta.clone(),
-                        },
-                    })
-                    .ok();
-                }
-            }
-            StreamEvent::ToolCallDelta { delta, .. } => {
-                if let Some(ref msg) = partial_message {
-                    tx.send(AgentEvent::MessageUpdate {
-                        message: msg.clone(),
-                        delta: StreamDelta::ToolCallDelta {
-                            delta: delta.clone(),
-                        },
-                    })
-                    .ok();
-                }
-            }
-            StreamEvent::Done { message } => {
-                let am: AgentMessage = message.clone().into();
-                partial_message = Some(am.clone());
-                // MessageStart was already emitted on StreamEvent::Start
-                tx.send(AgentEvent::MessageEnd { message: am }).ok();
-            }
-            StreamEvent::Error { message } => {
-                let am: AgentMessage = message.clone().into();
-                // Only emit MessageStart if Start wasn't received
-                if partial_message.is_none() {
-                    tx.send(AgentEvent::MessageStart {
-                        message: am.clone(),
-                    })
-                    .ok();
-                }
-                partial_message = Some(am.clone());
-                tx.send(AgentEvent::MessageEnd { message: am }).ok();
-            }
-            _ => {}
-        }
-    }
 
     match result {
         Ok(msg) => msg,
