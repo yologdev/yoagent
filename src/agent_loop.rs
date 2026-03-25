@@ -60,7 +60,7 @@ pub struct AgentLoopConfig {
     pub context_config: Option<ContextConfig>,
 
     /// Custom compaction strategy. When set, replaces the default
-    /// `compact_messages()` call. Only invoked when `context_config` is `Some`.
+    /// `compact_messages()` call. Invoked when `context_config` is `Some`.
     pub compaction_strategy: Option<Arc<dyn CompactionStrategy>>,
 
     /// Execution limits (max turns, tokens, duration).
