@@ -104,7 +104,7 @@ pub struct AgentLoopConfig {
 | `transform_context` | Pre-processing hook for context pruning |
 | `get_steering_messages` | Returns user interruptions during tool execution |
 | `get_follow_up_messages` | Returns queued work after agent would stop |
-| `context_config` | Token budget and compaction settings |
+| `context_config` | Token budget and compaction settings. Auto-derived from `model_config.context_window` (80%) when not set |
 | `execution_limits` | Max turns, tokens, duration |
 | `cache_config` | Prompt caching behavior (see [Prompt Caching](prompt-caching.md)) |
 | `tool_execution` | Parallel, Sequential, or Batched (see [Tools](tools.md#execution-strategies)) |

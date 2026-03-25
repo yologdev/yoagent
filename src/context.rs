@@ -166,6 +166,20 @@ impl Default for ContextConfig {
     }
 }
 
+impl ContextConfig {
+    /// Derive a context config from a model's context window size.
+    ///
+    /// Reserves 20% of the context window for output tokens, uses the rest
+    /// as the compaction budget. All other settings use defaults.
+    pub fn from_context_window(context_window: u32) -> Self {
+        let max_context_tokens = (context_window as usize) * 80 / 100;
+        Self {
+            max_context_tokens,
+            ..Default::default()
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Compaction strategy
 // ---------------------------------------------------------------------------
@@ -535,6 +549,20 @@ mod tests {
         assert!(estimate_tokens("hello world") > 0);
         assert!(estimate_tokens("hello world") < 10);
         assert_eq!(estimate_tokens(""), 0);
+    }
+
+    #[test]
+    fn test_context_config_from_context_window() {
+        let config = ContextConfig::from_context_window(200_000);
+        assert_eq!(config.max_context_tokens, 160_000); // 80% of 200K
+        assert_eq!(config.system_prompt_tokens, 4_000); // default
+        assert_eq!(config.keep_recent, 10); // default
+
+        let config = ContextConfig::from_context_window(1_000_000);
+        assert_eq!(config.max_context_tokens, 800_000); // 80% of 1M
+
+        let config = ContextConfig::from_context_window(128_000);
+        assert_eq!(config.max_context_tokens, 102_400); // 80% of 128K
     }
 
     #[test]

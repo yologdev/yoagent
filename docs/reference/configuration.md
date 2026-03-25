@@ -64,6 +64,14 @@ pub struct ContextConfig {
 }
 ```
 
+When `context_config` is not explicitly set, it is automatically derived from `ModelConfig.context_window` (80% for context, 20% reserved for output). If neither is set, `ContextConfig::default()` (100K) is used.
+
+```rust
+// Derive from a model's context window:
+let config = ContextConfig::from_context_window(200_000);
+// config.max_context_tokens == 160_000
+```
+
 ## ExecutionLimits
 
 Prevents runaway agents:

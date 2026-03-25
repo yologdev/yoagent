@@ -45,7 +45,7 @@ async fn main() {
 
 ## Example with OpenAI-Compatible Provider
 
-For OpenAI, xAI, Groq, or any compatible API, use `OpenAiCompatProvider` with a `ModelConfig`:
+For OpenAI, xAI, Groq, DeepSeek, Mistral, MiniMax, Z.ai, or any compatible API, use `OpenAiCompatProvider` with a `ModelConfig`:
 
 ```rust
 use yoagent::{Agent, AgentEvent};

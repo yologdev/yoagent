@@ -98,6 +98,34 @@ pub struct ContextConfig {
 }
 ```
 
+### Auto-Derivation from ModelConfig
+
+When you set a `ModelConfig` but don't explicitly set a `ContextConfig`, the compaction budget is automatically derived from the model's `context_window` — reserving 80% for context and 20% for output:
+
+```rust
+// MiniMax with 1M context → compacts at 800K (no manual config needed)
+let agent = Agent::new(OpenAiCompatProvider)
+    .with_model_config(ModelConfig::minimax("MiniMax-Text-01", "MiniMax Text 01"))
+    .with_api_key(api_key);
+
+// Anthropic with 200K context → compacts at 160K
+let agent = Agent::new(AnthropicProvider)
+    .with_model_config(ModelConfig::anthropic("claude-sonnet-4-20250514", "Claude Sonnet 4"))
+    .with_api_key(api_key);
+```
+
+The priority chain:
+1. Explicit `with_context_config(...)` → always wins
+2. Has `model_config` → auto-derives from `context_window` (80%)
+3. Neither → `ContextConfig::default()` (100K)
+
+You can also derive manually:
+
+```rust
+let config = ContextConfig::from_context_window(1_000_000);
+// config.max_context_tokens == 800_000
+```
+
 ## Tiered Compaction
 
 `compact_messages()` tries each level in order, stopping as soon as messages fit the budget:

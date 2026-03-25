@@ -1,6 +1,6 @@
 # OpenAI Compatible Provider
 
-`OpenAiCompatProvider` implements the OpenAI Chat Completions API. One implementation covers OpenAI, xAI, Groq, Cerebras, OpenRouter, Mistral, DeepSeek, and any other compatible API.
+`OpenAiCompatProvider` implements the OpenAI Chat Completions API. One implementation covers OpenAI, xAI, Groq, Cerebras, OpenRouter, Mistral, DeepSeek, MiniMax, Z.ai, and any other compatible API.
 
 ## Usage
 
@@ -42,6 +42,8 @@ pub struct OpenAiCompat {
 | OpenRouter | `OpenAiCompat::openrouter()` | `max_completion_tokens` |
 | Mistral | `OpenAiCompat::mistral()` | `max_tokens` field |
 | DeepSeek | `OpenAiCompat::deepseek()` | `max_completion_tokens` |
+| MiniMax | `OpenAiCompat::minimax()` | Standard defaults, 1M context window |
+| Z.ai (Zhipu) | `OpenAiCompat::zai()` | Standard defaults |
 
 ## Adding a New Compatible Provider
 

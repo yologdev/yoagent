@@ -87,7 +87,7 @@ impl Agent {
             follow_up_queue: Arc::new(Mutex::new(Vec::new())),
             steering_mode: QueueMode::OneAtATime,
             follow_up_mode: QueueMode::OneAtATime,
-            context_config: Some(ContextConfig::default()),
+            context_config: None,
             execution_limits: Some(ExecutionLimits::default()),
             cache_config: CacheConfig::default(),
             tool_execution: ToolExecutionStrategy::default(),
@@ -640,7 +640,12 @@ impl Agent {
                     QueueMode::All => queue.drain(..).collect(),
                 }
             })),
-            context_config: self.context_config.clone(),
+            context_config: Some(self.context_config.clone().unwrap_or_else(|| {
+                self.model_config
+                    .as_ref()
+                    .map(|m| ContextConfig::from_context_window(m.context_window))
+                    .unwrap_or_default()
+            })),
             compaction_strategy: self.compaction_strategy.clone(),
             execution_limits: self.execution_limits.clone(),
             cache_config: self.cache_config.clone(),

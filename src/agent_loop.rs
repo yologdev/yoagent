@@ -328,8 +328,14 @@ async fn run_loop(
             }
             turn_number += 1;
 
-            // Compact context if configured (tiered: tool outputs → summarize → drop)
-            if let Some(ref ctx_config) = config.context_config {
+            // Compact context if configured, or auto-derive from model's context window
+            let ctx_config = config.context_config.clone().or_else(|| {
+                config
+                    .model_config
+                    .as_ref()
+                    .map(|m| ContextConfig::from_context_window(m.context_window))
+            });
+            if let Some(ref ctx_config) = ctx_config {
                 let strategy: &dyn CompactionStrategy = config
                     .compaction_strategy
                     .as_deref()
