@@ -130,18 +130,9 @@ impl StreamProvider for AzureOpenAiProvider {
                                     break;
                                 }
                                 "error" => {
-                                    warn!("Azure OpenAI error: {}", msg.data);
-                                    let err_msg = Message::Assistant {
-                                        content: vec![Content::Text { text: String::new() }],
-                                        stop_reason: StopReason::Error,
-                                        model: config.model.clone(),
-                                        provider: model_config.provider.clone(),
-                                        usage: usage.clone(),
-                                        timestamp: now_ms(),
-                                        error_message: Some(msg.data),
-                                    };
-                                    let _ = tx.send(StreamEvent::Error { message: err_msg.clone() });
-                                    return Ok(err_msg);
+                                    let provider_err = classify_sse_error_event(&msg.data);
+                                    warn!("Azure OpenAI error: {}", provider_err);
+                                    return Err(provider_err);
                                 }
                                 _ => {}
                             }
@@ -149,16 +140,6 @@ impl StreamProvider for AzureOpenAiProvider {
                         Some(Err(e)) => {
                             let provider_err = classify_eventsource_error(e).await;
                             warn!("Azure SSE error: {}", provider_err);
-                            let err_msg = Message::Assistant {
-                                content: vec![Content::Text { text: String::new() }],
-                                stop_reason: StopReason::Error,
-                                model: config.model.clone(),
-                                provider: model_config.provider.clone(),
-                                usage: usage.clone(),
-                                timestamp: now_ms(),
-                                error_message: Some(provider_err.to_string()),
-                            };
-                            let _ = tx.send(StreamEvent::Error { message: err_msg.clone() });
                             return Err(provider_err);
                         }
                     }

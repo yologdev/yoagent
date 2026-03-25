@@ -154,18 +154,9 @@ impl StreamProvider for OpenAiResponsesProvider {
                                     break;
                                 }
                                 "error" => {
-                                    warn!("OpenAI Responses error: {}", msg.data);
-                                    let err_msg = Message::Assistant {
-                                        content: vec![Content::Text { text: String::new() }],
-                                        stop_reason: StopReason::Error,
-                                        model: config.model.clone(),
-                                        provider: model_config.provider.clone(),
-                                        usage: usage.clone(),
-                                        timestamp: now_ms(),
-                                        error_message: Some(msg.data),
-                                    };
-                                    let _ = tx.send(StreamEvent::Error { message: err_msg.clone() });
-                                    return Ok(err_msg);
+                                    let provider_err = classify_sse_error_event(&msg.data);
+                                    warn!("OpenAI Responses error: {}", provider_err);
+                                    return Err(provider_err);
                                 }
                                 _ => {
                                     debug!("Unknown Responses event: {}", msg.event);
@@ -175,16 +166,6 @@ impl StreamProvider for OpenAiResponsesProvider {
                         Some(Err(e)) => {
                             let provider_err = classify_eventsource_error(e).await;
                             warn!("OpenAI Responses SSE error: {}", provider_err);
-                            let err_msg = Message::Assistant {
-                                content: vec![Content::Text { text: String::new() }],
-                                stop_reason: StopReason::Error,
-                                model: config.model.clone(),
-                                provider: model_config.provider.clone(),
-                                usage: usage.clone(),
-                                timestamp: now_ms(),
-                                error_message: Some(provider_err.to_string()),
-                            };
-                            let _ = tx.send(StreamEvent::Error { message: err_msg.clone() });
                             return Err(provider_err);
                         }
                     }

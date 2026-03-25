@@ -184,16 +184,6 @@ impl StreamProvider for OpenAiCompatProvider {
                         Some(Err(e)) => {
                             let provider_err = classify_eventsource_error(e).await;
                             warn!("OpenAI SSE error: {}", provider_err);
-                            let err_msg = Message::Assistant {
-                                content: vec![Content::Text { text: String::new() }],
-                                stop_reason: StopReason::Error,
-                                model: config.model.clone(),
-                                provider: model_config.provider.clone(),
-                                usage: usage.clone(),
-                                timestamp: now_ms(),
-                                error_message: Some(provider_err.to_string()),
-                            };
-                            let _ = tx.send(StreamEvent::Error { message: err_msg.clone() });
                             return Err(provider_err);
                         }
                     }
