@@ -127,7 +127,12 @@ pub async fn classify_eventsource_error(error: reqwest_eventsource::Error) -> Pr
             let body = response.text().await.unwrap_or_default();
             ProviderError::classify(
                 status_code,
-                &format!("HTTP {} {}: {}", status_code, status.canonical_reason().unwrap_or(""), body),
+                &format!(
+                    "HTTP {} {}: {}",
+                    status_code,
+                    status.canonical_reason().unwrap_or(""),
+                    body
+                ),
             )
         }
         other => ProviderError::Network(other.to_string()),
