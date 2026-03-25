@@ -45,6 +45,7 @@ pub struct Agent {
 
     // Context, limits & caching
     pub context_config: Option<ContextConfig>,
+    context_management_disabled: bool,
     pub execution_limits: Option<ExecutionLimits>,
     pub cache_config: CacheConfig,
     pub tool_execution: ToolExecutionStrategy,
@@ -88,6 +89,7 @@ impl Agent {
             steering_mode: QueueMode::OneAtATime,
             follow_up_mode: QueueMode::OneAtATime,
             context_config: None,
+            context_management_disabled: false,
             execution_limits: Some(ExecutionLimits::default()),
             cache_config: CacheConfig::default(),
             tool_execution: ToolExecutionStrategy::default(),
@@ -227,9 +229,11 @@ impl Agent {
         self
     }
 
-    /// Disable automatic context compaction
+    /// Disable automatic context compaction and execution limits.
+    /// This takes precedence over auto-derivation from `ModelConfig.context_window`.
     pub fn without_context_management(mut self) -> Self {
         self.context_config = None;
+        self.context_management_disabled = true;
         self.execution_limits = None;
         self
     }
@@ -640,12 +644,16 @@ impl Agent {
                     QueueMode::All => queue.drain(..).collect(),
                 }
             })),
-            context_config: Some(self.context_config.clone().unwrap_or_else(|| {
-                self.model_config
-                    .as_ref()
-                    .map(|m| ContextConfig::from_context_window(m.context_window))
-                    .unwrap_or_default()
-            })),
+            context_config: if self.context_management_disabled {
+                None
+            } else {
+                Some(self.context_config.clone().unwrap_or_else(|| {
+                    self.model_config
+                        .as_ref()
+                        .map(|m| ContextConfig::from_context_window(m.context_window))
+                        .unwrap_or_default()
+                }))
+            },
             compaction_strategy: self.compaction_strategy.clone(),
             execution_limits: self.execution_limits.clone(),
             cache_config: self.cache_config.clone(),

@@ -60,7 +60,7 @@ pub struct AgentLoopConfig {
     pub context_config: Option<ContextConfig>,
 
     /// Custom compaction strategy. When set, replaces the default
-    /// `compact_messages()` call. Only invoked when `context_config` is `Some`.
+    /// `compact_messages()` call. Invoked when `context_config` is `Some`.
     pub compaction_strategy: Option<Arc<dyn CompactionStrategy>>,
 
     /// Execution limits (max turns, tokens, duration).
@@ -328,14 +328,8 @@ async fn run_loop(
             }
             turn_number += 1;
 
-            // Compact context if configured, or auto-derive from model's context window
-            let ctx_config = config.context_config.clone().or_else(|| {
-                config
-                    .model_config
-                    .as_ref()
-                    .map(|m| ContextConfig::from_context_window(m.context_window))
-            });
-            if let Some(ref ctx_config) = ctx_config {
+            // Compact context if configured (tiered: tool outputs → summarize → drop)
+            if let Some(ref ctx_config) = config.context_config {
                 let strategy: &dyn CompactionStrategy = config
                     .compaction_strategy
                     .as_deref()
