@@ -147,8 +147,8 @@ impl StreamProvider for AzureOpenAiProvider {
                             }
                         }
                         Some(Err(e)) => {
-                            let err_str = e.to_string();
-                            warn!("Azure SSE error: {}", err_str);
+                            let provider_err = classify_eventsource_error(e).await;
+                            warn!("Azure SSE error: {}", provider_err);
                             let err_msg = Message::Assistant {
                                 content: vec![Content::Text { text: String::new() }],
                                 stop_reason: StopReason::Error,
@@ -156,10 +156,10 @@ impl StreamProvider for AzureOpenAiProvider {
                                 provider: model_config.provider.clone(),
                                 usage: usage.clone(),
                                 timestamp: now_ms(),
-                                error_message: Some(err_str),
+                                error_message: Some(provider_err.to_string()),
                             };
                             let _ = tx.send(StreamEvent::Error { message: err_msg.clone() });
-                            return Ok(err_msg);
+                            return Err(provider_err);
                         }
                     }
                 }

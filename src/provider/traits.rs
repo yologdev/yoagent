@@ -115,6 +115,25 @@ impl ProviderError {
     }
 }
 
+/// Extract a classified error from a `reqwest_eventsource::Error`.
+///
+/// When the error is `InvalidStatusCode`, reads the response body and uses
+/// `ProviderError::classify()` to produce a properly typed error. Otherwise
+/// falls back to a generic network/API error with the error string.
+pub async fn classify_eventsource_error(error: reqwest_eventsource::Error) -> ProviderError {
+    match error {
+        reqwest_eventsource::Error::InvalidStatusCode(status, response) => {
+            let status_code = status.as_u16();
+            let body = response.text().await.unwrap_or_default();
+            ProviderError::classify(
+                status_code,
+                &format!("HTTP {} {}: {}", status_code, status.canonical_reason().unwrap_or(""), body),
+            )
+        }
+        other => ProviderError::Network(other.to_string()),
+    }
+}
+
 /// Known phrases that indicate context overflow across LLM providers.
 ///
 /// Covers: Anthropic, OpenAI, Google Gemini, AWS Bedrock, xAI, Groq,
