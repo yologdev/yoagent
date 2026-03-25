@@ -11,7 +11,7 @@
 //!   ANTHROPIC_API_KEY=sk-... cargo run --example cli -- --model claude-sonnet-4-20250514
 //!   ANTHROPIC_API_KEY=sk-... cargo run --example cli -- --skills ./skills
 //!
-//! Run with a named provider (zai, openai, xai, groq, deepseek, mistral, google):
+//! Run with a named provider (zai, openai, xai, groq, deepseek, mistral, minimax, google):
 //!   API_KEY=... cargo run --example cli -- --provider zai --model glm-4.7
 //!
 //! Run with LM Studio / Ollama / local OpenAI-compatible server:
@@ -91,6 +91,7 @@ async fn main() {
         Some("groq") => "llama-3.3-70b-versatile",
         Some("deepseek") => "deepseek-chat",
         Some("mistral") => "mistral-large-latest",
+        Some("minimax") => "MiniMax-Text-01",
         Some("google") => "gemini-2.5-pro",
         _ => "claude-sonnet-4-20250514",
     };
@@ -314,9 +315,12 @@ fn make_provider_agent(provider: &str, model: &str) -> Agent {
         "mistral" => {
             Agent::new(OpenAiCompatProvider).with_model_config(ModelConfig::mistral(model, model))
         }
+        "minimax" => {
+            Agent::new(OpenAiCompatProvider).with_model_config(ModelConfig::minimax(model, model))
+        }
         "google" => Agent::new(GoogleProvider).with_model_config(ModelConfig::google(model, model)),
         other => {
-            eprintln!("Unknown provider: {other}. Supported: zai, openai, xai, groq, deepseek, mistral, google.");
+            eprintln!("Unknown provider: {other}. Supported: zai, openai, xai, groq, deepseek, mistral, minimax, google.");
             std::process::exit(1);
         }
     }

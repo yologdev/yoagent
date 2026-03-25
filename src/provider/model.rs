@@ -177,6 +177,14 @@ impl OpenAiCompat {
             ..Default::default()
         }
     }
+
+    /// Compat flags for MiniMax.
+    pub fn minimax() -> Self {
+        Self {
+            supports_usage_in_streaming: true,
+            ..Default::default()
+        }
+    }
 }
 
 /// Full model configuration. Knows everything needed to make API calls.
@@ -278,6 +286,25 @@ impl ModelConfig {
             cost: CostConfig::default(),
             headers: HashMap::new(),
             compat: Some(OpenAiCompat::zai()),
+        }
+    }
+
+    /// Create a new MiniMax model config.
+    ///
+    /// Models: `MiniMax-Text-01`, `MiniMax-M1`, etc.
+    pub fn minimax(id: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            api: ApiProtocol::OpenAiCompletions,
+            provider: "minimax".into(),
+            base_url: "https://api.minimaxi.chat/v1".into(),
+            reasoning: false,
+            context_window: 1_000_000,
+            max_tokens: 4096,
+            cost: CostConfig::default(),
+            headers: HashMap::new(),
+            compat: Some(OpenAiCompat::minimax()),
         }
     }
 
@@ -416,6 +443,10 @@ mod tests {
         let zai = OpenAiCompat::zai();
         assert!(zai.supports_usage_in_streaming);
         assert!(!zai.supports_store);
+
+        let minimax = OpenAiCompat::minimax();
+        assert!(minimax.supports_usage_in_streaming);
+        assert!(!minimax.supports_store);
     }
 
     #[test]
@@ -424,6 +455,16 @@ mod tests {
         assert_eq!(config.api, ApiProtocol::OpenAiCompletions);
         assert_eq!(config.provider, "zai");
         assert_eq!(config.base_url, "https://api.z.ai/api/paas/v4");
+        assert!(config.compat.is_some());
+    }
+
+    #[test]
+    fn test_model_config_minimax() {
+        let config = ModelConfig::minimax("MiniMax-Text-01", "MiniMax Text 01");
+        assert_eq!(config.api, ApiProtocol::OpenAiCompletions);
+        assert_eq!(config.provider, "minimax");
+        assert_eq!(config.base_url, "https://api.minimaxi.chat/v1");
+        assert_eq!(config.context_window, 1_000_000);
         assert!(config.compat.is_some());
     }
 
