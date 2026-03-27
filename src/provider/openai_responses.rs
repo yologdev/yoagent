@@ -223,6 +223,7 @@ fn build_request_body(config: &StreamConfig, _model_config: &ModelConfig) -> ser
                 // Build content array for user message (supports text + images)
                 let user_content: Vec<serde_json::Value> = content
                     .iter()
+                    .filter(|c| !matches!(c, Content::Text { text } if text.is_empty()))
                     .filter_map(|c| match c {
                         Content::Text { text } => Some(serde_json::json!({
                             "type": "input_text",
@@ -253,6 +254,7 @@ fn build_request_body(config: &StreamConfig, _model_config: &ModelConfig) -> ser
             Message::Assistant { content, .. } => {
                 for c in content {
                     match c {
+                        Content::Text { text } if text.is_empty() => {}
                         Content::Text { text } => {
                             input.push(serde_json::json!({
                                 "type": "message",
@@ -285,6 +287,7 @@ fn build_request_body(config: &StreamConfig, _model_config: &ModelConfig) -> ser
                     // Images present: build content array
                     let parts: Vec<serde_json::Value> = content
                         .iter()
+                        .filter(|c| !matches!(c, Content::Text { text } if text.is_empty()))
                         .filter_map(|c| match c {
                             Content::Text { text } => Some(serde_json::json!({
                                 "type": "input_text",

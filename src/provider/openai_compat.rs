@@ -267,6 +267,7 @@ fn build_request_body(
 
                 for c in content {
                     match c {
+                        Content::Text { text } if text.is_empty() => {}
                         Content::Text { text } => {
                             parts.push(serde_json::json!({"type": "text", "text": text}));
                         }
@@ -388,6 +389,7 @@ fn content_to_openai(content: &[Content]) -> serde_json::Value {
     }
     let parts: Vec<serde_json::Value> = content
         .iter()
+        .filter(|c| !matches!(c, Content::Text { text } if text.is_empty()))
         .filter_map(|c| match c {
             Content::Text { text } => Some(serde_json::json!({"type": "text", "text": text})),
             Content::Image { data, mime_type } => Some(serde_json::json!({

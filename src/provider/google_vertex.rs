@@ -282,6 +282,7 @@ fn build_vertex_request_body(config: &StreamConfig) -> serde_json::Value {
             Message::User { content, .. } => {
                 let parts: Vec<serde_json::Value> = content
                     .iter()
+                    .filter(|c| !matches!(c, Content::Text { text } if text.is_empty()))
                     .filter_map(|c| match c {
                         Content::Text { text } => Some(serde_json::json!({"text": text})),
                         Content::Image { data, mime_type } => Some(serde_json::json!({
@@ -295,6 +296,7 @@ fn build_vertex_request_body(config: &StreamConfig) -> serde_json::Value {
             Message::Assistant { content, .. } => {
                 let parts: Vec<serde_json::Value> = content
                     .iter()
+                    .filter(|c| !matches!(c, Content::Text { text } if text.is_empty()))
                     .filter_map(|c| match c {
                         Content::Text { text } => Some(serde_json::json!({"text": text})),
                         Content::ToolCall {

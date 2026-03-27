@@ -200,6 +200,7 @@ fn build_azure_request_body(config: &StreamConfig) -> serde_json::Value {
                 // Build content array for user message (supports text + images)
                 let user_content: Vec<serde_json::Value> = content
                     .iter()
+                    .filter(|c| !matches!(c, Content::Text { text } if text.is_empty()))
                     .filter_map(|c| match c {
                         Content::Text { text } => Some(serde_json::json!({
                             "type": "input_text",
@@ -230,6 +231,7 @@ fn build_azure_request_body(config: &StreamConfig) -> serde_json::Value {
             Message::Assistant { content, .. } => {
                 for c in content {
                     match c {
+                        Content::Text { text } if text.is_empty() => {}
                         Content::Text { text } => {
                             input.push(serde_json::json!({
                                 "type": "message",
@@ -261,6 +263,7 @@ fn build_azure_request_body(config: &StreamConfig) -> serde_json::Value {
                 let output_val = if content.iter().any(|c| matches!(c, Content::Image { .. })) {
                     let parts: Vec<serde_json::Value> = content
                         .iter()
+                        .filter(|c| !matches!(c, Content::Text { text } if text.is_empty()))
                         .filter_map(|c| match c {
                             Content::Text { text } => Some(serde_json::json!({
                                 "type": "input_text",
