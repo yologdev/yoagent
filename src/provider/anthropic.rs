@@ -320,7 +320,15 @@ fn build_request_body(config: &StreamConfig, is_oauth: bool) -> serde_json::Valu
         let cache_idx = messages.len() - 2;
         if let Some(content) = messages[cache_idx]["content"].as_array_mut() {
             if let Some(last_block) = content.last_mut() {
-                last_block["cache_control"] = serde_json::json!({"type": "ephemeral"});
+                let is_empty_text = last_block.get("type").and_then(|t| t.as_str()) == Some("text")
+                    && last_block
+                        .get("text")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("")
+                        .is_empty();
+                if !is_empty_text {
+                    last_block["cache_control"] = serde_json::json!({"type": "ephemeral"});
+                }
             }
         }
     }
@@ -407,6 +415,7 @@ fn build_request_body(config: &StreamConfig, is_oauth: bool) -> serde_json::Valu
 fn content_to_anthropic(content: &[Content]) -> Vec<serde_json::Value> {
     content
         .iter()
+        .filter(|c| !matches!(c, Content::Text { text } if text.is_empty()))
         .map(|c| match c {
             Content::Text { text } => serde_json::json!({"type": "text", "text": text}),
             Content::Image { data, mime_type } => serde_json::json!({
@@ -743,5 +752,64 @@ mod tests {
         let tool_result = &msgs[1]["content"][0];
         // Text-only: content should be a plain string
         assert_eq!(tool_result["content"], "hello");
+    }
+
+    #[test]
+    fn test_content_to_anthropic_filters_empty_text() {
+        let content = vec![
+            Content::Text { text: "".into() },
+            Content::Text {
+                text: "hello".into(),
+            },
+            Content::Text { text: "".into() },
+        ];
+        let result = content_to_anthropic(&content);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0]["text"], "hello");
+    }
+
+    #[test]
+    fn test_cache_control_not_set_on_empty_text_block() {
+        let config = StreamConfig {
+            model: "claude-sonnet-4-20250514".into(),
+            system_prompt: "You are helpful.".into(),
+            messages: vec![
+                Message::User {
+                    content: vec![Content::Text {
+                        text: "first message".into(),
+                    }],
+                    timestamp: 0,
+                },
+                Message::User {
+                    content: vec![Content::Text { text: "".into() }],
+                    timestamp: 0,
+                },
+                Message::User {
+                    content: vec![Content::Text {
+                        text: "last".into(),
+                    }],
+                    timestamp: 0,
+                },
+            ],
+            tools: vec![],
+            thinking_level: ThinkingLevel::Off,
+            api_key: "test-key".into(),
+            max_tokens: Some(1024),
+            temperature: None,
+            model_config: None,
+            cache_config: CacheConfig::default(),
+        };
+        let body = build_request_body(&config, false);
+        let msgs = body["messages"].as_array().unwrap();
+        // The second-to-last message has only an empty text block which gets filtered,
+        // so its content array should be empty and no cache_control should be set
+        let second_to_last = &msgs[msgs.len() - 2];
+        let content = second_to_last["content"].as_array().unwrap();
+        for block in content {
+            assert!(
+                block.get("cache_control").is_none(),
+                "cache_control should not be set on empty text blocks"
+            );
+        }
     }
 }
