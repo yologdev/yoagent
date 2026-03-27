@@ -412,6 +412,20 @@ mod tests {
     }
 
     #[test]
+    fn test_content_to_bedrock_filters_empty_text() {
+        let content = vec![
+            Content::Text { text: "".into() },
+            Content::Text {
+                text: "hello".into(),
+            },
+            Content::Text { text: "".into() },
+        ];
+        let blocks = content_to_bedrock(&content);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["text"], "hello");
+    }
+
+    #[test]
     fn test_content_to_bedrock() {
         let content = vec![
             Content::Text {

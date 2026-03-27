@@ -394,6 +394,20 @@ mod tests {
     }
 
     #[test]
+    fn test_content_to_google_parts_filters_empty_text() {
+        let content = vec![
+            Content::Text { text: "".into() },
+            Content::Text {
+                text: "hello".into(),
+            },
+            Content::Text { text: "".into() },
+        ];
+        let parts = content_to_google_parts(&content);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0]["text"], "hello");
+    }
+
+    #[test]
     fn test_content_to_google_parts_tool_call() {
         let content = vec![Content::ToolCall {
             id: "tc-1".into(),

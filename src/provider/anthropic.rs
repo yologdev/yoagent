@@ -315,19 +315,23 @@ fn build_request_body(config: &StreamConfig, is_oauth: bool) -> serde_json::Valu
         } => (*cache_system, *cache_tools, *cache_messages),
     };
 
-    // Breakpoint 3: second-to-last message (cache conversation prefix)
+    // Breakpoint 3: scan backwards from second-to-last message to find one with
+    // non-empty content to place the cache breakpoint on
     if caching_enabled && cache_messages && messages.len() >= 2 {
-        let cache_idx = messages.len() - 2;
-        if let Some(content) = messages[cache_idx]["content"].as_array_mut() {
-            if let Some(last_block) = content.last_mut() {
-                let is_empty_text = last_block.get("type").and_then(|t| t.as_str()) == Some("text")
-                    && last_block
-                        .get("text")
-                        .and_then(|t| t.as_str())
-                        .unwrap_or("")
-                        .is_empty();
-                if !is_empty_text {
-                    last_block["cache_control"] = serde_json::json!({"type": "ephemeral"});
+        for idx in (0..messages.len() - 1).rev() {
+            if let Some(content) = messages[idx]["content"].as_array_mut() {
+                if let Some(last_block) = content.last_mut() {
+                    let is_empty_text = last_block.get("type").and_then(|t| t.as_str())
+                        == Some("text")
+                        && last_block
+                            .get("text")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("")
+                            .is_empty();
+                    if !is_empty_text {
+                        last_block["cache_control"] = serde_json::json!({"type": "ephemeral"});
+                        break;
+                    }
                 }
             }
         }
@@ -802,14 +806,66 @@ mod tests {
         let body = build_request_body(&config, false);
         let msgs = body["messages"].as_array().unwrap();
         // The second-to-last message has only an empty text block which gets filtered,
-        // so its content array should be empty and no cache_control should be set
+        // so its content array should be empty
         let second_to_last = &msgs[msgs.len() - 2];
         let content = second_to_last["content"].as_array().unwrap();
-        for block in content {
-            assert!(
-                block.get("cache_control").is_none(),
-                "cache_control should not be set on empty text blocks"
-            );
-        }
+        assert!(
+            content.is_empty(),
+            "empty text blocks should be filtered out"
+        );
+
+        // Cache breakpoint should fall back to the first message instead
+        let first = &msgs[0];
+        let first_content = first["content"].as_array().unwrap();
+        let last_block = first_content.last().unwrap();
+        assert_eq!(
+            last_block["cache_control"]["type"], "ephemeral",
+            "cache_control should fall back to an earlier message with content"
+        );
+    }
+
+    #[test]
+    fn test_cache_breakpoint_falls_back_when_second_to_last_is_empty() {
+        // When the second-to-last message has only empty text blocks, the cache
+        // breakpoint should scan backwards and land on an earlier non-empty message.
+        let config = StreamConfig {
+            model: "claude-sonnet-4-20250514".into(),
+            system_prompt: "You are helpful.".into(),
+            messages: vec![
+                Message::User {
+                    content: vec![Content::Text {
+                        text: "first message".into(),
+                    }],
+                    timestamp: 0,
+                },
+                Message::User {
+                    content: vec![Content::Text { text: "".into() }],
+                    timestamp: 0,
+                },
+                Message::User {
+                    content: vec![Content::Text {
+                        text: "last message".into(),
+                    }],
+                    timestamp: 0,
+                },
+            ],
+            tools: vec![],
+            thinking_level: ThinkingLevel::Off,
+            api_key: "test-key".into(),
+            max_tokens: Some(1024),
+            temperature: None,
+            model_config: None,
+            cache_config: CacheConfig::default(),
+        };
+
+        let body = build_request_body(&config, false);
+        let msgs = body["messages"].as_array().unwrap();
+
+        // cache_control should be placed on the first message (fallback)
+        let first_content = msgs[0]["content"].as_array().unwrap();
+        assert_eq!(
+            first_content.last().unwrap()["cache_control"]["type"],
+            "ephemeral"
+        );
     }
 }
