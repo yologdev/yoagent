@@ -178,6 +178,7 @@ impl StreamProvider for OpenAiResponsesProvider {
             let args = serde_json::from_str(&buf.arguments)
                 .unwrap_or(serde_json::Value::Object(Default::default()));
             content.push(Content::ToolCall {
+                provider_metadata: None,
                 id: buf.id,
                 name: buf.name,
                 arguments: args,
@@ -266,6 +267,7 @@ fn build_request_body(config: &StreamConfig, _model_config: &ModelConfig) -> ser
                             id,
                             name,
                             arguments,
+                            ..
                         } => {
                             input.push(serde_json::json!({
                                 "type": "function_call",

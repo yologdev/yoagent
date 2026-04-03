@@ -151,6 +151,7 @@ impl StreamProvider for AzureOpenAiProvider {
             let args = serde_json::from_str(&buf.arguments)
                 .unwrap_or(serde_json::Value::Object(Default::default()));
             content.push(Content::ToolCall {
+                provider_metadata: None,
                 id: buf.id.clone(),
                 name: buf.name.clone(),
                 arguments: args,
@@ -243,6 +244,7 @@ fn build_azure_request_body(config: &StreamConfig) -> serde_json::Value {
                             id,
                             name,
                             arguments,
+                            ..
                         } => {
                             input.push(serde_json::json!({
                                 "type": "function_call",

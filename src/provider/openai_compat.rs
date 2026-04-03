@@ -196,6 +196,7 @@ impl StreamProvider for OpenAiCompatProvider {
             let args = serde_json::from_str(&buf.arguments)
                 .unwrap_or(serde_json::Value::Object(Default::default()));
             content.push(Content::ToolCall {
+                provider_metadata: None,
                 id: buf.id.clone(),
                 name: buf.name.clone(),
                 arguments: args,
@@ -275,6 +276,7 @@ fn build_request_body(
                             id,
                             name,
                             arguments,
+                            ..
                         } => {
                             tool_calls.push(serde_json::json!({
                                 "id": id,
@@ -585,6 +587,7 @@ mod tests {
             messages: vec![
                 Message::Assistant {
                     content: vec![Content::ToolCall {
+                        provider_metadata: None,
                         id: "call-1".into(),
                         name: "read_file".into(),
                         arguments: serde_json::json!({"path": "img.png"}),

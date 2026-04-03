@@ -98,6 +98,7 @@ impl StreamProvider for MockProvider {
                         });
                         let _ = tx.send(StreamEvent::ToolCallEnd { content_index: i });
                         Content::ToolCall {
+                            provider_metadata: None,
                             id,
                             name: call.name.clone(),
                             arguments: call.arguments.clone(),
