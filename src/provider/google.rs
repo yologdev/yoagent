@@ -84,14 +84,16 @@ impl StreamProvider for GoogleProvider {
                         Some(Ok(bytes)) => {
                             buffer.push_str(&String::from_utf8_lossy(&bytes));
 
-                            // Process complete SSE events
-                            while let Some(pos) = buffer.find("\n\n") {
+                            // Process complete SSE events (handle both \n\n and \r\n\r\n)
+                            while let Some(pos) = buffer.find("\n\n").or_else(|| buffer.find("\r\n\r\n")) {
+                                let sep_len = if buffer[pos..].starts_with("\r\n\r\n") { 4 } else { 2 };
                                 let event_str = buffer[..pos].to_string();
-                                buffer = buffer[pos + 2..].to_string();
+                                buffer = buffer[pos + sep_len..].to_string();
 
-                                // Parse SSE data line
+                                // Parse SSE data line (strip trailing \r)
                                 let data = event_str
                                     .lines()
+                                    .map(|l| l.trim_end_matches('\r'))
                                     .find(|l| l.starts_with("data: "))
                                     .map(|l| &l[6..])
                                     .unwrap_or("");
@@ -113,6 +115,10 @@ impl StreamProvider for GoogleProvider {
                                     if let Some(c) = &candidate.content {
                                         for part in &c.parts {
                                             if let Some(text) = &part.text {
+                                                // Skip empty text parts (sent during thinking)
+                                                if text.is_empty() {
+                                                    continue;
+                                                }
                                                 let text_idx = content.iter().position(|c| matches!(c, Content::Text { .. }));
                                                 let idx = match text_idx {
                                                     Some(i) => i,
@@ -130,8 +136,14 @@ impl StreamProvider for GoogleProvider {
                                                 });
                                             }
                                             if let Some(fc) = &part.function_call {
-                                                let id = format!("google-fc-{}", content.len());
-                                                let args = fc.args.clone().unwrap_or(serde_json::Value::Object(Default::default()));
+                                                let id = fc.id.clone().unwrap_or_else(|| format!("google-fc-{}", content.len()));
+                                                let mut args = fc.args.clone().unwrap_or(serde_json::Value::Object(Default::default()));
+                                                // Store thought signature for round-tripping
+                                                if let Some(sig) = &part.thought_signature {
+                                                    if let Some(obj) = args.as_object_mut() {
+                                                        obj.insert("__thought_signature".into(), serde_json::Value::String(sig.clone()));
+                                                    }
+                                                }
                                                 let idx = content.len();
                                                 content.push(Content::ToolCall {
                                                     id: id.clone(),
@@ -149,11 +161,15 @@ impl StreamProvider for GoogleProvider {
                                         }
                                     }
                                     if let Some(reason) = &candidate.finish_reason {
-                                        stop_reason = match reason.as_str() {
-                                            "STOP" => StopReason::Stop,
-                                            "MAX_TOKENS" | "RECITATION" => StopReason::Length,
-                                            _ => StopReason::Stop,
-                                        };
+                                        // Don't override ToolUse -- Gemini returns "STOP"
+                                        // even when it emits function calls
+                                        if stop_reason != StopReason::ToolUse {
+                                            stop_reason = match reason.as_str() {
+                                                "STOP" => StopReason::Stop,
+                                                "MAX_TOKENS" | "RECITATION" => StopReason::Length,
+                                                _ => StopReason::Stop,
+                                            };
+                                        }
                                     }
                                 }
 
@@ -208,7 +224,7 @@ fn build_request_body(config: &StreamConfig) -> serde_json::Value {
                 }));
             }
             Message::ToolResult {
-                tool_call_id: _,
+                tool_call_id,
                 tool_name,
                 content,
                 ..
@@ -221,12 +237,15 @@ fn build_request_body(config: &StreamConfig) -> serde_json::Value {
                     })
                     .unwrap_or_default();
 
-                let mut parts = vec![serde_json::json!({
-                    "functionResponse": {
-                        "name": tool_name,
-                        "response": {"result": text},
-                    }
-                })];
+                let mut fr = serde_json::json!({
+                    "name": tool_name,
+                    "response": {"result": text},
+                });
+                // Include the function call ID if present (required by newer Gemini models)
+                if !tool_call_id.is_empty() && !tool_call_id.starts_with("google-fc-") {
+                    fr["id"] = serde_json::json!(tool_call_id);
+                }
+                let mut parts = vec![serde_json::json!({"functionResponse": fr})];
 
                 // Append image parts if present
                 for c in content {
@@ -296,10 +315,25 @@ fn content_to_google_parts(content: &[Content]) -> Vec<serde_json::Value> {
                 "inlineData": {"mimeType": mime_type, "data": data},
             })),
             Content::ToolCall {
-                name, arguments, ..
-            } => Some(serde_json::json!({
-                "functionCall": {"name": name, "args": arguments},
-            })),
+                id,
+                name,
+                arguments,
+            } => {
+                let mut args = arguments.clone();
+                let thought_sig = args
+                    .as_object_mut()
+                    .and_then(|o| o.remove("__thought_signature"))
+                    .and_then(|v| v.as_str().map(|s| s.to_string()));
+                let mut fc = serde_json::json!({"name": name, "args": args});
+                if !id.starts_with("google-fc-") && !id.is_empty() {
+                    fc["id"] = serde_json::json!(id);
+                }
+                let mut part = serde_json::json!({"functionCall": fc});
+                if let Some(sig) = thought_sig {
+                    part["thoughtSignature"] = serde_json::json!(sig);
+                }
+                Some(part)
+            }
             Content::Thinking { .. } => None,
         })
         .collect()
@@ -334,6 +368,8 @@ struct GooglePart {
     text: Option<String>,
     #[serde(default, rename = "functionCall")]
     function_call: Option<GoogleFunctionCall>,
+    #[serde(default, rename = "thoughtSignature")]
+    thought_signature: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -341,6 +377,8 @@ struct GoogleFunctionCall {
     name: String,
     #[serde(default)]
     args: Option<serde_json::Value>,
+    #[serde(default)]
+    id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -416,5 +454,195 @@ mod tests {
         }];
         let parts = content_to_google_parts(&content);
         assert_eq!(parts[0]["functionCall"]["name"], "bash");
+    }
+
+    #[test]
+    fn test_parse_chunk_with_function_call_and_thought_signature() {
+        let data = r#"{"candidates": [{"content": {"parts": [{"functionCall": {"name": "bash", "args": {"command": "echo hi"}, "id": "abc123"}, "thoughtSignature": "SIG_DATA"}], "role": "model"}, "finishReason": "STOP", "index": 0}], "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 5, "totalTokenCount": 15}}"#;
+
+        let chunk: GoogleChunk = serde_json::from_str(data).unwrap();
+        let candidates = chunk.candidates.unwrap();
+        assert_eq!(candidates.len(), 1);
+
+        let parts = &candidates[0].content.as_ref().unwrap().parts;
+        assert_eq!(parts.len(), 1);
+
+        let fc = parts[0].function_call.as_ref().unwrap();
+        assert_eq!(fc.name, "bash");
+        assert_eq!(fc.id.as_deref(), Some("abc123"));
+        assert_eq!(fc.args.as_ref().unwrap()["command"], "echo hi");
+
+        assert_eq!(parts[0].thought_signature.as_deref(), Some("SIG_DATA"));
+    }
+
+    #[test]
+    fn test_parse_chunk_with_empty_text() {
+        // Gemini sends empty text parts during thinking -- these should parse fine
+        let data = r#"{"candidates": [{"content": {"parts": [{"text": ""}], "role": "model"}, "index": 0}]}"#;
+
+        let chunk: GoogleChunk = serde_json::from_str(data).unwrap();
+        let candidates = chunk.candidates.unwrap();
+        let parts = &candidates[0].content.as_ref().unwrap().parts;
+        assert_eq!(parts[0].text.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn test_parse_chunk_with_crlf_sse() {
+        // Simulate \r\n line endings from Google's API
+        let raw = "data: {\"candidates\": [{\"content\": {\"parts\": [{\"text\": \"Blue\"}], \"role\": \"model\"}, \"finishReason\": \"STOP\", \"index\": 0}]}\r\n\r\n";
+
+        // Verify our separator detection works
+        let pos = raw.find("\n\n").or_else(|| raw.find("\r\n\r\n"));
+        assert!(pos.is_some(), "Should find separator");
+        let sep_start = pos.unwrap();
+        let is_crlf = raw[sep_start..].starts_with("\r\n\r\n");
+        assert!(is_crlf, "Should detect \\r\\n\\r\\n separator");
+
+        let event_str = &raw[..sep_start];
+        let data = event_str
+            .lines()
+            .map(|l| l.trim_end_matches('\r'))
+            .find(|l| l.starts_with("data: "))
+            .map(|l| &l[6..])
+            .unwrap();
+
+        let chunk: GoogleChunk = serde_json::from_str(data).unwrap();
+        let candidates = chunk.candidates.unwrap();
+        let text = &candidates[0].content.as_ref().unwrap().parts[0].text;
+        assert_eq!(text.as_deref(), Some("Blue"));
+    }
+
+    #[test]
+    fn test_thought_signature_round_trip() {
+        // Store thought signature in tool call arguments
+        let content = vec![Content::ToolCall {
+            id: "abc123".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({
+                "command": "echo hi",
+                "__thought_signature": "SIG_DATA"
+            }),
+        }];
+
+        let parts = content_to_google_parts(&content);
+        assert_eq!(parts.len(), 1);
+
+        // Should have functionCall with id
+        assert_eq!(parts[0]["functionCall"]["name"], "bash");
+        assert_eq!(parts[0]["functionCall"]["id"], "abc123");
+
+        // Args should NOT contain __thought_signature
+        assert!(parts[0]["functionCall"]["args"]
+            .get("__thought_signature")
+            .is_none());
+        assert_eq!(parts[0]["functionCall"]["args"]["command"], "echo hi");
+
+        // thoughtSignature should be a sibling of functionCall
+        assert_eq!(parts[0]["thoughtSignature"], "SIG_DATA");
+    }
+
+    #[test]
+    fn test_tool_call_without_thought_signature() {
+        // Generated IDs (google-fc-*) should not be included
+        let content = vec![Content::ToolCall {
+            id: "google-fc-0".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({"command": "ls"}),
+        }];
+
+        let parts = content_to_google_parts(&content);
+        assert!(parts[0]["functionCall"].get("id").is_none());
+        assert!(parts[0].get("thoughtSignature").is_none());
+    }
+
+    #[test]
+    fn test_function_response_includes_id() {
+        let config = StreamConfig {
+            model: "gemini-2.5-flash".into(),
+            system_prompt: "".into(),
+            messages: vec![
+                Message::Assistant {
+                    content: vec![Content::ToolCall {
+                        id: "abc123".into(),
+                        name: "bash".into(),
+                        arguments: serde_json::json!({"command": "echo hi"}),
+                    }],
+                    stop_reason: StopReason::ToolUse,
+                    model: "test".into(),
+                    provider: "test".into(),
+                    usage: Usage::default(),
+                    timestamp: 0,
+                    error_message: None,
+                },
+                Message::ToolResult {
+                    tool_call_id: "abc123".into(),
+                    tool_name: "bash".into(),
+                    content: vec![Content::Text { text: "hi".into() }],
+                    is_error: false,
+                    timestamp: 0,
+                },
+            ],
+            tools: vec![],
+            thinking_level: ThinkingLevel::Off,
+            api_key: "test".into(),
+            max_tokens: None,
+            temperature: None,
+            model_config: None,
+            cache_config: CacheConfig::default(),
+        };
+
+        let body = build_request_body(&config);
+        let msgs = body["contents"].as_array().unwrap();
+        let tool_result = &msgs[1]["parts"][0]["functionResponse"];
+        assert_eq!(tool_result["name"], "bash");
+        assert_eq!(tool_result["id"], "abc123");
+        assert_eq!(tool_result["response"]["result"], "hi");
+    }
+
+    #[test]
+    fn test_function_response_no_id_for_generated() {
+        let config = StreamConfig {
+            model: "gemini-2.5-flash".into(),
+            system_prompt: "".into(),
+            messages: vec![
+                Message::Assistant {
+                    content: vec![Content::ToolCall {
+                        id: "google-fc-0".into(),
+                        name: "bash".into(),
+                        arguments: serde_json::json!({"command": "ls"}),
+                    }],
+                    stop_reason: StopReason::ToolUse,
+                    model: "test".into(),
+                    provider: "test".into(),
+                    usage: Usage::default(),
+                    timestamp: 0,
+                    error_message: None,
+                },
+                Message::ToolResult {
+                    tool_call_id: "google-fc-0".into(),
+                    tool_name: "bash".into(),
+                    content: vec![Content::Text {
+                        text: "output".into(),
+                    }],
+                    is_error: false,
+                    timestamp: 0,
+                },
+            ],
+            tools: vec![],
+            thinking_level: ThinkingLevel::Off,
+            api_key: "test".into(),
+            max_tokens: None,
+            temperature: None,
+            model_config: None,
+            cache_config: CacheConfig::default(),
+        };
+
+        let body = build_request_body(&config);
+        let msgs = body["contents"].as_array().unwrap();
+        let tool_result = &msgs[1]["parts"][0]["functionResponse"];
+        assert!(
+            tool_result.get("id").is_none(),
+            "Generated ID should not be included"
+        );
     }
 }
