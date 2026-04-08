@@ -220,7 +220,7 @@ async fn parse_google_sse_response(
                                             let id = format!("vertex-fc-{}", content.len());
                                             let args = fc.args.unwrap_or(serde_json::Value::Object(Default::default()));
                                             let idx = content.len();
-                                            content.push(Content::ToolCall {
+                                            content.push(Content::ToolCall { provider_metadata: None,
                                                 id: id.clone(),
                                                 name: fc.name.clone(),
                                                 arguments: args,

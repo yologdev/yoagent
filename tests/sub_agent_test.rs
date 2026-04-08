@@ -131,6 +131,7 @@ async fn test_sub_agent_with_tools() {
     // Sub-agent first calls the echo tool, then responds with text
     let sub_provider = Arc::new(MockProvider::new(vec![
         MockResponse::ToolCalls(vec![MockToolCall {
+            provider_metadata: None,
             name: "echo".into(),
             arguments: serde_json::json!({"text": "hello"}),
         }]),
@@ -225,6 +226,7 @@ async fn test_sub_agent_max_turns() {
     // The sub-agent won't get a second LLM call to produce text.
     let sub_provider = Arc::new(MockProvider::new(vec![
         MockResponse::ToolCalls(vec![MockToolCall {
+            provider_metadata: None,
             name: "echo".into(),
             arguments: serde_json::json!({"text": "loop"}),
         }]),
@@ -339,10 +341,12 @@ async fn test_sub_agent_parallel() {
     let parent_provider = MockProvider::new(vec![
         MockResponse::ToolCalls(vec![
             MockToolCall {
+                provider_metadata: None,
                 name: "agent_a".into(),
                 arguments: serde_json::json!({"task": "Do A"}),
             },
             MockToolCall {
+                provider_metadata: None,
                 name: "agent_b".into(),
                 arguments: serde_json::json!({"task": "Do B"}),
             },
@@ -491,6 +495,7 @@ async fn test_sub_agent_in_parent_loop() {
 
     let parent_provider = MockProvider::new(vec![
         MockResponse::ToolCalls(vec![MockToolCall {
+            provider_metadata: None,
             name: "calculator".into(),
             arguments: serde_json::json!({"task": "What is 6*7?"}),
         }]),

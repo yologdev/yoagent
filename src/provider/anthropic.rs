@@ -96,7 +96,7 @@ impl StreamProvider for AnthropicProvider {
                                             }
                                             AnthropicContentBlock::ToolUse { id, name, .. } => {
                                                 while content.len() <= idx {
-                                                    content.push(Content::ToolCall {
+                                                    content.push(Content::ToolCall { provider_metadata: None,
                                                         id: id.clone(),
                                                         name: name.clone(),
                                                         arguments: serde_json::Value::Object(Default::default()),
@@ -438,6 +438,7 @@ fn content_to_anthropic(content: &[Content]) -> Vec<serde_json::Value> {
                 id,
                 name,
                 arguments,
+                ..
             } => serde_json::json!({
                 "type": "tool_use",
                 "id": id,
@@ -658,6 +659,7 @@ mod tests {
             messages: vec![
                 Message::Assistant {
                     content: vec![Content::ToolCall {
+                        provider_metadata: None,
                         id: "tc-1".into(),
                         name: "read_file".into(),
                         arguments: serde_json::json!({"path": "test.png"}),
@@ -718,6 +720,7 @@ mod tests {
             messages: vec![
                 Message::Assistant {
                     content: vec![Content::ToolCall {
+                        provider_metadata: None,
                         id: "tc-1".into(),
                         name: "bash".into(),
                         arguments: serde_json::json!({"command": "echo hi"}),
