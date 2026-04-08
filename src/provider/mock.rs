@@ -16,6 +16,8 @@ pub enum MockResponse {
 pub struct MockToolCall {
     pub name: String,
     pub arguments: serde_json::Value,
+    #[allow(dead_code)]
+    pub provider_metadata: Option<serde_json::Value>,
 }
 
 /// Mock LLM provider for tests. Supply a sequence of responses.
@@ -98,10 +100,10 @@ impl StreamProvider for MockProvider {
                         });
                         let _ = tx.send(StreamEvent::ToolCallEnd { content_index: i });
                         Content::ToolCall {
-                            provider_metadata: None,
                             id,
                             name: call.name.clone(),
                             arguments: call.arguments.clone(),
+                            provider_metadata: call.provider_metadata.clone(),
                         }
                     })
                     .collect();
