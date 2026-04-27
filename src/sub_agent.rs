@@ -28,6 +28,8 @@
 use crate::agent_loop::{agent_loop, AgentLoopConfig};
 use crate::context::ExecutionLimits;
 use crate::provider::StreamProvider;
+use crate::shared_state::SharedState;
+use crate::tools::shared_state_tool::SharedStateTool;
 use crate::types::*;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -54,6 +56,7 @@ pub struct SubAgentTool {
     tool_execution: ToolExecutionStrategy,
     retry_config: crate::retry::RetryConfig,
     max_turns: usize,
+    shared_state: Option<SharedState>,
 }
 
 impl SubAgentTool {
@@ -74,6 +77,7 @@ impl SubAgentTool {
             tool_execution: ToolExecutionStrategy::default(),
             retry_config: crate::retry::RetryConfig::default(),
             max_turns: DEFAULT_MAX_TURNS,
+            shared_state: None,
         }
     }
 
@@ -129,6 +133,14 @@ impl SubAgentTool {
 
     pub fn with_max_turns(mut self, max: usize) -> Self {
         self.max_turns = max;
+        self
+    }
+
+    /// Attach a shared key-value store. Sub-agents get a `shared_state` tool
+    /// to read/write variables. The parent can also read/write programmatically
+    /// via the `SharedState` handle.
+    pub fn with_shared_state(mut self, state: SharedState) -> Self {
+        self.shared_state = Some(state);
         self
     }
 }
@@ -203,15 +215,26 @@ impl AgentTool for SubAgentTool {
             .to_string();
 
         // Build tool list from Arc wrappers
-        let tools: Vec<Box<dyn AgentTool>> = self
+        let mut tools: Vec<Box<dyn AgentTool>> = self
             .tools
             .iter()
             .map(|t| Box::new(ArcToolWrapper(Arc::clone(t))) as Box<dyn AgentTool>)
             .collect();
 
+        // Inject SharedStateTool when shared state is configured
+        let mut system_prompt = self.system_prompt.clone();
+        if let Some(ref state) = self.shared_state {
+            tools.push(Box::new(SharedStateTool::new(state.clone())));
+            let summary = state.summary().await;
+            system_prompt.push_str(&format!(
+                "\n\n## Shared State\nYou have access to a shared variable store via the `shared_state` tool.\nAvailable: {}",
+                summary
+            ));
+        }
+
         // Fresh context for the sub-agent
         let mut context = AgentContext {
-            system_prompt: self.system_prompt.clone(),
+            system_prompt,
             messages: Vec::new(),
             tools,
         };
