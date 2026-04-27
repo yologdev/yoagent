@@ -24,6 +24,7 @@ async fn test_sub_agent_reads_shared_state() {
     let sub_provider = Arc::new(MockProvider::new(vec![
         MockResponse::ToolCalls(vec![MockToolCall {
             name: "shared_state".into(),
+            provider_metadata: None,
             arguments: serde_json::json!({"action": "get", "key": "artifact"}),
         }]),
         MockResponse::Text("The build failed with exit code 1".into()),
@@ -69,6 +70,7 @@ async fn test_sub_agent_writes_shared_state() {
     let sub_provider = Arc::new(MockProvider::new(vec![
         MockResponse::ToolCalls(vec![MockToolCall {
             name: "shared_state".into(),
+            provider_metadata: None,
             arguments: serde_json::json!({
                 "action": "set",
                 "key": "summary",
@@ -117,10 +119,12 @@ async fn test_parallel_sub_agents_share_state() {
     let provider_a = Arc::new(MockProvider::new(vec![
         MockResponse::ToolCalls(vec![MockToolCall {
             name: "shared_state".into(),
+            provider_metadata: None,
             arguments: serde_json::json!({"action": "get", "key": "input"}),
         }]),
         MockResponse::ToolCalls(vec![MockToolCall {
             name: "shared_state".into(),
+            provider_metadata: None,
             arguments: serde_json::json!({"action": "set", "key": "result_a", "value": "from A"}),
         }]),
         MockResponse::Text("A done".into()),
@@ -130,10 +134,12 @@ async fn test_parallel_sub_agents_share_state() {
     let provider_b = Arc::new(MockProvider::new(vec![
         MockResponse::ToolCalls(vec![MockToolCall {
             name: "shared_state".into(),
+            provider_metadata: None,
             arguments: serde_json::json!({"action": "get", "key": "input"}),
         }]),
         MockResponse::ToolCalls(vec![MockToolCall {
             name: "shared_state".into(),
+            provider_metadata: None,
             arguments: serde_json::json!({"action": "set", "key": "result_b", "value": "from B"}),
         }]),
         MockResponse::Text("B done".into()),
@@ -221,6 +227,7 @@ async fn test_shared_state_summary_in_system_prompt() {
     let sub_provider = Arc::new(MockProvider::new(vec![
         MockResponse::ToolCalls(vec![MockToolCall {
             name: "shared_state".into(),
+            provider_metadata: None,
             arguments: serde_json::json!({"action": "list"}),
         }]),
         MockResponse::Text("Listed state".into()),
