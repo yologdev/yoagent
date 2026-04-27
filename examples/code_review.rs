@@ -12,8 +12,7 @@
 //! Try it on this repo:
 //!   ANTHROPIC_API_KEY=sk-... cargo run --example code_review -- src/shared_state.rs
 
-use std::io::Write;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use yoagent::provider::{AnthropicProvider, StreamProvider};
 use yoagent::shared_state::SharedState;
 use yoagent::sub_agent::SubAgentTool;
@@ -100,44 +99,68 @@ async fn main() {
     // --- Run all three in parallel with streaming ---
     println!("Dispatching 3 reviewers in parallel...\n");
 
-    let ctx = |label: &str| {
+    let make_ctx = |label: &str| -> (ToolContext, Arc<Mutex<String>>) {
         let label = label.to_string();
-        ToolContext {
+        let buf: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+        let ctx = ToolContext {
             tool_call_id: format!("tc-{}", label),
             tool_name: label.clone(),
             cancel: tokio_util::sync::CancellationToken::new(),
             on_update: Some(Arc::new({
                 let label = label.clone();
+                let buf = buf.clone();
                 move |result: ToolResult| {
                     for content in &result.content {
                         if let Content::Text { text } = content {
-                            // Print streaming deltas with agent label prefix
-                            eprint!("[{}] {}", label, text);
-                            let _ = std::io::stderr().flush();
+                            let mut b = buf.lock().unwrap();
+                            // Tool call events: flush buffer first, print on own line
+                            if text.starts_with("[sub-agent calling tool:") {
+                                if !b.is_empty() {
+                                    eprintln!("[{}] {}", label, b.drain(..).collect::<String>());
+                                }
+                                eprintln!("[{}] {}", label, text);
+                                continue;
+                            }
+                            b.push_str(text);
+                            while let Some(pos) = b.find('\n') {
+                                let line: String = b.drain(..=pos).collect();
+                                eprint!("[{}] {}", label, line);
+                            }
                         }
                     }
                 }
             })),
             on_progress: None,
-        }
+        };
+        (ctx, buf)
     };
+
+    let (ctx1, buf1) = make_ctx("bugs");
+    let (ctx2, buf2) = make_ctx("quality");
+    let (ctx3, buf3) = make_ctx("docs");
 
     let (r1, r2, r3) = tokio::join!(
         bug_reviewer.execute(
             serde_json::json!({"task": "Review the source code for bugs and logic errors."}),
-            ctx("bugs"),
+            ctx1,
         ),
         quality_reviewer.execute(
             serde_json::json!({"task": "Review the source code for quality and style."}),
-            ctx("quality"),
+            ctx2,
         ),
         docs_reviewer.execute(
             serde_json::json!({"task": "Review the source code for documentation completeness."}),
-            ctx("docs"),
+            ctx3,
         ),
     );
 
-    eprintln!();
+    // Flush any remaining buffered text
+    for (label, buf) in [("bugs", buf1), ("quality", buf2), ("docs", buf3)] {
+        let b = buf.lock().unwrap();
+        if !b.is_empty() {
+            eprintln!("[{}] {}", label, *b);
+        }
+    }
     r1.expect("bug reviewer failed");
     r2.expect("quality reviewer failed");
     r3.expect("docs reviewer failed");
