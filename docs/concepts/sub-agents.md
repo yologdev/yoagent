@@ -74,6 +74,68 @@ When the parent provides an `on_update` callback (standard for all tools), sub-a
 - Text deltas from the sub-agent's LLM responses
 - Tool call notifications from the sub-agent's tool usage
 
+## Shared State
+
+By default, each sub-agent invocation is isolated — to pass data between sub-agents, the parent must re-paste it into every prompt. For large artifacts (CI logs, codebases, analysis results), this wastes context tokens.
+
+`SharedState` solves this: store an artifact once, and any number of sub-agents read/write it by reference.
+
+```rust
+use yoagent::shared_state::SharedState;
+
+let state = SharedState::new();
+state.set("ci_log", large_log_text).await.unwrap();
+
+let analyzer = SubAgentTool::new("analyzer", provider.clone())
+    .with_system_prompt("Analyze the CI log for failures.")
+    .with_model("claude-sonnet-4-20250514")
+    .with_api_key(&api_key)
+    .with_shared_state(state.clone());  // opt-in
+```
+
+When `.with_shared_state()` is used, the sub-agent automatically gets:
+
+1. A `shared_state` tool with `get`, `set`, `list`, and `remove` actions
+2. A system prompt appendix listing available keys and their sizes
+
+The sub-agent reads the artifact via tool call instead of having it pasted into the prompt:
+
+```
+Sub-agent calls: shared_state(action="get", key="ci_log")
+Sub-agent calls: shared_state(action="set", key="summary", value="...")
+```
+
+The parent reads results back programmatically:
+
+```rust
+let summary = state.get("summary").await.expect("sub-agent wrote this");
+```
+
+### Parallel Sub-Agents with Shared State
+
+Multiple sub-agents can share the same `SharedState` concurrently. Each gets its own clone of the `Arc` handle — reads are concurrent, writes are serialized by `tokio::sync::RwLock`.
+
+```rust
+let error_analyst = SubAgentTool::new("error_analyst", provider.clone())
+    .with_shared_state(state.clone());
+let perf_analyst = SubAgentTool::new("perf_analyst", provider.clone())
+    .with_shared_state(state.clone());
+
+// Both run in parallel, reading the same artifact and writing different keys
+```
+
+### Capacity Limits
+
+Default capacity is 10MB. Customize with `SharedState::with_max_bytes()`:
+
+```rust
+let state = SharedState::with_max_bytes(50 * 1024 * 1024); // 50MB
+```
+
+A `set` call that would exceed capacity returns `Err(CapacityError)`.
+
+See [`examples/shared_state.rs`](../../examples/shared_state.rs) for a complete parallel analysis demo.
+
 ## Design Decisions
 
 - **Context isolation**: Each invocation starts fresh. Sub-agents don't accumulate history across calls.
