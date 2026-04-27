@@ -19,7 +19,8 @@
 use std::sync::{Arc, Mutex};
 use yoagent::provider::model::ModelConfig;
 use yoagent::provider::{OpenAiCompatProvider, StreamProvider};
-use yoagent::shared_state::SharedState;
+#[allow(unused_imports)]
+use yoagent::shared_state::{FileBackend, SharedState};
 use yoagent::sub_agent::SubAgentTool;
 use yoagent::tools;
 use yoagent::*;
@@ -37,6 +38,10 @@ async fn main() {
     println!("Target: {}\n", target_dir);
 
     let state = SharedState::new();
+
+    // Or use filesystem backend — each key becomes a file for persistence
+    // and easy inspection of agent outputs:
+    // let state = SharedState::with_backend(FileBackend::new(".rlm-state"));
 
     // Store the target directory so agents know where to look
     state
