@@ -128,15 +128,45 @@ let perf_analyst = SubAgentTool::new("perf_analyst", provider.clone())
 // Both run in parallel, reading the same artifact and writing different keys
 ```
 
-### Capacity Limits
+### Backends
 
-Default capacity is 10MB. Customize with `SharedState::with_max_bytes()`:
+`SharedState` is backed by a pluggable `SharedStateBackend` trait. Two built-in backends are provided:
+
+**MemoryBackend** (default) — in-memory `HashMap` with a byte capacity limit:
 
 ```rust
+let state = SharedState::new();                          // 10MB default
 let state = SharedState::with_max_bytes(50 * 1024 * 1024); // 50MB
 ```
 
 A `set` call that would exceed capacity returns `Err(CapacityError)`.
+
+**FileBackend** — one file per key, persistent across process restarts:
+
+```rust
+use yoagent::shared_state::FileBackend;
+
+let state = SharedState::with_backend(FileBackend::new(".agent-state"));
+```
+
+Keys are percent-encoded to filenames (reversible, no collisions). Useful for debugging (inspect state with `ls` / `cat`) and for long-running workflows where memory limits matter.
+
+**Custom backends** implement the `SharedStateBackend` trait:
+
+```rust
+use yoagent::shared_state::{SharedStateBackend, SharedStateError};
+
+#[async_trait::async_trait]
+impl SharedStateBackend for MyRedisBackend {
+    async fn get(&self, key: &str) -> Result<Option<String>, SharedStateError> { ... }
+    async fn set(&self, key: &str, value: String) -> Result<(), SharedStateError> { ... }
+    async fn remove(&self, key: &str) -> Result<bool, SharedStateError> { ... }
+    async fn keys(&self) -> Result<Vec<String>, SharedStateError> { ... }
+    async fn summary(&self) -> Result<String, SharedStateError> { ... }
+}
+
+let state = SharedState::with_backend(MyRedisBackend::new());
+```
 
 See [`examples/shared_state.rs`](../../examples/shared_state.rs) for a complete parallel analysis demo.
 

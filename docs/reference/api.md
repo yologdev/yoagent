@@ -186,6 +186,52 @@ All return `Self` for chaining.
 | `with_retry_config(config: RetryConfig) -> Self` | Custom retry configuration |
 | `with_turn_delay(delay: Duration) -> Self` | Inter-turn delay to throttle API calls (skips first turn) |
 
+## SharedState
+
+Pluggable key-value store for sub-agent communication. Backed by a `SharedStateBackend` trait.
+
+### Construction
+
+```rust
+use yoagent::shared_state::{SharedState, FileBackend};
+
+let state = SharedState::new();                              // MemoryBackend, 10MB cap
+let state = SharedState::with_max_bytes(50 * 1024 * 1024);  // MemoryBackend, 50MB cap
+let state = SharedState::with_backend(FileBackend::new("./state-dir")); // FileBackend
+```
+
+### Methods
+
+| Method | Description |
+|--------|-------------|
+| `async get(key) -> Option<String>` | Read a value by key |
+| `async set(key, value) -> Result<(), SharedStateError>` | Store a value |
+| `async remove(key) -> bool` | Delete a key, returns whether it existed |
+| `async keys() -> Vec<String>` | List all keys |
+| `async summary() -> String` | Human-readable summary of keys and sizes |
+
+### Built-in Backends
+
+| Backend | Description |
+|---------|-------------|
+| `MemoryBackend` | In-memory `HashMap` with byte capacity limit (default) |
+| `FileBackend` | One file per key, percent-encoded filenames, persistent |
+
+### Custom Backends
+
+Implement the `SharedStateBackend` trait:
+
+```rust
+#[async_trait::async_trait]
+pub trait SharedStateBackend: Send + Sync {
+    async fn get(&self, key: &str) -> Result<Option<String>, SharedStateError>;
+    async fn set(&self, key: &str, value: String) -> Result<(), SharedStateError>;
+    async fn remove(&self, key: &str) -> Result<bool, SharedStateError>;
+    async fn keys(&self) -> Result<Vec<String>, SharedStateError>;
+    async fn summary(&self) -> Result<String, SharedStateError>;
+}
+```
+
 ## Re-exports
 
 The crate re-exports key types from `lib.rs`:
