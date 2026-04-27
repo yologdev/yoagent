@@ -307,9 +307,7 @@ impl SharedStateBackend for FileBackend {
         let mut entries = Vec::new();
         let mut dir = match tokio::fs::read_dir(&self.dir).await {
             Ok(dir) => dir,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok("(empty)".to_string())
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok("(empty)".to_string()),
             Err(e) => return Err(e.into()),
         };
         while let Some(entry) = dir.next_entry().await? {
@@ -493,7 +491,7 @@ mod tests {
     async fn test_overwrite_within_capacity() {
         let state = SharedState::with_max_bytes(30);
         state.set("k", "aaaaaaaaaa".into()).await.unwrap(); // 1+10=11
-        // Overwrite with larger value — old value excluded from budget
+                                                            // Overwrite with larger value — old value excluded from budget
         state.set("k", "bbbbbbbbbbbbbbbbbb".into()).await.unwrap(); // 1+18=19
         assert_eq!(state.get("k").await, Some("bbbbbbbbbbbbbbbbbb".into()));
     }

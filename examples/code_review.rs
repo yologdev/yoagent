@@ -35,11 +35,7 @@ async fn main() {
         std::process::exit(1);
     });
 
-    println!(
-        "Reviewing: {} ({} bytes)\n",
-        file_path,
-        source_code.len()
-    );
+    println!("Reviewing: {} ({} bytes)\n", file_path, source_code.len());
 
     // --- Store the source code once in shared state ---
     let state = SharedState::new();
@@ -185,6 +181,9 @@ async fn main() {
     }
 
     println!("═══════════════════════════════════════════════════════════");
-    println!("  Review complete. Shared state keys: {}", state.summary().await);
+    println!(
+        "  Review complete. Shared state keys: {}",
+        state.summary().await
+    );
     println!("═══════════════════════════════════════════════════════════");
 }
