@@ -7,7 +7,7 @@
 //! # Design
 //!
 //! - **Context isolation**: each invocation starts a fresh conversation
-//! - **Depth limiting**: sub-agents are not given other SubAgentTools (static, no runtime counter)
+//! - **Nesting supported**: sub-agents can contain other SubAgentTools for recursive delegation (use `with_max_turns()` to bound depth)
 //! - **Cancellation propagation**: the parent's cancel token is forwarded
 //! - **Event forwarding**: sub-agent events stream to the parent via `on_update`
 //!
@@ -27,7 +27,10 @@
 
 use crate::agent_loop::{agent_loop, AgentLoopConfig};
 use crate::context::ExecutionLimits;
+use crate::provider::model::ModelConfig;
 use crate::provider::StreamProvider;
+use crate::shared_state::SharedState;
+use crate::tools::shared_state_tool::SharedStateTool;
 use crate::types::*;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -54,6 +57,9 @@ pub struct SubAgentTool {
     tool_execution: ToolExecutionStrategy,
     retry_config: crate::retry::RetryConfig,
     max_turns: usize,
+    shared_state: Option<SharedState>,
+    turn_delay: Option<std::time::Duration>,
+    model_config: Option<ModelConfig>,
 }
 
 impl SubAgentTool {
@@ -74,6 +80,9 @@ impl SubAgentTool {
             tool_execution: ToolExecutionStrategy::default(),
             retry_config: crate::retry::RetryConfig::default(),
             max_turns: DEFAULT_MAX_TURNS,
+            shared_state: None,
+            turn_delay: None,
+            model_config: None,
         }
     }
 
@@ -129,6 +138,30 @@ impl SubAgentTool {
 
     pub fn with_max_turns(mut self, max: usize) -> Self {
         self.max_turns = max;
+        self
+    }
+
+    /// Attach a shared key-value store. Sub-agents get a `shared_state` tool
+    /// to read/write variables. The parent can also read/write programmatically
+    /// via the `SharedState` handle.
+    pub fn with_shared_state(mut self, state: SharedState) -> Self {
+        self.shared_state = Some(state);
+        self
+    }
+
+    /// Add an inter-turn delay to throttle API requests.
+    /// Useful when using OAuth tokens or providers with low rate limits.
+    /// The delay is applied before each turn except the first.
+    pub fn with_turn_delay(mut self, delay: std::time::Duration) -> Self {
+        self.turn_delay = Some(delay);
+        self
+    }
+
+    /// Set the model configuration for multi-provider support.
+    /// Required for non-Anthropic providers (OpenAI-compat, Google, etc.)
+    /// to specify base URL, compat flags, and other provider-specific settings.
+    pub fn with_model_config(mut self, config: ModelConfig) -> Self {
+        self.model_config = Some(config);
         self
     }
 }
@@ -203,15 +236,26 @@ impl AgentTool for SubAgentTool {
             .to_string();
 
         // Build tool list from Arc wrappers
-        let tools: Vec<Box<dyn AgentTool>> = self
+        let mut tools: Vec<Box<dyn AgentTool>> = self
             .tools
             .iter()
             .map(|t| Box::new(ArcToolWrapper(Arc::clone(t))) as Box<dyn AgentTool>)
             .collect();
 
+        // Inject SharedStateTool when shared state is configured
+        let mut system_prompt = self.system_prompt.clone();
+        if let Some(ref state) = self.shared_state {
+            tools.push(Box::new(SharedStateTool::new(state.clone())));
+            let summary = state.summary().await;
+            system_prompt.push_str(&format!(
+                "\n\n## Shared State\nYou have access to a shared variable store via the `shared_state` tool.\nAvailable: {}",
+                summary
+            ));
+        }
+
         // Fresh context for the sub-agent
         let mut context = AgentContext {
-            system_prompt: self.system_prompt.clone(),
+            system_prompt,
             messages: Vec::new(),
             tools,
         };
@@ -224,7 +268,7 @@ impl AgentTool for SubAgentTool {
             thinking_level: self.thinking_level,
             max_tokens: self.max_tokens,
             temperature: None,
-            model_config: None,
+            model_config: self.model_config.clone(),
             convert_to_llm: None,
             transform_context: None,
             get_steering_messages: None,
@@ -244,6 +288,7 @@ impl AgentTool for SubAgentTool {
             after_turn: None,
             on_error: None,
             input_filters: vec![],
+            turn_delay: self.turn_delay,
         };
 
         // Channel for sub-agent events
@@ -296,6 +341,14 @@ impl AgentTool for SubAgentTool {
             let _ = handle.await;
         }
 
+        // Check if the last message was an error
+        if let Some(error_msg) = extract_error(&new_messages) {
+            return Err(ToolError::Failed(format!(
+                "Sub-agent '{}' failed: {}",
+                self.tool_name, error_msg
+            )));
+        }
+
         // Extract final assistant text from the returned messages
         let result_text = extract_final_text(&new_messages);
 
@@ -312,6 +365,27 @@ impl AgentTool for SubAgentTool {
     }
 }
 
+/// Check if the last assistant message was an error, return the error message.
+fn extract_error(messages: &[AgentMessage]) -> Option<String> {
+    for msg in messages.iter().rev() {
+        if let AgentMessage::Llm(Message::Assistant {
+            stop_reason,
+            error_message,
+            ..
+        }) = msg
+        {
+            if *stop_reason == StopReason::Error {
+                return Some(
+                    error_message
+                        .clone()
+                        .unwrap_or_else(|| "Unknown error".into()),
+                );
+            }
+        }
+    }
+    None
+}
+
 /// Extract the final assistant text from agent messages.
 /// Collects text from the last assistant message, or returns a fallback.
 fn extract_final_text(messages: &[AgentMessage]) -> String {
@@ -320,7 +394,7 @@ fn extract_final_text(messages: &[AgentMessage]) -> String {
             let texts: Vec<&str> = content
                 .iter()
                 .filter_map(|c| match c {
-                    Content::Text { text } => Some(text.as_str()),
+                    Content::Text { text } if !text.is_empty() => Some(text.as_str()),
                     _ => None,
                 })
                 .collect();

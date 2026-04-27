@@ -3,12 +3,14 @@ pub mod edit;
 pub mod file;
 pub mod list;
 pub mod search;
+pub mod shared_state_tool;
 
 pub use bash::BashTool;
 pub use edit::EditFileTool;
 pub use file::{ReadFileTool, WriteFileTool};
 pub use list::ListFilesTool;
 pub use search::SearchTool;
+pub use shared_state_tool::SharedStateTool;
 
 use crate::types::AgentTool;
 

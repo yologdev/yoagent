@@ -30,6 +30,7 @@ fn make_config(provider: MockProvider) -> AgentLoopConfig {
         after_turn: None,
         on_error: None,
         input_filters: vec![],
+        turn_delay: None,
     }
 }
 
@@ -761,6 +762,7 @@ async fn test_retry_on_rate_limit_succeeds() {
         after_turn: None,
         on_error: None,
         input_filters: vec![],
+        turn_delay: None,
     };
 
     let mut context = AgentContext {
@@ -828,6 +830,7 @@ async fn test_retry_exhausted_returns_error() {
         after_turn: None,
         on_error: None,
         input_filters: vec![],
+        turn_delay: None,
     };
 
     let mut context = AgentContext {
@@ -897,6 +900,7 @@ async fn test_no_retry_on_auth_error() {
         after_turn: None,
         on_error: None,
         input_filters: vec![],
+        turn_delay: None,
     };
 
     let mut context = AgentContext {
@@ -954,6 +958,7 @@ async fn test_retry_none_disables_retries() {
         after_turn: None,
         on_error: None,
         input_filters: vec![],
+        turn_delay: None,
     };
 
     let mut context = AgentContext {
@@ -1189,6 +1194,7 @@ async fn test_on_error_fires_on_provider_error() {
             error_msgs_clone.lock().unwrap().push(err.to_string());
         })),
         input_filters: vec![],
+        turn_delay: None,
     };
 
     let mut context = AgentContext {
@@ -1892,6 +1898,7 @@ async fn test_custom_compaction_strategy_is_called() {
         after_turn: None,
         on_error: None,
         input_filters: vec![],
+        turn_delay: None,
     };
 
     let prompt = AgentMessage::Llm(Message::user("Hello"));
@@ -1967,6 +1974,7 @@ async fn test_none_compaction_strategy_uses_default() {
         after_turn: None,
         on_error: None,
         input_filters: vec![],
+        turn_delay: None,
     };
 
     let prompt = AgentMessage::Llm(Message::user("Hello"));

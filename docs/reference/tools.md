@@ -108,3 +108,19 @@ pub struct SearchTool {
 ```
 
 Returns matching lines with file paths and line numbers.
+
+## SharedStateTool
+
+Read and write named variables in a shared key-value store. This tool is **not** included in `default_tools()` — it is automatically injected into sub-agents when you call `SubAgentTool::with_shared_state()`.
+
+- **Name**: `shared_state`
+- **Parameters**: `action` (required: `get`, `set`, `list`, `remove`), `key` (required for get/set/remove), `value` (required for set)
+
+| Action | Description |
+|--------|-------------|
+| `get` | Returns the value for a key, or error if not found |
+| `set` | Stores a value, returns confirmation with byte size |
+| `list` | Lists all keys with their byte sizes |
+| `remove` | Deletes a key |
+
+See [Sub-Agents: Shared State](../concepts/sub-agents.md#shared-state) for usage details.

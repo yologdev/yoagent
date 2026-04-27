@@ -37,6 +37,7 @@ fn make_config(provider: AnthropicProvider) -> AgentLoopConfig {
         after_turn: None,
         on_error: None,
         input_filters: vec![],
+        turn_delay: None,
     }
 }
 

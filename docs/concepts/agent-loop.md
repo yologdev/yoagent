@@ -90,6 +90,7 @@ pub struct AgentLoopConfig {
     pub on_error: Option<OnErrorFn>,
     pub input_filters: Vec<Arc<dyn InputFilter>>,
     pub compaction_strategy: Option<Arc<dyn CompactionStrategy>>,
+    pub turn_delay: Option<Duration>,
 }
 ```
 
@@ -114,6 +115,7 @@ pub struct AgentLoopConfig {
 | `on_error` | Called on `StopReason::Error` with the error string (see [Callbacks](callbacks.md)) |
 | `input_filters` | Input filters applied to user messages before the LLM call (see [Tools](tools.md)) |
 | `compaction_strategy` | Custom compaction strategy (see [Custom Compaction](#custom-compaction) below) |
+| `turn_delay` | Optional inter-turn delay to throttle API calls. Skips the first turn. Useful for rate-limit-sensitive providers (e.g., OAuth tokens with low RPM caps) |
 
 ## Steering & Follow-Ups
 

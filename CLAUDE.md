@@ -80,6 +80,30 @@ Behind the `openapi` Cargo feature. `OpenApiToolAdapter` parses an OpenAPI 3.0 s
 
 `McpClient` communicates via `McpTransport` trait (stdio or HTTP). `McpToolAdapter` wraps MCP tools to implement `AgentTool`, making them transparent to the agent loop. Added via `Agent::with_mcp_server_stdio()` / `with_mcp_server_http()`.
 
+### Shared State (`shared_state.rs`)
+
+`SharedState` is a pluggable key-value store (`Arc<dyn SharedStateBackend>`) for sub-agent communication. It lets a parent store large artifacts once and have multiple sub-agents read/write by reference — no re-pasting into prompts.
+
+- Two built-in backends: `MemoryBackend` (default, `HashMap` with 10MB cap) and `FileBackend` (one file per key, persistent)
+- Custom backends implement the `SharedStateBackend` trait
+- Opt-in via `SubAgentTool::with_shared_state(state)` — injects a `shared_state` tool and appends a state summary to the sub-agent's system prompt automatically
+- Actions: `get`, `set`, `list`, `remove`
+- Does **not** touch the core agent loop — wired entirely through `SubAgentTool`
+
+### Sub-Agent Multi-Provider Support
+
+`SubAgentTool` supports any provider via `with_model_config()`. Without it, sub-agents default to Anthropic. For non-Anthropic providers (OpenAI, xAI, Groq, etc.), pass the appropriate `ModelConfig`:
+
+```rust
+let config = ModelConfig::xai("grok-3-mini-fast", "Grok 3 Mini Fast");
+let sub = SubAgentTool::new("analyst", Arc::new(OpenAiCompatProvider))
+    .with_model(&config.id)
+    .with_api_key(&key)
+    .with_model_config(config);
+```
+
+`AgentLoopConfig` also supports `turn_delay: Option<Duration>` — an inter-turn delay to throttle API calls for rate-limit-sensitive providers. Exposed on `SubAgentTool` via `with_turn_delay()`.
+
 ### Testing
 
 All unit tests use `MockProvider` (`provider/mock.rs`) to simulate LLM responses without network. Test files are in `tests/` — `agent_test.rs`, `agent_loop_test.rs`, `tools_test.rs`. Follow the existing pattern of constructing a `MockProvider` with predetermined responses.

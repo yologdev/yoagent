@@ -86,6 +86,11 @@ pub struct AgentLoopConfig {
     /// Filters run in order; first `Reject` wins and discards any accumulated
     /// warnings. `Warn` messages accumulate and are appended to the user message.
     pub input_filters: Vec<Arc<dyn InputFilter>>,
+
+    /// Optional delay between turns. Useful for rate-limit-sensitive scenarios
+    /// (e.g., OAuth tokens with low request-per-minute caps). Skipped on the
+    /// first turn so the agent starts immediately.
+    pub turn_delay: Option<std::time::Duration>,
 }
 
 /// Default convert_to_llm: keep only user/assistant/toolResult messages.
@@ -326,6 +331,15 @@ async fn run_loop(
                     return;
                 }
             }
+
+            // Inter-turn delay — throttle API calls to stay under rate limits.
+            // Skipped on the first turn so the agent starts immediately.
+            if turn_number > 0 {
+                if let Some(delay) = config.turn_delay {
+                    tokio::time::sleep(delay).await;
+                }
+            }
+
             turn_number += 1;
 
             // Compact context if configured (tiered: tool outputs → summarize → drop)
