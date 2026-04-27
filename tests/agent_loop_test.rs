@@ -100,6 +100,7 @@ async fn test_tool_call_and_response() {
     // Mock: first call returns tool use, second returns text
     let provider = MockProvider::new(vec![
         MockResponse::ToolCalls(vec![MockToolCall {
+            provider_metadata: None,
             name: "read_file".into(),
             arguments: serde_json::json!({"path": "test.txt"}),
         }]),
@@ -249,6 +250,7 @@ async fn test_continue_from_tool_result() {
 async fn test_tool_error_is_reported() {
     let provider = MockProvider::new(vec![
         MockResponse::ToolCalls(vec![MockToolCall {
+            provider_metadata: None,
             name: "failing_tool".into(),
             arguments: serde_json::json!({}),
         }]),
@@ -310,6 +312,7 @@ async fn test_tool_error_is_reported() {
 async fn test_unknown_tool_reports_error() {
     let provider = MockProvider::new(vec![
         MockResponse::ToolCalls(vec![MockToolCall {
+            provider_metadata: None,
             name: "nonexistent".into(),
             arguments: serde_json::json!({}),
         }]),
@@ -382,14 +385,17 @@ async fn test_parallel_tool_execution_faster_than_sequential() {
     let provider = MockProvider::new(vec![
         MockResponse::ToolCalls(vec![
             MockToolCall {
+                provider_metadata: None,
                 name: "tool_a".into(),
                 arguments: serde_json::json!({}),
             },
             MockToolCall {
+                provider_metadata: None,
                 name: "tool_b".into(),
                 arguments: serde_json::json!({}),
             },
             MockToolCall {
+                provider_metadata: None,
                 name: "tool_c".into(),
                 arguments: serde_json::json!({}),
             },
@@ -461,10 +467,12 @@ async fn test_sequential_tool_execution_is_slower() {
     let provider = MockProvider::new(vec![
         MockResponse::ToolCalls(vec![
             MockToolCall {
+                provider_metadata: None,
                 name: "tool_a".into(),
                 arguments: serde_json::json!({}),
             },
             MockToolCall {
+                provider_metadata: None,
                 name: "tool_b".into(),
                 arguments: serde_json::json!({}),
             },
@@ -512,18 +520,22 @@ async fn test_batched_tool_execution() {
     let provider = MockProvider::new(vec![
         MockResponse::ToolCalls(vec![
             MockToolCall {
+                provider_metadata: None,
                 name: "tool_a".into(),
                 arguments: serde_json::json!({}),
             },
             MockToolCall {
+                provider_metadata: None,
                 name: "tool_b".into(),
                 arguments: serde_json::json!({}),
             },
             MockToolCall {
+                provider_metadata: None,
                 name: "tool_c".into(),
                 arguments: serde_json::json!({}),
             },
             MockToolCall {
+                provider_metadata: None,
                 name: "tool_d".into(),
                 arguments: serde_json::json!({}),
             },
@@ -632,6 +644,7 @@ impl AgentTool for ProgressTool {
 async fn test_tool_execution_update_events_emitted() {
     let provider = MockProvider::new(vec![
         MockResponse::ToolCalls(vec![MockToolCall {
+            provider_metadata: None,
             name: "progress_tool".into(),
             arguments: serde_json::json!({}),
         }]),
@@ -1055,15 +1068,18 @@ async fn test_before_turn_can_abort() {
     // We need tool calls to keep the loop going for multiple turns.
     let provider = MockProvider::new(vec![
         MockResponse::ToolCalls(vec![MockToolCall {
+            provider_metadata: None,
             name: "progress_tool".into(),
             arguments: serde_json::json!({}),
         }]),
         MockResponse::ToolCalls(vec![MockToolCall {
+            provider_metadata: None,
             name: "progress_tool".into(),
             arguments: serde_json::json!({}),
         }]),
         // These should never be reached
         MockResponse::ToolCalls(vec![MockToolCall {
+            provider_metadata: None,
             name: "progress_tool".into(),
             arguments: serde_json::json!({}),
         }]),
@@ -1106,6 +1122,7 @@ async fn test_before_turn_can_abort() {
 async fn test_after_turn_receives_messages() {
     let provider = MockProvider::new(vec![
         MockResponse::ToolCalls(vec![MockToolCall {
+            provider_metadata: None,
             name: "progress_tool".into(),
             arguments: serde_json::json!({}),
         }]),
@@ -1265,6 +1282,7 @@ impl AgentTool for ProgressMessageTool {
 async fn test_progress_message_event_emitted() {
     let provider = MockProvider::new(vec![
         MockResponse::ToolCalls(vec![MockToolCall {
+            provider_metadata: None,
             name: "progress_msg_tool".into(),
             arguments: serde_json::json!({}),
         }]),
@@ -1338,6 +1356,7 @@ impl AgentTool for SilentTool {
 async fn test_tool_ignoring_progress_no_panic() {
     let provider = MockProvider::new(vec![
         MockResponse::ToolCalls(vec![MockToolCall {
+            provider_metadata: None,
             name: "silent_tool".into(),
             arguments: serde_json::json!({}),
         }]),
@@ -1407,10 +1426,12 @@ async fn test_parallel_tools_progress_distinguishable() {
     let provider = MockProvider::new(vec![
         MockResponse::ToolCalls(vec![
             MockToolCall {
+                provider_metadata: None,
                 name: "pa".into(),
                 arguments: serde_json::json!({}),
             },
             MockToolCall {
+                provider_metadata: None,
                 name: "pb".into(),
                 arguments: serde_json::json!({}),
             },
@@ -1460,6 +1481,7 @@ async fn test_on_update_still_works_after_refactor() {
     // Existing ProgressTool uses on_update (not on_progress) — ensure it still works.
     let provider = MockProvider::new(vec![
         MockResponse::ToolCalls(vec![MockToolCall {
+            provider_metadata: None,
             name: "progress_tool".into(),
             arguments: serde_json::json!({}),
         }]),
@@ -1973,4 +1995,97 @@ async fn test_none_compaction_strategy_uses_default() {
         !new_messages.is_empty(),
         "Agent should have produced messages"
     );
+}
+
+/// Tool calls with provider_metadata (e.g. Gemini thought signatures)
+/// must still be executed by the agent loop.
+#[tokio::test]
+async fn test_tool_call_with_provider_metadata_executes() {
+    let provider = MockProvider::new(vec![
+        MockResponse::ToolCalls(vec![MockToolCall {
+            name: "echo_tool".into(),
+            arguments: serde_json::json!({"text": "hello"}),
+            provider_metadata: Some(serde_json::json!({"thought_signature": "SIG_DATA"})),
+        }]),
+        MockResponse::Text("done".into()),
+    ]);
+
+    struct EchoTool;
+
+    #[async_trait::async_trait]
+    impl AgentTool for EchoTool {
+        fn name(&self) -> &str {
+            "echo_tool"
+        }
+        fn label(&self) -> &str {
+            "Echo"
+        }
+        fn description(&self) -> &str {
+            "Echoes input"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {"text": {"type": "string"}}})
+        }
+        async fn execute(
+            &self,
+            params: serde_json::Value,
+            _ctx: ToolContext,
+        ) -> Result<ToolResult, ToolError> {
+            let text = params["text"].as_str().unwrap_or("").to_string();
+            Ok(ToolResult {
+                content: vec![Content::Text { text }],
+                details: serde_json::Value::Null,
+            })
+        }
+    }
+
+    let config = make_config(provider);
+    let mut context = AgentContext {
+        system_prompt: String::new(),
+        messages: Vec::new(),
+        tools: vec![Box::new(EchoTool)],
+    };
+
+    let prompt = AgentMessage::Llm(Message::user("echo hello"));
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+
+    let new_messages = agent_loop(vec![prompt], &mut context, &config, tx, cancel).await;
+
+    // Tool should have been executed despite provider_metadata being Some
+    let mut got_tool_start = false;
+    let mut got_tool_end = false;
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            AgentEvent::ToolExecutionStart { tool_name, .. } => {
+                assert_eq!(tool_name, "echo_tool");
+                got_tool_start = true;
+            }
+            AgentEvent::ToolExecutionEnd { .. } => {
+                got_tool_end = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(got_tool_start, "Tool should have been executed");
+    assert!(got_tool_end, "Tool execution should have completed");
+
+    // Should have: user, assistant (tool call), tool result, assistant (final)
+    assert!(
+        new_messages.len() >= 4,
+        "Expected at least 4 messages, got {}",
+        new_messages.len()
+    );
+
+    // Verify tool result contains echoed text
+    let has_tool_result = new_messages.iter().any(|m| {
+        if let AgentMessage::Llm(Message::ToolResult { content, .. }) = m {
+            content
+                .iter()
+                .any(|c| matches!(c, Content::Text { text } if text == "hello"))
+        } else {
+            false
+        }
+    });
+    assert!(has_tool_result, "Tool result should contain 'hello'");
 }

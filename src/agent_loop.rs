@@ -396,6 +396,7 @@ async fn run_loop(
                             id,
                             name,
                             arguments,
+                            ..
                         } => Some((id.clone(), name.clone(), arguments.clone())),
                         _ => None,
                     })

@@ -147,7 +147,7 @@ impl StreamProvider for BedrockProvider {
                                     BedrockEvent::ContentBlockStart { start, .. } => {
                                         if let Some(tool_use) = start.tool_use {
                                             let idx = content.len();
-                                            content.push(Content::ToolCall {
+                                            content.push(Content::ToolCall { provider_metadata: None,
                                                 id: tool_use.tool_use_id.clone(),
                                                 name: tool_use.name.clone(),
                                                 arguments: serde_json::Value::Object(Default::default()),
@@ -315,6 +315,7 @@ fn content_to_bedrock(content: &[Content]) -> Vec<serde_json::Value> {
                 id,
                 name,
                 arguments,
+                ..
             } => Some(serde_json::json!({
                 "toolUse": {"toolUseId": id, "name": name, "input": arguments},
             })),
@@ -432,6 +433,7 @@ mod tests {
                 text: "hello".into(),
             },
             Content::ToolCall {
+                provider_metadata: None,
                 id: "tc-1".into(),
                 name: "bash".into(),
                 arguments: serde_json::json!({"command": "ls"}),

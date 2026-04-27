@@ -19,6 +19,7 @@ async fn main() {
     // Provider: tool call → text response (2-turn conversation)
     let provider = MockProvider::new(vec![
         MockResponse::ToolCalls(vec![MockToolCall {
+            provider_metadata: None,
             name: "greet".into(),
             arguments: serde_json::json!({"name": "World"}),
         }]),

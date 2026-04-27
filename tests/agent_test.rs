@@ -80,6 +80,7 @@ async fn test_agent_with_tools() {
 
     let provider = MockProvider::new(vec![
         MockResponse::ToolCalls(vec![MockToolCall {
+            provider_metadata: None,
             name: "echo".into(),
             arguments: serde_json::json!({"text": "hello"}),
         }]),

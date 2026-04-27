@@ -33,6 +33,7 @@ fn test_message_assistant_roundtrip() {
                 text: "Hi there".into(),
             },
             Content::ToolCall {
+                provider_metadata: None,
                 id: "tc-1".into(),
                 name: "read_file".into(),
                 arguments: serde_json::json!({"path": "foo.rs"}),
@@ -105,6 +106,7 @@ fn test_content_variants_roundtrip() {
         signature: Some("sig123".into()),
     });
     roundtrip(&Content::ToolCall {
+        provider_metadata: None,
         id: "tc-1".into(),
         name: "bash".into(),
         arguments: serde_json::json!({"command": "ls"}),
@@ -121,6 +123,7 @@ fn test_full_conversation_roundtrip() {
         AgentMessage::Llm(Message::user("Read the file")),
         AgentMessage::Llm(Message::Assistant {
             content: vec![Content::ToolCall {
+                provider_metadata: None,
                 id: "tc-1".into(),
                 name: "read_file".into(),
                 arguments: serde_json::json!({"path": "main.rs"}),

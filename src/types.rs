@@ -28,6 +28,11 @@ pub enum Content {
         id: String,
         name: String,
         arguments: serde_json::Value,
+        /// Provider-specific metadata (e.g. Gemini thought signatures).
+        /// Not passed to tool execution; used by providers when building
+        /// the next request.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_metadata: Option<serde_json::Value>,
     },
 }
 
