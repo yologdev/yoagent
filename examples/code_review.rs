@@ -12,6 +12,7 @@
 //! Try it on this repo:
 //!   ANTHROPIC_API_KEY=sk-... cargo run --example code_review -- src/shared_state.rs
 
+use std::io::Write;
 use std::sync::Arc;
 use yoagent::provider::{AnthropicProvider, StreamProvider};
 use yoagent::shared_state::SharedState;
@@ -96,32 +97,47 @@ async fn main() {
         .with_shared_state(state.clone())
         .with_max_turns(5);
 
-    // --- Run all three in parallel ---
+    // --- Run all three in parallel with streaming ---
     println!("Dispatching 3 reviewers in parallel...\n");
 
-    let ctx = |name: &str| ToolContext {
-        tool_call_id: format!("tc-{}", name),
-        tool_name: name.to_string(),
-        cancel: tokio_util::sync::CancellationToken::new(),
-        on_update: None,
-        on_progress: None,
+    let ctx = |label: &str| {
+        let label = label.to_string();
+        ToolContext {
+            tool_call_id: format!("tc-{}", label),
+            tool_name: label.clone(),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            on_update: Some(Arc::new({
+                let label = label.clone();
+                move |result: ToolResult| {
+                    for content in &result.content {
+                        if let Content::Text { text } = content {
+                            // Print streaming deltas with agent label prefix
+                            eprint!("[{}] {}", label, text);
+                            let _ = std::io::stderr().flush();
+                        }
+                    }
+                }
+            })),
+            on_progress: None,
+        }
     };
 
     let (r1, r2, r3) = tokio::join!(
         bug_reviewer.execute(
             serde_json::json!({"task": "Review the source code for bugs and logic errors."}),
-            ctx("bug_reviewer"),
+            ctx("bugs"),
         ),
         quality_reviewer.execute(
             serde_json::json!({"task": "Review the source code for quality and style."}),
-            ctx("quality_reviewer"),
+            ctx("quality"),
         ),
         docs_reviewer.execute(
             serde_json::json!({"task": "Review the source code for documentation completeness."}),
-            ctx("docs_reviewer"),
+            ctx("docs"),
         ),
     );
 
+    eprintln!();
     r1.expect("bug reviewer failed");
     r2.expect("quality reviewer failed");
     r3.expect("docs reviewer failed");
