@@ -82,12 +82,12 @@ Behind the `openapi` Cargo feature. `OpenApiToolAdapter` parses an OpenAPI 3.0 s
 
 ### Shared State (`shared_state.rs`)
 
-`SharedState` is a shared key-value store (`Arc<RwLock<HashMap<String, String>>>`) for sub-agent communication. It lets a parent store large artifacts once and have multiple sub-agents read/write by reference — no re-pasting into prompts.
+`SharedState` is a pluggable key-value store (`Arc<dyn SharedStateBackend>`) for sub-agent communication. It lets a parent store large artifacts once and have multiple sub-agents read/write by reference — no re-pasting into prompts.
 
+- Two built-in backends: `MemoryBackend` (default, `HashMap` with 10MB cap) and `FileBackend` (one file per key, persistent)
+- Custom backends implement the `SharedStateBackend` trait
 - Opt-in via `SubAgentTool::with_shared_state(state)` — injects a `shared_state` tool and appends a state summary to the sub-agent's system prompt automatically
 - Actions: `get`, `set`, `list`, `remove`
-- Default 10MB capacity; configurable via `SharedState::with_max_bytes()`
-- Concurrent-safe: `tokio::sync::RwLock` allows parallel sub-agents to share state
 - Does **not** touch the core agent loop — wired entirely through `SubAgentTool`
 
 ### Sub-Agent Multi-Provider Support

@@ -209,27 +209,51 @@ pub struct FileBackend {
 }
 
 impl FileBackend {
-    /// Create a new filesystem backend. Creates the directory if it doesn't exist.
+    /// Create a new filesystem backend. The directory is created lazily on first write.
     pub fn new(dir: impl AsRef<Path>) -> Self {
         Self {
             dir: dir.as_ref().to_path_buf(),
         }
     }
 
-    /// Sanitize a key into a safe filename.
-    /// Replaces path separators and other unsafe chars with underscores.
+    /// Encode a key into a safe, reversible filename.
+    /// Percent-encodes any character that isn't alphanumeric, `-`, `_`, or `.`.
+    /// This avoids collisions: distinct keys always produce distinct filenames.
     fn key_to_path(&self, key: &str) -> PathBuf {
-        let safe: String = key
+        let encoded: String = key
             .chars()
             .map(|c| {
                 if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
-                    c
+                    c.to_string()
                 } else {
-                    '_'
+                    format!("%{:02X}", c as u32)
                 }
             })
             .collect();
-        self.dir.join(safe)
+        self.dir.join(encoded)
+    }
+
+    /// Decode a filename back into the original key.
+    fn path_to_key(filename: &str) -> String {
+        let mut result = String::new();
+        let mut chars = filename.chars();
+        while let Some(c) = chars.next() {
+            if c == '%' {
+                let hex: String = chars.by_ref().take(2).collect();
+                if let Ok(code) = u32::from_str_radix(&hex, 16) {
+                    if let Some(decoded) = char::from_u32(code) {
+                        result.push(decoded);
+                        continue;
+                    }
+                }
+                // Fallback: keep the raw percent sequence
+                result.push('%');
+                result.push_str(&hex);
+            } else {
+                result.push(c);
+            }
+        }
+        result
     }
 }
 
@@ -271,7 +295,7 @@ impl SharedStateBackend for FileBackend {
             if let Some(name) = entry.file_name().to_str() {
                 // Skip hidden files
                 if !name.starts_with('.') {
-                    keys.push(name.to_string());
+                    keys.push(Self::path_to_key(name));
                 }
             }
         }
@@ -292,7 +316,7 @@ impl SharedStateBackend for FileBackend {
             if let Some(name) = entry.file_name().to_str() {
                 if !name.starts_with('.') {
                     let meta = entry.metadata().await?;
-                    entries.push((name.to_string(), meta.len() as usize));
+                    entries.push((Self::path_to_key(name), meta.len() as usize));
                 }
             }
         }
@@ -340,31 +364,52 @@ impl SharedState {
 
     /// Get a value by key. Returns `None` if the key doesn't exist.
     pub async fn get(&self, key: &str) -> Option<String> {
-        self.backend.get(key).await.ok().flatten()
+        match self.backend.get(key).await {
+            Ok(val) => val,
+            Err(e) => {
+                eprintln!("[SharedState] get({:?}) error: {}", key, e);
+                None
+            }
+        }
     }
 
-    /// Store a value. Returns `Err(CapacityError)` if the backend rejects it.
+    /// Store a value. Returns `Err` if the backend rejects it (capacity, I/O, etc.).
     pub async fn set(&self, key: &str, value: String) -> Result<(), SharedStateError> {
         self.backend.set(key, value).await
     }
 
     /// Remove a key. Returns `true` if the key existed.
     pub async fn remove(&self, key: &str) -> bool {
-        self.backend.remove(key).await.unwrap_or(false)
+        match self.backend.remove(key).await {
+            Ok(existed) => existed,
+            Err(e) => {
+                eprintln!("[SharedState] remove({:?}) error: {}", key, e);
+                false
+            }
+        }
     }
 
     /// List all keys (sorted).
     pub async fn keys(&self) -> Vec<String> {
-        self.backend.keys().await.unwrap_or_default()
+        match self.backend.keys().await {
+            Ok(keys) => keys,
+            Err(e) => {
+                eprintln!("[SharedState] keys() error: {}", e);
+                Vec::new()
+            }
+        }
     }
 
     /// Human-readable summary of stored variables (key names + byte sizes).
     /// Suitable for injecting into a system prompt.
     pub async fn summary(&self) -> String {
-        self.backend
-            .summary()
-            .await
-            .unwrap_or_else(|_| "(error reading state)".to_string())
+        match self.backend.summary().await {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[SharedState] summary() error: {}", e);
+                "(error reading state)".to_string()
+            }
+        }
     }
 }
 
@@ -514,11 +559,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_file_backend_key_sanitization() {
+    async fn test_file_backend_key_encoding() {
         let dir = tempfile::tempdir().unwrap();
         let state = SharedState::with_backend(FileBackend::new(dir.path()));
 
-        // Keys with special chars get sanitized
+        // Keys with special chars are percent-encoded (reversible)
         state
             .set("summary:src/main.rs", "file analysis".into())
             .await
@@ -528,9 +573,28 @@ mod tests {
             Some("file analysis".into())
         );
 
-        // The file on disk uses the sanitized name
-        let sanitized = dir.path().join("summary_src_main.rs");
-        assert!(sanitized.exists());
+        // The file on disk uses percent-encoded name
+        let encoded = dir.path().join("summary%3Asrc%2Fmain.rs");
+        assert!(encoded.exists());
+
+        // keys() returns the original key, not the filename
+        let keys = state.keys().await;
+        assert!(keys.contains(&"summary:src/main.rs".to_string()));
+
+        // No collision: distinct keys produce distinct files
+        state
+            .set("summary_src_main.rs", "different".into())
+            .await
+            .unwrap();
+        assert_eq!(
+            state.get("summary:src/main.rs").await,
+            Some("file analysis".into())
+        );
+        assert_eq!(
+            state.get("summary_src_main.rs").await,
+            Some("different".into())
+        );
+        assert_eq!(state.keys().await.len(), 2);
     }
 
     #[tokio::test]

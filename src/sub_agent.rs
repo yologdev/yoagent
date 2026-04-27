@@ -7,7 +7,7 @@
 //! # Design
 //!
 //! - **Context isolation**: each invocation starts a fresh conversation
-//! - **Depth limiting**: sub-agents are not given other SubAgentTools (static, no runtime counter)
+//! - **Nesting supported**: sub-agents can contain other SubAgentTools for recursive delegation (use `with_max_turns()` to bound depth)
 //! - **Cancellation propagation**: the parent's cancel token is forwarded
 //! - **Event forwarding**: sub-agent events stream to the parent via `on_update`
 //!
