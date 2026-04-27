@@ -57,6 +57,7 @@ pub struct SubAgentTool {
     retry_config: crate::retry::RetryConfig,
     max_turns: usize,
     shared_state: Option<SharedState>,
+    turn_delay: Option<std::time::Duration>,
 }
 
 impl SubAgentTool {
@@ -78,6 +79,7 @@ impl SubAgentTool {
             retry_config: crate::retry::RetryConfig::default(),
             max_turns: DEFAULT_MAX_TURNS,
             shared_state: None,
+            turn_delay: None,
         }
     }
 
@@ -141,6 +143,14 @@ impl SubAgentTool {
     /// via the `SharedState` handle.
     pub fn with_shared_state(mut self, state: SharedState) -> Self {
         self.shared_state = Some(state);
+        self
+    }
+
+    /// Add an inter-turn delay to throttle API requests.
+    /// Useful when using OAuth tokens or providers with low rate limits.
+    /// The delay is applied before each turn except the first.
+    pub fn with_turn_delay(mut self, delay: std::time::Duration) -> Self {
+        self.turn_delay = Some(delay);
         self
     }
 }
@@ -267,6 +277,7 @@ impl AgentTool for SubAgentTool {
             after_turn: None,
             on_error: None,
             input_filters: vec![],
+            turn_delay: self.turn_delay,
         };
 
         // Channel for sub-agent events
@@ -319,6 +330,14 @@ impl AgentTool for SubAgentTool {
             let _ = handle.await;
         }
 
+        // Check if the last message was an error
+        if let Some(error_msg) = extract_error(&new_messages) {
+            return Err(ToolError::Failed(format!(
+                "Sub-agent '{}' failed: {}",
+                self.tool_name, error_msg
+            )));
+        }
+
         // Extract final assistant text from the returned messages
         let result_text = extract_final_text(&new_messages);
 
@@ -335,6 +354,27 @@ impl AgentTool for SubAgentTool {
     }
 }
 
+/// Check if the last assistant message was an error, return the error message.
+fn extract_error(messages: &[AgentMessage]) -> Option<String> {
+    for msg in messages.iter().rev() {
+        if let AgentMessage::Llm(Message::Assistant {
+            stop_reason,
+            error_message,
+            ..
+        }) = msg
+        {
+            if *stop_reason == StopReason::Error {
+                return Some(
+                    error_message
+                        .clone()
+                        .unwrap_or_else(|| "Unknown error".into()),
+                );
+            }
+        }
+    }
+    None
+}
+
 /// Extract the final assistant text from agent messages.
 /// Collects text from the last assistant message, or returns a fallback.
 fn extract_final_text(messages: &[AgentMessage]) -> String {
@@ -343,7 +383,7 @@ fn extract_final_text(messages: &[AgentMessage]) -> String {
             let texts: Vec<&str> = content
                 .iter()
                 .filter_map(|c| match c {
-                    Content::Text { text } => Some(text.as_str()),
+                    Content::Text { text } if !text.is_empty() => Some(text.as_str()),
                     _ => None,
                 })
                 .collect();

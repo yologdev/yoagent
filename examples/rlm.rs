@@ -1,0 +1,208 @@
+//! Recursive Language Model (RLM) example.
+//!
+//! Demonstrates true RLM: an LLM that autonomously explores a codebase,
+//! recursively delegating file-level analysis to sub-agents. All agents
+//! communicate through shared state.
+//!
+//!   Parent (Rust) → lead_analyst (LLM, discovers + delegates)
+//!                      → file_analyst (LLM, reads + analyzes)
+//!
+//! The lead_analyst uses file system tools to explore, then spawns
+//! file_analyst sub-agents for deep analysis. No hardcoded file lists.
+//!
+//! Run (analyzes current directory):
+//!   ANTHROPIC_API_KEY=sk-... cargo run --example rlm
+//!
+//! Run on a specific directory:
+//!   ANTHROPIC_API_KEY=sk-... cargo run --example rlm -- path/to/dir
+
+use std::sync::{Arc, Mutex};
+use yoagent::provider::{AnthropicProvider, StreamProvider};
+use yoagent::shared_state::SharedState;
+use yoagent::sub_agent::SubAgentTool;
+use yoagent::tools;
+use yoagent::{ToolExecutionStrategy, *};
+
+#[tokio::main]
+async fn main() {
+    let api_key = std::env::var("ANTHROPIC_API_KEY").expect("Set ANTHROPIC_API_KEY");
+    let model = "claude-sonnet-4-20250514";
+    let provider: Arc<dyn StreamProvider> = Arc::new(AnthropicProvider);
+
+    let target_dir = std::env::args().nth(1).unwrap_or_else(|| ".".into());
+
+    println!("RLM Codebase Analyzer");
+    println!("Target: {}\n", target_dir);
+
+    let state = SharedState::new();
+
+    // Store the target directory so agents know where to look
+    state
+        .set("target_dir", target_dir.clone())
+        .await
+        .expect("store target dir");
+
+    println!("--- RLM: 2-level recursive agent delegation ---");
+    println!("Parent → lead_analyst (explores) → file_analyst (analyzes)\n");
+
+    // --- Level 2: file_analyst (leaf agent) ---
+    // Has read_file + shared_state. Reads a file, writes summary to shared state.
+    // Retry config for OAuth tokens (sk-ant-oat01-*) which have stricter rate
+    // limits than API keys. Longer delays and more retries give the server time
+    // to recover between requests. Not needed with regular API keys.
+    let retry = yoagent::RetryConfig {
+        max_retries: 5,
+        initial_delay_ms: 2000,
+        backoff_multiplier: 2.0,
+        max_delay_ms: 60_000,
+    };
+
+    let file_analyst = SubAgentTool::new("file_analyst", Arc::clone(&provider))
+        .with_description(
+            "Analyzes a single source file in depth. \
+             Call with a task specifying the file path to analyze.",
+        )
+        .with_system_prompt(
+            "You are a file-level code analyst. When given a file to analyze:\n\
+             1. Use read_file to read the file content\n\
+             2. Analyze it: purpose, key types/functions, design patterns, quality\n\
+             3. Write a concise summary (under 200 words) to shared state with \
+                key 'summary:<filepath>'\n\n\
+             Be specific and technical. Focus on what makes this code interesting.",
+        )
+        .with_model(model)
+        .with_api_key(&api_key)
+        .with_shared_state(state.clone())
+        .with_tools(vec![Arc::new(tools::ReadFileTool::new())])
+        .with_retry_config(retry.clone())
+        .with_max_turns(5)
+        // Throttle API calls — recursive agents produce many rapid-fire turns,
+        // which can trigger rate limits (especially with OAuth tokens).
+        .with_turn_delay(std::time::Duration::from_secs(1));
+
+    // --- Level 1: lead_analyst (orchestrator agent) ---
+    // Has list_files + read_file to explore, file_analyst to delegate, shared_state for results.
+    let lead_analyst = SubAgentTool::new("lead_analyst", Arc::clone(&provider))
+        .with_description("Orchestrates codebase analysis")
+        .with_system_prompt(
+            "You are a lead code analyst orchestrating a codebase review.\n\n\
+             IMPORTANT: Only analyze files within the target directory. Do NOT explore \
+             parent directories or other parts of the project.\n\n\
+             Steps:\n\
+             1. Read 'target_dir' from shared state\n\
+             2. Use list_files to discover source files ONLY within that directory\n\
+             3. Pick the 2 most important files\n\
+             4. For EACH chosen file, delegate to the 'file_analyst' tool: \
+                'Analyze <filepath>'\n\
+             5. After all files are analyzed, read each summary from shared state \
+                (keys are 'summary:<filepath>')\n\
+             6. Write a final synthesis report to shared state under key 'final_report'\n\n\
+             The final report should identify cross-cutting themes, architectural patterns, \
+             and how the files relate to each other. Keep it under 300 words.",
+        )
+        .with_model(model)
+        .with_api_key(&api_key)
+        .with_shared_state(state.clone())
+        .with_tools(vec![
+            Arc::new(tools::ListFilesTool::new()),
+            Arc::new(tools::ReadFileTool::new()),
+            Arc::new(file_analyst),
+        ])
+        // Sequential to avoid hitting API rate limits with parallel file_analyst calls
+        .with_tool_execution(ToolExecutionStrategy::Sequential)
+        .with_retry_config(retry)
+        .with_max_turns(25)
+        // Throttle API calls — recursive agents produce many rapid-fire turns,
+        // which can trigger rate limits (especially with OAuth tokens).
+        .with_turn_delay(std::time::Duration::from_secs(1));
+
+    // --- Parent: single call triggers the full recursive chain ---
+    let buf: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+    let ctx = ToolContext {
+        tool_call_id: "tc-rlm".into(),
+        tool_name: "lead_analyst".into(),
+        cancel: tokio_util::sync::CancellationToken::new(),
+        on_update: Some(Arc::new({
+            let buf = buf.clone();
+            move |result: ToolResult| {
+                for content in &result.content {
+                    if let Content::Text { text } = content {
+                        let mut b = buf.lock().unwrap();
+                        if text.starts_with("[sub-agent calling tool:") {
+                            if !b.is_empty() {
+                                eprintln!("[lead] {}", b.drain(..).collect::<String>());
+                            }
+                            eprintln!("[lead] {}", text);
+                            return;
+                        }
+                        b.push_str(text);
+                        while let Some(pos) = b.find('\n') {
+                            let line: String = b.drain(..=pos).collect();
+                            eprint!("[lead] {}", line);
+                        }
+                    }
+                }
+            }
+        })),
+        on_progress: None,
+    };
+
+    let result = lead_analyst
+        .execute(
+            serde_json::json!({"task": "Explore and analyze this Rust crate."}),
+            ctx,
+        )
+        .await;
+
+    // Flush remaining buffer
+    {
+        let b = buf.lock().unwrap();
+        if !b.is_empty() {
+            eprintln!("[lead] {}", *b);
+        }
+    }
+
+    match result {
+        Ok(result) => {
+            eprintln!("[lead] details: {}", result.details);
+            for content in &result.content {
+                if let Content::Text { text } = content {
+                    if !text.is_empty() {
+                        eprintln!("[lead] (final) {}", text);
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("\nError: {}", e);
+            std::process::exit(1);
+        }
+    }
+
+    // --- Read results from shared state ---
+    println!("\n═══════════════════════════════════════════════════════════");
+    println!("  RLM Results");
+    println!("═══════════════════════════════════════════════════════════\n");
+
+    // Print all per-file summaries
+    let keys = state.keys().await;
+    for key in &keys {
+        if let Some(file) = key.strip_prefix("summary:") {
+            println!("── {} ──\n", file);
+            if let Some(summary) = state.get(key).await {
+                println!("{}\n", summary);
+            }
+        }
+    }
+
+    // Final report (written by lead_analyst, level 1)
+    println!("── Final Synthesis ──\n");
+    match state.get("final_report").await {
+        Some(report) => println!("{}", report),
+        None => println!("(lead_analyst did not produce a final report)"),
+    }
+
+    println!("\n═══════════════════════════════════════════════════════════");
+    println!("  Shared state: {}", state.summary().await);
+    println!("═══════════════════════════════════════════════════════════");
+}

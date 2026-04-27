@@ -141,7 +141,7 @@ pub async fn classify_eventsource_error(error: reqwest_eventsource::Error) -> Pr
                 ),
             )
         }
-        reqwest_eventsource::Error::Transport(e) => ProviderError::Network(e.to_string()),
+        reqwest_eventsource::Error::Transport(e) => ProviderError::Network(format!("{:?}", e)),
         other => ProviderError::Other(other.to_string()),
     }
 }

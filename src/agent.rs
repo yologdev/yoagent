@@ -676,6 +676,7 @@ impl Agent {
             after_turn: self.after_turn.clone(),
             on_error: self.on_error.clone(),
             input_filters: self.input_filters.clone(),
+            turn_delay: None,
         }
     }
 }
