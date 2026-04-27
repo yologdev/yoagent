@@ -11,27 +11,29 @@
 //! file_analyst sub-agents for deep analysis. No hardcoded file lists.
 //!
 //! Run (analyzes current directory):
-//!   ANTHROPIC_API_KEY=sk-... cargo run --example rlm
+//!   XAI_API_KEY=xai-... cargo run --example rlm
 //!
 //! Run on a specific directory:
-//!   ANTHROPIC_API_KEY=sk-... cargo run --example rlm -- path/to/dir
+//!   XAI_API_KEY=xai-... cargo run --example rlm -- path/to/dir
 
 use std::sync::{Arc, Mutex};
-use yoagent::provider::{AnthropicProvider, StreamProvider};
+use yoagent::provider::model::ModelConfig;
+use yoagent::provider::{OpenAiCompatProvider, StreamProvider};
 use yoagent::shared_state::SharedState;
 use yoagent::sub_agent::SubAgentTool;
 use yoagent::tools;
-use yoagent::{ToolExecutionStrategy, *};
+use yoagent::*;
 
 #[tokio::main]
 async fn main() {
-    let api_key = std::env::var("ANTHROPIC_API_KEY").expect("Set ANTHROPIC_API_KEY");
-    let model = "claude-sonnet-4-20250514";
-    let provider: Arc<dyn StreamProvider> = Arc::new(AnthropicProvider);
+    let api_key = std::env::var("XAI_API_KEY").expect("Set XAI_API_KEY");
+    let mut model_config = ModelConfig::xai("grok-4-1-fast-reasoning", "Grok 4.1 Fast Reasoning");
+    model_config.reasoning = true;
+    let provider: Arc<dyn StreamProvider> = Arc::new(OpenAiCompatProvider);
 
     let target_dir = std::env::args().nth(1).unwrap_or_else(|| ".".into());
 
-    println!("RLM Codebase Analyzer");
+    println!("RLM Codebase Analyzer (Grok)");
     println!("Target: {}\n", target_dir);
 
     let state = SharedState::new();
@@ -47,16 +49,6 @@ async fn main() {
 
     // --- Level 2: file_analyst (leaf agent) ---
     // Has read_file + shared_state. Reads a file, writes summary to shared state.
-    // Retry config for OAuth tokens (sk-ant-oat01-*) which have stricter rate
-    // limits than API keys. Longer delays and more retries give the server time
-    // to recover between requests. Not needed with regular API keys.
-    let retry = yoagent::RetryConfig {
-        max_retries: 5,
-        initial_delay_ms: 2000,
-        backoff_multiplier: 2.0,
-        max_delay_ms: 60_000,
-    };
-
     let file_analyst = SubAgentTool::new("file_analyst", Arc::clone(&provider))
         .with_description(
             "Analyzes a single source file in depth. \
@@ -70,15 +62,12 @@ async fn main() {
                 key 'summary:<filepath>'\n\n\
              Be specific and technical. Focus on what makes this code interesting.",
         )
-        .with_model(model)
+        .with_model(&model_config.id)
         .with_api_key(&api_key)
+        .with_model_config(model_config.clone())
         .with_shared_state(state.clone())
         .with_tools(vec![Arc::new(tools::ReadFileTool::new())])
-        .with_retry_config(retry.clone())
-        .with_max_turns(5)
-        // Throttle API calls — recursive agents produce many rapid-fire turns,
-        // which can trigger rate limits (especially with OAuth tokens).
-        .with_turn_delay(std::time::Duration::from_secs(1));
+        .with_max_turns(5);
 
     // --- Level 1: lead_analyst (orchestrator agent) ---
     // Has list_files + read_file to explore, file_analyst to delegate, shared_state for results.
@@ -100,21 +89,16 @@ async fn main() {
              The final report should identify cross-cutting themes, architectural patterns, \
              and how the files relate to each other. Keep it under 300 words.",
         )
-        .with_model(model)
+        .with_model(&model_config.id)
         .with_api_key(&api_key)
+        .with_model_config(model_config)
         .with_shared_state(state.clone())
         .with_tools(vec![
             Arc::new(tools::ListFilesTool::new()),
             Arc::new(tools::ReadFileTool::new()),
             Arc::new(file_analyst),
         ])
-        // Sequential to avoid hitting API rate limits with parallel file_analyst calls
-        .with_tool_execution(ToolExecutionStrategy::Sequential)
-        .with_retry_config(retry)
-        .with_max_turns(25)
-        // Throttle API calls — recursive agents produce many rapid-fire turns,
-        // which can trigger rate limits (especially with OAuth tokens).
-        .with_turn_delay(std::time::Duration::from_secs(1));
+        .with_max_turns(25);
 
     // --- Parent: single call triggers the full recursive chain ---
     let buf: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));

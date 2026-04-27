@@ -62,10 +62,14 @@ When the parent LLM calls multiple sub-agents in a single response, they run con
 | `with_description()` | What the parent LLM sees (helps it decide when to delegate) |
 | `with_system_prompt()` | The sub-agent's own instructions |
 | `with_model()` / `with_api_key()` | Can use a different model than the parent |
+| `with_model_config()` | Set `ModelConfig` for non-Anthropic providers (base URL, compat flags, etc.) |
 | `with_tools()` | Tools available to the sub-agent (accepts `Vec<Arc<dyn AgentTool>>`) |
 | `with_max_turns(N)` | Turn limit (default: 10). Primary guard against runaway execution. |
 | `with_thinking()` | Enable extended thinking for the sub-agent |
 | `with_cache_config()` | Prompt caching settings |
+| `with_turn_delay()` | Inter-turn delay to throttle API calls (useful for rate-limit-sensitive providers) |
+| `with_retry_config()` | Custom retry configuration for transient errors |
+| `with_tool_execution()` | Tool execution strategy (`Parallel`, `Sequential`, `Batched`) |
 
 ## Event Forwarding
 
@@ -136,13 +140,34 @@ A `set` call that would exceed capacity returns `Err(CapacityError)`.
 
 See [`examples/shared_state.rs`](../../examples/shared_state.rs) for a complete parallel analysis demo.
 
+## Multi-Provider Support
+
+Sub-agents can use any provider supported by yoagent — not just Anthropic. Pass a `ModelConfig` to configure the base URL, compat flags, and other provider-specific settings:
+
+```rust
+use yoagent::provider::{OpenAiCompatProvider, model::ModelConfig};
+
+let provider = Arc::new(OpenAiCompatProvider);
+let model_config = ModelConfig::xai("grok-3-mini-fast", "Grok 3 Mini Fast");
+
+let analyst = SubAgentTool::new("analyst", provider)
+    .with_model(&model_config.id)
+    .with_api_key(&xai_api_key)
+    .with_model_config(model_config)
+    .with_tools(vec![...]);
+```
+
+This works with all providers: OpenAI, Groq, DeepSeek, Gemini, Mistral, xAI, and more. See [`ModelConfig`](../reference/configuration.md) for the full list of factory methods.
+
 ## Design Decisions
 
 - **Context isolation**: Each invocation starts fresh. Sub-agents don't accumulate history across calls.
-- **No nesting**: Sub-agents are not given other `SubAgentTool`s. This prevents infinite delegation chains.
+- **Nesting supported**: Sub-agents can be given other `SubAgentTool`s for recursive delegation (see [`examples/rlm.rs`](../../examples/rlm.rs)). Use `with_max_turns()` to prevent infinite chains.
 - **Cancellation propagation**: The parent's cancellation token is forwarded. Aborting the parent aborts all sub-agents.
 - **Turn limiting**: The default 10-turn limit prevents runaway execution. The parent's execution limits also apply to total wall-clock time.
 
-## Example
+## Examples
 
-See [`examples/sub_agent.rs`](../../examples/sub_agent.rs) for a complete coordinator with researcher and coder sub-agents.
+- [`examples/sub_agent.rs`](../../examples/sub_agent.rs) — Coordinator with researcher and coder sub-agents
+- [`examples/code_review.rs`](../../examples/code_review.rs) — 3 parallel sub-agents reviewing a file via shared state
+- [`examples/rlm.rs`](../../examples/rlm.rs) — Recursive Language Model: nested sub-agents with autonomous file discovery

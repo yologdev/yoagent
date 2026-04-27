@@ -27,6 +27,7 @@
 
 use crate::agent_loop::{agent_loop, AgentLoopConfig};
 use crate::context::ExecutionLimits;
+use crate::provider::model::ModelConfig;
 use crate::provider::StreamProvider;
 use crate::shared_state::SharedState;
 use crate::tools::shared_state_tool::SharedStateTool;
@@ -58,6 +59,7 @@ pub struct SubAgentTool {
     max_turns: usize,
     shared_state: Option<SharedState>,
     turn_delay: Option<std::time::Duration>,
+    model_config: Option<ModelConfig>,
 }
 
 impl SubAgentTool {
@@ -80,6 +82,7 @@ impl SubAgentTool {
             max_turns: DEFAULT_MAX_TURNS,
             shared_state: None,
             turn_delay: None,
+            model_config: None,
         }
     }
 
@@ -151,6 +154,14 @@ impl SubAgentTool {
     /// The delay is applied before each turn except the first.
     pub fn with_turn_delay(mut self, delay: std::time::Duration) -> Self {
         self.turn_delay = Some(delay);
+        self
+    }
+
+    /// Set the model configuration for multi-provider support.
+    /// Required for non-Anthropic providers (OpenAI-compat, Google, etc.)
+    /// to specify base URL, compat flags, and other provider-specific settings.
+    pub fn with_model_config(mut self, config: ModelConfig) -> Self {
+        self.model_config = Some(config);
         self
     }
 }
@@ -257,7 +268,7 @@ impl AgentTool for SubAgentTool {
             thinking_level: self.thinking_level,
             max_tokens: self.max_tokens,
             temperature: None,
-            model_config: None,
+            model_config: self.model_config.clone(),
             convert_to_llm: None,
             transform_context: None,
             get_steering_messages: None,

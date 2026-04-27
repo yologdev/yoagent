@@ -155,6 +155,37 @@ All return `Self` for chaining (unless noted as `Result`).
 | `abort()` | Cancel the current run via `CancellationToken` |
 | `async reset()` | Cancel any pending loop, recover tools, clear all state (messages, queues, streaming flag) |
 
+## SubAgentTool
+
+Delegates tasks to a child agent loop.
+
+### Construction
+
+```rust
+let sub = SubAgentTool::new("name", Arc::new(provider));
+```
+
+### Builder Methods
+
+All return `Self` for chaining.
+
+| Method | Description |
+|--------|-------------|
+| `with_description(desc) -> Self` | What the parent LLM sees (helps it decide when to delegate) |
+| `with_system_prompt(prompt) -> Self` | The sub-agent's own instructions |
+| `with_model(model) -> Self` | Set the model identifier |
+| `with_api_key(key) -> Self` | Set the API key |
+| `with_model_config(config: ModelConfig) -> Self` | Set model config for non-Anthropic providers (base URL, compat flags, etc.) |
+| `with_tools(tools: Vec<Arc<dyn AgentTool>>) -> Self` | Tools available to the sub-agent |
+| `with_shared_state(state: SharedState) -> Self` | Attach a shared key-value store (injects `shared_state` tool automatically) |
+| `with_max_turns(N) -> Self` | Turn limit (default: 10) |
+| `with_thinking(level: ThinkingLevel) -> Self` | Enable extended thinking |
+| `with_max_tokens(max: u32) -> Self` | Set max output tokens |
+| `with_cache_config(config: CacheConfig) -> Self` | Prompt caching settings |
+| `with_tool_execution(strategy: ToolExecutionStrategy) -> Self` | Tool execution strategy (`Parallel`, `Sequential`, `Batched`) |
+| `with_retry_config(config: RetryConfig) -> Self` | Custom retry configuration |
+| `with_turn_delay(delay: Duration) -> Self` | Inter-turn delay to throttle API calls (skips first turn) |
+
 ## Re-exports
 
 The crate re-exports key types from `lib.rs`:

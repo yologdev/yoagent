@@ -1,8 +1,8 @@
 //! Shared key-value state for sub-agent communication.
 //!
-//! `SharedState` wraps an `Arc<RwLock<HashMap<String, String>>>` so multiple
-//! sub-agents (and the parent) can read/write named variables without re-pasting
-//! large artifacts into every prompt.
+//! `SharedState` is a pluggable key-value store that multiple sub-agents (and
+//! the parent) can read/write. The default backend is in-memory; a filesystem
+//! backend is also available for persistence and large artifacts.
 //!
 //! # Example
 //!
@@ -20,10 +20,11 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// Default capacity: 10 MB.
+/// Default capacity for the memory backend: 10 MB.
 const DEFAULT_MAX_BYTES: usize = 10 * 1024 * 1024;
 
 /// Error returned when a `set` would exceed the capacity limit.
@@ -47,41 +48,101 @@ impl fmt::Display for CapacityError {
 
 impl std::error::Error for CapacityError {}
 
-/// A shared string key-value store for sub-agent communication.
+/// Error type for shared state operations.
+#[derive(Debug)]
+pub enum SharedStateError {
+    Capacity(CapacityError),
+    Io(std::io::Error),
+}
+
+impl fmt::Display for SharedStateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Capacity(e) => write!(f, "{}", e),
+            Self::Io(e) => write!(f, "SharedState I/O error: {}", e),
+        }
+    }
+}
+
+impl std::error::Error for SharedStateError {}
+
+impl From<CapacityError> for SharedStateError {
+    fn from(e: CapacityError) -> Self {
+        Self::Capacity(e)
+    }
+}
+
+impl From<std::io::Error> for SharedStateError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Backend trait
+// ---------------------------------------------------------------------------
+
+/// Pluggable storage backend for `SharedState`.
 ///
-/// Cheaply cloneable (wraps `Arc`). All methods acquire and release locks
-/// within a single call — no holding across await points.
-#[derive(Clone)]
-pub struct SharedState {
-    inner: Arc<RwLock<HashMap<String, String>>>,
+/// Implement this trait to back shared state with a custom store
+/// (database, Redis, HTTP service, etc.).
+#[async_trait::async_trait]
+pub trait SharedStateBackend: Send + Sync {
+    /// Get a value by key. Returns `None` if the key doesn't exist.
+    async fn get(&self, key: &str) -> Result<Option<String>, SharedStateError>;
+
+    /// Store a value. Implementations should enforce their own capacity limits.
+    async fn set(&self, key: &str, value: String) -> Result<(), SharedStateError>;
+
+    /// Remove a key. Returns `true` if the key existed.
+    async fn remove(&self, key: &str) -> Result<bool, SharedStateError>;
+
+    /// List all keys (sorted).
+    async fn keys(&self) -> Result<Vec<String>, SharedStateError>;
+
+    /// Human-readable summary of stored variables (key names + sizes).
+    async fn summary(&self) -> Result<String, SharedStateError>;
+}
+
+// ---------------------------------------------------------------------------
+// Memory backend (default)
+// ---------------------------------------------------------------------------
+
+/// In-memory backend backed by `HashMap` with a byte capacity limit.
+pub struct MemoryBackend {
+    inner: RwLock<HashMap<String, String>>,
     max_bytes: usize,
 }
 
-impl SharedState {
-    /// Create a new store with the default 10 MB capacity.
+impl Default for MemoryBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MemoryBackend {
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(RwLock::new(HashMap::new())),
+            inner: RwLock::new(HashMap::new()),
             max_bytes: DEFAULT_MAX_BYTES,
         }
     }
 
-    /// Create a new store with a custom byte capacity.
     pub fn with_max_bytes(max_bytes: usize) -> Self {
         Self {
-            inner: Arc::new(RwLock::new(HashMap::new())),
+            inner: RwLock::new(HashMap::new()),
             max_bytes,
         }
     }
+}
 
-    /// Get a value by key. Returns `None` if the key doesn't exist.
-    pub async fn get(&self, key: &str) -> Option<String> {
-        self.inner.read().await.get(key).cloned()
+#[async_trait::async_trait]
+impl SharedStateBackend for MemoryBackend {
+    async fn get(&self, key: &str) -> Result<Option<String>, SharedStateError> {
+        Ok(self.inner.read().await.get(key).cloned())
     }
 
-    /// Store a value. Returns `Err(CapacityError)` if the total size
-    /// (excluding the old value for this key, if any) would exceed capacity.
-    pub async fn set(&self, key: &str, value: String) -> Result<(), CapacityError> {
+    async fn set(&self, key: &str, value: String) -> Result<(), SharedStateError> {
         let mut map = self.inner.write().await;
 
         // Calculate current total excluding the old value for this key.
@@ -98,41 +159,212 @@ impl SharedState {
                 value_bytes: value.len(),
                 current_bytes: current,
                 max_bytes: self.max_bytes,
-            });
+            }
+            .into());
         }
 
         map.insert(key.to_string(), value);
         Ok(())
     }
 
+    async fn remove(&self, key: &str) -> Result<bool, SharedStateError> {
+        Ok(self.inner.write().await.remove(key).is_some())
+    }
+
+    async fn keys(&self) -> Result<Vec<String>, SharedStateError> {
+        let map = self.inner.read().await;
+        let mut keys: Vec<String> = map.keys().cloned().collect();
+        keys.sort();
+        Ok(keys)
+    }
+
+    async fn summary(&self) -> Result<String, SharedStateError> {
+        let map = self.inner.read().await;
+        Ok(format_summary(
+            map.iter().map(|(k, v)| (k.as_str(), v.len())),
+        ))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Filesystem backend
+// ---------------------------------------------------------------------------
+
+/// Filesystem backend — each key is stored as a file in a directory.
+///
+/// Keys are sanitized to safe filenames. Values are stored as plain text
+/// (no extension) for easy inspection and debugging.
+///
+/// ```rust,no_run
+/// use yoagent::shared_state::{SharedState, FileBackend};
+///
+/// # async fn example() {
+/// let state = SharedState::with_backend(FileBackend::new("/tmp/agent-state"));
+/// state.set("summary", "analysis results...".into()).await.unwrap();
+/// // Creates /tmp/agent-state/summary with the content
+/// # }
+/// ```
+pub struct FileBackend {
+    dir: PathBuf,
+}
+
+impl FileBackend {
+    /// Create a new filesystem backend. Creates the directory if it doesn't exist.
+    pub fn new(dir: impl AsRef<Path>) -> Self {
+        Self {
+            dir: dir.as_ref().to_path_buf(),
+        }
+    }
+
+    /// Sanitize a key into a safe filename.
+    /// Replaces path separators and other unsafe chars with underscores.
+    fn key_to_path(&self, key: &str) -> PathBuf {
+        let safe: String = key
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        self.dir.join(safe)
+    }
+}
+
+#[async_trait::async_trait]
+impl SharedStateBackend for FileBackend {
+    async fn get(&self, key: &str) -> Result<Option<String>, SharedStateError> {
+        let path = self.key_to_path(key);
+        match tokio::fs::read_to_string(&path).await {
+            Ok(content) => Ok(Some(content)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    async fn set(&self, key: &str, value: String) -> Result<(), SharedStateError> {
+        tokio::fs::create_dir_all(&self.dir).await?;
+        let path = self.key_to_path(key);
+        tokio::fs::write(&path, &value).await?;
+        Ok(())
+    }
+
+    async fn remove(&self, key: &str) -> Result<bool, SharedStateError> {
+        let path = self.key_to_path(key);
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    async fn keys(&self) -> Result<Vec<String>, SharedStateError> {
+        let mut keys = Vec::new();
+        let mut entries = match tokio::fs::read_dir(&self.dir).await {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(keys),
+            Err(e) => return Err(e.into()),
+        };
+        while let Some(entry) = entries.next_entry().await? {
+            if let Some(name) = entry.file_name().to_str() {
+                // Skip hidden files
+                if !name.starts_with('.') {
+                    keys.push(name.to_string());
+                }
+            }
+        }
+        keys.sort();
+        Ok(keys)
+    }
+
+    async fn summary(&self) -> Result<String, SharedStateError> {
+        let mut entries = Vec::new();
+        let mut dir = match tokio::fs::read_dir(&self.dir).await {
+            Ok(dir) => dir,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok("(empty)".to_string())
+            }
+            Err(e) => return Err(e.into()),
+        };
+        while let Some(entry) = dir.next_entry().await? {
+            if let Some(name) = entry.file_name().to_str() {
+                if !name.starts_with('.') {
+                    let meta = entry.metadata().await?;
+                    entries.push((name.to_string(), meta.len() as usize));
+                }
+            }
+        }
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(format_summary(
+            entries.iter().map(|(k, s)| (k.as_str(), *s)),
+        ))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SharedState (public API)
+// ---------------------------------------------------------------------------
+
+/// A shared string key-value store for sub-agent communication.
+///
+/// Cheaply cloneable (wraps `Arc`). Delegates all operations to a
+/// pluggable [`SharedStateBackend`].
+#[derive(Clone)]
+pub struct SharedState {
+    backend: Arc<dyn SharedStateBackend>,
+}
+
+impl SharedState {
+    /// Create a new in-memory store with the default 10 MB capacity.
+    pub fn new() -> Self {
+        Self {
+            backend: Arc::new(MemoryBackend::new()),
+        }
+    }
+
+    /// Create a new in-memory store with a custom byte capacity.
+    pub fn with_max_bytes(max_bytes: usize) -> Self {
+        Self {
+            backend: Arc::new(MemoryBackend::with_max_bytes(max_bytes)),
+        }
+    }
+
+    /// Create a store backed by a custom backend.
+    pub fn with_backend(backend: impl SharedStateBackend + 'static) -> Self {
+        Self {
+            backend: Arc::new(backend),
+        }
+    }
+
+    /// Get a value by key. Returns `None` if the key doesn't exist.
+    pub async fn get(&self, key: &str) -> Option<String> {
+        self.backend.get(key).await.ok().flatten()
+    }
+
+    /// Store a value. Returns `Err(CapacityError)` if the backend rejects it.
+    pub async fn set(&self, key: &str, value: String) -> Result<(), SharedStateError> {
+        self.backend.set(key, value).await
+    }
+
     /// Remove a key. Returns `true` if the key existed.
     pub async fn remove(&self, key: &str) -> bool {
-        self.inner.write().await.remove(key).is_some()
+        self.backend.remove(key).await.unwrap_or(false)
     }
 
     /// List all keys (sorted).
     pub async fn keys(&self) -> Vec<String> {
-        let map = self.inner.read().await;
-        let mut keys: Vec<String> = map.keys().cloned().collect();
-        keys.sort();
-        keys
+        self.backend.keys().await.unwrap_or_default()
     }
 
     /// Human-readable summary of stored variables (key names + byte sizes).
     /// Suitable for injecting into a system prompt.
     pub async fn summary(&self) -> String {
-        let map = self.inner.read().await;
-        if map.is_empty() {
-            return "(empty)".to_string();
-        }
-        let mut entries: Vec<_> = map.iter().map(|(k, v)| (k.clone(), v.len())).collect();
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
-
-        entries
-            .iter()
-            .map(|(k, size)| format_entry(k, *size))
-            .collect::<Vec<_>>()
-            .join(", ")
+        self.backend
+            .summary()
+            .await
+            .unwrap_or_else(|_| "(error reading state)".to_string())
     }
 }
 
@@ -142,13 +374,29 @@ impl Default for SharedState {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn format_summary<'a>(entries: impl Iterator<Item = (&'a str, usize)>) -> String {
+    let entries: Vec<_> = entries.collect();
+    if entries.is_empty() {
+        return "(empty)".to_string();
+    }
+    entries
+        .iter()
+        .map(|(k, size)| format_entry(k, *size))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn format_entry(key: &str, bytes: usize) -> String {
     if bytes >= 1024 * 1024 {
-        format!("{} ({:.1}MB)", key, bytes as f64 / (1024.0 * 1024.0))
+        format!("{} ({:.1} MB)", key, bytes as f64 / (1024.0 * 1024.0))
     } else if bytes >= 1024 {
-        format!("{} ({:.1}KB)", key, bytes as f64 / 1024.0)
+        format!("{} ({:.1} KB)", key, bytes as f64 / 1024.0)
     } else {
-        format!("{} ({}B)", key, bytes)
+        format!("{} ({} bytes)", key, bytes)
     }
 }
 
@@ -200,7 +448,7 @@ mod tests {
     async fn test_overwrite_within_capacity() {
         let state = SharedState::with_max_bytes(30);
         state.set("k", "aaaaaaaaaa".into()).await.unwrap(); // 1+10=11
-                                                            // Overwrite with larger value — old value excluded from budget
+        // Overwrite with larger value — old value excluded from budget
         state.set("k", "bbbbbbbbbbbbbbbbbb".into()).await.unwrap(); // 1+18=19
         assert_eq!(state.get("k").await, Some("bbbbbbbbbbbbbbbbbb".into()));
     }
@@ -213,7 +461,7 @@ mod tests {
         state.set("small", "hi".into()).await.unwrap();
         let s = state.summary().await;
         assert!(s.contains("small"));
-        assert!(s.contains("B)"));
+        assert!(s.contains("bytes)"));
     }
 
     #[tokio::test]
@@ -230,5 +478,66 @@ mod tests {
             h.await.unwrap();
         }
         assert_eq!(state.keys().await.len(), 10);
+    }
+
+    #[tokio::test]
+    async fn test_file_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = SharedState::with_backend(FileBackend::new(dir.path()));
+
+        // Empty state
+        assert_eq!(state.get("x").await, None);
+        assert_eq!(state.keys().await, Vec::<String>::new());
+        assert_eq!(state.summary().await, "(empty)");
+
+        // Set and get
+        state.set("report", "analysis done".into()).await.unwrap();
+        assert_eq!(state.get("report").await, Some("analysis done".into()));
+
+        // File actually exists on disk
+        let content = std::fs::read_to_string(dir.path().join("report")).unwrap();
+        assert_eq!(content, "analysis done");
+
+        // Keys
+        state.set("log", "build output".into()).await.unwrap();
+        assert_eq!(state.keys().await, vec!["log", "report"]);
+
+        // Summary
+        let summary = state.summary().await;
+        assert!(summary.contains("report"));
+        assert!(summary.contains("log"));
+
+        // Remove
+        assert!(state.remove("report").await);
+        assert_eq!(state.get("report").await, None);
+        assert!(!state.remove("report").await);
+    }
+
+    #[tokio::test]
+    async fn test_file_backend_key_sanitization() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = SharedState::with_backend(FileBackend::new(dir.path()));
+
+        // Keys with special chars get sanitized
+        state
+            .set("summary:src/main.rs", "file analysis".into())
+            .await
+            .unwrap();
+        assert_eq!(
+            state.get("summary:src/main.rs").await,
+            Some("file analysis".into())
+        );
+
+        // The file on disk uses the sanitized name
+        let sanitized = dir.path().join("summary_src_main.rs");
+        assert!(sanitized.exists());
+    }
+
+    #[tokio::test]
+    async fn test_with_backend() {
+        // Verify with_backend works with MemoryBackend directly
+        let state = SharedState::with_backend(MemoryBackend::new());
+        state.set("k", "v".into()).await.unwrap();
+        assert_eq!(state.get("k").await, Some("v".into()));
     }
 }
