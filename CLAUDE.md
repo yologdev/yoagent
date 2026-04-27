@@ -80,6 +80,16 @@ Behind the `openapi` Cargo feature. `OpenApiToolAdapter` parses an OpenAPI 3.0 s
 
 `McpClient` communicates via `McpTransport` trait (stdio or HTTP). `McpToolAdapter` wraps MCP tools to implement `AgentTool`, making them transparent to the agent loop. Added via `Agent::with_mcp_server_stdio()` / `with_mcp_server_http()`.
 
+### Shared State (`shared_state.rs`)
+
+`SharedState` is a shared key-value store (`Arc<RwLock<HashMap<String, String>>>`) for sub-agent communication. It lets a parent store large artifacts once and have multiple sub-agents read/write by reference — no re-pasting into prompts.
+
+- Opt-in via `SubAgentTool::with_shared_state(state)` — injects a `shared_state` tool and appends a state summary to the sub-agent's system prompt automatically
+- Actions: `get`, `set`, `list`, `remove`
+- Default 10MB capacity; configurable via `SharedState::with_max_bytes()`
+- Concurrent-safe: `tokio::sync::RwLock` allows parallel sub-agents to share state
+- Does **not** touch the core agent loop — wired entirely through `SubAgentTool`
+
 ### Testing
 
 All unit tests use `MockProvider` (`provider/mock.rs`) to simulate LLM responses without network. Test files are in `tests/` — `agent_test.rs`, `agent_loop_test.rs`, `tools_test.rs`. Follow the existing pattern of constructing a `MockProvider` with predetermined responses.
