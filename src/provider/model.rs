@@ -91,6 +91,7 @@ pub struct OpenAiCompat {
     /// Tool results must include a `name` field.
     pub requires_tool_result_name: bool,
     /// Must insert an assistant message after tool results.
+    #[serde(default)]
     pub requires_assistant_after_tool_result: bool,
     /// How thinking/reasoning content is formatted in streaming.
     pub thinking_format: ThinkingFormat,
@@ -191,6 +192,14 @@ impl OpenAiCompat {
             ..Default::default()
         }
     }
+
+    /// Compat flags for Ollama's OpenAI-compatible API.
+    pub fn ollama() -> Self {
+        Self {
+            requires_assistant_after_tool_result: true,
+            ..Default::default()
+        }
+    }
 }
 
 /// Full model configuration. Knows everything needed to make API calls.
@@ -273,6 +282,26 @@ impl ModelConfig {
             cost: CostConfig::default(),
             headers: HashMap::new(),
             compat: Some(OpenAiCompat::default()),
+        }
+    }
+
+    /// Create a config for Ollama's OpenAI-compatible API.
+    ///
+    /// Default local base URL: `http://localhost:11434/v1`.
+    pub fn ollama(base_url: impl Into<String>, model_id: impl Into<String>) -> Self {
+        let id = model_id.into();
+        Self {
+            id: id.clone(),
+            name: id,
+            api: ApiProtocol::OpenAiCompletions,
+            provider: "ollama".into(),
+            base_url: base_url.into(),
+            reasoning: false,
+            context_window: 128_000,
+            max_tokens: 4096,
+            cost: CostConfig::default(),
+            headers: HashMap::new(),
+            compat: Some(OpenAiCompat::ollama()),
         }
     }
 
@@ -455,6 +484,49 @@ mod tests {
         let minimax = OpenAiCompat::minimax();
         assert!(minimax.supports_usage_in_streaming);
         assert!(!minimax.supports_store);
+
+        let ollama = OpenAiCompat::ollama();
+        assert!(ollama.requires_assistant_after_tool_result);
+        assert!(!ollama.requires_tool_result_name);
+    }
+
+    #[test]
+    fn test_openai_compat_deserializes_without_assistant_after_tool_result_flag() {
+        let compat: OpenAiCompat = serde_json::from_value(serde_json::json!({
+            "supports_store": false,
+            "supports_developer_role": false,
+            "supports_reasoning_effort": false,
+            "supports_thinking_control": false,
+            "supports_usage_in_streaming": true,
+            "max_tokens_field": "max_tokens",
+            "requires_tool_result_name": false,
+            "thinking_format": "open_ai"
+        }))
+        .unwrap();
+
+        assert!(!compat.requires_assistant_after_tool_result);
+    }
+
+    #[test]
+    fn test_model_config_local_remains_neutral() {
+        let config = ModelConfig::local("http://localhost:1234/v1", "local-model");
+        assert_eq!(config.api, ApiProtocol::OpenAiCompletions);
+        assert_eq!(config.provider, "local");
+        assert_eq!(config.base_url, "http://localhost:1234/v1");
+        let compat = config.compat.unwrap();
+        assert!(!compat.requires_assistant_after_tool_result);
+    }
+
+    #[test]
+    fn test_model_config_ollama() {
+        let config = ModelConfig::ollama("http://localhost:11434/v1", "llama3.1:8b");
+        assert_eq!(config.api, ApiProtocol::OpenAiCompletions);
+        assert_eq!(config.provider, "ollama");
+        assert_eq!(config.id, "llama3.1:8b");
+        assert_eq!(config.name, "llama3.1:8b");
+        assert_eq!(config.base_url, "http://localhost:11434/v1");
+        let compat = config.compat.unwrap();
+        assert!(compat.requires_assistant_after_tool_result);
     }
 
     #[test]
