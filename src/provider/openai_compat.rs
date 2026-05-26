@@ -622,6 +622,67 @@ mod tests {
     }
 
     #[test]
+    fn test_build_request_body_qwen_uses_max_tokens_and_streaming_usage() {
+        let model_config = ModelConfig::qwen("qwen3.6-plus", "Qwen 3.6 Plus");
+        let compat = model_config.compat.as_ref().unwrap().clone();
+        let config = StreamConfig {
+            model: "qwen3.6-plus".into(),
+            system_prompt: "You are helpful.".into(),
+            messages: vec![Message::user("Hello")],
+            tools: vec![],
+            thinking_level: ThinkingLevel::High,
+            api_key: "test".into(),
+            max_tokens: Some(2048),
+            temperature: None,
+            model_config: Some(model_config.clone()),
+            cache_config: CacheConfig::default(),
+        };
+
+        let body = build_request_body(&config, &model_config, &compat);
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(body["max_tokens"], 2048);
+        assert!(body.get("max_completion_tokens").is_none());
+        assert_eq!(body["stream_options"]["include_usage"], true);
+        assert!(body.get("reasoning_effort").is_none());
+        assert!(body.get("thinking").is_none());
+    }
+
+    #[test]
+    fn test_build_request_body_qwen_tools_use_openai_shape() {
+        let model_config = ModelConfig::qwen("qwen3-coder-plus", "Qwen 3 Coder Plus");
+        let compat = model_config.compat.as_ref().unwrap().clone();
+        let config = StreamConfig {
+            model: "qwen3-coder-plus".into(),
+            system_prompt: String::new(),
+            messages: vec![Message::user("List files")],
+            tools: vec![ToolDefinition {
+                name: "list_files".into(),
+                description: "List files".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"}
+                    }
+                }),
+            }],
+            thinking_level: ThinkingLevel::Off,
+            api_key: "test".into(),
+            max_tokens: None,
+            temperature: None,
+            model_config: Some(model_config.clone()),
+            cache_config: CacheConfig::default(),
+        };
+
+        let body = build_request_body(&config, &model_config, &compat);
+        assert_eq!(body["tools"][0]["type"], "function");
+        assert_eq!(body["tools"][0]["function"]["name"], "list_files");
+        assert_eq!(
+            body["tools"][0]["function"]["parameters"]["properties"]["path"]["type"],
+            "string"
+        );
+    }
+
+    #[test]
     fn test_deepseek_usage_cache_fields_parse() {
         let chunk: OpenAiChunk = serde_json::from_value(serde_json::json!({
             "choices": [],

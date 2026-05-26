@@ -183,6 +183,9 @@ use yoagent::provider::{ModelConfig, ProviderRegistry};
 // Use a first-class OpenAI-compatible provider preset
 let model = ModelConfig::groq("llama-3.3-70b-versatile", "Llama 3.3 70B");
 
+// Or Qwen / DashScope
+let model = ModelConfig::qwen("qwen3.6-plus", "Qwen 3.6 Plus");
+
 // Or Google Gemini
 let model = ModelConfig::google("gemini-2.5-pro", "Gemini 2.5 Pro");
 
@@ -199,7 +202,7 @@ let registry = ProviderRegistry::default();
 | Protocol | Providers |
 |----------|-----------|
 | Anthropic Messages | Anthropic (Claude) |
-| OpenAI Completions | OpenAI, xAI, Groq, Mistral, DeepSeek, MiniMax, Z.ai, Ollama, local servers, and custom compatible APIs |
+| OpenAI Completions | OpenAI, xAI, Groq, Mistral, DeepSeek, MiniMax, Z.ai, Qwen, Ollama, local servers, and custom compatible APIs |
 | OpenAI Responses | OpenAI (newer API) |
 | Azure OpenAI | Azure OpenAI |
 | Google Generative AI | Google Gemini |

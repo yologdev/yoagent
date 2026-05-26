@@ -11,8 +11,9 @@
 //!   ANTHROPIC_API_KEY=sk-... cargo run --example cli -- --model claude-sonnet-4-20250514
 //!   ANTHROPIC_API_KEY=sk-... cargo run --example cli -- --skills ./skills
 //!
-//! Run with a named provider (zai, openai, xai, groq, deepseek, mistral, minimax, ollama, google):
+//! Run with a named provider (zai, qwen, openai, xai, groq, deepseek, mistral, minimax, ollama, google):
 //!   API_KEY=... cargo run --example cli -- --provider zai --model glm-4.7
+//!   DASHSCOPE_API_KEY=... cargo run --example cli -- --provider qwen --model qwen3.6-plus
 //!   cargo run --example cli -- --provider ollama --model llama3.1:8b
 //!
 //! Run with LM Studio / local OpenAI-compatible server:
@@ -76,7 +77,11 @@ async fn main() {
         .cloned();
 
     let api_key_optional = api_url.is_some() || provider_name.as_deref() == Some("ollama");
-    let api_key = if api_key_optional {
+    let api_key = if provider_name.as_deref() == Some("qwen") {
+        std::env::var("DASHSCOPE_API_KEY")
+            .or_else(|_| std::env::var("API_KEY"))
+            .expect("Set DASHSCOPE_API_KEY or API_KEY")
+    } else if api_key_optional {
         std::env::var("ANTHROPIC_API_KEY")
             .or_else(|_| std::env::var("API_KEY"))
             .unwrap_or_default() // empty string OK for local/Ollama
@@ -88,6 +93,7 @@ async fn main() {
 
     let default_model = match provider_name.as_deref() {
         Some("zai") => "glm-4.7",
+        Some("qwen") => "qwen3.6-plus",
         Some("openai") => "gpt-4o",
         Some("xai") => "grok-3-mini",
         Some("groq") => "llama-3.3-70b-versatile",
@@ -314,6 +320,9 @@ async fn main() {
 fn make_provider_agent(provider: &str, model: &str) -> Agent {
     match provider {
         "zai" => Agent::new(OpenAiCompatProvider).with_model_config(ModelConfig::zai(model, model)),
+        "qwen" => {
+            Agent::new(OpenAiCompatProvider).with_model_config(ModelConfig::qwen(model, model))
+        }
         "openai" => {
             Agent::new(OpenAiCompatProvider).with_model_config(ModelConfig::openai(model, model))
         }
@@ -334,7 +343,7 @@ fn make_provider_agent(provider: &str, model: &str) -> Agent {
             .with_model_config(ModelConfig::ollama("http://localhost:11434/v1", model)),
         "google" => Agent::new(GoogleProvider).with_model_config(ModelConfig::google(model, model)),
         other => {
-            eprintln!("Unknown provider: {other}. Supported: zai, openai, xai, groq, deepseek, mistral, minimax, ollama, google.");
+            eprintln!("Unknown provider: {other}. Supported: zai, qwen, openai, xai, groq, deepseek, mistral, minimax, ollama, google.");
             std::process::exit(1);
         }
     }

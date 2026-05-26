@@ -1,6 +1,6 @@
 # OpenAI Compatible Provider
 
-`OpenAiCompatProvider` implements the OpenAI Chat Completions API. One implementation covers OpenAI, xAI, Groq, Cerebras, OpenRouter, Mistral, DeepSeek, MiniMax, Z.ai, and any other compatible API.
+`OpenAiCompatProvider` implements the OpenAI Chat Completions API. One implementation covers OpenAI, xAI, Groq, Cerebras, OpenRouter, Mistral, DeepSeek, MiniMax, Z.ai, Qwen, Ollama, and any other compatible API.
 
 For the first-class `ModelConfig::*` constructors and default model metadata, see [Model Presets](model-presets.md).
 
@@ -47,6 +47,7 @@ pub struct OpenAiCompat {
 | DeepSeek | `OpenAiCompat::deepseek()` | `max_tokens`, `thinking`, `reasoning_effort`, 1M context window |
 | MiniMax | `OpenAiCompat::minimax()` | Standard defaults, 1M context window |
 | Z.ai (Zhipu) | `OpenAiCompat::zai()` | Standard defaults |
+| Qwen | `OpenAiCompat::qwen()` | Qwen reasoning content format, `max_tokens`, streaming usage |
 | Ollama | `OpenAiCompat::ollama()` | Inserts an empty assistant message after tool result runs |
 
 `OpenAiCompat` presets are lower-level quirk flags. A provider is first-class when it also has a `ModelConfig::*` constructor; see [Model Presets](model-presets.md).
@@ -70,15 +71,12 @@ impl OpenAiCompat {
 2. Create a `ModelConfig` that uses it:
 
 ```rust
-let config = ModelConfig {
-    id: "my-model".into(),
-    name: "My Model".into(),
-    api: ApiProtocol::OpenAiCompletions,
-    provider: "my-provider".into(),
-    base_url: "https://api.myprovider.com/v1".into(),
-    compat: Some(OpenAiCompat::my_provider()),
-    // ...
-};
+let config = ModelConfig::openai_compat(
+    "https://api.myprovider.com/v1",
+    "my-model",
+    "my-provider",
+    OpenAiCompat::my_provider(),
+);
 ```
 
 ## Thinking/Reasoning
@@ -116,6 +114,31 @@ Or via the CLI example:
 
 ```bash
 cargo run --example cli -- --api-url http://localhost:1234/v1 --model my-model
+```
+
+For locally deployed open-source model families, keep the local endpoint and choose the model-family compat profile:
+
+```rust
+let qwen_local = ModelConfig::openai_compat(
+    "http://localhost:1234/v1",
+    "qwen3-local",
+    "qwen",
+    OpenAiCompat::qwen(),
+);
+```
+
+Serving-layer quirks and model-family quirks can be combined because `OpenAiCompat` fields are public:
+
+```rust
+let mut compat = OpenAiCompat::qwen();
+compat.requires_assistant_after_tool_result = true;
+
+let qwen_on_ollama = ModelConfig::openai_compat(
+    "http://localhost:11434/v1",
+    "qwen2.5-coder:7b",
+    "ollama",
+    compat,
+);
 ```
 
 ## Auth
