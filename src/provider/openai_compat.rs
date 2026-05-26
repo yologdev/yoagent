@@ -85,12 +85,18 @@ impl StreamProvider for OpenAiCompatProvider {
 
                             // Process usage
                             if let Some(u) = &chunk.usage {
-                                usage.input = u.prompt_tokens;
+                                let cache_read = u
+                                    .prompt_cache_hit_tokens
+                                    .or_else(|| {
+                                        u.prompt_tokens_details.as_ref().map(|d| d.cached_tokens)
+                                    })
+                                    .unwrap_or(0);
+                                usage.input = u.prompt_cache_miss_tokens.unwrap_or_else(|| {
+                                    u.prompt_tokens.saturating_sub(cache_read)
+                                });
                                 usage.output = u.completion_tokens;
                                 usage.total_tokens = u.total_tokens;
-                                if let Some(details) = &u.prompt_tokens_details {
-                                    usage.cache_read = details.cached_tokens;
-                                }
+                                usage.cache_read = cache_read;
                             }
 
                             for choice in &chunk.choices {
@@ -348,6 +354,15 @@ fn build_request_body(
         }
     }
 
+    if compat.supports_thinking_control {
+        let thinking_type = if config.thinking_level == ThinkingLevel::Off {
+            "disabled"
+        } else {
+            "enabled"
+        };
+        body["thinking"] = serde_json::json!({ "type": thinking_type });
+    }
+
     if !config.tools.is_empty() {
         let tools: Vec<serde_json::Value> = config
             .tools
@@ -462,6 +477,10 @@ struct OpenAiUsage {
     total_tokens: u64,
     #[serde(default)]
     prompt_tokens_details: Option<OpenAiPromptTokensDetails>,
+    #[serde(default)]
+    prompt_cache_hit_tokens: Option<u64>,
+    #[serde(default)]
+    prompt_cache_miss_tokens: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -526,6 +545,78 @@ mod tests {
         assert!(body["tools"].is_array());
         assert_eq!(body["tools"][0]["function"]["name"], "bash");
         assert_eq!(body["temperature"], 0.5);
+    }
+
+    #[test]
+    fn test_build_request_body_deepseek_off_uses_current_api_shape() {
+        let model_config = ModelConfig::deepseek("deepseek-v4-flash", "DeepSeek V4 Flash");
+        let compat = model_config.compat.as_ref().unwrap().clone();
+        let config = StreamConfig {
+            model: "deepseek-v4-flash".into(),
+            system_prompt: "You are helpful.".into(),
+            messages: vec![Message::user("Hello")],
+            tools: vec![],
+            thinking_level: ThinkingLevel::Off,
+            api_key: "test".into(),
+            max_tokens: Some(1024),
+            temperature: None,
+            model_config: Some(model_config.clone()),
+            cache_config: CacheConfig::default(),
+        };
+
+        let body = build_request_body(&config, &model_config, &compat);
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(body["max_tokens"], 1024);
+        assert!(body.get("max_completion_tokens").is_none());
+        assert_eq!(body["thinking"]["type"], "disabled");
+        assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn test_build_request_body_deepseek_thinking_enabled() {
+        let model_config = ModelConfig::deepseek("deepseek-v4-pro", "DeepSeek V4 Pro");
+        let compat = model_config.compat.as_ref().unwrap().clone();
+        let config = StreamConfig {
+            model: "deepseek-v4-pro".into(),
+            system_prompt: String::new(),
+            messages: vec![Message::user("Solve this")],
+            tools: vec![],
+            thinking_level: ThinkingLevel::High,
+            api_key: "test".into(),
+            max_tokens: None,
+            temperature: None,
+            model_config: Some(model_config.clone()),
+            cache_config: CacheConfig::default(),
+        };
+
+        let body = build_request_body(&config, &model_config, &compat);
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["reasoning_effort"], "high");
+        assert_eq!(body["max_tokens"], 384_000);
+    }
+
+    #[test]
+    fn test_deepseek_usage_cache_fields_parse() {
+        let chunk: OpenAiChunk = serde_json::from_value(serde_json::json!({
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 100,
+                "prompt_cache_hit_tokens": 70,
+                "prompt_cache_miss_tokens": 30,
+                "completion_tokens": 10,
+                "total_tokens": 110
+            }
+        }))
+        .unwrap();
+
+        let u = chunk.usage.unwrap();
+        let cache_read = u.prompt_cache_hit_tokens.unwrap_or(0);
+        let input = u
+            .prompt_cache_miss_tokens
+            .unwrap_or_else(|| u.prompt_tokens.saturating_sub(cache_read));
+        assert_eq!(input, 30);
+        assert_eq!(cache_read, 70);
+        assert_eq!(u.completion_tokens, 10);
     }
 
     #[test]

@@ -108,3 +108,9 @@ pub struct CostConfig {
     pub cache_write_per_million: f64,
 }
 ```
+
+## ModelConfig Presets
+
+yoagent provides first-class `ModelConfig::*` constructors for Anthropic, OpenAI, Google Gemini, xAI, Groq, DeepSeek, Mistral, MiniMax, Z.ai, and local OpenAI-compatible servers.
+
+See [Model Presets](../providers/model-presets.md) for the full table of constructors, default base URLs, context windows, and DeepSeek legacy alias notes.

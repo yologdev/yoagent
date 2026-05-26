@@ -2,6 +2,8 @@
 
 `OpenAiCompatProvider` implements the OpenAI Chat Completions API. One implementation covers OpenAI, xAI, Groq, Cerebras, OpenRouter, Mistral, DeepSeek, MiniMax, Z.ai, and any other compatible API.
 
+For the first-class `ModelConfig::*` constructors and default model metadata, see [Model Presets](model-presets.md).
+
 ## Usage
 
 Requires a `ModelConfig` with `compat` flags set in `StreamConfig.model_config`:
@@ -23,6 +25,7 @@ pub struct OpenAiCompat {
     pub supports_store: bool,
     pub supports_developer_role: bool,
     pub supports_reasoning_effort: bool,
+    pub supports_thinking_control: bool,
     pub supports_usage_in_streaming: bool,
     pub max_tokens_field: MaxTokensField,       // MaxTokens or MaxCompletionTokens
     pub requires_tool_result_name: bool,
@@ -41,9 +44,11 @@ pub struct OpenAiCompat {
 | Cerebras | `OpenAiCompat::cerebras()` | Standard defaults |
 | OpenRouter | `OpenAiCompat::openrouter()` | `max_completion_tokens` |
 | Mistral | `OpenAiCompat::mistral()` | `max_tokens` field |
-| DeepSeek | `OpenAiCompat::deepseek()` | `max_completion_tokens` |
+| DeepSeek | `OpenAiCompat::deepseek()` | `max_tokens`, `thinking`, `reasoning_effort`, 1M context window |
 | MiniMax | `OpenAiCompat::minimax()` | Standard defaults, 1M context window |
 | Z.ai (Zhipu) | `OpenAiCompat::zai()` | Standard defaults |
+
+`OpenAiCompat` presets are lower-level quirk flags. A provider is first-class when it also has a `ModelConfig::*` constructor; see [Model Presets](model-presets.md).
 
 ## Adding a New Compatible Provider
 

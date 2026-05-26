@@ -176,13 +176,13 @@ Found 3 TODOs:
 <summary>OpenAI-compatible provider example</summary>
 
 ```rust
-use yoagent::provider::{ModelConfig, ApiProtocol, ProviderRegistry};
+use yoagent::provider::{ModelConfig, ProviderRegistry};
 
-// Use any OpenAI-compatible provider
-let model = ModelConfig::openai_compat("groq", "llama-3.3-70b", "https://api.groq.com/openai/v1");
+// Use a first-class OpenAI-compatible provider preset
+let model = ModelConfig::groq("llama-3.3-70b-versatile", "Llama 3.3 70B");
 
 // Or Google Gemini
-let model = ModelConfig::google("gemini-2.5-pro");
+let model = ModelConfig::google("gemini-2.5-pro", "Gemini 2.5 Pro");
 
 // Registry dispatches to the right provider
 let registry = ProviderRegistry::default();
@@ -197,7 +197,7 @@ let registry = ProviderRegistry::default();
 | Protocol | Providers |
 |----------|-----------|
 | Anthropic Messages | Anthropic (Claude) |
-| OpenAI Completions | OpenAI, xAI, Groq, Cerebras, OpenRouter, Mistral, MiniMax, HuggingFace, Kimi, DeepSeek |
+| OpenAI Completions | OpenAI, xAI, Groq, Mistral, DeepSeek, MiniMax, Z.ai, local servers, and custom compatible APIs |
 | OpenAI Responses | OpenAI (newer API) |
 | Azure OpenAI | Azure OpenAI |
 | Google Generative AI | Google Gemini |

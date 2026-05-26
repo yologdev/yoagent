@@ -28,6 +28,7 @@
 # Providers
 
 - [Overview](providers/overview.md)
+- [Model Presets](providers/model-presets.md)
 - [Anthropic](providers/anthropic.md)
 - [OpenAI Compatible](providers/openai-compat.md)
 - [Google Gemini](providers/google.md)
