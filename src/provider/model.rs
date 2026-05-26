@@ -81,6 +81,9 @@ pub struct OpenAiCompat {
     pub supports_developer_role: bool,
     /// Supports `reasoning_effort` parameter.
     pub supports_reasoning_effort: bool,
+    /// Supports DeepSeek-style `thinking` mode control.
+    #[serde(default)]
+    pub supports_thinking_control: bool,
     /// Includes usage data in streaming responses.
     pub supports_usage_in_streaming: bool,
     /// Which field name to use for max tokens.
@@ -99,6 +102,7 @@ impl Default for OpenAiCompat {
             supports_store: false,
             supports_developer_role: false,
             supports_reasoning_effort: false,
+            supports_thinking_control: false,
             supports_usage_in_streaming: true,
             max_tokens_field: MaxTokensField::MaxTokens,
             requires_tool_result_name: false,
@@ -164,8 +168,10 @@ impl OpenAiCompat {
     /// Compat flags for DeepSeek.
     pub fn deepseek() -> Self {
         Self {
+            supports_reasoning_effort: true,
+            supports_thinking_control: true,
             supports_usage_in_streaming: true,
-            max_tokens_field: MaxTokensField::MaxCompletionTokens,
+            max_tokens_field: MaxTokensField::MaxTokens,
             ..Default::default()
         }
     }
@@ -348,17 +354,20 @@ impl ModelConfig {
 
     /// Create a new DeepSeek model config.
     ///
-    /// Models: `deepseek-chat`, `deepseek-reasoner`, etc.
+    /// Models: `deepseek-v4-flash`, `deepseek-v4-pro`, etc.
+    ///
+    /// Legacy aliases `deepseek-chat` and `deepseek-reasoner` are accepted by
+    /// DeepSeek for now, but are scheduled for deprecation on 2026-07-24.
     pub fn deepseek(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             id: id.into(),
             name: name.into(),
             api: ApiProtocol::OpenAiCompletions,
             provider: "deepseek".into(),
-            base_url: "https://api.deepseek.com/v1".into(),
-            reasoning: false,
-            context_window: 128_000,
-            max_tokens: 4096,
+            base_url: "https://api.deepseek.com".into(),
+            reasoning: true,
+            context_window: 1_000_000,
+            max_tokens: 384_000,
             cost: CostConfig::default(),
             headers: HashMap::new(),
             compat: Some(OpenAiCompat::deepseek()),
@@ -435,10 +444,9 @@ mod tests {
         assert!(!groq.supports_store);
 
         let deepseek = OpenAiCompat::deepseek();
-        assert_eq!(
-            deepseek.max_tokens_field,
-            MaxTokensField::MaxCompletionTokens
-        );
+        assert_eq!(deepseek.max_tokens_field, MaxTokensField::MaxTokens);
+        assert!(deepseek.supports_reasoning_effort);
+        assert!(deepseek.supports_thinking_control);
 
         let zai = OpenAiCompat::zai();
         assert!(zai.supports_usage_in_streaming);
@@ -465,6 +473,18 @@ mod tests {
         assert_eq!(config.provider, "minimax");
         assert_eq!(config.base_url, "https://api.minimaxi.chat/v1");
         assert_eq!(config.context_window, 1_000_000);
+        assert!(config.compat.is_some());
+    }
+
+    #[test]
+    fn test_model_config_deepseek() {
+        let config = ModelConfig::deepseek("deepseek-v4-flash", "DeepSeek V4 Flash");
+        assert_eq!(config.api, ApiProtocol::OpenAiCompletions);
+        assert_eq!(config.provider, "deepseek");
+        assert_eq!(config.base_url, "https://api.deepseek.com");
+        assert_eq!(config.context_window, 1_000_000);
+        assert_eq!(config.max_tokens, 384_000);
+        assert!(config.reasoning);
         assert!(config.compat.is_some());
     }
 

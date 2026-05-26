@@ -48,7 +48,7 @@ pub struct ModelConfig {
 }
 ```
 
-Convenience constructors:
+First-class model presets are documented in [Model Presets](model-presets.md). Convenience constructors:
 
 ```rust
 let anthropic = ModelConfig::anthropic("claude-sonnet-4-20250514", "Claude Sonnet 4");
@@ -56,7 +56,7 @@ let openai = ModelConfig::openai("gpt-4o", "GPT-4o");
 let google = ModelConfig::google("gemini-2.0-flash", "Gemini 2.0 Flash");
 let xai = ModelConfig::xai("grok-3-mini", "Grok 3 Mini");
 let groq = ModelConfig::groq("llama-3.3-70b-versatile", "Llama 3.3 70B");
-let deepseek = ModelConfig::deepseek("deepseek-chat", "DeepSeek Chat");
+let deepseek = ModelConfig::deepseek("deepseek-v4-flash", "DeepSeek V4 Flash");
 let mistral = ModelConfig::mistral("mistral-large-latest", "Mistral Large");
 let minimax = ModelConfig::minimax("MiniMax-Text-01", "MiniMax Text 01");
 let zai = ModelConfig::zai("glm-4.7", "GLM 4.7");

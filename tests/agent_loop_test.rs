@@ -3,6 +3,7 @@
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use yoagent::agent_loop::{agent_loop, agent_loop_continue, AgentLoopConfig};
+use yoagent::context::ExecutionLimits;
 use yoagent::provider::mock::*;
 use yoagent::provider::MockProvider;
 use yoagent::*;
@@ -697,6 +698,120 @@ struct FailThenSucceedProvider {
 }
 
 use yoagent::provider::{ProviderError, StreamConfig, StreamEvent, StreamProvider};
+
+struct UsageProvider {
+    usage: Usage,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl StreamProvider for UsageProvider {
+    async fn stream(
+        &self,
+        _config: StreamConfig,
+        tx: tokio::sync::mpsc::UnboundedSender<StreamEvent>,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<yoagent::Message, ProviderError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+        let message = Message::Assistant {
+            content: vec![Content::Text {
+                text: "usage response".into(),
+            }],
+            stop_reason: StopReason::Stop,
+            model: "usage-test".into(),
+            provider: "usage-test".into(),
+            usage: self.usage.clone(),
+            timestamp: now_ms(),
+            error_message: None,
+        };
+
+        let _ = tx.send(StreamEvent::Start);
+        let _ = tx.send(StreamEvent::Done {
+            message: message.clone(),
+        });
+        Ok(message)
+    }
+}
+
+#[tokio::test]
+async fn test_execution_limit_counts_cached_tokens() {
+    let provider = std::sync::Arc::new(UsageProvider {
+        usage: Usage {
+            input: 1,
+            output: 1,
+            cache_read: 99,
+            cache_write: 0,
+            total_tokens: 101,
+        },
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let provider_for_config: std::sync::Arc<dyn StreamProvider> = provider.clone();
+
+    let config = AgentLoopConfig {
+        provider: provider_for_config,
+        model: "usage-test".into(),
+        api_key: "test".into(),
+        thinking_level: ThinkingLevel::Off,
+        max_tokens: None,
+        temperature: None,
+        model_config: None,
+        convert_to_llm: None,
+        transform_context: None,
+        get_steering_messages: None,
+        get_follow_up_messages: Some(Box::new(|| {
+            vec![AgentMessage::Llm(Message::user("follow up"))]
+        })),
+        context_config: None,
+        compaction_strategy: None,
+        execution_limits: Some(ExecutionLimits {
+            max_turns: 50,
+            max_total_tokens: 100,
+            max_duration: std::time::Duration::from_secs(60),
+        }),
+        cache_config: CacheConfig::default(),
+        tool_execution: ToolExecutionStrategy::default(),
+        retry_config: yoagent::RetryConfig::default(),
+        before_turn: None,
+        after_turn: None,
+        on_error: None,
+        input_filters: vec![],
+        turn_delay: None,
+    };
+
+    let mut context = AgentContext {
+        system_prompt: "test".into(),
+        messages: Vec::new(),
+        tools: Vec::new(),
+    };
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+
+    let new_messages = agent_loop(
+        vec![AgentMessage::Llm(Message::user("start"))],
+        &mut context,
+        &config,
+        tx,
+        cancel,
+    )
+    .await;
+
+    assert_eq!(
+        provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "cached prompt tokens should trip the limit before a second provider call"
+    );
+    assert!(new_messages.iter().any(|msg| {
+        matches!(
+            msg,
+            AgentMessage::Llm(Message::User { content, .. })
+                if content.iter().any(|c| matches!(
+                    c,
+                    Content::Text { text } if text.contains("[Agent stopped: Max tokens reached")
+                ))
+        )
+    }));
+}
 
 #[async_trait::async_trait]
 impl StreamProvider for FailThenSucceedProvider {

@@ -187,7 +187,7 @@ let analyst = SubAgentTool::new("analyst", provider)
     .with_tools(vec![...]);
 ```
 
-This works with all providers: OpenAI, Groq, DeepSeek, Gemini, Mistral, xAI, and more. See [`ModelConfig`](../reference/configuration.md) for the full list of factory methods.
+This works with all providers: OpenAI, Groq, DeepSeek, Gemini, Mistral, xAI, and more. See [Model Presets](../providers/model-presets.md) for the full list of first-class factory methods.
 
 ## Design Decisions
 

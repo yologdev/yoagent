@@ -89,7 +89,7 @@ async fn main() {
         Some("openai") => "gpt-4o",
         Some("xai") => "grok-3-mini",
         Some("groq") => "llama-3.3-70b-versatile",
-        Some("deepseek") => "deepseek-chat",
+        Some("deepseek") => "deepseek-v4-flash",
         Some("mistral") => "mistral-large-latest",
         Some("minimax") => "MiniMax-Text-01",
         Some("google") => "gemini-2.5-pro",
