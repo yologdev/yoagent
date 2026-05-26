@@ -60,6 +60,7 @@ let deepseek = ModelConfig::deepseek("deepseek-v4-flash", "DeepSeek V4 Flash");
 let mistral = ModelConfig::mistral("mistral-large-latest", "Mistral Large");
 let minimax = ModelConfig::minimax("MiniMax-Text-01", "MiniMax Text 01");
 let zai = ModelConfig::zai("glm-4.7", "GLM 4.7");
+let qwen = ModelConfig::qwen("qwen3.6-plus", "Qwen 3.6 Plus");
 let ollama = ModelConfig::ollama("http://localhost:11434/v1", "llama3.1:8b");
 let local = ModelConfig::local("http://localhost:1234/v1", "my-model");
 ```

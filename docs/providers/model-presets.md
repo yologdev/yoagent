@@ -17,7 +17,9 @@ Use a preset when the provider is listed here. Use a custom `ModelConfig` when y
 | `ModelConfig::mistral(id, name)` | Mistral | `OpenAiCompletions` | `https://api.mistral.ai/v1` | 128K | 4,096 |
 | `ModelConfig::minimax(id, name)` | MiniMax | `OpenAiCompletions` | `https://api.minimaxi.chat/v1` | 1M | 4,096 |
 | `ModelConfig::zai(id, name)` | Z.ai | `OpenAiCompletions` | `https://api.z.ai/api/paas/v4` | 128K | 4,096 |
+| `ModelConfig::qwen(id, name)` | Qwen / DashScope | `OpenAiCompletions` | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` | 128K | 4,096 |
 | `ModelConfig::ollama(base_url, model_id)` | Ollama | `OpenAiCompletions` | caller provided | 128K | 4,096 |
+| `ModelConfig::openai_compat(base_url, model_id, provider, compat)` | Custom compatible server | `OpenAiCompletions` | caller provided | 128K | 4,096 |
 | `ModelConfig::local(base_url, model_id)` | Local compatible server | `OpenAiCompletions` | caller provided | 128K | 4,096 |
 
 The constructors do not validate model IDs. They send the `id` you pass through to the provider, which lets you use newly released model IDs before yoagent updates its examples.
@@ -49,6 +51,52 @@ let llama = ModelConfig::ollama("http://localhost:11434/v1", "llama3.1:8b");
 ```
 
 Ollama remains separate from `ModelConfig::local(...)` because some Ollama-served models need an assistant message after tool results, while other local OpenAI-compatible servers may not. The Ollama preset enables that transcript workaround; the generic local preset stays neutral.
+
+## Qwen Models
+
+Use `ModelConfig::qwen` for hosted Qwen / DashScope:
+
+```rust
+let qwen = ModelConfig::qwen("qwen3.6-plus", "Qwen 3.6 Plus");
+```
+
+The default base URL is the international DashScope endpoint. For other regions, override `base_url` after construction:
+
+```rust
+let mut qwen = ModelConfig::qwen("qwen3.6-plus", "Qwen 3.6 Plus");
+qwen.base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1".into();
+```
+
+Region endpoints:
+
+- International/Singapore: `https://dashscope-intl.aliyuncs.com/compatible-mode/v1`
+- China/Beijing: `https://dashscope.aliyuncs.com/compatible-mode/v1`
+- US/Virginia: `https://dashscope-us.aliyuncs.com/compatible-mode/v1`
+
+For locally deployed Qwen, keep the local endpoint and opt into Qwen's model-family compat flags:
+
+```rust
+let qwen_local = ModelConfig::openai_compat(
+    "http://localhost:1234/v1",
+    "qwen3-local",
+    "qwen",
+    OpenAiCompat::qwen(),
+);
+```
+
+If a local serving layer also has its own quirks, combine the compat flags explicitly. For example, Qwen served by Ollama may need both Qwen reasoning parsing and Ollama's tool-result transcript workaround:
+
+```rust
+let mut compat = OpenAiCompat::qwen();
+compat.requires_assistant_after_tool_result = true;
+
+let qwen_ollama = ModelConfig::openai_compat(
+    "http://localhost:11434/v1",
+    "qwen2.5-coder:7b",
+    "ollama",
+    compat,
+);
+```
 
 ## DeepSeek Models
 
@@ -93,4 +141,4 @@ Older DeepSeek reasoning models had stricter feature limits than the current V4 
 
 ## Compat Flags Without Constructors
 
-`OpenAiCompat` also has quirk presets such as `OpenAiCompat::cerebras()` and `OpenAiCompat::openrouter()`. Those are compatibility profiles, not full `ModelConfig` constructors. To use them, build a custom `ModelConfig` with the provider name, base URL, protocol, and `compat` value you need.
+`OpenAiCompat` also has quirk presets such as `OpenAiCompat::cerebras()` and `OpenAiCompat::openrouter()`. Those are compatibility profiles, not full `ModelConfig` constructors. To use them, call `ModelConfig::openai_compat(...)` with the provider name, base URL, and `compat` value you need.

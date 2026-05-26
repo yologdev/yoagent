@@ -193,6 +193,16 @@ impl OpenAiCompat {
         }
     }
 
+    /// Compat flags for Qwen / DashScope.
+    pub fn qwen() -> Self {
+        Self {
+            supports_usage_in_streaming: true,
+            max_tokens_field: MaxTokensField::MaxTokens,
+            thinking_format: ThinkingFormat::Qwen,
+            ..Default::default()
+        }
+    }
+
     /// Compat flags for Ollama's OpenAI-compatible API.
     pub fn ollama() -> Self {
         Self {
@@ -285,6 +295,29 @@ impl ModelConfig {
         }
     }
 
+    /// Create a config for a custom OpenAI-compatible endpoint with explicit compat flags.
+    pub fn openai_compat(
+        base_url: impl Into<String>,
+        model_id: impl Into<String>,
+        provider: impl Into<String>,
+        compat: OpenAiCompat,
+    ) -> Self {
+        let id = model_id.into();
+        Self {
+            id: id.clone(),
+            name: id,
+            api: ApiProtocol::OpenAiCompletions,
+            provider: provider.into(),
+            base_url: base_url.into(),
+            reasoning: false,
+            context_window: 128_000,
+            max_tokens: 4096,
+            cost: CostConfig::default(),
+            headers: HashMap::new(),
+            compat: Some(compat),
+        }
+    }
+
     /// Create a config for Ollama's OpenAI-compatible API.
     ///
     /// Default local base URL: `http://localhost:11434/v1`.
@@ -340,6 +373,25 @@ impl ModelConfig {
             cost: CostConfig::default(),
             headers: HashMap::new(),
             compat: Some(OpenAiCompat::minimax()),
+        }
+    }
+
+    /// Create a new Qwen / DashScope model config.
+    ///
+    /// Models: `qwen3.6-plus`, `qwen3.5-plus`, `qwen-plus`, `qwen-flash`, etc.
+    pub fn qwen(id: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            api: ApiProtocol::OpenAiCompletions,
+            provider: "qwen".into(),
+            base_url: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1".into(),
+            reasoning: true,
+            context_window: 128_000,
+            max_tokens: 4096,
+            cost: CostConfig::default(),
+            headers: HashMap::new(),
+            compat: Some(OpenAiCompat::qwen()),
         }
     }
 
@@ -488,6 +540,13 @@ mod tests {
         let ollama = OpenAiCompat::ollama();
         assert!(ollama.requires_assistant_after_tool_result);
         assert!(!ollama.requires_tool_result_name);
+
+        let qwen = OpenAiCompat::qwen();
+        assert_eq!(qwen.thinking_format, ThinkingFormat::Qwen);
+        assert_eq!(qwen.max_tokens_field, MaxTokensField::MaxTokens);
+        assert!(qwen.supports_usage_in_streaming);
+        assert!(!qwen.supports_reasoning_effort);
+        assert!(!qwen.supports_thinking_control);
     }
 
     #[test]
@@ -527,6 +586,38 @@ mod tests {
         assert_eq!(config.base_url, "http://localhost:11434/v1");
         let compat = config.compat.unwrap();
         assert!(compat.requires_assistant_after_tool_result);
+    }
+
+    #[test]
+    fn test_model_config_openai_compat() {
+        let config = ModelConfig::openai_compat(
+            "http://localhost:1234/v1",
+            "qwen3-local",
+            "qwen",
+            OpenAiCompat::qwen(),
+        );
+        assert_eq!(config.api, ApiProtocol::OpenAiCompletions);
+        assert_eq!(config.provider, "qwen");
+        assert_eq!(config.id, "qwen3-local");
+        assert_eq!(config.name, "qwen3-local");
+        assert_eq!(config.base_url, "http://localhost:1234/v1");
+        let compat = config.compat.unwrap();
+        assert_eq!(compat.thinking_format, ThinkingFormat::Qwen);
+    }
+
+    #[test]
+    fn test_model_config_qwen() {
+        let config = ModelConfig::qwen("qwen3.6-plus", "Qwen 3.6 Plus");
+        assert_eq!(config.api, ApiProtocol::OpenAiCompletions);
+        assert_eq!(config.provider, "qwen");
+        assert_eq!(
+            config.base_url,
+            "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+        );
+        assert!(config.reasoning);
+        let compat = config.compat.unwrap();
+        assert_eq!(compat.thinking_format, ThinkingFormat::Qwen);
+        assert_eq!(compat.max_tokens_field, MaxTokensField::MaxTokens);
     }
 
     #[test]
