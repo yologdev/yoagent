@@ -47,6 +47,7 @@ pub struct OpenAiCompat {
 | DeepSeek | `OpenAiCompat::deepseek()` | `max_tokens`, `thinking`, `reasoning_effort`, 1M context window |
 | MiniMax | `OpenAiCompat::minimax()` | Standard defaults, 1M context window |
 | Z.ai (Zhipu) | `OpenAiCompat::zai()` | Standard defaults |
+| Ollama | `OpenAiCompat::ollama()` | Inserts an empty assistant message after tool result runs |
 
 `OpenAiCompat` presets are lower-level quirk flags. A provider is first-class when it also has a `ModelConfig::*` constructor; see [Model Presets](model-presets.md).
 
@@ -90,7 +91,7 @@ The `ThinkingFormat` enum controls how reasoning content is parsed from streams:
 
 ## Local Servers (LM Studio, Ollama, llama.cpp, vLLM)
 
-Use `ModelConfig::local()` for any local OpenAI-compatible server. No API key required:
+Use `ModelConfig::ollama()` for Ollama, or `ModelConfig::local()` for any other local OpenAI-compatible server. No API key required:
 
 ```rust
 use yoagent::agent::Agent;
@@ -100,6 +101,15 @@ let agent = Agent::new(OpenAiCompatProvider)
     .with_model_config(ModelConfig::local("http://localhost:1234/v1", "my-model"))
     .with_model("my-model")
     .with_api_key(""); // empty string OK for local
+```
+
+For Ollama:
+
+```rust
+let agent = Agent::new(OpenAiCompatProvider)
+    .with_model_config(ModelConfig::ollama("http://localhost:11434/v1", "llama3.1:8b"))
+    .with_model("llama3.1:8b")
+    .with_api_key("");
 ```
 
 Or via the CLI example:

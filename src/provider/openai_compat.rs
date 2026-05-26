@@ -261,6 +261,10 @@ fn build_request_body(
     }
 
     for msg in &config.messages {
+        if !matches!(msg, Message::ToolResult { .. } | Message::Assistant { .. }) {
+            maybe_insert_assistant_after_tool_results(&mut messages, compat);
+        }
+
         match msg {
             Message::User { content, .. } => {
                 messages.push(serde_json::json!({
@@ -336,6 +340,7 @@ fn build_request_body(
             }
         }
     }
+    maybe_insert_assistant_after_tool_results(&mut messages, compat);
 
     let max_tokens_val = config.max_tokens.unwrap_or(model_config.max_tokens);
     let mut body = serde_json::json!({
@@ -396,6 +401,27 @@ fn build_request_body(
     }
 
     body
+}
+
+fn maybe_insert_assistant_after_tool_results(
+    messages: &mut Vec<serde_json::Value>,
+    compat: &OpenAiCompat,
+) {
+    if !compat.requires_assistant_after_tool_result {
+        return;
+    }
+
+    let last_is_tool = messages
+        .last()
+        .and_then(|m| m.get("role"))
+        .and_then(|role| role.as_str())
+        == Some("tool");
+    if last_is_tool {
+        messages.push(serde_json::json!({
+            "role": "assistant",
+            "content": "",
+        }));
+    }
 }
 
 fn content_to_openai(content: &[Content]) -> serde_json::Value {
@@ -754,5 +780,153 @@ mod tests {
         let tool_msg = msgs.last().unwrap();
         // Text-only: content should be a plain string
         assert_eq!(tool_msg["content"], "hello");
+    }
+
+    #[test]
+    fn test_ollama_inserts_assistant_after_tool_result_run() {
+        let model_config = ModelConfig::ollama("http://localhost:11434/v1", "llama3.1:8b");
+        let compat = model_config.compat.as_ref().unwrap().clone();
+        let config = StreamConfig {
+            model: "llama3.1:8b".into(),
+            system_prompt: String::new(),
+            messages: vec![
+                Message::Assistant {
+                    content: vec![Content::ToolCall {
+                        provider_metadata: None,
+                        id: "call-1".into(),
+                        name: "bash".into(),
+                        arguments: serde_json::json!({"cmd": "ls"}),
+                    }],
+                    stop_reason: StopReason::ToolUse,
+                    model: "test".into(),
+                    provider: "test".into(),
+                    usage: Usage::default(),
+                    timestamp: 0,
+                    error_message: None,
+                },
+                Message::ToolResult {
+                    tool_call_id: "call-1".into(),
+                    tool_name: "bash".into(),
+                    content: vec![Content::Text {
+                        text: "a.txt\nb.txt".into(),
+                    }],
+                    is_error: false,
+                    timestamp: 0,
+                },
+                Message::User {
+                    content: vec![Content::Text {
+                        text: "which is largest?".into(),
+                    }],
+                    timestamp: 0,
+                },
+            ],
+            tools: vec![],
+            thinking_level: ThinkingLevel::Off,
+            api_key: "test".into(),
+            max_tokens: None,
+            temperature: None,
+            model_config: Some(model_config.clone()),
+            cache_config: CacheConfig::default(),
+        };
+
+        let body = build_request_body(&config, &model_config, &compat);
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs[0]["role"], "assistant");
+        assert_eq!(msgs[1]["role"], "tool");
+        assert_eq!(msgs[2]["role"], "assistant");
+        assert_eq!(msgs[2]["content"], "");
+        assert_eq!(msgs[3]["role"], "user");
+    }
+
+    #[test]
+    fn test_ollama_inserts_one_assistant_after_multiple_tool_results() {
+        let model_config = ModelConfig::ollama("http://localhost:11434/v1", "qwen2.5-coder:7b");
+        let compat = model_config.compat.as_ref().unwrap().clone();
+        let config = StreamConfig {
+            model: "qwen2.5-coder:7b".into(),
+            system_prompt: String::new(),
+            messages: vec![
+                Message::ToolResult {
+                    tool_call_id: "call-1".into(),
+                    tool_name: "read_file".into(),
+                    content: vec![Content::Text { text: "a".into() }],
+                    is_error: false,
+                    timestamp: 0,
+                },
+                Message::ToolResult {
+                    tool_call_id: "call-2".into(),
+                    tool_name: "read_file".into(),
+                    content: vec![Content::Text { text: "b".into() }],
+                    is_error: false,
+                    timestamp: 0,
+                },
+            ],
+            tools: vec![],
+            thinking_level: ThinkingLevel::Off,
+            api_key: "test".into(),
+            max_tokens: None,
+            temperature: None,
+            model_config: Some(model_config.clone()),
+            cache_config: CacheConfig::default(),
+        };
+
+        let body = build_request_body(&config, &model_config, &compat);
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[0]["role"], "tool");
+        assert_eq!(msgs[1]["role"], "tool");
+        assert_eq!(msgs[2]["role"], "assistant");
+        assert_eq!(msgs[2]["content"], "");
+    }
+
+    #[test]
+    fn test_ollama_does_not_insert_assistant_before_existing_assistant() {
+        let model_config = ModelConfig::ollama("http://localhost:11434/v1", "llama3.1:8b");
+        let compat = model_config.compat.as_ref().unwrap().clone();
+        let config = StreamConfig {
+            model: "llama3.1:8b".into(),
+            system_prompt: String::new(),
+            messages: vec![
+                Message::ToolResult {
+                    tool_call_id: "call-1".into(),
+                    tool_name: "read_file".into(),
+                    content: vec![Content::Text { text: "a".into() }],
+                    is_error: false,
+                    timestamp: 0,
+                },
+                Message::Assistant {
+                    content: vec![Content::Text {
+                        text: "The file contains a.".into(),
+                    }],
+                    stop_reason: StopReason::Stop,
+                    model: "test".into(),
+                    provider: "test".into(),
+                    usage: Usage::default(),
+                    timestamp: 0,
+                    error_message: None,
+                },
+                Message::User {
+                    content: vec![Content::Text {
+                        text: "thanks".into(),
+                    }],
+                    timestamp: 0,
+                },
+            ],
+            tools: vec![],
+            thinking_level: ThinkingLevel::Off,
+            api_key: "test".into(),
+            max_tokens: None,
+            temperature: None,
+            model_config: Some(model_config.clone()),
+            cache_config: CacheConfig::default(),
+        };
+
+        let body = build_request_body(&config, &model_config, &compat);
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[0]["role"], "tool");
+        assert_eq!(msgs[1]["role"], "assistant");
+        assert_eq!(msgs[1]["content"][0]["text"], "The file contains a.");
+        assert_eq!(msgs[2]["role"], "user");
     }
 }

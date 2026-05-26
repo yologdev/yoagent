@@ -146,7 +146,9 @@ See [docs/concepts/skills.md](docs/concepts/skills.md) for the full guide.
 ANTHROPIC_API_KEY=sk-... cargo run --example cli
 # With skills:
 ANTHROPIC_API_KEY=sk-... cargo run --example cli -- --skills ./skills
-# With a local server (LM Studio, Ollama, llama.cpp, vLLM):
+# With Ollama:
+cargo run --example cli -- --provider ollama --model llama3.1:8b
+# With another local server (LM Studio, llama.cpp, vLLM):
 cargo run --example cli -- --api-url http://localhost:1234/v1 --model my-model
 ```
 
@@ -197,7 +199,7 @@ let registry = ProviderRegistry::default();
 | Protocol | Providers |
 |----------|-----------|
 | Anthropic Messages | Anthropic (Claude) |
-| OpenAI Completions | OpenAI, xAI, Groq, Mistral, DeepSeek, MiniMax, Z.ai, local servers, and custom compatible APIs |
+| OpenAI Completions | OpenAI, xAI, Groq, Mistral, DeepSeek, MiniMax, Z.ai, Ollama, local servers, and custom compatible APIs |
 | OpenAI Responses | OpenAI (newer API) |
 | Azure OpenAI | Azure OpenAI |
 | Google Generative AI | Google Gemini |

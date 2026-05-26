@@ -11,10 +11,11 @@
 //!   ANTHROPIC_API_KEY=sk-... cargo run --example cli -- --model claude-sonnet-4-20250514
 //!   ANTHROPIC_API_KEY=sk-... cargo run --example cli -- --skills ./skills
 //!
-//! Run with a named provider (zai, openai, xai, groq, deepseek, mistral, minimax, google):
+//! Run with a named provider (zai, openai, xai, groq, deepseek, mistral, minimax, ollama, google):
 //!   API_KEY=... cargo run --example cli -- --provider zai --model glm-4.7
+//!   cargo run --example cli -- --provider ollama --model llama3.1:8b
 //!
-//! Run with LM Studio / Ollama / local OpenAI-compatible server:
+//! Run with LM Studio / local OpenAI-compatible server:
 //!   cargo run --example cli -- --api-url http://localhost:1234/v1 --model local-model
 //!
 //! Commands:
@@ -74,10 +75,11 @@ async fn main() {
         .and_then(|i| args.get(i + 1))
         .cloned();
 
-    let api_key = if api_url.is_some() {
+    let api_key_optional = api_url.is_some() || provider_name.as_deref() == Some("ollama");
+    let api_key = if api_key_optional {
         std::env::var("ANTHROPIC_API_KEY")
             .or_else(|_| std::env::var("API_KEY"))
-            .unwrap_or_default() // empty string OK for local
+            .unwrap_or_default() // empty string OK for local/Ollama
     } else {
         std::env::var("ANTHROPIC_API_KEY")
             .or_else(|_| std::env::var("API_KEY"))
@@ -92,6 +94,7 @@ async fn main() {
         Some("deepseek") => "deepseek-v4-flash",
         Some("mistral") => "mistral-large-latest",
         Some("minimax") => "MiniMax-Text-01",
+        Some("ollama") => "llama3.1:8b",
         Some("google") => "gemini-2.5-pro",
         _ => "claude-sonnet-4-20250514",
     };
@@ -118,7 +121,11 @@ async fn main() {
     };
 
     let mut agent = if let Some(ref url) = api_url {
-        Agent::new(OpenAiCompatProvider).with_model_config(ModelConfig::local(url, &model))
+        if provider_name.as_deref() == Some("ollama") {
+            Agent::new(OpenAiCompatProvider).with_model_config(ModelConfig::ollama(url, &model))
+        } else {
+            Agent::new(OpenAiCompatProvider).with_model_config(ModelConfig::local(url, &model))
+        }
     } else if let Some(ref prov) = provider_name {
         make_provider_agent(prov, &model)
     } else {
@@ -177,8 +184,13 @@ async fn main() {
             s if s.starts_with("/model ") => {
                 let new_model = s.trim_start_matches("/model ").trim();
                 agent = if let Some(ref url) = api_url {
-                    Agent::new(OpenAiCompatProvider)
-                        .with_model_config(ModelConfig::local(url, new_model))
+                    if provider_name.as_deref() == Some("ollama") {
+                        Agent::new(OpenAiCompatProvider)
+                            .with_model_config(ModelConfig::ollama(url, new_model))
+                    } else {
+                        Agent::new(OpenAiCompatProvider)
+                            .with_model_config(ModelConfig::local(url, new_model))
+                    }
                 } else if let Some(ref prov) = provider_name {
                     make_provider_agent(prov, new_model)
                 } else {
@@ -318,9 +330,11 @@ fn make_provider_agent(provider: &str, model: &str) -> Agent {
         "minimax" => {
             Agent::new(OpenAiCompatProvider).with_model_config(ModelConfig::minimax(model, model))
         }
+        "ollama" => Agent::new(OpenAiCompatProvider)
+            .with_model_config(ModelConfig::ollama("http://localhost:11434/v1", model)),
         "google" => Agent::new(GoogleProvider).with_model_config(ModelConfig::google(model, model)),
         other => {
-            eprintln!("Unknown provider: {other}. Supported: zai, openai, xai, groq, deepseek, mistral, minimax, google.");
+            eprintln!("Unknown provider: {other}. Supported: zai, openai, xai, groq, deepseek, mistral, minimax, ollama, google.");
             std::process::exit(1);
         }
     }

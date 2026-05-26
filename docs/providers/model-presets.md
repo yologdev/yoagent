@@ -17,6 +17,7 @@ Use a preset when the provider is listed here. Use a custom `ModelConfig` when y
 | `ModelConfig::mistral(id, name)` | Mistral | `OpenAiCompletions` | `https://api.mistral.ai/v1` | 128K | 4,096 |
 | `ModelConfig::minimax(id, name)` | MiniMax | `OpenAiCompletions` | `https://api.minimaxi.chat/v1` | 1M | 4,096 |
 | `ModelConfig::zai(id, name)` | Z.ai | `OpenAiCompletions` | `https://api.z.ai/api/paas/v4` | 128K | 4,096 |
+| `ModelConfig::ollama(base_url, model_id)` | Ollama | `OpenAiCompletions` | caller provided | 128K | 4,096 |
 | `ModelConfig::local(base_url, model_id)` | Local compatible server | `OpenAiCompletions` | caller provided | 128K | 4,096 |
 
 The constructors do not validate model IDs. They send the `id` you pass through to the provider, which lets you use newly released model IDs before yoagent updates its examples.
@@ -38,6 +39,16 @@ let agent = Agent::new(OpenAiCompatProvider)
 ```
 
 OpenAI-compatible presets also set `OpenAiCompat` flags for provider-specific API differences, such as `max_tokens` vs. `max_completion_tokens`, reasoning fields, tool result formatting, and streaming usage support. See [OpenAI Compatible](openai-compat.md) for the full quirk-flag list.
+
+## Ollama Models
+
+Use `ModelConfig::ollama` for Ollama's OpenAI-compatible endpoint:
+
+```rust
+let llama = ModelConfig::ollama("http://localhost:11434/v1", "llama3.1:8b");
+```
+
+Ollama remains separate from `ModelConfig::local(...)` because some Ollama-served models need an assistant message after tool results, while other local OpenAI-compatible servers may not. The Ollama preset enables that transcript workaround; the generic local preset stays neutral.
 
 ## DeepSeek Models
 
