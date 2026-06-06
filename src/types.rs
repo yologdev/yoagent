@@ -200,10 +200,12 @@ impl Usage {
 // Cache configuration
 // ---------------------------------------------------------------------------
 
-/// Controls prompt caching behavior for providers that support it.
+/// Controls yoagent-managed prompt caching hints for providers that support
+/// explicit cache controls.
 ///
 /// By default, caching is enabled with automatic breakpoint placement.
-/// This gives optimal cost savings without any user configuration.
+/// Providers with automatic server-side caching, such as DeepSeek, may ignore
+/// this setting.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CacheConfig {
     /// Master switch — set to false to disable all caching hints.
@@ -254,7 +256,7 @@ pub enum CacheStrategy {
     /// Caches: system prompt, tool definitions, and recent conversation history.
     #[default]
     Auto,
-    /// Disable caching entirely.
+    /// Disable explicit cache hints.
     Disabled,
     /// Fine-grained control over what gets cached.
     Manual {
