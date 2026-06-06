@@ -52,6 +52,11 @@ pub struct OpenAiCompat {
 
 `OpenAiCompat` presets are lower-level quirk flags. A provider is first-class when it also has a `ModelConfig::*` constructor; see [Model Presets](model-presets.md).
 
+DeepSeek context caching is automatic on DeepSeek's side. yoagent does not send
+`cache_control` markers for DeepSeek, but it does parse DeepSeek's
+`prompt_cache_hit_tokens` and `prompt_cache_miss_tokens` usage fields into
+`Usage.cache_read` and `Usage.input`.
+
 ## Adding a New Compatible Provider
 
 1. Add a constructor to `OpenAiCompat`:

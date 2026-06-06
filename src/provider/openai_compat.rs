@@ -596,6 +596,7 @@ mod tests {
         assert!(body.get("max_completion_tokens").is_none());
         assert_eq!(body["thinking"]["type"], "disabled");
         assert!(body.get("reasoning_effort").is_none());
+        assert!(!body.to_string().contains("cache_control"));
     }
 
     #[test]

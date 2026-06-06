@@ -12,6 +12,7 @@ In a multi-turn agent loop, each request sends the full context: system prompt +
 |----------|-------------|---------|-----------------|
 | **Anthropic** | Explicit (cache breakpoints) | 90% on hits | ✅ Auto-placed |
 | **OpenAI** | Automatic (>1024 tokens) | 50% on hits | None needed |
+| **DeepSeek** | Automatic prefix cache | Varies by model | None needed |
 | **Google Gemini** | Implicit (automatic) | Varies | None needed |
 | **Azure OpenAI** | Automatic (same as OpenAI) | 50% on hits | None needed |
 | **Amazon Bedrock** | Automatic (where supported) | Varies | None needed |
@@ -26,11 +27,19 @@ yoagent places up to 3 cache breakpoints automatically:
 
 This means on a typical multi-turn conversation, only the latest user message and the new assistant response cost full price.
 
+### DeepSeek
+
+DeepSeek's API manages context caching automatically. yoagent does not send
+Anthropic-style `cache_control` markers for DeepSeek; instead, keep stable
+prefixes stable (system prompt, tool definitions, and earlier messages) and
+monitor DeepSeek's `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`
+usage fields through `Usage.cache_read` and `Usage.input`.
+
 ## Configuration
 
 Caching is **enabled by default** with automatic breakpoint placement. No configuration needed for optimal behavior.
 
-### Disable Caching
+### Disable Explicit Cache Hints
 
 ```rust
 use yoagent::{CacheConfig, CacheStrategy};
@@ -41,6 +50,10 @@ let agent = Agent::new(provider)
         ..Default::default()
     });
 ```
+
+This disables yoagent-managed cache hints for providers such as Anthropic. It
+does not turn off automatic server-side caching for providers such as DeepSeek
+or OpenAI.
 
 ### Fine-Grained Control
 
@@ -69,7 +82,7 @@ println!("Cache hit rate: {:.1}%", usage.cache_hit_rate() * 100.0);
 ```
 
 - **`cache_read`** — tokens served from cache (cheap)
-- **`cache_write`** — tokens written to cache (slightly more than base price)
+- **`cache_write`** — tokens written to cache when the provider reports that metric
 - **`cache_hit_rate()`** — fraction of input tokens from cache (0.0–1.0)
 
 ## Cost Impact
