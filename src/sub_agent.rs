@@ -47,6 +47,7 @@ pub struct SubAgentTool {
     tool_name: String,
     tool_description: String,
     system_prompt: String,
+    skills_prompt: String,
     model: String,
     api_key: String,
     provider: Arc<dyn StreamProvider>,
@@ -70,6 +71,7 @@ impl SubAgentTool {
             tool_description: format!("Delegate a task to the '{}' sub-agent", name),
             tool_name: name,
             system_prompt: String::new(),
+            skills_prompt: String::new(),
             model: String::new(),
             api_key: String::new(),
             provider,
@@ -93,6 +95,18 @@ impl SubAgentTool {
 
     pub fn with_system_prompt(mut self, prompt: impl Into<String>) -> Self {
         self.system_prompt = prompt.into();
+        self
+    }
+
+    /// Attach a skill set so the sub-agent sees the skills index.
+    ///
+    /// Mirrors [`Agent::with_skills`](crate::agent::Agent::with_skills): the skills
+    /// index is formatted as XML per the [AgentSkills standard](https://agentskills.io)
+    /// and appended to the sub-agent's system prompt at dispatch time. The sub-agent
+    /// can then read individual SKILL.md files via the `read_file` tool when it
+    /// decides a skill is relevant (make sure the sub-agent has such a tool).
+    pub fn with_skills(mut self, skills: crate::skills::SkillSet) -> Self {
+        self.skills_prompt = skills.format_for_prompt();
         self
     }
 
@@ -242,8 +256,17 @@ impl AgentTool for SubAgentTool {
             .map(|t| Box::new(ArcToolWrapper(Arc::clone(t))) as Box<dyn AgentTool>)
             .collect();
 
-        // Inject SharedStateTool when shared state is configured
+        // Append the skills index (if any) so the sub-agent can discover skills.
         let mut system_prompt = self.system_prompt.clone();
+        if !self.skills_prompt.is_empty() {
+            if system_prompt.is_empty() {
+                system_prompt = self.skills_prompt.clone();
+            } else {
+                system_prompt = format!("{}\n\n{}", system_prompt, self.skills_prompt);
+            }
+        }
+
+        // Inject SharedStateTool when shared state is configured
         if let Some(ref state) = self.shared_state {
             tools.push(Box::new(SharedStateTool::new(state.clone())));
             let summary = state.summary().await;

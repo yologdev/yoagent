@@ -61,6 +61,7 @@ When the parent LLM calls multiple sub-agents in a single response, they run con
 |--------|---------|
 | `with_description()` | What the parent LLM sees (helps it decide when to delegate) |
 | `with_system_prompt()` | The sub-agent's own instructions |
+| `with_skills()` | Attach a `SkillSet` — its index is appended to the sub-agent's system prompt (mirrors `Agent::with_skills`) |
 | `with_model()` / `with_api_key()` | Can use a different model than the parent |
 | `with_model_config()` | Set `ModelConfig` for non-Anthropic providers (base URL, compat flags, etc.) |
 | `with_tools()` | Tools available to the sub-agent (accepts `Vec<Arc<dyn AgentTool>>`) |
