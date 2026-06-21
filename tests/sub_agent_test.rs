@@ -481,6 +481,205 @@ async fn test_sub_agent_missing_task_parameter() {
 }
 
 // ---------------------------------------------------------------------------
+// Skills: with_skills injects the skills index into the sub-agent system prompt
+// ---------------------------------------------------------------------------
+
+/// Provider that records the system prompt it is dispatched with, so tests can
+/// assert on the exact prompt the sub-agent assembles.
+struct CapturingProvider {
+    captured: Arc<std::sync::Mutex<String>>,
+}
+
+#[async_trait::async_trait]
+impl yoagent::provider::StreamProvider for CapturingProvider {
+    async fn stream(
+        &self,
+        config: yoagent::provider::StreamConfig,
+        tx: mpsc::UnboundedSender<yoagent::provider::StreamEvent>,
+        _cancel: CancellationToken,
+    ) -> Result<Message, yoagent::provider::ProviderError> {
+        *self.captured.lock().unwrap() = config.system_prompt.clone();
+        let _ = tx.send(yoagent::provider::StreamEvent::Start);
+        let msg = Message::Assistant {
+            content: vec![Content::Text {
+                text: "done".into(),
+            }],
+            stop_reason: StopReason::Stop,
+            model: "mock".into(),
+            provider: "mock".into(),
+            usage: Usage::default(),
+            timestamp: yoagent::now_ms(),
+            error_message: None,
+        };
+        let _ = tx.send(yoagent::provider::StreamEvent::Done {
+            message: msg.clone(),
+        });
+        Ok(msg)
+    }
+}
+
+/// RAII guard for a per-test temp skills directory. Holds a unique path
+/// (avoids collisions under parallel `cargo test`) and removes it on drop,
+/// so cleanup runs even if the test panics.
+struct SkillsDir(std::path::PathBuf);
+
+impl SkillsDir {
+    /// Create a temp dir containing a single `<name>/SKILL.md`. `unique` must
+    /// differ per test to avoid concurrent collisions on the shared temp dir.
+    fn with_one_skill(unique: &str, name: &str, description: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("yoagent-test-skills-{unique}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let skill_dir = dir.join(name);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: {description}\n---\n\nBody.\n"),
+        )
+        .unwrap();
+        Self(dir)
+    }
+
+    fn load(&self) -> yoagent::skills::SkillSet {
+        yoagent::skills::SkillSet::load(&[self.0.to_string_lossy().to_string()]).unwrap()
+    }
+}
+
+impl Drop for SkillsDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Dispatch a sub-agent through a `CapturingProvider` and return the system
+/// prompt the provider was called with.
+async fn capture_system_prompt(
+    build: impl FnOnce(Arc<CapturingProvider>) -> SubAgentTool,
+) -> String {
+    let captured = Arc::new(std::sync::Mutex::new(String::new()));
+    let provider = Arc::new(CapturingProvider {
+        captured: captured.clone(),
+    });
+    let sub_agent = build(provider);
+
+    sub_agent
+        .execute(
+            serde_json::json!({"task": "do work"}),
+            ToolContext {
+                tool_call_id: "tc-1".into(),
+                tool_name: "sub".into(),
+                cancel: CancellationToken::new(),
+                on_update: None,
+                on_progress: None,
+            },
+        )
+        .await
+        .expect("sub-agent should succeed");
+
+    let prompt = captured.lock().unwrap().clone();
+    prompt
+}
+
+#[tokio::test]
+async fn test_sub_agent_with_skills() {
+    let skills_dir = SkillsDir::with_one_skill(
+        "with-skills",
+        "research",
+        "How to call the search and read APIs",
+    );
+    let skills = skills_dir.load();
+    assert_eq!(skills.len(), 1, "expected the research skill to load");
+
+    let prompt = capture_system_prompt(|provider| {
+        SubAgentTool::new("researcher", provider)
+            .with_system_prompt("You are a research assistant.")
+            .with_model("mock")
+            .with_api_key("test")
+            .with_skills(skills)
+    })
+    .await;
+
+    // Base system prompt is preserved...
+    assert!(
+        prompt.contains("You are a research assistant."),
+        "base system prompt missing, got: {prompt}"
+    );
+    // ...and the skills index is appended.
+    assert!(
+        prompt.contains("<available_skills>") && prompt.contains("<name>research</name>"),
+        "skills index not injected into sub-agent system prompt, got: {prompt}"
+    );
+}
+
+#[tokio::test]
+async fn test_sub_agent_with_skills_empty_base_prompt() {
+    // Exercises the `system_prompt.is_empty()` branch: skills become the entire
+    // prompt with no leading blank line. assert_eq pins the exact output.
+    let skills_dir = SkillsDir::with_one_skill("empty-base", "research", "desc");
+    let skills = skills_dir.load();
+    let expected = skills.format_for_prompt();
+    assert!(!expected.is_empty());
+
+    let prompt = capture_system_prompt(|provider| {
+        // No with_system_prompt() call — base prompt is empty.
+        SubAgentTool::new("researcher", provider)
+            .with_model("mock")
+            .with_api_key("test")
+            .with_skills(skills)
+    })
+    .await;
+
+    assert_eq!(
+        prompt, expected,
+        "with empty base prompt, the skills index should be the whole prompt verbatim"
+    );
+}
+
+#[tokio::test]
+async fn test_sub_agent_with_empty_skillset_is_noop() {
+    // An empty SkillSet must not alter the system prompt (no trailing "\n\n").
+    let prompt = capture_system_prompt(|provider| {
+        SubAgentTool::new("researcher", provider)
+            .with_system_prompt("Base prompt.")
+            .with_model("mock")
+            .with_api_key("test")
+            .with_skills(yoagent::skills::SkillSet::empty())
+    })
+    .await;
+
+    assert_eq!(prompt, "Base prompt.", "empty SkillSet should be a no-op");
+}
+
+#[tokio::test]
+async fn test_sub_agent_skills_before_shared_state() {
+    // Skills and shared-state both append to the prompt; lock in the order
+    // base -> skills -> shared-state.
+    let skills_dir = SkillsDir::with_one_skill("ordering", "research", "desc");
+    let skills = skills_dir.load();
+    let state = SharedState::new();
+
+    let prompt = capture_system_prompt(|provider| {
+        SubAgentTool::new("researcher", provider)
+            .with_system_prompt("Base prompt.")
+            .with_model("mock")
+            .with_api_key("test")
+            .with_skills(skills)
+            .with_shared_state(state)
+    })
+    .await;
+
+    let skills_at = prompt
+        .find("<available_skills>")
+        .expect("skills index present");
+    let shared_at = prompt
+        .find("## Shared State")
+        .expect("shared-state block present");
+    assert!(
+        skills_at < shared_at,
+        "skills index should precede the shared-state block, got: {prompt}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Integration: sub-agent tool in a parent agent loop
 // ---------------------------------------------------------------------------
 
