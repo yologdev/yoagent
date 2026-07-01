@@ -146,6 +146,50 @@ let qwen_on_ollama = ModelConfig::openai_compat(
 );
 ```
 
+## GitHub Copilot (bring-your-own-token)
+
+> **Terms of service.** `api.githubcopilot.com` is intended for use through official
+> GitHub Copilot editor integrations. Accessing it from a third-party agent is against
+> GitHub's Copilot terms of service and may result in token revocation or account
+> suspension. yoagent does **not** ship a first-class Copilot preset for this reason.
+> The configuration below is documented only for users who understand and accept that
+> risk. Use at your own discretion.
+
+Copilot's chat endpoint is OpenAI Chat Completions–shaped, so it works with
+`OpenAiCompatProvider` given the right base URL, integration headers, and a valid
+Copilot token as the API key:
+
+```rust
+use yoagent::agent::Agent;
+use yoagent::provider::{OpenAiCompatProvider, ModelConfig, OpenAiCompat};
+
+let mut config = ModelConfig::openai_compat(
+    "https://api.githubcopilot.com",
+    "gpt-4o",
+    "copilot",
+    OpenAiCompat::openai(),
+);
+// Copilot fingerprints clients via these headers; they are required.
+config.headers.insert("Copilot-Integration-Id".into(), "vscode-chat".into());
+config.headers.insert("Editor-Version".into(), "Neovim/0.10.0".into());
+
+let agent = Agent::new(OpenAiCompatProvider)
+    .with_model_config(config)
+    .with_model("gpt-4o")
+    .with_api_key(copilot_token); // see below
+```
+
+**The API key is a short-lived Copilot token, not your GitHub token.** You obtain it by
+exchanging a GitHub OAuth token (from the device-login flow, or from the local Copilot
+config under `~/.config/github-copilot/`) at
+`https://api.github.com/copilot_internal/v2/token`. That token **expires after ~25–30
+minutes**.
+
+yoagent has no built-in credential refresh — `api_key` is static for the life of the
+provider (`Authorization: Bearer {api_key}`). For anything longer than a single short
+turn, **you** must exchange and refresh the token yourself and rebuild the agent's config
+with a fresh token before it expires; otherwise long runs will fail with `401`.
+
 ## Auth
 
 Uses `Authorization: Bearer {api_key}` header. Extra headers can be added via `ModelConfig.headers`.
