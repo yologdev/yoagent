@@ -24,8 +24,8 @@ async-trait = "0.1"
 thiserror = "2"
 uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
-reqwest = { version = "0.12", features = ["json", "stream"] }
-reqwest-eventsource = "0.6"
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
+reqwest-eventsource = { package = "kameleoon-reqwest-eventsource", version = "0.6" }
 futures = "0.3"
 rand = "0.10.0"
 base64 = "0.22"
