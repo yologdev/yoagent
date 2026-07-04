@@ -165,6 +165,25 @@ agent.clear_follow_up_queue();  // Drop all pending follow-ups
 agent.clear_all_queues();       // Drop everything
 ```
 
+Clients that render the queue (e.g. showing pending messages while the agent
+is busy) can inspect it without consuming:
+
+```rust
+let pending = agent.steering_queue_snapshot();  // point-in-time copy
+let count = agent.steering_queue_len();
+```
+
+Snapshots are for display — the loop may drain the queue at any moment. For
+an edit-and-requeue UI, drain atomically instead:
+
+```rust
+let mut queued = agent.take_steering_queue();  // atomically drain
+queued.retain(|m| user_kept(m));               // let the user edit the list
+for msg in queued {
+    agent.steer(msg);                          // requeue the survivors
+}
+```
+
 ### Low-Level API
 
 When using `agent_loop()` directly, steering and follow-ups are provided via callback functions:

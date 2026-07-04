@@ -375,6 +375,43 @@ impl Agent {
         self.clear_follow_up_queue();
     }
 
+    /// Snapshot of the messages currently waiting in the steering queue.
+    ///
+    /// The snapshot is a point-in-time copy for display purposes — the agent
+    /// loop may drain the queue at any moment. For atomic remove-and-edit,
+    /// use [`Agent::take_steering_queue`].
+    pub fn steering_queue_snapshot(&self) -> Vec<AgentMessage> {
+        self.steering_queue.lock().unwrap().clone()
+    }
+
+    /// Snapshot of the messages currently waiting in the follow-up queue.
+    pub fn follow_up_queue_snapshot(&self) -> Vec<AgentMessage> {
+        self.follow_up_queue.lock().unwrap().clone()
+    }
+
+    /// Number of messages currently waiting in the steering queue.
+    pub fn steering_queue_len(&self) -> usize {
+        self.steering_queue.lock().unwrap().len()
+    }
+
+    /// Number of messages currently waiting in the follow-up queue.
+    pub fn follow_up_queue_len(&self) -> usize {
+        self.follow_up_queue.lock().unwrap().len()
+    }
+
+    /// Atomically drain the steering queue and return its messages.
+    ///
+    /// Enables edit-and-requeue UIs: take the queue, let the user edit or
+    /// drop entries, then [`Agent::steer`] the survivors back.
+    pub fn take_steering_queue(&self) -> Vec<AgentMessage> {
+        std::mem::take(&mut *self.steering_queue.lock().unwrap())
+    }
+
+    /// Atomically drain the follow-up queue and return its messages.
+    pub fn take_follow_up_queue(&self) -> Vec<AgentMessage> {
+        std::mem::take(&mut *self.follow_up_queue.lock().unwrap())
+    }
+
     pub fn set_steering_mode(&mut self, mode: QueueMode) {
         self.steering_mode = mode;
     }

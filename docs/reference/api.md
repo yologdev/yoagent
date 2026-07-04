@@ -145,6 +145,12 @@ All return `Self` for chaining (unless noted as `Result`).
 | `clear_steering_queue()` | Clear pending steering messages |
 | `clear_follow_up_queue()` | Clear pending follow-up messages |
 | `clear_all_queues()` | Clear both queues |
+| `steering_queue_snapshot()` | Copy of pending steering messages (does not consume) |
+| `follow_up_queue_snapshot()` | Copy of pending follow-up messages |
+| `steering_queue_len()` | Number of pending steering messages |
+| `follow_up_queue_len()` | Number of pending follow-up messages |
+| `take_steering_queue()` | Atomically drain and return pending steering messages |
+| `take_follow_up_queue()` | Atomically drain and return pending follow-up messages |
 | `set_steering_mode(mode: QueueMode)` | Set delivery mode: `OneAtATime` or `All` |
 | `set_follow_up_mode(mode: QueueMode)` | Set delivery mode: `OneAtATime` or `All` |
 
