@@ -401,7 +401,6 @@ async fn test_queue_inspection_and_take() {
     agent.follow_up(AgentMessage::Llm(Message::user("then run tests")));
 
     // Inspection does not consume
-    assert_eq!(agent.steering_queue_len(), 2);
     assert_eq!(agent.follow_up_queue_len(), 1);
     let snapshot = agent.steering_queue_snapshot();
     assert_eq!(snapshot.len(), 2);
@@ -421,9 +420,19 @@ async fn test_queue_inspection_and_take() {
         }]
     );
 
-    // Edit-and-requeue: push a survivor back
-    agent.steer(taken[1].clone());
+    // Edit-and-requeue: drop the first entry, batch-requeue the survivor
+    agent.steer_all(vec![taken[1].clone()]);
     assert_eq!(agent.steering_queue_len(), 1);
+    let requeued = agent.steering_queue_snapshot();
+    let AgentMessage::Llm(Message::User { content, .. }) = &requeued[0] else {
+        panic!("expected user message");
+    };
+    assert_eq!(
+        content,
+        &vec![Content::Text {
+            text: "use v2 instead".into()
+        }]
+    );
 
     // Follow-up variants
     let taken = agent.take_follow_up_queue();

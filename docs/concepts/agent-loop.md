@@ -170,19 +170,42 @@ is busy) can inspect it without consuming:
 
 ```rust
 let pending = agent.steering_queue_snapshot();  // point-in-time copy
-let count = agent.steering_queue_len();
+let count = pending.len();
 ```
 
-Snapshots are for display — the loop may drain the queue at any moment. For
-an edit-and-requeue UI, drain atomically instead:
+Use `steering_queue_len()` instead when only the count is needed — it avoids
+cloning message contents, which matters for high-frequency polling.
+
+For an edit-and-requeue UI, drain atomically and requeue the survivors as a
+single batch:
 
 ```rust
-let mut queued = agent.take_steering_queue();  // atomically drain
-queued.retain(|m| user_kept(m));               // let the user edit the list
-for msg in queued {
-    agent.steer(msg);                          // requeue the survivors
-}
+let mut queued = agent.take_steering_queue(); // atomic drain
+queued.pop();                                 // e.g. drop the newest entry
+agent.steer_all(queued);                      // requeue the rest under one lock
 ```
+
+These accessors pair with the spawn-based flows (`prompt()`,
+`prompt_messages()`, `continue_loop()`). The `_with_sender` variants borrow
+the agent mutably for the whole run, so the queue cannot be touched while one
+is in flight.
+
+Only the drain is atomic — the edit round trip is not:
+
+- The loop keeps running while the queue is taken. If the run finishes
+  during the edit, requeued survivors are delivered at the start of the
+  *next* run.
+- A message the loop has already picked up for injection is no longer in
+  the queue: snapshots won't show it and `take_steering_queue()` cannot
+  retract it.
+- Messages steered concurrently during the edit window land ahead of
+  requeued survivors (`steer` appends to the back; delivery pops the front).
+- Delivery of a requeued batch follows the steering `QueueMode`: `All`
+  injects it at one check, the default `OneAtATime` delivers one message
+  per check.
+- After `reset()`, discard taken messages instead of requeueing them.
+- Pending queue contents are not included in `save_messages()` persistence —
+  snapshot and store them separately if they must survive a restart.
 
 ### Low-Level API
 

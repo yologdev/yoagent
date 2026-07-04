@@ -362,6 +362,20 @@ impl Agent {
         self.follow_up_queue.lock().unwrap().push(msg);
     }
 
+    /// Queue multiple steering messages under a single lock acquisition.
+    ///
+    /// Use this to requeue messages from [`Agent::take_steering_queue`] — a
+    /// per-message [`Agent::steer`] loop can be interleaved by the running
+    /// loop's steering checks, splitting the batch across turns.
+    pub fn steer_all(&self, msgs: Vec<AgentMessage>) {
+        self.steering_queue.lock().unwrap().extend(msgs);
+    }
+
+    /// Queue multiple follow-up messages under a single lock acquisition.
+    pub fn follow_up_all(&self, msgs: Vec<AgentMessage>) {
+        self.follow_up_queue.lock().unwrap().extend(msgs);
+    }
+
     pub fn clear_steering_queue(&self) {
         self.steering_queue.lock().unwrap().clear();
     }
@@ -402,7 +416,16 @@ impl Agent {
     /// Atomically drain the steering queue and return its messages.
     ///
     /// Enables edit-and-requeue UIs: take the queue, let the user edit or
-    /// drop entries, then [`Agent::steer`] the survivors back.
+    /// drop entries, then push the survivors back with [`Agent::steer_all`].
+    ///
+    /// Only the drain itself is atomic. For edit-and-requeue flows:
+    /// - Messages the running loop has already picked up (but not yet
+    ///   injected into history) are no longer in the queue and cannot be
+    ///   retracted here.
+    /// - If the run finishes while the queue is taken, requeued messages
+    ///   are delivered at the start of the *next* run.
+    /// - After [`Agent::reset`], discard taken messages instead of
+    ///   requeueing them — they belong to the discarded conversation.
     pub fn take_steering_queue(&self) -> Vec<AgentMessage> {
         std::mem::take(&mut *self.steering_queue.lock().unwrap())
     }
