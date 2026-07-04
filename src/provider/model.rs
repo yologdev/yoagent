@@ -275,7 +275,12 @@ impl OpenCodeGateway {
 }
 
 /// Full model configuration. Knows everything needed to make API calls.
+///
+/// Marked `#[non_exhaustive]`: fields may be added in minor releases (0.9.0
+/// added `anthropic`). Construct via the `ModelConfig::*` preset constructors
+/// and mutate fields to customize.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ModelConfig {
     /// Model identifier sent to the API (e.g. "gpt-4o", "claude-sonnet-4-20250514").
     pub id: String,

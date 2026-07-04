@@ -32,12 +32,7 @@ fn test_message_assistant_roundtrip() {
             Content::Text {
                 text: "Hi there".into(),
             },
-            Content::ToolCall {
-                provider_metadata: None,
-                id: "tc-1".into(),
-                name: "read_file".into(),
-                arguments: serde_json::json!({"path": "foo.rs"}),
-            },
+            Content::tool_call("tc-1", "read_file", serde_json::json!({"path": "foo.rs"})),
         ],
         stop_reason: StopReason::ToolUse,
         model: "claude-sonnet".into(),
@@ -105,12 +100,11 @@ fn test_content_variants_roundtrip() {
         thinking: "let me think...".into(),
         signature: Some("sig123".into()),
     });
-    roundtrip(&Content::ToolCall {
-        provider_metadata: None,
-        id: "tc-1".into(),
-        name: "bash".into(),
-        arguments: serde_json::json!({"command": "ls"}),
-    });
+    roundtrip(&Content::tool_call(
+        "tc-1",
+        "bash",
+        serde_json::json!({"command": "ls"}),
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -122,12 +116,11 @@ fn test_full_conversation_roundtrip() {
     let conversation: Vec<AgentMessage> = vec![
         AgentMessage::Llm(Message::user("Read the file")),
         AgentMessage::Llm(Message::Assistant {
-            content: vec![Content::ToolCall {
-                provider_metadata: None,
-                id: "tc-1".into(),
-                name: "read_file".into(),
-                arguments: serde_json::json!({"path": "main.rs"}),
-            }],
+            content: vec![Content::tool_call(
+                "tc-1",
+                "read_file",
+                serde_json::json!({"path": "main.rs"}),
+            )],
             stop_reason: StopReason::ToolUse,
             model: "mock".into(),
             provider: "mock".into(),

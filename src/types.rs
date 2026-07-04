@@ -6,8 +6,15 @@ use std::sync::Arc;
 // Content types
 // ---------------------------------------------------------------------------
 
+/// Content block of a message.
+///
+/// Marked `#[non_exhaustive]`: new content kinds (and new fields on
+/// `ToolCall`) may be added in minor releases, so `match` arms need a
+/// wildcard and `ToolCall` must be constructed via [`Content::tool_call`] /
+/// [`Content::tool_call_with_metadata`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
+#[non_exhaustive]
 pub enum Content {
     #[serde(rename = "text")]
     Text { text: String },
@@ -24,6 +31,7 @@ pub enum Content {
         signature: Option<String>,
     },
     #[serde(rename = "toolCall")]
+    #[non_exhaustive]
     ToolCall {
         id: String,
         name: String,
@@ -34,6 +42,42 @@ pub enum Content {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_metadata: Option<serde_json::Value>,
     },
+}
+
+impl Content {
+    /// Construct a tool-call content block.
+    ///
+    /// The `ToolCall` variant is `#[non_exhaustive]` so provider-specific
+    /// fields can be added without breaking downstream crates — use this
+    /// constructor instead of a struct literal.
+    pub fn tool_call(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: serde_json::Value,
+    ) -> Self {
+        Self::ToolCall {
+            id: id.into(),
+            name: name.into(),
+            arguments,
+            provider_metadata: None,
+        }
+    }
+
+    /// Construct a tool-call content block carrying provider metadata
+    /// (e.g. a Gemini thought signature).
+    pub fn tool_call_with_metadata(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        arguments: serde_json::Value,
+        provider_metadata: serde_json::Value,
+    ) -> Self {
+        Self::ToolCall {
+            id: id.into(),
+            name: name.into(),
+            arguments,
+            provider_metadata: Some(provider_metadata),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -162,6 +206,11 @@ impl From<Message> for AgentMessage {
 // Stop reasons & usage
 // ---------------------------------------------------------------------------
 
+/// Why the model stopped generating.
+///
+/// Deliberately NOT `#[non_exhaustive]`: this is a control-flow enum, and a
+/// new variant (like `Refusal` in 0.9.0) should be a compile error for
+/// downstream matches rather than silently falling into a wildcard arm.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum StopReason {
