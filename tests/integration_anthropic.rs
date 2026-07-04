@@ -17,11 +17,11 @@ fn api_key() -> String {
 fn make_config(provider: AnthropicProvider) -> AgentLoopConfig {
     AgentLoopConfig {
         provider: std::sync::Arc::new(provider),
-        model: "claude-sonnet-4-20250514".into(),
+        model: "claude-sonnet-5".into(),
         api_key: api_key(),
         thinking_level: ThinkingLevel::Off,
         max_tokens: Some(1024),
-        temperature: Some(0.0),
+        temperature: None,
         model_config: None,
         convert_to_llm: None,
         transform_context: None,

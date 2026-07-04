@@ -12,7 +12,7 @@ Requires a `ModelConfig` with `compat` flags set in `StreamConfig.model_config`:
 use yoagent::provider::{OpenAiCompatProvider, ModelConfig};
 
 let agent = Agent::new(OpenAiCompatProvider)
-    .with_model("gpt-4o")
+    .with_model("gpt-5.5")
     .with_api_key(std::env::var("OPENAI_API_KEY").unwrap());
 ```
 
@@ -165,7 +165,7 @@ use yoagent::provider::{OpenAiCompatProvider, ModelConfig, OpenAiCompat};
 
 let mut config = ModelConfig::openai_compat(
     "https://api.githubcopilot.com",
-    "gpt-4o",
+    "gpt-5.5",
     "copilot",
     OpenAiCompat::openai(),
 );
@@ -175,7 +175,7 @@ config.headers.insert("Editor-Version".into(), "Neovim/0.10.0".into());
 
 let agent = Agent::new(OpenAiCompatProvider)
     .with_model_config(config)
-    .with_model("gpt-4o")
+    .with_model("gpt-5.5")
     .with_api_key(copilot_token); // see below
 ```
 

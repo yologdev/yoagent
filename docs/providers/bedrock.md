@@ -8,7 +8,7 @@
 use yoagent::provider::BedrockProvider;
 
 let agent = Agent::new(BedrockProvider)
-    .with_model("anthropic.claude-3-sonnet-20240229-v1:0")
+    .with_model("anthropic.claude-opus-4-8")
     .with_api_key("ACCESS_KEY:SECRET_KEY");  // or ACCESS_KEY:SECRET_KEY:SESSION_TOKEN
 ```
 

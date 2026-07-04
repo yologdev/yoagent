@@ -110,7 +110,7 @@ let agent = Agent::new(OpenAiCompatProvider)
 
 // Anthropic with 200K context → compacts at 160K
 let agent = Agent::new(AnthropicProvider)
-    .with_model_config(ModelConfig::anthropic("claude-sonnet-4-20250514", "Claude Sonnet 4"))
+    .with_model_config(ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"))
     .with_api_key(api_key);
 ```
 

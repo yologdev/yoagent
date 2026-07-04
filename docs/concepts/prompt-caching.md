@@ -92,9 +92,9 @@ For a typical 10-turn agent conversation with Anthropic Claude:
 | Without Caching | With Caching (auto) |
 |-----------------|-------------------|
 | ~500K input tokens billed at full price | ~50K at full price + ~450K at 10% price |
-| **$2.50** (Sonnet) | **$0.39** (Sonnet) |
+| **$1.50** (Claude Sonnet 5) | **$0.29** (Claude Sonnet 5) |
 
-That's an **84% cost reduction** with zero configuration.
+That's an **~80% cost reduction** with zero configuration.
 
 ## Best Practices
 

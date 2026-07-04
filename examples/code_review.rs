@@ -21,7 +21,7 @@ use yoagent::*;
 #[tokio::main]
 async fn main() {
     let api_key = std::env::var("ANTHROPIC_API_KEY").expect("Set ANTHROPIC_API_KEY");
-    let model = "claude-sonnet-4-20250514";
+    let model = "claude-sonnet-5";
     let provider: Arc<dyn StreamProvider> = Arc::new(AnthropicProvider);
 
     // --- Read the target file from CLI args ---

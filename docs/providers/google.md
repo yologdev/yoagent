@@ -11,7 +11,7 @@ Two providers for Google's Gemini models:
 use yoagent::provider::GoogleProvider;
 
 let agent = Agent::new(GoogleProvider)
-    .with_model("gemini-2.0-flash")
+    .with_model("gemini-2.5-flash")
     .with_api_key(std::env::var("GOOGLE_API_KEY").unwrap());
 ```
 

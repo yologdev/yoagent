@@ -34,7 +34,7 @@ Full configuration for a model, including provider routing:
 
 ```rust
 pub struct ModelConfig {
-    pub id: String,              // e.g. "gpt-4o"
+    pub id: String,              // e.g. "gpt-5.5"
     pub name: String,            // e.g. "GPT-4o"
     pub api: ApiProtocol,        // Which provider to use
     pub provider: String,        // e.g. "openai"
@@ -51,10 +51,10 @@ pub struct ModelConfig {
 First-class model presets are documented in [Model Presets](model-presets.md). Convenience constructors:
 
 ```rust
-let anthropic = ModelConfig::anthropic("claude-sonnet-4-20250514", "Claude Sonnet 4");
-let openai = ModelConfig::openai("gpt-4o", "GPT-4o");
-let google = ModelConfig::google("gemini-2.0-flash", "Gemini 2.0 Flash");
-let xai = ModelConfig::xai("grok-3-mini", "Grok 3 Mini");
+let anthropic = ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5");
+let openai = ModelConfig::openai("gpt-5.5", "GPT-4o");
+let google = ModelConfig::google("gemini-2.5-flash", "Gemini 2.0 Flash");
+let xai = ModelConfig::xai("grok-4-1-fast", "Grok 4.1 Fast");
 let groq = ModelConfig::groq("llama-3.3-70b-versatile", "Llama 3.3 70B");
 let deepseek = ModelConfig::deepseek("deepseek-v4-flash", "DeepSeek V4 Flash");
 let mistral = ModelConfig::mistral("mistral-large-latest", "Mistral Large");

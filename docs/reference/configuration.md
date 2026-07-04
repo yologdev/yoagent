@@ -89,10 +89,10 @@ pub struct ExecutionLimits {
 ```rust
 pub enum ThinkingLevel {
     Off,        // No thinking (default)
-    Minimal,    // 128 tokens (Anthropic budget)
-    Low,        // 512 tokens
-    Medium,     // 2,048 tokens
-    High,       // 8,192 tokens
+    Minimal,    // effort "low" (adaptive) / 1,024-token budget (legacy)
+    Low,        // effort "low" / 1,024
+    Medium,     // effort "medium" / 2,048
+    High,       // effort "high" / 8,192
 }
 ```
 

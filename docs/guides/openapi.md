@@ -18,7 +18,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let agent = Agent::new(AnthropicProvider)
         .with_system_prompt("You are an API assistant.")
-        .with_model("claude-sonnet-4-20250514")
+        .with_model("claude-sonnet-5")
         .with_api_key(std::env::var("ANTHROPIC_API_KEY")?)
         .with_openapi_file("petstore.yaml", config, &OperationFilter::All)
         .await?;

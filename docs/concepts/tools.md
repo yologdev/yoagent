@@ -355,7 +355,7 @@ impl AgentTool for DeployTool {
 async fn main() {
     let mut agent = Agent::new(AnthropicProvider)
         .with_system_prompt("You are a deployment assistant.")
-        .with_model("claude-sonnet-4-20250514")
+        .with_model("claude-sonnet-5")
         .with_api_key(std::env::var("ANTHROPIC_API_KEY").unwrap())
         .with_tools(vec![Box::new(DeployTool)]);
 
