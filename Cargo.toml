@@ -11,7 +11,7 @@ readme = "README.md"
 keywords = ["agent", "llm", "ai", "tools", "streaming"]
 categories = ["api-bindings", "asynchronous"]
 authors = ["Yuanhao <yuanhao@yolog.dev>"]
-rust-version = "1.75"
+rust-version = "1.85"
 exclude = ["docs/images/*", "docs/theme/*", ".github/*", "scripts/*"]
 
 [dependencies]
@@ -24,7 +24,7 @@ async-trait = "0.1"
 thiserror = "2"
 uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
-reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
+reqwest = { version = "0.13", features = ["json", "stream", "socks"] }
 reqwest-eventsource = { package = "kameleoon-reqwest-eventsource", version = "0.6" }
 futures = "0.3"
 rand = "0.10.0"
@@ -33,7 +33,7 @@ openapiv3 = { version = "2", optional = true }
 serde_yaml = { version = "0.9", optional = true }
 
 [features]
-openapi = ["dep:openapiv3", "dep:serde_yaml"]
+openapi = ["dep:openapiv3", "dep:serde_yaml", "reqwest/query"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
