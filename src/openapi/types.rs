@@ -2,9 +2,10 @@ use std::collections::HashMap;
 use std::fmt;
 
 /// Authentication method for OpenAPI requests.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub enum OpenApiAuth {
     /// No authentication.
+    #[default]
     None,
     /// Bearer token (Authorization: Bearer <token>).
     Bearer(String),
@@ -23,12 +24,6 @@ impl fmt::Debug for OpenApiAuth {
                 .field("value", &"****")
                 .finish(),
         }
-    }
-}
-
-impl Default for OpenApiAuth {
-    fn default() -> Self {
-        Self::None
     }
 }
 
@@ -108,9 +103,10 @@ impl OpenApiConfig {
 }
 
 /// Controls which operations from the spec become tools.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum OperationFilter {
     /// Include all operations.
+    #[default]
     All,
     /// Include only operations with these operation IDs.
     ByOperationId(Vec<String>),
@@ -118,12 +114,6 @@ pub enum OperationFilter {
     ByTag(Vec<String>),
     /// Include only operations whose path starts with this prefix.
     ByPathPrefix(String),
-}
-
-impl Default for OperationFilter {
-    fn default() -> Self {
-        Self::All
-    }
 }
 
 /// Parsed operation metadata (internal).
