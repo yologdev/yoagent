@@ -12,7 +12,9 @@ The gateways serve different model families over different protocols. The preset
 | Go | `qwen*`, `minimax-*` | Anthropic Messages | `AnthropicProvider` |
 | Go | GLM, Kimi, DeepSeek, MiMo, ... | Chat Completions | `OpenAiCompatProvider` |
 
-Gemini models on Zen are **not supported** — Zen serves them over a Google-native endpoint shape yoagent does not target.
+Gemini models on Zen are **not supported** — Zen serves them over a Google-native endpoint shape yoagent does not target. A `gemini-*` id falls through to Chat Completions (with a warning logged) and will fail at request time.
+
+The routing table mirrors the Zen/Go endpoint docs as of mid-2026. OpenCode can change gateway-side routing at any time — if a model errors, verify its protocol against `{base}/models`.
 
 ## Usage
 

@@ -170,11 +170,12 @@ pub enum StopReason {
     ToolUse,
     Error,
     Aborted,
-    /// The provider's safety system declined the request (HTTP 200 with an
-    /// empty or partial response). Currently emitted by Anthropic models that
-    /// support the `refusal` stop reason (e.g. Claude Fable 5). The loop
-    /// treats it like `Stop`; callers can match on it to retry on a fallback
-    /// model.
+    /// The provider's safety system declined the request. The stream completes
+    /// normally (HTTP 200) but with `stop_reason: refusal` and empty or partial
+    /// content; `error_message` carries an explanation. Currently emitted by
+    /// Anthropic models that support the `refusal` stop reason (e.g. Claude
+    /// Fable 5). The agent loop does not special-case it (the turn ends like a
+    /// normal `Stop`); callers can match on it to retry on a fallback model.
     Refusal,
 }
 

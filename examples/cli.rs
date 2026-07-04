@@ -294,6 +294,23 @@ async fn main() {
                     let msg = error_message.as_deref().unwrap_or("unknown error");
                     println!("{RED}  error: {msg}{RESET}");
                 }
+                AgentEvent::MessageEnd {
+                    message:
+                        AgentMessage::Llm(Message::Assistant {
+                            stop_reason: StopReason::Refusal,
+                            error_message,
+                            ..
+                        }),
+                } => {
+                    if in_text {
+                        println!();
+                        in_text = false;
+                    }
+                    let msg = error_message
+                        .as_deref()
+                        .unwrap_or("request declined by the model's safety system");
+                    println!("{RED}  refused: {msg}{RESET}");
+                }
                 AgentEvent::AgentEnd { messages } => {
                     // Extract usage from the last assistant message
                     for msg in messages.iter().rev() {

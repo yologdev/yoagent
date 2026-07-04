@@ -217,6 +217,7 @@ impl OpenAiCompat {
 /// When `ModelConfig.anthropic` is `None`, providers use `AnthropicCompat::default()`,
 /// which targets the current model generation (Claude 4.6+ / Fable 5).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AnthropicCompat {
     /// Use adaptive thinking (`thinking: {"type": "adaptive"}` plus
     /// `output_config.effort`). Required by Claude Fable 5, Opus 4.7/4.8, and
@@ -244,6 +245,31 @@ impl AnthropicCompat {
         Self {
             adaptive_thinking: false,
             bearer_auth: false,
+        }
+    }
+}
+
+/// The two OpenCode gateways (<https://opencode.ai>).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenCodeGateway {
+    /// Pay-per-use gateway (`opencode.ai/zen/v1`).
+    Zen,
+    /// Subscription gateway for open models (`opencode.ai/zen/go/v1`).
+    Go,
+}
+
+impl OpenCodeGateway {
+    fn provider_name(self) -> &'static str {
+        match self {
+            Self::Zen => "opencode-zen",
+            Self::Go => "opencode-go",
+        }
+    }
+
+    fn base_url(self) -> &'static str {
+        match self {
+            Self::Zen => "https://opencode.ai/zen/v1",
+            Self::Go => "https://opencode.ai/zen/go/v1",
         }
     }
 }
@@ -301,7 +327,8 @@ impl ModelConfig {
         }
     }
 
-    /// Claude Fable 5 — Anthropic's most capable model (1M context, 128K max output).
+    /// Claude Fable 5 — Anthropic's most capable model.
+    /// 1M context; defaults to 64K of the model's 128K max output.
     pub fn claude_fable_5() -> Self {
         Self {
             context_window: 1_000_000,
@@ -316,7 +343,7 @@ impl ModelConfig {
         }
     }
 
-    /// Claude Opus 4.8 (1M context, 128K max output).
+    /// Claude Opus 4.8. 1M context; defaults to 64K of the model's 128K max output.
     pub fn claude_opus_4_8() -> Self {
         Self {
             context_window: 1_000_000,
@@ -331,7 +358,7 @@ impl ModelConfig {
         }
     }
 
-    /// Claude Sonnet 5 (1M context, 128K max output).
+    /// Claude Sonnet 5. 1M context; defaults to 64K of the model's 128K max output.
     pub fn claude_sonnet_5() -> Self {
         Self {
             context_window: 1_000_000,
@@ -346,7 +373,7 @@ impl ModelConfig {
         }
     }
 
-    /// Claude Haiku 4.5 (200K context, 64K max output).
+    /// Claude Haiku 4.5. 200K context; defaults to 32K of the model's 64K max output.
     pub fn claude_haiku_4_5() -> Self {
         Self {
             context_window: 200_000,
@@ -361,7 +388,8 @@ impl ModelConfig {
         }
     }
 
-    /// GPT-5.5 (~1M context, 128K max output). Uses the Chat Completions API.
+    /// GPT-5.5. ~1M context; defaults to 64K of the model's 128K max output.
+    /// Uses the Chat Completions API.
     pub fn gpt_5_5() -> Self {
         Self {
             reasoning: true,
@@ -370,7 +398,8 @@ impl ModelConfig {
             cost: CostConfig {
                 input_per_million: 5.0,
                 output_per_million: 30.0,
-                ..CostConfig::default()
+                cache_read_per_million: 0.5,
+                cache_write_per_million: 0.0,
             },
             ..Self::openai("gpt-5.5", "GPT-5.5")
         }
@@ -424,13 +453,16 @@ impl ModelConfig {
     ///   (pair with `OpenAiCompatProvider`)
     ///
     /// Gemini models are not supported — Zen serves them over a Google-native
-    /// endpoint shape yoagent does not target.
+    /// endpoint shape yoagent does not target. A `gemini-*` id falls through to
+    /// Chat Completions (with a warning) and will likely fail at request time.
+    ///
+    /// The routing mirrors the Zen endpoint tables as of mid-2026; if a model
+    /// errors, verify its protocol against `https://opencode.ai/zen/v1/models`.
     ///
     /// Context window and max output default conservatively (128K / 16K);
     /// override the fields for models with larger limits.
     pub fn opencode_zen(model_id: impl Into<String>) -> Self {
-        let id = model_id.into();
-        Self::opencode(id, "opencode-zen", "https://opencode.ai/zen/v1", false)
+        Self::opencode(model_id.into(), OpenCodeGateway::Zen)
     }
 
     /// Create a config for a model served by OpenCode Go
@@ -442,20 +474,27 @@ impl ModelConfig {
     /// - everything else (GLM, Kimi, DeepSeek, MiMo, ...) → Chat Completions
     ///   (pair with `OpenAiCompatProvider`)
     pub fn opencode_go(model_id: impl Into<String>) -> Self {
-        let id = model_id.into();
-        Self::opencode(id, "opencode-go", "https://opencode.ai/zen/go/v1", true)
+        Self::opencode(model_id.into(), OpenCodeGateway::Go)
     }
 
-    fn opencode(id: String, provider: &str, base_url: &str, is_go: bool) -> Self {
+    fn opencode(id: String, gateway: OpenCodeGateway) -> Self {
         let lower = id.to_ascii_lowercase();
-        let anthropic_protocol = if is_go {
-            lower.starts_with("qwen") || lower.starts_with("minimax-")
-        } else {
-            lower.starts_with("claude-") || lower.starts_with("qwen")
+        if lower.starts_with("gemini-") {
+            tracing::warn!(
+                "OpenCode serves Gemini models over a Google-native endpoint yoagent \
+                 does not target; '{}' is routed to /chat/completions and will likely \
+                 fail at request time",
+                id
+            );
+        }
+        let anthropic_protocol = match gateway {
+            OpenCodeGateway::Zen => lower.starts_with("claude-") || lower.starts_with("qwen"),
+            OpenCodeGateway::Go => lower.starts_with("qwen") || lower.starts_with("minimax-"),
         };
-        let (api, compat, anthropic) = if anthropic_protocol {
+        let (api, reasoning, compat, anthropic) = if anthropic_protocol {
             (
                 ApiProtocol::AnthropicMessages,
+                true,
                 None,
                 // Gateways use OpenAI-style Bearer auth, not x-api-key.
                 Some(AnthropicCompat {
@@ -463,11 +502,12 @@ impl ModelConfig {
                     bearer_auth: true,
                 }),
             )
-        } else if !is_go && lower.starts_with("gpt-") {
-            (ApiProtocol::OpenAiResponses, None, None)
+        } else if gateway == OpenCodeGateway::Zen && lower.starts_with("gpt-") {
+            (ApiProtocol::OpenAiResponses, true, None, None)
         } else {
             (
                 ApiProtocol::OpenAiCompletions,
+                false,
                 Some(OpenAiCompat::default()),
                 None,
             )
@@ -476,9 +516,9 @@ impl ModelConfig {
             id: id.clone(),
             name: id,
             api,
-            provider: provider.into(),
-            base_url: base_url.into(),
-            reasoning: false,
+            provider: gateway.provider_name().into(),
+            base_url: gateway.base_url().into(),
+            reasoning,
             context_window: 128_000,
             max_tokens: 16_000,
             cost: CostConfig::default(),
@@ -829,6 +869,28 @@ mod tests {
         assert!(qwen.supports_usage_in_streaming);
         assert!(!qwen.supports_reasoning_effort);
         assert!(!qwen.supports_thinking_control);
+    }
+
+    #[test]
+    fn test_model_config_deserializes_without_anthropic_field() {
+        // Configs persisted before 0.9.0 have no `anthropic` field.
+        let mut value = serde_json::to_value(ModelConfig::anthropic("m", "M")).unwrap();
+        value.as_object_mut().unwrap().remove("anthropic");
+        let config: ModelConfig = serde_json::from_value(value).unwrap();
+        assert!(config.anthropic.is_none());
+    }
+
+    #[test]
+    fn test_anthropic_compat_deserializes_from_partial_json() {
+        // Container-level serde(default): missing fields use Default (adaptive on).
+        let compat: AnthropicCompat = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(compat.adaptive_thinking);
+        assert!(!compat.bearer_auth);
+
+        let compat: AnthropicCompat =
+            serde_json::from_value(serde_json::json!({"bearer_auth": true})).unwrap();
+        assert!(compat.adaptive_thinking);
+        assert!(compat.bearer_auth);
     }
 
     #[test]

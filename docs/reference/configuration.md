@@ -89,12 +89,16 @@ pub struct ExecutionLimits {
 ```rust
 pub enum ThinkingLevel {
     Off,        // No thinking (default)
-    Minimal,    // effort "low" (adaptive) / 1,024-token budget (legacy)
-    Low,        // effort "low" / 1,024
-    Medium,     // effort "medium" / 2,048
-    High,       // effort "high" / 8,192
+    Minimal,    // Anthropic: effort "low" (adaptive) / 1,024-token budget (legacy)
+    Low,        // Anthropic: effort "low" / 1,024
+    Medium,     // Anthropic: effort "medium" / 2,048
+    High,       // Anthropic: effort "high" / 8,192
 }
 ```
+
+OpenAI-family providers map these levels to `reasoning_effort` where the
+compat flags enable it; the Google and Bedrock providers currently ignore
+`thinking_level`.
 
 ## CostConfig
 
