@@ -17,7 +17,7 @@ pub use bedrock::BedrockProvider;
 pub use google::GoogleProvider;
 pub use google_vertex::GoogleVertexProvider;
 pub use mock::MockProvider;
-pub use model::{ApiProtocol, CostConfig, ModelConfig, OpenAiCompat};
+pub use model::{AnthropicCompat, ApiProtocol, CostConfig, ModelConfig, OpenAiCompat};
 pub use openai_compat::OpenAiCompatProvider;
 pub use openai_responses::OpenAiResponsesProvider;
 pub use registry::ProviderRegistry;

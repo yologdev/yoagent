@@ -212,6 +212,42 @@ impl OpenAiCompat {
     }
 }
 
+/// Quirk flags for the Anthropic Messages protocol (only for AnthropicMessages).
+///
+/// When `ModelConfig.anthropic` is `None`, providers use `AnthropicCompat::default()`,
+/// which targets the current model generation (Claude 4.6+ / Fable 5).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnthropicCompat {
+    /// Use adaptive thinking (`thinking: {"type": "adaptive"}` plus
+    /// `output_config.effort`). Required by Claude Fable 5, Opus 4.7/4.8, and
+    /// Sonnet 5; recommended on Opus 4.6 / Sonnet 4.6. Set to `false` for
+    /// pre-4.6 models, which only accept `{"type": "enabled", "budget_tokens": N}`.
+    pub adaptive_thinking: bool,
+    /// Send the API key as `Authorization: Bearer {key}` instead of the
+    /// Anthropic-native `x-api-key` header. Needed for OpenAI-style gateways
+    /// that speak the Anthropic Messages protocol (e.g. OpenCode Zen/Go).
+    pub bearer_auth: bool,
+}
+
+impl Default for AnthropicCompat {
+    fn default() -> Self {
+        Self {
+            adaptive_thinking: true,
+            bearer_auth: false,
+        }
+    }
+}
+
+impl AnthropicCompat {
+    /// Compat flags for pre-4.6 Claude models (budget-based extended thinking).
+    pub fn legacy() -> Self {
+        Self {
+            adaptive_thinking: false,
+            bearer_auth: false,
+        }
+    }
+}
+
 /// Full model configuration. Knows everything needed to make API calls.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelConfig {
@@ -240,6 +276,10 @@ pub struct ModelConfig {
     /// OpenAI-compat quirk flags (only for OpenAiCompletions protocol).
     #[serde(default)]
     pub compat: Option<OpenAiCompat>,
+    /// Anthropic Messages quirk flags (only for AnthropicMessages protocol).
+    /// `None` behaves like `AnthropicCompat::default()` (current generation).
+    #[serde(default)]
+    pub anthropic: Option<AnthropicCompat>,
 }
 
 impl ModelConfig {
@@ -250,13 +290,89 @@ impl ModelConfig {
             name: name.into(),
             api: ApiProtocol::AnthropicMessages,
             provider: "anthropic".into(),
-            base_url: "https://api.anthropic.com".into(),
-            reasoning: false,
+            base_url: "https://api.anthropic.com/v1".into(),
+            reasoning: true,
             context_window: 200_000,
-            max_tokens: 8192,
+            max_tokens: 16_000,
             cost: CostConfig::default(),
             headers: HashMap::new(),
+            anthropic: None,
             compat: None,
+        }
+    }
+
+    /// Claude Fable 5 — Anthropic's most capable model (1M context, 128K max output).
+    pub fn claude_fable_5() -> Self {
+        Self {
+            context_window: 1_000_000,
+            max_tokens: 64_000,
+            cost: CostConfig {
+                input_per_million: 10.0,
+                output_per_million: 50.0,
+                cache_read_per_million: 1.0,
+                cache_write_per_million: 12.5,
+            },
+            ..Self::anthropic("claude-fable-5", "Claude Fable 5")
+        }
+    }
+
+    /// Claude Opus 4.8 (1M context, 128K max output).
+    pub fn claude_opus_4_8() -> Self {
+        Self {
+            context_window: 1_000_000,
+            max_tokens: 64_000,
+            cost: CostConfig {
+                input_per_million: 5.0,
+                output_per_million: 25.0,
+                cache_read_per_million: 0.5,
+                cache_write_per_million: 6.25,
+            },
+            ..Self::anthropic("claude-opus-4-8", "Claude Opus 4.8")
+        }
+    }
+
+    /// Claude Sonnet 5 (1M context, 128K max output).
+    pub fn claude_sonnet_5() -> Self {
+        Self {
+            context_window: 1_000_000,
+            max_tokens: 64_000,
+            cost: CostConfig {
+                input_per_million: 3.0,
+                output_per_million: 15.0,
+                cache_read_per_million: 0.3,
+                cache_write_per_million: 3.75,
+            },
+            ..Self::anthropic("claude-sonnet-5", "Claude Sonnet 5")
+        }
+    }
+
+    /// Claude Haiku 4.5 (200K context, 64K max output).
+    pub fn claude_haiku_4_5() -> Self {
+        Self {
+            context_window: 200_000,
+            max_tokens: 32_000,
+            cost: CostConfig {
+                input_per_million: 1.0,
+                output_per_million: 5.0,
+                cache_read_per_million: 0.1,
+                cache_write_per_million: 1.25,
+            },
+            ..Self::anthropic("claude-haiku-4-5", "Claude Haiku 4.5")
+        }
+    }
+
+    /// GPT-5.5 (~1M context, 128K max output). Uses the Chat Completions API.
+    pub fn gpt_5_5() -> Self {
+        Self {
+            reasoning: true,
+            context_window: 1_000_000,
+            max_tokens: 64_000,
+            cost: CostConfig {
+                input_per_million: 5.0,
+                output_per_million: 30.0,
+                ..CostConfig::default()
+            },
+            ..Self::openai("gpt-5.5", "GPT-5.5")
         }
     }
 
@@ -273,6 +389,7 @@ impl ModelConfig {
             max_tokens: 4096,
             cost: CostConfig::default(),
             headers: HashMap::new(),
+            anthropic: None,
             compat: Some(OpenAiCompat::openai()),
         }
     }
@@ -291,7 +408,83 @@ impl ModelConfig {
             max_tokens: 4096,
             cost: CostConfig::default(),
             headers: HashMap::new(),
+            anthropic: None,
             compat: Some(OpenAiCompat::default()),
+        }
+    }
+
+    /// Create a config for a model served by OpenCode Zen
+    /// (<https://opencode.ai/docs/zen>), OpenCode's pay-per-use gateway.
+    ///
+    /// Zen serves each model family over a different protocol; the protocol is
+    /// selected from the model id:
+    /// - `gpt-*` → OpenAI Responses API (pair with `OpenAiResponsesProvider`)
+    /// - `claude-*`, `qwen*` → Anthropic Messages API (pair with `AnthropicProvider`)
+    /// - everything else (DeepSeek, MiniMax, GLM, Kimi, ...) → Chat Completions
+    ///   (pair with `OpenAiCompatProvider`)
+    ///
+    /// Gemini models are not supported — Zen serves them over a Google-native
+    /// endpoint shape yoagent does not target.
+    ///
+    /// Context window and max output default conservatively (128K / 16K);
+    /// override the fields for models with larger limits.
+    pub fn opencode_zen(model_id: impl Into<String>) -> Self {
+        let id = model_id.into();
+        Self::opencode(id, "opencode-zen", "https://opencode.ai/zen/v1", false)
+    }
+
+    /// Create a config for a model served by OpenCode Go
+    /// (<https://opencode.ai/docs/go>), OpenCode's subscription gateway for
+    /// open models.
+    ///
+    /// Protocol is selected from the model id:
+    /// - `qwen*`, `minimax-*` → Anthropic Messages API (pair with `AnthropicProvider`)
+    /// - everything else (GLM, Kimi, DeepSeek, MiMo, ...) → Chat Completions
+    ///   (pair with `OpenAiCompatProvider`)
+    pub fn opencode_go(model_id: impl Into<String>) -> Self {
+        let id = model_id.into();
+        Self::opencode(id, "opencode-go", "https://opencode.ai/zen/go/v1", true)
+    }
+
+    fn opencode(id: String, provider: &str, base_url: &str, is_go: bool) -> Self {
+        let lower = id.to_ascii_lowercase();
+        let anthropic_protocol = if is_go {
+            lower.starts_with("qwen") || lower.starts_with("minimax-")
+        } else {
+            lower.starts_with("claude-") || lower.starts_with("qwen")
+        };
+        let (api, compat, anthropic) = if anthropic_protocol {
+            (
+                ApiProtocol::AnthropicMessages,
+                None,
+                // Gateways use OpenAI-style Bearer auth, not x-api-key.
+                Some(AnthropicCompat {
+                    adaptive_thinking: true,
+                    bearer_auth: true,
+                }),
+            )
+        } else if !is_go && lower.starts_with("gpt-") {
+            (ApiProtocol::OpenAiResponses, None, None)
+        } else {
+            (
+                ApiProtocol::OpenAiCompletions,
+                Some(OpenAiCompat::default()),
+                None,
+            )
+        };
+        Self {
+            id: id.clone(),
+            name: id,
+            api,
+            provider: provider.into(),
+            base_url: base_url.into(),
+            reasoning: false,
+            context_window: 128_000,
+            max_tokens: 16_000,
+            cost: CostConfig::default(),
+            headers: HashMap::new(),
+            compat,
+            anthropic,
         }
     }
 
@@ -314,6 +507,7 @@ impl ModelConfig {
             max_tokens: 4096,
             cost: CostConfig::default(),
             headers: HashMap::new(),
+            anthropic: None,
             compat: Some(compat),
         }
     }
@@ -334,6 +528,7 @@ impl ModelConfig {
             max_tokens: 4096,
             cost: CostConfig::default(),
             headers: HashMap::new(),
+            anthropic: None,
             compat: Some(OpenAiCompat::ollama()),
         }
     }
@@ -353,6 +548,7 @@ impl ModelConfig {
             max_tokens: 4096,
             cost: CostConfig::default(),
             headers: HashMap::new(),
+            anthropic: None,
             compat: Some(OpenAiCompat::zai()),
         }
     }
@@ -372,6 +568,7 @@ impl ModelConfig {
             max_tokens: 4096,
             cost: CostConfig::default(),
             headers: HashMap::new(),
+            anthropic: None,
             compat: Some(OpenAiCompat::minimax()),
         }
     }
@@ -391,13 +588,14 @@ impl ModelConfig {
             max_tokens: 4096,
             cost: CostConfig::default(),
             headers: HashMap::new(),
+            anthropic: None,
             compat: Some(OpenAiCompat::qwen()),
         }
     }
 
     /// Create a new xAI (Grok) model config.
     ///
-    /// Models: `grok-3-mini`, `grok-3`, etc.
+    /// Models: `grok-4-1-fast`, `grok-4-1`, etc.
     pub fn xai(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -410,6 +608,7 @@ impl ModelConfig {
             max_tokens: 4096,
             cost: CostConfig::default(),
             headers: HashMap::new(),
+            anthropic: None,
             compat: Some(OpenAiCompat::xai()),
         }
     }
@@ -429,6 +628,7 @@ impl ModelConfig {
             max_tokens: 4096,
             cost: CostConfig::default(),
             headers: HashMap::new(),
+            anthropic: None,
             compat: Some(OpenAiCompat::groq()),
         }
     }
@@ -451,6 +651,7 @@ impl ModelConfig {
             max_tokens: 384_000,
             cost: CostConfig::default(),
             headers: HashMap::new(),
+            anthropic: None,
             compat: Some(OpenAiCompat::deepseek()),
         }
     }
@@ -470,6 +671,7 @@ impl ModelConfig {
             max_tokens: 4096,
             cost: CostConfig::default(),
             headers: HashMap::new(),
+            anthropic: None,
             compat: Some(OpenAiCompat::mistral()),
         }
     }
@@ -487,6 +689,7 @@ impl ModelConfig {
             max_tokens: 8192,
             cost: CostConfig::default(),
             headers: HashMap::new(),
+            anthropic: None,
             compat: None,
         }
     }
@@ -498,10 +701,89 @@ mod tests {
 
     #[test]
     fn test_model_config_anthropic() {
-        let config = ModelConfig::anthropic("claude-sonnet-4-20250514", "Claude Sonnet 4");
+        let config = ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5");
         assert_eq!(config.api, ApiProtocol::AnthropicMessages);
         assert_eq!(config.provider, "anthropic");
+        assert_eq!(config.base_url, "https://api.anthropic.com/v1");
         assert!(config.compat.is_none());
+        assert!(config.anthropic.is_none());
+    }
+
+    #[test]
+    fn test_new_generation_presets() {
+        let fable = ModelConfig::claude_fable_5();
+        assert_eq!(fable.id, "claude-fable-5");
+        assert_eq!(fable.api, ApiProtocol::AnthropicMessages);
+        assert_eq!(fable.context_window, 1_000_000);
+        assert_eq!(fable.cost.input_per_million, 10.0);
+        assert_eq!(fable.cost.output_per_million, 50.0);
+
+        let opus = ModelConfig::claude_opus_4_8();
+        assert_eq!(opus.id, "claude-opus-4-8");
+        assert_eq!(opus.context_window, 1_000_000);
+        assert_eq!(opus.cost.input_per_million, 5.0);
+
+        let sonnet = ModelConfig::claude_sonnet_5();
+        assert_eq!(sonnet.id, "claude-sonnet-5");
+        assert_eq!(sonnet.cost.output_per_million, 15.0);
+
+        let haiku = ModelConfig::claude_haiku_4_5();
+        assert_eq!(haiku.id, "claude-haiku-4-5");
+        assert_eq!(haiku.context_window, 200_000);
+
+        let gpt = ModelConfig::gpt_5_5();
+        assert_eq!(gpt.id, "gpt-5.5");
+        assert_eq!(gpt.api, ApiProtocol::OpenAiCompletions);
+        assert_eq!(gpt.context_window, 1_000_000);
+        assert_eq!(gpt.cost.output_per_million, 30.0);
+        assert!(gpt.compat.is_some());
+    }
+
+    #[test]
+    fn test_opencode_zen_protocol_selection() {
+        // GPT models → Responses API
+        let gpt = ModelConfig::opencode_zen("gpt-5.5");
+        assert_eq!(gpt.api, ApiProtocol::OpenAiResponses);
+        assert_eq!(gpt.provider, "opencode-zen");
+        assert_eq!(gpt.base_url, "https://opencode.ai/zen/v1");
+
+        // Claude and Qwen models → Anthropic Messages with Bearer auth
+        for id in ["claude-sonnet-5", "qwen3.7-max"] {
+            let config = ModelConfig::opencode_zen(id);
+            assert_eq!(config.api, ApiProtocol::AnthropicMessages, "{id}");
+            let compat = config.anthropic.expect("anthropic compat set");
+            assert!(compat.bearer_auth);
+        }
+
+        // Everything else → Chat Completions
+        for id in ["deepseek-v4-pro", "minimax-m3", "glm-5.2", "kimi-k2.7-code"] {
+            let config = ModelConfig::opencode_zen(id);
+            assert_eq!(config.api, ApiProtocol::OpenAiCompletions, "{id}");
+            assert!(config.compat.is_some());
+        }
+    }
+
+    #[test]
+    fn test_opencode_go_protocol_selection() {
+        // Qwen and MiniMax models → Anthropic Messages with Bearer auth
+        for id in ["qwen3.7-max", "minimax-m3"] {
+            let config = ModelConfig::opencode_go(id);
+            assert_eq!(config.api, ApiProtocol::AnthropicMessages, "{id}");
+            assert_eq!(config.base_url, "https://opencode.ai/zen/go/v1");
+            assert!(config.anthropic.expect("anthropic compat set").bearer_auth);
+        }
+
+        // Everything else → Chat Completions (Go has no GPT models)
+        for id in [
+            "glm-5.2",
+            "kimi-k2.7-code",
+            "deepseek-v4-flash",
+            "mimo-v2.5",
+        ] {
+            let config = ModelConfig::opencode_go(id);
+            assert_eq!(config.api, ApiProtocol::OpenAiCompletions, "{id}");
+            assert_eq!(config.provider, "opencode-go", "{id}");
+        }
     }
 
     #[test]

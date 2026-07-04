@@ -34,6 +34,7 @@
 - [Google Gemini](providers/google.md)
 - [Amazon Bedrock](providers/bedrock.md)
 - [Azure OpenAI](providers/azure-openai.md)
+- [OpenCode Zen & Go](providers/opencode.md)
 
 # Reference
 

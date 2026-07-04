@@ -170,6 +170,12 @@ pub enum StopReason {
     ToolUse,
     Error,
     Aborted,
+    /// The provider's safety system declined the request (HTTP 200 with an
+    /// empty or partial response). Currently emitted by Anthropic models that
+    /// support the `refusal` stop reason (e.g. Claude Fable 5). The loop
+    /// treats it like `Stop`; callers can match on it to retry on a fallback
+    /// model.
+    Refusal,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -501,6 +507,7 @@ impl fmt::Display for StopReason {
             Self::ToolUse => write!(f, "toolUse"),
             Self::Error => write!(f, "error"),
             Self::Aborted => write!(f, "aborted"),
+            Self::Refusal => write!(f, "refusal"),
         }
     }
 }
