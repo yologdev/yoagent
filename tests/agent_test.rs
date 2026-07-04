@@ -384,3 +384,59 @@ async fn test_prompt_with_sender_tools_restored() {
     agent.finish().await;
     assert_eq!(agent.messages().len(), 4); // 2 from first + 2 from second
 }
+
+#[tokio::test]
+async fn test_queue_inspection_and_take() {
+    let provider = MockProvider::text("Hello!");
+    let agent = Agent::new(provider)
+        .with_system_prompt("test")
+        .with_model("mock")
+        .with_api_key("test");
+
+    assert_eq!(agent.steering_queue_len(), 0);
+    assert!(agent.steering_queue_snapshot().is_empty());
+
+    agent.steer(AgentMessage::Llm(Message::user("stop")));
+    agent.steer(AgentMessage::Llm(Message::user("use v2 instead")));
+    agent.follow_up(AgentMessage::Llm(Message::user("then run tests")));
+
+    // Inspection does not consume
+    assert_eq!(agent.follow_up_queue_len(), 1);
+    let snapshot = agent.steering_queue_snapshot();
+    assert_eq!(snapshot.len(), 2);
+    assert_eq!(agent.steering_queue_len(), 2, "snapshot must not drain");
+
+    // Take drains atomically and returns in FIFO order
+    let taken = agent.take_steering_queue();
+    assert_eq!(taken.len(), 2);
+    assert_eq!(agent.steering_queue_len(), 0);
+    let AgentMessage::Llm(Message::User { content, .. }) = &taken[0] else {
+        panic!("expected user message");
+    };
+    assert_eq!(
+        content,
+        &vec![Content::Text {
+            text: "stop".into()
+        }]
+    );
+
+    // Edit-and-requeue: drop the first entry, batch-requeue the survivor
+    agent.steer_all(vec![taken[1].clone()]);
+    assert_eq!(agent.steering_queue_len(), 1);
+    let requeued = agent.steering_queue_snapshot();
+    let AgentMessage::Llm(Message::User { content, .. }) = &requeued[0] else {
+        panic!("expected user message");
+    };
+    assert_eq!(
+        content,
+        &vec![Content::Text {
+            text: "use v2 instead".into()
+        }]
+    );
+
+    // Follow-up variants
+    let taken = agent.take_follow_up_queue();
+    assert_eq!(taken.len(), 1);
+    assert_eq!(agent.follow_up_queue_len(), 0);
+    assert!(agent.follow_up_queue_snapshot().is_empty());
+}

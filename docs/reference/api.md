@@ -145,6 +145,14 @@ All return `Self` for chaining (unless noted as `Result`).
 | `clear_steering_queue()` | Clear pending steering messages |
 | `clear_follow_up_queue()` | Clear pending follow-up messages |
 | `clear_all_queues()` | Clear both queues |
+| `steer_all(msgs: Vec<AgentMessage>)` | Queue multiple steering messages under one lock |
+| `follow_up_all(msgs: Vec<AgentMessage>)` | Queue multiple follow-up messages under one lock |
+| `steering_queue_snapshot() -> Vec<AgentMessage>` | Copy of pending steering messages (does not consume) |
+| `follow_up_queue_snapshot() -> Vec<AgentMessage>` | Copy of pending follow-up messages |
+| `steering_queue_len() -> usize` | Number of pending steering messages |
+| `follow_up_queue_len() -> usize` | Number of pending follow-up messages |
+| `take_steering_queue() -> Vec<AgentMessage>` | Atomically drain and return pending steering messages (messages already picked up by the loop are not included) |
+| `take_follow_up_queue() -> Vec<AgentMessage>` | Atomically drain and return pending follow-up messages |
 | `set_steering_mode(mode: QueueMode)` | Set delivery mode: `OneAtATime` or `All` |
 | `set_follow_up_mode(mode: QueueMode)` | Set delivery mode: `OneAtATime` or `All` |
 
