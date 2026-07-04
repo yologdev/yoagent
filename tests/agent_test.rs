@@ -126,17 +126,15 @@ async fn test_agent_builder_pattern() {
 async fn test_with_messages_builder() {
     let saved = vec![
         AgentMessage::Llm(Message::user("Hello")),
-        AgentMessage::Llm(Message::Assistant {
-            content: vec![Content::Text {
+        AgentMessage::Llm(Message::assistant(
+            vec![Content::Text {
                 text: "Hi there!".into(),
             }],
-            stop_reason: StopReason::Stop,
-            model: "mock".into(),
-            provider: "mock".into(),
-            usage: Usage::default(),
-            timestamp: 0,
-            error_message: None,
-        }),
+            StopReason::Stop,
+            "mock",
+            "mock",
+            Usage::default(),
+        )),
     ];
 
     let provider = MockProvider::text("ok");
@@ -305,15 +303,16 @@ async fn test_continue_loop_with_sender() {
 
     // First, add some messages to continue from (last must not be assistant)
     agent.append_message(AgentMessage::Llm(Message::user("Hello")));
-    agent.append_message(AgentMessage::Llm(Message::Assistant {
-        content: vec![Content::Text { text: "Hi!".into() }],
-        stop_reason: StopReason::Error,
-        model: "mock".into(),
-        provider: "mock".into(),
-        usage: Usage::default(),
-        timestamp: 0,
-        error_message: Some("rate limited".into()),
-    }));
+    agent.append_message(AgentMessage::Llm(
+        Message::assistant(
+            vec![Content::Text { text: "Hi!".into() }],
+            StopReason::Error,
+            "mock",
+            "mock",
+            Usage::default(),
+        )
+        .with_error_message("rate limited"),
+    ));
     agent.append_message(AgentMessage::Llm(Message::user("Please try again")));
 
     let (tx, mut rx) = mpsc::unbounded_channel();

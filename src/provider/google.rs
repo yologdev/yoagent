@@ -62,6 +62,7 @@ impl StreamProvider for GoogleProvider {
         let mut content: Vec<Content> = Vec::new();
         let mut usage = Usage::default();
         let mut stop_reason = StopReason::Stop;
+        let mut error_message: Option<String> = None;
 
         let _ = tx.send(StreamEvent::Start);
 
@@ -78,8 +79,11 @@ impl StreamProvider for GoogleProvider {
                     match chunk {
                         None => break,
                         Some(Err(e)) => {
-                            warn!("Google stream error: {}", e);
-                            break;
+                            // Match the other providers: a transport failure is an
+                            // error (and retryable), not a silently truncated turn.
+                            let provider_err = ProviderError::Network(e.to_string());
+                            warn!("Google stream error: {}", provider_err);
+                            return Err(provider_err);
                         }
                         Some(Ok(bytes)) => {
                             buffer.push_str(&String::from_utf8_lossy(&bytes));
@@ -88,6 +92,15 @@ impl StreamProvider for GoogleProvider {
                             while let Some(data) = next_sse_data(&mut buffer) {
                                 if data.is_empty() {
                                     continue;
+                                }
+
+                                // Google reports mid-stream failures as
+                                // {"error": {...}} payloads, which would otherwise
+                                // deserialize into an empty chunk and vanish.
+                                if is_error_payload(&data) {
+                                    let provider_err = classify_sse_error_event(&data);
+                                    warn!("Google in-stream error: {}", provider_err);
+                                    return Err(provider_err);
                                 }
 
                                 let chunk: GoogleChunk = match serde_json::from_str(&data) {
@@ -149,6 +162,18 @@ impl StreamProvider for GoogleProvider {
                                             stop_reason = match reason.as_str() {
                                                 "STOP" => StopReason::Stop,
                                                 "MAX_TOKENS" | "RECITATION" => StopReason::Length,
+                                                "SAFETY" | "PROHIBITED_CONTENT" | "BLOCKLIST"
+                                                | "SPII" => {
+                                                    warn!(
+                                                        "Gemini blocked the response (finishReason={})",
+                                                        reason
+                                                    );
+                                                    error_message = Some(format!(
+                                                        "Response blocked by Gemini safety filters (finishReason: {})",
+                                                        reason
+                                                    ));
+                                                    StopReason::Refusal
+                                                }
                                                 _ => StopReason::Stop,
                                             };
                                         }
@@ -176,7 +201,7 @@ impl StreamProvider for GoogleProvider {
             provider: model_config.provider.clone(),
             usage,
             timestamp: now_ms(),
-            error_message: None,
+            error_message,
         };
 
         let _ = tx.send(StreamEvent::Done {
@@ -189,7 +214,8 @@ impl StreamProvider for GoogleProvider {
 /// Pop the next complete SSE event from `buffer` and return its `data:`
 /// payload (empty string when the event carries no data line). Handles both
 /// `\n\n` and `\r\n\r\n` event separators, splitting at whichever occurs
-/// first. Returns `None` until a complete event is buffered.
+/// first. Returns `None` until a complete event is buffered. Only the first
+/// `data:` line of an event is returned.
 fn next_sse_data(buffer: &mut String) -> Option<String> {
     let lf = buffer.find("\n\n");
     let crlf = buffer.find("\r\n\r\n");
@@ -208,6 +234,14 @@ fn next_sse_data(buffer: &mut String) -> Option<String> {
         .map(|l| l[6..].to_string())
         .unwrap_or_default();
     Some(data)
+}
+
+/// Whether an SSE data payload is a Google error envelope
+/// (`{"error": {...}}`) rather than a content chunk.
+fn is_error_payload(data: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(data)
+        .map(|v| v.get("error").is_some())
+        .unwrap_or(false)
 }
 
 /// Non-empty text of a part. Gemini streams empty text parts while thinking;
@@ -524,6 +558,27 @@ mod tests {
         assert_eq!(buf, "data: partial");
         buf.push_str("\n\n");
         assert_eq!(next_sse_data(&mut buf).as_deref(), Some("partial"));
+    }
+
+    #[test]
+    fn test_next_sse_data_consumes_events_without_data_lines() {
+        // SSE comments/keepalives and leading separators must be CONSUMED
+        // (returning Some("")), never None — returning None would wedge the
+        // buffer and drop every subsequent event.
+        let mut buf = ": keepalive\n\n\n\ndata: x\n\n".to_string();
+        assert_eq!(next_sse_data(&mut buf).as_deref(), Some(""));
+        assert_eq!(next_sse_data(&mut buf).as_deref(), Some(""));
+        assert_eq!(next_sse_data(&mut buf).as_deref(), Some("x"));
+        assert_eq!(next_sse_data(&mut buf), None);
+    }
+
+    #[test]
+    fn test_is_error_payload() {
+        assert!(is_error_payload(
+            r#"{"error": {"code": 429, "status": "RESOURCE_EXHAUSTED"}}"#
+        ));
+        assert!(!is_error_payload(r#"{"candidates": []}"#));
+        assert!(!is_error_payload("not json"));
     }
 
     #[test]

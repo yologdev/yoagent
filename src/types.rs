@@ -8,10 +8,15 @@ use std::sync::Arc;
 
 /// Content block of a message.
 ///
-/// Marked `#[non_exhaustive]`: new content kinds (and new fields on
-/// `ToolCall`) may be added in minor releases, so `match` arms need a
-/// wildcard and `ToolCall` must be constructed via [`Content::tool_call`] /
-/// [`Content::tool_call_with_metadata`].
+/// Exhaustiveness policy (two separate levers):
+/// - The **enum** is `#[non_exhaustive]`: new content kinds may be added in
+///   minor releases, so downstream `match` arms need a wildcard.
+/// - The `ToolCall` and `Thinking` **variants** are separately
+///   `#[non_exhaustive]`: their fields grow with provider features (PR #32
+///   added `provider_metadata`), so downstream constructs them via the
+///   `Content::tool_call*` / `Content::thinking*` constructors and uses `..`
+///   in patterns. `Text` and `Image` stay literally constructible — they are
+///   user-facing shapes that do not grow.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 #[non_exhaustive]
@@ -25,6 +30,7 @@ pub enum Content {
         mime_type: String,
     },
     #[serde(rename = "thinking")]
+    #[non_exhaustive]
     Thinking {
         thinking: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -63,6 +69,22 @@ impl Content {
         }
     }
 
+    /// Construct a thinking content block without a signature.
+    pub fn thinking(text: impl Into<String>) -> Self {
+        Self::Thinking {
+            thinking: text.into(),
+            signature: None,
+        }
+    }
+
+    /// Construct a thinking content block with a provider signature.
+    pub fn thinking_signed(text: impl Into<String>, signature: impl Into<String>) -> Self {
+        Self::Thinking {
+            thinking: text.into(),
+            signature: Some(signature.into()),
+        }
+    }
+
     /// Construct a tool-call content block carrying provider metadata
     /// (e.g. a Gemini thought signature).
     pub fn tool_call_with_metadata(
@@ -93,6 +115,7 @@ pub enum Message {
         timestamp: u64,
     },
     #[serde(rename = "assistant")]
+    #[non_exhaustive]
     Assistant {
         content: Vec<Content>,
         #[serde(rename = "stopReason")]
@@ -123,6 +146,50 @@ impl Message {
             content: vec![Content::Text { text: text.into() }],
             timestamp: now_ms(),
         }
+    }
+
+    /// Construct an assistant message.
+    ///
+    /// The `Assistant` variant is `#[non_exhaustive]` — its fields grow with
+    /// provider features (`error_message` was itself a later addition), so
+    /// custom `StreamProvider` implementations construct it here instead of
+    /// with a struct literal. `timestamp` is set to now and `error_message`
+    /// to `None`; use [`Message::with_error_message`] /
+    /// [`Message::with_timestamp`] to override.
+    pub fn assistant(
+        content: Vec<Content>,
+        stop_reason: StopReason,
+        model: impl Into<String>,
+        provider: impl Into<String>,
+        usage: Usage,
+    ) -> Self {
+        Self::Assistant {
+            content,
+            stop_reason,
+            model: model.into(),
+            provider: provider.into(),
+            usage,
+            timestamp: now_ms(),
+            error_message: None,
+        }
+    }
+
+    /// Set the error message (no-op on non-assistant messages).
+    pub fn with_error_message(mut self, msg: impl Into<String>) -> Self {
+        if let Self::Assistant { error_message, .. } = &mut self {
+            *error_message = Some(msg.into());
+        }
+        self
+    }
+
+    /// Override the timestamp (applies to all message kinds).
+    pub fn with_timestamp(mut self, ts: u64) -> Self {
+        match &mut self {
+            Self::User { timestamp, .. }
+            | Self::Assistant { timestamp, .. }
+            | Self::ToolResult { timestamp, .. } => *timestamp = ts,
+        }
+        self
     }
 
     pub fn role(&self) -> &str {
@@ -209,7 +276,8 @@ impl From<Message> for AgentMessage {
 /// Why the model stopped generating.
 ///
 /// Deliberately NOT `#[non_exhaustive]`: this is a control-flow enum, and a
-/// new variant (like `Refusal` in 0.9.0) should be a compile error for
+/// new variant (like `Refusal`, added for the 0.9.0 breaking release)
+/// should be a compile error for
 /// downstream matches rather than silently falling into a wildcard arm.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

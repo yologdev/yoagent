@@ -74,11 +74,18 @@ pub enum Content {
     Text { text: String },
     Image { data: String, mime_type: String },
     Thinking { thinking: String, signature: Option<String> },
-    ToolCall { id: String, name: String, arguments: serde_json::Value },
+    ToolCall {
+        id: String,
+        name: String,
+        arguments: serde_json::Value,
+        provider_metadata: Option<serde_json::Value>, // e.g. Gemini thought signatures
+    },
 }
 ```
 
 An assistant message can contain multiple content blocks — e.g., thinking + text + tool calls.
+
+`Content` is `#[non_exhaustive]` (match with a wildcard arm), and the `ToolCall` and `Thinking` variants are separately `#[non_exhaustive]` — construct them via `Content::tool_call()` / `tool_call_with_metadata()` / `thinking()` / `thinking_signed()`. `Message::Assistant` is likewise `#[non_exhaustive]`; custom providers construct it via `Message::assistant()`.
 
 ## StopReason
 
@@ -89,6 +96,7 @@ pub enum StopReason {
     ToolUse,    // Wants to call tools
     Error,      // Provider error
     Aborted,    // Cancelled by user
+    Refusal,    // Declined by the provider's safety system
 }
 ```
 

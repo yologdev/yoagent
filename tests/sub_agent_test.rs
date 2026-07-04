@@ -300,17 +300,15 @@ async fn test_sub_agent_parallel() {
                 content_index: 0,
                 delta: self.text.clone(),
             });
-            let msg = Message::Assistant {
-                content: vec![Content::Text {
+            let msg = Message::assistant(
+                vec![Content::Text {
                     text: self.text.clone(),
                 }],
-                stop_reason: StopReason::Stop,
-                model: "slow".into(),
-                provider: "slow".into(),
-                usage: Usage::default(),
-                timestamp: yoagent::now_ms(),
-                error_message: None,
-            };
+                StopReason::Stop,
+                "slow",
+                "slow",
+                Usage::default(),
+            );
             let _ = tx.send(yoagent::provider::StreamEvent::Done {
                 message: msg.clone(),
             });
@@ -500,17 +498,15 @@ impl yoagent::provider::StreamProvider for CapturingProvider {
     ) -> Result<Message, yoagent::provider::ProviderError> {
         *self.captured.lock().unwrap() = config.system_prompt.clone();
         let _ = tx.send(yoagent::provider::StreamEvent::Start);
-        let msg = Message::Assistant {
-            content: vec![Content::Text {
+        let msg = Message::assistant(
+            vec![Content::Text {
                 text: "done".into(),
             }],
-            stop_reason: StopReason::Stop,
-            model: "mock".into(),
-            provider: "mock".into(),
-            usage: Usage::default(),
-            timestamp: yoagent::now_ms(),
-            error_message: None,
-        };
+            StopReason::Stop,
+            "mock",
+            "mock",
+            Usage::default(),
+        );
         let _ = tx.send(yoagent::provider::StreamEvent::Done {
             message: msg.clone(),
         });
