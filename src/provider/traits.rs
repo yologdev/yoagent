@@ -180,6 +180,7 @@ const OVERFLOW_PHRASES: &[&str] = &[
     "exceeded model token limit",         // Kimi
     "context length exceeded",            // Generic
     "context_length_exceeded",            // Generic (underscore variant)
+    "model_context_window_exceeded",      // Anthropic in-stream stop_reason
     "too many tokens",                    // Generic
     "token limit exceeded",               // Generic
 ];

@@ -8,7 +8,7 @@
 use yoagent::provider::AzureOpenAiProvider;
 
 let agent = Agent::new(AzureOpenAiProvider)
-    .with_model("gpt-4o")
+    .with_model("gpt-5.5")
     .with_api_key(std::env::var("AZURE_OPENAI_API_KEY").unwrap());
 ```
 

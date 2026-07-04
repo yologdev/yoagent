@@ -97,7 +97,7 @@ use yoagent::types::*;
 async fn main() {
     let mut agent = Agent::new(AnthropicProvider)
         .with_system_prompt("You are a helpful assistant.")
-        .with_model("claude-sonnet-4-20250514")
+        .with_model("claude-sonnet-5")
         .with_api_key(std::env::var("ANTHROPIC_API_KEY").unwrap());
 
     let mut rx = agent.prompt("What is Rust's ownership model?").await;
@@ -158,7 +158,7 @@ A ~250-line interactive coding agent with all built-in tools, skills support, st
   yoagent cli — mini coding agent
   Type /quit to exit, /clear to reset
 
-  model: claude-sonnet-4-20250514
+  model: claude-sonnet-5
   skills: 3 loaded
   cwd:   /home/user/my-project
 

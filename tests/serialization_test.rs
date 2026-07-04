@@ -191,3 +191,23 @@ fn test_tool_execution_strategy_roundtrip() {
     roundtrip(&ToolExecutionStrategy::Parallel);
     roundtrip(&ToolExecutionStrategy::Batched { size: 4 });
 }
+
+#[test]
+fn test_refusal_stop_reason_round_trip() {
+    use yoagent::types::*;
+
+    let message = Message::Assistant {
+        content: vec![],
+        stop_reason: StopReason::Refusal,
+        model: "claude-fable-5".into(),
+        provider: "anthropic".into(),
+        usage: Usage::default(),
+        timestamp: 1,
+        error_message: Some("declined".into()),
+    };
+
+    let json = serde_json::to_string(&message).unwrap();
+    let back: Message = serde_json::from_str(&json).unwrap();
+    assert_eq!(message, back);
+    assert_eq!(StopReason::Refusal.to_string(), "refusal");
+}

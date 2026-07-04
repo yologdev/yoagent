@@ -21,7 +21,7 @@ use yoagent::provider::AnthropicProvider;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut agent = Agent::new(AnthropicProvider)
         .with_system_prompt("You are a helpful assistant with file access.")
-        .with_model("claude-sonnet-4-20250514")
+        .with_model("claude-sonnet-5")
         .with_api_key(std::env::var("ANTHROPIC_API_KEY")?)
         .with_mcp_server_stdio(
             "npx",

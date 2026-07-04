@@ -12,6 +12,33 @@ use tracing::{debug, warn};
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 const API_VERSION: &str = "2023-06-01";
 
+/// Resolve the request URL: `{base_url}/messages` when a `ModelConfig` is set
+/// (e.g. a gateway like OpenCode Zen), the official endpoint otherwise.
+fn request_url(config: &StreamConfig) -> String {
+    match &config.model_config {
+        Some(mc) => {
+            let base = mc.base_url.trim_end_matches('/');
+            // Configs created before 0.9.0 carry the un-versioned official
+            // host (base_url used to be ignored); keep them working.
+            if base == "https://api.anthropic.com" {
+                API_URL.to_string()
+            } else {
+                format!("{}/messages", base)
+            }
+        }
+        None => API_URL.to_string(),
+    }
+}
+
+/// Effective Anthropic quirk flags. `None` means current-generation defaults.
+fn anthropic_compat(config: &StreamConfig) -> crate::provider::AnthropicCompat {
+    config
+        .model_config
+        .as_ref()
+        .and_then(|mc| mc.anthropic.clone())
+        .unwrap_or_default()
+}
+
 pub struct AnthropicProvider;
 
 #[async_trait]
@@ -24,18 +51,33 @@ impl StreamProvider for AnthropicProvider {
     ) -> Result<Message, ProviderError> {
         let is_oauth = config.api_key.contains("sk-ant-oat");
         let body = build_request_body(&config, is_oauth);
+        let url = request_url(&config);
         debug!(
-            "Anthropic request: model={}, oauth={}",
-            config.model, is_oauth
+            "Anthropic request: model={}, url={}, oauth={}",
+            config.model, url, is_oauth
         );
-
         let client = reqwest::Client::new();
         let mut builder = client
-            .post(API_URL)
+            .post(&url)
             .header("anthropic-version", API_VERSION)
             .header("content-type", "application/json");
 
-        if is_oauth {
+        // Custom headers from ModelConfig. A user-supplied `authorization`
+        // header takes over auth entirely (bring-your-own-token gateways).
+        let mut user_auth = false;
+        if let Some(mc) = &config.model_config {
+            for (key, value) in &mc.headers {
+                if key.eq_ignore_ascii_case("authorization") {
+                    user_auth = true;
+                }
+                builder = builder.header(key, value);
+            }
+        }
+
+        let compat = anthropic_compat(&config);
+        if user_auth {
+            // Auth fully managed via ModelConfig.headers.
+        } else if is_oauth {
             // OAuth token — Bearer auth with Claude Code identity headers
             builder = builder
                 .header("authorization", format!("Bearer {}", config.api_key))
@@ -46,6 +88,9 @@ impl StreamProvider for AnthropicProvider {
                 .header("anthropic-dangerous-direct-browser-access", "true")
                 .header("user-agent", "claude-cli/2.1.2 (external, cli)")
                 .header("x-app", "cli");
+        } else if compat.bearer_auth {
+            // OpenAI-style gateway speaking the Anthropic protocol
+            builder = builder.header("authorization", format!("Bearer {}", config.api_key));
         } else {
             builder = builder.header("x-api-key", &config.api_key);
         }
@@ -58,6 +103,7 @@ impl StreamProvider for AnthropicProvider {
         let mut content: Vec<Content> = Vec::new();
         let mut usage = Usage::default();
         let mut stop_reason = StopReason::Stop;
+        let mut error_message: Option<String> = None;
 
         let _ = tx.send(StreamEvent::Start);
 
@@ -186,6 +232,27 @@ impl StreamProvider for AnthropicProvider {
                                         stop_reason = match data.delta.stop_reason.as_deref() {
                                             Some("tool_use") => StopReason::ToolUse,
                                             Some("max_tokens") => StopReason::Length,
+                                            Some("model_context_window_exceeded") => {
+                                                // In-stream overflow (HTTP 200). Map to the same
+                                                // Error + overflow-phrase shape as an HTTP 400
+                                                // overflow so Message::is_context_overflow() and
+                                                // compaction-retry hooks keep working.
+                                                warn!("Anthropic context window exceeded mid-stream");
+                                                error_message =
+                                                    Some("model_context_window_exceeded".into());
+                                                StopReason::Error
+                                            }
+                                            Some("refusal") => {
+                                                warn!(
+                                                    "Anthropic declined the request (stop_reason=refusal)"
+                                                );
+                                                error_message = Some(
+                                                    "Request declined by the model's safety system \
+                                                     (stop_reason: refusal)"
+                                                        .into(),
+                                                );
+                                                StopReason::Refusal
+                                            }
                                             _ => StopReason::Stop,
                                         };
                                         usage.output = data.usage.output_tokens;
@@ -216,7 +283,8 @@ impl StreamProvider for AnthropicProvider {
         let has_tool_calls = content
             .iter()
             .any(|c| matches!(c, Content::ToolCall { .. }));
-        if has_tool_calls {
+        // Never let the tool-call fallback mask a refusal or an error signal.
+        if has_tool_calls && !matches!(stop_reason, StopReason::Refusal | StopReason::Error) {
             stop_reason = StopReason::ToolUse;
         }
 
@@ -227,7 +295,7 @@ impl StreamProvider for AnthropicProvider {
             provider: "anthropic".into(),
             usage,
             timestamp: now_ms(),
-            error_message: None,
+            error_message,
         };
 
         let _ = tx.send(StreamEvent::Done {
@@ -253,10 +321,16 @@ fn build_request_body(config: &StreamConfig, is_oauth: bool) -> serde_json::Valu
                 }));
             }
             Message::Assistant { content, .. } => {
-                messages.push(serde_json::json!({
-                    "role": "assistant",
-                    "content": content_to_anthropic(content),
-                }));
+                // A refused or errored turn can leave an assistant message with
+                // no serializable content; the API rejects empty assistant
+                // content blocks mid-conversation, so skip such messages.
+                let blocks = content_to_anthropic(content);
+                if !blocks.is_empty() {
+                    messages.push(serde_json::json!({
+                        "role": "assistant",
+                        "content": blocks,
+                    }));
+                }
             }
             Message::ToolResult {
                 tool_call_id,
@@ -337,9 +411,29 @@ fn build_request_body(config: &StreamConfig, is_oauth: bool) -> serde_json::Valu
         }
     }
 
+    // Default max_tokens: explicit request value, then the model's configured
+    // default, then a conservative fallback.
+    let mut max_tokens = config
+        .max_tokens
+        .or(config.model_config.as_ref().map(|mc| mc.max_tokens))
+        .unwrap_or(8192);
+    let compat = anthropic_compat(config);
+    // Legacy (budget-based) thinking requires max_tokens > budget_tokens.
+    if config.thinking_level != ThinkingLevel::Off && !compat.adaptive_thinking {
+        let budget = legacy_thinking_budget(config.thinking_level);
+        if max_tokens <= budget {
+            debug!(
+                "Raising max_tokens from {} to {} to exceed the thinking budget",
+                max_tokens,
+                budget + 1024
+            );
+            max_tokens = budget + 1024;
+        }
+    }
+
     let mut body = serde_json::json!({
         "model": config.model,
-        "max_tokens": config.max_tokens.unwrap_or(8192),
+        "max_tokens": max_tokens,
         "stream": true,
         "messages": messages,
     });
@@ -396,17 +490,23 @@ fn build_request_body(config: &StreamConfig, is_oauth: bool) -> serde_json::Valu
     }
 
     if config.thinking_level != ThinkingLevel::Off {
-        let budget = match config.thinking_level {
-            ThinkingLevel::Minimal => 128,
-            ThinkingLevel::Low => 512,
-            ThinkingLevel::Medium => 2048,
-            ThinkingLevel::High => 8192,
-            ThinkingLevel::Off => 0,
-        };
-        body["thinking"] = serde_json::json!({
-            "type": "enabled",
-            "budget_tokens": budget,
-        });
+        if compat.adaptive_thinking {
+            // Current generation (Claude 4.6+ / Fable 5): adaptive thinking with
+            // an effort hint. Budget-based thinking is rejected with a 400.
+            let effort = match config.thinking_level {
+                ThinkingLevel::Minimal | ThinkingLevel::Low => "low",
+                ThinkingLevel::Medium => "medium",
+                ThinkingLevel::High => "high",
+                ThinkingLevel::Off => unreachable!(),
+            };
+            body["thinking"] = serde_json::json!({ "type": "adaptive" });
+            body["output_config"] = serde_json::json!({ "effort": effort });
+        } else {
+            body["thinking"] = serde_json::json!({
+                "type": "enabled",
+                "budget_tokens": legacy_thinking_budget(config.thinking_level),
+            });
+        }
     }
 
     if let Some(temp) = config.temperature {
@@ -414,6 +514,18 @@ fn build_request_body(config: &StreamConfig, is_oauth: bool) -> serde_json::Valu
     }
 
     body
+}
+
+/// Budget tokens for legacy (pre-4.6) extended thinking. The API requires a
+/// minimum of 1024. (`Off` returns 0 but never reaches a thinking-enabled
+/// request — both call sites guard on `!= ThinkingLevel::Off`.)
+fn legacy_thinking_budget(level: ThinkingLevel) -> u32 {
+    match level {
+        ThinkingLevel::Off => 0,
+        ThinkingLevel::Minimal | ThinkingLevel::Low => 1024,
+        ThinkingLevel::Medium => 2048,
+        ThinkingLevel::High => 8192,
+    }
 }
 
 fn content_to_anthropic(content: &[Content]) -> Vec<serde_json::Value> {
@@ -869,6 +981,159 @@ mod tests {
         assert_eq!(
             first_content.last().unwrap()["cache_control"]["type"],
             "ephemeral"
+        );
+    }
+
+    #[test]
+    fn test_adaptive_thinking_by_default() {
+        let mut config = make_config(CacheConfig::default());
+        config.thinking_level = ThinkingLevel::High;
+
+        let body = build_request_body(&config, false);
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert!(body["thinking"].get("budget_tokens").is_none());
+        assert_eq!(body["output_config"]["effort"], "high");
+    }
+
+    #[test]
+    fn test_adaptive_thinking_effort_mapping() {
+        for (level, effort) in [
+            (ThinkingLevel::Minimal, "low"),
+            (ThinkingLevel::Low, "low"),
+            (ThinkingLevel::Medium, "medium"),
+            (ThinkingLevel::High, "high"),
+        ] {
+            let mut config = make_config(CacheConfig::default());
+            config.thinking_level = level;
+            let body = build_request_body(&config, false);
+            assert_eq!(body["output_config"]["effort"], effort);
+        }
+    }
+
+    #[test]
+    fn test_legacy_thinking_budget_clamped_to_api_minimum() {
+        let mut config = make_config(CacheConfig::default());
+        config.thinking_level = ThinkingLevel::Minimal;
+        let mut mc = crate::provider::ModelConfig::anthropic("claude-sonnet-4-5", "Sonnet 4.5");
+        mc.anthropic = Some(crate::provider::AnthropicCompat::legacy());
+        config.model_config = Some(mc);
+
+        let body = build_request_body(&config, false);
+        assert_eq!(body["thinking"]["type"], "enabled");
+        // API minimum is 1024
+        assert_eq!(body["thinking"]["budget_tokens"], 1024);
+        // max_tokens must exceed budget_tokens even though the request asked for 1024
+        assert!(body["max_tokens"].as_u64().unwrap() > 1024);
+    }
+
+    #[test]
+    fn test_thinking_off_sends_no_thinking_field() {
+        let config = make_config(CacheConfig::default());
+        let body = build_request_body(&config, false);
+        assert!(body.get("thinking").is_none());
+        assert!(body.get("output_config").is_none());
+    }
+
+    #[test]
+    fn test_max_tokens_falls_back_to_model_config() {
+        let mut config = make_config(CacheConfig::default());
+        config.max_tokens = None;
+        config.model_config = Some(crate::provider::ModelConfig::anthropic(
+            "claude-sonnet-5",
+            "Claude Sonnet 5",
+        ));
+
+        let body = build_request_body(&config, false);
+        assert_eq!(body["max_tokens"], 16_000);
+    }
+
+    #[test]
+    fn test_explicit_max_tokens_beats_model_config() {
+        let mut config = make_config(CacheConfig::default());
+        config.max_tokens = Some(1024);
+        config.model_config = Some(crate::provider::ModelConfig::claude_sonnet_5());
+
+        let body = build_request_body(&config, false);
+        assert_eq!(body["max_tokens"], 1024);
+    }
+
+    #[test]
+    fn test_adaptive_thinking_does_not_clamp_max_tokens() {
+        let mut config = make_config(CacheConfig::default());
+        config.thinking_level = ThinkingLevel::High;
+        config.max_tokens = Some(1024);
+
+        let body = build_request_body(&config, false);
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(body["max_tokens"], 1024);
+    }
+
+    #[test]
+    fn test_empty_assistant_message_is_skipped() {
+        let mut config = make_config(CacheConfig::default());
+        // A refused turn leaves an assistant message with no serializable content.
+        config.messages = vec![
+            Message::user("Hello"),
+            Message::Assistant {
+                content: vec![],
+                stop_reason: StopReason::Refusal,
+                model: "claude-sonnet-5".into(),
+                provider: "anthropic".into(),
+                usage: Usage::default(),
+                timestamp: 0,
+                error_message: Some("refused".into()),
+            },
+            Message::user("Try again"),
+        ];
+
+        let body = build_request_body(&config, false);
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 2, "empty assistant message must be dropped");
+        assert!(msgs.iter().all(|m| m["role"] == "user"));
+    }
+
+    #[test]
+    fn test_legacy_official_base_url_without_version_still_works() {
+        // Configs persisted before 0.9.0 carry the un-versioned host.
+        let mut config = make_config(CacheConfig::default());
+        let mut mc = crate::provider::ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5");
+        mc.base_url = "https://api.anthropic.com".into();
+        config.model_config = Some(mc);
+        assert_eq!(
+            request_url(&config),
+            "https://api.anthropic.com/v1/messages"
+        );
+    }
+
+    #[test]
+    fn test_request_url_from_model_config_base_url() {
+        let mut config = make_config(CacheConfig::default());
+        assert_eq!(
+            request_url(&config),
+            "https://api.anthropic.com/v1/messages"
+        );
+
+        let mut mc = crate::provider::ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5");
+        mc.base_url = "https://opencode.ai/zen/v1".into();
+        config.model_config = Some(mc.clone());
+        assert_eq!(request_url(&config), "https://opencode.ai/zen/v1/messages");
+
+        // trailing slash is tolerated
+        mc.base_url = "https://opencode.ai/zen/v1/".into();
+        config.model_config = Some(mc);
+        assert_eq!(request_url(&config), "https://opencode.ai/zen/v1/messages");
+    }
+
+    #[test]
+    fn test_default_base_url_yields_official_endpoint() {
+        let mut config = make_config(CacheConfig::default());
+        config.model_config = Some(crate::provider::ModelConfig::anthropic(
+            "claude-opus-4-8",
+            "Claude Opus 4.8",
+        ));
+        assert_eq!(
+            request_url(&config),
+            "https://api.anthropic.com/v1/messages"
         );
     }
 }

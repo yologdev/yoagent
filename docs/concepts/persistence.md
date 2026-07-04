@@ -15,7 +15,7 @@ std::fs::write("conversation.json", &json)?;
 let json = std::fs::read_to_string("conversation.json")?;
 let mut agent = Agent::new(provider)
     .with_system_prompt("You are helpful.")
-    .with_model("claude-sonnet-4-20250514")
+    .with_model("claude-sonnet-5")
     .with_api_key(api_key);
 
 agent.restore_messages(&json)?;
@@ -51,7 +51,7 @@ Messages serialize as a JSON array. Each message is tagged by role:
     "role": "assistant",
     "content": [{"type": "text", "text": "Hi there!"}],
     "stopReason": "stop",
-    "model": "claude-sonnet-4-20250514",
+    "model": "claude-sonnet-5",
     "provider": "anthropic",
     "usage": {"input": 100, "output": 50, "cache_read": 0, "cache_write": 0, "total_tokens": 150},
     "timestamp": 1700000001000

@@ -170,6 +170,13 @@ pub enum StopReason {
     ToolUse,
     Error,
     Aborted,
+    /// The provider's safety system declined the request. The stream completes
+    /// normally (HTTP 200) but with `stop_reason: refusal` and empty or partial
+    /// content; `error_message` carries an explanation. Currently emitted by
+    /// Anthropic models that support the `refusal` stop reason (e.g. Claude
+    /// Fable 5). The agent loop does not special-case it (the turn ends like a
+    /// normal `Stop`); callers can match on it to retry on a fallback model.
+    Refusal,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -501,6 +508,7 @@ impl fmt::Display for StopReason {
             Self::ToolUse => write!(f, "toolUse"),
             Self::Error => write!(f, "error"),
             Self::Aborted => write!(f, "aborted"),
+            Self::Refusal => write!(f, "refusal"),
         }
     }
 }

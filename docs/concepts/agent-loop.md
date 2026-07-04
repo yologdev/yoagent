@@ -97,7 +97,7 @@ pub struct AgentLoopConfig {
 | Field | Purpose |
 |-------|---------|
 | `provider` | The `StreamProvider` implementation to use |
-| `model` | Model identifier (e.g., `"claude-sonnet-4-20250514"`) |
+| `model` | Model identifier (e.g., `"claude-sonnet-5"`) |
 | `api_key` | API key for the provider |
 | `thinking_level` | `Off`, `Minimal`, `Low`, `Medium`, `High` |
 | `model_config` | Optional `ModelConfig` for multi-provider support (base URL, headers, compat flags) |

@@ -8,7 +8,7 @@
 //!
 //! Run:
 //!   ANTHROPIC_API_KEY=sk-... cargo run --example cli
-//!   ANTHROPIC_API_KEY=sk-... cargo run --example cli -- --model claude-sonnet-4-20250514
+//!   ANTHROPIC_API_KEY=sk-... cargo run --example cli -- --model claude-sonnet-5
 //!   ANTHROPIC_API_KEY=sk-... cargo run --example cli -- --skills ./skills
 //!
 //! Run with a named provider (zai, qwen, openai, xai, groq, deepseek, mistral, minimax, ollama, google):
@@ -94,15 +94,15 @@ async fn main() {
     let default_model = match provider_name.as_deref() {
         Some("zai") => "glm-4.7",
         Some("qwen") => "qwen3.6-plus",
-        Some("openai") => "gpt-4o",
-        Some("xai") => "grok-3-mini",
+        Some("openai") => "gpt-5.5",
+        Some("xai") => "grok-4-1-fast",
         Some("groq") => "llama-3.3-70b-versatile",
         Some("deepseek") => "deepseek-v4-flash",
         Some("mistral") => "mistral-large-latest",
         Some("minimax") => "MiniMax-Text-01",
         Some("ollama") => "llama3.1:8b",
         Some("google") => "gemini-2.5-pro",
-        _ => "claude-sonnet-4-20250514",
+        _ => "claude-sonnet-5",
     };
 
     let model = args
@@ -293,6 +293,23 @@ async fn main() {
                     }
                     let msg = error_message.as_deref().unwrap_or("unknown error");
                     println!("{RED}  error: {msg}{RESET}");
+                }
+                AgentEvent::MessageEnd {
+                    message:
+                        AgentMessage::Llm(Message::Assistant {
+                            stop_reason: StopReason::Refusal,
+                            error_message,
+                            ..
+                        }),
+                } => {
+                    if in_text {
+                        println!();
+                        in_text = false;
+                    }
+                    let msg = error_message
+                        .as_deref()
+                        .unwrap_or("request declined by the model's safety system");
+                    println!("{RED}  refused: {msg}{RESET}");
                 }
                 AgentEvent::AgentEnd { messages } => {
                     // Extract usage from the last assistant message

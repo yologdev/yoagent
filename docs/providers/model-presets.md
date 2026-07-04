@@ -8,8 +8,15 @@ Use a preset when the provider is listed here. Use a custom `ModelConfig` when y
 
 | Constructor | Provider | Protocol | Default Base URL | Context | Default Max Output |
 |-------------|----------|----------|------------------|---------|--------------------|
-| `ModelConfig::anthropic(id, name)` | Anthropic | `AnthropicMessages` | `https://api.anthropic.com` | 200K | 8,192 |
+| `ModelConfig::anthropic(id, name)` | Anthropic | `AnthropicMessages` | `https://api.anthropic.com/v1` | 200K | 16,000 |
+| `ModelConfig::claude_fable_5()` | Anthropic | `AnthropicMessages` | `https://api.anthropic.com/v1` | 1M | 64,000 |
+| `ModelConfig::claude_opus_4_8()` | Anthropic | `AnthropicMessages` | `https://api.anthropic.com/v1` | 1M | 64,000 |
+| `ModelConfig::claude_sonnet_5()` | Anthropic | `AnthropicMessages` | `https://api.anthropic.com/v1` | 1M | 64,000 |
+| `ModelConfig::claude_haiku_4_5()` | Anthropic | `AnthropicMessages` | `https://api.anthropic.com/v1` | 200K | 32,000 |
 | `ModelConfig::openai(id, name)` | OpenAI | `OpenAiCompletions` | `https://api.openai.com/v1` | 128K | 4,096 |
+| `ModelConfig::gpt_5_5()` | OpenAI | `OpenAiCompletions` | `https://api.openai.com/v1` | 1M | 64,000 |
+| `ModelConfig::opencode_zen(model_id)` | OpenCode Zen | by model family | `https://opencode.ai/zen/v1` | 128K | 16,000 |
+| `ModelConfig::opencode_go(model_id)` | OpenCode Go | by model family | `https://opencode.ai/zen/go/v1` | 128K | 16,000 |
 | `ModelConfig::google(id, name)` | Google Gemini | `GoogleGenerativeAi` | `https://generativelanguage.googleapis.com` | 1M | 8,192 |
 | `ModelConfig::xai(id, name)` | xAI | `OpenAiCompletions` | `https://api.x.ai/v1` | 131,072 | 4,096 |
 | `ModelConfig::groq(id, name)` | Groq | `OpenAiCompletions` | `https://api.groq.com/openai/v1` | 128K | 4,096 |
@@ -23,6 +30,8 @@ Use a preset when the provider is listed here. Use a custom `ModelConfig` when y
 | `ModelConfig::local(base_url, model_id)` | Local compatible server | `OpenAiCompletions` | caller provided | 128K | 4,096 |
 
 The constructors do not validate model IDs. They send the `id` you pass through to the provider, which lets you use newly released model IDs before yoagent updates its examples.
+
+The named presets (`claude_fable_5`, `claude_opus_4_8`, `claude_sonnet_5`, `claude_haiku_4_5`, `gpt_5_5`) also fill in real `CostConfig` pricing. The OpenCode presets select the API protocol from the model id — see [OpenCode Zen & Go](opencode.md).
 
 ## OpenAI-Compatible Presets
 

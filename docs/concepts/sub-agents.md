@@ -27,7 +27,7 @@ use yoagent::tools;
 let researcher = SubAgentTool::new("researcher", Arc::new(AnthropicProvider))
     .with_description("Searches and reads files to gather information.")
     .with_system_prompt("You are a research assistant. Be thorough and concise.")
-    .with_model("claude-sonnet-4-20250514")
+    .with_model("claude-sonnet-5")
     .with_api_key(&api_key)
     .with_tools(vec![
         Arc::new(tools::ReadFileTool::new()),
@@ -43,7 +43,7 @@ use yoagent::agent::Agent;
 
 let mut agent = Agent::new(AnthropicProvider)
     .with_system_prompt("You coordinate between sub-agents.")
-    .with_model("claude-sonnet-4-20250514")
+    .with_model("claude-sonnet-5")
     .with_api_key(api_key)
     .with_sub_agent(researcher)
     .with_sub_agent(coder);
@@ -93,7 +93,7 @@ state.set("ci_log", large_log_text).await.unwrap();
 
 let analyzer = SubAgentTool::new("analyzer", provider.clone())
     .with_system_prompt("Analyze the CI log for failures.")
-    .with_model("claude-sonnet-4-20250514")
+    .with_model("claude-sonnet-5")
     .with_api_key(&api_key)
     .with_shared_state(state.clone());  // opt-in
 ```
@@ -179,7 +179,7 @@ Sub-agents can use any provider supported by yoagent — not just Anthropic. Pas
 use yoagent::provider::{OpenAiCompatProvider, model::ModelConfig};
 
 let provider = Arc::new(OpenAiCompatProvider);
-let model_config = ModelConfig::xai("grok-3-mini-fast", "Grok 3 Mini Fast");
+let model_config = ModelConfig::xai("grok-4-1-fast-reasoning", "Grok 3 Mini Fast");
 
 let analyst = SubAgentTool::new("analyst", provider)
     .with_model(&model_config.id)

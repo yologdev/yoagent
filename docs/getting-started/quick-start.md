@@ -11,7 +11,7 @@ use yoagent::tools::default_tools;
 async fn main() {
     let mut agent = Agent::new(AnthropicProvider)
         .with_system_prompt("You are a helpful coding assistant.")
-        .with_model("claude-sonnet-4-20250514")
+        .with_model("claude-sonnet-5")
         .with_api_key(std::env::var("ANTHROPIC_API_KEY").unwrap())
         .with_tools(default_tools());
 
@@ -56,7 +56,7 @@ use yoagent::tools::default_tools;
 async fn main() {
     let mut agent = Agent::new(OpenAiCompatProvider)
         .with_system_prompt("You are a helpful assistant.")
-        .with_model("gpt-4o")
+        .with_model("gpt-5.5")
         .with_api_key(std::env::var("OPENAI_API_KEY").unwrap())
         .with_tools(default_tools());
 
@@ -89,7 +89,7 @@ use yoagent::tools::default_tools;
 async fn main() {
     let mut agent = Agent::new(AnthropicProvider)
         .with_system_prompt("You are a helpful assistant.")
-        .with_model("claude-sonnet-4-20250514")
+        .with_model("claude-sonnet-5")
         .with_api_key(std::env::var("ANTHROPIC_API_KEY").unwrap())
         .with_tools(default_tools());
 
@@ -142,7 +142,7 @@ async fn main() {
 
     let config = AgentLoopConfig {
         provider: std::sync::Arc::new(AnthropicProvider),
-        model: "claude-sonnet-4-20250514".into(),
+        model: "claude-sonnet-5".into(),
         api_key: std::env::var("ANTHROPIC_API_KEY").unwrap(),
         thinking_level: ThinkingLevel::Off,
         max_tokens: None,
