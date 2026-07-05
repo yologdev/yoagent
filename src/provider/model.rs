@@ -275,7 +275,17 @@ impl OpenCodeGateway {
 }
 
 /// Full model configuration. Knows everything needed to make API calls.
+///
+/// Marked `#[non_exhaustive]`: fields may be added in minor releases (e.g.
+/// the `anthropic` compat flags, slated for 0.9.0). Construct via the
+/// `ModelConfig::*` preset constructors — or [`ModelConfig::custom`] for
+/// protocols without a preset — and mutate fields to customize. Note that
+/// downstream struct literals and functional-record-update
+/// (`ModelConfig { .. }`) no longer compile; field mutation is the supported
+/// pattern. New fields must carry `#[serde(default)]` so previously
+/// persisted configs keep deserializing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ModelConfig {
     /// Model identifier sent to the API (e.g. "gpt-4o", "claude-sonnet-4-20250514").
     pub id: String,
@@ -309,6 +319,35 @@ pub struct ModelConfig {
 }
 
 impl ModelConfig {
+    /// Create a config for any protocol without a dedicated preset
+    /// (Bedrock, Vertex, Azure, or future protocols).
+    ///
+    /// Since `ModelConfig` is `#[non_exhaustive]`, this is the construction
+    /// path when no `ModelConfig::*` preset fits. Defaults: 128K context,
+    /// 16K max output, no compat flags — mutate fields to adjust.
+    pub fn custom(
+        api: ApiProtocol,
+        provider: impl Into<String>,
+        base_url: impl Into<String>,
+        model_id: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: model_id.into(),
+            name: name.into(),
+            api,
+            provider: provider.into(),
+            base_url: base_url.into(),
+            reasoning: false,
+            context_window: 128_000,
+            max_tokens: 16_000,
+            cost: CostConfig::default(),
+            headers: HashMap::new(),
+            compat: None,
+            anthropic: None,
+        }
+    }
+
     /// Create a new Anthropic model config.
     pub fn anthropic(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {

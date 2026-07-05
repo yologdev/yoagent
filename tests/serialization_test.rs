@@ -27,31 +27,25 @@ fn test_message_user_roundtrip() {
 
 #[test]
 fn test_message_assistant_roundtrip() {
-    let msg = Message::Assistant {
-        content: vec![
+    let msg = Message::assistant(
+        vec![
             Content::Text {
                 text: "Hi there".into(),
             },
-            Content::ToolCall {
-                provider_metadata: None,
-                id: "tc-1".into(),
-                name: "read_file".into(),
-                arguments: serde_json::json!({"path": "foo.rs"}),
-            },
+            Content::tool_call("tc-1", "read_file", serde_json::json!({"path": "foo.rs"})),
         ],
-        stop_reason: StopReason::ToolUse,
-        model: "claude-sonnet".into(),
-        provider: "anthropic".into(),
-        usage: Usage {
+        StopReason::ToolUse,
+        "claude-sonnet",
+        "anthropic",
+        Usage {
             input: 100,
             output: 50,
             cache_read: 10,
             cache_write: 5,
             total_tokens: 165,
         },
-        timestamp: 789,
-        error_message: None,
-    };
+    )
+    .with_timestamp(789);
     roundtrip(&msg);
 }
 
@@ -101,16 +95,13 @@ fn test_content_variants_roundtrip() {
         data: "base64data".into(),
         mime_type: "image/png".into(),
     });
-    roundtrip(&Content::Thinking {
-        thinking: "let me think...".into(),
-        signature: Some("sig123".into()),
-    });
-    roundtrip(&Content::ToolCall {
-        provider_metadata: None,
-        id: "tc-1".into(),
-        name: "bash".into(),
-        arguments: serde_json::json!({"command": "ls"}),
-    });
+    roundtrip(&Content::thinking_signed("let me think...", "sig123"));
+    roundtrip(&Content::thinking("unsigned thought"));
+    roundtrip(&Content::tool_call(
+        "tc-1",
+        "bash",
+        serde_json::json!({"command": "ls"}),
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -121,20 +112,20 @@ fn test_content_variants_roundtrip() {
 fn test_full_conversation_roundtrip() {
     let conversation: Vec<AgentMessage> = vec![
         AgentMessage::Llm(Message::user("Read the file")),
-        AgentMessage::Llm(Message::Assistant {
-            content: vec![Content::ToolCall {
-                provider_metadata: None,
-                id: "tc-1".into(),
-                name: "read_file".into(),
-                arguments: serde_json::json!({"path": "main.rs"}),
-            }],
-            stop_reason: StopReason::ToolUse,
-            model: "mock".into(),
-            provider: "mock".into(),
-            usage: Usage::default(),
-            timestamp: 100,
-            error_message: None,
-        }),
+        AgentMessage::Llm(
+            Message::assistant(
+                vec![Content::tool_call(
+                    "tc-1",
+                    "read_file",
+                    serde_json::json!({"path": "main.rs"}),
+                )],
+                StopReason::ToolUse,
+                "mock",
+                "mock",
+                Usage::default(),
+            )
+            .with_timestamp(100),
+        ),
         AgentMessage::Llm(Message::ToolResult {
             tool_call_id: "tc-1".into(),
             tool_name: "read_file".into(),
@@ -144,17 +135,18 @@ fn test_full_conversation_roundtrip() {
             is_error: false,
             timestamp: 200,
         }),
-        AgentMessage::Llm(Message::Assistant {
-            content: vec![Content::Text {
-                text: "The file contains a main function.".into(),
-            }],
-            stop_reason: StopReason::Stop,
-            model: "mock".into(),
-            provider: "mock".into(),
-            usage: Usage::default(),
-            timestamp: 300,
-            error_message: None,
-        }),
+        AgentMessage::Llm(
+            Message::assistant(
+                vec![Content::Text {
+                    text: "The file contains a main function.".into(),
+                }],
+                StopReason::Stop,
+                "mock",
+                "mock",
+                Usage::default(),
+            )
+            .with_timestamp(300),
+        ),
         AgentMessage::Extension(ExtensionMessage::new(
             "ui_event",
             serde_json::json!({"action": "scroll"}),
@@ -196,18 +188,88 @@ fn test_tool_execution_strategy_roundtrip() {
 fn test_refusal_stop_reason_round_trip() {
     use yoagent::types::*;
 
-    let message = Message::Assistant {
-        content: vec![],
-        stop_reason: StopReason::Refusal,
-        model: "claude-fable-5".into(),
-        provider: "anthropic".into(),
-        usage: Usage::default(),
-        timestamp: 1,
-        error_message: Some("declined".into()),
-    };
+    let message = Message::assistant(
+        vec![],
+        StopReason::Refusal,
+        "claude-fable-5",
+        "anthropic",
+        Usage::default(),
+    )
+    .with_timestamp(1)
+    .with_error_message("declined");
 
     let json = serde_json::to_string(&message).unwrap();
     let back: Message = serde_json::from_str(&json).unwrap();
     assert_eq!(message, back);
     assert_eq!(StopReason::Refusal.to_string(), "refusal");
+}
+
+#[test]
+fn test_constructors_pin_fields() {
+    // The non_exhaustive variants make these the mandated construction path
+    // for downstream crates — pin every field explicitly.
+    let tc = Content::tool_call("id-1", "bash", serde_json::json!({"cmd": "ls"}));
+    let Content::ToolCall {
+        id,
+        name,
+        arguments,
+        provider_metadata,
+        ..
+    } = &tc
+    else {
+        panic!("expected tool call");
+    };
+    assert_eq!(id, "id-1");
+    assert_eq!(name, "bash");
+    assert_eq!(arguments["cmd"], "ls");
+    assert!(provider_metadata.is_none());
+
+    let think = Content::thinking_signed("hmm", "sig");
+    let Content::Thinking {
+        thinking,
+        signature,
+        ..
+    } = &think
+    else {
+        panic!("expected thinking");
+    };
+    assert_eq!(thinking, "hmm");
+    assert_eq!(signature.as_deref(), Some("sig"));
+
+    let msg = Message::assistant(
+        vec![Content::Text { text: "hi".into() }],
+        StopReason::Stop,
+        "model-x",
+        "provider-y",
+        Usage::default(),
+    )
+    .with_timestamp(42)
+    .with_error_message("oops");
+    let Message::Assistant {
+        model,
+        provider,
+        timestamp,
+        error_message,
+        stop_reason,
+        ..
+    } = &msg
+    else {
+        panic!("expected assistant");
+    };
+    assert_eq!(model, "model-x");
+    assert_eq!(provider, "provider-y");
+    assert_eq!(*timestamp, 42);
+    assert_eq!(error_message.as_deref(), Some("oops"));
+    assert_eq!(*stop_reason, StopReason::Stop);
+}
+
+#[test]
+fn test_tool_call_with_metadata_roundtrip() {
+    // Thought signatures must survive session persistence.
+    roundtrip(&Content::tool_call_with_metadata(
+        "tc-9",
+        "get_weather",
+        serde_json::json!({"city": "Paris"}),
+        serde_json::json!({"thought_signature": "sig-xyz"}),
+    ));
 }

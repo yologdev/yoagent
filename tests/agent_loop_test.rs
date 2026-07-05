@@ -714,17 +714,15 @@ impl StreamProvider for UsageProvider {
     ) -> Result<yoagent::Message, ProviderError> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
-        let message = Message::Assistant {
-            content: vec![Content::Text {
+        let message = Message::assistant(
+            vec![Content::Text {
                 text: "usage response".into(),
             }],
-            stop_reason: StopReason::Stop,
-            model: "usage-test".into(),
-            provider: "usage-test".into(),
-            usage: self.usage.clone(),
-            timestamp: now_ms(),
-            error_message: None,
-        };
+            StopReason::Stop,
+            "usage-test",
+            "usage-test",
+            self.usage.clone(),
+        );
 
         let _ = tx.send(StreamEvent::Start);
         let _ = tx.send(StreamEvent::Done {

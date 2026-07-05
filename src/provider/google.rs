@@ -62,6 +62,7 @@ impl StreamProvider for GoogleProvider {
         let mut content: Vec<Content> = Vec::new();
         let mut usage = Usage::default();
         let mut stop_reason = StopReason::Stop;
+        let mut error_message: Option<String> = None;
 
         let _ = tx.send(StreamEvent::Start);
 
@@ -78,31 +79,31 @@ impl StreamProvider for GoogleProvider {
                     match chunk {
                         None => break,
                         Some(Err(e)) => {
-                            warn!("Google stream error: {}", e);
-                            break;
+                            // Match the other providers: a transport failure is an
+                            // error (and retryable), not a silently truncated turn.
+                            let provider_err = ProviderError::Network(e.to_string());
+                            warn!("Google stream error: {}", provider_err);
+                            return Err(provider_err);
                         }
                         Some(Ok(bytes)) => {
                             buffer.push_str(&String::from_utf8_lossy(&bytes));
 
                             // Process complete SSE events (handle both \n\n and \r\n\r\n)
-                            while let Some(pos) = buffer.find("\n\n").or_else(|| buffer.find("\r\n\r\n")) {
-                                let sep_len = if buffer[pos..].starts_with("\r\n\r\n") { 4 } else { 2 };
-                                let event_str = buffer[..pos].to_string();
-                                buffer = buffer[pos + sep_len..].to_string();
-
-                                // Parse SSE data line (strip trailing \r)
-                                let data = event_str
-                                    .lines()
-                                    .map(|l| l.trim_end_matches('\r'))
-                                    .find(|l| l.starts_with("data: "))
-                                    .map(|l| &l[6..])
-                                    .unwrap_or("");
-
+                            while let Some(data) = next_sse_data(&mut buffer) {
                                 if data.is_empty() {
                                     continue;
                                 }
 
-                                let chunk: GoogleChunk = match serde_json::from_str(data) {
+                                // Google reports mid-stream failures as
+                                // {"error": {...}} payloads, which would otherwise
+                                // deserialize into an empty chunk and vanish.
+                                if is_error_payload(&data) {
+                                    let provider_err = classify_sse_error_event(&data);
+                                    warn!("Google in-stream error: {}", provider_err);
+                                    return Err(provider_err);
+                                }
+
+                                let chunk: GoogleChunk = match serde_json::from_str(&data) {
                                     Ok(c) => c,
                                     Err(e) => {
                                         warn!("Failed to parse Google chunk: {}", e);
@@ -114,11 +115,7 @@ impl StreamProvider for GoogleProvider {
                                 for candidate in &chunk.candidates.unwrap_or_default() {
                                     if let Some(c) = &candidate.content {
                                         for part in &c.parts {
-                                            if let Some(text) = &part.text {
-                                                // Skip empty text parts (sent during thinking)
-                                                if text.is_empty() {
-                                                    continue;
-                                                }
+                                            if let Some(text) = part_text(part) {
                                                 let text_idx = content.iter().position(|c| matches!(c, Content::Text { .. }));
                                                 let idx = match text_idx {
                                                     Some(i) => i,
@@ -132,7 +129,7 @@ impl StreamProvider for GoogleProvider {
                                                 }
                                                 let _ = tx.send(StreamEvent::TextDelta {
                                                     content_index: idx,
-                                                    delta: text.clone(),
+                                                    delta: text.to_string(),
                                                 });
                                             }
                                             if let Some(fc) = &part.function_call {
@@ -165,6 +162,18 @@ impl StreamProvider for GoogleProvider {
                                             stop_reason = match reason.as_str() {
                                                 "STOP" => StopReason::Stop,
                                                 "MAX_TOKENS" | "RECITATION" => StopReason::Length,
+                                                "SAFETY" | "PROHIBITED_CONTENT" | "BLOCKLIST"
+                                                | "SPII" => {
+                                                    warn!(
+                                                        "Gemini blocked the response (finishReason={})",
+                                                        reason
+                                                    );
+                                                    error_message = Some(format!(
+                                                        "Response blocked by Gemini safety filters (finishReason: {})",
+                                                        reason
+                                                    ));
+                                                    StopReason::Refusal
+                                                }
                                                 _ => StopReason::Stop,
                                             };
                                         }
@@ -192,7 +201,7 @@ impl StreamProvider for GoogleProvider {
             provider: model_config.provider.clone(),
             usage,
             timestamp: now_ms(),
-            error_message: None,
+            error_message,
         };
 
         let _ = tx.send(StreamEvent::Done {
@@ -200,6 +209,45 @@ impl StreamProvider for GoogleProvider {
         });
         Ok(message)
     }
+}
+
+/// Pop the next complete SSE event from `buffer` and return its `data:`
+/// payload (empty string when the event carries no data line). Handles both
+/// `\n\n` and `\r\n\r\n` event separators, splitting at whichever occurs
+/// first. Returns `None` until a complete event is buffered. Only the first
+/// `data:` line of an event is returned.
+fn next_sse_data(buffer: &mut String) -> Option<String> {
+    let lf = buffer.find("\n\n");
+    let crlf = buffer.find("\r\n\r\n");
+    let (pos, sep_len) = match (lf, crlf) {
+        (Some(l), Some(c)) if c < l => (c, 4),
+        (Some(l), _) => (l, 2),
+        (None, Some(c)) => (c, 4),
+        (None, None) => return None,
+    };
+    let event_str = buffer[..pos].to_string();
+    *buffer = buffer[pos + sep_len..].to_string();
+    let data = event_str
+        .lines()
+        .map(|l| l.trim_end_matches('\r'))
+        .find(|l| l.starts_with("data: "))
+        .map(|l| l[6..].to_string())
+        .unwrap_or_default();
+    Some(data)
+}
+
+/// Whether an SSE data payload is a Google error envelope
+/// (`{"error": {...}}`) rather than a content chunk.
+fn is_error_payload(data: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(data)
+        .map(|v| v.get("error").is_some())
+        .unwrap_or(false)
+}
+
+/// Non-empty text of a part. Gemini streams empty text parts while thinking;
+/// those must be skipped.
+fn part_text(part: &GooglePart) -> Option<&str> {
+    part.text.as_deref().filter(|t| !t.is_empty())
 }
 
 fn build_request_body(config: &StreamConfig) -> serde_json::Value {
@@ -475,39 +523,73 @@ mod tests {
 
     #[test]
     fn test_parse_chunk_with_empty_text() {
-        // Gemini sends empty text parts during thinking -- these should parse fine
-        let data = r#"{"candidates": [{"content": {"parts": [{"text": ""}], "role": "model"}, "index": 0}]}"#;
+        // Gemini sends empty text parts during thinking -- part_text (used by
+        // the streaming loop) must skip them and keep non-empty ones.
+        let data = r#"{"candidates": [{"content": {"parts": [{"text": ""}, {"text": "Hello"}], "role": "model"}, "index": 0}]}"#;
 
         let chunk: GoogleChunk = serde_json::from_str(data).unwrap();
         let candidates = chunk.candidates.unwrap();
         let parts = &candidates[0].content.as_ref().unwrap().parts;
-        assert_eq!(parts[0].text.as_deref(), Some(""));
+        assert_eq!(part_text(&parts[0]), None, "empty text parts are skipped");
+        assert_eq!(part_text(&parts[1]), Some("Hello"));
     }
 
     #[test]
     fn test_parse_chunk_with_crlf_sse() {
-        // Simulate \r\n line endings from Google's API
-        let raw = "data: {\"candidates\": [{\"content\": {\"parts\": [{\"text\": \"Blue\"}], \"role\": \"model\"}, \"finishReason\": \"STOP\", \"index\": 0}]}\r\n\r\n";
+        // Full pipeline: next_sse_data (the production splitter) on a CRLF
+        // stream, then chunk parsing.
+        let mut buf = "data: {\"candidates\": [{\"content\": {\"parts\": [{\"text\": \"Blue\"}], \"role\": \"model\"}, \"finishReason\": \"STOP\", \"index\": 0}]}\r\n\r\n".to_string();
 
-        // Verify our separator detection works
-        let pos = raw.find("\n\n").or_else(|| raw.find("\r\n\r\n"));
-        assert!(pos.is_some(), "Should find separator");
-        let sep_start = pos.unwrap();
-        let is_crlf = raw[sep_start..].starts_with("\r\n\r\n");
-        assert!(is_crlf, "Should detect \\r\\n\\r\\n separator");
+        let data = next_sse_data(&mut buf).expect("complete CRLF event");
+        assert!(buf.is_empty(), "event consumed from buffer");
+        assert_eq!(next_sse_data(&mut buf), None);
 
-        let event_str = &raw[..sep_start];
-        let data = event_str
-            .lines()
-            .map(|l| l.trim_end_matches('\r'))
-            .find(|l| l.starts_with("data: "))
-            .map(|l| &l[6..])
-            .unwrap();
-
-        let chunk: GoogleChunk = serde_json::from_str(data).unwrap();
+        let chunk: GoogleChunk = serde_json::from_str(&data).unwrap();
         let candidates = chunk.candidates.unwrap();
         let text = &candidates[0].content.as_ref().unwrap().parts[0].text;
         assert_eq!(text.as_deref(), Some("Blue"));
+    }
+
+    #[test]
+    fn test_next_sse_data_partial_events_stay_buffered() {
+        let mut buf = "data: {\"a\":1}\n\ndata: partial".to_string();
+        assert_eq!(next_sse_data(&mut buf).as_deref(), Some("{\"a\":1}"));
+        assert_eq!(next_sse_data(&mut buf), None, "incomplete event waits");
+        assert_eq!(buf, "data: partial");
+        buf.push_str("\n\n");
+        assert_eq!(next_sse_data(&mut buf).as_deref(), Some("partial"));
+    }
+
+    #[test]
+    fn test_next_sse_data_consumes_events_without_data_lines() {
+        // SSE comments/keepalives and leading separators must be CONSUMED
+        // (returning Some("")), never None — returning None would wedge the
+        // buffer and drop every subsequent event.
+        let mut buf = ": keepalive\n\n\n\ndata: x\n\n".to_string();
+        assert_eq!(next_sse_data(&mut buf).as_deref(), Some(""));
+        assert_eq!(next_sse_data(&mut buf).as_deref(), Some(""));
+        assert_eq!(next_sse_data(&mut buf).as_deref(), Some("x"));
+        assert_eq!(next_sse_data(&mut buf), None);
+    }
+
+    #[test]
+    fn test_is_error_payload() {
+        assert!(is_error_payload(
+            r#"{"error": {"code": 429, "status": "RESOURCE_EXHAUSTED"}}"#
+        ));
+        assert!(!is_error_payload(r#"{"candidates": []}"#));
+        assert!(!is_error_payload("not json"));
+    }
+
+    #[test]
+    fn test_next_sse_data_splits_earliest_separator_first() {
+        // A CRLF-separated event earlier in the buffer must split before a
+        // later LF separator (the old inline logic preferred the LF match and
+        // merged the two events).
+        let mut buf = "data: one\r\n\r\ndata: two\n\n".to_string();
+        assert_eq!(next_sse_data(&mut buf).as_deref(), Some("one"));
+        assert_eq!(next_sse_data(&mut buf).as_deref(), Some("two"));
+        assert_eq!(next_sse_data(&mut buf), None);
     }
 
     #[test]
