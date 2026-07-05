@@ -8,7 +8,8 @@
 //! Both return a stream of `AgentEvent`s.
 
 use crate::context::{
-    self, CompactionStrategy, ContextConfig, DefaultCompaction, ExecutionLimits, ExecutionTracker,
+    self, CompactionStrategy, ContextConfig, ContextTracker, DefaultCompaction, ExecutionLimits,
+    ExecutionTracker,
 };
 use crate::provider::{ModelConfig, StreamConfig, StreamEvent, StreamProvider, ToolDefinition};
 use crate::types::*;
@@ -253,6 +254,8 @@ async fn run_loop(
 ) {
     let mut first_turn = true;
     let mut turn_number: usize = 0;
+    // Blends real provider usage with estimation for compaction sizing.
+    let mut context_tracker = ContextTracker::new();
     let mut tracker = config
         .execution_limits
         .as_ref()
@@ -342,14 +345,37 @@ async fn run_loop(
 
             turn_number += 1;
 
-            // Compact context if configured (tiered: tool outputs → summarize → drop)
+            // Compact context if configured (tiered: tool outputs → summarize → drop).
+            // The context tracker blends real provider usage with estimation;
+            // when real usage shows the char-based estimate runs low (images,
+            // non-Latin text), scale the budget proportionally so compaction
+            // triggers at the true context size.
             if let Some(ref ctx_config) = config.context_config {
+                let estimated = context::total_tokens(&context.messages);
+                let hybrid = context_tracker.estimate_context_tokens(&context.messages);
+                let calibrated;
+                let effective_config = if hybrid > estimated && estimated > 0 {
+                    calibrated = ContextConfig {
+                        max_context_tokens: ((ctx_config.max_context_tokens as u64
+                            * estimated as u64)
+                            / hybrid as u64) as usize,
+                        ..ctx_config.clone()
+                    };
+                    &calibrated
+                } else {
+                    ctx_config
+                };
                 let strategy: &dyn CompactionStrategy = config
                     .compaction_strategy
                     .as_deref()
                     .unwrap_or(&DefaultCompaction);
+                let before_len = context.messages.len();
                 context.messages =
-                    strategy.compact(std::mem::take(&mut context.messages), ctx_config);
+                    strategy.compact(std::mem::take(&mut context.messages), effective_config);
+                if context.messages.len() != before_len {
+                    // Messages shifted; re-baseline from the next real usage.
+                    context_tracker.reset();
+                }
             }
 
             // Stream assistant response
@@ -358,6 +384,9 @@ async fn run_loop(
             let agent_msg: AgentMessage = message.clone().into();
             context.messages.push(agent_msg.clone());
             new_messages.push(agent_msg.clone());
+            if let Message::Assistant { usage, .. } = &message {
+                context_tracker.record_usage(usage, context.messages.len() - 1);
+            }
 
             // Check for error/abort
             if let Message::Assistant {

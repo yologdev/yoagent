@@ -115,3 +115,80 @@ mod tests {
         assert!(registry.has(&ApiProtocol::AnthropicMessages));
     }
 }
+
+/// Resolve an API key from the conventional environment variable(s) for a
+/// provider name (the `ModelConfig.provider` string).
+///
+/// Used as a fallback when no explicit key is set on the agent — an explicit
+/// `with_api_key` always wins. Conventions:
+///
+/// | provider | env var(s), first match wins |
+/// |---|---|
+/// | `anthropic` | `ANTHROPIC_API_KEY` |
+/// | `openai` | `OPENAI_API_KEY` |
+/// | `google` | `GEMINI_API_KEY`, `GOOGLE_API_KEY` |
+/// | `xai` / `groq` / `deepseek` / `mistral` / `zai` / `minimax` / `openrouter` / `cerebras` | `<PROVIDER>_API_KEY` |
+/// | `qwen` | `DASHSCOPE_API_KEY` |
+/// | `opencode-zen` / `opencode-go` | `OPENCODE_API_KEY` |
+/// | `azure` | `AZURE_OPENAI_API_KEY` |
+/// | `bedrock` | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (+ `AWS_SESSION_TOKEN`), composed as `access:secret[:token]` |
+/// | `vertex` | none — pass a short-lived OAuth token via `with_api_key` |
+/// | `local` / `ollama` | no key needed (empty) |
+/// | anything else | `YOAGENT_API_KEY`, then `API_KEY` |
+pub fn resolve_api_key(provider: &str) -> Option<String> {
+    use std::env::var;
+    let first = |names: &[&str]| names.iter().find_map(|n| var(n).ok());
+    match provider {
+        "anthropic" => first(&["ANTHROPIC_API_KEY"]),
+        "openai" => first(&["OPENAI_API_KEY"]),
+        "google" => first(&["GEMINI_API_KEY", "GOOGLE_API_KEY"]),
+        "xai" => first(&["XAI_API_KEY"]),
+        "groq" => first(&["GROQ_API_KEY"]),
+        "deepseek" => first(&["DEEPSEEK_API_KEY"]),
+        "mistral" => first(&["MISTRAL_API_KEY"]),
+        "zai" => first(&["ZAI_API_KEY"]),
+        "minimax" => first(&["MINIMAX_API_KEY"]),
+        "openrouter" => first(&["OPENROUTER_API_KEY"]),
+        "cerebras" => first(&["CEREBRAS_API_KEY"]),
+        "qwen" => first(&["DASHSCOPE_API_KEY"]),
+        "opencode-zen" | "opencode-go" => first(&["OPENCODE_API_KEY"]),
+        "azure" => first(&["AZURE_OPENAI_API_KEY"]),
+        "bedrock" => {
+            let access = var("AWS_ACCESS_KEY_ID").ok()?;
+            let secret = var("AWS_SECRET_ACCESS_KEY").ok()?;
+            Some(match var("AWS_SESSION_TOKEN") {
+                Ok(token) => format!("{}:{}:{}", access, secret, token),
+                Err(_) => format!("{}:{}", access, secret),
+            })
+        }
+        "vertex" => None,
+        "local" | "ollama" => Some(String::new()),
+        _ => first(&["YOAGENT_API_KEY", "API_KEY"]),
+    }
+}
+
+#[cfg(test)]
+mod resolve_key_tests {
+    use super::resolve_api_key;
+
+    #[test]
+    fn test_deterministic_branches() {
+        // local/ollama need no key
+        assert_eq!(resolve_api_key("local").as_deref(), Some(""));
+        assert_eq!(resolve_api_key("ollama").as_deref(), Some(""));
+        // vertex expects an explicit OAuth token — never env-resolved
+        assert_eq!(resolve_api_key("vertex"), None);
+    }
+
+    #[test]
+    fn test_env_resolution() {
+        // Use a provider name unique to this test to avoid env races with
+        // parallel tests.
+        std::env::set_var("YOAGENT_API_KEY", "from-generic-fallback");
+        assert_eq!(
+            resolve_api_key("some-unknown-gateway").as_deref(),
+            Some("from-generic-fallback")
+        );
+        std::env::remove_var("YOAGENT_API_KEY");
+    }
+}

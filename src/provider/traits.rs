@@ -97,14 +97,22 @@ impl ProviderError {
     /// Detects context overflow, rate limits, auth errors, and general API errors
     /// from the HTTP status code and response body.
     pub fn classify(status: u16, message: &str) -> Self {
+        Self::classify_with_retry_after(status, message, None)
+    }
+
+    /// Like [`classify`](Self::classify), carrying a parsed `Retry-After`
+    /// value (milliseconds) into the `RateLimited` variant when present.
+    pub fn classify_with_retry_after(
+        status: u16,
+        message: &str,
+        retry_after_ms: Option<u64>,
+    ) -> Self {
         if is_context_overflow(status, message) {
             Self::ContextOverflow {
                 message: message.to_string(),
             }
         } else if status == 429 {
-            Self::RateLimited {
-                retry_after_ms: None,
-            }
+            Self::RateLimited { retry_after_ms }
         } else if status == 401 || status == 403 {
             Self::Auth(message.to_string())
         } else {
@@ -130,8 +138,9 @@ pub async fn classify_eventsource_error(error: reqwest_eventsource::Error) -> Pr
     match error {
         reqwest_eventsource::Error::InvalidStatusCode(status, response) => {
             let status_code = status.as_u16();
+            let retry_after_ms = parse_retry_after(response.headers());
             let body = response.text().await.unwrap_or_default();
-            ProviderError::classify(
+            ProviderError::classify_with_retry_after(
                 status_code,
                 &format!(
                     "HTTP {} {}: {}",
@@ -139,11 +148,25 @@ pub async fn classify_eventsource_error(error: reqwest_eventsource::Error) -> Pr
                     status.canonical_reason().unwrap_or(""),
                     body
                 ),
+                retry_after_ms,
             )
         }
         reqwest_eventsource::Error::Transport(e) => ProviderError::Network(format!("{:?}", e)),
         other => ProviderError::Other(other.to_string()),
     }
+}
+
+/// Parse a `Retry-After` header (seconds form) into milliseconds.
+pub(crate) fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|s| *s >= 0.0)
+        .map(|secs| (secs * 1000.0) as u64)
 }
 
 /// Classify an SSE-embedded error event message into a [`ProviderError`].

@@ -37,7 +37,7 @@ The loop: stream assistant response → extract tool calls → execute tools (pa
 
 ### Provider System
 
-7 provider implementations behind `StreamProvider`, dispatched by `ApiProtocol` enum via `ProviderRegistry`:
+7 provider implementations behind `StreamProvider`. `Agent` holds a concrete provider directly; `ProviderRegistry` maps `ApiProtocol` → provider for registry-based dispatch (e.g. custom multi-protocol routers):
 
 | Protocol | File | Covers |
 |----------|------|--------|
@@ -61,7 +61,7 @@ The loop: stream assistant response → extract tool calls → execute tools (pa
 
 ### Context Management (`context.rs`)
 
-- **`ContextTracker`** — hybrid real-usage + estimation for token tracking
+- **`ContextTracker`** — hybrid real-usage + estimation; the loop uses it to calibrate the compaction budget against real provider usage
 - **`compact_messages()`** — tiered compaction: Level 1 (truncate tool outputs) → Level 2 (summarize old turns) → Level 3 (drop middle turns)
 - **`ExecutionLimits`/`ExecutionTracker`** — max turns (50), max tokens (1M), max duration (10 min)
 
@@ -74,7 +74,7 @@ The loop: stream assistant response → extract tool calls → execute tools (pa
 
 ### OpenAPI Integration (`openapi/`, feature-gated)
 
-Behind the `openapi` Cargo feature. `OpenApiToolAdapter` parses an OpenAPI 3.0 spec and creates one `AgentTool` per operation. Factory methods: `from_str`, `from_file`, `from_url`, `from_spec`. `OperationFilter` controls which operations become tools. Added to `Agent` via `with_openapi_file()` / `with_openapi_url()` / `with_openapi_spec()`.
+Behind the `openapi` Cargo feature. `OpenApiToolAdapter` parses an OpenAPI 3.0 spec and creates one `AgentTool` per operation. Factory methods: `from_str`, `from_file`, `from_url`, `from_spec`. `OperationFilter` controls which operations become tools. Added to `Agent` via `with_openapi_spec()`.
 
 ### MCP Integration (`mcp/`)
 

@@ -54,6 +54,7 @@ pub struct SubAgentTool {
     tools: Vec<Arc<dyn AgentTool>>,
     thinking_level: ThinkingLevel,
     max_tokens: Option<u32>,
+    temperature: Option<f32>,
     cache_config: CacheConfig,
     tool_execution: ToolExecutionStrategy,
     retry_config: crate::retry::RetryConfig,
@@ -78,6 +79,7 @@ impl SubAgentTool {
             tools: Vec::new(),
             thinking_level: ThinkingLevel::Off,
             max_tokens: None,
+            temperature: None,
             cache_config: CacheConfig::default(),
             tool_execution: ToolExecutionStrategy::default(),
             retry_config: crate::retry::RetryConfig::default(),
@@ -132,6 +134,12 @@ impl SubAgentTool {
 
     pub fn with_max_tokens(mut self, max: u32) -> Self {
         self.max_tokens = Some(max);
+        self
+    }
+
+    /// Set the sampling temperature for the sub-agent.
+    pub fn with_temperature(mut self, temperature: f32) -> Self {
+        self.temperature = Some(temperature);
         self
     }
 
@@ -287,10 +295,20 @@ impl AgentTool for SubAgentTool {
         let config = AgentLoopConfig {
             provider: self.provider.clone(),
             model: self.model.clone(),
-            api_key: self.api_key.clone(),
+            api_key: if self.api_key.is_empty() {
+                crate::provider::resolve_api_key(
+                    self.model_config
+                        .as_ref()
+                        .map(|m| m.provider.as_str())
+                        .unwrap_or("anthropic"),
+                )
+                .unwrap_or_default()
+            } else {
+                self.api_key.clone()
+            },
             thinking_level: self.thinking_level,
             max_tokens: self.max_tokens,
-            temperature: None,
+            temperature: self.temperature,
             model_config: self.model_config.clone(),
             convert_to_llm: None,
             transform_context: None,

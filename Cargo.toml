@@ -6,7 +6,7 @@ description = "Simple, effective agent loop with tool execution and event stream
 license = "MIT"
 repository = "https://github.com/yologdev/yoagent"
 homepage = "https://yologdev.github.io/yoagent/"
-documentation = "https://yologdev.github.io/yoagent/"
+documentation = "https://docs.rs/yoagent"
 readme = "README.md"
 keywords = ["agent", "llm", "ai", "tools", "streaming"]
 categories = ["api-bindings", "asynchronous"]
@@ -15,7 +15,7 @@ rust-version = "1.85"
 exclude = ["docs/images/*", "docs/theme/*", ".github/*", "scripts/*"]
 
 [dependencies]
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt", "sync", "fs", "macros", "process", "time", "io-util"] }
 tokio-util = "0.7"
 tokio-stream = "0.1"
 serde = { version = "1", features = ["derive"] }
@@ -30,10 +30,10 @@ futures = "0.3"
 rand = "0.10.0"
 base64 = "0.22"
 openapiv3 = { version = "2", optional = true }
-serde_yaml = { version = "0.9", optional = true }
+serde_yaml_ng = { version = "0.10", optional = true }
 
 [features]
-openapi = ["dep:openapiv3", "dep:serde_yaml", "reqwest/query"]
+openapi = ["dep:openapiv3", "dep:serde_yaml_ng", "reqwest/query"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

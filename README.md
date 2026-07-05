@@ -46,9 +46,10 @@ Everything is observable via events. Supports 7 API protocols covering 20+ LLM p
 - [AgentSkills](https://agentskills.io)-compatible skills — load skill directories, inject into system prompt, agent activates on demand
 
 **Multi-Provider**
-- 7 API protocols, 20+ providers through a modular registry
+- 7 API protocols, 20+ providers behind one `StreamProvider` trait
 - One OpenAI-compatible implementation covers OpenAI, xAI, Groq, Cerebras, OpenRouter, Mistral, and more
-- Per-provider quirk flags (`OpenAiCompat`) handle auth, reasoning format, and tool handling differences
+- Per-provider quirk flags (`OpenAiCompat`, `AnthropicCompat`) handle auth, reasoning format, and tool handling differences
+- Capability notes: thinking/reasoning controls are wired for Anthropic and the OpenAI family today (Gemini, Vertex, Bedrock, and Azure planned — setting `thinking_level` there logs a warning); client-side prompt-cache breakpoints are Anthropic-specific (other providers cache server-side automatically)
 
 **Built-in Tools**
 - `bash` — Shell execution with timeout, output truncation, command deny patterns
@@ -82,7 +83,7 @@ Or add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-yoagent = "0.6"
+yoagent = "0.9"
 tokio = { version = "1", features = ["full"] }
 ```
 

@@ -33,6 +33,11 @@ impl StreamProvider for GoogleVertexProvider {
         tx: mpsc::UnboundedSender<StreamEvent>,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<Message, ProviderError> {
+        if config.thinking_level != ThinkingLevel::Off {
+            tracing::warn!(
+                "thinking_level is not yet wired for the Google Vertex provider and will be ignored"
+            );
+        }
         let model_config = config
             .model_config
             .as_ref()
