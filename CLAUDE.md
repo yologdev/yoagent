@@ -90,7 +90,7 @@ Behind the `openapi` Cargo feature. `OpenApiToolAdapter` parses an OpenAPI 3.0 s
 - Actions: `get`, `set`, `list`, `remove`
 - Does **not** touch the core agent loop — wired entirely through `SubAgentTool`
 
-### Construction API (0.10+)
+### Construction API
 
 The primary constructor is `Agent::from_config(ModelConfig)`: it selects the built-in provider from `config.api`, sets the model id from `config.id`, and resolves the API key from the provider-conventional env var (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, …; see `provider::resolve_api_key`). This removes the provider↔config pairing footgun and the doubly-specified model id.
 
@@ -102,8 +102,10 @@ let agent = Agent::from_config(ModelConfig::xai("grok-4-1-fast", "Grok 4.1 Fast"
 Other constructors:
 - `Agent::from_provider(provider, config)` — explicit provider (custom impls, test doubles). Pair with `ModelConfig::mock()` in tests.
 - `Agent::from_config_with(&registry, config) -> Result<_, AgentBuildError>` — resolve against a custom `ProviderRegistry`.
-- `Agent::set_model(config)` — switch model mid-session (re-selects provider + re-resolves env key; explicit keys preserved).
-- `Agent::new(provider)` + `with_model`/`with_model_config` — the pre-0.10 builder, still supported.
+- `Agent::set_model(config)` — switch model mid-session (re-resolves the env key; re-selects the provider only when it was registry-resolved, never clobbering an explicit one; explicit keys preserved).
+- `Agent::new(provider)` + `with_model`/`with_model_config` — the original builder, still supported.
+
+`SubAgentTool` mirrors these: `from_config`, `from_config_with`, `from_provider`.
 
 `SubAgentTool` mirrors these: `SubAgentTool::from_config(name, config)` and `SubAgentTool::from_provider(name, provider, config)`.
 

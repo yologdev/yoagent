@@ -43,6 +43,10 @@ pub struct AnthropicProvider;
 
 #[async_trait]
 impl StreamProvider for AnthropicProvider {
+    fn protocol(&self) -> Option<crate::provider::ApiProtocol> {
+        Some(crate::provider::ApiProtocol::AnthropicMessages)
+    }
+
     async fn stream(
         &self,
         config: StreamConfig,

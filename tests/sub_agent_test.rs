@@ -864,3 +864,32 @@ async fn test_sub_agent_from_provider_construction() {
     };
     assert!(text.contains("Research result"));
 }
+
+#[test]
+fn test_sub_agent_from_config_wires_model() {
+    // from_config selects a built-in provider from config.api and sets the id.
+    let tool = SubAgentTool::from_config(
+        "analyst",
+        yoagent::provider::ModelConfig::anthropic("claude-sonnet-5", "Sonnet 5"),
+    );
+    assert_eq!(tool.name(), "analyst");
+}
+
+#[test]
+fn test_sub_agent_from_config_with_errors_on_empty_registry() {
+    let registry = yoagent::provider::ProviderRegistry::new();
+    let err = match SubAgentTool::from_config_with(
+        &registry,
+        "analyst",
+        yoagent::provider::ModelConfig::anthropic("claude-sonnet-5", "Sonnet 5"),
+    ) {
+        Ok(_) => panic!("empty registry must fail"),
+        Err(e) => e,
+    };
+    assert_eq!(
+        err,
+        yoagent::AgentBuildError::NoProviderForProtocol(
+            yoagent::provider::ApiProtocol::AnthropicMessages
+        )
+    );
+}

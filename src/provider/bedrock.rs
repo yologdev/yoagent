@@ -22,6 +22,10 @@ pub struct BedrockProvider;
 
 #[async_trait]
 impl StreamProvider for BedrockProvider {
+    fn protocol(&self) -> Option<crate::provider::ApiProtocol> {
+        Some(crate::provider::ApiProtocol::BedrockConverseStream)
+    }
+
     async fn stream(
         &self,
         config: StreamConfig,

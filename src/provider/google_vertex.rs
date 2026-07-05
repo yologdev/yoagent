@@ -27,6 +27,10 @@ impl GoogleVertexProvider {
 
 #[async_trait]
 impl StreamProvider for GoogleVertexProvider {
+    fn protocol(&self) -> Option<crate::provider::ApiProtocol> {
+        Some(crate::provider::ApiProtocol::GoogleVertex)
+    }
+
     async fn stream(
         &self,
         config: StreamConfig,

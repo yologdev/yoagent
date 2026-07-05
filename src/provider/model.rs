@@ -346,13 +346,20 @@ pub struct ModelConfig {
 }
 
 impl ModelConfig {
-    /// A minimal config for tests. Pair with
-    /// [`Agent::from_provider`](crate::Agent::from_provider) and a
-    /// [`MockProvider`](crate::provider::MockProvider) so tests can use the
-    /// [`from_config`](crate::Agent::from_config)-style construction path
-    /// without ceremony. `provider` is `"mock"`, cost rates are all zero, and
-    /// the protocol is arbitrary (dispatch is bypassed when the provider is
-    /// passed explicitly).
+    /// A minimal config for tests. `provider` is `"mock"`, cost rates are all
+    /// zero, and `base_url` points at a non-routable host.
+    ///
+    /// Use it **only** with
+    /// [`Agent::from_provider`](crate::Agent::from_provider) /
+    /// [`SubAgentTool::from_provider`](crate::SubAgentTool::from_provider) and a
+    /// [`MockProvider`](crate::provider::MockProvider): those take the provider
+    /// explicitly, so the config's protocol is never consulted.
+    ///
+    /// **Do not** pass it to
+    /// [`Agent::from_config`](crate::Agent::from_config) — that dispatches on
+    /// the protocol (here `AnthropicMessages`) and would build the **real**
+    /// Anthropic provider pointed at the non-routable `base_url`, so the first
+    /// prompt fails with a network error instead of returning a mock response.
     pub fn mock() -> Self {
         Self::custom(
             ApiProtocol::AnthropicMessages,

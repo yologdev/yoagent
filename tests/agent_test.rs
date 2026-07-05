@@ -691,3 +691,37 @@ fn test_model_config_mock_is_unpriced() {
     assert_eq!(mc.provider, "mock");
     assert!(!mc.cost.is_configured());
 }
+
+#[tokio::test]
+async fn test_set_model_preserves_explicit_provider_and_key() {
+    // Regression guard for the set_model custom-provider clobber: an agent
+    // built with an explicit provider must keep BOTH that provider and an
+    // explicit key across a model switch — never silently swap in a built-in
+    // network provider.
+    let captured = Arc::new(std::sync::Mutex::new(String::new()));
+    let mut agent = Agent::from_provider(
+        KeyCapturingProvider {
+            captured: captured.clone(),
+        },
+        yoagent::provider::ModelConfig::mock(),
+    )
+    .with_api_key("explicit-key")
+    .with_retry_config(yoagent::RetryConfig::none());
+
+    // Switch to a different protocol whose built-in provider would hit the
+    // network if it clobbered ours.
+    agent.set_model(yoagent::provider::ModelConfig::anthropic(
+        "claude-sonnet-5",
+        "Sonnet 5",
+    ));
+    assert_eq!(agent.model, "claude-sonnet-5");
+
+    run_one_prompt(&mut agent).await;
+    // If the provider had been clobbered, our capture probe would never run
+    // (and the real Anthropic provider would have been used instead).
+    assert_eq!(
+        *captured.lock().unwrap(),
+        "explicit-key",
+        "set_model must keep the explicit provider and key"
+    );
+}

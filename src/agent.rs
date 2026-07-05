@@ -36,6 +36,10 @@ pub struct Agent {
     messages: Vec<AgentMessage>,
     tools: Vec<Box<dyn AgentTool>>,
     provider: Arc<dyn StreamProvider>,
+    /// Whether `provider` was supplied explicitly by the caller (`new` /
+    /// `from_provider`) rather than resolved from a registry (`from_config`).
+    /// `set_model` uses this to avoid silently discarding a caller's provider.
+    provider_is_explicit: bool,
 
     // Queues (shared with the loop via Arc<Mutex>)
     steering_queue: Arc<Mutex<Vec<AgentMessage>>>,
@@ -73,28 +77,19 @@ pub struct Agent {
 
 /// Error building an [`Agent`] from a [`ModelConfig`] and a registry.
 ///
-/// Only returned by [`Agent::from_config_with`]; the built-in
-/// [`Agent::from_config`] uses a complete registry and cannot fail.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Only returned by [`Agent::from_config_with`] /
+/// [`SubAgentTool::from_config_with`](crate::SubAgentTool::from_config_with);
+/// the built-in `from_config` uses a complete registry and cannot fail.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum AgentBuildError {
     /// The registry has no provider registered for the config's protocol.
+    #[error(
+        "no provider registered for protocol {0}; register one on the \
+         ProviderRegistry or use Agent::from_provider with an explicit provider"
+    )]
     NoProviderForProtocol(crate::provider::ApiProtocol),
 }
-
-impl std::fmt::Display for AgentBuildError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NoProviderForProtocol(api) => write!(
-                f,
-                "no provider registered for protocol {api}; register one on the \
-                 ProviderRegistry or use Agent::from_provider with an explicit provider"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for AgentBuildError {}
 
 impl Agent {
     /// Construct from an explicit provider, then configure with
@@ -126,9 +121,12 @@ impl Agent {
     ///
     /// # Panics
     ///
-    /// Never panics for a built-in protocol — the default registry covers all
-    /// of them. Use [`from_config_with`](Self::from_config_with) with a custom
-    /// registry when a protocol may be unregistered.
+    /// Never panics — the default registry covers every [`ApiProtocol`]
+    /// variant (enforced by a unit test). Use
+    /// [`from_config_with`](Self::from_config_with) with a custom registry
+    /// when a protocol may be unregistered and you want a `Result` instead.
+    ///
+    /// [`ApiProtocol`]: crate::provider::ApiProtocol
     pub fn from_config(config: ModelConfig) -> Self {
         Self::from_config_with(&crate::provider::ProviderRegistry::default(), config)
             .expect("default registry covers all built-in protocols")
@@ -144,7 +142,11 @@ impl Agent {
         let provider = registry
             .resolve(&config.api)
             .ok_or(AgentBuildError::NoProviderForProtocol(config.api))?;
-        Ok(Self::with_provider_arc(provider).configured_for(config))
+        let mut agent = Self::with_provider_arc(provider).configured_for(config);
+        // The provider came from the registry, not the caller — set_model may
+        // safely re-resolve it on a model switch.
+        agent.provider_is_explicit = false;
+        Ok(agent)
     }
 
     /// Build an [`Agent`] from an explicit provider plus its [`ModelConfig`].
@@ -159,16 +161,36 @@ impl Agent {
         Self::with_provider_arc(Arc::new(provider)).configured_for(config)
     }
 
-    /// Switch the model mid-session, re-selecting the built-in provider for
-    /// the new protocol and re-resolving the environment API key (an explicit
-    /// key set via [`with_api_key`](Self::with_api_key) is preserved).
+    /// Switch the model mid-session, re-resolving the environment API key from
+    /// the new config's provider (an explicit key set via
+    /// [`with_api_key`](Self::with_api_key) is preserved, since the key is
+    /// resolved lazily and an explicit one always wins).
     ///
-    /// Uses the default registry; an agent built with a custom provider via
-    /// [`from_provider`](Self::from_provider) should switch by constructing
-    /// again rather than calling this.
+    /// Provider handling depends on how the agent was built:
+    /// - Built with [`from_config`](Self::from_config): the built-in provider
+    ///   for the new protocol is selected from the default registry.
+    /// - Built with an **explicit** provider ([`from_provider`](Self::from_provider)
+    ///   or [`new`](Self::new)): that provider is **kept** — it is never
+    ///   silently replaced — and a warning is logged if it may not serve the
+    ///   new protocol. Reconstruct with `from_provider` to change providers.
     pub fn set_model(&mut self, config: ModelConfig) {
-        if let Some(provider) = crate::provider::ProviderRegistry::default().resolve(&config.api) {
+        if self.provider_is_explicit {
+            tracing::warn!(
+                "set_model: keeping the explicitly-supplied provider; it may not \
+                 serve the new protocol {}. Reconstruct with from_provider to \
+                 change providers.",
+                config.api
+            );
+        } else if let Some(provider) =
+            crate::provider::ProviderRegistry::default().resolve(&config.api)
+        {
             self.provider = provider;
+        } else {
+            tracing::warn!(
+                "set_model: no built-in provider for protocol {}; keeping the \
+                 previous provider, which will not match the new model.",
+                config.api
+            );
         }
         self.model = config.id.clone();
         self.model_config = Some(config);
@@ -195,6 +217,9 @@ impl Agent {
             messages: Vec::new(),
             tools: Vec::new(),
             provider,
+            // Explicit by default (new / from_provider); from_config_with
+            // flips this to false after resolving from the registry.
+            provider_is_explicit: true,
             steering_queue: Arc::new(Mutex::new(Vec::new())),
             follow_up_queue: Arc::new(Mutex::new(Vec::new())),
             steering_mode: QueueMode::OneAtATime,

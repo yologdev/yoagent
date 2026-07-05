@@ -97,11 +97,32 @@ impl SubAgentTool {
     /// id, provider, and pricing come from one config, and the API key is
     /// resolved from the provider-conventional env var unless set explicitly
     /// with [`with_api_key`](Self::with_api_key).
+    ///
+    /// # Panics
+    ///
+    /// Never panics — the default registry covers every [`ApiProtocol`]
+    /// variant. Use [`from_config_with`](Self::from_config_with) with a custom
+    /// registry when a protocol may be unregistered and you want a `Result`.
+    ///
+    /// [`ApiProtocol`]: crate::provider::ApiProtocol
     pub fn from_config(name: impl Into<String>, config: ModelConfig) -> Self {
-        let provider = crate::provider::ProviderRegistry::default()
+        Self::from_config_with(&crate::provider::ProviderRegistry::default(), name, config)
+            .expect("default registry covers all built-in protocols")
+    }
+
+    /// Like [`from_config`](Self::from_config) but resolves the provider from a
+    /// caller-supplied registry, returning an error if the config's protocol
+    /// isn't registered. Mirrors
+    /// [`Agent::from_config_with`](crate::Agent::from_config_with).
+    pub fn from_config_with(
+        registry: &crate::provider::ProviderRegistry,
+        name: impl Into<String>,
+        config: ModelConfig,
+    ) -> Result<Self, crate::AgentBuildError> {
+        let provider = registry
             .resolve(&config.api)
-            .expect("default registry covers all built-in protocols");
-        Self::new(name, provider).configured_for(config)
+            .ok_or(crate::AgentBuildError::NoProviderForProtocol(config.api))?;
+        Ok(Self::new(name, provider).configured_for(config))
     }
 
     /// Create a sub-agent from a name, explicit provider, and [`ModelConfig`].

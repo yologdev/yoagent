@@ -19,6 +19,10 @@ pub struct AzureOpenAiProvider;
 
 #[async_trait]
 impl StreamProvider for AzureOpenAiProvider {
+    fn protocol(&self) -> Option<crate::provider::ApiProtocol> {
+        Some(crate::provider::ApiProtocol::AzureOpenAiResponses)
+    }
+
     async fn stream(
         &self,
         config: StreamConfig,
