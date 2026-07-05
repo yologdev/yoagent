@@ -314,3 +314,34 @@ async fn safety_finish_reason_maps_to_refusal() {
         "error_message should explain the block, got {error_message:?}"
     );
 }
+
+/// Gemini's promptTokenCount INCLUDES cachedContentTokenCount; the mapping
+/// must keep `input` as the uncached remainder so `input + cache_read`
+/// doesn't double-count cached tokens.
+#[tokio::test]
+async fn cached_tokens_are_not_double_counted_in_usage() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/v1beta/models/{}:streamGenerateContent",
+            MODEL
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            sse(&[
+                r#"{"candidates":[{"content":{"parts":[{"text":"hi"}],"role":"model"},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":100,"cachedContentTokenCount":80,"candidatesTokenCount":5,"totalTokenCount":105}}"#,
+            ]),
+            "text/event-stream",
+        ))
+        .mount(&server)
+        .await;
+
+    let message = run_stream(stream_config(&server.uri(), vec![Message::user("hi")])).await;
+
+    let Message::Assistant { usage, .. } = &message else {
+        panic!("expected assistant message");
+    };
+    assert_eq!(usage.input, 20, "input must exclude cached tokens");
+    assert_eq!(usage.cache_read, 80);
+    assert_eq!(usage.output, 5);
+    assert_eq!(usage.input + usage.cache_read + usage.output, 105);
+}

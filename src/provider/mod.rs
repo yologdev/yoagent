@@ -20,5 +20,6 @@ pub use mock::MockProvider;
 pub use model::{AnthropicCompat, ApiProtocol, CostConfig, ModelConfig, OpenAiCompat};
 pub use openai_compat::OpenAiCompatProvider;
 pub use openai_responses::OpenAiResponsesProvider;
-pub use registry::ProviderRegistry;
+pub(crate) use registry::resolve_api_key_or_warn;
+pub use registry::{resolve_api_key, ProviderRegistry};
 pub use traits::*;

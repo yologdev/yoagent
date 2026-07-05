@@ -21,6 +21,11 @@ impl StreamProvider for GoogleProvider {
         tx: mpsc::UnboundedSender<StreamEvent>,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<Message, ProviderError> {
+        if config.thinking_level != ThinkingLevel::Off {
+            warn!(
+                "thinking_level is not yet wired for the Google Gemini provider and will be ignored"
+            );
+        }
         let model_config = config
             .model_config
             .as_ref()
@@ -182,7 +187,13 @@ impl StreamProvider for GoogleProvider {
 
                                 // Process usage
                                 if let Some(u) = &chunk.usage_metadata {
-                                    usage.input = u.prompt_token_count.unwrap_or(0);
+                                    // promptTokenCount includes cached tokens;
+                                    // keep `input` as the uncached remainder so
+                                    // downstream sums don't double-count.
+                                    usage.input = u
+                                        .prompt_token_count
+                                        .unwrap_or(0)
+                                        .saturating_sub(u.cached_content_token_count.unwrap_or(0));
                                     usage.output = u.candidates_token_count.unwrap_or(0);
                                     usage.total_tokens = u.total_token_count.unwrap_or(0);
                                     usage.cache_read = u.cached_content_token_count.unwrap_or(0);

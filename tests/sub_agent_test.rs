@@ -742,3 +742,95 @@ async fn test_sub_agent_in_parent_loop() {
     assert!(has_tool_start);
     assert!(has_tool_end);
 }
+
+// ---------------------------------------------------------------------------
+// Config plumbing: temperature and env-var key fallback reach the provider
+// ---------------------------------------------------------------------------
+
+/// Records the api_key and temperature each stream call receives.
+struct StreamConfigCapture {
+    captured: Arc<std::sync::Mutex<(String, Option<f32>)>>,
+}
+
+#[async_trait::async_trait]
+impl yoagent::provider::StreamProvider for StreamConfigCapture {
+    async fn stream(
+        &self,
+        config: yoagent::provider::StreamConfig,
+        tx: mpsc::UnboundedSender<yoagent::provider::StreamEvent>,
+        _cancel: CancellationToken,
+    ) -> Result<Message, yoagent::provider::ProviderError> {
+        *self.captured.lock().unwrap() = (config.api_key.clone(), config.temperature);
+        let msg = Message::assistant(
+            vec![Content::Text {
+                text: "done".into(),
+            }],
+            StopReason::Stop,
+            "mock",
+            "mock",
+            Usage::default(),
+        );
+        let _ = tx.send(yoagent::provider::StreamEvent::Start);
+        let _ = tx.send(yoagent::provider::StreamEvent::Done {
+            message: msg.clone(),
+        });
+        Ok(msg)
+    }
+}
+
+async fn run_sub_agent(tool: &SubAgentTool) {
+    tool.execute(
+        serde_json::json!({"task": "go"}),
+        ToolContext {
+            tool_call_id: "tc-cfg".into(),
+            tool_name: "cfg".into(),
+            cancel: CancellationToken::new(),
+            on_update: None,
+            on_progress: None,
+        },
+    )
+    .await
+    .expect("sub-agent should succeed");
+}
+
+#[tokio::test]
+async fn test_sub_agent_temperature_reaches_provider() {
+    let captured = Arc::new(std::sync::Mutex::new((String::new(), None)));
+    let tool = SubAgentTool::new(
+        "cfg",
+        Arc::new(StreamConfigCapture {
+            captured: captured.clone(),
+        }),
+    )
+    .with_model("mock")
+    .with_api_key("k")
+    .with_temperature(0.3);
+
+    run_sub_agent(&tool).await;
+    assert_eq!(captured.lock().unwrap().1, Some(0.3));
+}
+
+#[tokio::test]
+async fn test_sub_agent_env_key_fallback() {
+    // Own env var (not shared with other tests) to stay race-free under
+    // parallel execution.
+    std::env::set_var("MINIMAX_API_KEY", "minimax-env-key");
+    let captured = Arc::new(std::sync::Mutex::new((String::new(), None)));
+    let tool = SubAgentTool::new(
+        "cfg",
+        Arc::new(StreamConfigCapture {
+            captured: captured.clone(),
+        }),
+    )
+    .with_model("m")
+    .with_model_config(yoagent::provider::ModelConfig::custom(
+        yoagent::provider::ApiProtocol::OpenAiCompletions,
+        "minimax",
+        "http://localhost:8080/v1",
+        "m",
+        "M",
+    ));
+
+    run_sub_agent(&tool).await;
+    assert_eq!(captured.lock().unwrap().0, "minimax-env-key");
+}

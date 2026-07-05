@@ -142,6 +142,14 @@ impl Agent {
         self
     }
 
+    /// Set the sampling temperature. Note: the newest reasoning models
+    /// (e.g. Claude Fable 5 / Opus 4.7+) reject sampling parameters — leave
+    /// unset for those.
+    pub fn with_temperature(mut self, temperature: f32) -> Self {
+        self.temperature = Some(temperature);
+        self
+    }
+
     pub fn with_context_config(mut self, config: ContextConfig) -> Self {
         self.context_config = Some(config);
         self
@@ -476,6 +484,15 @@ impl Agent {
     /// Call [`finish()`](Self::finish) after draining the receiver to restore
     /// agent state (messages, tools). `finish()` is also called automatically
     /// at the start of the next `prompt` / `continue_loop` call.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the agent still counts as streaming — in practice only when
+    /// a previous `*_with_sender` future was dropped mid-run, which leaves
+    /// the agent stuck in the streaming state ([`Agent::finish`] cannot
+    /// recover it; recreate the agent). Runs started by the
+    /// receiver-returning methods are joined automatically. A
+    /// misuse-`Result` variant is planned for 0.10.
     pub async fn prompt(&mut self, text: impl Into<String>) -> mpsc::UnboundedReceiver<AgentEvent> {
         let msg = AgentMessage::Llm(Message::user(text));
         self.prompt_messages(vec![msg]).await
@@ -485,6 +502,15 @@ impl Agent {
     /// agent loop running concurrently for true streaming.
     ///
     /// Call [`finish()`](Self::finish) after draining events to restore state.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the agent still counts as streaming — in practice only when
+    /// a previous `*_with_sender` future was dropped mid-run, which leaves
+    /// the agent stuck in the streaming state ([`Agent::finish`] cannot
+    /// recover it; recreate the agent). Runs started by the
+    /// receiver-returning methods are joined automatically. A
+    /// misuse-`Result` variant is planned for 0.10.
     pub async fn prompt_messages(
         &mut self,
         messages: Vec<AgentMessage>,
@@ -539,6 +565,15 @@ impl Agent {
     /// agent.prompt_with_sender("hello", tx).await;
     /// # }
     /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if the agent still counts as streaming — in practice only when
+    /// a previous `*_with_sender` future was dropped mid-run, which leaves
+    /// the agent stuck in the streaming state ([`Agent::finish`] cannot
+    /// recover it; recreate the agent). Runs started by the
+    /// receiver-returning methods are joined automatically. A
+    /// misuse-`Result` variant is planned for 0.10.
     pub async fn prompt_with_sender(
         &mut self,
         text: impl Into<String>,
@@ -550,6 +585,15 @@ impl Agent {
 
     /// Send messages as a prompt, streaming events to a caller-provided sender.
     /// Blocks until the loop finishes and state is restored.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the agent still counts as streaming — in practice only when
+    /// a previous `*_with_sender` future was dropped mid-run, which leaves
+    /// the agent stuck in the streaming state ([`Agent::finish`] cannot
+    /// recover it; recreate the agent). Runs started by the
+    /// receiver-returning methods are joined automatically. A
+    /// misuse-`Result` variant is planned for 0.10.
     pub async fn prompt_messages_with_sender(
         &mut self,
         messages: Vec<AgentMessage>,
@@ -587,6 +631,13 @@ impl Agent {
     /// receiver immediately with the loop running concurrently.
     ///
     /// Call [`finish()`](Self::finish) after draining events to restore state.
+    ///
+    /// # Panics
+    ///
+    /// Panics if there are no messages to continue from, or if a previous
+    /// `*_with_sender` future was dropped mid-run (the agent is stuck in the
+    /// streaming state; [`Agent::finish`] cannot recover it — recreate the
+    /// agent). A misuse-`Result` variant is planned for 0.10.
     pub async fn continue_loop(&mut self) -> mpsc::UnboundedReceiver<AgentEvent> {
         self.finish().await; // restore from previous if needed
 
@@ -618,6 +669,13 @@ impl Agent {
 
     /// Continue from current context, streaming events to a caller-provided sender.
     /// Blocks until the loop finishes and state is restored.
+    ///
+    /// # Panics
+    ///
+    /// Panics if there are no messages to continue from, or if a previous
+    /// `*_with_sender` future was dropped mid-run (the agent is stuck in the
+    /// streaming state; [`Agent::finish`] cannot recover it — recreate the
+    /// agent). A misuse-`Result` variant is planned for 0.10.
     pub async fn continue_loop_with_sender(&mut self, tx: mpsc::UnboundedSender<AgentEvent>) {
         self.finish().await; // restore from previous if needed
 
@@ -674,7 +732,58 @@ impl Agent {
 
     // -- Internal --
 
+    /// The explicit key if set, else the provider-conventional env var
+    /// (see [`crate::provider::resolve_api_key`]).
+    fn resolved_api_key(&self) -> String {
+        if !self.api_key.is_empty() {
+            return self.api_key.clone();
+        }
+        let provider = self
+            .model_config
+            .as_ref()
+            .map(|m| m.provider.as_str())
+            .unwrap_or("anthropic");
+        crate::provider::resolve_api_key_or_warn(provider)
+    }
+
+    /// Total dollar cost of the assistant turns currently in history, using
+    /// the model's [`CostConfig`](crate::provider::CostConfig) rates.
+    ///
+    /// Returns `None` when no `ModelConfig` is set or when the config's
+    /// rates are all zero (pricing unknown — e.g. custom or local models),
+    /// so `None` means "can't price this", never "free". Rates come from the
+    /// *current* model config; sessions that switched models mid-way are
+    /// priced entirely at the current rates.
+    pub fn session_cost_usd(&self) -> Option<f64> {
+        let cost = &self.model_config.as_ref()?.cost;
+        if !cost.is_configured() {
+            return None;
+        }
+        Some(
+            self.messages
+                .iter()
+                .filter_map(|m| match m {
+                    AgentMessage::Llm(Message::Assistant { usage, .. }) => {
+                        Some(cost.cost_usd(usage))
+                    }
+                    _ => None,
+                })
+                .sum(),
+        )
+    }
+
     fn build_config(&self) -> AgentLoopConfig {
+        if self.thinking_level != ThinkingLevel::Off {
+            if let Some(mc) = &self.model_config {
+                if !mc.reasoning {
+                    tracing::warn!(
+                        "thinking_level is set but model '{}' is not marked \
+                         reasoning-capable (ModelConfig.reasoning = false)",
+                        mc.id
+                    );
+                }
+            }
+        }
         let steering_queue = self.steering_queue.clone();
         let steering_mode = self.steering_mode;
 
@@ -684,7 +793,7 @@ impl Agent {
         AgentLoopConfig {
             provider: self.provider.clone(),
             model: self.model.clone(),
-            api_key: self.api_key.clone(),
+            api_key: self.resolved_api_key(),
             thinking_level: self.thinking_level,
             max_tokens: self.max_tokens,
             temperature: self.temperature,

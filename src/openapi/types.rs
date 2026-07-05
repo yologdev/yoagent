@@ -7,7 +7,7 @@ pub enum OpenApiAuth {
     /// No authentication.
     #[default]
     None,
-    /// Bearer token (Authorization: Bearer <token>).
+    /// Bearer token (`Authorization: Bearer <token>`).
     Bearer(String),
     /// API key in a custom header.
     ApiKey { header: String, value: String },

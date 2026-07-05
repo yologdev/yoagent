@@ -41,6 +41,29 @@ pub struct CostConfig {
     pub cache_write_per_million: f64,
 }
 
+impl CostConfig {
+    /// Whether any rate is set. All-zero rates mean pricing is unknown
+    /// (custom/local models), not that the model is free.
+    pub fn is_configured(&self) -> bool {
+        self.input_per_million != 0.0
+            || self.output_per_million != 0.0
+            || self.cache_read_per_million != 0.0
+            || self.cache_write_per_million != 0.0
+    }
+
+    /// Dollar cost of a usage record at these per-million-token rates.
+    ///
+    /// Consumed by [`crate::Agent::session_cost_usd`]; also usable directly
+    /// in `after_turn` callbacks for per-turn cost tracking.
+    pub fn cost_usd(&self, usage: &crate::types::Usage) -> f64 {
+        (usage.input as f64 * self.input_per_million
+            + usage.output as f64 * self.output_per_million
+            + usage.cache_read as f64 * self.cache_read_per_million
+            + usage.cache_write as f64 * self.cache_write_per_million)
+            / 1_000_000.0
+    }
+}
+
 impl Default for CostConfig {
     fn default() -> Self {
         Self {
@@ -297,7 +320,11 @@ pub struct ModelConfig {
     pub provider: String,
     /// Base URL for API requests (without trailing slash).
     pub base_url: String,
-    /// Whether this model supports reasoning/thinking.
+    /// Whether this model supports reasoning/thinking. When `false` and a
+    /// `thinking_level` is requested, the [`Agent`](crate::Agent) wrapper
+    /// logs a warning; sub-agents and direct `agent_loop` calls do not. The
+    /// request is still sent either way — gate behavior stays with the
+    /// caller.
     pub reasoning: bool,
     /// Context window size in tokens.
     pub context_window: u32,
@@ -786,6 +813,27 @@ mod tests {
         assert_eq!(config.base_url, "https://api.anthropic.com/v1");
         assert!(config.compat.is_none());
         assert!(config.anthropic.is_none());
+    }
+
+    #[test]
+    fn test_cost_usd() {
+        let cost = CostConfig {
+            input_per_million: 3.0,
+            output_per_million: 15.0,
+            cache_read_per_million: 0.3,
+            cache_write_per_million: 3.75,
+        };
+        let usage = crate::types::Usage {
+            input: 1_000_000,
+            output: 100_000,
+            cache_read: 2_000_000,
+            cache_write: 400_000,
+            total_tokens: 0,
+        };
+        // 3.0 + 1.5 + 0.6 + 1.5 = 6.6
+        assert!((cost.cost_usd(&usage) - 6.6).abs() < 1e-9);
+        // zero rates (default) => zero cost
+        assert_eq!(CostConfig::default().cost_usd(&usage), 0.0);
     }
 
     #[test]

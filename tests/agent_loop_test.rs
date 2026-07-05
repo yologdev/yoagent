@@ -2202,3 +2202,139 @@ async fn test_tool_call_with_provider_metadata_executes() {
     });
     assert!(has_tool_result, "Tool result should contain 'hello'");
 }
+
+// ---------------------------------------------------------------------------
+// Budget calibration: measured overhead (system prompt, tool schemas, estimate
+// shortfall) is subtracted from the compaction budget once real usage arrives
+// ---------------------------------------------------------------------------
+
+/// Records the ContextConfig each compact call receives; never modifies
+/// messages, so the loop's behavior is otherwise unaffected.
+struct RecordingCompaction {
+    calls: std::sync::Mutex<Vec<(usize, usize)>>, // (max_context_tokens, system_prompt_tokens)
+}
+
+impl yoagent::CompactionStrategy for RecordingCompaction {
+    fn compact(
+        &self,
+        messages: Vec<AgentMessage>,
+        config: &yoagent::context::ContextConfig,
+    ) -> Vec<AgentMessage> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push((config.max_context_tokens, config.system_prompt_tokens));
+        messages
+    }
+}
+
+fn calibration_config(
+    provider: std::sync::Arc<dyn StreamProvider>,
+    strategy: std::sync::Arc<RecordingCompaction>,
+    max_context_tokens: usize,
+) -> AgentLoopConfig {
+    AgentLoopConfig {
+        provider,
+        model: "usage-test".into(),
+        api_key: "test".into(),
+        thinking_level: ThinkingLevel::Off,
+        max_tokens: None,
+        temperature: None,
+        model_config: None,
+        convert_to_llm: None,
+        transform_context: None,
+        get_steering_messages: None,
+        get_follow_up_messages: Some(Box::new(|| {
+            vec![AgentMessage::Llm(Message::user("follow up"))]
+        })),
+        context_config: Some(yoagent::context::ContextConfig {
+            max_context_tokens,
+            system_prompt_tokens: 500,
+            keep_recent: 1,
+            keep_first: 1,
+            tool_output_max_lines: 10,
+        }),
+        compaction_strategy: Some(strategy),
+        execution_limits: Some(ExecutionLimits {
+            max_turns: 2,
+            max_total_tokens: 1_000_000,
+            max_duration: std::time::Duration::from_secs(60),
+        }),
+        cache_config: CacheConfig::default(),
+        tool_execution: ToolExecutionStrategy::default(),
+        retry_config: yoagent::RetryConfig::none(),
+        before_turn: None,
+        after_turn: None,
+        on_error: None,
+        input_filters: vec![],
+        turn_delay: None,
+    }
+}
+
+async fn run_calibration_loop(max_context_tokens: usize) -> Vec<(usize, usize)> {
+    // Real usage (5010 tokens) dwarfs the char-based estimate of the tiny
+    // messages, so the measured overhead is ~5000 tokens.
+    let provider = std::sync::Arc::new(UsageProvider {
+        usage: Usage {
+            input: 5000,
+            output: 10,
+            cache_read: 0,
+            cache_write: 0,
+            total_tokens: 5010,
+        },
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let strategy = std::sync::Arc::new(RecordingCompaction {
+        calls: std::sync::Mutex::new(Vec::new()),
+    });
+    let config = calibration_config(provider, strategy.clone(), max_context_tokens);
+
+    let mut context = AgentContext {
+        system_prompt: "test".into(),
+        messages: Vec::new(),
+        tools: Vec::new(),
+    };
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent_loop(
+        vec![AgentMessage::Llm(Message::user("start"))],
+        &mut context,
+        &config,
+        tx,
+        CancellationToken::new(),
+    )
+    .await;
+
+    let calls = strategy.calls.lock().unwrap().clone();
+    calls
+}
+
+#[tokio::test]
+async fn test_calibration_subtracts_measured_overhead() {
+    let calls = run_calibration_loop(8000).await;
+    assert!(calls.len() >= 2, "expected 2 turns, got {:?}", calls);
+
+    // Turn 1: no real usage yet — config passes through unchanged.
+    assert_eq!(calls[0], (8000, 500));
+
+    // Turn 2: usage anchored at ~5010 vs a tiny estimate, so ~5000 tokens of
+    // overhead are subtracted and the static reserve is zeroed (the measured
+    // overhead already includes the real system prompt).
+    let (max, reserve) = calls[1];
+    assert_eq!(reserve, 0);
+    assert!(
+        (2500..=3500).contains(&max),
+        "expected ~3000 calibrated budget, got {}",
+        max
+    );
+}
+
+#[tokio::test]
+async fn test_calibration_floor_prevents_budget_collapse() {
+    // Overhead (~5000) exceeds the whole budget (4000). Without the floor the
+    // budget would hit 0 and compaction would wipe the conversation; the
+    // calibrated budget must never drop below 10% of the configured one.
+    let calls = run_calibration_loop(4000).await;
+    assert!(calls.len() >= 2, "expected 2 turns, got {:?}", calls);
+    assert_eq!(calls[0], (4000, 500));
+    assert_eq!(calls[1], (400, 0));
+}

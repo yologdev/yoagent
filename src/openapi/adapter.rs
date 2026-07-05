@@ -349,7 +349,7 @@ fn parse_spec(input: &str) -> Result<OpenAPI, OpenApiError> {
         serde_json::from_str::<OpenAPI>(input)
             .map_err(|e| OpenApiError::ParseError(format!("JSON: {}", e)))
     } else {
-        serde_yaml::from_str::<OpenAPI>(input)
+        serde_yaml_ng::from_str::<OpenAPI>(input)
             .map_err(|e| OpenApiError::ParseError(format!("YAML: {}", e)))
     }
 }

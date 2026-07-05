@@ -180,3 +180,31 @@ async fn user_authorization_header_suppresses_x_api_key() {
     }
     run_stream(config).await.expect("stream should succeed");
 }
+
+#[tokio::test]
+async fn rate_limit_carries_retry_after_from_header() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/messages"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("retry-after", "7")
+                .set_body_string(
+                    r#"{"type":"error","error":{"type":"rate_limit_error","message":"rate limited"}}"#,
+                ),
+        )
+        .mount(&server)
+        .await;
+
+    let err = run_stream(stream_config(&server.uri(), None))
+        .await
+        .expect_err("429 must surface as an error");
+
+    match err {
+        yoagent::provider::ProviderError::RateLimited { retry_after_ms } => {
+            assert_eq!(retry_after_ms, Some(7000));
+        }
+        other => panic!("expected RateLimited, got: {:?}", other),
+    }
+}
