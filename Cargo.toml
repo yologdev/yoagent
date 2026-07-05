@@ -11,7 +11,7 @@ readme = "README.md"
 keywords = ["agent", "llm", "ai", "tools", "streaming"]
 categories = ["api-bindings", "asynchronous"]
 authors = ["Yuanhao <yuanhao@yolog.dev>"]
-rust-version = "1.85"
+rust-version = "1.86"
 exclude = ["docs/images/*", "docs/theme/*", ".github/*", "scripts/*"]
 
 [dependencies]
