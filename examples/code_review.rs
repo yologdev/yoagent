@@ -13,7 +13,7 @@
 //!   ANTHROPIC_API_KEY=sk-... cargo run --example code_review -- src/shared_state.rs
 
 use std::sync::{Arc, Mutex};
-use yoagent::provider::{AnthropicProvider, StreamProvider};
+use yoagent::provider::{AnthropicProvider, ModelConfig, StreamProvider};
 use yoagent::shared_state::SharedState;
 use yoagent::sub_agent::SubAgentTool;
 use yoagent::*;
@@ -21,7 +21,7 @@ use yoagent::*;
 #[tokio::main]
 async fn main() {
     let api_key = std::env::var("ANTHROPIC_API_KEY").expect("Set ANTHROPIC_API_KEY");
-    let model = "claude-sonnet-5";
+    let config = ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5");
     let provider: Arc<dyn StreamProvider> = Arc::new(AnthropicProvider);
 
     // --- Read the target file from CLI args ---
@@ -50,47 +50,47 @@ async fn main() {
 
     // --- Three reviewers, each focused on a different aspect ---
 
-    let bug_reviewer = SubAgentTool::new("bug_reviewer", Arc::clone(&provider))
-        .with_description("Reviews code for bugs and logic errors")
-        .with_system_prompt(
-            "You are a bug-finding specialist. Read the source code from shared state \
+    let bug_reviewer =
+        SubAgentTool::from_provider("bug_reviewer", Arc::clone(&provider), config.clone())
+            .with_description("Reviews code for bugs and logic errors")
+            .with_system_prompt(
+                "You are a bug-finding specialist. Read the source code from shared state \
              (key: 'source_code'), look for bugs, logic errors, off-by-one errors, \
              race conditions, and potential panics. Write your findings to shared state \
              under key 'bugs_review'. Format: bullet points, each with line reference \
              and severity (critical/warning/info). If no bugs found, say so.",
-        )
-        .with_model(model)
-        .with_api_key(&api_key)
-        .with_shared_state(state.clone())
-        .with_max_turns(5);
+            )
+            .with_api_key(&api_key)
+            .with_shared_state(state.clone())
+            .with_max_turns(5);
 
-    let quality_reviewer = SubAgentTool::new("quality_reviewer", Arc::clone(&provider))
-        .with_description("Reviews code quality and style")
-        .with_system_prompt(
-            "You are a code quality reviewer. Read the source code from shared state \
+    let quality_reviewer =
+        SubAgentTool::from_provider("quality_reviewer", Arc::clone(&provider), config.clone())
+            .with_description("Reviews code quality and style")
+            .with_system_prompt(
+                "You are a code quality reviewer. Read the source code from shared state \
              (key: 'source_code'), evaluate naming, structure, idiomatic usage, \
              error handling patterns, and API design. Write your findings to shared state \
              under key 'quality_review'. Format: bullet points with specific suggestions. \
              Mention what's done well too.",
-        )
-        .with_model(model)
-        .with_api_key(&api_key)
-        .with_shared_state(state.clone())
-        .with_max_turns(5);
+            )
+            .with_api_key(&api_key)
+            .with_shared_state(state.clone())
+            .with_max_turns(5);
 
-    let docs_reviewer = SubAgentTool::new("docs_reviewer", Arc::clone(&provider))
-        .with_description("Reviews documentation completeness")
-        .with_system_prompt(
-            "You are a documentation reviewer. Read the source code from shared state \
+    let docs_reviewer =
+        SubAgentTool::from_provider("docs_reviewer", Arc::clone(&provider), config.clone())
+            .with_description("Reviews documentation completeness")
+            .with_system_prompt(
+                "You are a documentation reviewer. Read the source code from shared state \
              (key: 'source_code') and the file path (key: 'file_path'). Evaluate: \
              are public items documented? Are doc comments accurate? Are edge cases \
              explained? Are examples provided where helpful? Write findings to shared \
              state under key 'docs_review'. Format: bullet points.",
-        )
-        .with_model(model)
-        .with_api_key(&api_key)
-        .with_shared_state(state.clone())
-        .with_max_turns(5);
+            )
+            .with_api_key(&api_key)
+            .with_shared_state(state.clone())
+            .with_max_turns(5);
 
     // --- Run all three in parallel with streaming ---
     println!("Dispatching 3 reviewers in parallel...\n");

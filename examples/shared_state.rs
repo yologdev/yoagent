@@ -14,7 +14,7 @@
 //!   ANTHROPIC_API_KEY=sk-... cargo run --example shared_state
 
 use std::sync::Arc;
-use yoagent::provider::{AnthropicProvider, StreamProvider};
+use yoagent::provider::{AnthropicProvider, ModelConfig, StreamProvider};
 use yoagent::shared_state::SharedState;
 use yoagent::sub_agent::SubAgentTool;
 use yoagent::*;
@@ -22,7 +22,7 @@ use yoagent::*;
 #[tokio::main]
 async fn main() {
     let api_key = std::env::var("ANTHROPIC_API_KEY").expect("Set ANTHROPIC_API_KEY");
-    let model = "claude-sonnet-5";
+    let config = ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5");
     let provider: Arc<dyn StreamProvider> = Arc::new(AnthropicProvider);
 
     // --- The artifact: a large CI log (simulated) ---
@@ -67,41 +67,41 @@ async fn main() {
 
     // --- Three sub-agents, each analyzing a different aspect ---
 
-    let error_analyst = SubAgentTool::new("error_analyst", Arc::clone(&provider))
-        .with_description("Analyzes test failures in CI logs")
-        .with_system_prompt(
-            "You analyze CI logs for test failures. Read the log from shared state, \
+    let error_analyst =
+        SubAgentTool::from_provider("error_analyst", Arc::clone(&provider), config.clone())
+            .with_description("Analyzes test failures in CI logs")
+            .with_system_prompt(
+                "You analyze CI logs for test failures. Read the log from shared state, \
              identify each failure, its root cause, and write a concise summary back \
              to shared state under 'errors_summary'. Be brief — bullet points only.",
-        )
-        .with_model(model)
-        .with_api_key(&api_key)
-        .with_shared_state(state.clone())
-        .with_max_turns(5);
+            )
+            .with_api_key(&api_key)
+            .with_shared_state(state.clone())
+            .with_max_turns(5);
 
-    let perf_analyst = SubAgentTool::new("perf_analyst", Arc::clone(&provider))
-        .with_description("Analyzes performance issues in CI logs")
-        .with_system_prompt(
-            "You analyze CI logs for performance issues. Read the log from shared state, \
+    let perf_analyst =
+        SubAgentTool::from_provider("perf_analyst", Arc::clone(&provider), config.clone())
+            .with_description("Analyzes performance issues in CI logs")
+            .with_system_prompt(
+                "You analyze CI logs for performance issues. Read the log from shared state, \
              identify slow tests and bottlenecks, and write a concise summary back \
              to shared state under 'perf_summary'. Be brief — bullet points only.",
-        )
-        .with_model(model)
-        .with_api_key(&api_key)
-        .with_shared_state(state.clone())
-        .with_max_turns(5);
+            )
+            .with_api_key(&api_key)
+            .with_shared_state(state.clone())
+            .with_max_turns(5);
 
-    let flaky_analyst = SubAgentTool::new("flaky_analyst", Arc::clone(&provider))
-        .with_description("Identifies flaky tests in CI logs")
-        .with_system_prompt(
-            "You analyze CI logs for flaky/unreliable tests. Read the log from shared state, \
+    let flaky_analyst =
+        SubAgentTool::from_provider("flaky_analyst", Arc::clone(&provider), config.clone())
+            .with_description("Identifies flaky tests in CI logs")
+            .with_system_prompt(
+                "You analyze CI logs for flaky/unreliable tests. Read the log from shared state, \
              identify tests that are flaky or infrastructure-dependent, and write a concise \
              summary back to shared state under 'flaky_summary'. Be brief — bullet points only.",
-        )
-        .with_model(model)
-        .with_api_key(&api_key)
-        .with_shared_state(state.clone())
-        .with_max_turns(5);
+            )
+            .with_api_key(&api_key)
+            .with_shared_state(state.clone())
+            .with_max_turns(5);
 
     // --- Run all three in parallel ---
     println!("Dispatching 3 sub-agents in parallel...\n");

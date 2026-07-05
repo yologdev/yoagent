@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use yoagent::provider::mock::*;
 use yoagent::provider::MockProvider;
+use yoagent::provider::ModelConfig;
 use yoagent::shared_state::SharedState;
 use yoagent::sub_agent::SubAgentTool;
 use yoagent::*;
@@ -30,11 +31,9 @@ async fn test_sub_agent_reads_shared_state() {
         MockResponse::Text("The build failed with exit code 1".into()),
     ]));
 
-    let sub_agent = SubAgentTool::new("analyzer", sub_provider)
+    let sub_agent = SubAgentTool::from_provider("analyzer", sub_provider, ModelConfig::mock())
         .with_description("Analyzes artifacts")
         .with_system_prompt("Analyze the artifact.")
-        .with_model("mock")
-        .with_api_key("test")
         .with_shared_state(state.clone());
 
     let result = sub_agent
@@ -80,11 +79,9 @@ async fn test_sub_agent_writes_shared_state() {
         MockResponse::Text("Done, wrote summary.".into()),
     ]));
 
-    let sub_agent = SubAgentTool::new("writer", sub_provider)
+    let sub_agent = SubAgentTool::from_provider("writer", sub_provider, ModelConfig::mock())
         .with_description("Writes summaries")
         .with_system_prompt("Summarize findings.")
-        .with_model("mock")
-        .with_api_key("test")
         .with_shared_state(state.clone());
 
     sub_agent
@@ -145,16 +142,12 @@ async fn test_parallel_sub_agents_share_state() {
         MockResponse::Text("B done".into()),
     ]));
 
-    let agent_a = SubAgentTool::new("agent_a", provider_a)
+    let agent_a = SubAgentTool::from_provider("agent_a", provider_a, ModelConfig::mock())
         .with_system_prompt("You are agent A.")
-        .with_model("mock")
-        .with_api_key("test")
         .with_shared_state(state.clone());
 
-    let agent_b = SubAgentTool::new("agent_b", provider_b)
+    let agent_b = SubAgentTool::from_provider("agent_b", provider_b, ModelConfig::mock())
         .with_system_prompt("You are agent B.")
-        .with_model("mock")
-        .with_api_key("test")
         .with_shared_state(state.clone());
 
     let ctx = || ToolContext {
@@ -186,10 +179,8 @@ async fn test_parallel_sub_agents_share_state() {
 async fn test_sub_agent_without_shared_state_unchanged() {
     let sub_provider = Arc::new(MockProvider::text("hello"));
 
-    let sub_agent = SubAgentTool::new("plain", sub_provider)
-        .with_system_prompt("You are plain.")
-        .with_model("mock")
-        .with_api_key("test");
+    let sub_agent = SubAgentTool::from_provider("plain", sub_provider, ModelConfig::mock())
+        .with_system_prompt("You are plain.");
     // No .with_shared_state() — existing behavior
 
     let result = sub_agent
@@ -233,10 +224,8 @@ async fn test_shared_state_summary_in_system_prompt() {
         MockResponse::Text("Listed state".into()),
     ]));
 
-    let sub_agent = SubAgentTool::new("lister", sub_provider)
+    let sub_agent = SubAgentTool::from_provider("lister", sub_provider, ModelConfig::mock())
         .with_system_prompt("List state.")
-        .with_model("mock")
-        .with_api_key("test")
         .with_shared_state(state);
 
     let result = sub_agent

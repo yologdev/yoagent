@@ -5,10 +5,16 @@
 ## Usage
 
 ```rust
-use yoagent::provider::BedrockProvider;
+use yoagent::provider::{ApiProtocol, ModelConfig};
 
-let agent = Agent::new(BedrockProvider)
-    .with_model("anthropic.claude-opus-4-8")
+// Bedrock has no dedicated ModelConfig preset — build one with `custom`.
+let agent = Agent::from_config(ModelConfig::custom(
+    ApiProtocol::BedrockConverseStream,
+    "bedrock",
+    "https://bedrock-runtime.us-east-1.amazonaws.com",
+    "anthropic.claude-opus-4-8",
+    "Claude Opus 4.8",
+))
     .with_api_key("ACCESS_KEY:SECRET_KEY");  // or ACCESS_KEY:SECRET_KEY:SESSION_TOKEN
 ```
 

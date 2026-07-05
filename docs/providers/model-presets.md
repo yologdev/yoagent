@@ -38,15 +38,12 @@ The named presets (`claude_fable_5`, `claude_opus_4_8`, `claude_sonnet_5`, `clau
 These constructors all use `OpenAiCompatProvider`:
 
 ```rust
-use yoagent::provider::{ModelConfig, OpenAiCompatProvider};
+use yoagent::provider::ModelConfig;
 
-let agent = Agent::new(OpenAiCompatProvider)
-    .with_model_config(ModelConfig::deepseek(
-        "deepseek-v4-flash",
-        "DeepSeek V4 Flash",
-    ))
-    .with_model("deepseek-v4-flash")
-    .with_api_key(std::env::var("DEEPSEEK_API_KEY").unwrap());
+let agent = Agent::from_config(ModelConfig::deepseek(
+    "deepseek-v4-flash",
+    "DeepSeek V4 Flash",
+));
 ```
 
 OpenAI-compatible presets also set `OpenAiCompat` flags for provider-specific API differences, such as `max_tokens` vs. `max_completion_tokens`, reasoning fields, tool result formatting, and streaming usage support. See [OpenAI Compatible](openai-compat.md) for the full quirk-flag list.
@@ -135,14 +132,10 @@ yoagent also sends DeepSeek's current request shape:
 For legacy aliases, set `ThinkingLevel` to match the alias behavior:
 
 ```rust
-let chat_agent = Agent::new(OpenAiCompatProvider)
-    .with_model_config(ModelConfig::deepseek("deepseek-chat", "DeepSeek Chat"))
-    .with_model("deepseek-chat")
+let chat_agent = Agent::from_config(ModelConfig::deepseek("deepseek-chat", "DeepSeek Chat"))
     .with_thinking_level(ThinkingLevel::Off);
 
-let reasoner_agent = Agent::new(OpenAiCompatProvider)
-    .with_model_config(ModelConfig::deepseek("deepseek-reasoner", "DeepSeek Reasoner"))
-    .with_model("deepseek-reasoner")
+let reasoner_agent = Agent::from_config(ModelConfig::deepseek("deepseek-reasoner", "DeepSeek Reasoner"))
     .with_thinking_level(ThinkingLevel::High);
 ```
 

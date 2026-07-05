@@ -44,7 +44,7 @@ Caching is **enabled by default** with automatic breakpoint placement. No config
 ```rust
 use yoagent::{CacheConfig, CacheStrategy};
 
-let agent = Agent::new(provider)
+let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"))
     .with_cache_config(CacheConfig {
         enabled: false,
         ..Default::default()
@@ -58,7 +58,7 @@ or OpenAI.
 ### Fine-Grained Control
 
 ```rust
-let agent = Agent::new(provider)
+let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"))
     .with_cache_config(CacheConfig {
         enabled: true,
         strategy: CacheStrategy::Manual {

@@ -9,17 +9,15 @@ Auto-generate `AgentTool` implementations from OpenAPI 3.0 specs. Point an agent
 ```rust
 use yoagent::Agent;
 use yoagent::openapi::{OpenApiToolAdapter, OpenApiConfig, OperationFilter};
-use yoagent::provider::AnthropicProvider;
+use yoagent::provider::ModelConfig;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = OpenApiConfig::new()
         .with_bearer_token("sk-...");
 
-    let agent = Agent::new(AnthropicProvider)
+    let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"))
         .with_system_prompt("You are an API assistant.")
-        .with_model("claude-sonnet-5")
-        .with_api_key(std::env::var("ANTHROPIC_API_KEY")?)
         .with_openapi_file("petstore.yaml", config, &OperationFilter::All)
         .await?;
 
@@ -127,7 +125,7 @@ OpenAPI tools work alongside built-in tools and MCP tools:
 ```rust
 use yoagent::tools::default_tools;
 
-let agent = Agent::new(provider)
+let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"))
     .with_tools(default_tools())
     .with_openapi_file("github.yaml", github_config, &github_filter).await?
     .with_mcp_server_stdio("db-server", &[], None).await?;

@@ -15,14 +15,15 @@
 //!
 //! ```rust,no_run
 //! use yoagent::sub_agent::SubAgentTool;
-//! use yoagent::provider::AnthropicProvider;
-//! use std::sync::Arc;
+//! use yoagent::provider::ModelConfig;
 //!
-//! let researcher = SubAgentTool::new("researcher", Arc::new(AnthropicProvider))
-//!     .with_description("Searches codebases and documents")
-//!     .with_system_prompt("You are a research assistant.")
-//!     .with_model("claude-sonnet-4-20250514")
-//!     .with_api_key("sk-...");
+//! // Provider selected from the config's protocol; key from ANTHROPIC_API_KEY.
+//! let researcher = SubAgentTool::from_config(
+//!     "researcher",
+//!     ModelConfig::anthropic("claude-sonnet-5", "Sonnet 5"),
+//! )
+//! .with_description("Searches codebases and documents")
+//! .with_system_prompt("You are a research assistant.");
 //! ```
 
 use crate::agent_loop::{agent_loop, AgentLoopConfig};
@@ -66,7 +67,19 @@ pub struct SubAgentTool {
 
 impl SubAgentTool {
     /// Create a new sub-agent tool with a name and provider.
+    #[deprecated(
+        since = "0.10.0",
+        note = "use SubAgentTool::from_config(name, config) — provider + env key \
+                resolved automatically — or SubAgentTool::from_provider(name, provider, config) \
+                for a custom provider; will be removed in 1.0"
+    )]
     pub fn new(name: impl Into<String>, provider: Arc<dyn StreamProvider>) -> Self {
+        Self::build(name, provider)
+    }
+
+    /// Internal constructor shared by `new` and the `from_*` builders (not
+    /// deprecated, so the builders don't trip the deprecation lint).
+    fn build(name: impl Into<String>, provider: Arc<dyn StreamProvider>) -> Self {
         let name = name.into();
         Self {
             tool_description: format!("Delegate a task to the '{}' sub-agent", name),
@@ -122,7 +135,7 @@ impl SubAgentTool {
         let provider = registry
             .resolve(&config.api)
             .ok_or(crate::AgentBuildError::NoProviderForProtocol(config.api))?;
-        Ok(Self::new(name, provider).configured_for(config))
+        Ok(Self::build(name, provider).configured_for(config))
     }
 
     /// Create a sub-agent from a name, explicit provider, and [`ModelConfig`].
@@ -135,7 +148,7 @@ impl SubAgentTool {
         provider: Arc<dyn StreamProvider>,
         config: ModelConfig,
     ) -> Self {
-        Self::new(name, provider).configured_for(config)
+        Self::build(name, provider).configured_for(config)
     }
 
     /// Set the model id and stash the config on a freshly-constructed
@@ -168,6 +181,11 @@ impl SubAgentTool {
         self
     }
 
+    #[deprecated(
+        since = "0.10.0",
+        note = "the model id now comes from the ModelConfig passed to \
+                SubAgentTool::from_config / from_provider; will be removed in 1.0"
+    )]
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = model.into();
         self
@@ -240,6 +258,11 @@ impl SubAgentTool {
     /// Set the model configuration for multi-provider support.
     /// Required for non-Anthropic providers (OpenAI-compat, Google, etc.)
     /// to specify base URL, compat flags, and other provider-specific settings.
+    #[deprecated(
+        since = "0.10.0",
+        note = "pass the ModelConfig to SubAgentTool::from_config(name, config) or \
+                from_provider(name, provider, config) instead; will be removed in 1.0"
+    )]
     pub fn with_model_config(mut self, config: ModelConfig) -> Self {
         self.model_config = Some(config);
         self

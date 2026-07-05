@@ -15,14 +15,12 @@ Use `with_mcp_server_stdio()` to spawn an MCP server process and register its to
 
 ```rust
 use yoagent::Agent;
-use yoagent::provider::AnthropicProvider;
+use yoagent::provider::ModelConfig;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut agent = Agent::new(AnthropicProvider)
+    let mut agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"))
         .with_system_prompt("You are a helpful assistant with file access.")
-        .with_model("claude-sonnet-5")
-        .with_api_key(std::env::var("ANTHROPIC_API_KEY")?)
         .with_mcp_server_stdio(
             "npx",
             &["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
@@ -44,7 +42,7 @@ use std::collections::HashMap;
 let mut env = HashMap::new();
 env.insert("API_TOKEN".into(), "secret".into());
 
-let agent = Agent::new(provider)
+let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"))
     .with_mcp_server_stdio("my-mcp-server", &["--port", "0"], Some(env))
     .await?;
 ```
@@ -54,7 +52,7 @@ let agent = Agent::new(provider)
 For remote MCP servers exposed over HTTP:
 
 ```rust
-let agent = Agent::new(provider)
+let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"))
     .with_mcp_server_http("http://localhost:8080/mcp")
     .await?;
 ```
@@ -75,7 +73,7 @@ MCP tools appear alongside built-in tools. The LLM sees them with their original
 ```rust
 use yoagent::tools::default_tools;
 
-let agent = Agent::new(provider)
+let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"))
     .with_tools(default_tools())  // bash, read, write, edit, list, search
     .with_mcp_server_stdio("my-db-server", &[], None)
     .await?;

@@ -2,14 +2,15 @@
 
 ## Requirements
 
-- Rust 2021 edition (1.56+, recommended 1.75+)
+- Rust 1.86+ (2021 edition)
 - Tokio async runtime
 
 ## Add to Cargo.toml
 
 ```toml
 [dependencies]
-yoagent = "0.5"
+yoagent = "0.10"
+tokio = { version = "1", features = ["full"] }
 ```
 
 ## Dependencies

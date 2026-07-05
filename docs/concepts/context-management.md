@@ -104,14 +104,10 @@ When you set a `ModelConfig` but don't explicitly set a `ContextConfig`, the com
 
 ```rust
 // MiniMax with 1M context → compacts at 800K (no manual config needed)
-let agent = Agent::new(OpenAiCompatProvider)
-    .with_model_config(ModelConfig::minimax("MiniMax-Text-01", "MiniMax Text 01"))
-    .with_api_key(api_key);
+let agent = Agent::from_config(ModelConfig::minimax("MiniMax-Text-01", "MiniMax Text 01"));
 
 // Anthropic with 200K context → compacts at 160K
-let agent = Agent::new(AnthropicProvider)
-    .with_model_config(ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"))
-    .with_api_key(api_key);
+let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"));
 ```
 
 The priority chain:
@@ -159,7 +155,7 @@ When a limit is reached, the agent stops with a message like `"[Agent stopped: M
 ## Disabling Context Management
 
 ```rust
-let agent = Agent::new(provider)
+let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"))
     .without_context_management();
 ```
 

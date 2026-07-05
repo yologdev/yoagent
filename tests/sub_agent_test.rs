@@ -6,6 +6,7 @@ use tokio_util::sync::CancellationToken;
 use yoagent::agent_loop::{agent_loop, AgentLoopConfig};
 use yoagent::provider::mock::*;
 use yoagent::provider::MockProvider;
+use yoagent::provider::ModelConfig;
 use yoagent::sub_agent::SubAgentTool;
 use yoagent::*;
 
@@ -53,11 +54,9 @@ async fn test_sub_agent_basic() {
     // The sub-agent's mock provider returns a simple text response
     let sub_provider = Arc::new(MockProvider::text("Research result: Rust is great"));
 
-    let sub_agent = SubAgentTool::new("researcher", sub_provider)
+    let sub_agent = SubAgentTool::from_provider("researcher", sub_provider, ModelConfig::mock())
         .with_description("Researches topics")
-        .with_system_prompt("You are a research assistant.")
-        .with_model("mock")
-        .with_api_key("test");
+        .with_system_prompt("You are a research assistant.");
 
     // Execute the sub-agent tool directly
     let params = serde_json::json!({"task": "Tell me about Rust"});
@@ -141,11 +140,9 @@ async fn test_sub_agent_with_tools() {
 
     let echo_tool: Arc<dyn AgentTool> = Arc::new(EchoTool);
 
-    let sub_agent = SubAgentTool::new("echo_agent", sub_provider)
+    let sub_agent = SubAgentTool::from_provider("echo_agent", sub_provider, ModelConfig::mock())
         .with_description("Agent that echoes")
         .with_system_prompt("Use the echo tool.")
-        .with_model("mock")
-        .with_api_key("test")
         .with_tools(vec![echo_tool]);
 
     let params = serde_json::json!({"task": "Echo hello"});
@@ -180,9 +177,8 @@ async fn test_sub_agent_cancellation() {
     // Sub-agent provider returns text, but we cancel before execution
     let sub_provider = Arc::new(MockProvider::text("Should not appear"));
 
-    let sub_agent = SubAgentTool::new("cancelled_agent", sub_provider)
-        .with_model("mock")
-        .with_api_key("test");
+    let sub_agent =
+        SubAgentTool::from_provider("cancelled_agent", sub_provider, ModelConfig::mock());
 
     let cancel = CancellationToken::new();
     cancel.cancel(); // Cancel immediately
@@ -237,9 +233,7 @@ async fn test_sub_agent_max_turns() {
 
     let echo_tool: Arc<dyn AgentTool> = Arc::new(EchoTool);
 
-    let sub_agent = SubAgentTool::new("limited_agent", sub_provider)
-        .with_model("mock")
-        .with_api_key("test")
+    let sub_agent = SubAgentTool::from_provider("limited_agent", sub_provider, ModelConfig::mock())
         .with_tools(vec![echo_tool])
         .with_max_turns(1); // Only 1 turn allowed
 
@@ -316,25 +310,23 @@ async fn test_sub_agent_parallel() {
         }
     }
 
-    let sub_a = SubAgentTool::new(
+    let sub_a = SubAgentTool::from_provider(
         "agent_a",
         Arc::new(SlowProvider {
             delay_ms: 50,
             text: "Result A".into(),
         }),
-    )
-    .with_model("slow")
-    .with_api_key("test");
+        ModelConfig::mock(),
+    );
 
-    let sub_b = SubAgentTool::new(
+    let sub_b = SubAgentTool::from_provider(
         "agent_b",
         Arc::new(SlowProvider {
             delay_ms: 50,
             text: "Result B".into(),
         }),
-    )
-    .with_model("slow")
-    .with_api_key("test");
+        ModelConfig::mock(),
+    );
 
     // Parent provider: first call triggers both sub-agents, second returns final text
     let parent_provider = MockProvider::new(vec![
@@ -394,9 +386,8 @@ async fn test_sub_agent_parallel() {
 async fn test_sub_agent_event_forwarding() {
     let sub_provider = Arc::new(MockProvider::text("Sub-agent done"));
 
-    let sub_agent = SubAgentTool::new("streaming_agent", sub_provider)
-        .with_model("mock")
-        .with_api_key("test");
+    let sub_agent =
+        SubAgentTool::from_provider("streaming_agent", sub_provider, ModelConfig::mock());
 
     let params = serde_json::json!({"task": "Do work"});
 
@@ -452,9 +443,7 @@ async fn test_sub_agent_event_forwarding() {
 async fn test_sub_agent_missing_task_parameter() {
     let sub_provider = Arc::new(MockProvider::text("Should not run"));
 
-    let sub_agent = SubAgentTool::new("test_agent", sub_provider)
-        .with_model("mock")
-        .with_api_key("test");
+    let sub_agent = SubAgentTool::from_provider("test_agent", sub_provider, ModelConfig::mock());
 
     let params = serde_json::json!({}); // Missing "task"
 
@@ -586,10 +575,8 @@ async fn test_sub_agent_with_skills() {
     assert_eq!(skills.len(), 1, "expected the research skill to load");
 
     let prompt = capture_system_prompt(|provider| {
-        SubAgentTool::new("researcher", provider)
+        SubAgentTool::from_provider("researcher", provider, ModelConfig::mock())
             .with_system_prompt("You are a research assistant.")
-            .with_model("mock")
-            .with_api_key("test")
             .with_skills(skills)
     })
     .await;
@@ -617,10 +604,7 @@ async fn test_sub_agent_with_skills_empty_base_prompt() {
 
     let prompt = capture_system_prompt(|provider| {
         // No with_system_prompt() call — base prompt is empty.
-        SubAgentTool::new("researcher", provider)
-            .with_model("mock")
-            .with_api_key("test")
-            .with_skills(skills)
+        SubAgentTool::from_provider("researcher", provider, ModelConfig::mock()).with_skills(skills)
     })
     .await;
 
@@ -634,10 +618,8 @@ async fn test_sub_agent_with_skills_empty_base_prompt() {
 async fn test_sub_agent_with_empty_skillset_is_noop() {
     // An empty SkillSet must not alter the system prompt (no trailing "\n\n").
     let prompt = capture_system_prompt(|provider| {
-        SubAgentTool::new("researcher", provider)
+        SubAgentTool::from_provider("researcher", provider, ModelConfig::mock())
             .with_system_prompt("Base prompt.")
-            .with_model("mock")
-            .with_api_key("test")
             .with_skills(yoagent::skills::SkillSet::empty())
     })
     .await;
@@ -654,10 +636,8 @@ async fn test_sub_agent_skills_before_shared_state() {
     let state = SharedState::new();
 
     let prompt = capture_system_prompt(|provider| {
-        SubAgentTool::new("researcher", provider)
+        SubAgentTool::from_provider("researcher", provider, ModelConfig::mock())
             .with_system_prompt("Base prompt.")
-            .with_model("mock")
-            .with_api_key("test")
             .with_skills(skills)
             .with_shared_state(state)
     })
@@ -684,10 +664,8 @@ async fn test_sub_agent_in_parent_loop() {
     // Parent calls sub-agent, sub-agent returns text, parent summarizes
     let sub_provider = Arc::new(MockProvider::text("42 is the answer"));
 
-    let sub_agent = SubAgentTool::new("calculator", sub_provider)
-        .with_description("Calculates things")
-        .with_model("mock")
-        .with_api_key("test");
+    let sub_agent = SubAgentTool::from_provider("calculator", sub_provider, ModelConfig::mock())
+        .with_description("Calculates things");
 
     let parent_provider = MockProvider::new(vec![
         MockResponse::ToolCalls(vec![MockToolCall {
@@ -796,14 +774,13 @@ async fn run_sub_agent(tool: &SubAgentTool) {
 #[tokio::test]
 async fn test_sub_agent_temperature_reaches_provider() {
     let captured = Arc::new(std::sync::Mutex::new((String::new(), None)));
-    let tool = SubAgentTool::new(
+    let tool = SubAgentTool::from_provider(
         "cfg",
         Arc::new(StreamConfigCapture {
             captured: captured.clone(),
         }),
+        ModelConfig::mock(),
     )
-    .with_model("mock")
-    .with_api_key("k")
     .with_temperature(0.3);
 
     run_sub_agent(&tool).await;
@@ -816,20 +793,19 @@ async fn test_sub_agent_env_key_fallback() {
     // parallel execution.
     std::env::set_var("MINIMAX_API_KEY", "minimax-env-key");
     let captured = Arc::new(std::sync::Mutex::new((String::new(), None)));
-    let tool = SubAgentTool::new(
+    let tool = SubAgentTool::from_provider(
         "cfg",
         Arc::new(StreamConfigCapture {
             captured: captured.clone(),
         }),
-    )
-    .with_model("m")
-    .with_model_config(yoagent::provider::ModelConfig::custom(
-        yoagent::provider::ApiProtocol::OpenAiCompletions,
-        "minimax",
-        "http://localhost:8080/v1",
-        "m",
-        "M",
-    ));
+        yoagent::provider::ModelConfig::custom(
+            yoagent::provider::ApiProtocol::OpenAiCompletions,
+            "minimax",
+            "http://localhost:8080/v1",
+            "m",
+            "M",
+        ),
+    );
 
     run_sub_agent(&tool).await;
     assert_eq!(captured.lock().unwrap().0, "minimax-env-key");

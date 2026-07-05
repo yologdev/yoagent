@@ -21,14 +21,15 @@ Each sub-agent invocation starts a fresh conversation — no state leaks between
 ```rust
 use std::sync::Arc;
 use yoagent::sub_agent::SubAgentTool;
-use yoagent::provider::AnthropicProvider;
+use yoagent::provider::ModelConfig;
 use yoagent::tools;
 
-let researcher = SubAgentTool::new("researcher", Arc::new(AnthropicProvider))
+let researcher = SubAgentTool::from_config(
+    "researcher",
+    ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"),
+)
     .with_description("Searches and reads files to gather information.")
     .with_system_prompt("You are a research assistant. Be thorough and concise.")
-    .with_model("claude-sonnet-5")
-    .with_api_key(&api_key)
     .with_tools(vec![
         Arc::new(tools::ReadFileTool::new()),
         Arc::new(tools::SearchTool::new()),
@@ -41,10 +42,8 @@ let researcher = SubAgentTool::new("researcher", Arc::new(AnthropicProvider))
 ```rust
 use yoagent::agent::Agent;
 
-let mut agent = Agent::new(AnthropicProvider)
+let mut agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"))
     .with_system_prompt("You coordinate between sub-agents.")
-    .with_model("claude-sonnet-5")
-    .with_api_key(api_key)
     .with_sub_agent(researcher)
     .with_sub_agent(coder);
 ```
@@ -62,8 +61,8 @@ When the parent LLM calls multiple sub-agents in a single response, they run con
 | `with_description()` | What the parent LLM sees (helps it decide when to delegate) |
 | `with_system_prompt()` | The sub-agent's own instructions |
 | `with_skills()` | Attach a `SkillSet` — its index is appended to the sub-agent's system prompt (mirrors `Agent::with_skills`) |
-| `with_model()` / `with_api_key()` | Can use a different model than the parent |
-| `with_model_config()` | Set `ModelConfig` for non-Anthropic providers (base URL, compat flags, etc.) |
+| `from_config(name, config)` / `from_provider(name, provider, config)` | Set the sub-agent's model, provider, and metadata from a `ModelConfig` — resolves the env key automatically and can use a different model than the parent |
+| `with_api_key()` | Override the env-resolved API key explicitly |
 | `with_tools()` | Tools available to the sub-agent (accepts `Vec<Arc<dyn AgentTool>>`) |
 | `with_max_turns(N)` | Turn limit (default: 10). Primary guard against runaway execution. |
 | `with_thinking()` | Enable extended thinking for the sub-agent |
@@ -91,10 +90,12 @@ use yoagent::shared_state::SharedState;
 let state = SharedState::new();
 state.set("ci_log", large_log_text).await.unwrap();
 
-let analyzer = SubAgentTool::new("analyzer", provider.clone())
+let analyzer = SubAgentTool::from_provider(
+    "analyzer",
+    provider.clone(),
+    ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"),
+)
     .with_system_prompt("Analyze the CI log for failures.")
-    .with_model("claude-sonnet-5")
-    .with_api_key(&api_key)
     .with_shared_state(state.clone());  // opt-in
 ```
 
@@ -121,9 +122,17 @@ let summary = state.get("summary").await.expect("sub-agent wrote this");
 Multiple sub-agents can share the same `SharedState` concurrently. Each gets its own clone of the `Arc` handle — reads are concurrent, writes are serialized by `tokio::sync::RwLock`.
 
 ```rust
-let error_analyst = SubAgentTool::new("error_analyst", provider.clone())
+let error_analyst = SubAgentTool::from_provider(
+    "error_analyst",
+    provider.clone(),
+    ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"),
+)
     .with_shared_state(state.clone());
-let perf_analyst = SubAgentTool::new("perf_analyst", provider.clone())
+let perf_analyst = SubAgentTool::from_provider(
+    "perf_analyst",
+    provider.clone(),
+    ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"),
+)
     .with_shared_state(state.clone());
 
 // Both run in parallel, reading the same artifact and writing different keys
@@ -176,15 +185,13 @@ See [`examples/shared_state.rs`](../../examples/shared_state.rs) for a complete 
 Sub-agents can use any provider supported by yoagent — not just Anthropic. Pass a `ModelConfig` to configure the base URL, compat flags, and other provider-specific settings:
 
 ```rust
-use yoagent::provider::{OpenAiCompatProvider, model::ModelConfig};
+use yoagent::provider::ModelConfig;
 
-let provider = Arc::new(OpenAiCompatProvider);
 let model_config = ModelConfig::xai("grok-4-1-fast-reasoning", "Grok 3 Mini Fast");
 
-let analyst = SubAgentTool::new("analyst", provider)
-    .with_model(&model_config.id)
-    .with_api_key(&xai_api_key)
-    .with_model_config(model_config)
+// `from_config` resolves OpenAiCompatProvider from the config's protocol and
+// the key from XAI_API_KEY.
+let analyst = SubAgentTool::from_config("analyst", model_config)
     .with_tools(vec![...]);
 ```
 

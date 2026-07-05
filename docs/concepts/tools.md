@@ -130,7 +130,7 @@ use yoagent::tools::default_tools;
 
 let mut tools = default_tools();
 tools.push(Box::new(WeatherTool));
-let agent = Agent::new(provider).with_tools(tools);
+let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5")).with_tools(tools);
 ```
 
 ## Error Handling
@@ -289,7 +289,7 @@ Here's a complete example: a CLI agent with a deploy tool that streams progress.
 
 ```rust
 use yoagent::agent::Agent;
-use yoagent::provider::AnthropicProvider;
+use yoagent::provider::ModelConfig;
 use yoagent::types::*;
 
 /// A tool that deploys an app and streams each step.
@@ -353,10 +353,8 @@ impl AgentTool for DeployTool {
 
 #[tokio::main]
 async fn main() {
-    let mut agent = Agent::new(AnthropicProvider)
+    let mut agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"))
         .with_system_prompt("You are a deployment assistant.")
-        .with_model("claude-sonnet-5")
-        .with_api_key(std::env::var("ANTHROPIC_API_KEY").unwrap())
         .with_tools(vec![Box::new(DeployTool)]);
 
     let mut rx = agent.prompt("Deploy to production").await;
@@ -436,14 +434,14 @@ use yoagent::agent::Agent;
 use yoagent::types::ToolExecutionStrategy;
 
 // Default — parallel (fastest)
-let agent = Agent::new(provider);
+let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"));
 
 // Sequential (debug / shared state)
-let agent = Agent::new(provider)
+let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"))
     .with_tool_execution(ToolExecutionStrategy::Sequential);
 
 // Batched — 3 at a time
-let agent = Agent::new(provider)
+let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"))
     .with_tool_execution(ToolExecutionStrategy::Batched { size: 3 });
 ```
 

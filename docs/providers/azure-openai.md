@@ -5,11 +5,17 @@
 ## Usage
 
 ```rust
-use yoagent::provider::AzureOpenAiProvider;
+use yoagent::provider::{ApiProtocol, ModelConfig};
 
-let agent = Agent::new(AzureOpenAiProvider)
-    .with_model("gpt-5.5")
-    .with_api_key(std::env::var("AZURE_OPENAI_API_KEY").unwrap());
+// Azure has no dedicated ModelConfig preset — build one with `custom`.
+// The provider ("azure") resolves the key from AZURE_OPENAI_API_KEY.
+let agent = Agent::from_config(ModelConfig::custom(
+    ApiProtocol::AzureOpenAiResponses,
+    "azure",
+    "https://{resource}.openai.azure.com/openai/deployments/{deployment}",
+    "gpt-5.5",
+    "GPT-5.5",
+));
 ```
 
 ## Authentication

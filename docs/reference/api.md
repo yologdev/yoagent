@@ -44,12 +44,14 @@ High-level stateful wrapper around the agent loop.
 ### Construction
 
 ```rust
-let agent = Agent::new(provider);
+let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"));
 ```
 
 | Signature | Description |
 |-----------|-------------|
-| `Agent::new(provider: impl StreamProvider + 'static) -> Self` | Create a new agent with the given provider |
+| `Agent::from_config(config: ModelConfig) -> Self` | Build from a `ModelConfig` — auto-selects the built-in provider for the config's protocol and resolves the API key from the provider's conventional env var (primary constructor) |
+| `Agent::from_provider(provider: impl StreamProvider + 'static, config: ModelConfig) -> Self` | Build from an explicit provider plus its `ModelConfig` (custom providers and test doubles — pair with `ModelConfig::mock()`) |
+| `Agent::from_config_with(registry: &ProviderRegistry, config: ModelConfig) -> Result<Self, AgentBuildError>` | Like `from_config`, but resolves the provider from a caller-supplied registry |
 
 ### Builder Methods
 
@@ -60,11 +62,9 @@ All return `Self` for chaining (unless noted as `Result`).
 | Method | Description |
 |--------|-------------|
 | `with_system_prompt(prompt) -> Self` | Set the system prompt |
-| `with_model(model) -> Self` | Set the model identifier |
-| `with_api_key(key) -> Self` | Set the API key |
+| `with_api_key(key) -> Self` | Override the env-resolved API key |
 | `with_thinking(level: ThinkingLevel) -> Self` | Set thinking level (`Off`, `Minimal`, `Low`, `Medium`, `High`) |
 | `with_max_tokens(max: u32) -> Self` | Set max output tokens |
-| `with_model_config(config: ModelConfig) -> Self` | Set model config (base URL, headers, compat flags) for multi-provider support |
 
 **Tools & Integrations**
 
@@ -170,7 +170,11 @@ Delegates tasks to a child agent loop.
 ### Construction
 
 ```rust
-let sub = SubAgentTool::new("name", Arc::new(provider));
+// Provider auto-selected from the config's protocol; env key resolved automatically:
+let sub = SubAgentTool::from_config("name", ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"));
+
+// Or pass an explicit provider Arc (custom providers, or a shared handle across sub-agents):
+let sub = SubAgentTool::from_provider("name", Arc::new(provider), ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"));
 ```
 
 ### Builder Methods
@@ -181,9 +185,7 @@ All return `Self` for chaining.
 |--------|-------------|
 | `with_description(desc) -> Self` | What the parent LLM sees (helps it decide when to delegate) |
 | `with_system_prompt(prompt) -> Self` | The sub-agent's own instructions |
-| `with_model(model) -> Self` | Set the model identifier |
-| `with_api_key(key) -> Self` | Set the API key |
-| `with_model_config(config: ModelConfig) -> Self` | Set model config for non-Anthropic providers (base URL, compat flags, etc.) |
+| `with_api_key(key) -> Self` | Override the env-resolved API key |
 | `with_tools(tools: Vec<Arc<dyn AgentTool>>) -> Self` | Tools available to the sub-agent |
 | `with_shared_state(state: SharedState) -> Self` | Attach a shared key-value store (injects `shared_state` tool automatically) |
 | `with_max_turns(N) -> Self` | Turn limit (default: 10) |
