@@ -71,6 +71,16 @@ pub trait StreamProvider: Send + Sync {
         tx: mpsc::UnboundedSender<StreamEvent>,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<Message, ProviderError>;
+
+    /// The API protocol this provider speaks, if it maps to a single one.
+    ///
+    /// Built-in providers return `Some(_)`; the default is `None` (for test
+    /// doubles and multi-protocol adapters). Used to verify registry wiring
+    /// (a resolved provider should report the protocol it was registered for)
+    /// and to enable protocol-mismatch diagnostics.
+    fn protocol(&self) -> Option<crate::provider::ApiProtocol> {
+        None
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

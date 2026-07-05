@@ -20,6 +20,10 @@ pub struct OpenAiCompatProvider;
 
 #[async_trait]
 impl StreamProvider for OpenAiCompatProvider {
+    fn protocol(&self) -> Option<crate::provider::ApiProtocol> {
+        Some(crate::provider::ApiProtocol::OpenAiCompletions)
+    }
+
     async fn stream(
         &self,
         config: StreamConfig,

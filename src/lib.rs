@@ -7,13 +7,13 @@
 //! # Quick start
 //!
 //! ```no_run
-//! use yoagent::{Agent, provider::AnthropicProvider, tools};
+//! use yoagent::{Agent, provider::ModelConfig, tools};
 //!
 //! # #[tokio::main]
 //! # async fn main() {
-//! let mut agent = Agent::new(AnthropicProvider)
-//!     .with_model("claude-sonnet-5")
-//!     .with_api_key(std::env::var("ANTHROPIC_API_KEY").unwrap())
+//! // Provider is selected from the config's protocol; the API key is read
+//! // from ANTHROPIC_API_KEY. Call `.with_api_key(...)` to override.
+//! let mut agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Sonnet 5"))
 //!     .with_system_prompt("You are a helpful coding assistant.")
 //!     .with_tools(tools::default_tools());
 //!
@@ -65,7 +65,7 @@ pub mod types;
 #[cfg(feature = "openapi")]
 pub mod openapi;
 
-pub use agent::Agent;
+pub use agent::{Agent, AgentBuildError};
 pub use agent_loop::{agent_loop, agent_loop_continue};
 pub use context::{CompactionStrategy, DefaultCompaction};
 pub use retry::RetryConfig;

@@ -834,3 +834,62 @@ async fn test_sub_agent_env_key_fallback() {
     run_sub_agent(&tool).await;
     assert_eq!(captured.lock().unwrap().0, "minimax-env-key");
 }
+
+#[tokio::test]
+async fn test_sub_agent_from_provider_construction() {
+    // from_provider + ModelConfig::mock() mirrors Agent's construction path.
+    let tool = SubAgentTool::from_provider(
+        "researcher",
+        Arc::new(MockProvider::text("Research result")),
+        yoagent::provider::ModelConfig::mock(),
+    )
+    .with_description("Researches topics");
+
+    let result = tool
+        .execute(
+            serde_json::json!({"task": "go"}),
+            ToolContext {
+                tool_call_id: "tc-fp".into(),
+                tool_name: "researcher".into(),
+                cancel: CancellationToken::new(),
+                on_update: None,
+                on_progress: None,
+            },
+        )
+        .await
+        .expect("sub-agent should succeed");
+    let text = match &result.content[0] {
+        Content::Text { text } => text,
+        other => panic!("expected text, got {other:?}"),
+    };
+    assert!(text.contains("Research result"));
+}
+
+#[test]
+fn test_sub_agent_from_config_wires_model() {
+    // from_config selects a built-in provider from config.api and sets the id.
+    let tool = SubAgentTool::from_config(
+        "analyst",
+        yoagent::provider::ModelConfig::anthropic("claude-sonnet-5", "Sonnet 5"),
+    );
+    assert_eq!(tool.name(), "analyst");
+}
+
+#[test]
+fn test_sub_agent_from_config_with_errors_on_empty_registry() {
+    let registry = yoagent::provider::ProviderRegistry::new();
+    let err = match SubAgentTool::from_config_with(
+        &registry,
+        "analyst",
+        yoagent::provider::ModelConfig::anthropic("claude-sonnet-5", "Sonnet 5"),
+    ) {
+        Ok(_) => panic!("empty registry must fail"),
+        Err(e) => e,
+    };
+    assert_eq!(
+        err,
+        yoagent::AgentBuildError::NoProviderForProtocol(
+            yoagent::provider::ApiProtocol::AnthropicMessages
+        )
+    );
+}

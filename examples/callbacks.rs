@@ -70,10 +70,8 @@ async fn main() {
         }
     }
 
-    let mut agent = Agent::new(provider)
+    let mut agent = Agent::from_provider(provider, yoagent::provider::ModelConfig::mock())
         .with_system_prompt("You are helpful.")
-        .with_model("mock")
-        .with_api_key("test")
         .with_tools(vec![Box::new(GreetTool)])
         // Limit to 5 turns (plenty for this example)
         .on_before_turn(|messages, turn| {

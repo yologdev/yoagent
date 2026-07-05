@@ -4,11 +4,12 @@ use super::model::{ApiProtocol, ModelConfig};
 use super::traits::*;
 use crate::types::*;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 /// Registry of all available stream providers, keyed by API protocol.
 pub struct ProviderRegistry {
-    providers: HashMap<ApiProtocol, Box<dyn StreamProvider>>,
+    providers: HashMap<ApiProtocol, Arc<dyn StreamProvider>>,
 }
 
 impl ProviderRegistry {
@@ -21,10 +22,21 @@ impl ProviderRegistry {
 
     /// Register a provider for a given protocol.
     pub fn register(&mut self, protocol: ApiProtocol, provider: impl StreamProvider + 'static) {
-        self.providers.insert(protocol, Box::new(provider));
+        self.providers.insert(protocol, Arc::new(provider));
     }
 
-    /// Get a provider for a given protocol.
+    /// Resolve the provider for a protocol as a shared handle.
+    ///
+    /// Unlike [`get`](Self::get), this hands out an owned `Arc` that can be
+    /// stored (e.g. by [`Agent::from_config`](crate::Agent::from_config)),
+    /// so callers don't have to borrow the registry for the provider's
+    /// lifetime.
+    pub fn resolve(&self, protocol: &ApiProtocol) -> Option<Arc<dyn StreamProvider>> {
+        self.providers.get(protocol).cloned()
+    }
+
+    /// Borrow the provider for a protocol for a transient call. Prefer
+    /// [`resolve`](Self::resolve) when you need to keep the handle.
     pub fn get(&self, protocol: &ApiProtocol) -> Option<&dyn StreamProvider> {
         self.providers.get(protocol).map(|p| p.as_ref())
     }
@@ -242,5 +254,76 @@ mod resolve_key_tests {
             Some("from-generic-fallback")
         );
         std::env::remove_var("YOAGENT_API_KEY");
+    }
+}
+
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+
+    /// Every `ApiProtocol` variant. The wildcard-free `match` is a compile
+    /// forcing-function: adding a variant fails to build here until it's added
+    /// to the list (and, in turn, registered in `default()` below), so the
+    /// "default registry is complete" invariant behind `from_config`'s unwrap
+    /// cannot silently rot.
+    fn all_protocols() -> Vec<ApiProtocol> {
+        fn _assert_exhaustive(p: ApiProtocol) {
+            match p {
+                ApiProtocol::AnthropicMessages
+                | ApiProtocol::OpenAiCompletions
+                | ApiProtocol::OpenAiResponses
+                | ApiProtocol::AzureOpenAiResponses
+                | ApiProtocol::GoogleGenerativeAi
+                | ApiProtocol::GoogleVertex
+                | ApiProtocol::BedrockConverseStream => {}
+            }
+        }
+        vec![
+            ApiProtocol::AnthropicMessages,
+            ApiProtocol::OpenAiCompletions,
+            ApiProtocol::OpenAiResponses,
+            ApiProtocol::AzureOpenAiResponses,
+            ApiProtocol::GoogleGenerativeAi,
+            ApiProtocol::GoogleVertex,
+            ApiProtocol::BedrockConverseStream,
+        ]
+    }
+
+    /// The default registry must resolve a provider for every protocol, so
+    /// `Agent::from_config` (which unwraps against it) can never panic.
+    #[test]
+    fn default_registry_covers_all_protocols() {
+        let registry = ProviderRegistry::default();
+        for api in all_protocols() {
+            assert!(
+                registry.resolve(&api).is_some(),
+                "default registry missing a provider for {api}"
+            );
+        }
+    }
+
+    /// Each protocol must resolve to a provider that actually *speaks* that
+    /// protocol — guards against a mis-wired `register()` line (e.g. mapping
+    /// `GoogleVertex` to the Anthropic provider) that a mere is-some check
+    /// would miss.
+    #[test]
+    fn default_registry_maps_each_protocol_to_its_own_provider() {
+        let registry = ProviderRegistry::default();
+        for api in all_protocols() {
+            let provider = registry.resolve(&api).expect("registered");
+            assert_eq!(
+                provider.protocol(),
+                Some(api),
+                "protocol {api} resolved to a provider that reports {:?}",
+                provider.protocol()
+            );
+        }
+    }
+
+    #[test]
+    fn empty_registry_resolves_nothing() {
+        assert!(ProviderRegistry::new()
+            .resolve(&ApiProtocol::AnthropicMessages)
+            .is_none());
     }
 }

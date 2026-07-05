@@ -15,6 +15,10 @@ pub struct GoogleProvider;
 
 #[async_trait]
 impl StreamProvider for GoogleProvider {
+    fn protocol(&self) -> Option<crate::provider::ApiProtocol> {
+        Some(crate::provider::ApiProtocol::GoogleGenerativeAi)
+    }
+
     async fn stream(
         &self,
         config: StreamConfig,
