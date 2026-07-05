@@ -10,27 +10,27 @@
 
 use std::sync::Arc;
 use yoagent::agent::Agent;
-use yoagent::provider::{AnthropicProvider, StreamProvider};
+use yoagent::provider::ModelConfig;
 use yoagent::sub_agent::SubAgentTool;
 use yoagent::tools;
 use yoagent::*;
 
+// Each construction resolves the Anthropic provider from the config's protocol
+// and reads ANTHROPIC_API_KEY from the environment.
+fn sonnet() -> ModelConfig {
+    ModelConfig::anthropic("claude-sonnet-5", "Sonnet 5")
+}
+
 #[tokio::main]
 async fn main() {
-    let api_key = std::env::var("ANTHROPIC_API_KEY").expect("Set ANTHROPIC_API_KEY");
-    let model = "claude-sonnet-5";
-    let provider: Arc<dyn StreamProvider> = Arc::new(AnthropicProvider);
-
     // Sub-agent 1: a researcher with file reading tools
-    let researcher = SubAgentTool::new("researcher", Arc::clone(&provider))
+    let researcher = SubAgentTool::from_config("researcher", sonnet())
         .with_description(
             "Searches and reads files to gather information. Delegate research tasks here.",
         )
         .with_system_prompt(
             "You are a research assistant. Read files and summarize findings concisely.",
         )
-        .with_model(model)
-        .with_api_key(&api_key)
         .with_tools(vec![
             Arc::new(tools::ReadFileTool::new()),
             Arc::new(tools::SearchTool::new()),
@@ -39,11 +39,9 @@ async fn main() {
         .with_max_turns(10);
 
     // Sub-agent 2: a coder with file editing tools
-    let coder = SubAgentTool::new("coder", Arc::clone(&provider))
+    let coder = SubAgentTool::from_config("coder", sonnet())
         .with_description("Writes and edits code files. Delegate coding tasks here.")
         .with_system_prompt("You are a coding assistant. Write clean, correct code. Be concise.")
-        .with_model(model)
-        .with_api_key(&api_key)
         .with_tools(vec![
             Arc::new(tools::ReadFileTool::new()),
             Arc::new(tools::WriteFileTool::new()),
@@ -52,7 +50,7 @@ async fn main() {
         .with_max_turns(15);
 
     // Parent agent: coordinates between sub-agents
-    let mut agent = Agent::new(AnthropicProvider)
+    let mut agent = Agent::from_config(sonnet())
         .with_system_prompt(
             "You are a coordinator agent. You have two sub-agents:\n\
              - 'researcher': for reading files and gathering information\n\
@@ -60,8 +58,6 @@ async fn main() {
              Delegate tasks to the appropriate sub-agent. You can run both in parallel \
              when the tasks are independent.",
         )
-        .with_model(model)
-        .with_api_key(api_key)
         .with_sub_agent(researcher)
         .with_sub_agent(coder);
 

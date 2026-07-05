@@ -4,15 +4,15 @@
 
 ```rust
 use yoagent::{Agent, AgentEvent, StreamDelta};
-use yoagent::provider::AnthropicProvider;
+use yoagent::provider::ModelConfig;
 use yoagent::tools::default_tools;
 
 #[tokio::main]
 async fn main() {
-    let mut agent = Agent::new(AnthropicProvider)
+    // The provider is selected from the config's protocol, and the API key is
+    // read from ANTHROPIC_API_KEY. Add `.with_api_key(key)` to override it.
+    let mut agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Sonnet 5"))
         .with_system_prompt("You are a helpful coding assistant.")
-        .with_model("claude-sonnet-5")
-        .with_api_key(std::env::var("ANTHROPIC_API_KEY").unwrap())
         .with_tools(default_tools());
 
     let mut rx = agent.prompt("List the files in the current directory").await;
@@ -45,19 +45,18 @@ async fn main() {
 
 ## Example with OpenAI-Compatible Provider
 
-For OpenAI, xAI, Groq, DeepSeek, Mistral, MiniMax, Z.ai, Qwen, Ollama, or any compatible API, use `OpenAiCompatProvider` with a `ModelConfig`:
+For OpenAI, xAI, Groq, DeepSeek, Mistral, MiniMax, Z.ai, Qwen, Ollama, or any compatible API, pass the matching `ModelConfig` preset — `from_config` picks the OpenAI-compatible provider and resolves the provider's env key automatically:
 
 ```rust
 use yoagent::{Agent, AgentEvent};
-use yoagent::provider::OpenAiCompatProvider;
+use yoagent::provider::ModelConfig;
 use yoagent::tools::default_tools;
 
 #[tokio::main]
 async fn main() {
-    let mut agent = Agent::new(OpenAiCompatProvider)
+    // Provider inferred from the preset; key from OPENAI_API_KEY.
+    let mut agent = Agent::from_config(ModelConfig::openai("gpt-5.5", "GPT-5.5"))
         .with_system_prompt("You are a helpful assistant.")
-        .with_model("gpt-5.5")
-        .with_api_key(std::env::var("OPENAI_API_KEY").unwrap())
         .with_tools(default_tools());
 
     let mut rx = agent.prompt("What is 2 + 2?").await;
@@ -82,15 +81,13 @@ async fn main() {
 
 ```rust
 use yoagent::{Agent, AgentEvent, StreamDelta};
-use yoagent::provider::AnthropicProvider;
+use yoagent::provider::ModelConfig;
 use yoagent::tools::default_tools;
 
 #[tokio::main]
 async fn main() {
-    let mut agent = Agent::new(AnthropicProvider)
+    let mut agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Sonnet 5"))
         .with_system_prompt("You are a helpful assistant.")
-        .with_model("claude-sonnet-5")
-        .with_api_key(std::env::var("ANTHROPIC_API_KEY").unwrap())
         .with_tools(default_tools());
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();

@@ -91,15 +91,15 @@ tokio = { version = "1", features = ["full"] }
 
 ```rust
 use yoagent::agent::Agent;
-use yoagent::provider::AnthropicProvider;
+use yoagent::provider::ModelConfig;
 use yoagent::types::*;
 
 #[tokio::main]
 async fn main() {
-    let mut agent = Agent::new(AnthropicProvider)
-        .with_system_prompt("You are a helpful assistant.")
-        .with_model("claude-sonnet-5")
-        .with_api_key(std::env::var("ANTHROPIC_API_KEY").unwrap());
+    // Provider is selected from the config's protocol; the key is read from
+    // ANTHROPIC_API_KEY. Call `.with_api_key(key)` to pass one explicitly.
+    let mut agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Sonnet 5"))
+        .with_system_prompt("You are a helpful assistant.");
 
     let mut rx = agent.prompt("What is Rust's ownership model?").await;
 
@@ -131,7 +131,7 @@ use yoagent::SkillSet;
 
 let skills = SkillSet::load(&["./skills"])?;
 
-let agent = Agent::new(AnthropicProvider)
+let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Sonnet 5"))
     .with_system_prompt("You are a coding assistant.")
     .with_skills(skills)   // Injects skill index into system prompt
     .with_tools(tools);

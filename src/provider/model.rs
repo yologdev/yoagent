@@ -346,6 +346,23 @@ pub struct ModelConfig {
 }
 
 impl ModelConfig {
+    /// A minimal config for tests. Pair with
+    /// [`Agent::from_provider`](crate::Agent::from_provider) and a
+    /// [`MockProvider`](crate::provider::MockProvider) so tests can use the
+    /// [`from_config`](crate::Agent::from_config)-style construction path
+    /// without ceremony. `provider` is `"mock"`, cost rates are all zero, and
+    /// the protocol is arbitrary (dispatch is bypassed when the provider is
+    /// passed explicitly).
+    pub fn mock() -> Self {
+        Self::custom(
+            ApiProtocol::AnthropicMessages,
+            "mock",
+            "http://mock.invalid",
+            "mock",
+            "Mock",
+        )
+    }
+
     /// Create a config for any protocol without a dedicated preset
     /// (Bedrock, Vertex, Azure, or future protocols).
     ///

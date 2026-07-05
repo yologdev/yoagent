@@ -3,17 +3,16 @@
 //! Run with: ANTHROPIC_API_KEY=sk-... cargo run --example basic
 
 use yoagent::agent::Agent;
-use yoagent::provider::AnthropicProvider;
+use yoagent::provider::ModelConfig;
 use yoagent::*;
 
 #[tokio::main]
 async fn main() {
-    let api_key = std::env::var("ANTHROPIC_API_KEY").expect("Set ANTHROPIC_API_KEY");
-
-    let mut agent = Agent::new(AnthropicProvider)
-        .with_system_prompt("You are a helpful assistant. Be concise.")
-        .with_model("claude-sonnet-5")
-        .with_api_key(api_key);
+    // The Anthropic provider is selected from the config's protocol, and the
+    // API key is read from ANTHROPIC_API_KEY. Add `.with_api_key(key)` to
+    // pass one explicitly.
+    let mut agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Sonnet 5"))
+        .with_system_prompt("You are a helpful assistant. Be concise.");
 
     println!("Sending prompt...");
 

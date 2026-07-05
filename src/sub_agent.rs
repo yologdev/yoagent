@@ -90,6 +90,41 @@ impl SubAgentTool {
         }
     }
 
+    /// Create a sub-agent from a name and [`ModelConfig`], selecting the
+    /// built-in provider for the config's protocol.
+    ///
+    /// Mirrors [`Agent::from_config`](crate::Agent::from_config): the model
+    /// id, provider, and pricing come from one config, and the API key is
+    /// resolved from the provider-conventional env var unless set explicitly
+    /// with [`with_api_key`](Self::with_api_key).
+    pub fn from_config(name: impl Into<String>, config: ModelConfig) -> Self {
+        let provider = crate::provider::ProviderRegistry::default()
+            .resolve(&config.api)
+            .expect("default registry covers all built-in protocols");
+        Self::new(name, provider).configured_for(config)
+    }
+
+    /// Create a sub-agent from a name, explicit provider, and [`ModelConfig`].
+    ///
+    /// The escape hatch for custom providers and test doubles (pair with
+    /// [`ModelConfig::mock`](crate::provider::ModelConfig::mock)). Mirrors
+    /// [`Agent::from_provider`](crate::Agent::from_provider).
+    pub fn from_provider(
+        name: impl Into<String>,
+        provider: Arc<dyn StreamProvider>,
+        config: ModelConfig,
+    ) -> Self {
+        Self::new(name, provider).configured_for(config)
+    }
+
+    /// Set the model id and stash the config on a freshly-constructed
+    /// sub-agent (provider already wired).
+    fn configured_for(mut self, config: ModelConfig) -> Self {
+        self.model = config.id.clone();
+        self.model_config = Some(config);
+        self
+    }
+
     pub fn with_description(mut self, desc: impl Into<String>) -> Self {
         self.tool_description = desc.into();
         self

@@ -71,8 +71,119 @@ pub struct Agent {
     pending_completion: Option<JoinHandle<(Vec<Box<dyn AgentTool>>, Vec<AgentMessage>)>>,
 }
 
+/// Error building an [`Agent`] from a [`ModelConfig`] and a registry.
+///
+/// Only returned by [`Agent::from_config_with`]; the built-in
+/// [`Agent::from_config`] uses a complete registry and cannot fail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AgentBuildError {
+    /// The registry has no provider registered for the config's protocol.
+    NoProviderForProtocol(crate::provider::ApiProtocol),
+}
+
+impl std::fmt::Display for AgentBuildError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoProviderForProtocol(api) => write!(
+                f,
+                "no provider registered for protocol {api}; register one on the \
+                 ProviderRegistry or use Agent::from_provider with an explicit provider"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AgentBuildError {}
+
 impl Agent {
+    /// Construct from an explicit provider, then configure with
+    /// [`with_model`](Self::with_model) / [`with_api_key`](Self::with_api_key).
+    ///
+    /// Prefer [`from_config`](Self::from_config) (provider + env key resolved
+    /// from one `ModelConfig`) or [`from_provider`](Self::from_provider) for a
+    /// custom provider; both avoid the provider↔config mismatch this
+    /// constructor allows. Kept for backward compatibility.
     pub fn new(provider: impl StreamProvider + 'static) -> Self {
+        Self::with_provider_arc(Arc::new(provider))
+    }
+
+    /// Build an [`Agent`] from a [`ModelConfig`], selecting the built-in
+    /// provider for the config's protocol and resolving the API key from the
+    /// provider-conventional environment variable.
+    ///
+    /// This is the primary constructor: the model id, provider, context
+    /// window, and pricing all come from the one `ModelConfig`, so there's no
+    /// provider↔config mismatch to get wrong and no model id to pass twice.
+    /// An explicit key set later via [`with_api_key`](Self::with_api_key)
+    /// always overrides the environment.
+    ///
+    /// ```no_run
+    /// use yoagent::{Agent, provider::ModelConfig};
+    /// // provider auto-selected from config.api; key from ANTHROPIC_API_KEY
+    /// let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Sonnet 5"));
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Never panics for a built-in protocol — the default registry covers all
+    /// of them. Use [`from_config_with`](Self::from_config_with) with a custom
+    /// registry when a protocol may be unregistered.
+    pub fn from_config(config: ModelConfig) -> Self {
+        Self::from_config_with(&crate::provider::ProviderRegistry::default(), config)
+            .expect("default registry covers all built-in protocols")
+    }
+
+    /// Like [`from_config`](Self::from_config) but resolves the provider from a
+    /// caller-supplied registry, returning an error if the config's protocol
+    /// isn't registered.
+    pub fn from_config_with(
+        registry: &crate::provider::ProviderRegistry,
+        config: ModelConfig,
+    ) -> Result<Self, AgentBuildError> {
+        let provider = registry
+            .resolve(&config.api)
+            .ok_or(AgentBuildError::NoProviderForProtocol(config.api))?;
+        Ok(Self::with_provider_arc(provider).configured_for(config))
+    }
+
+    /// Build an [`Agent`] from an explicit provider plus its [`ModelConfig`].
+    ///
+    /// The escape hatch for custom [`StreamProvider`] implementations that
+    /// aren't in any registry (including test doubles — pair with
+    /// [`ModelConfig::mock`](crate::provider::ModelConfig::mock)). The config
+    /// is still required so the model id, context window, and pricing stay
+    /// defined together; the API key is resolved from the environment unless
+    /// set explicitly.
+    pub fn from_provider(provider: impl StreamProvider + 'static, config: ModelConfig) -> Self {
+        Self::with_provider_arc(Arc::new(provider)).configured_for(config)
+    }
+
+    /// Switch the model mid-session, re-selecting the built-in provider for
+    /// the new protocol and re-resolving the environment API key (an explicit
+    /// key set via [`with_api_key`](Self::with_api_key) is preserved).
+    ///
+    /// Uses the default registry; an agent built with a custom provider via
+    /// [`from_provider`](Self::from_provider) should switch by constructing
+    /// again rather than calling this.
+    pub fn set_model(&mut self, config: ModelConfig) {
+        if let Some(provider) = crate::provider::ProviderRegistry::default().resolve(&config.api) {
+            self.provider = provider;
+        }
+        self.model = config.id.clone();
+        self.model_config = Some(config);
+    }
+
+    /// Apply a `ModelConfig` to a freshly-constructed agent: set the model id
+    /// and stash the config (provider is already wired). Key stays lazily
+    /// resolved from the config's provider env var unless set explicitly.
+    fn configured_for(mut self, config: ModelConfig) -> Self {
+        self.model = config.id.clone();
+        self.model_config = Some(config);
+        self
+    }
+
+    fn with_provider_arc(provider: Arc<dyn StreamProvider>) -> Self {
         Self {
             system_prompt: String::new(),
             model: String::new(),
@@ -83,7 +194,7 @@ impl Agent {
             model_config: None,
             messages: Vec::new(),
             tools: Vec::new(),
-            provider: Arc::new(provider),
+            provider,
             steering_queue: Arc::new(Mutex::new(Vec::new())),
             follow_up_queue: Arc::new(Mutex::new(Vec::new())),
             steering_mode: QueueMode::OneAtATime,

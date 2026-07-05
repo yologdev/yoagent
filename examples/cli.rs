@@ -26,7 +26,7 @@
 
 use std::io::{self, BufRead, Write};
 use yoagent::agent::Agent;
-use yoagent::provider::{AnthropicProvider, GoogleProvider, ModelConfig, OpenAiCompatProvider};
+use yoagent::provider::ModelConfig;
 use yoagent::skills::SkillSet;
 use yoagent::tools::default_tools;
 use yoagent::*;
@@ -126,20 +126,10 @@ async fn main() {
         SkillSet::load(&skill_dirs).expect("Failed to load skills")
     };
 
-    let mut agent = if let Some(ref url) = api_url {
-        if provider_name.as_deref() == Some("ollama") {
-            Agent::new(OpenAiCompatProvider).with_model_config(ModelConfig::ollama(url, &model))
-        } else {
-            Agent::new(OpenAiCompatProvider).with_model_config(ModelConfig::local(url, &model))
-        }
-    } else if let Some(ref prov) = provider_name {
-        make_provider_agent(prov, &model)
-    } else {
-        Agent::new(AnthropicProvider)
-    };
-    agent = agent
+    let mut agent = build_agent(&api_url, &provider_name, &model)
         .with_system_prompt(SYSTEM_PROMPT)
-        .with_model(&model)
+        // from_config already resolves the provider-conventional env key; this
+        // override preserves the CLI's API_KEY fallback (empty = leave to env).
         .with_api_key(&api_key)
         .with_skills(skills.clone())
         .with_tools(default_tools());
@@ -189,22 +179,8 @@ async fn main() {
             }
             s if s.starts_with("/model ") => {
                 let new_model = s.trim_start_matches("/model ").trim();
-                agent = if let Some(ref url) = api_url {
-                    if provider_name.as_deref() == Some("ollama") {
-                        Agent::new(OpenAiCompatProvider)
-                            .with_model_config(ModelConfig::ollama(url, new_model))
-                    } else {
-                        Agent::new(OpenAiCompatProvider)
-                            .with_model_config(ModelConfig::local(url, new_model))
-                    }
-                } else if let Some(ref prov) = provider_name {
-                    make_provider_agent(prov, new_model)
-                } else {
-                    Agent::new(AnthropicProvider)
-                };
-                agent = agent
+                agent = build_agent(&api_url, &provider_name, new_model)
                     .with_system_prompt(SYSTEM_PROMPT)
-                    .with_model(new_model)
                     .with_api_key(&api_key)
                     .with_skills(skills.clone())
                     .with_tools(default_tools());
@@ -334,36 +310,46 @@ async fn main() {
     println!("\n{DIM}  bye 👋{RESET}\n");
 }
 
+/// Select the config for the requested provider/URL and build an agent from
+/// it. A local/OpenAI-compatible URL wins; then a named provider; else
+/// Anthropic. Every branch flows through `from_config`, so the provider,
+/// model id, and context window all come from a single `ModelConfig`.
+fn build_agent(api_url: &Option<String>, provider_name: &Option<String>, model: &str) -> Agent {
+    if let Some(url) = api_url {
+        let config = if provider_name.as_deref() == Some("ollama") {
+            ModelConfig::ollama(url, model)
+        } else {
+            ModelConfig::local(url, model)
+        };
+        Agent::from_config(config)
+    } else if let Some(prov) = provider_name {
+        make_provider_agent(prov, model)
+    } else {
+        Agent::from_config(ModelConfig::anthropic(model, model))
+    }
+}
+
 fn make_provider_agent(provider: &str, model: &str) -> Agent {
-    match provider {
-        "zai" => Agent::new(OpenAiCompatProvider).with_model_config(ModelConfig::zai(model, model)),
-        "qwen" => {
-            Agent::new(OpenAiCompatProvider).with_model_config(ModelConfig::qwen(model, model))
-        }
-        "openai" => {
-            Agent::new(OpenAiCompatProvider).with_model_config(ModelConfig::openai(model, model))
-        }
-        "xai" => Agent::new(OpenAiCompatProvider).with_model_config(ModelConfig::xai(model, model)),
-        "groq" => {
-            Agent::new(OpenAiCompatProvider).with_model_config(ModelConfig::groq(model, model))
-        }
-        "deepseek" => {
-            Agent::new(OpenAiCompatProvider).with_model_config(ModelConfig::deepseek(model, model))
-        }
-        "mistral" => {
-            Agent::new(OpenAiCompatProvider).with_model_config(ModelConfig::mistral(model, model))
-        }
-        "minimax" => {
-            Agent::new(OpenAiCompatProvider).with_model_config(ModelConfig::minimax(model, model))
-        }
-        "ollama" => Agent::new(OpenAiCompatProvider)
-            .with_model_config(ModelConfig::ollama("http://localhost:11434/v1", model)),
-        "google" => Agent::new(GoogleProvider).with_model_config(ModelConfig::google(model, model)),
+    // One `from_config` per provider: the config carries the protocol (so the
+    // right provider is selected), the model id, context window, and pricing.
+    // No provider↔config pairing to get wrong, and no model id passed twice.
+    let config = match provider {
+        "zai" => ModelConfig::zai(model, model),
+        "qwen" => ModelConfig::qwen(model, model),
+        "openai" => ModelConfig::openai(model, model),
+        "xai" => ModelConfig::xai(model, model),
+        "groq" => ModelConfig::groq(model, model),
+        "deepseek" => ModelConfig::deepseek(model, model),
+        "mistral" => ModelConfig::mistral(model, model),
+        "minimax" => ModelConfig::minimax(model, model),
+        "ollama" => ModelConfig::ollama("http://localhost:11434/v1", model),
+        "google" => ModelConfig::google(model, model),
         other => {
             eprintln!("Unknown provider: {other}. Supported: zai, qwen, openai, xai, groq, deepseek, mistral, minimax, ollama, google.");
             std::process::exit(1);
         }
-    }
+    };
+    Agent::from_config(config)
 }
 
 fn truncate(s: &str, max: usize) -> &str {

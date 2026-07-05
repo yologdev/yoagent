@@ -593,3 +593,101 @@ async fn test_env_var_fallback_resolves_api_key() {
     run_one_prompt(&mut agent).await;
     assert_eq!(*captured.lock().unwrap(), "cerebras-env-key");
 }
+
+// ---------------------------------------------------------------------------
+// 0.10 construction API: from_config / from_provider / from_config_with / set_model
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_from_provider_runs_end_to_end() {
+    // from_provider + ModelConfig::mock() is the test-double construction path.
+    let mut agent = Agent::from_provider(
+        MockProvider::text("Hi from mock"),
+        yoagent::provider::ModelConfig::mock(),
+    );
+    assert_eq!(agent.model, "mock");
+
+    let mut rx = agent.prompt("hello").await;
+    let mut events = Vec::new();
+    while let Some(e) = rx.recv().await {
+        events.push(e);
+    }
+    agent.finish().await;
+    assert_eq!(agent.messages().len(), 2);
+}
+
+#[test]
+fn test_from_config_wires_model_and_config() {
+    // from_config selects a built-in provider from config.api, sets the id,
+    // and stashes pricing so session_cost_usd can price the session.
+    let mut mc = yoagent::provider::ModelConfig::anthropic("claude-sonnet-5", "Sonnet 5");
+    mc.cost.input_per_million = 3.0;
+    let agent = Agent::from_config(mc).with_messages(vec![assistant_with_usage(some_usage())]);
+    assert_eq!(agent.model, "claude-sonnet-5");
+    assert!(
+        agent.session_cost_usd().is_some_and(|c| c > 0.0),
+        "from_config must carry the config's pricing"
+    );
+}
+
+#[tokio::test]
+async fn test_from_config_resolves_env_key() {
+    std::env::set_var("OPENROUTER_API_KEY", "openrouter-from-config");
+    let captured = Arc::new(std::sync::Mutex::new(String::new()));
+    // from_provider carries the config (so provider="openrouter" drives env
+    // resolution) while letting us capture the resolved key.
+    let mut agent = Agent::from_provider(
+        KeyCapturingProvider {
+            captured: captured.clone(),
+        },
+        yoagent::provider::ModelConfig::custom(
+            yoagent::provider::ApiProtocol::OpenAiCompletions,
+            "openrouter",
+            "http://unused.invalid",
+            "m",
+            "M",
+        ),
+    );
+    run_one_prompt(&mut agent).await;
+    assert_eq!(*captured.lock().unwrap(), "openrouter-from-config");
+}
+
+#[test]
+fn test_from_config_with_errors_on_empty_registry() {
+    let registry = yoagent::provider::ProviderRegistry::new();
+    // Agent isn't Debug, so match instead of expect_err.
+    let err = match Agent::from_config_with(
+        &registry,
+        yoagent::provider::ModelConfig::anthropic("claude-sonnet-5", "Sonnet 5"),
+    ) {
+        Ok(_) => panic!("empty registry must fail"),
+        Err(e) => e,
+    };
+    assert_eq!(
+        err,
+        yoagent::AgentBuildError::NoProviderForProtocol(
+            yoagent::provider::ApiProtocol::AnthropicMessages
+        )
+    );
+}
+
+#[tokio::test]
+async fn test_set_model_switches_model_id() {
+    let mut agent = Agent::from_config(yoagent::provider::ModelConfig::anthropic(
+        "claude-sonnet-5",
+        "Sonnet 5",
+    ));
+    assert_eq!(agent.model, "claude-sonnet-5");
+    agent.set_model(yoagent::provider::ModelConfig::anthropic(
+        "claude-opus-4-8",
+        "Opus 4.8",
+    ));
+    assert_eq!(agent.model, "claude-opus-4-8");
+}
+
+#[test]
+fn test_model_config_mock_is_unpriced() {
+    let mc = yoagent::provider::ModelConfig::mock();
+    assert_eq!(mc.provider, "mock");
+    assert!(!mc.cost.is_configured());
+}
