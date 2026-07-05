@@ -187,7 +187,13 @@ impl StreamProvider for GoogleProvider {
 
                                 // Process usage
                                 if let Some(u) = &chunk.usage_metadata {
-                                    usage.input = u.prompt_token_count.unwrap_or(0);
+                                    // promptTokenCount includes cached tokens;
+                                    // keep `input` as the uncached remainder so
+                                    // downstream sums don't double-count.
+                                    usage.input = u
+                                        .prompt_token_count
+                                        .unwrap_or(0)
+                                        .saturating_sub(u.cached_content_token_count.unwrap_or(0));
                                     usage.output = u.candidates_token_count.unwrap_or(0);
                                     usage.total_tokens = u.total_token_count.unwrap_or(0);
                                     usage.cache_read = u.cached_content_token_count.unwrap_or(0);

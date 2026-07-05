@@ -346,21 +346,39 @@ async fn run_loop(
             turn_number += 1;
 
             // Compact context if configured (tiered: tool outputs → summarize → drop).
-            // The context tracker blends real provider usage with estimation;
-            // when real usage shows the char-based estimate runs low (images,
-            // non-Latin text), scale the budget proportionally so compaction
-            // triggers at the true context size.
+            //
+            // Calibration: the tracker's hybrid figure is anchored on provider
+            // usage, which counts the FULL request (system prompt + tool
+            // schemas + any estimation shortfall on messages), while
+            // `total_tokens` counts messages only. The difference is a
+            // measured overhead; subtracting it from the budget makes the
+            // strategy's message-token checks equivalent to "true window
+            // occupancy <= max_context_tokens". The static
+            // `system_prompt_tokens` reserve is zeroed in the calibrated
+            // config because the measured overhead already includes the real
+            // system prompt. A floor of 10% of the configured budget
+            // guarantees a mis-measured overhead can never wipe the history.
             if let Some(ref ctx_config) = config.context_config {
                 let estimated = context::total_tokens(&context.messages);
                 let hybrid = context_tracker.estimate_context_tokens(&context.messages);
+                let overhead = hybrid.saturating_sub(estimated);
                 let calibrated;
-                let effective_config = if hybrid > estimated && estimated > 0 {
+                let effective_config = if overhead > 0 {
+                    let floor = ctx_config.max_context_tokens / 10;
                     calibrated = ContextConfig {
-                        max_context_tokens: ((ctx_config.max_context_tokens as u64
-                            * estimated as u64)
-                            / hybrid as u64) as usize,
+                        max_context_tokens: ctx_config
+                            .max_context_tokens
+                            .saturating_sub(overhead)
+                            .max(floor),
+                        system_prompt_tokens: 0,
                         ..ctx_config.clone()
                     };
+                    tracing::debug!(
+                        "compaction budget calibrated: {} -> {} (measured overhead: {} tokens)",
+                        ctx_config.max_context_tokens,
+                        calibrated.max_context_tokens,
+                        overhead
+                    );
                     &calibrated
                 } else {
                     ctx_config
@@ -665,8 +683,11 @@ async fn stream_assistant_response(
                 // Abort forwarder to prevent forwarding events from failed attempt
                 forward_handle.abort();
                 attempt += 1;
+                // Server-provided Retry-After wins over backoff, but is
+                // clamped to max_delay_ms so a bad header can't stall the loop.
                 let delay = e
                     .retry_after()
+                    .map(|d| d.min(std::time::Duration::from_millis(retry.max_delay_ms)))
                     .unwrap_or_else(|| retry.delay_for_attempt(attempt));
                 crate::retry::log_retry(attempt, retry.max_retries, &delay, e);
                 tokio::time::sleep(delay).await;

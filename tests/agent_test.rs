@@ -439,3 +439,157 @@ async fn test_queue_inspection_and_take() {
     assert_eq!(agent.follow_up_queue_len(), 0);
     assert!(agent.follow_up_queue_snapshot().is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// session_cost_usd
+// ---------------------------------------------------------------------------
+
+fn assistant_with_usage(usage: Usage) -> AgentMessage {
+    AgentMessage::Llm(Message::assistant(
+        vec![Content::Text { text: "ok".into() }],
+        StopReason::Stop,
+        "id",
+        "model",
+        usage,
+    ))
+}
+
+fn some_usage() -> Usage {
+    Usage {
+        input: 1_000_000,
+        output: 500_000,
+        cache_read: 0,
+        cache_write: 0,
+        total_tokens: 1_500_000,
+    }
+}
+
+#[test]
+fn session_cost_usd_none_without_model_config() {
+    let agent =
+        Agent::new(MockProvider::text("x")).with_messages(vec![assistant_with_usage(some_usage())]);
+    assert_eq!(agent.session_cost_usd(), None);
+}
+
+#[test]
+fn session_cost_usd_none_when_rates_unconfigured() {
+    // ModelConfig::custom has all-zero cost rates: pricing is unknown, so
+    // the answer must be None ("can't price"), not Some(0.0) ("free").
+    let mc = yoagent::provider::ModelConfig::custom(
+        yoagent::provider::ApiProtocol::OpenAiCompletions,
+        "local",
+        "http://localhost:8080/v1",
+        "m",
+        "M",
+    );
+    let agent = Agent::new(MockProvider::text("x"))
+        .with_model_config(mc)
+        .with_messages(vec![assistant_with_usage(some_usage())]);
+    assert_eq!(agent.session_cost_usd(), None);
+}
+
+#[test]
+fn session_cost_usd_sums_assistant_turns_only() {
+    let mut mc = yoagent::provider::ModelConfig::custom(
+        yoagent::provider::ApiProtocol::OpenAiCompletions,
+        "local",
+        "http://localhost:8080/v1",
+        "m",
+        "M",
+    );
+    mc.cost.input_per_million = 3.0;
+    mc.cost.output_per_million = 15.0;
+    let expected_per_turn = mc.cost.cost_usd(&some_usage());
+
+    let agent = Agent::new(MockProvider::text("x"))
+        .with_model_config(mc)
+        .with_messages(vec![
+            AgentMessage::Llm(Message::user("hi")),
+            assistant_with_usage(some_usage()),
+            assistant_with_usage(some_usage()),
+        ]);
+    let total = agent.session_cost_usd().expect("rates are configured");
+    assert!(total > 0.0);
+    assert!((total - 2.0 * expected_per_turn).abs() < 1e-9);
+}
+
+// ---------------------------------------------------------------------------
+// API-key resolution: explicit key wins; env var is the fallback
+// ---------------------------------------------------------------------------
+
+/// Records the api_key each stream call receives.
+struct KeyCapturingProvider {
+    captured: Arc<std::sync::Mutex<String>>,
+}
+
+#[async_trait::async_trait]
+impl yoagent::provider::StreamProvider for KeyCapturingProvider {
+    async fn stream(
+        &self,
+        config: yoagent::provider::StreamConfig,
+        tx: mpsc::UnboundedSender<yoagent::provider::StreamEvent>,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<Message, yoagent::provider::ProviderError> {
+        *self.captured.lock().unwrap() = config.api_key.clone();
+        let msg = Message::assistant(
+            vec![Content::Text { text: "ok".into() }],
+            StopReason::Stop,
+            "mock",
+            "mock",
+            Usage::default(),
+        );
+        let _ = tx.send(yoagent::provider::StreamEvent::Start);
+        let _ = tx.send(yoagent::provider::StreamEvent::Done {
+            message: msg.clone(),
+        });
+        Ok(msg)
+    }
+}
+
+/// Run one prompt to completion so the provider records the resolved key.
+async fn run_one_prompt(agent: &mut Agent) {
+    let mut rx = agent.prompt("hi").await;
+    while rx.recv().await.is_some() {}
+    agent.finish().await;
+}
+
+#[tokio::test]
+async fn test_explicit_api_key_wins_over_env() {
+    // Each key-resolution test uses its own env var to stay race-free under
+    // parallel test execution.
+    std::env::set_var("ZAI_API_KEY", "env-key-should-lose");
+    let captured = Arc::new(std::sync::Mutex::new(String::new()));
+    let mut agent = Agent::new(KeyCapturingProvider {
+        captured: captured.clone(),
+    })
+    .with_model("m")
+    .with_api_key("explicit-key")
+    .with_model_config(yoagent::provider::ModelConfig::custom(
+        yoagent::provider::ApiProtocol::OpenAiCompletions,
+        "zai",
+        "http://localhost:8080/v1",
+        "m",
+        "M",
+    ));
+    run_one_prompt(&mut agent).await;
+    assert_eq!(*captured.lock().unwrap(), "explicit-key");
+}
+
+#[tokio::test]
+async fn test_env_var_fallback_resolves_api_key() {
+    std::env::set_var("CEREBRAS_API_KEY", "cerebras-env-key");
+    let captured = Arc::new(std::sync::Mutex::new(String::new()));
+    let mut agent = Agent::new(KeyCapturingProvider {
+        captured: captured.clone(),
+    })
+    .with_model("m")
+    .with_model_config(yoagent::provider::ModelConfig::custom(
+        yoagent::provider::ApiProtocol::OpenAiCompletions,
+        "cerebras",
+        "http://localhost:8080/v1",
+        "m",
+        "M",
+    ));
+    run_one_prompt(&mut agent).await;
+    assert_eq!(*captured.lock().unwrap(), "cerebras-env-key");
+}

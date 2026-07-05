@@ -42,6 +42,15 @@ pub struct CostConfig {
 }
 
 impl CostConfig {
+    /// Whether any rate is set. All-zero rates mean pricing is unknown
+    /// (custom/local models), not that the model is free.
+    pub fn is_configured(&self) -> bool {
+        self.input_per_million != 0.0
+            || self.output_per_million != 0.0
+            || self.cache_read_per_million != 0.0
+            || self.cache_write_per_million != 0.0
+    }
+
     /// Dollar cost of a usage record at these per-million-token rates.
     ///
     /// Consumed by [`crate::Agent::session_cost_usd`]; also usable directly
@@ -312,8 +321,10 @@ pub struct ModelConfig {
     /// Base URL for API requests (without trailing slash).
     pub base_url: String,
     /// Whether this model supports reasoning/thinking. When `false` and a
-    /// `thinking_level` is requested, the agent logs a warning (the request
-    /// is still sent — gate behavior stays with the caller).
+    /// `thinking_level` is requested, the [`Agent`](crate::Agent) wrapper
+    /// logs a warning; sub-agents and direct `agent_loop` calls do not. The
+    /// request is still sent either way — gate behavior stays with the
+    /// caller.
     pub reasoning: bool,
     /// Context window size in tokens.
     pub context_window: u32,

@@ -137,7 +137,9 @@ impl SubAgentTool {
         self
     }
 
-    /// Set the sampling temperature for the sub-agent.
+    /// Set the sampling temperature for the sub-agent. Note: the newest
+    /// reasoning models (e.g. Claude Fable 5 / Opus 4.7+) reject sampling
+    /// parameters — leave unset for those.
     pub fn with_temperature(mut self, temperature: f32) -> Self {
         self.temperature = Some(temperature);
         self
@@ -296,13 +298,12 @@ impl AgentTool for SubAgentTool {
             provider: self.provider.clone(),
             model: self.model.clone(),
             api_key: if self.api_key.is_empty() {
-                crate::provider::resolve_api_key(
+                crate::provider::resolve_api_key_or_warn(
                     self.model_config
                         .as_ref()
                         .map(|m| m.provider.as_str())
                         .unwrap_or("anthropic"),
                 )
-                .unwrap_or_default()
             } else {
                 self.api_key.clone()
             },

@@ -227,6 +227,48 @@ fn is_context_overflow(status: u16, message: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn headers_with_retry_after(value: &str) -> reqwest::header::HeaderMap {
+        let mut h = reqwest::header::HeaderMap::new();
+        h.insert(reqwest::header::RETRY_AFTER, value.parse().unwrap());
+        h
+    }
+
+    #[test]
+    fn parse_retry_after_whole_seconds() {
+        assert_eq!(
+            parse_retry_after(&headers_with_retry_after("5")),
+            Some(5000)
+        );
+    }
+
+    #[test]
+    fn parse_retry_after_fractional_seconds() {
+        assert_eq!(
+            parse_retry_after(&headers_with_retry_after("1.5")),
+            Some(1500)
+        );
+    }
+
+    #[test]
+    fn parse_retry_after_rejects_negative() {
+        assert_eq!(parse_retry_after(&headers_with_retry_after("-1")), None);
+    }
+
+    #[test]
+    fn parse_retry_after_rejects_http_date() {
+        // The HTTP-date form of Retry-After is not supported; must not
+        // misparse as a huge delay.
+        assert_eq!(
+            parse_retry_after(&headers_with_retry_after("Wed, 21 Oct 2015 07:28:00 GMT")),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_retry_after_missing_header() {
+        assert_eq!(parse_retry_after(&reqwest::header::HeaderMap::new()), None);
+    }
+
     #[test]
     fn classify_anthropic_overflow() {
         let err =

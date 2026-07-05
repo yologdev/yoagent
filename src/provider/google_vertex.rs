@@ -191,6 +191,8 @@ async fn parse_google_sse_response(
                                 candidates_token_count: Option<u64>,
                                 #[serde(default, rename = "totalTokenCount")]
                                 total_token_count: Option<u64>,
+                                #[serde(default, rename = "cachedContentTokenCount")]
+                                cached_content_token_count: Option<u64>,
                             }
 
                             let parsed: Chunk = match serde_json::from_str(data) {
@@ -250,8 +252,15 @@ async fn parse_google_sse_response(
                             }
 
                             if let Some(u) = parsed.usage_metadata {
-                                usage.input = u.prompt_token_count.unwrap_or(0);
+                                // promptTokenCount includes cached tokens;
+                                // keep `input` as the uncached remainder so
+                                // downstream sums don't double-count.
+                                usage.input = u
+                                    .prompt_token_count
+                                    .unwrap_or(0)
+                                    .saturating_sub(u.cached_content_token_count.unwrap_or(0));
                                 usage.output = u.candidates_token_count.unwrap_or(0);
+                                usage.cache_read = u.cached_content_token_count.unwrap_or(0);
                                 usage.total_tokens = u.total_token_count.unwrap_or(0);
                             }
                         }

@@ -7,7 +7,7 @@
 //! # Quick start
 //!
 //! ```no_run
-//! use yoagent::{Agent, AgentMessage, provider::AnthropicProvider, tools};
+//! use yoagent::{Agent, provider::AnthropicProvider, tools};
 //!
 //! # #[tokio::main]
 //! # async fn main() {
@@ -37,8 +37,9 @@
 //!   via the [`AgentTool`] trait. [MCP](mcp) servers and
 //!   [OpenAPI specs](https://docs.rs/yoagent/latest/yoagent/openapi/index.html)
 //!   (feature `openapi`) become tools transparently.
-//! - **Steering** — interrupt a running agent mid-tool-execution
-//!   ([`Agent::steer`]), queue follow-ups, inspect/edit the queues.
+//! - **Steering** — inject guidance into a running agent ([`Agent::steer`]);
+//!   picked up between tool executions (per batch under the default parallel
+//!   strategy). Queue follow-ups, inspect/edit the queues.
 //! - **Sub-agents** ([`SubAgentTool`]) — delegation with per-sub-agent models
 //!   and [`SharedState`] for passing artifacts by reference.
 //! - **Context management** ([`context`]) — token tracking and tiered

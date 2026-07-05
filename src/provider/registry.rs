@@ -137,7 +137,13 @@ mod tests {
 /// | anything else | `YOAGENT_API_KEY`, then `API_KEY` |
 pub fn resolve_api_key(provider: &str) -> Option<String> {
     use std::env::var;
-    let first = |names: &[&str]| names.iter().find_map(|n| var(n).ok());
+    let first = |names: &[&str]| {
+        names.iter().find_map(|n| {
+            var(n).ok().inspect(|_| {
+                tracing::debug!("resolved API key for provider '{}' from ${}", provider, n)
+            })
+        })
+    };
     match provider {
         "anthropic" => first(&["ANTHROPIC_API_KEY"]),
         "openai" => first(&["OPENAI_API_KEY"]),
@@ -164,6 +170,52 @@ pub fn resolve_api_key(provider: &str) -> Option<String> {
         "vertex" => None,
         "local" | "ollama" => Some(String::new()),
         _ => first(&["YOAGENT_API_KEY", "API_KEY"]),
+    }
+}
+
+/// Like [`resolve_api_key`], but warns (via `tracing`) when resolution fails
+/// for a provider that needs a key, then falls back to an empty string so
+/// the provider returns a clear authentication error instead of the failure
+/// being invisible until the first request.
+pub(crate) fn resolve_api_key_or_warn(provider: &str) -> String {
+    match resolve_api_key(provider) {
+        Some(key) => key,
+        None => {
+            tracing::warn!(
+                "no API key found for provider '{}': {}; requests will fail \
+                 with an authentication error",
+                provider,
+                api_key_env_hint(provider)
+            );
+            String::new()
+        }
+    }
+}
+
+/// Remedy fragment for the missing-key warning, matching the
+/// [`resolve_api_key`] table.
+fn api_key_env_hint(provider: &str) -> &'static str {
+    match provider {
+        "anthropic" => "set ANTHROPIC_API_KEY or call .with_api_key(...)",
+        "openai" => "set OPENAI_API_KEY or call .with_api_key(...)",
+        "google" => "set GEMINI_API_KEY (or GOOGLE_API_KEY) or call .with_api_key(...)",
+        "xai" => "set XAI_API_KEY or call .with_api_key(...)",
+        "groq" => "set GROQ_API_KEY or call .with_api_key(...)",
+        "deepseek" => "set DEEPSEEK_API_KEY or call .with_api_key(...)",
+        "mistral" => "set MISTRAL_API_KEY or call .with_api_key(...)",
+        "zai" => "set ZAI_API_KEY or call .with_api_key(...)",
+        "minimax" => "set MINIMAX_API_KEY or call .with_api_key(...)",
+        "openrouter" => "set OPENROUTER_API_KEY or call .with_api_key(...)",
+        "cerebras" => "set CEREBRAS_API_KEY or call .with_api_key(...)",
+        "qwen" => "set DASHSCOPE_API_KEY or call .with_api_key(...)",
+        "opencode-zen" | "opencode-go" => "set OPENCODE_API_KEY or call .with_api_key(...)",
+        "azure" => "set AZURE_OPENAI_API_KEY or call .with_api_key(...)",
+        "bedrock" => {
+            "set AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY (+ AWS_SESSION_TOKEN) \
+             or call .with_api_key(\"access:secret[:token]\")"
+        }
+        "vertex" => "pass a short-lived OAuth token via .with_api_key(...)",
+        _ => "set YOAGENT_API_KEY (or API_KEY) or call .with_api_key(...)",
     }
 }
 

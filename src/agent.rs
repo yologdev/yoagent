@@ -487,9 +487,12 @@ impl Agent {
     ///
     /// # Panics
     ///
-    /// Panics if the agent is already streaming (call [`Agent::finish`] or
-    /// await the previous run first). A misuse-`Result` variant is planned
-    /// for 0.10.
+    /// Panics if the agent still counts as streaming — in practice only when
+    /// a previous `*_with_sender` future was dropped mid-run, which leaves
+    /// the agent stuck in the streaming state ([`Agent::finish`] cannot
+    /// recover it; recreate the agent). Runs started by the
+    /// receiver-returning methods are joined automatically. A
+    /// misuse-`Result` variant is planned for 0.10.
     pub async fn prompt(&mut self, text: impl Into<String>) -> mpsc::UnboundedReceiver<AgentEvent> {
         let msg = AgentMessage::Llm(Message::user(text));
         self.prompt_messages(vec![msg]).await
@@ -502,9 +505,12 @@ impl Agent {
     ///
     /// # Panics
     ///
-    /// Panics if the agent is already streaming (call [`Agent::finish`] or
-    /// await the previous run first). A misuse-`Result` variant is planned
-    /// for 0.10.
+    /// Panics if the agent still counts as streaming — in practice only when
+    /// a previous `*_with_sender` future was dropped mid-run, which leaves
+    /// the agent stuck in the streaming state ([`Agent::finish`] cannot
+    /// recover it; recreate the agent). Runs started by the
+    /// receiver-returning methods are joined automatically. A
+    /// misuse-`Result` variant is planned for 0.10.
     pub async fn prompt_messages(
         &mut self,
         messages: Vec<AgentMessage>,
@@ -562,9 +568,12 @@ impl Agent {
     ///
     /// # Panics
     ///
-    /// Panics if the agent is already streaming (call [`Agent::finish`] or
-    /// await the previous run first). A misuse-`Result` variant is planned
-    /// for 0.10.
+    /// Panics if the agent still counts as streaming — in practice only when
+    /// a previous `*_with_sender` future was dropped mid-run, which leaves
+    /// the agent stuck in the streaming state ([`Agent::finish`] cannot
+    /// recover it; recreate the agent). Runs started by the
+    /// receiver-returning methods are joined automatically. A
+    /// misuse-`Result` variant is planned for 0.10.
     pub async fn prompt_with_sender(
         &mut self,
         text: impl Into<String>,
@@ -579,9 +588,12 @@ impl Agent {
     ///
     /// # Panics
     ///
-    /// Panics if the agent is already streaming (call [`Agent::finish`] or
-    /// await the previous run first). A misuse-`Result` variant is planned
-    /// for 0.10.
+    /// Panics if the agent still counts as streaming — in practice only when
+    /// a previous `*_with_sender` future was dropped mid-run, which leaves
+    /// the agent stuck in the streaming state ([`Agent::finish`] cannot
+    /// recover it; recreate the agent). Runs started by the
+    /// receiver-returning methods are joined automatically. A
+    /// misuse-`Result` variant is planned for 0.10.
     pub async fn prompt_messages_with_sender(
         &mut self,
         messages: Vec<AgentMessage>,
@@ -622,8 +634,10 @@ impl Agent {
     ///
     /// # Panics
     ///
-    /// Panics if the agent is already streaming or if there are no messages
-    /// to continue from. A misuse-`Result` variant is planned for 0.10.
+    /// Panics if there are no messages to continue from, or if a previous
+    /// `*_with_sender` future was dropped mid-run (the agent is stuck in the
+    /// streaming state; [`Agent::finish`] cannot recover it — recreate the
+    /// agent). A misuse-`Result` variant is planned for 0.10.
     pub async fn continue_loop(&mut self) -> mpsc::UnboundedReceiver<AgentEvent> {
         self.finish().await; // restore from previous if needed
 
@@ -658,8 +672,10 @@ impl Agent {
     ///
     /// # Panics
     ///
-    /// Panics if the agent is already streaming or if there are no messages
-    /// to continue from. A misuse-`Result` variant is planned for 0.10.
+    /// Panics if there are no messages to continue from, or if a previous
+    /// `*_with_sender` future was dropped mid-run (the agent is stuck in the
+    /// streaming state; [`Agent::finish`] cannot recover it — recreate the
+    /// agent). A misuse-`Result` variant is planned for 0.10.
     pub async fn continue_loop_with_sender(&mut self, tx: mpsc::UnboundedSender<AgentEvent>) {
         self.finish().await; // restore from previous if needed
 
@@ -727,17 +743,22 @@ impl Agent {
             .as_ref()
             .map(|m| m.provider.as_str())
             .unwrap_or("anthropic");
-        crate::provider::resolve_api_key(provider).unwrap_or_default()
+        crate::provider::resolve_api_key_or_warn(provider)
     }
 
     /// Total dollar cost of the assistant turns currently in history, using
     /// the model's [`CostConfig`](crate::provider::CostConfig) rates.
     ///
-    /// Returns `None` when no `ModelConfig` is set. Rates come from the
+    /// Returns `None` when no `ModelConfig` is set or when the config's
+    /// rates are all zero (pricing unknown — e.g. custom or local models),
+    /// so `None` means "can't price this", never "free". Rates come from the
     /// *current* model config; sessions that switched models mid-way are
     /// priced entirely at the current rates.
     pub fn session_cost_usd(&self) -> Option<f64> {
         let cost = &self.model_config.as_ref()?.cost;
+        if !cost.is_configured() {
+            return None;
+        }
         Some(
             self.messages
                 .iter()
