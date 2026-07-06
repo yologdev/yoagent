@@ -15,7 +15,7 @@ In a multi-turn agent loop, each request sends the full context: system prompt +
 | **DeepSeek** | Automatic prefix cache | Varies by model | None needed |
 | **Google Gemini** | Implicit (automatic) | Varies | None needed |
 | **Azure OpenAI** | Automatic (same as OpenAI) | 50% on hits | None needed |
-| **Amazon Bedrock** | Automatic (where supported) | Varies | None needed |
+| **Amazon Bedrock** | None (no automatic caching) | — | Not supported |
 
 ### What Gets Cached (Anthropic)
 

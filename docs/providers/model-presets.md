@@ -133,10 +133,10 @@ For legacy aliases, set `ThinkingLevel` to match the alias behavior:
 
 ```rust
 let chat_agent = Agent::from_config(ModelConfig::deepseek("deepseek-chat", "DeepSeek Chat"))
-    .with_thinking_level(ThinkingLevel::Off);
+    .with_thinking(ThinkingLevel::Off);
 
 let reasoner_agent = Agent::from_config(ModelConfig::deepseek("deepseek-reasoner", "DeepSeek Reasoner"))
-    .with_thinking_level(ThinkingLevel::High);
+    .with_thinking(ThinkingLevel::High);
 ```
 
 Older DeepSeek reasoning models had stricter feature limits than the current V4 API. In particular, historical `deepseek-reasoner` documentation did not support function calling. If you need tools, prefer current V4 model IDs unless you have tested the legacy alias for your workflow.

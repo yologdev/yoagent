@@ -34,11 +34,11 @@ All providers and built-in tools are included by default. Optional features:
 
 | Feature | Dependencies | Description |
 |---------|-------------|-------------|
-| `openapi` | `openapiv3`, `serde_yaml` | Auto-generate tools from OpenAPI 3.0 specs |
+| `openapi` | `openapiv3`, `serde_yaml_ng` | Auto-generate tools from OpenAPI 3.0 specs |
 
 Enable in `Cargo.toml`:
 
 ```toml
 [dependencies]
-yoagent = { version = "0.5", features = ["openapi"] }
+yoagent = { version = "0.10", features = ["openapi"] }
 ```
