@@ -13,10 +13,8 @@ std::fs::write("conversation.json", &json)?;
 
 // Later, in a new process:
 let json = std::fs::read_to_string("conversation.json")?;
-let mut agent = Agent::new(provider)
-    .with_system_prompt("You are helpful.")
-    .with_model("claude-sonnet-5")
-    .with_api_key(api_key);
+let mut agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"))
+    .with_system_prompt("You are helpful.");
 
 agent.restore_messages(&json)?;
 
@@ -30,10 +28,9 @@ For constructing an agent with pre-existing history:
 
 ```rust
 let saved: Vec<AgentMessage> = serde_json::from_str(&json)?;
-let agent = Agent::new(provider)
+let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"))
     .with_messages(saved)
-    .with_system_prompt("...")
-    .with_model("...");
+    .with_system_prompt("...");
 ```
 
 ## JSON Format

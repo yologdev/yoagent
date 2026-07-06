@@ -6,15 +6,14 @@ use tokio::sync::mpsc;
 use yoagent::agent::Agent;
 use yoagent::provider::mock::*;
 use yoagent::provider::MockProvider;
+use yoagent::provider::ModelConfig;
 use yoagent::*;
 
 #[tokio::test]
 async fn test_agent_simple_prompt() {
     let provider = MockProvider::text("Hello!");
-    let mut agent = Agent::new(provider)
-        .with_system_prompt("You are helpful.")
-        .with_model("mock")
-        .with_api_key("test");
+    let mut agent =
+        Agent::from_provider(provider, ModelConfig::mock()).with_system_prompt("You are helpful.");
 
     let mut rx = agent.prompt("Hi there").await;
 
@@ -32,10 +31,7 @@ async fn test_agent_simple_prompt() {
 #[tokio::test]
 async fn test_agent_reset() {
     let provider = MockProvider::text("Hello!");
-    let mut agent = Agent::new(provider)
-        .with_system_prompt("test")
-        .with_model("mock")
-        .with_api_key("test");
+    let mut agent = Agent::from_provider(provider, ModelConfig::mock()).with_system_prompt("test");
 
     let mut rx = agent.prompt("Hi").await;
     while rx.recv().await.is_some() {}
@@ -87,10 +83,8 @@ async fn test_agent_with_tools() {
         MockResponse::Text("Echoed: hello".into()),
     ]);
 
-    let mut agent = Agent::new(provider)
+    let mut agent = Agent::from_provider(provider, ModelConfig::mock())
         .with_system_prompt("test")
-        .with_model("mock")
-        .with_api_key("test")
         .with_tools(vec![Box::new(EchoTool)]);
 
     let mut rx = agent.prompt("Echo hello").await;
@@ -101,7 +95,10 @@ async fn test_agent_with_tools() {
     assert_eq!(agent.messages().len(), 4);
 }
 
+// Deliberately exercises the deprecated builder chain (`new` + `with_model` +
+// `with_api_key`) to keep coverage of that still-present API until 1.0.
 #[tokio::test]
+#[allow(deprecated)]
 async fn test_agent_builder_pattern() {
     let provider = MockProvider::text("ok");
     let agent = Agent::new(provider)
@@ -138,10 +135,7 @@ async fn test_with_messages_builder() {
     ];
 
     let provider = MockProvider::text("ok");
-    let agent = Agent::new(provider)
-        .with_model("mock")
-        .with_api_key("test")
-        .with_messages(saved.clone());
+    let agent = Agent::from_provider(provider, ModelConfig::mock()).with_messages(saved.clone());
 
     assert_eq!(agent.messages().len(), 2);
     assert_eq!(*agent.messages(), saved[..]);
@@ -150,10 +144,7 @@ async fn test_with_messages_builder() {
 #[tokio::test]
 async fn test_save_and_restore_messages() {
     let provider = MockProvider::text("Hello!");
-    let mut agent = Agent::new(provider)
-        .with_system_prompt("test")
-        .with_model("mock")
-        .with_api_key("test");
+    let mut agent = Agent::from_provider(provider, ModelConfig::mock()).with_system_prompt("test");
 
     let mut rx = agent.prompt("Hi").await;
     while rx.recv().await.is_some() {}
@@ -162,10 +153,8 @@ async fn test_save_and_restore_messages() {
 
     // Create a fresh agent and restore
     let provider2 = MockProvider::text("ok");
-    let mut agent2 = Agent::new(provider2)
-        .with_system_prompt("test")
-        .with_model("mock")
-        .with_api_key("test");
+    let mut agent2 =
+        Agent::from_provider(provider2, ModelConfig::mock()).with_system_prompt("test");
 
     agent2
         .restore_messages(&json)
@@ -177,10 +166,8 @@ async fn test_save_and_restore_messages() {
 async fn test_agent_continues_after_restore() {
     // First agent: prompt → get response → save
     let provider1 = MockProvider::text("First response");
-    let mut agent1 = Agent::new(provider1)
-        .with_system_prompt("test")
-        .with_model("mock")
-        .with_api_key("test");
+    let mut agent1 =
+        Agent::from_provider(provider1, ModelConfig::mock()).with_system_prompt("test");
 
     let mut rx = agent1.prompt("Hello").await;
     while rx.recv().await.is_some() {}
@@ -190,10 +177,8 @@ async fn test_agent_continues_after_restore() {
     // Second agent: restore → prompt again
     // The MockProvider will receive the full restored history + new prompt
     let provider2 = MockProvider::text("Second response");
-    let mut agent2 = Agent::new(provider2)
-        .with_system_prompt("test")
-        .with_model("mock")
-        .with_api_key("test");
+    let mut agent2 =
+        Agent::from_provider(provider2, ModelConfig::mock()).with_system_prompt("test");
 
     agent2.restore_messages(&json).expect("restore");
     let mut rx = agent2.prompt("Follow up").await;
@@ -215,10 +200,7 @@ async fn test_agent_continues_after_restore() {
 #[tokio::test]
 async fn test_prompt_with_sender_streams_events() {
     let provider = MockProvider::text("Hello!");
-    let mut agent = Agent::new(provider)
-        .with_system_prompt("test")
-        .with_model("mock")
-        .with_api_key("test");
+    let mut agent = Agent::from_provider(provider, ModelConfig::mock()).with_system_prompt("test");
 
     let (tx, mut rx) = mpsc::unbounded_channel();
     let event_count = Arc::new(AtomicUsize::new(0));
@@ -243,10 +225,7 @@ async fn test_prompt_with_sender_streams_events() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_prompt_with_sender_real_time_streaming() {
     let provider = MockProvider::text("Hello!");
-    let mut agent = Agent::new(provider)
-        .with_system_prompt("test")
-        .with_model("mock")
-        .with_api_key("test");
+    let mut agent = Agent::from_provider(provider, ModelConfig::mock()).with_system_prompt("test");
 
     let (tx, mut rx) = mpsc::unbounded_channel();
     let received_during = Arc::new(AtomicUsize::new(0));
@@ -270,10 +249,7 @@ async fn test_prompt_with_sender_real_time_streaming() {
 #[tokio::test]
 async fn test_prompt_messages_with_sender() {
     let provider = MockProvider::text("Response");
-    let mut agent = Agent::new(provider)
-        .with_system_prompt("test")
-        .with_model("mock")
-        .with_api_key("test");
+    let mut agent = Agent::from_provider(provider, ModelConfig::mock()).with_system_prompt("test");
 
     let (tx, mut rx) = mpsc::unbounded_channel();
 
@@ -296,10 +272,7 @@ async fn test_prompt_messages_with_sender() {
 #[tokio::test]
 async fn test_continue_loop_with_sender() {
     let provider = MockProvider::text("Continued response");
-    let mut agent = Agent::new(provider)
-        .with_system_prompt("test")
-        .with_model("mock")
-        .with_api_key("test");
+    let mut agent = Agent::from_provider(provider, ModelConfig::mock()).with_system_prompt("test");
 
     // First, add some messages to continue from (last must not be assistant)
     agent.append_message(AgentMessage::Llm(Message::user("Hello")));
@@ -363,10 +336,8 @@ async fn test_prompt_with_sender_tools_restored() {
     }
 
     let provider = MockProvider::text("Hello!");
-    let mut agent = Agent::new(provider)
+    let mut agent = Agent::from_provider(provider, ModelConfig::mock())
         .with_system_prompt("test")
-        .with_model("mock")
-        .with_api_key("test")
         .with_tools(vec![Box::new(DummyTool)]);
 
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -387,10 +358,7 @@ async fn test_prompt_with_sender_tools_restored() {
 #[tokio::test]
 async fn test_queue_inspection_and_take() {
     let provider = MockProvider::text("Hello!");
-    let agent = Agent::new(provider)
-        .with_system_prompt("test")
-        .with_model("mock")
-        .with_api_key("test");
+    let agent = Agent::from_provider(provider, ModelConfig::mock()).with_system_prompt("test");
 
     assert_eq!(agent.steering_queue_len(), 0);
     assert!(agent.steering_queue_snapshot().is_empty());
@@ -464,7 +432,11 @@ fn some_usage() -> Usage {
     }
 }
 
+// Covers session_cost_usd's "no ModelConfig at all" branch (early `?` return).
+// Only the deprecated `Agent::new` (with no from_* config) leaves model_config
+// unset, so this test keeps that API to preserve that coverage until 1.0.
 #[test]
+#[allow(deprecated)]
 fn session_cost_usd_none_without_model_config() {
     let agent =
         Agent::new(MockProvider::text("x")).with_messages(vec![assistant_with_usage(some_usage())]);
@@ -482,8 +454,7 @@ fn session_cost_usd_none_when_rates_unconfigured() {
         "m",
         "M",
     );
-    let agent = Agent::new(MockProvider::text("x"))
-        .with_model_config(mc)
+    let agent = Agent::from_provider(MockProvider::text("x"), mc)
         .with_messages(vec![assistant_with_usage(some_usage())]);
     assert_eq!(agent.session_cost_usd(), None);
 }
@@ -501,13 +472,11 @@ fn session_cost_usd_sums_assistant_turns_only() {
     mc.cost.output_per_million = 15.0;
     let expected_per_turn = mc.cost.cost_usd(&some_usage());
 
-    let agent = Agent::new(MockProvider::text("x"))
-        .with_model_config(mc)
-        .with_messages(vec![
-            AgentMessage::Llm(Message::user("hi")),
-            assistant_with_usage(some_usage()),
-            assistant_with_usage(some_usage()),
-        ]);
+    let agent = Agent::from_provider(MockProvider::text("x"), mc).with_messages(vec![
+        AgentMessage::Llm(Message::user("hi")),
+        assistant_with_usage(some_usage()),
+        assistant_with_usage(some_usage()),
+    ]);
     let total = agent.session_cost_usd().expect("rates are configured");
     assert!(total > 0.0);
     assert!((total - 2.0 * expected_per_turn).abs() < 1e-9);
@@ -559,18 +528,19 @@ async fn test_explicit_api_key_wins_over_env() {
     // parallel test execution.
     std::env::set_var("ZAI_API_KEY", "env-key-should-lose");
     let captured = Arc::new(std::sync::Mutex::new(String::new()));
-    let mut agent = Agent::new(KeyCapturingProvider {
-        captured: captured.clone(),
-    })
-    .with_model("m")
-    .with_api_key("explicit-key")
-    .with_model_config(yoagent::provider::ModelConfig::custom(
-        yoagent::provider::ApiProtocol::OpenAiCompletions,
-        "zai",
-        "http://localhost:8080/v1",
-        "m",
-        "M",
-    ));
+    let mut agent = Agent::from_provider(
+        KeyCapturingProvider {
+            captured: captured.clone(),
+        },
+        yoagent::provider::ModelConfig::custom(
+            yoagent::provider::ApiProtocol::OpenAiCompletions,
+            "zai",
+            "http://localhost:8080/v1",
+            "m",
+            "M",
+        ),
+    )
+    .with_api_key("explicit-key");
     run_one_prompt(&mut agent).await;
     assert_eq!(*captured.lock().unwrap(), "explicit-key");
 }
@@ -579,17 +549,18 @@ async fn test_explicit_api_key_wins_over_env() {
 async fn test_env_var_fallback_resolves_api_key() {
     std::env::set_var("CEREBRAS_API_KEY", "cerebras-env-key");
     let captured = Arc::new(std::sync::Mutex::new(String::new()));
-    let mut agent = Agent::new(KeyCapturingProvider {
-        captured: captured.clone(),
-    })
-    .with_model("m")
-    .with_model_config(yoagent::provider::ModelConfig::custom(
-        yoagent::provider::ApiProtocol::OpenAiCompletions,
-        "cerebras",
-        "http://localhost:8080/v1",
-        "m",
-        "M",
-    ));
+    let mut agent = Agent::from_provider(
+        KeyCapturingProvider {
+            captured: captured.clone(),
+        },
+        yoagent::provider::ModelConfig::custom(
+            yoagent::provider::ApiProtocol::OpenAiCompletions,
+            "cerebras",
+            "http://localhost:8080/v1",
+            "m",
+            "M",
+        ),
+    );
     run_one_prompt(&mut agent).await;
     assert_eq!(*captured.lock().unwrap(), "cerebras-env-key");
 }

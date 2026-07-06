@@ -60,7 +60,7 @@ use yoagent::{Agent, SkillSet};
 
 let skills = SkillSet::load(&["./skills"])?;
 
-let agent = Agent::new(provider)
+let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"))
     .with_system_prompt("You are a coding assistant.")
     .with_skills(skills)  // Appends skill index to system prompt
     .with_tools(tools);

@@ -18,27 +18,19 @@ The routing table mirrors the Zen/Go endpoint docs as of mid-2026. OpenCode can 
 
 ## Usage
 
-Because `Agent::new()` takes a concrete provider, pair the preset with the provider matching its protocol (check `config.api`):
+`Agent::from_config` selects the built-in provider from the preset's protocol
+(`config.api`) and resolves the key from `OPENCODE_API_KEY`, so the same call
+works whichever model family you pick:
 
 ```rust
-use yoagent::provider::{AnthropicProvider, ModelConfig, OpenAiCompatProvider};
+use yoagent::provider::ModelConfig;
 use yoagent::Agent;
 
-let key = std::env::var("OPENCODE_API_KEY").unwrap();
-
 // Chat-completions model (GLM, Kimi, DeepSeek, ...)
-let config = ModelConfig::opencode_zen("glm-5.2");
-let agent = Agent::new(OpenAiCompatProvider)
-    .with_model(&config.id)
-    .with_api_key(&key)
-    .with_model_config(config);
+let agent = Agent::from_config(ModelConfig::opencode_zen("glm-5.2"));
 
 // Claude/Qwen model — Anthropic Messages protocol
-let config = ModelConfig::opencode_zen("claude-sonnet-5");
-let agent = Agent::new(AnthropicProvider)
-    .with_model(&config.id)
-    .with_api_key(&key)
-    .with_model_config(config);
+let agent = Agent::from_config(ModelConfig::opencode_zen("claude-sonnet-5"));
 ```
 
 For OpenCode Go, use `ModelConfig::opencode_go("kimi-k2.7-code")` — the base URL and protocol map differ, the usage pattern is identical.

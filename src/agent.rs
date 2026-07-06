@@ -98,7 +98,13 @@ impl Agent {
     /// Prefer [`from_config`](Self::from_config) (provider + env key resolved
     /// from one `ModelConfig`) or [`from_provider`](Self::from_provider) for a
     /// custom provider; both avoid the provider↔config mismatch this
-    /// constructor allows. Kept for backward compatibility.
+    /// constructor allows.
+    #[deprecated(
+        since = "0.10.0",
+        note = "use Agent::from_config(config) — provider + env key resolved \
+                automatically — or Agent::from_provider(provider, config) for a \
+                custom provider; will be removed in 1.0"
+    )]
     pub fn new(provider: impl StreamProvider + 'static) -> Self {
         Self::with_provider_arc(Arc::new(provider))
     }
@@ -248,6 +254,11 @@ impl Agent {
         self
     }
 
+    #[deprecated(
+        since = "0.10.0",
+        note = "the model id now comes from the ModelConfig passed to \
+                Agent::from_config / from_provider; will be removed in 1.0"
+    )]
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = model.into();
         self
@@ -268,6 +279,11 @@ impl Agent {
         self
     }
 
+    #[deprecated(
+        since = "0.10.0",
+        note = "pass the ModelConfig to Agent::from_config(config) or \
+                from_provider(provider, config) instead; will be removed in 1.0"
+    )]
     pub fn with_model_config(mut self, config: ModelConfig) -> Self {
         self.model_config = Some(config);
         self
@@ -690,10 +706,9 @@ impl Agent {
     ///
     /// ```rust,no_run
     /// # use yoagent::Agent;
-    /// # use yoagent::provider::MockProvider;
+    /// # use yoagent::provider::{MockProvider, ModelConfig};
     /// # async fn example() {
-    /// let mut agent = Agent::new(MockProvider::text("hi"))
-    ///     .with_model("mock").with_api_key("test");
+    /// let mut agent = Agent::from_provider(MockProvider::text("hi"), ModelConfig::mock());
     /// let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     /// tokio::spawn(async move {
     ///     while let Some(event) = rx.recv().await { /* real-time */ }

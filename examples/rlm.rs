@@ -54,32 +54,32 @@ async fn main() {
 
     // --- Level 2: file_analyst (leaf agent) ---
     // Has read_file + shared_state. Reads a file, writes summary to shared state.
-    let file_analyst = SubAgentTool::new("file_analyst", Arc::clone(&provider))
-        .with_description(
-            "Analyzes a single source file in depth. \
+    let file_analyst =
+        SubAgentTool::from_provider("file_analyst", Arc::clone(&provider), model_config.clone())
+            .with_description(
+                "Analyzes a single source file in depth. \
              Call with a task specifying the file path to analyze.",
-        )
-        .with_system_prompt(
-            "You are a file-level code analyst. When given a file to analyze:\n\
+            )
+            .with_system_prompt(
+                "You are a file-level code analyst. When given a file to analyze:\n\
              1. Use read_file to read the file content\n\
              2. Analyze it: purpose, key types/functions, design patterns, quality\n\
              3. Write a concise summary (under 200 words) to shared state with \
                 key 'summary:<filepath>'\n\n\
              Be specific and technical. Focus on what makes this code interesting.",
-        )
-        .with_model(&model_config.id)
-        .with_api_key(&api_key)
-        .with_model_config(model_config.clone())
-        .with_shared_state(state.clone())
-        .with_tools(vec![Arc::new(tools::ReadFileTool::new())])
-        .with_max_turns(5);
+            )
+            .with_api_key(&api_key)
+            .with_shared_state(state.clone())
+            .with_tools(vec![Arc::new(tools::ReadFileTool::new())])
+            .with_max_turns(5);
 
     // --- Level 1: lead_analyst (orchestrator agent) ---
     // Has list_files + read_file to explore, file_analyst to delegate, shared_state for results.
-    let lead_analyst = SubAgentTool::new("lead_analyst", Arc::clone(&provider))
-        .with_description("Orchestrates codebase analysis")
-        .with_system_prompt(
-            "You are a lead code analyst orchestrating a codebase review.\n\n\
+    let lead_analyst =
+        SubAgentTool::from_provider("lead_analyst", Arc::clone(&provider), model_config)
+            .with_description("Orchestrates codebase analysis")
+            .with_system_prompt(
+                "You are a lead code analyst orchestrating a codebase review.\n\n\
              IMPORTANT: Only analyze files within the target directory. Do NOT explore \
              parent directories or other parts of the project.\n\n\
              Steps:\n\
@@ -93,17 +93,15 @@ async fn main() {
              6. Write a final synthesis report to shared state under key 'final_report'\n\n\
              The final report should identify cross-cutting themes, architectural patterns, \
              and how the files relate to each other. Keep it under 300 words.",
-        )
-        .with_model(&model_config.id)
-        .with_api_key(&api_key)
-        .with_model_config(model_config)
-        .with_shared_state(state.clone())
-        .with_tools(vec![
-            Arc::new(tools::ListFilesTool::new()),
-            Arc::new(tools::ReadFileTool::new()),
-            Arc::new(file_analyst),
-        ])
-        .with_max_turns(25);
+            )
+            .with_api_key(&api_key)
+            .with_shared_state(state.clone())
+            .with_tools(vec![
+                Arc::new(tools::ListFilesTool::new()),
+                Arc::new(tools::ReadFileTool::new()),
+                Arc::new(file_analyst),
+            ])
+            .with_max_turns(25);
 
     // --- Parent: single call triggers the full recursive chain ---
     let buf: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));

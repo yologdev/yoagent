@@ -15,7 +15,7 @@ In a multi-turn agent loop, each request sends the full context: system prompt +
 | **DeepSeek** | Automatic prefix cache | Varies by model | None needed |
 | **Google Gemini** | Implicit (automatic) | Varies | None needed |
 | **Azure OpenAI** | Automatic (same as OpenAI) | 50% on hits | None needed |
-| **Amazon Bedrock** | Automatic (where supported) | Varies | None needed |
+| **Amazon Bedrock** | None (no automatic caching) | — | Not supported |
 
 ### What Gets Cached (Anthropic)
 
@@ -44,7 +44,7 @@ Caching is **enabled by default** with automatic breakpoint placement. No config
 ```rust
 use yoagent::{CacheConfig, CacheStrategy};
 
-let agent = Agent::new(provider)
+let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"))
     .with_cache_config(CacheConfig {
         enabled: false,
         ..Default::default()
@@ -58,7 +58,7 @@ or OpenAI.
 ### Fine-Grained Control
 
 ```rust
-let agent = Agent::new(provider)
+let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"))
     .with_cache_config(CacheConfig {
         enabled: true,
         strategy: CacheStrategy::Manual {

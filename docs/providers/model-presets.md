@@ -38,15 +38,12 @@ The named presets (`claude_fable_5`, `claude_opus_4_8`, `claude_sonnet_5`, `clau
 These constructors all use `OpenAiCompatProvider`:
 
 ```rust
-use yoagent::provider::{ModelConfig, OpenAiCompatProvider};
+use yoagent::provider::ModelConfig;
 
-let agent = Agent::new(OpenAiCompatProvider)
-    .with_model_config(ModelConfig::deepseek(
-        "deepseek-v4-flash",
-        "DeepSeek V4 Flash",
-    ))
-    .with_model("deepseek-v4-flash")
-    .with_api_key(std::env::var("DEEPSEEK_API_KEY").unwrap());
+let agent = Agent::from_config(ModelConfig::deepseek(
+    "deepseek-v4-flash",
+    "DeepSeek V4 Flash",
+));
 ```
 
 OpenAI-compatible presets also set `OpenAiCompat` flags for provider-specific API differences, such as `max_tokens` vs. `max_completion_tokens`, reasoning fields, tool result formatting, and streaming usage support. See [OpenAI Compatible](openai-compat.md) for the full quirk-flag list.
@@ -135,15 +132,11 @@ yoagent also sends DeepSeek's current request shape:
 For legacy aliases, set `ThinkingLevel` to match the alias behavior:
 
 ```rust
-let chat_agent = Agent::new(OpenAiCompatProvider)
-    .with_model_config(ModelConfig::deepseek("deepseek-chat", "DeepSeek Chat"))
-    .with_model("deepseek-chat")
-    .with_thinking_level(ThinkingLevel::Off);
+let chat_agent = Agent::from_config(ModelConfig::deepseek("deepseek-chat", "DeepSeek Chat"))
+    .with_thinking(ThinkingLevel::Off);
 
-let reasoner_agent = Agent::new(OpenAiCompatProvider)
-    .with_model_config(ModelConfig::deepseek("deepseek-reasoner", "DeepSeek Reasoner"))
-    .with_model("deepseek-reasoner")
-    .with_thinking_level(ThinkingLevel::High);
+let reasoner_agent = Agent::from_config(ModelConfig::deepseek("deepseek-reasoner", "DeepSeek Reasoner"))
+    .with_thinking(ThinkingLevel::High);
 ```
 
 Older DeepSeek reasoning models had stricter feature limits than the current V4 API. In particular, historical `deepseek-reasoner` documentation did not support function calling. If you need tools, prefer current V4 model IDs unless you have tested the legacy alias for your workflow.

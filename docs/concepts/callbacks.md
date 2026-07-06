@@ -9,7 +9,7 @@ yoagent provides three lifecycle callbacks that let you observe and control the 
 Called before each LLM call. Receives the current message history and the turn number (0-indexed). Return `false` to abort the loop.
 
 ```rust
-let agent = Agent::new(provider)
+let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"))
     .on_before_turn(|messages, turn| {
         println!("Turn {} starting with {} messages", turn, messages.len());
         turn < 10 // Stop after 10 turns
@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex};
 let total_cost = Arc::new(Mutex::new(0u64));
 let cost_tracker = total_cost.clone();
 
-let agent = Agent::new(provider)
+let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"))
     .on_after_turn(move |_messages, usage| {
         let mut cost = cost_tracker.lock().unwrap();
         *cost += usage.input + usage.output;
@@ -39,7 +39,7 @@ let agent = Agent::new(provider)
 Called when the LLM returns a `StopReason::Error`. Receives the error message string.
 
 ```rust
-let agent = Agent::new(provider)
+let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"))
     .on_error(|err| {
         eprintln!("LLM error: {}", err);
         // Log to monitoring, send alert, etc.
@@ -51,7 +51,7 @@ let agent = Agent::new(provider)
 All callbacks are optional and independent:
 
 ```rust
-let agent = Agent::new(provider)
+let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"))
     .on_before_turn(|_msgs, turn| turn < 20)
     .on_after_turn(|msgs, usage| {
         println!("Messages: {}, Tokens: {}/{}", msgs.len(), usage.input, usage.output);

@@ -246,7 +246,7 @@ impl CompactionStrategy for MyCompaction {
     }
 }
 
-let agent = Agent::new(provider)
+let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"))
     .with_compaction_strategy(MyCompaction);
 ```
 

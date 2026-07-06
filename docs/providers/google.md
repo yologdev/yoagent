@@ -8,11 +8,9 @@ Two providers for Google's Gemini models:
 ## Google AI Studio
 
 ```rust
-use yoagent::provider::GoogleProvider;
+use yoagent::provider::ModelConfig;
 
-let agent = Agent::new(GoogleProvider)
-    .with_model("gemini-2.5-flash")
-    .with_api_key(std::env::var("GOOGLE_API_KEY").unwrap());
+let agent = Agent::from_config(ModelConfig::google("gemini-2.5-flash", "Gemini 2.5 Flash"));
 ```
 
 ### API Details

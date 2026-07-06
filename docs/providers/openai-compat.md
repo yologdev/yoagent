@@ -9,11 +9,9 @@ For the first-class `ModelConfig::*` constructors and default model metadata, se
 Requires a `ModelConfig` with `compat` flags set in `StreamConfig.model_config`:
 
 ```rust
-use yoagent::provider::{OpenAiCompatProvider, ModelConfig};
+use yoagent::provider::ModelConfig;
 
-let agent = Agent::new(OpenAiCompatProvider)
-    .with_model("gpt-5.5")
-    .with_api_key(std::env::var("OPENAI_API_KEY").unwrap());
+let agent = Agent::from_config(ModelConfig::openai("gpt-5.5", "GPT-5.5"));
 ```
 
 ## OpenAiCompat Quirk Flags
@@ -98,21 +96,16 @@ Use `ModelConfig::ollama()` for Ollama, or `ModelConfig::local()` for any other 
 
 ```rust
 use yoagent::agent::Agent;
-use yoagent::provider::{OpenAiCompatProvider, ModelConfig};
+use yoagent::provider::ModelConfig;
 
-let agent = Agent::new(OpenAiCompatProvider)
-    .with_model_config(ModelConfig::local("http://localhost:1234/v1", "my-model"))
-    .with_model("my-model")
-    .with_api_key(""); // empty string OK for local
+// The `local` provider resolves to an empty API key automatically — none needed.
+let agent = Agent::from_config(ModelConfig::local("http://localhost:1234/v1", "my-model"));
 ```
 
 For Ollama:
 
 ```rust
-let agent = Agent::new(OpenAiCompatProvider)
-    .with_model_config(ModelConfig::ollama("http://localhost:11434/v1", "llama3.1:8b"))
-    .with_model("llama3.1:8b")
-    .with_api_key("");
+let agent = Agent::from_config(ModelConfig::ollama("http://localhost:11434/v1", "llama3.1:8b"));
 ```
 
 Or via the CLI example:
@@ -161,7 +154,7 @@ Copilot token as the API key:
 
 ```rust
 use yoagent::agent::Agent;
-use yoagent::provider::{OpenAiCompatProvider, ModelConfig, OpenAiCompat};
+use yoagent::provider::{ModelConfig, OpenAiCompat};
 
 let mut config = ModelConfig::openai_compat(
     "https://api.githubcopilot.com",
@@ -173,9 +166,7 @@ let mut config = ModelConfig::openai_compat(
 config.headers.insert("Copilot-Integration-Id".into(), "vscode-chat".into());
 config.headers.insert("Editor-Version".into(), "Neovim/0.10.0".into());
 
-let agent = Agent::new(OpenAiCompatProvider)
-    .with_model_config(config)
-    .with_model("gpt-5.5")
+let agent = Agent::from_config(config)
     .with_api_key(copilot_token); // see below
 ```
 

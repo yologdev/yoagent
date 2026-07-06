@@ -2,14 +2,15 @@
 
 ## Requirements
 
-- Rust 2021 edition (1.56+, recommended 1.75+)
+- Rust 1.86+ (2021 edition)
 - Tokio async runtime
 
 ## Add to Cargo.toml
 
 ```toml
 [dependencies]
-yoagent = "0.5"
+yoagent = "0.10"
+tokio = { version = "1", features = ["full"] }
 ```
 
 ## Dependencies
@@ -33,11 +34,11 @@ All providers and built-in tools are included by default. Optional features:
 
 | Feature | Dependencies | Description |
 |---------|-------------|-------------|
-| `openapi` | `openapiv3`, `serde_yaml` | Auto-generate tools from OpenAPI 3.0 specs |
+| `openapi` | `openapiv3`, `serde_yaml_ng` | Auto-generate tools from OpenAPI 3.0 specs |
 
 Enable in `Cargo.toml`:
 
 ```toml
 [dependencies]
-yoagent = { version = "0.5", features = ["openapi"] }
+yoagent = { version = "0.10", features = ["openapi"] }
 ```

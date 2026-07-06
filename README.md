@@ -83,7 +83,7 @@ Or add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-yoagent = "0.9"
+yoagent = "0.10"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -179,19 +179,17 @@ Found 3 TODOs:
 <summary>OpenAI-compatible provider example</summary>
 
 ```rust
-use yoagent::provider::{ModelConfig, ProviderRegistry};
+use yoagent::{Agent, provider::ModelConfig};
 
-// Use a first-class OpenAI-compatible provider preset
-let model = ModelConfig::groq("llama-3.3-70b-versatile", "Llama 3.3 70B");
+// Pick a first-class preset — the provider is inferred from it, and the API
+// key is read from that provider's conventional env var (GROQ_API_KEY here).
+let mut agent = Agent::from_config(ModelConfig::groq("llama-3.3-70b-versatile", "Llama 3.3 70B"));
 
-// Or Qwen / DashScope
-let model = ModelConfig::qwen("qwen3.6-plus", "Qwen 3.6 Plus");
+// Or Qwen / DashScope (DASHSCOPE_API_KEY):
+let mut agent = Agent::from_config(ModelConfig::qwen("qwen3.6-plus", "Qwen 3.6 Plus"));
 
-// Or Google Gemini
-let model = ModelConfig::google("gemini-2.5-pro", "Gemini 2.5 Pro");
-
-// Registry dispatches to the right provider
-let registry = ProviderRegistry::default();
+// Or Google Gemini (GEMINI_API_KEY):
+let mut agent = Agent::from_config(ModelConfig::google("gemini-2.5-pro", "Gemini 2.5 Pro"));
 ```
 
 </details>

@@ -54,10 +54,10 @@ use yoagent::agent::Agent;
 use yoagent::retry::RetryConfig;
 
 // Default — 3 retries, exponential backoff (recommended)
-let agent = Agent::new(provider);
+let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"));
 
 // Custom — more retries, longer initial delay
-let agent = Agent::new(provider)
+let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"))
     .with_retry_config(RetryConfig {
         max_retries: 5,
         initial_delay_ms: 2000,
@@ -66,7 +66,7 @@ let agent = Agent::new(provider)
     });
 
 // Disable retries entirely
-let agent = Agent::new(provider)
+let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"))
     .with_retry_config(RetryConfig::none());
 ```
 

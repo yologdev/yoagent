@@ -5,11 +5,9 @@
 ## Usage
 
 ```rust
-use yoagent::provider::AnthropicProvider;
+use yoagent::provider::ModelConfig;
 
-let agent = Agent::new(AnthropicProvider)
-    .with_model("claude-sonnet-5")
-    .with_api_key(std::env::var("ANTHROPIC_API_KEY").unwrap());
+let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"));
 ```
 
 ## Features
