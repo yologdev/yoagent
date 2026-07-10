@@ -103,9 +103,10 @@ fn jsonl_roundtrip_preserves_tree_and_ids() {
     assert_eq!(restored.head(), s.head());
     // Tree shape intact: two children of root.
     assert_eq!(restored.children(&root).len(), 2);
-    // Checkpoint label survives.
+    // Checkpoint label survives and resolves to the same entry.
     let mut r = restored.clone();
     r.seek_checkpoint("tip2").unwrap();
+    assert_eq!(r.head(), s.head());
 
     // Appending after load can't collide with existing ids.
     let mut r2 = restored;
@@ -144,18 +145,15 @@ async fn fork_edit_rerun_with_agent() {
     agent.finish().await;
 
     let mut session = Session::new();
-    session.append_new(agent.messages());
+    session.append_new(agent.messages()).unwrap();
     assert_eq!(session.entries().len(), 2); // user + assistant
     session.checkpoint("turn-1").unwrap();
 
-    // "Edit" the first user message: fork from BEFORE it (root fork = seek to
-    // nothing is not a thing — fork from the first entry's parent by starting
-    // a sibling of the user message). Here: fork from turn-1's assistant to
-    // ask a different follow-up on one branch...
+    // Continue on one branch: ask a follow-up from turn-1's assistant...
     let mut rx = agent.prompt("follow-up B").await;
     while rx.recv().await.is_some() {}
     agent.finish().await;
-    session.append_new(agent.messages());
+    session.append_new(agent.messages()).unwrap();
     assert_eq!(session.entries().len(), 4);
     let tip_b = session.head().unwrap().to_string();
 
@@ -170,7 +168,7 @@ async fn fork_edit_rerun_with_agent() {
     let mut rx = agent2.prompt("follow-up C").await;
     while rx.recv().await.is_some() {}
     agent2.finish().await;
-    session.append_new(agent2.messages());
+    session.append_new(agent2.messages()).unwrap();
 
     // Two branches: B's tip and C's tip; both intact.
     assert_eq!(session.entries().len(), 6);
@@ -188,4 +186,81 @@ async fn fork_edit_rerun_with_agent() {
         },
         other => panic!("unexpected message {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Hardening from the Phase C review: divergence detection + load validation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn append_new_detects_diverged_history() {
+    // Reuse the SAME message values (timestamps included) so equality with
+    // the stored path is meaningful — exactly like a real Agent history.
+    let (a, b) = (user("a"), user("b"));
+    let mut s = Session::new();
+    s.append(a.clone());
+    s.append(b.clone());
+
+    // Shorter history than the path → divergence, nothing appended.
+    let err = s.append_new(std::slice::from_ref(&a)).unwrap_err();
+    assert!(matches!(err, SessionError::HistoryDiverged { index: 1 }));
+    assert_eq!(s.entries().len(), 2);
+
+    // Same length but rewritten prefix (what compaction does) → divergence
+    // at the mismatching index.
+    let err = s
+        .append_new(&[a.clone(), user("REWRITTEN"), user("c")])
+        .unwrap_err();
+    assert!(matches!(err, SessionError::HistoryDiverged { index: 1 }));
+    assert_eq!(s.entries().len(), 2, "no partial append on divergence");
+
+    // A genuine extension appends and reports the count.
+    let c = user("c");
+    let appended = s.append_new(&[a, b, c]).unwrap();
+    assert_eq!(appended, 1);
+    assert_eq!(s.entries().len(), 3);
+}
+
+#[test]
+fn from_jsonl_rejects_duplicate_ids() {
+    let mut s = Session::new();
+    s.append(user("x"));
+    let line = s.to_jsonl();
+    let doubled = format!("{line}\n{line}");
+    assert!(matches!(
+        Session::from_jsonl(&doubled),
+        Err(SessionError::DuplicateId(_))
+    ));
+}
+
+#[test]
+fn from_jsonl_rejects_dangling_or_forward_parent() {
+    // Build a valid line via the library, then doctor its parent to a
+    // nonexistent id (also covers cycles: a cycle needs a forward reference,
+    // which this rejects).
+    let mut s = Session::new();
+    s.append(user("x"));
+    let mut v: serde_json::Value = serde_json::from_str(&s.to_jsonl()).unwrap();
+    v["parent_id"] = serde_json::json!("e99");
+    let line = serde_json::to_string(&v).unwrap();
+
+    match Session::from_jsonl(&line) {
+        Err(SessionError::UnknownParent { id, parent }) => {
+            assert_eq!(id, "e1");
+            assert_eq!(parent, "e99");
+        }
+        other => panic!("expected UnknownParent, got {other:?}"),
+    }
+}
+
+#[test]
+fn seek_checkpoint_latest_wins_on_duplicate_labels() {
+    let mut s = Session::new();
+    s.append(user("a"));
+    s.checkpoint("mark").unwrap();
+    let b = s.append(user("b"));
+    s.checkpoint("mark").unwrap();
+
+    s.seek_checkpoint("mark").unwrap();
+    assert_eq!(s.head(), Some(b.as_str()), "most recent label wins");
 }

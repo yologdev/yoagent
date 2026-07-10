@@ -32,8 +32,11 @@ let invoice: Invoice = agent
 ```
 
 Derive the schema however you like — by hand as above, or with the
-[`schemars`](https://crates.io/crates/schemars) crate
-(`schemars::schema_for!(Invoice)`).
+[`schemars`](https://crates.io/crates/schemars) crate (convert with
+`serde_json::to_value(schemars::schema_for!(Invoice))`). Mind the provider
+dialects: OpenAI strict mode requires `additionalProperties: false` and every
+property listed in `required`; Gemini rejects `$defs`/`$ref`. Schemas are
+passed through as given.
 
 ## How each provider enforces it
 
@@ -48,9 +51,15 @@ Derive the schema however you like — by hand as above, or with the
 
 - `prompt_structured` runs the loop to completion internally and returns the
   parsed `T` — there is no event receiver for this call.
-- On parse failure you get `StructuredPromptError::Parse { error, raw }` — the
-  raw model text is preserved so you can retry or salvage.
-- On Anthropic the forced tool call preempts regular tools for that request.
+- Three error shapes: `Provider { message }` when the API call itself failed
+  (auth, network, a schema-induced 400 — retrying the parse is pointless);
+  `Parse { source, raw }` when the model's text didn't deserialize (the raw
+  text is preserved so you can retry or salvage); `NoOutput` when the run
+  produced no text. Only messages produced by **this call** are considered —
+  stale output from earlier turns is never parsed.
+- On Anthropic the forced tool call preempts regular tools for that request,
+  and **disables extended thinking** for that request (forced tool choice and
+  thinking are mutually exclusive at the API level — a warning is logged).
   Treat structured prompts as **extraction/finalization calls**, not agentic
   tool-using turns.
 - Markdown code fences around the JSON are stripped defensively before

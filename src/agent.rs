@@ -66,9 +66,6 @@ pub struct Agent {
     // Tool middleware (permissions/policy hooks)
     tool_middleware: Vec<Arc<dyn ToolMiddleware>>,
 
-    // Structured-output schema for the in-flight prompt_structured call
-    output_schema: Option<crate::provider::OutputSchema>,
-
     // Custom compaction strategy
     compaction_strategy: Option<Arc<dyn CompactionStrategy>>,
 
@@ -101,13 +98,23 @@ pub enum AgentBuildError {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum StructuredPromptError {
-    /// The run produced no assistant text to parse.
+    /// The run produced no assistant text to parse. Only messages produced by
+    /// this call are considered — earlier history is never scanned.
     #[error("model returned no output to parse")]
     NoOutput,
+    /// The provider call itself failed (auth, network, rate limits, a
+    /// schema-induced 400, ...). Retrying the parse is pointless; the message
+    /// carries the underlying provider error.
+    #[error("provider error during structured prompt: {message}")]
+    Provider { message: String },
     /// The model's output did not deserialize into the requested type.
     /// `raw` carries the model's text so callers can retry or salvage.
-    #[error("failed to parse structured output: {error}; raw output: {raw}")]
-    Parse { error: String, raw: String },
+    #[error("failed to parse structured output: {source}; raw output: {raw}")]
+    Parse {
+        #[source]
+        source: serde_json::Error,
+        raw: String,
+    },
 }
 
 impl Agent {
@@ -260,7 +267,6 @@ impl Agent {
             on_error: None,
             input_filters: Vec::new(),
             tool_middleware: Vec::new(),
-            output_schema: None,
             compaction_strategy: None,
             cancel: None,
             is_streaming: false,
@@ -698,26 +704,55 @@ impl Agent {
         text: impl Into<String>,
         schema: serde_json::Value,
     ) -> Result<T, StructuredPromptError> {
-        self.output_schema = Some(crate::provider::OutputSchema::new(
-            "structured_output",
-            schema,
-        ));
-        let mut rx = self.prompt(text).await;
+        // The schema is threaded through this call's loop config only — it is
+        // never stored on the agent, so a dropped/timed-out future cannot
+        // leave the agent stuck in schema-forcing mode.
+        let schema = crate::provider::OutputSchema::new("structured_output", schema);
+        let history_len = self.messages.len();
+
+        let msg = AgentMessage::Llm(Message::user(text));
+        let mut rx = self.prompt_messages_internal(vec![msg], Some(schema)).await;
         while rx.recv().await.is_some() {}
         self.finish().await;
-        self.output_schema = None;
 
-        let raw = self
-            .messages
-            .iter()
+        // Only messages produced by THIS run count — never parse stale text
+        // from earlier turns. (Compaction can shrink history below
+        // history_len; saturating slice keeps the scan sound.)
+        let run_messages = self.messages.get(history_len.min(self.messages.len())..);
+        let last_assistant = run_messages
+            .into_iter()
+            .flatten()
             .rev()
             .find_map(|m| match m {
-                AgentMessage::Llm(Message::Assistant { content, .. }) => {
-                    content.iter().find_map(|c| match c {
-                        Content::Text { text } => Some(text.clone()),
-                        _ => None,
-                    })
-                }
+                AgentMessage::Llm(Message::Assistant {
+                    content,
+                    stop_reason,
+                    error_message,
+                    ..
+                }) => Some((content, stop_reason, error_message)),
+                _ => None,
+            });
+
+        let Some((content, stop_reason, error_message)) = last_assistant else {
+            return Err(StructuredPromptError::NoOutput);
+        };
+
+        // A failed provider call is not a parse problem — surface it as such.
+        if *stop_reason == StopReason::Error {
+            return Err(StructuredPromptError::Provider {
+                message: error_message
+                    .clone()
+                    .unwrap_or_else(|| "provider error (no detail)".into()),
+            });
+        }
+
+        // The structured payload is the LAST text block: tool-forcing unwrap
+        // appends it after any preamble text the model produced.
+        let raw = content
+            .iter()
+            .rev()
+            .find_map(|c| match c {
+                Content::Text { text } if !text.is_empty() => Some(text.clone()),
                 _ => None,
             })
             .ok_or(StructuredPromptError::NoOutput)?;
@@ -729,8 +764,8 @@ impl Agent {
             .trim_start_matches("```")
             .trim_end_matches("```")
             .trim();
-        serde_json::from_str(cleaned).map_err(|e| StructuredPromptError::Parse {
-            error: e.to_string(),
+        serde_json::from_str(cleaned).map_err(|source| StructuredPromptError::Parse {
+            source,
             raw: raw.clone(),
         })
     }
@@ -752,6 +787,17 @@ impl Agent {
         &mut self,
         messages: Vec<AgentMessage>,
     ) -> mpsc::UnboundedReceiver<AgentEvent> {
+        self.prompt_messages_internal(messages, None).await
+    }
+
+    /// Shared plumbing for `prompt_messages` and `prompt_structured`. The
+    /// structured-output schema is per-call state: it lives on this run's
+    /// `AgentLoopConfig` only, never on the agent.
+    async fn prompt_messages_internal(
+        &mut self,
+        messages: Vec<AgentMessage>,
+        output_schema: Option<crate::provider::OutputSchema>,
+    ) -> mpsc::UnboundedReceiver<AgentEvent> {
         self.finish().await; // restore from previous if needed
 
         assert!(
@@ -771,7 +817,8 @@ impl Agent {
             tools: std::mem::take(&mut self.tools),
         };
 
-        let config = self.build_config();
+        let mut config = self.build_config();
+        config.output_schema = output_schema;
 
         let handle = tokio::spawn(async move {
             let _new_messages = agent_loop(messages, &mut context, &config, tx, cancel).await;
@@ -1082,7 +1129,7 @@ impl Agent {
             on_error: self.on_error.clone(),
             input_filters: self.input_filters.clone(),
             tool_middleware: self.tool_middleware.clone(),
-            output_schema: self.output_schema.clone(),
+            output_schema: None,
             turn_delay: None,
         }
     }

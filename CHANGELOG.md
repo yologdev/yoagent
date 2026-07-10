@@ -6,6 +6,31 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Fixed (pre-release review of the items below)
+
+- `prompt_structured` now surfaces provider failures as
+  `StructuredPromptError::Provider` (previously laundered into
+  `Parse { raw: "" }`), scans only messages produced by the current call
+  (never stale history), and threads the schema per-call so a dropped/timed-
+  out future can't leave the agent stuck in schema-forcing mode.
+- Bedrock replays `Content::Thinking` blocks (with signatures) on subsequent
+  requests — previously captured and then dropped, breaking multi-turn
+  thinking + tool use with a ValidationException.
+- Anthropic structured outputs disable extended thinking for that request
+  (forced tool choice + thinking is an API-level conflict) with a warning.
+- Vertex now round-trips Gemini thought signatures on function calls (parity
+  with the Gemini API provider).
+- `Session::append_new` verifies the history still extends the session path
+  and returns `HistoryDiverged` instead of silently corrupting the tree (the
+  usual cause: context compaction); `from_jsonl` validates ids and parents
+  (duplicates/dangling/cycles rejected); `seek_checkpoint` is latest-wins.
+- A panicking `ToolMiddleware` is contained as a denial instead of killing
+  the loop task (which stripped the agent of its tools).
+- Middleware denials are logged (`tracing::warn!`) so operators see them.
+- `ToolMiddleware::before_tool` takes a `ToolCallRequest` context struct
+  (extensible without breaking implementors); `StreamConfig` and
+  `OutputSchema` are `#[non_exhaustive]` with constructors.
+
 ### Added
 
 - **Telemetry** — `tracing` spans: `agent_loop` (model), `llm_stream` per
@@ -23,7 +48,7 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 - **Session trees** — `Session`: branching conversation history with
   `append`/`seek`/`checkpoint`, fork-preserving edits, `path_messages()` for
-  branch resume, and JSONL persistence. The pi-style id/parentId tree; maps
+  branch resume, and JSONL persistence. The pi-style id/parent_id tree; maps
   to GASP's `transcripts/` tier.
 
 - **Structured outputs** — `Agent::prompt_structured::<T>(text, schema)`

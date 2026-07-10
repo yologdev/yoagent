@@ -880,12 +880,7 @@ struct DenyAll;
 
 #[async_trait::async_trait]
 impl yoagent::ToolMiddleware for DenyAll {
-    async fn before_tool(
-        &self,
-        _id: &str,
-        _name: &str,
-        _args: &serde_json::Value,
-    ) -> yoagent::ToolDecision {
+    async fn before_tool(&self, _call: &yoagent::ToolCallRequest<'_>) -> yoagent::ToolDecision {
         yoagent::ToolDecision::Deny("sub-agent policy".into())
     }
 }

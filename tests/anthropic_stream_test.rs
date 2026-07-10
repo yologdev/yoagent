@@ -39,19 +39,12 @@ fn stream_config(base_url: &str, anthropic: Option<AnthropicCompat>) -> StreamCo
     let mut mc = ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5");
     mc.base_url = base_url.to_string();
     mc.anthropic = anthropic;
-    StreamConfig {
-        model: "claude-sonnet-5".into(),
-        system_prompt: "test".into(),
-        messages: vec![Message::user("hi")],
-        tools: vec![],
-        thinking_level: ThinkingLevel::Off,
-        api_key: "test-key".into(),
-        max_tokens: Some(256),
-        temperature: None,
-        model_config: Some(mc),
-        cache_config: CacheConfig::default(),
-        output_schema: None,
-    }
+    let mut config = StreamConfig::new("claude-sonnet-5", "test-key");
+    config.system_prompt = "test".into();
+    config.messages = vec![Message::user("hi")];
+    config.max_tokens = Some(256);
+    config.model_config = Some(mc);
+    config
 }
 
 async fn run_stream(config: StreamConfig) -> Result<Message, yoagent::provider::ProviderError> {

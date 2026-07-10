@@ -20,7 +20,7 @@ let mut agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "So
 let mut rx = agent.prompt("draft a plan").await;
 while rx.recv().await.is_some() {}
 agent.finish().await;
-session.append_new(agent.messages());
+session.append_new(agent.messages())?;
 session.checkpoint("first-draft")?;
 
 // ... more turns ...
@@ -32,7 +32,7 @@ let mut agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "So
 let mut rx = agent.prompt("actually, make it a library instead").await;
 while rx.recv().await.is_some() {}
 agent.finish().await;
-session.append_new(agent.messages());          // new branch recorded
+session.append_new(agent.messages())?;          // new branch recorded
 
 // Both branches exist:
 assert_eq!(session.branch_tips().len(), 2);
@@ -46,7 +46,15 @@ let restored = Session::from_jsonl(&std::fs::read_to_string("session.jsonl")?)?;
 ```
 
 One entry per line, append-friendly, diff-friendly. On load the head is the
-last line's entry. The flat `save_messages()` / `restore_messages()` API
+last line's entry, and the file is validated (duplicate ids and
+dangling/forward parent references are rejected — which also makes cycles
+impossible).
+
+> **Compaction caveat:** `append_new` verifies the agent's history still
+> extends the session path and returns `SessionError::HistoryDiverged` when it
+> doesn't. The usual cause is context compaction (on by default) rewriting the
+> agent's messages — disable context management on session-tracked agents, or
+> rebuild the branch with `Session::from_messages` after a divergence. The flat `save_messages()` / `restore_messages()` API
 remains for single-branch persistence.
 
 ## API sketch
@@ -54,7 +62,7 @@ remains for single-branch persistence.
 | Method | Purpose |
 |---|---|
 | `append(msg) -> id` | Add as child of head, advance head |
-| `append_new(&agent_messages)` | Record everything beyond the current path — the post-run sync |
+| `append_new(&agent_messages)` | Record everything beyond the current path (verifies the prefix; errors on divergence) |
 | `seek(id)` / `seek_checkpoint(label)` | Move the head (fork point) |
 | `checkpoint(label)` | Label the head |
 | `path_messages()` | Root→head messages — feed to `Agent::with_messages` |

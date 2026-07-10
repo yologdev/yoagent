@@ -509,7 +509,17 @@ fn build_request_body(config: &StreamConfig, is_oauth: bool) -> serde_json::Valu
         body["tool_choice"] = serde_json::json!({ "type": "tool", "name": schema.name });
     }
 
-    if config.thinking_level != ThinkingLevel::Off {
+    // Forced tool_choice and extended thinking are mutually exclusive at the
+    // API level — a structured-output request wins and thinking is skipped
+    // for this call (warned, not silent).
+    let thinking_requested = config.thinking_level != ThinkingLevel::Off;
+    if thinking_requested && config.output_schema.is_some() {
+        tracing::warn!(
+            "structured outputs force tool_choice, which Anthropic rejects with \
+             extended thinking; thinking is disabled for this request"
+        );
+    }
+    if thinking_requested && config.output_schema.is_none() {
         if compat.adaptive_thinking {
             // Current generation (Claude 4.6+ / Fable 5): adaptive thinking with
             // an effort hint. Budget-based thinking is rejected with a 400.
@@ -782,6 +792,22 @@ mod tests {
 
         let empty = Usage::default();
         assert_eq!(empty.cache_hit_rate(), 0.0);
+    }
+
+    #[test]
+    fn structured_output_disables_thinking() {
+        // Forced tool_choice + extended thinking is an API-level conflict:
+        // the schema wins and no thinking field may be emitted.
+        let mut config = make_config(CacheConfig::default());
+        config.thinking_level = ThinkingLevel::High;
+        config.output_schema = Some(crate::provider::OutputSchema::new(
+            "structured_output",
+            serde_json::json!({"type": "object"}),
+        ));
+        let body = build_request_body(&config, false);
+        assert!(body["thinking"].is_null(), "thinking must be skipped");
+        assert!(body["output_config"].is_null());
+        assert_eq!(body["tool_choice"]["name"], "structured_output");
     }
 
     #[test]

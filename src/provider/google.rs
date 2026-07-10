@@ -501,6 +501,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn thinking_blocks_are_dropped_on_replay() {
+        // Gemini does not accept echoed thought summaries; signatures ride on
+        // functionCall parts instead. Pin the drop so it stays deliberate.
+        let mut config = StreamConfig::new("gemini-2.5-pro", "k");
+        config.messages = vec![
+            Message::user("go"),
+            Message::assistant(
+                vec![
+                    Content::thinking("thought"),
+                    Content::Text {
+                        text: "answer".into(),
+                    },
+                ],
+                StopReason::Stop,
+                "m",
+                "google",
+                Usage::default(),
+            ),
+        ];
+        let body = build_request_body(&config);
+        let parts = body["contents"][1]["parts"].as_array().unwrap();
+        assert_eq!(parts.len(), 1, "only the text part is replayed");
+        assert_eq!(parts[0]["text"], "answer");
+    }
+
+    #[test]
     fn thinking_level_sets_thinking_config() {
         let config = StreamConfig {
             model: "gemini-2.5-pro".into(),

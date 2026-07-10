@@ -36,7 +36,7 @@ Everything is observable via events. Supports 7 API protocols covering 20+ LLM p
 - Parallel tool execution by default — sequential and batched strategies also available
 - Sub-agents via `SubAgentTool` — delegate tasks to child agent loops with their own tools and system prompts
 - Tool middleware — async approve/deny/modify hooks gating every tool call (`with_tool_middleware`), the mechanism for permission prompts and policy engines
-- Structured outputs — `prompt_structured::<T>()` returns typed, schema-validated replies, enforced natively per provider (Anthropic tool-forcing, OpenAI `json_schema`, Gemini `responseSchema`)
+- Structured outputs — `prompt_structured::<T>()` returns typed, schema-validated replies, enforced natively where supported (Anthropic tool-forcing, OpenAI `json_schema`, Gemini `responseSchema`; other protocols log a warning)
 - Real-time event streaming — `prompt()` spawns the loop concurrently and returns events immediately; `prompt_with_sender()` accepts a caller-provided channel for custom consumption
 - Streaming tool output — tools emit real-time progress via `on_update` callback
 - Multimodal support — `Content::Image` flows through tool results across all providers
@@ -45,7 +45,7 @@ Everything is observable via events. Supports 7 API protocols covering 20+ LLM p
 - State persistence — `save_messages()` / `restore_messages()` for pause/resume workflows
 - Session trees — branching history with fork, checkpoints, and JSONL persistence (`Session`); edit an earlier turn and re-run without losing the original branch
 - Lifecycle callbacks — `before_turn`, `after_turn`, `on_error` for observability and control
-- Telemetry — `tracing` spans for the loop, each LLM stream (tokens + cost fields), and each tool execution; bridge to OpenTelemetry via `tracing-opentelemetry`, zero overhead when no subscriber is installed
+- Telemetry — `tracing` spans for the loop, each LLM stream (tokens + cost fields), and each tool execution; bridge to OpenTelemetry via `tracing-opentelemetry`, negligible overhead when no subscriber is installed
 - Full serde support — all core types implement `Serialize`/`Deserialize`/`PartialEq`
 - [AgentSkills](https://agentskills.io)-compatible skills — load skill directories, inject into system prompt, agent activates on demand
 

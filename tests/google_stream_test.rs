@@ -24,19 +24,12 @@ fn sse(events: &[&str]) -> String {
 fn stream_config(base_url: &str, messages: Vec<Message>) -> StreamConfig {
     let mut mc = ModelConfig::google(MODEL, "Gemini 2.5 Flash");
     mc.base_url = base_url.to_string();
-    StreamConfig {
-        model: MODEL.into(),
-        system_prompt: "test".into(),
-        messages,
-        tools: vec![],
-        thinking_level: ThinkingLevel::Off,
-        api_key: "test-key".into(),
-        max_tokens: Some(256),
-        temperature: None,
-        model_config: Some(mc),
-        cache_config: CacheConfig::default(),
-        output_schema: None,
-    }
+    let mut config = StreamConfig::new(MODEL, "test-key");
+    config.system_prompt = "test".into();
+    config.messages = messages;
+    config.max_tokens = Some(256);
+    config.model_config = Some(mc);
+    config
 }
 
 async fn run_stream(config: StreamConfig) -> Message {

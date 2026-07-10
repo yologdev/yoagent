@@ -24,7 +24,7 @@
 //! let mut rx = agent.prompt("hello").await;
 //! while rx.recv().await.is_some() {}
 //! agent.finish().await;
-//! session.append_new(agent.messages());
+//! session.append_new(agent.messages()).unwrap();
 //!
 //! // Checkpoint, keep working...
 //! session.checkpoint("after-hello").unwrap();
@@ -74,6 +74,20 @@ pub enum SessionError {
     /// The session is empty where an entry was required.
     #[error("session is empty")]
     Empty,
+    /// A JSONL file contained the same entry id twice.
+    #[error("duplicate session entry id: {0}")]
+    DuplicateId(String),
+    /// An entry referenced a parent that does not precede it in the file
+    /// (dangling parent or forward/cyclic reference).
+    #[error("entry {id} references unknown parent {parent}")]
+    UnknownParent { id: String, parent: String },
+    /// The history passed to `append_new` does not extend this session's
+    /// current path (e.g. context compaction rewrote the agent's messages).
+    #[error(
+        "history diverged from the session path at index {index}: the agent's \
+         messages no longer extend this branch (did compaction rewrite them?)"
+    )]
+    HistoryDiverged { index: usize },
 }
 
 /// A conversation history tree: append advances the head; seek + append forks.
@@ -117,13 +131,35 @@ impl Session {
         id
     }
 
-    /// Append every message of `full_history` beyond the current path length
-    /// — the typical post-run sync from [`Agent::messages`](crate::Agent::messages).
-    pub fn append_new(&mut self, full_history: &[AgentMessage]) {
-        let known = self.path_ids().len();
-        for m in full_history.iter().skip(known) {
-            self.append(m.clone());
+    /// Append every message of `full_history` beyond the current path — the
+    /// typical post-run sync from [`Agent::messages`](crate::Agent::messages).
+    /// Returns how many messages were appended.
+    ///
+    /// The history must **extend the current path**: `full_history[..path_len]`
+    /// is verified against the path's messages, and any mismatch (or a
+    /// shorter history) returns [`SessionError::HistoryDiverged`] instead of
+    /// silently corrupting the tree. The common cause is context compaction
+    /// (on by default) rewriting the agent's messages mid-session — disable
+    /// context management on session-tracked agents, or rebuild the branch
+    /// with [`from_messages`](Self::from_messages) after a divergence.
+    pub fn append_new(&mut self, full_history: &[AgentMessage]) -> Result<usize, SessionError> {
+        let path = self.path_messages();
+        if full_history.len() < path.len() {
+            return Err(SessionError::HistoryDiverged {
+                index: full_history.len(),
+            });
         }
+        for (i, known) in path.iter().enumerate() {
+            if &full_history[i] != known {
+                return Err(SessionError::HistoryDiverged { index: i });
+            }
+        }
+        let mut appended = 0;
+        for m in full_history.iter().skip(path.len()) {
+            self.append(m.clone());
+            appended += 1;
+        }
+        Ok(appended)
     }
 
     /// Current head entry id, if any.
@@ -155,11 +191,13 @@ impl Session {
         Ok(())
     }
 
-    /// Move the head to the entry labeled `label`.
+    /// Move the head to the entry labeled `label`. If several entries carry
+    /// the same label, the most recently created one wins.
     pub fn seek_checkpoint(&mut self, label: &str) -> Result<(), SessionError> {
         let id = self
             .entries
             .iter()
+            .rev()
             .find(|e| e.label.as_deref() == Some(label))
             .map(|e| e.id.clone())
             .ok_or_else(|| SessionError::UnknownCheckpoint(label.to_string()))?;
@@ -239,6 +277,12 @@ impl Session {
     /// to the last line's entry.
     pub fn from_jsonl(s: &str) -> Result<Self, SessionError> {
         let mut session = Self::new();
+        // `to_jsonl` writes insertion order with parents preceding children,
+        // so one streaming check enforces every tree invariant: ids unique,
+        // parents already seen (which also rules out cycles — a cycle would
+        // need a forward reference). This keeps `path_ids` provably
+        // terminating and the internal `expect`s sound.
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for (i, line) in s.lines().enumerate() {
             let line = line.trim();
             if line.is_empty() {
@@ -249,6 +293,18 @@ impl Session {
                     line: i + 1,
                     error: e.to_string(),
                 })?;
+            if seen.contains(&entry.id) {
+                return Err(SessionError::DuplicateId(entry.id));
+            }
+            if let Some(parent) = &entry.parent_id {
+                if !seen.contains(parent) {
+                    return Err(SessionError::UnknownParent {
+                        id: entry.id.clone(),
+                        parent: parent.clone(),
+                    });
+                }
+            }
+            seen.insert(entry.id.clone());
             // Track the numeric suffix so future appends can't collide.
             if let Some(n) = entry
                 .id
