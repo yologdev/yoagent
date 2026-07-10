@@ -19,6 +19,7 @@
 - [Skills](concepts/skills.md)
 - [Sub-Agents](concepts/sub-agents.md)
 - [State Persistence](concepts/persistence.md)
+- [Session Trees](concepts/session-trees.md)
 - [Lifecycle Callbacks](concepts/callbacks.md)
 
 # Guides

@@ -84,6 +84,10 @@ Behind the `openapi` Cargo feature. `OpenApiToolAdapter` parses an OpenAPI 3.0 s
 
 `McpClient` communicates via `McpTransport` trait (stdio or HTTP). `McpToolAdapter` wraps MCP tools to implement `AgentTool`, making them transparent to the agent loop. Added via `Agent::with_mcp_server_stdio()` / `with_mcp_server_http()`.
 
+### Session Trees (`session.rs`)
+
+`Session` stores history as an id/parent_id tree: `append` advances the head, `seek`/`seek_checkpoint` move it, appending after a seek forks a new branch (never overwrites). `path_messages()` feeds a branch into `Agent::with_messages`; `append_new(agent.messages())` is the post-run sync. JSONL persistence (`to_jsonl`/`from_jsonl`, head = last line). Freestanding — no loop changes; maps to GASP's `transcripts/` tier.
+
 ### Shared State (`shared_state.rs`)
 
 `SharedState` is a pluggable key-value store (`Arc<dyn SharedStateBackend>`) for sub-agent communication. It lets a parent store large artifacts once and have multiple sub-agents read/write by reference — no re-pasting into prompts.
