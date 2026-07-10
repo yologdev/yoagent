@@ -72,6 +72,8 @@ The loop: stream assistant response → extract tool calls → execute tools (pa
 - `Sequential` — one at a time, checks steering queue between each
 - `Batched { size }` — concurrent within batch, steering check between batches
 
+**Tool middleware** (`ToolMiddleware` in `types.rs`): async approve/deny/modify hooks gating every tool call, run in a chain at the single choke point (`execute_single_tool`) shared by all three strategies. `Deny(reason)` becomes an error tool result the LLM sees (loop continues); `Modify(args)` rewrites the call. Installed via `Agent::with_tool_middleware` / `SubAgentTool::with_tool_middleware` / `AgentLoopConfig::tool_middleware`. Empty chain = allow all.
+
 ### OpenAPI Integration (`openapi/`, feature-gated)
 
 Behind the `openapi` Cargo feature. `OpenApiToolAdapter` parses an OpenAPI 3.0 spec and creates one `AgentTool` per operation. Factory methods: `from_str`, `from_file`, `from_url`, `from_spec`. `OperationFilter` controls which operations become tools. Added to `Agent` via `with_openapi_file()` / `with_openapi_url()` / `with_openapi_spec()`.

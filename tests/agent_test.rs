@@ -696,3 +696,203 @@ async fn test_set_model_preserves_explicit_provider_and_key() {
         "set_model must keep the explicit provider and key"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Tool middleware: approve / deny / modify hooks gating tool execution
+// ---------------------------------------------------------------------------
+
+/// Tool that records whether it ran and with what args.
+struct RecordingTool {
+    ran: Arc<std::sync::Mutex<Option<serde_json::Value>>>,
+}
+
+#[async_trait::async_trait]
+impl AgentTool for RecordingTool {
+    fn name(&self) -> &str {
+        "recording_tool"
+    }
+    fn label(&self) -> &str {
+        "Recording Tool"
+    }
+    fn description(&self) -> &str {
+        "Records its invocation"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        _ctx: ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        *self.ran.lock().unwrap() = Some(params);
+        Ok(ToolResult {
+            content: vec![Content::Text { text: "ok".into() }],
+            details: serde_json::Value::Null,
+        })
+    }
+}
+
+/// Middleware driven by a closure, for tests.
+struct FnMiddleware<F>(F);
+
+#[async_trait::async_trait]
+impl<F> ToolMiddleware for FnMiddleware<F>
+where
+    F: Fn(&str, &serde_json::Value) -> ToolDecision + Send + Sync,
+{
+    async fn before_tool(
+        &self,
+        _tool_call_id: &str,
+        tool_name: &str,
+        args: &serde_json::Value,
+    ) -> ToolDecision {
+        (self.0)(tool_name, args)
+    }
+}
+
+/// Provider that calls recording_tool once, then finishes with text.
+fn tool_call_provider() -> MockProvider {
+    MockProvider::new(vec![
+        MockResponse::ToolCalls(vec![MockToolCall {
+            provider_metadata: None,
+            name: "recording_tool".into(),
+            arguments: serde_json::json!({"path": "/etc/passwd"}),
+        }]),
+        MockResponse::Text("done".into()),
+    ])
+}
+
+async fn run_middleware_agent(mut agent: Agent) -> (Agent, Vec<AgentEvent>) {
+    let mut rx = agent.prompt("go").await;
+    let mut events = Vec::new();
+    while let Some(e) = rx.recv().await {
+        events.push(e);
+    }
+    agent.finish().await;
+    (agent, events)
+}
+
+#[tokio::test]
+async fn test_tool_middleware_deny_blocks_tool_and_loop_continues() {
+    let ran = Arc::new(std::sync::Mutex::new(None));
+    let agent = Agent::from_provider(tool_call_provider(), yoagent::provider::ModelConfig::mock())
+        .with_tools(vec![Box::new(RecordingTool { ran: ran.clone() })])
+        .with_tool_middleware(FnMiddleware(|name: &str, _args: &serde_json::Value| {
+            if name == "recording_tool" {
+                ToolDecision::Deny("blocked by policy".into())
+            } else {
+                ToolDecision::Allow
+            }
+        }));
+
+    let (agent, events) = run_middleware_agent(agent).await;
+
+    // Tool must never have executed.
+    assert!(ran.lock().unwrap().is_none(), "denied tool must not run");
+
+    // The denial reaches the LLM as an error tool result with the reason.
+    let denial = agent
+        .messages()
+        .iter()
+        .find_map(|m| match m {
+            AgentMessage::Llm(Message::ToolResult {
+                content, is_error, ..
+            }) => Some((content.clone(), *is_error)),
+            _ => None,
+        })
+        .expect("a tool result must be recorded");
+    assert!(denial.1, "denial must be an error result");
+    match &denial.0[0] {
+        Content::Text { text } => {
+            assert!(text.contains("Tool call denied"), "got: {text}");
+            assert!(text.contains("blocked by policy"), "got: {text}");
+        }
+        other => panic!("expected text content, got {other:?}"),
+    }
+
+    // The loop continued to the final assistant text (not aborted).
+    assert!(matches!(
+        agent.messages().last(),
+        Some(AgentMessage::Llm(Message::Assistant { .. }))
+    ));
+
+    // Event pairing stays intact: Start and End both emitted, End is error.
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::ToolExecutionStart { .. })));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::ToolExecutionEnd { is_error: true, .. })));
+}
+
+#[tokio::test]
+async fn test_tool_middleware_modify_rewrites_args() {
+    let ran = Arc::new(std::sync::Mutex::new(None));
+    let agent = Agent::from_provider(tool_call_provider(), yoagent::provider::ModelConfig::mock())
+        .with_tools(vec![Box::new(RecordingTool { ran: ran.clone() })])
+        .with_tool_middleware(FnMiddleware(|_: &str, _: &serde_json::Value| {
+            ToolDecision::Modify(serde_json::json!({"path": "/tmp/sandboxed"}))
+        }));
+
+    let (_, events) = run_middleware_agent(agent).await;
+
+    // Tool ran with the REWRITTEN args, not the LLM's originals.
+    let seen = ran.lock().unwrap().clone().expect("tool must run");
+    assert_eq!(seen["path"], "/tmp/sandboxed");
+
+    // The Start event carries the effective (post-middleware) args.
+    let start_args = events
+        .iter()
+        .find_map(|e| match e {
+            AgentEvent::ToolExecutionStart { args, .. } => Some(args.clone()),
+            _ => None,
+        })
+        .expect("start event");
+    assert_eq!(start_args["path"], "/tmp/sandboxed");
+}
+
+#[tokio::test]
+async fn test_tool_middleware_chain_first_deny_wins() {
+    // First middleware rewrites; second sees the rewritten args and denies.
+    let ran = Arc::new(std::sync::Mutex::new(None));
+    let saw = Arc::new(std::sync::Mutex::new(None));
+    let saw2 = saw.clone();
+    let agent = Agent::from_provider(tool_call_provider(), yoagent::provider::ModelConfig::mock())
+        .with_tools(vec![Box::new(RecordingTool { ran: ran.clone() })])
+        .with_tool_middleware(FnMiddleware(|_: &str, _: &serde_json::Value| {
+            ToolDecision::Modify(serde_json::json!({"path": "/rewritten"}))
+        }))
+        .with_tool_middleware(FnMiddleware(move |_: &str, args: &serde_json::Value| {
+            *saw2.lock().unwrap() = Some(args.clone());
+            ToolDecision::Deny("second says no".into())
+        }));
+
+    let (agent, _) = run_middleware_agent(agent).await;
+
+    assert!(ran.lock().unwrap().is_none(), "denied tool must not run");
+    // Second middleware observed the first one's rewrite (chain order).
+    let observed = saw.lock().unwrap().clone().expect("second middleware ran");
+    assert_eq!(observed["path"], "/rewritten");
+    // Reason from the denying middleware reaches the LLM.
+    let has_reason = agent.messages().iter().any(|m| {
+        matches!(m, AgentMessage::Llm(Message::ToolResult { content, .. })
+            if matches!(&content[0], Content::Text { text } if text.contains("second says no")))
+    });
+    assert!(has_reason);
+}
+
+#[tokio::test]
+async fn test_tool_middleware_deny_under_sequential_strategy() {
+    // The choke point is shared, but pin the Sequential path explicitly too.
+    let ran = Arc::new(std::sync::Mutex::new(None));
+    let agent = Agent::from_provider(tool_call_provider(), yoagent::provider::ModelConfig::mock())
+        .with_tools(vec![Box::new(RecordingTool { ran: ran.clone() })])
+        .with_tool_execution(ToolExecutionStrategy::Sequential)
+        .with_tool_middleware(FnMiddleware(|_: &str, _: &serde_json::Value| {
+            ToolDecision::Deny("no".into())
+        }));
+
+    let _ = run_middleware_agent(agent).await;
+    assert!(ran.lock().unwrap().is_none());
+}

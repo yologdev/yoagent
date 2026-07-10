@@ -63,6 +63,9 @@ pub struct Agent {
     // Input filters
     input_filters: Vec<Arc<dyn InputFilter>>,
 
+    // Tool middleware (permissions/policy hooks)
+    tool_middleware: Vec<Arc<dyn ToolMiddleware>>,
+
     // Custom compaction strategy
     compaction_strategy: Option<Arc<dyn CompactionStrategy>>,
 
@@ -240,6 +243,7 @@ impl Agent {
             after_turn: None,
             on_error: None,
             input_filters: Vec::new(),
+            tool_middleware: Vec::new(),
             compaction_strategy: None,
             cancel: None,
             is_streaming: false,
@@ -373,6 +377,16 @@ impl Agent {
     /// Add an input filter. Filters run in order on user messages before the LLM call.
     pub fn with_input_filter(mut self, filter: impl InputFilter + 'static) -> Self {
         self.input_filters.push(Arc::new(filter));
+        self
+    }
+
+    /// Add a tool middleware — an async approve/deny/modify hook that gates
+    /// every tool call (see [`ToolMiddleware`]). Middleware run in
+    /// installation order; each may rewrite the arguments seen by later ones,
+    /// and the first `Deny` turns the call into an error tool result carrying
+    /// the reason (the LLM sees it and adapts — the loop continues).
+    pub fn with_tool_middleware(mut self, middleware: impl ToolMiddleware + 'static) -> Self {
+        self.tool_middleware.push(Arc::new(middleware));
         self
     }
 
@@ -996,6 +1010,7 @@ impl Agent {
             after_turn: self.after_turn.clone(),
             on_error: self.on_error.clone(),
             input_filters: self.input_filters.clone(),
+            tool_middleware: self.tool_middleware.clone(),
             turn_delay: None,
         }
     }

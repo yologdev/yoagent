@@ -40,6 +40,9 @@
 //! - **Steering** — inject guidance into a running agent ([`Agent::steer`]);
 //!   picked up between tool executions (per batch under the default parallel
 //!   strategy). Queue follow-ups, inspect/edit the queues.
+//! - **Permissions** ([`ToolMiddleware`]) — async approve/deny/modify hooks
+//!   gating every tool call; the mechanism behind approval prompts and
+//!   policy engines (yoagent ships no policy — you install it).
 //! - **Sub-agents** ([`SubAgentTool`]) — delegation with per-sub-agent models
 //!   and [`SharedState`] for passing artifacts by reference.
 //! - **Context management** ([`context`]) — token tracking and tiered
