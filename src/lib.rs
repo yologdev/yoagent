@@ -48,6 +48,9 @@
 //!   policy engines (yoagent ships no policy — you install it).
 //! - **Sub-agents** ([`SubAgentTool`]) — delegation with per-sub-agent models
 //!   and [`SharedState`] for passing artifacts by reference.
+//! - **Session trees** ([`Session`]) — branching conversation history with
+//!   fork, checkpoints, and JSONL persistence; edit an earlier turn and
+//!   re-run without losing the original branch.
 //! - **Context management** ([`context`]) — token tracking and tiered
 //!   compaction so long sessions keep running.
 //! - **Skills** ([`skills`]) — load `SKILL.md` files per the
@@ -62,6 +65,7 @@ pub mod context;
 pub mod mcp;
 pub mod provider;
 pub mod retry;
+pub mod session;
 pub mod shared_state;
 pub mod skills;
 pub mod sub_agent;
@@ -75,6 +79,7 @@ pub use agent::{Agent, AgentBuildError, StructuredPromptError};
 pub use agent_loop::{agent_loop, agent_loop_continue};
 pub use context::{CompactionStrategy, DefaultCompaction};
 pub use retry::RetryConfig;
+pub use session::{Session, SessionEntry, SessionError};
 pub use shared_state::SharedState;
 pub use skills::SkillSet;
 pub use sub_agent::SubAgentTool;

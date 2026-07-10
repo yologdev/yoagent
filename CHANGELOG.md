@@ -8,6 +8,11 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Session trees** — `Session`: branching conversation history with
+  `append`/`seek`/`checkpoint`, fork-preserving edits, `path_messages()` for
+  branch resume, and JSONL persistence. The pi-style id/parentId tree; maps
+  to GASP's `transcripts/` tier.
+
 - **Structured outputs** — `Agent::prompt_structured::<T>(text, schema)`
   returns a typed, schema-validated reply. Enforcement is native per
   provider: Anthropic (forced tool call, unwrapped by the loop),

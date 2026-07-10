@@ -85,3 +85,5 @@ Extension messages use a nested structure:
 | `ToolExecutionStrategy` | Yes | Yes | Yes |
 | `ContextConfig` | Yes | Yes | No |
 | `ExecutionLimits` | Yes | Yes | No |
+
+For **branching** history — fork, checkpoints, edit-and-rerun — see [Session Trees](session-trees.md).
