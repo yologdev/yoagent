@@ -346,3 +346,46 @@ async fn cached_tokens_are_not_double_counted_in_usage() {
     assert_eq!(usage.output, 5);
     assert_eq!(usage.input + usage.cache_read + usage.output, 105);
 }
+
+/// Thought-summary parts (thinkingConfig.includeThoughts) must stream as
+/// ThinkingDelta and land as Content::Thinking — separate from the answer.
+#[tokio::test]
+async fn thought_parts_map_to_thinking_content() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/v1beta/models/{}:streamGenerateContent",
+            MODEL
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            sse(&[
+                r#"{"candidates":[{"content":{"parts":[{"text":"Considering the options...","thought":true}],"role":"model"},"index":0}]}"#,
+                r#"{"candidates":[{"content":{"parts":[{"text":"The answer is 4."}],"role":"model"},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5,"totalTokenCount":15}}"#,
+            ]),
+            "text/event-stream",
+        ))
+        .mount(&server)
+        .await;
+
+    let message = run_stream(stream_config(&server.uri(), vec![Message::user("2+2?")])).await;
+
+    let Message::Assistant { content, .. } = &message else {
+        panic!("expected assistant message");
+    };
+    let thinking = content
+        .iter()
+        .find_map(|c| match c {
+            Content::Thinking { thinking, .. } => Some(thinking.clone()),
+            _ => None,
+        })
+        .expect("thought part must become Thinking content");
+    assert!(thinking.contains("Considering the options"));
+    let text = content
+        .iter()
+        .find_map(|c| match c {
+            Content::Text { text } => Some(text.clone()),
+            _ => None,
+        })
+        .expect("answer text");
+    assert_eq!(text, "The answer is 4.");
+}

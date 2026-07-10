@@ -34,11 +34,6 @@ impl StreamProvider for AzureOpenAiProvider {
                 "structured outputs are not yet wired for the Azure OpenAI provider; output_schema will be ignored"
             );
         }
-        if config.thinking_level != ThinkingLevel::Off {
-            warn!(
-                "thinking_level is not yet wired for the Azure OpenAI provider and will be ignored"
-            );
-        }
         let model_config = config
             .model_config
             .as_ref()
@@ -346,6 +341,18 @@ fn build_azure_request_body(config: &StreamConfig) -> serde_json::Value {
         body["temperature"] = serde_json::json!(temp);
     }
 
+    // Thinking: the Responses API's reasoning effort (same mapping as the
+    // first-party OpenAI Responses provider).
+    if config.thinking_level != ThinkingLevel::Off {
+        let effort = match config.thinking_level {
+            ThinkingLevel::Minimal | ThinkingLevel::Low => "low",
+            ThinkingLevel::Medium => "medium",
+            ThinkingLevel::High => "high",
+            ThinkingLevel::Off => unreachable!(),
+        };
+        body["reasoning"] = serde_json::json!({"effort": effort});
+    }
+
     body
 }
 
@@ -383,4 +390,37 @@ struct AzureUsage {
     output_tokens: u64,
     #[serde(default)]
     total_tokens: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(level: ThinkingLevel) -> StreamConfig {
+        StreamConfig {
+            model: "gpt-5.5".into(),
+            system_prompt: "".into(),
+            messages: vec![Message::user("hi")],
+            tools: vec![],
+            thinking_level: level,
+            api_key: "key".into(),
+            max_tokens: None,
+            temperature: None,
+            model_config: None,
+            cache_config: CacheConfig::default(),
+            output_schema: None,
+        }
+    }
+
+    #[test]
+    fn thinking_level_sets_reasoning_effort() {
+        let body = build_azure_request_body(&config(ThinkingLevel::Medium));
+        assert_eq!(body["reasoning"]["effort"], "medium");
+    }
+
+    #[test]
+    fn thinking_off_omits_reasoning() {
+        let body = build_azure_request_body(&config(ThinkingLevel::Off));
+        assert!(body["reasoning"].is_null());
+    }
 }

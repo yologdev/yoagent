@@ -37,11 +37,6 @@ impl StreamProvider for BedrockProvider {
                 "structured outputs are not yet wired for the Amazon Bedrock provider; output_schema will be ignored"
             );
         }
-        if config.thinking_level != ThinkingLevel::Off {
-            warn!(
-                "thinking_level is not yet wired for the Amazon Bedrock provider and will be ignored"
-            );
-        }
         let model_config = config
             .model_config
             .as_ref()
@@ -157,6 +152,28 @@ impl StreamProvider for BedrockProvider {
                                                 delta: tool_use.input,
                                             });
                                         }
+                                        if let Some(reasoning) = delta.reasoning_content {
+                                            let think_idx = content.iter().position(|c| matches!(c, Content::Thinking { .. }));
+                                            let idx = match think_idx {
+                                                Some(i) => i,
+                                                None => {
+                                                    content.push(Content::thinking(String::new()));
+                                                    content.len() - 1
+                                                }
+                                            };
+                                            if let Some(Content::Thinking { thinking, signature }) = content.get_mut(idx) {
+                                                if let Some(text) = reasoning.text {
+                                                    thinking.push_str(&text);
+                                                    let _ = tx.send(StreamEvent::ThinkingDelta {
+                                                        content_index: idx,
+                                                        delta: text,
+                                                    });
+                                                }
+                                                if reasoning.signature.is_some() {
+                                                    *signature = reasoning.signature;
+                                                }
+                                            }
+                                        }
                                     }
                                     BedrockEvent::ContentBlockStart { start, .. } => {
                                         if let Some(tool_use) = start.tool_use {
@@ -218,6 +235,17 @@ impl StreamProvider for BedrockProvider {
             message: message.clone(),
         });
         Ok(message)
+    }
+}
+
+/// Budget for Bedrock's Anthropic-style thinking per level (matches the
+/// legacy Anthropic budget mapping).
+fn bedrock_thinking_budget(level: ThinkingLevel) -> u32 {
+    match level {
+        ThinkingLevel::Off => 0,
+        ThinkingLevel::Minimal | ThinkingLevel::Low => 1024,
+        ThinkingLevel::Medium => 2048,
+        ThinkingLevel::High => 8192,
     }
 }
 
@@ -291,6 +319,18 @@ fn build_bedrock_body(config: &StreamConfig) -> serde_json::Value {
     }
     if inference_config != serde_json::json!({}) {
         body["inferenceConfig"] = inference_config;
+    }
+
+    // Thinking: Claude models on Bedrock take Anthropic's budget-based
+    // thinking via additionalModelRequestFields (same budgets as the
+    // pre-adaptive Anthropic path).
+    if config.thinking_level != ThinkingLevel::Off {
+        body["additionalModelRequestFields"] = serde_json::json!({
+            "thinking": {
+                "type": "enabled",
+                "budget_tokens": bedrock_thinking_budget(config.thinking_level),
+            }
+        });
     }
 
     if !config.tools.is_empty() {
@@ -372,6 +412,16 @@ struct BedrockDelta {
     text: Option<String>,
     #[serde(default, rename = "toolUse")]
     tool_use: Option<BedrockToolUseDelta>,
+    #[serde(default, rename = "reasoningContent")]
+    reasoning_content: Option<BedrockReasoningDelta>,
+}
+
+#[derive(Deserialize)]
+struct BedrockReasoningDelta {
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    signature: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -403,6 +453,46 @@ struct BedrockUsage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thinking_level_sets_additional_model_request_fields() {
+        let config = StreamConfig {
+            model: "anthropic.claude-sonnet".into(),
+            system_prompt: "".into(),
+            messages: vec![Message::user("hi")],
+            tools: vec![],
+            thinking_level: ThinkingLevel::High,
+            api_key: "a:b".into(),
+            max_tokens: Some(1024),
+            temperature: None,
+            model_config: None,
+            cache_config: CacheConfig::default(),
+            output_schema: None,
+        };
+        let body = build_bedrock_body(&config);
+        let thinking = &body["additionalModelRequestFields"]["thinking"];
+        assert_eq!(thinking["type"], "enabled");
+        assert_eq!(thinking["budget_tokens"], 8192);
+    }
+
+    #[test]
+    fn thinking_off_omits_additional_fields() {
+        let config = StreamConfig {
+            model: "anthropic.claude-sonnet".into(),
+            system_prompt: "".into(),
+            messages: vec![Message::user("hi")],
+            tools: vec![],
+            thinking_level: ThinkingLevel::Off,
+            api_key: "a:b".into(),
+            max_tokens: Some(1024),
+            temperature: None,
+            model_config: None,
+            cache_config: CacheConfig::default(),
+            output_schema: None,
+        };
+        let body = build_bedrock_body(&config);
+        assert!(body["additionalModelRequestFields"].is_null());
+    }
 
     #[test]
     fn test_build_bedrock_body() {
