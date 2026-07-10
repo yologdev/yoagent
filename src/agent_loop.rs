@@ -77,6 +77,11 @@ pub struct AgentLoopConfig {
     /// executes (see [`ToolMiddleware`]). Empty = allow all.
     pub tool_middleware: Vec<Arc<dyn ToolMiddleware>>,
 
+    /// Structured-output constraint, passed through to the provider (see
+    /// [`OutputSchema`](crate::provider::OutputSchema)). Usually set via
+    /// [`Agent::prompt_structured`](crate::Agent::prompt_structured).
+    pub output_schema: Option<crate::provider::OutputSchema>,
+
     /// Retry configuration for transient provider errors.
     pub retry_config: crate::retry::RetryConfig,
 
@@ -402,6 +407,10 @@ async fn run_loop(
 
             // Stream assistant response
             let message = stream_assistant_response(context, config, tx, cancel).await;
+            // Tool-forcing providers (Anthropic) deliver structured output as
+            // a forced tool call — unwrap it into plain text BEFORE tool-call
+            // extraction, so the loop never tries to execute the synthetic tool.
+            let message = unwrap_structured_tool_call(message, config.output_schema.as_ref());
 
             let agent_msg: AgentMessage = message.clone().into();
             context.messages.push(agent_msg.clone());
@@ -589,6 +598,7 @@ async fn stream_assistant_response(
             temperature: config.temperature,
             model_config: config.model_config.clone(),
             cache_config: config.cache_config.clone(),
+            output_schema: config.output_schema.clone(),
         };
 
         let (stream_tx, mut stream_rx) = mpsc::unbounded_channel();
@@ -732,6 +742,54 @@ async fn stream_assistant_response(
 struct ToolExecutionResult {
     tool_results: Vec<Message>,
     steering_messages: Option<Vec<AgentMessage>>,
+}
+
+/// Convert a forced structured-output tool call back into a plain-text
+/// assistant message with `StopReason::Stop`. No-op unless a schema is set
+/// and the message carries a tool call named after it.
+fn unwrap_structured_tool_call(
+    message: Message,
+    schema: Option<&crate::provider::OutputSchema>,
+) -> Message {
+    let Some(schema) = schema else {
+        return message;
+    };
+    let Message::Assistant {
+        content,
+        model,
+        provider,
+        usage,
+        ..
+    } = &message
+    else {
+        return message;
+    };
+    let Some(payload) = content.iter().find_map(|c| match c {
+        Content::ToolCall {
+            name, arguments, ..
+        } if *name == schema.name => Some(arguments.clone()),
+        _ => None,
+    }) else {
+        return message;
+    };
+
+    // Keep non-tool-call content (e.g. thinking blocks); the payload becomes
+    // the message text.
+    let mut new_content: Vec<Content> = content
+        .iter()
+        .filter(|c| !matches!(c, Content::ToolCall { .. }))
+        .cloned()
+        .collect();
+    new_content.push(Content::Text {
+        text: payload.to_string(),
+    });
+    Message::assistant(
+        new_content,
+        StopReason::Stop,
+        model.clone(),
+        provider.clone(),
+        usage.clone(),
+    )
 }
 
 async fn execute_tool_calls(

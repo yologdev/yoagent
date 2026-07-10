@@ -50,6 +50,7 @@ fn stream_config(base_url: &str, anthropic: Option<AnthropicCompat>) -> StreamCo
         temperature: None,
         model_config: Some(mc),
         cache_config: CacheConfig::default(),
+        output_schema: None,
     }
 }
 

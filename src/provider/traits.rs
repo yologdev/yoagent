@@ -45,6 +45,29 @@ pub struct StreamConfig {
     pub model_config: Option<ModelConfig>,
     /// Prompt caching configuration. Default: enabled with auto strategy.
     pub cache_config: CacheConfig,
+    /// Structured-output constraint. When set, providers enforce the schema
+    /// natively (Anthropic: forced tool call; OpenAI-compat: `json_schema`
+    /// response format; Gemini: `responseSchema`). Providers without support
+    /// log a warning and ignore it.
+    pub output_schema: Option<OutputSchema>,
+}
+
+/// JSON-Schema constraint for structured outputs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutputSchema {
+    /// Schema name (doubles as the forced tool name on Anthropic).
+    pub name: String,
+    /// The JSON Schema the model's reply must satisfy.
+    pub schema: serde_json::Value,
+}
+
+impl OutputSchema {
+    pub fn new(name: impl Into<String>, schema: serde_json::Value) -> Self {
+        Self {
+            name: name.into(),
+            schema,
+        }
+    }
 }
 
 /// Tool definition sent to the LLM (schema only, no execute fn)

@@ -72,6 +72,8 @@ The loop: stream assistant response → extract tool calls → execute tools (pa
 - `Sequential` — one at a time, checks steering queue between each
 - `Batched { size }` — concurrent within batch, steering check between batches
 
+**Structured outputs** (`Agent::prompt_structured::<T>(text, schema)`): the schema travels via `StreamConfig.output_schema` (`OutputSchema` in `provider/traits.rs`). Anthropic enforces it by tool-forcing (a synthetic tool + `tool_choice`; the loop's `unwrap_structured_tool_call` converts the forced call back to text **before** tool-call extraction); OpenAI-compat uses `response_format: json_schema`; Gemini uses `responseSchema`. Responses/Azure/Vertex/Bedrock warn and ignore.
+
 **Tool middleware** (`ToolMiddleware` in `types.rs`): async approve/deny/modify hooks gating every tool call, run in a chain at the single choke point (`execute_single_tool`) shared by all three strategies. `Deny(reason)` becomes an error tool result the LLM sees (loop continues); `Modify(args)` rewrites the call. Installed via `Agent::with_tool_middleware` / `SubAgentTool::with_tool_middleware` / `AgentLoopConfig::tool_middleware`. Empty chain = allow all.
 
 ### OpenAPI Integration (`openapi/`, feature-gated)

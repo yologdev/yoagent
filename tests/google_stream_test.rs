@@ -35,6 +35,7 @@ fn stream_config(base_url: &str, messages: Vec<Message>) -> StreamConfig {
         temperature: None,
         model_config: Some(mc),
         cache_config: CacheConfig::default(),
+        output_schema: None,
     }
 }
 

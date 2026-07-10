@@ -341,6 +341,13 @@ fn build_request_body(config: &StreamConfig) -> serde_json::Value {
     if let Some(temp) = config.temperature {
         generation_config["temperature"] = serde_json::json!(temp);
     }
+    // Structured outputs: native responseSchema (Gemini's OpenAPI-style
+    // schema dialect — pass the caller's schema through as given).
+    if let Some(schema) = &config.output_schema {
+        generation_config["responseMimeType"] = serde_json::json!("application/json");
+        generation_config["responseSchema"] = schema.schema.clone();
+    }
+
     if generation_config != serde_json::json!({}) {
         body["generationConfig"] = generation_config;
     }
@@ -458,6 +465,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn structured_output_sets_response_schema() {
+        let config = StreamConfig {
+            model: "gemini-2.5-pro".into(),
+            system_prompt: "".into(),
+            messages: vec![Message::user("Hello")],
+            tools: vec![],
+            thinking_level: ThinkingLevel::Off,
+            api_key: "test".into(),
+            max_tokens: None,
+            temperature: None,
+            model_config: None,
+            cache_config: CacheConfig::default(),
+            output_schema: Some(crate::provider::OutputSchema::new(
+                "structured_output",
+                serde_json::json!({"type": "object", "properties": {"x": {"type": "number"}}}),
+            )),
+        };
+        let body = build_request_body(&config);
+        assert_eq!(
+            body["generationConfig"]["responseMimeType"],
+            "application/json"
+        );
+        assert_eq!(
+            body["generationConfig"]["responseSchema"]["properties"]["x"]["type"],
+            "number"
+        );
+    }
+
+    #[test]
     fn test_build_google_request() {
         let config = StreamConfig {
             model: "gemini-2.0-flash".into(),
@@ -470,6 +506,7 @@ mod tests {
             temperature: Some(0.7),
             model_config: None,
             cache_config: CacheConfig::default(),
+            output_schema: None,
         };
 
         let body = build_request_body(&config);
@@ -675,6 +712,7 @@ mod tests {
             temperature: None,
             model_config: None,
             cache_config: CacheConfig::default(),
+            output_schema: None,
         };
 
         let body = build_request_body(&config);
@@ -722,6 +760,7 @@ mod tests {
             temperature: None,
             model_config: None,
             cache_config: CacheConfig::default(),
+            output_schema: None,
         };
 
         let body = build_request_body(&config);

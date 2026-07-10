@@ -12,6 +12,7 @@
 - [The Agent Loop](concepts/agent-loop.md)
 - [Messages & Events](concepts/messages-events.md)
 - [Tools](concepts/tools.md)
+- [Structured Outputs](concepts/structured-outputs.md)
 - [Context Management](concepts/context-management.md)
 - [Prompt Caching](concepts/prompt-caching.md)
 - [Retry with Backoff](concepts/retry.md)

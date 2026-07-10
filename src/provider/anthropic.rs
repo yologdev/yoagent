@@ -493,6 +493,22 @@ fn build_request_body(config: &StreamConfig, is_oauth: bool) -> serde_json::Valu
         body["tools"] = serde_json::json!(tools);
     }
 
+    // Structured outputs via tool-forcing: append a synthetic tool built from
+    // the schema and force the model to call it. The loop unwraps the forced
+    // call back into plain text (`unwrap_structured_tool_call`).
+    if let Some(schema) = &config.output_schema {
+        let synthetic = serde_json::json!({
+            "name": schema.name,
+            "description": "Produce the final answer in the required schema.",
+            "input_schema": schema.schema,
+        });
+        match body.get_mut("tools").and_then(|v| v.as_array_mut()) {
+            Some(arr) => arr.push(synthetic),
+            None => body["tools"] = serde_json::json!([synthetic]),
+        }
+        body["tool_choice"] = serde_json::json!({ "type": "tool", "name": schema.name });
+    }
+
     if config.thinking_level != ThinkingLevel::Off {
         if compat.adaptive_thinking {
             // Current generation (Claude 4.6+ / Fable 5): adaptive thinking with
@@ -671,6 +687,7 @@ mod tests {
             temperature: None,
             model_config: None,
             cache_config: cache,
+            output_schema: None,
         }
     }
 
@@ -768,6 +785,26 @@ mod tests {
     }
 
     #[test]
+    fn test_structured_output_forces_synthetic_tool() {
+        let mut config = make_config(CacheConfig::default());
+        config.output_schema = Some(crate::provider::OutputSchema::new(
+            "structured_output",
+            serde_json::json!({"type": "object", "properties": {"answer": {"type": "string"}}}),
+        ));
+        let body = build_request_body(&config, false);
+
+        let tools = body["tools"].as_array().unwrap();
+        let synthetic = tools.last().unwrap();
+        assert_eq!(synthetic["name"], "structured_output");
+        assert_eq!(
+            synthetic["input_schema"]["properties"]["answer"]["type"],
+            "string"
+        );
+        assert_eq!(body["tool_choice"]["type"], "tool");
+        assert_eq!(body["tool_choice"]["name"], "structured_output");
+    }
+
+    #[test]
     fn test_tool_result_with_image() {
         let config = StreamConfig {
             model: "claude-sonnet-4-20250514".into(),
@@ -813,6 +850,7 @@ mod tests {
                 enabled: false,
                 strategy: CacheStrategy::Disabled,
             },
+            output_schema: None,
         };
 
         let body = build_request_body(&config, false);
@@ -868,6 +906,7 @@ mod tests {
                 enabled: false,
                 strategy: CacheStrategy::Disabled,
             },
+            output_schema: None,
         };
 
         let body = build_request_body(&config, false);
@@ -921,6 +960,7 @@ mod tests {
             temperature: None,
             model_config: None,
             cache_config: CacheConfig::default(),
+            output_schema: None,
         };
         let body = build_request_body(&config, false);
         let msgs = body["messages"].as_array().unwrap();
@@ -975,6 +1015,7 @@ mod tests {
             temperature: None,
             model_config: None,
             cache_config: CacheConfig::default(),
+            output_schema: None,
         };
 
         let body = build_request_body(&config, false);

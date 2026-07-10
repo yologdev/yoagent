@@ -31,6 +31,7 @@ fn make_config(provider: AnthropicProvider) -> AgentLoopConfig {
         compaction_strategy: None,
         execution_limits: None,
         cache_config: CacheConfig::default(),
+        output_schema: None,
         tool_execution: ToolExecutionStrategy::default(),
         retry_config: yoagent::RetryConfig::default(),
         before_turn: None,

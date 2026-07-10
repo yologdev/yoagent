@@ -66,6 +66,9 @@ pub struct Agent {
     // Tool middleware (permissions/policy hooks)
     tool_middleware: Vec<Arc<dyn ToolMiddleware>>,
 
+    // Structured-output schema for the in-flight prompt_structured call
+    output_schema: Option<crate::provider::OutputSchema>,
+
     // Custom compaction strategy
     compaction_strategy: Option<Arc<dyn CompactionStrategy>>,
 
@@ -92,6 +95,19 @@ pub enum AgentBuildError {
          ProviderRegistry or use Agent::from_provider with an explicit provider"
     )]
     NoProviderForProtocol(crate::provider::ApiProtocol),
+}
+
+/// Error from [`Agent::prompt_structured`].
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum StructuredPromptError {
+    /// The run produced no assistant text to parse.
+    #[error("model returned no output to parse")]
+    NoOutput,
+    /// The model's output did not deserialize into the requested type.
+    /// `raw` carries the model's text so callers can retry or salvage.
+    #[error("failed to parse structured output: {error}; raw output: {raw}")]
+    Parse { error: String, raw: String },
 }
 
 impl Agent {
@@ -244,6 +260,7 @@ impl Agent {
             on_error: None,
             input_filters: Vec::new(),
             tool_middleware: Vec::new(),
+            output_schema: None,
             compaction_strategy: None,
             cancel: None,
             is_streaming: false,
@@ -664,6 +681,60 @@ impl Agent {
         self.prompt_messages(vec![msg]).await
     }
 
+    /// Send a prompt and parse the reply into `T`, with the JSON Schema
+    /// enforced natively by the provider (Anthropic: forced tool call;
+    /// OpenAI-compatible: `json_schema` response format; Gemini:
+    /// `responseSchema`; other providers log a warning and return free text,
+    /// which still must parse into `T`).
+    ///
+    /// Runs the loop to completion internally (no event receiver). Derive the
+    /// schema however you like — by hand or e.g. with the `schemars` crate.
+    ///
+    /// Note: on Anthropic the forced tool call preempts regular tools for
+    /// that request — treat structured prompts as extraction/finalization
+    /// calls, not agentic tool-using turns.
+    pub async fn prompt_structured<T: serde::de::DeserializeOwned>(
+        &mut self,
+        text: impl Into<String>,
+        schema: serde_json::Value,
+    ) -> Result<T, StructuredPromptError> {
+        self.output_schema = Some(crate::provider::OutputSchema::new(
+            "structured_output",
+            schema,
+        ));
+        let mut rx = self.prompt(text).await;
+        while rx.recv().await.is_some() {}
+        self.finish().await;
+        self.output_schema = None;
+
+        let raw = self
+            .messages
+            .iter()
+            .rev()
+            .find_map(|m| match m {
+                AgentMessage::Llm(Message::Assistant { content, .. }) => {
+                    content.iter().find_map(|c| match c {
+                        Content::Text { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                }
+                _ => None,
+            })
+            .ok_or(StructuredPromptError::NoOutput)?;
+
+        // Defensive: some models wrap JSON in markdown fences.
+        let cleaned = raw
+            .trim()
+            .trim_start_matches("```json")
+            .trim_start_matches("```")
+            .trim_end_matches("```")
+            .trim();
+        serde_json::from_str(cleaned).map_err(|e| StructuredPromptError::Parse {
+            error: e.to_string(),
+            raw: raw.clone(),
+        })
+    }
+
     /// Send messages as a prompt. Returns a receiver immediately with the
     /// agent loop running concurrently for true streaming.
     ///
@@ -1011,6 +1082,7 @@ impl Agent {
             on_error: self.on_error.clone(),
             input_filters: self.input_filters.clone(),
             tool_middleware: self.tool_middleware.clone(),
+            output_schema: self.output_schema.clone(),
             turn_delay: None,
         }
     }
