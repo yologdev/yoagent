@@ -390,6 +390,18 @@ fn build_request_body(
         body["tools"] = serde_json::json!(tools);
     }
 
+    // Structured outputs: native json_schema response format.
+    if let Some(schema) = &config.output_schema {
+        body["response_format"] = serde_json::json!({
+            "type": "json_schema",
+            "json_schema": {
+                "name": schema.name,
+                "schema": schema.schema,
+                "strict": true,
+            },
+        });
+    }
+
     if config.thinking_level != ThinkingLevel::Off && compat.supports_reasoning_effort {
         let effort = match config.thinking_level {
             ThinkingLevel::Minimal | ThinkingLevel::Low => "low",
@@ -525,6 +537,38 @@ mod tests {
     use crate::provider::model::ModelConfig;
 
     #[test]
+    fn structured_output_sets_json_schema_response_format() {
+        let mc = ModelConfig::openai("gpt-5.5", "GPT-5.5");
+        let config = StreamConfig {
+            model: "gpt-5.5".into(),
+            system_prompt: "".into(),
+            messages: vec![Message::user("Hello")],
+            tools: vec![],
+            thinking_level: ThinkingLevel::Off,
+            api_key: "test".into(),
+            max_tokens: None,
+            temperature: None,
+            model_config: Some(mc.clone()),
+            cache_config: CacheConfig::default(),
+            output_schema: Some(crate::provider::OutputSchema::new(
+                "structured_output",
+                serde_json::json!({"type": "object"}),
+            )),
+        };
+        let body = build_request_body(&config, &mc, &OpenAiCompat::openai());
+        assert_eq!(body["response_format"]["type"], "json_schema");
+        assert_eq!(
+            body["response_format"]["json_schema"]["name"],
+            "structured_output"
+        );
+        assert_eq!(body["response_format"]["json_schema"]["strict"], true);
+        assert_eq!(
+            body["response_format"]["json_schema"]["schema"]["type"],
+            "object"
+        );
+    }
+
+    #[test]
     fn test_build_request_body_basic() {
         let model_config = ModelConfig::openai("gpt-4o", "GPT-4o");
         let config = StreamConfig {
@@ -538,6 +582,7 @@ mod tests {
             temperature: None,
             model_config: Some(model_config.clone()),
             cache_config: CacheConfig::default(),
+            output_schema: None,
         };
 
         let body = build_request_body(&config, &model_config, &OpenAiCompat::openai());
@@ -569,6 +614,7 @@ mod tests {
             temperature: Some(0.5),
             model_config: Some(model_config.clone()),
             cache_config: CacheConfig::default(),
+            output_schema: None,
         };
 
         let body = build_request_body(&config, &model_config, &compat);
@@ -592,6 +638,7 @@ mod tests {
             temperature: None,
             model_config: Some(model_config.clone()),
             cache_config: CacheConfig::default(),
+            output_schema: None,
         };
 
         let body = build_request_body(&config, &model_config, &compat);
@@ -618,6 +665,7 @@ mod tests {
             temperature: None,
             model_config: Some(model_config.clone()),
             cache_config: CacheConfig::default(),
+            output_schema: None,
         };
 
         let body = build_request_body(&config, &model_config, &compat);
@@ -641,6 +689,7 @@ mod tests {
             temperature: None,
             model_config: Some(model_config.clone()),
             cache_config: CacheConfig::default(),
+            output_schema: None,
         };
 
         let body = build_request_body(&config, &model_config, &compat);
@@ -676,6 +725,7 @@ mod tests {
             temperature: None,
             model_config: Some(model_config.clone()),
             cache_config: CacheConfig::default(),
+            output_schema: None,
         };
 
         let body = build_request_body(&config, &model_config, &compat);
@@ -800,6 +850,7 @@ mod tests {
             temperature: None,
             model_config: Some(model_config.clone()),
             cache_config: CacheConfig::default(),
+            output_schema: None,
         };
 
         let body = build_request_body(&config, &model_config, &compat);
@@ -839,6 +890,7 @@ mod tests {
             temperature: None,
             model_config: Some(model_config.clone()),
             cache_config: CacheConfig::default(),
+            output_schema: None,
         };
 
         let body = build_request_body(&config, &model_config, &compat);
@@ -893,6 +945,7 @@ mod tests {
             temperature: None,
             model_config: Some(model_config.clone()),
             cache_config: CacheConfig::default(),
+            output_schema: None,
         };
 
         let body = build_request_body(&config, &model_config, &compat);
@@ -934,6 +987,7 @@ mod tests {
             temperature: None,
             model_config: Some(model_config.clone()),
             cache_config: CacheConfig::default(),
+            output_schema: None,
         };
 
         let body = build_request_body(&config, &model_config, &compat);
@@ -985,6 +1039,7 @@ mod tests {
             temperature: None,
             model_config: Some(model_config.clone()),
             cache_config: CacheConfig::default(),
+            output_schema: None,
         };
 
         let body = build_request_body(&config, &model_config, &compat);

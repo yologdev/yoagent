@@ -33,6 +33,7 @@ fn make_config(model: &str) -> AgentLoopConfig {
             enabled: false,
             strategy: CacheStrategy::Disabled,
         },
+        output_schema: None,
         tool_execution: ToolExecutionStrategy::default(),
         retry_config: yoagent::RetryConfig::default(),
         before_turn: None,

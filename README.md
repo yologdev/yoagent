@@ -36,6 +36,7 @@ Everything is observable via events. Supports 7 API protocols covering 20+ LLM p
 - Parallel tool execution by default — sequential and batched strategies also available
 - Sub-agents via `SubAgentTool` — delegate tasks to child agent loops with their own tools and system prompts
 - Tool middleware — async approve/deny/modify hooks gating every tool call (`with_tool_middleware`), the mechanism for permission prompts and policy engines
+- Structured outputs — `prompt_structured::<T>()` returns typed, schema-validated replies, enforced natively per provider (Anthropic tool-forcing, OpenAI `json_schema`, Gemini `responseSchema`)
 - Real-time event streaming — `prompt()` spawns the loop concurrently and returns events immediately; `prompt_with_sender()` accepts a caller-provided channel for custom consumption
 - Streaming tool output — tools emit real-time progress via `on_update` callback
 - Multimodal support — `Content::Image` flows through tool results across all providers

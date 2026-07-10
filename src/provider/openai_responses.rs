@@ -27,6 +27,11 @@ impl StreamProvider for OpenAiResponsesProvider {
         tx: mpsc::UnboundedSender<StreamEvent>,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<Message, ProviderError> {
+        if config.output_schema.is_some() {
+            tracing::warn!(
+                "structured outputs are not yet wired for the OpenAI Responses provider; output_schema will be ignored"
+            );
+        }
         let model_config = config
             .model_config
             .as_ref()

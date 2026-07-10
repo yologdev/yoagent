@@ -40,6 +40,9 @@
 //! - **Steering** — inject guidance into a running agent ([`Agent::steer`]);
 //!   picked up between tool executions (per batch under the default parallel
 //!   strategy). Queue follow-ups, inspect/edit the queues.
+//! - **Structured outputs** ([`Agent::prompt_structured`]) — typed,
+//!   schema-validated replies, enforced natively per provider (forced tool
+//!   call / `json_schema` / `responseSchema`).
 //! - **Permissions** ([`ToolMiddleware`]) — async approve/deny/modify hooks
 //!   gating every tool call; the mechanism behind approval prompts and
 //!   policy engines (yoagent ships no policy — you install it).
@@ -68,7 +71,7 @@ pub mod types;
 #[cfg(feature = "openapi")]
 pub mod openapi;
 
-pub use agent::{Agent, AgentBuildError};
+pub use agent::{Agent, AgentBuildError, StructuredPromptError};
 pub use agent_loop::{agent_loop, agent_loop_continue};
 pub use context::{CompactionStrategy, DefaultCompaction};
 pub use retry::RetryConfig;

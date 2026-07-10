@@ -32,6 +32,11 @@ impl StreamProvider for BedrockProvider {
         tx: mpsc::UnboundedSender<StreamEvent>,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<Message, ProviderError> {
+        if config.output_schema.is_some() {
+            tracing::warn!(
+                "structured outputs are not yet wired for the Amazon Bedrock provider; output_schema will be ignored"
+            );
+        }
         if config.thinking_level != ThinkingLevel::Off {
             warn!(
                 "thinking_level is not yet wired for the Amazon Bedrock provider and will be ignored"
@@ -412,6 +417,7 @@ mod tests {
             temperature: None,
             model_config: None,
             cache_config: CacheConfig::default(),
+            output_schema: None,
         };
 
         let body = build_bedrock_body(&config);

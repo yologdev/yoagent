@@ -896,3 +896,117 @@ async fn test_tool_middleware_deny_under_sequential_strategy() {
     let _ = run_middleware_agent(agent).await;
     assert!(ran.lock().unwrap().is_none());
 }
+
+// ---------------------------------------------------------------------------
+// Structured outputs: prompt_structured::<T>()
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize, Debug, PartialEq)]
+struct Extracted {
+    name: String,
+    count: u32,
+}
+
+#[tokio::test]
+async fn test_prompt_structured_parses_text_json() {
+    // Providers with native json_schema/responseSchema return plain JSON text.
+    let mut agent = Agent::from_provider(
+        MockProvider::text(r#"{"name": "widget", "count": 3}"#),
+        yoagent::provider::ModelConfig::mock(),
+    );
+    let out: Extracted = agent
+        .prompt_structured("extract", serde_json::json!({"type": "object"}))
+        .await
+        .expect("must parse");
+    assert_eq!(
+        out,
+        Extracted {
+            name: "widget".into(),
+            count: 3
+        }
+    );
+}
+
+#[tokio::test]
+async fn test_prompt_structured_unwraps_forced_tool_call() {
+    // Tool-forcing providers (Anthropic) return the payload as a tool call
+    // named after the schema; the loop must unwrap it to text — and must NOT
+    // try to execute it as a real tool.
+    let provider = MockProvider::new(vec![MockResponse::ToolCalls(vec![MockToolCall {
+        provider_metadata: None,
+        name: "structured_output".into(),
+        arguments: serde_json::json!({"name": "gadget", "count": 7}),
+    }])]);
+    let mut agent = Agent::from_provider(provider, yoagent::provider::ModelConfig::mock());
+    let out: Extracted = agent
+        .prompt_structured("extract", serde_json::json!({"type": "object"}))
+        .await
+        .expect("forced tool call must unwrap and parse");
+    assert_eq!(
+        out,
+        Extracted {
+            name: "gadget".into(),
+            count: 7
+        }
+    );
+    // The unwrap happened in the loop: history ends with a plain assistant
+    // message (Stop), no tool-result turn for the synthetic tool.
+    assert!(!agent
+        .messages()
+        .iter()
+        .any(|m| matches!(m, AgentMessage::Llm(Message::ToolResult { .. }))));
+}
+
+#[tokio::test]
+async fn test_prompt_structured_parse_error_carries_raw() {
+    let mut agent = Agent::from_provider(
+        MockProvider::text("not json at all"),
+        yoagent::provider::ModelConfig::mock(),
+    );
+    let err = agent
+        .prompt_structured::<Extracted>("extract", serde_json::json!({"type": "object"}))
+        .await
+        .expect_err("must fail to parse");
+    match err {
+        yoagent::StructuredPromptError::Parse { raw, .. } => {
+            assert!(raw.contains("not json at all"));
+        }
+        other => panic!("expected Parse error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_prompt_structured_strips_markdown_fences() {
+    let mut agent = Agent::from_provider(
+        MockProvider::text("```json\n{\"name\": \"x\", \"count\": 1}\n```"),
+        yoagent::provider::ModelConfig::mock(),
+    );
+    let out: Extracted = agent
+        .prompt_structured("extract", serde_json::json!({"type": "object"}))
+        .await
+        .expect("fenced JSON must parse");
+    assert_eq!(out.count, 1);
+}
+
+#[tokio::test]
+async fn test_prompt_structured_resets_schema_for_next_prompt() {
+    // After a structured call, a normal prompt must not carry the schema.
+    let provider = MockProvider::new(vec![
+        MockResponse::Text(r#"{"name": "a", "count": 1}"#.into()),
+        MockResponse::Text("plain answer".into()),
+    ]);
+    let mut agent = Agent::from_provider(provider, yoagent::provider::ModelConfig::mock());
+    let _: Extracted = agent
+        .prompt_structured("extract", serde_json::json!({"type": "object"}))
+        .await
+        .unwrap();
+
+    let mut rx = agent.prompt("normal question").await;
+    while rx.recv().await.is_some() {}
+    agent.finish().await;
+    // Last message is the plain text answer — the loop ran normally.
+    assert!(matches!(
+        agent.messages().last(),
+        Some(AgentMessage::Llm(Message::Assistant { .. }))
+    ));
+}

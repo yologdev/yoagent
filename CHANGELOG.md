@@ -8,6 +8,14 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Structured outputs** — `Agent::prompt_structured::<T>(text, schema)`
+  returns a typed, schema-validated reply. Enforcement is native per
+  provider: Anthropic (forced tool call, unwrapped by the loop),
+  OpenAI-compatible (`response_format: json_schema, strict`), Gemini
+  (`responseSchema`). Providers without support log a warning. New
+  `OutputSchema` type on `StreamConfig`/`AgentLoopConfig`; new
+  `StructuredPromptError` with the raw text preserved on parse failure.
+
 - **Tool middleware (permissions)** — `ToolMiddleware`, an async
   approve/deny/modify hook gating every tool call, installed via
   `Agent::with_tool_middleware` / `SubAgentTool::with_tool_middleware` /

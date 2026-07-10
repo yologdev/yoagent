@@ -419,6 +419,7 @@ impl AgentTool for SubAgentTool {
             on_error: None,
             input_filters: vec![],
             tool_middleware: self.tool_middleware.clone(),
+            output_schema: None,
             turn_delay: self.turn_delay,
         };
 
