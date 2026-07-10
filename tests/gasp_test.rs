@@ -36,6 +36,19 @@ impl AgentTool for NoopTool {
     }
 }
 
+/// CI runners have no git identity configured; commit_run shells out to
+/// plain `git commit`, so provide one via env (idempotent across tests).
+fn ensure_git_identity() {
+    for (k, v) in [
+        ("GIT_AUTHOR_NAME", "yoagent-test"),
+        ("GIT_AUTHOR_EMAIL", "test@yolog.dev"),
+        ("GIT_COMMITTER_NAME", "yoagent-test"),
+        ("GIT_COMMITTER_EMAIL", "test@yolog.dev"),
+    ] {
+        std::env::set_var(k, v);
+    }
+}
+
 fn tool_then_text_provider() -> MockProvider {
     MockProvider::new(vec![
         MockResponse::ToolCalls(vec![MockToolCall {
@@ -62,6 +75,7 @@ fn event_kinds(repo: &std::path::Path) -> Vec<String> {
 
 #[tokio::test]
 async fn records_a_full_run_with_expected_kinds_and_commit() {
+    ensure_git_identity();
     let dir = tempfile::tempdir().unwrap();
     let recorder = GaspRecorder::init(
         dir.path(),
@@ -119,6 +133,7 @@ async fn records_a_full_run_with_expected_kinds_and_commit() {
 
 #[tokio::test]
 async fn events_are_teed_to_the_forward_sender() {
+    ensure_git_identity();
     let dir = tempfile::tempdir().unwrap();
     let recorder = GaspRecorder::init(
         dir.path(),
@@ -146,6 +161,7 @@ async fn events_are_teed_to_the_forward_sender() {
 
 #[tokio::test]
 async fn goal_is_reused_across_runs_and_recorder_reopens() {
+    ensure_git_identity();
     let dir = tempfile::tempdir().unwrap();
     let recorder = GaspRecorder::init(
         dir.path(),
@@ -193,6 +209,7 @@ async fn goal_is_reused_across_runs_and_recorder_reopens() {
 
 #[tokio::test]
 async fn dropped_sender_without_agent_end_closes_run_as_interrupted() {
+    ensure_git_identity();
     let dir = tempfile::tempdir().unwrap();
     let recorder = GaspRecorder::init(
         dir.path(),

@@ -16,6 +16,10 @@ agent-loop changes**:
 yoagent = { version = "0.11", features = ["gasp"] }
 ```
 
+> The `gasp` feature currently requires a newer Rust than the crate's 1.86
+> MSRV (its `yoagent-state` dependency uses let-chains, stable since 1.88).
+
+
 ```rust
 use yoagent::gasp::{GaspRecorder, GoalRef};
 
