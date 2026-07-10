@@ -123,6 +123,10 @@ Other constructors:
 
 All unit tests use `MockProvider` (`provider/mock.rs`) to simulate LLM responses without network. Test files are in `tests/` — `agent_test.rs`, `agent_loop_test.rs`, `tools_test.rs`. Follow the existing pattern of constructing a `MockProvider` with predetermined responses.
 
+### Telemetry
+
+The loop emits `tracing` spans: `agent_loop` → `llm_stream` per turn (records tokens_in/out/cached + cost_usd from `CostConfig` when configured) → `tool` per execution (records is_error). Futures are instrumented with `.instrument(span)` (never hold an entered guard across `.await`). OTel is app-side via `tracing-opentelemetry` — the library has no OTel dependency by design.
+
 ## Key Design Conventions
 
 - Context overflow detection is centralized in `OVERFLOW_PHRASES` (`provider/traits.rs`) covering 15+ provider-specific error strings; both HTTP errors and SSE-embedded errors are classified

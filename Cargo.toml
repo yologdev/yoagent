@@ -37,5 +37,6 @@ openapi = ["dep:openapiv3", "dep:serde_yaml_ng", "reqwest/query"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
+tracing-subscriber = { version = "0.3", features = ["registry", "fmt"] }
 tempfile = "3"
 wiremock = "0.6"

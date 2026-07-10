@@ -55,6 +55,8 @@
 //!   compaction so long sessions keep running.
 //! - **Skills** ([`skills`]) — load `SKILL.md` files per the
 //!   [AgentSkills](https://agentskills.io) standard.
+//! - **Telemetry** — `tracing` spans per loop/LLM-stream/tool with token and
+//!   cost fields; bridge to OpenTelemetry app-side, zero overhead otherwise.
 //!
 //! The [book](https://yologdev.github.io/yoagent/) covers concepts and
 //! provider-specific guides.
