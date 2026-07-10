@@ -142,3 +142,142 @@ async fn loop_emits_agent_llm_and_tool_spans() {
         "got: {names:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Field values: tokens + cost recorded on llm_stream (not just span names)
+// ---------------------------------------------------------------------------
+
+/// Records (span_name, field_name, value_debug) for every record() call.
+struct FieldCollector {
+    names: Arc<Mutex<std::collections::HashMap<u64, String>>>,
+    records: Arc<Mutex<Vec<(String, String, String)>>>,
+}
+
+struct FieldVisitor<'a> {
+    span: String,
+    out: &'a Mutex<Vec<(String, String, String)>>,
+}
+
+impl tracing::field::Visit for FieldVisitor<'_> {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        self.out.lock().unwrap().push((
+            self.span.clone(),
+            field.name().to_string(),
+            format!("{value:?}"),
+        ));
+    }
+}
+
+impl<S> tracing_subscriber::Layer<S> for FieldCollector
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        self.names
+            .lock()
+            .unwrap()
+            .insert(id.into_u64(), attrs.metadata().name().to_string());
+    }
+    fn on_record(
+        &self,
+        id: &tracing::span::Id,
+        values: &tracing::span::Record<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let span = self
+            .names
+            .lock()
+            .unwrap()
+            .get(&id.into_u64())
+            .cloned()
+            .unwrap_or_default();
+        let mut visitor = FieldVisitor {
+            span,
+            out: &self.records,
+        };
+        values.record(&mut visitor);
+    }
+}
+
+/// Provider returning fixed non-zero usage so token/cost fields are real.
+struct UsageProvider;
+
+#[async_trait::async_trait]
+impl yoagent::provider::StreamProvider for UsageProvider {
+    async fn stream(
+        &self,
+        _config: yoagent::provider::StreamConfig,
+        tx: mpsc::UnboundedSender<yoagent::provider::StreamEvent>,
+        _cancel: CancellationToken,
+    ) -> Result<Message, yoagent::provider::ProviderError> {
+        let msg = Message::assistant(
+            vec![Content::Text { text: "ok".into() }],
+            StopReason::Stop,
+            "m",
+            "mock",
+            Usage {
+                input: 1_000_000,
+                output: 500_000,
+                cache_read: 7,
+                cache_write: 0,
+                total_tokens: 1_500_007,
+            },
+        );
+        let _ = tx.send(yoagent::provider::StreamEvent::Done {
+            message: msg.clone(),
+        });
+        Ok(msg)
+    }
+}
+
+#[tokio::test]
+async fn llm_stream_records_tokens_and_cost() {
+    let names = Arc::new(Mutex::new(std::collections::HashMap::new()));
+    let records = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::registry().with(FieldCollector {
+        names: names.clone(),
+        records: records.clone(),
+    });
+
+    let mut config = loop_config(MockProvider::text("unused"));
+    config.provider = std::sync::Arc::new(UsageProvider);
+    let mut mc = yoagent::provider::ModelConfig::mock();
+    mc.cost.input_per_million = 3.0;
+    mc.cost.output_per_million = 15.0;
+    config.model_config = Some(mc);
+
+    let mut context = AgentContext {
+        system_prompt: "t".into(),
+        messages: Vec::new(),
+        tools: Vec::new(),
+    };
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent_loop(
+        vec![AgentMessage::Llm(Message::user("go"))],
+        &mut context,
+        &config,
+        tx,
+        CancellationToken::new(),
+    )
+    .with_subscriber(subscriber)
+    .await;
+
+    let recs = records.lock().unwrap().clone();
+    let get = |field: &str| -> String {
+        recs.iter()
+            .find(|(span, f, _)| span == "llm_stream" && f == field)
+            .map(|(_, _, v)| v.clone())
+            .unwrap_or_else(|| panic!("field {field} not recorded; got {recs:?}"))
+    };
+    assert_eq!(get("tokens_in"), "1000000");
+    assert_eq!(get("tokens_out"), "500000");
+    assert_eq!(get("tokens_cached"), "7");
+    // 1M in @ $3/M + 0.5M out @ $15/M = 10.5
+    assert_eq!(get("cost_usd"), "10.5");
+    assert_eq!(get("error"), "false");
+}

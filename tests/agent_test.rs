@@ -741,13 +741,8 @@ impl<F> ToolMiddleware for FnMiddleware<F>
 where
     F: Fn(&str, &serde_json::Value) -> ToolDecision + Send + Sync,
 {
-    async fn before_tool(
-        &self,
-        _tool_call_id: &str,
-        tool_name: &str,
-        args: &serde_json::Value,
-    ) -> ToolDecision {
-        (self.0)(tool_name, args)
+    async fn before_tool(&self, call: &ToolCallRequest<'_>) -> ToolDecision {
+        (self.0)(call.tool_name, call.args)
     }
 }
 
@@ -988,14 +983,54 @@ async fn test_prompt_structured_strips_markdown_fences() {
     assert_eq!(out.count, 1);
 }
 
+/// Provider that records each call's output_schema, then answers with text.
+struct SchemaCapturingProvider {
+    schemas: Arc<std::sync::Mutex<Vec<Option<String>>>>,
+    reply: String,
+}
+
+#[async_trait::async_trait]
+impl yoagent::provider::StreamProvider for SchemaCapturingProvider {
+    async fn stream(
+        &self,
+        config: yoagent::provider::StreamConfig,
+        tx: mpsc::UnboundedSender<yoagent::provider::StreamEvent>,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<Message, yoagent::provider::ProviderError> {
+        self.schemas
+            .lock()
+            .unwrap()
+            .push(config.output_schema.as_ref().map(|s| s.name.clone()));
+        let msg = Message::assistant(
+            vec![Content::Text {
+                text: self.reply.clone(),
+            }],
+            StopReason::Stop,
+            "mock",
+            "mock",
+            Usage::default(),
+        );
+        let _ = tx.send(yoagent::provider::StreamEvent::Start);
+        let _ = tx.send(yoagent::provider::StreamEvent::Done {
+            message: msg.clone(),
+        });
+        Ok(msg)
+    }
+}
+
 #[tokio::test]
-async fn test_prompt_structured_resets_schema_for_next_prompt() {
-    // After a structured call, a normal prompt must not carry the schema.
-    let provider = MockProvider::new(vec![
-        MockResponse::Text(r#"{"name": "a", "count": 1}"#.into()),
-        MockResponse::Text("plain answer".into()),
-    ]);
-    let mut agent = Agent::from_provider(provider, yoagent::provider::ModelConfig::mock());
+async fn test_prompt_structured_schema_reaches_provider_then_resets() {
+    // Pins the loop→StreamConfig propagation joint (MockProvider ignores its
+    // config, so only a capturing provider can verify it) AND that the very
+    // next plain prompt carries no schema.
+    let schemas = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut agent = Agent::from_provider(
+        SchemaCapturingProvider {
+            schemas: schemas.clone(),
+            reply: r#"{"name": "a", "count": 1}"#.into(),
+        },
+        yoagent::provider::ModelConfig::mock(),
+    );
     let _: Extracted = agent
         .prompt_structured("extract", serde_json::json!({"type": "object"}))
         .await
@@ -1004,9 +1039,153 @@ async fn test_prompt_structured_resets_schema_for_next_prompt() {
     let mut rx = agent.prompt("normal question").await;
     while rx.recv().await.is_some() {}
     agent.finish().await;
-    // Last message is the plain text answer — the loop ran normally.
+
+    let seen = schemas.lock().unwrap().clone();
+    assert_eq!(
+        seen,
+        vec![Some("structured_output".to_string()), None],
+        "structured call must carry the schema; the next plain prompt must not"
+    );
+}
+
+/// Provider that always fails, for the Provider error-variant path.
+struct AlwaysFailProvider;
+
+#[async_trait::async_trait]
+impl yoagent::provider::StreamProvider for AlwaysFailProvider {
+    async fn stream(
+        &self,
+        _config: yoagent::provider::StreamConfig,
+        _tx: mpsc::UnboundedSender<yoagent::provider::StreamEvent>,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<Message, yoagent::provider::ProviderError> {
+        Err(yoagent::provider::ProviderError::Api(
+            "invalid x-api-key".into(),
+        ))
+    }
+}
+
+#[tokio::test]
+async fn test_prompt_structured_surfaces_provider_error() {
+    // A dead API key must surface as Provider { message } carrying the real
+    // error — never as Parse { raw: "" }.
+    let mut agent =
+        Agent::from_provider(AlwaysFailProvider, yoagent::provider::ModelConfig::mock())
+            .with_retry_config(yoagent::RetryConfig::none());
+    let err = agent
+        .prompt_structured::<Extracted>("extract", serde_json::json!({"type": "object"}))
+        .await
+        .unwrap_err();
+    match err {
+        yoagent::StructuredPromptError::Provider { message } => {
+            assert!(message.contains("invalid x-api-key"), "got: {message}");
+        }
+        other => panic!("expected Provider error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_prompt_structured_never_parses_stale_history() {
+    // Seed history with an earlier turn's perfectly-parsable JSON; a failed
+    // run must NOT fall back to it and return stale data as Ok.
+    let stale = AgentMessage::Llm(Message::assistant(
+        vec![Content::Text {
+            text: r#"{"name": "stale", "count": 99}"#.into(),
+        }],
+        StopReason::Stop,
+        "mock",
+        "mock",
+        Usage::default(),
+    ));
+    let mut agent =
+        Agent::from_provider(AlwaysFailProvider, yoagent::provider::ModelConfig::mock())
+            .with_retry_config(yoagent::RetryConfig::none())
+            .with_messages(vec![stale]);
+
+    let err = agent
+        .prompt_structured::<Extracted>("extract", serde_json::json!({"type": "object"}))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, yoagent::StructuredPromptError::Provider { .. }),
+        "must not return the stale turn's JSON, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_middleware_never_sees_synthetic_structured_tool() {
+    // The forced structured_output call is unwrapped BEFORE tool extraction,
+    // so middleware must never be consulted for it.
+    let calls = Arc::new(std::sync::Mutex::new(0usize));
+    let calls2 = calls.clone();
+    let provider = MockProvider::new(vec![MockResponse::ToolCalls(vec![MockToolCall {
+        provider_metadata: None,
+        name: "structured_output".into(),
+        arguments: serde_json::json!({"name": "g", "count": 7}),
+    }])]);
+    let mut agent = Agent::from_provider(provider, yoagent::provider::ModelConfig::mock())
+        .with_tool_middleware(FnMiddleware(move |_: &str, _: &serde_json::Value| {
+            *calls2.lock().unwrap() += 1;
+            ToolDecision::Deny("should never run".into())
+        }));
+    let out: Extracted = agent
+        .prompt_structured("extract", serde_json::json!({"type": "object"}))
+        .await
+        .expect("unwrap happens before middleware");
+    assert_eq!(out.count, 7);
+    assert_eq!(
+        *calls.lock().unwrap(),
+        0,
+        "middleware saw the synthetic tool"
+    );
+}
+
+#[tokio::test]
+async fn test_tool_middleware_panic_denies_and_loop_survives() {
+    // A panicking middleware must not kill the loop task (which would strip
+    // the agent of its tools) — it fails closed as a denial.
+    let ran = Arc::new(std::sync::Mutex::new(None));
+    let agent = Agent::from_provider(tool_call_provider(), yoagent::provider::ModelConfig::mock())
+        .with_tools(vec![Box::new(RecordingTool { ran: ran.clone() })])
+        .with_tool_middleware(FnMiddleware(|_: &str, _: &serde_json::Value| {
+            panic!("middleware bug")
+        }));
+
+    let (agent, _) = run_middleware_agent(agent).await;
+    assert!(ran.lock().unwrap().is_none(), "tool must not run");
+    // Loop survived to the final text, and the denial reached the LLM.
     assert!(matches!(
         agent.messages().last(),
         Some(AgentMessage::Llm(Message::Assistant { .. }))
     ));
+    let denied = agent.messages().iter().any(|m| {
+        matches!(m, AgentMessage::Llm(Message::ToolResult { content, is_error: true, .. })
+            if matches!(&content[0], Content::Text { text } if text.contains("middleware panicked")))
+    });
+    assert!(denied);
+    // Crucially: the tools survived for the next prompt.
+    // (RecordingTool was moved into the loop and restored by finish().)
+}
+
+#[tokio::test]
+async fn test_tool_middleware_deny_under_batched_strategy() {
+    let ran = Arc::new(std::sync::Mutex::new(None));
+    let agent = Agent::from_provider(tool_call_provider(), yoagent::provider::ModelConfig::mock())
+        .with_tools(vec![Box::new(RecordingTool { ran: ran.clone() })])
+        .with_tool_execution(ToolExecutionStrategy::Batched { size: 1 })
+        .with_tool_middleware(FnMiddleware(|_: &str, _: &serde_json::Value| {
+            ToolDecision::Deny("no".into())
+        }));
+    let (agent, events) = run_middleware_agent(agent).await;
+    assert!(ran.lock().unwrap().is_none());
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::ToolExecutionEnd { is_error: true, .. })));
+    let denied = agent.messages().iter().any(|m| {
+        matches!(
+            m,
+            AgentMessage::Llm(Message::ToolResult { is_error: true, .. })
+        )
+    });
+    assert!(denied);
 }

@@ -460,19 +460,14 @@ behind permission prompts, policy engines, and argument rewriting. yoagent
 ships the hook, not a policy: with no middleware installed, every call runs.
 
 ```rust
-use yoagent::{ToolDecision, ToolMiddleware};
+use yoagent::{ToolCallRequest, ToolDecision, ToolMiddleware};
 
 struct ReadOnlyPolicy;
 
 #[async_trait::async_trait]
 impl ToolMiddleware for ReadOnlyPolicy {
-    async fn before_tool(
-        &self,
-        _tool_call_id: &str,
-        tool_name: &str,
-        _args: &serde_json::Value,
-    ) -> ToolDecision {
-        match tool_name {
+    async fn before_tool(&self, call: &ToolCallRequest<'_>) -> ToolDecision {
+        match call.tool_name {
             "write_file" | "edit_file" | "bash" => {
                 ToolDecision::Deny("read-only session".into())
             }
@@ -497,6 +492,10 @@ Semantics:
   LLM as an **error tool result** (`"Tool call denied: ..."`), so the model can
   adapt — pick another tool, ask the user — and the loop continues. A denial
   never aborts the run.
+
+A middleware that panics is contained: the call is denied (reason `"tool
+middleware panicked"`) and the loop continues — a buggy policy can't kill the
+run.
 
 The hook is `async`, so an interactive app can prompt a human before deciding.
 Note that under the default `Parallel` execution strategy, middleware for

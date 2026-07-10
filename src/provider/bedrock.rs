@@ -357,23 +357,37 @@ fn content_to_bedrock(content: &[Content]) -> Vec<serde_json::Value> {
     content
         .iter()
         .filter(|c| !matches!(c, Content::Text { text } if text.is_empty()))
-        .filter_map(|c| match c {
-            Content::Text { text } => Some(serde_json::json!({"text": text})),
-            Content::Image { data, mime_type } => Some(serde_json::json!({
+        .map(|c| match c {
+            Content::Text { text } => serde_json::json!({"text": text}),
+            Content::Image { data, mime_type } => serde_json::json!({
                 "image": {
                     "format": mime_type.split('/').nth(1).unwrap_or("png"),
                     "source": {"bytes": data},
                 }
-            })),
+            }),
             Content::ToolCall {
                 id,
                 name,
                 arguments,
                 ..
-            } => Some(serde_json::json!({
+            } => serde_json::json!({
                 "toolUse": {"toolUseId": id, "name": name, "input": arguments},
-            })),
-            Content::Thinking { .. } => None,
+            }),
+            // Replay reasoning blocks: Anthropic-on-Bedrock requires the
+            // thinking block (with signature) to accompany a replayed
+            // assistant message in multi-turn tool use — dropping it causes a
+            // ValidationException on the next call.
+            Content::Thinking {
+                thinking,
+                signature,
+            } => serde_json::json!({
+                "reasoningContent": {
+                    "reasoningText": {
+                        "text": thinking,
+                        "signature": signature.clone().unwrap_or_default(),
+                    }
+                }
+            }),
         })
         .collect()
 }
@@ -453,6 +467,42 @@ struct BedrockUsage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thinking_blocks_are_replayed_with_signature() {
+        // Anthropic-on-Bedrock rejects replayed assistant messages whose
+        // thinking block was dropped — pin that we serialize it back.
+        let mut config = StreamConfig::new("anthropic.claude-sonnet", "a:b");
+        config.messages = vec![
+            Message::user("go"),
+            Message::assistant(
+                vec![
+                    Content::thinking_signed("chain of thought", "sig-1"),
+                    Content::Text {
+                        text: "answer".into(),
+                    },
+                ],
+                StopReason::Stop,
+                "m",
+                "bedrock",
+                Usage::default(),
+            ),
+        ];
+        let body = build_bedrock_body(&config);
+        let assistant_content = body["messages"][1]["content"].as_array().unwrap();
+        let reasoning = assistant_content
+            .iter()
+            .find(|b| b.get("reasoningContent").is_some())
+            .expect("thinking block must be replayed");
+        assert_eq!(
+            reasoning["reasoningContent"]["reasoningText"]["text"],
+            "chain of thought"
+        );
+        assert_eq!(
+            reasoning["reasoningContent"]["reasoningText"]["signature"],
+            "sig-1"
+        );
+    }
 
     #[test]
     fn thinking_level_sets_additional_model_request_fields() {

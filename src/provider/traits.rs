@@ -29,8 +29,19 @@ pub enum StreamEvent {
     Error { message: Message },
 }
 
-/// Configuration for a streaming LLM call
+/// Configuration for a streaming LLM call.
+///
+/// Marked `#[non_exhaustive]`: fields are added in minor releases (this
+/// release alone added `output_schema`). Construct with
+/// [`StreamConfig::new`] and mutate the public fields:
+///
+/// ```
+/// # use yoagent::provider::StreamConfig;
+/// let mut config = StreamConfig::new("claude-sonnet-5", "sk-key");
+/// config.system_prompt = "be brief".into();
+/// ```
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct StreamConfig {
     pub model: String,
     pub system_prompt: String,
@@ -52,8 +63,32 @@ pub struct StreamConfig {
     pub output_schema: Option<OutputSchema>,
 }
 
+impl StreamConfig {
+    /// A config with the given model and API key; everything else defaults
+    /// (empty prompt/messages/tools, thinking off, caching enabled).
+    pub fn new(model: impl Into<String>, api_key: impl Into<String>) -> Self {
+        Self {
+            model: model.into(),
+            system_prompt: String::new(),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            thinking_level: ThinkingLevel::Off,
+            api_key: api_key.into(),
+            max_tokens: None,
+            temperature: None,
+            model_config: None,
+            cache_config: CacheConfig::default(),
+            output_schema: None,
+        }
+    }
+}
+
 /// JSON-Schema constraint for structured outputs.
+///
+/// Marked `#[non_exhaustive]`: fields may be added in minor releases (e.g.
+/// strictness flags). Construct with [`OutputSchema::new`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct OutputSchema {
     /// Schema name (doubles as the forced tool name on Anthropic).
     pub name: String,

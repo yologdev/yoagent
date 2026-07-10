@@ -2,14 +2,14 @@
 
 yoagent instruments the loop with [`tracing`](https://docs.rs/tracing) **spans**
 — structured, timed, nested units your observability stack can consume. With
-no subscriber installed they compile to no-ops; there is zero overhead unless
-you opt in.
+no subscriber installed the overhead is near-zero (a cached per-callsite
+interest check); nothing is exported unless you opt in.
 
 ## The span tree
 
 ```
 agent_loop                (model)
-└─ llm_stream             (turn, model, tokens_in, tokens_out, tokens_cached, cost_usd)
+└─ llm_stream             (turn, model, tokens_in, tokens_out, tokens_cached, cost_usd, error)
 └─ tool                   (tool, tool_call_id, is_error)
 ```
 
@@ -38,18 +38,26 @@ same spans flow to any OTLP backend — Datadog, Grafana Tempo, Honeycomb,
 Jaeger:
 
 ```rust
-use opentelemetry_otlp::WithExportConfig;
+// opentelemetry_otlp 0.27+, opentelemetry_sdk 0.27+, tracing-opentelemetry 0.28+
+use opentelemetry::trace::TracerProvider as _;
 use tracing_subscriber::layer::SubscriberExt;
 
-let tracer = opentelemetry_otlp::new_pipeline()
-    .tracing()
-    .with_exporter(opentelemetry_otlp::new_exporter().tonic())
-    .install_batch(opentelemetry_sdk::runtime::Tokio)?;
+let exporter = opentelemetry_otlp::SpanExporter::builder()
+    .with_tonic()
+    .build()?;
+let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+    .with_batch_exporter(exporter)
+    .build();
 
 let subscriber = tracing_subscriber::registry()
-    .with(tracing_opentelemetry::layer().with_tracer(tracer));
+    .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("yoagent-app")));
 tracing::subscriber::set_global_default(subscriber)?;
 ```
+
+(The OTel crates rework their builder APIs between releases — if this snippet
+drifts, the authoritative wiring is the
+[`tracing-opentelemetry` docs](https://docs.rs/tracing-opentelemetry); yoagent
+only emits standard `tracing` spans and does not depend on OTel.)
 
 Because these are ordinary `tracing` spans, an agent call nests inside your
 app's existing request traces (e.g. an axum handler span) automatically.

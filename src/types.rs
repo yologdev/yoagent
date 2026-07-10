@@ -611,6 +611,12 @@ pub trait InputFilter: Send + Sync {
 // ---------------------------------------------------------------------------
 
 /// Decision returned by a [`ToolMiddleware`] before a tool executes.
+///
+/// Deliberately NOT `#[non_exhaustive]` (same policy as [`StopReason`]):
+/// this is a control-flow enum — a new variant should be a compile error for
+/// matchers, not a silent wildcard fallthrough. Interactive flows like
+/// "ask the user" need no variant: the hook is `async`, so prompt inside the
+/// middleware and return `Allow`/`Deny`.
 #[derive(Debug, Clone)]
 pub enum ToolDecision {
     /// Execute the tool with the current arguments.
@@ -637,14 +643,27 @@ pub enum ToolDecision {
 /// default [`ToolExecutionStrategy::Parallel`], middleware for parallel tool
 /// calls runs concurrently — serialize approval prompts inside your
 /// implementation (or use `Sequential`) if you need one-at-a-time UX.
+/// Borrowed view of a pending tool call, passed to
+/// [`ToolMiddleware::before_tool`].
+///
+/// Marked `#[non_exhaustive]`: fields may be added in minor releases (turn
+/// number, history access, ...) without breaking middleware implementations.
+/// Constructed by the loop; middleware only reads it.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct ToolCallRequest<'a> {
+    /// Provider-assigned id of this tool call.
+    pub tool_call_id: &'a str,
+    /// Name of the tool the model wants to run.
+    pub tool_name: &'a str,
+    /// Arguments as the model provided them (possibly rewritten by earlier
+    /// middleware in the chain).
+    pub args: &'a serde_json::Value,
+}
+
 #[async_trait::async_trait]
 pub trait ToolMiddleware: Send + Sync {
-    async fn before_tool(
-        &self,
-        tool_call_id: &str,
-        tool_name: &str,
-        args: &serde_json::Value,
-    ) -> ToolDecision;
+    async fn before_tool(&self, call: &ToolCallRequest<'_>) -> ToolDecision;
 }
 
 // ---------------------------------------------------------------------------

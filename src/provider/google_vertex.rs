@@ -182,6 +182,8 @@ async fn parse_google_sse_response(
                                 thought: Option<bool>,
                                 #[serde(default, rename = "functionCall")]
                                 function_call: Option<FCall>,
+                                #[serde(default, rename = "thoughtSignature")]
+                                thought_signature: Option<String>,
                             }
                             #[derive(Deserialize)]
                             struct FCall {
@@ -250,8 +252,13 @@ async fn parse_google_sse_response(
                                         if let Some(fc) = part.function_call {
                                             let id = format!("vertex-fc-{}", content.len());
                                             let args = fc.args.unwrap_or(serde_json::Value::Object(Default::default()));
+                                            // Gemini thinking conversations require the
+                                            // thought signature replayed on function calls.
+                                            let metadata = part.thought_signature.as_ref().map(|sig| {
+                                                serde_json::json!({"thought_signature": sig})
+                                            });
                                             let idx = content.len();
-                                            content.push(Content::ToolCall { provider_metadata: None,
+                                            content.push(Content::ToolCall { provider_metadata: metadata,
                                                 id: id.clone(),
                                                 name: fc.name.clone(),
                                                 arguments: args,
@@ -348,10 +355,23 @@ fn build_vertex_request_body(config: &StreamConfig) -> serde_json::Value {
                     .filter_map(|c| match c {
                         Content::Text { text } => Some(serde_json::json!({"text": text})),
                         Content::ToolCall {
-                            name, arguments, ..
-                        } => Some(serde_json::json!({
-                            "functionCall": {"name": name, "args": arguments},
-                        })),
+                            name,
+                            arguments,
+                            provider_metadata,
+                            ..
+                        } => {
+                            let mut part = serde_json::json!({
+                                "functionCall": {"name": name, "args": arguments},
+                            });
+                            if let Some(sig) = provider_metadata
+                                .as_ref()
+                                .and_then(|m| m.get("thought_signature"))
+                                .and_then(|v| v.as_str())
+                            {
+                                part["thoughtSignature"] = serde_json::json!(sig);
+                            }
+                            Some(part)
+                        }
                         _ => None,
                     })
                     .collect();
@@ -448,6 +468,32 @@ mod tests {
             cache_config: CacheConfig::default(),
             output_schema: None,
         }
+    }
+
+    #[test]
+    fn tool_call_thought_signature_is_replayed() {
+        // Parity with the Gemini API provider: signatures captured into
+        // provider_metadata must ride back on functionCall parts.
+        let mut c = config(ThinkingLevel::Off);
+        c.messages = vec![
+            Message::user("go"),
+            Message::assistant(
+                vec![Content::ToolCall {
+                    id: "vertex-fc-0".into(),
+                    name: "get_weather".into(),
+                    arguments: serde_json::json!({"city": "Paris"}),
+                    provider_metadata: Some(serde_json::json!({"thought_signature": "sig-9"})),
+                }],
+                StopReason::ToolUse,
+                "m",
+                "vertex",
+                Usage::default(),
+            ),
+        ];
+        let body = build_vertex_request_body(&c);
+        let part = &body["contents"][1]["parts"][0];
+        assert_eq!(part["functionCall"]["name"], "get_weather");
+        assert_eq!(part["thoughtSignature"], "sig-9");
     }
 
     #[test]

@@ -425,6 +425,7 @@ async fn run_loop(
                 tokens_out = tracing::field::Empty,
                 tokens_cached = tracing::field::Empty,
                 cost_usd = tracing::field::Empty,
+                error = tracing::field::Empty,
             );
             let message = {
                 use tracing::Instrument;
@@ -432,7 +433,11 @@ async fn run_loop(
                     .instrument(llm_span.clone())
                     .await
             };
-            if let Message::Assistant { usage, .. } = &message {
+            if let Message::Assistant {
+                usage, stop_reason, ..
+            } = &message
+            {
+                llm_span.record("error", *stop_reason == StopReason::Error);
                 llm_span.record("tokens_in", usage.input);
                 llm_span.record("tokens_out", usage.output);
                 llm_span.record("tokens_cached", usage.cache_read);
@@ -794,6 +799,7 @@ fn unwrap_structured_tool_call(
         model,
         provider,
         usage,
+        stop_reason,
         ..
     } = &message
     else {
@@ -808,19 +814,29 @@ fn unwrap_structured_tool_call(
         return message;
     };
 
-    // Keep non-tool-call content (e.g. thinking blocks); the payload becomes
-    // the message text.
+    // Remove ONLY the synthetic call; any real tool calls (shouldn't occur
+    // under forced tool_choice, but defensively) stay and execute normally.
+    // The payload is appended AFTER any preamble text — consumers take the
+    // last text block.
     let mut new_content: Vec<Content> = content
         .iter()
-        .filter(|c| !matches!(c, Content::ToolCall { .. }))
+        .filter(|c| !matches!(c, Content::ToolCall { name, .. } if *name == schema.name))
         .cloned()
         .collect();
     new_content.push(Content::Text {
         text: payload.to_string(),
     });
+    // ToolUse becomes Stop (the forced call was the "answer"); every other
+    // stop reason (Length = truncated payload, Error, ...) is preserved so
+    // truncation isn't laundered into success.
+    let new_stop = if *stop_reason == StopReason::ToolUse {
+        StopReason::Stop
+    } else {
+        stop_reason.clone()
+    };
     Message::assistant(
         new_content,
-        StopReason::Stop,
+        new_stop,
         model.clone(),
         provider.clone(),
         usage.clone(),
@@ -965,7 +981,24 @@ async fn execute_single_tool(
     // (the LLM sees the reason and can adapt — the loop continues).
     let mut effective_args = args.clone();
     for mw in middleware {
-        match mw.before_tool(id, name, &effective_args).await {
+        let call = ToolCallRequest {
+            tool_call_id: id,
+            tool_name: name,
+            args: &effective_args,
+        };
+        // A panicking middleware must not kill the loop task (which would
+        // strip the agent of its tools) — contain it and fail closed.
+        let decision = {
+            use futures::FutureExt;
+            std::panic::AssertUnwindSafe(mw.before_tool(&call))
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|_| {
+                    tracing::warn!(tool = name, "tool middleware panicked; denying the call");
+                    ToolDecision::Deny("tool middleware panicked".into())
+                })
+        };
+        match decision {
             ToolDecision::Allow => {}
             ToolDecision::Modify(new_args) => effective_args = new_args,
             ToolDecision::Deny(reason) => {
@@ -1098,6 +1131,14 @@ fn denied_tool_call(
     reason: &str,
     tx: &mpsc::UnboundedSender<AgentEvent>,
 ) -> (Message, bool) {
+    // Operator-visible signal: without this, a denial exists only in the
+    // event stream / message history, invisible to telemetry.
+    tracing::warn!(
+        tool = name,
+        tool_call_id = id,
+        reason,
+        "tool call denied by middleware"
+    );
     tx.send(AgentEvent::ToolExecutionStart {
         tool_call_id: id.to_string(),
         tool_name: name.to_string(),
