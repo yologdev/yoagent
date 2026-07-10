@@ -25,11 +25,6 @@ impl StreamProvider for GoogleProvider {
         tx: mpsc::UnboundedSender<StreamEvent>,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<Message, ProviderError> {
-        if config.thinking_level != ThinkingLevel::Off {
-            warn!(
-                "thinking_level is not yet wired for the Google Gemini provider and will be ignored"
-            );
-        }
         let model_config = config
             .model_config
             .as_ref()
@@ -125,6 +120,25 @@ impl StreamProvider for GoogleProvider {
                                     if let Some(c) = &candidate.content {
                                         for part in &c.parts {
                                             if let Some(text) = part_text(part) {
+                                                if part.thought.unwrap_or(false) {
+                                                    // Thought summary part → Thinking content.
+                                                    let think_idx = content.iter().position(|c| matches!(c, Content::Thinking { .. }));
+                                                    let idx = match think_idx {
+                                                        Some(i) => i,
+                                                        None => {
+                                                            content.push(Content::thinking(String::new()));
+                                                            content.len() - 1
+                                                        }
+                                                    };
+                                                    if let Some(Content::Thinking { thinking, .. }) = content.get_mut(idx) {
+                                                        thinking.push_str(text);
+                                                    }
+                                                    let _ = tx.send(StreamEvent::ThinkingDelta {
+                                                        content_index: idx,
+                                                        delta: text.to_string(),
+                                                    });
+                                                    continue;
+                                                }
                                                 let text_idx = content.iter().position(|c| matches!(c, Content::Text { .. }));
                                                 let idx = match text_idx {
                                                     Some(i) => i,
@@ -265,6 +279,16 @@ fn part_text(part: &GooglePart) -> Option<&str> {
     part.text.as_deref().filter(|t| !t.is_empty())
 }
 
+/// Token budget for Gemini's thinkingConfig per level.
+fn gemini_thinking_budget(level: ThinkingLevel) -> u32 {
+    match level {
+        ThinkingLevel::Off => 0,
+        ThinkingLevel::Minimal | ThinkingLevel::Low => 1024,
+        ThinkingLevel::Medium => 8192,
+        ThinkingLevel::High => 24576,
+    }
+}
+
 fn build_request_body(config: &StreamConfig) -> serde_json::Value {
     let mut contents: Vec<serde_json::Value> = Vec::new();
 
@@ -346,6 +370,15 @@ fn build_request_body(config: &StreamConfig) -> serde_json::Value {
     if let Some(schema) = &config.output_schema {
         generation_config["responseMimeType"] = serde_json::json!("application/json");
         generation_config["responseSchema"] = schema.schema.clone();
+    }
+
+    // Thinking: Gemini 2.5's thinkingConfig. Budget scales with the level;
+    // includeThoughts streams thought summaries back as thought parts.
+    if config.thinking_level != ThinkingLevel::Off {
+        generation_config["thinkingConfig"] = serde_json::json!({
+            "thinkingBudget": gemini_thinking_budget(config.thinking_level),
+            "includeThoughts": true,
+        });
     }
 
     if generation_config != serde_json::json!({}) {
@@ -433,6 +466,9 @@ struct GoogleContent {
 struct GooglePart {
     #[serde(default)]
     text: Option<String>,
+    /// True when this part is a thought summary (thinkingConfig.includeThoughts).
+    #[serde(default)]
+    thought: Option<bool>,
     #[serde(default, rename = "functionCall")]
     function_call: Option<GoogleFunctionCall>,
     #[serde(default, rename = "thoughtSignature")]
@@ -463,6 +499,51 @@ struct GoogleUsageMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thinking_level_sets_thinking_config() {
+        let config = StreamConfig {
+            model: "gemini-2.5-pro".into(),
+            system_prompt: "".into(),
+            messages: vec![Message::user("hi")],
+            tools: vec![],
+            thinking_level: ThinkingLevel::Medium,
+            api_key: "test".into(),
+            max_tokens: None,
+            temperature: None,
+            model_config: None,
+            cache_config: CacheConfig::default(),
+            output_schema: None,
+        };
+        let body = build_request_body(&config);
+        assert_eq!(
+            body["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+            8192
+        );
+        assert_eq!(
+            body["generationConfig"]["thinkingConfig"]["includeThoughts"],
+            true
+        );
+    }
+
+    #[test]
+    fn thinking_off_omits_thinking_config() {
+        let config = StreamConfig {
+            model: "gemini-2.5-pro".into(),
+            system_prompt: "".into(),
+            messages: vec![Message::user("hi")],
+            tools: vec![],
+            thinking_level: ThinkingLevel::Off,
+            api_key: "test".into(),
+            max_tokens: None,
+            temperature: None,
+            model_config: None,
+            cache_config: CacheConfig::default(),
+            output_schema: None,
+        };
+        let body = build_request_body(&config);
+        assert!(body["generationConfig"]["thinkingConfig"].is_null());
+    }
 
     #[test]
     fn structured_output_sets_response_schema() {

@@ -42,11 +42,6 @@ impl StreamProvider for GoogleVertexProvider {
                 "structured outputs are not yet wired for the Google Vertex provider; output_schema will be ignored"
             );
         }
-        if config.thinking_level != ThinkingLevel::Off {
-            tracing::warn!(
-                "thinking_level is not yet wired for the Google Vertex provider and will be ignored"
-            );
-        }
         let model_config = config
             .model_config
             .as_ref()
@@ -183,6 +178,8 @@ async fn parse_google_sse_response(
                             struct Part {
                                 #[serde(default)]
                                 text: Option<String>,
+                                #[serde(default)]
+                                thought: Option<bool>,
                                 #[serde(default, rename = "functionCall")]
                                 function_call: Option<FCall>,
                             }
@@ -216,6 +213,24 @@ async fn parse_google_sse_response(
                                 if let Some(c) = candidate.content {
                                     for part in c.parts {
                                         if let Some(text) = part.text {
+                                            if part.thought.unwrap_or(false) {
+                                                let think_idx = content.iter().position(|c| matches!(c, Content::Thinking { .. }));
+                                                let idx = match think_idx {
+                                                    Some(i) => i,
+                                                    None => {
+                                                        content.push(Content::thinking(String::new()));
+                                                        content.len() - 1
+                                                    }
+                                                };
+                                                if let Some(Content::Thinking { thinking, .. }) = content.get_mut(idx) {
+                                                    thinking.push_str(&text);
+                                                }
+                                                let _ = tx.send(StreamEvent::ThinkingDelta {
+                                                    content_index: idx,
+                                                    delta: text,
+                                                });
+                                                continue;
+                                            }
                                             let idx = content.iter().position(|c| matches!(c, Content::Text { .. }));
                                             let idx = match idx {
                                                 Some(i) => i,
@@ -296,6 +311,16 @@ async fn parse_google_sse_response(
 }
 
 /// Build the request body for Vertex AI (same format as Google GenAI).
+/// Token budget for Vertex's thinkingConfig per level (same scale as Gemini).
+fn vertex_thinking_budget(level: ThinkingLevel) -> u32 {
+    match level {
+        ThinkingLevel::Off => 0,
+        ThinkingLevel::Minimal | ThinkingLevel::Low => 1024,
+        ThinkingLevel::Medium => 8192,
+        ThinkingLevel::High => 24576,
+    }
+}
+
 fn build_vertex_request_body(config: &StreamConfig) -> serde_json::Value {
     // Same format as Google GenAI
     let mut contents: Vec<serde_json::Value> = Vec::new();
@@ -376,6 +401,13 @@ fn build_vertex_request_body(config: &StreamConfig) -> serde_json::Value {
     if let Some(temp) = config.temperature {
         gen_config["temperature"] = serde_json::json!(temp);
     }
+    // Thinking: same thinkingConfig as the Gemini API.
+    if config.thinking_level != ThinkingLevel::Off {
+        gen_config["thinkingConfig"] = serde_json::json!({
+            "thinkingBudget": vertex_thinking_budget(config.thinking_level),
+            "includeThoughts": true,
+        });
+    }
     if gen_config != serde_json::json!({}) {
         body["generationConfig"] = gen_config;
     }
@@ -396,4 +428,44 @@ fn build_vertex_request_body(config: &StreamConfig) -> serde_json::Value {
     }
 
     body
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(level: ThinkingLevel) -> StreamConfig {
+        StreamConfig {
+            model: "gemini-2.5-pro".into(),
+            system_prompt: "".into(),
+            messages: vec![Message::user("hi")],
+            tools: vec![],
+            thinking_level: level,
+            api_key: "token".into(),
+            max_tokens: None,
+            temperature: None,
+            model_config: None,
+            cache_config: CacheConfig::default(),
+            output_schema: None,
+        }
+    }
+
+    #[test]
+    fn thinking_level_sets_thinking_config() {
+        let body = build_vertex_request_body(&config(ThinkingLevel::High));
+        assert_eq!(
+            body["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+            24576
+        );
+        assert_eq!(
+            body["generationConfig"]["thinkingConfig"]["includeThoughts"],
+            true
+        );
+    }
+
+    #[test]
+    fn thinking_off_omits_thinking_config() {
+        let body = build_vertex_request_body(&config(ThinkingLevel::Off));
+        assert!(body["generationConfig"]["thinkingConfig"].is_null());
+    }
 }

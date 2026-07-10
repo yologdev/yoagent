@@ -8,6 +8,13 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Cross-provider thinking (7/7)** — `thinking_level` is now honored by
+  every protocol: Gemini and Vertex send `thinkingConfig` (with thought
+  summaries streamed back as `Content::Thinking`), Bedrock sends
+  Anthropic-style `additionalModelRequestFields.thinking` (reasoning deltas
+  and signatures streamed back), Azure sends Responses-style reasoning
+  effort. The "not yet wired" warnings are gone.
+
 - **Session trees** — `Session`: branching conversation history with
   `append`/`seek`/`checkpoint`, fork-preserving edits, `path_messages()` for
   branch resume, and JSONL persistence. The pi-style id/parentId tree; maps
