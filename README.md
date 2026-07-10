@@ -45,6 +45,7 @@ Everything is observable via events. Supports 7 API protocols covering 20+ LLM p
 - State persistence — `save_messages()` / `restore_messages()` for pause/resume workflows
 - Session trees — branching history with fork, checkpoints, and JSONL persistence (`Session`); edit an earlier turn and re-run without losing the original branch
 - Lifecycle callbacks — `before_turn`, `after_turn`, `on_error` for observability and control
+- Telemetry — `tracing` spans for the loop, each LLM stream (tokens + cost fields), and each tool execution; bridge to OpenTelemetry via `tracing-opentelemetry`, zero overhead when no subscriber is installed
 - Full serde support — all core types implement `Serialize`/`Deserialize`/`PartialEq`
 - [AgentSkills](https://agentskills.io)-compatible skills — load skill directories, inject into system prompt, agent activates on demand
 

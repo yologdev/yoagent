@@ -21,6 +21,7 @@
 - [State Persistence](concepts/persistence.md)
 - [Session Trees](concepts/session-trees.md)
 - [Lifecycle Callbacks](concepts/callbacks.md)
+- [Telemetry](concepts/telemetry.md)
 
 # Guides
 

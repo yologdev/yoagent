@@ -208,7 +208,12 @@ pub async fn agent_loop(
         .ok();
     }
 
-    run_loop(context, &mut new_messages, config, &tx, &cancel).await;
+    {
+        use tracing::Instrument;
+        run_loop(context, &mut new_messages, config, &tx, &cancel)
+            .instrument(tracing::info_span!("agent_loop", model = %config.model))
+            .await;
+    }
 
     tx.send(AgentEvent::AgentEnd {
         messages: new_messages.clone(),
@@ -241,7 +246,12 @@ pub async fn agent_loop_continue(
     tx.send(AgentEvent::AgentStart).ok();
     tx.send(AgentEvent::TurnStart).ok();
 
-    run_loop(context, &mut new_messages, config, &tx, &cancel).await;
+    {
+        use tracing::Instrument;
+        run_loop(context, &mut new_messages, config, &tx, &cancel)
+            .instrument(tracing::info_span!("agent_loop", model = %config.model))
+            .await;
+    }
 
     tx.send(AgentEvent::AgentEnd {
         messages: new_messages.clone(),
@@ -405,8 +415,33 @@ async fn run_loop(
                 }
             }
 
-            // Stream assistant response
-            let message = stream_assistant_response(context, config, tx, cancel).await;
+            // Stream assistant response, under an llm_stream span that
+            // records tokens and (when rates are configured) dollar cost.
+            let llm_span = tracing::info_span!(
+                "llm_stream",
+                turn = turn_number,
+                model = %config.model,
+                tokens_in = tracing::field::Empty,
+                tokens_out = tracing::field::Empty,
+                tokens_cached = tracing::field::Empty,
+                cost_usd = tracing::field::Empty,
+            );
+            let message = {
+                use tracing::Instrument;
+                stream_assistant_response(context, config, tx, cancel)
+                    .instrument(llm_span.clone())
+                    .await
+            };
+            if let Message::Assistant { usage, .. } = &message {
+                llm_span.record("tokens_in", usage.input);
+                llm_span.record("tokens_out", usage.output);
+                llm_span.record("tokens_cached", usage.cache_read);
+                if let Some(mc) = &config.model_config {
+                    if mc.cost.is_configured() {
+                        llm_span.record("cost_usd", mc.cost.cost_usd(usage));
+                    }
+                }
+            }
             // Tool-forcing providers (Anthropic) deliver structured output as
             // a forced tool call — unwrap it into plain text BEFORE tool-call
             // extraction, so the loop never tries to execute the synthetic tool.
@@ -987,19 +1022,32 @@ async fn execute_single_tool(
         on_progress,
     };
 
+    let tool_span = tracing::info_span!(
+        "tool",
+        tool = %name,
+        tool_call_id = %id,
+        is_error = tracing::field::Empty,
+    );
+    use tracing::Instrument;
     let (result, is_error) = match tool {
-        Some(tool) => match tool.execute(args.clone(), ctx).await {
-            Ok(r) => (r, false),
-            Err(e) => (
-                ToolResult {
-                    content: vec![Content::Text {
-                        text: e.to_string(),
-                    }],
-                    details: serde_json::Value::Null,
-                },
-                true,
-            ),
-        },
+        Some(tool) => {
+            let execution = tool
+                .execute(args.clone(), ctx)
+                .instrument(tool_span.clone())
+                .await;
+            match execution {
+                Ok(r) => (r, false),
+                Err(e) => (
+                    ToolResult {
+                        content: vec![Content::Text {
+                            text: e.to_string(),
+                        }],
+                        details: serde_json::Value::Null,
+                    },
+                    true,
+                ),
+            }
+        }
         None => (
             ToolResult {
                 content: vec![Content::Text {
@@ -1010,6 +1058,8 @@ async fn execute_single_tool(
             true,
         ),
     };
+
+    tool_span.record("is_error", is_error);
 
     tx.send(AgentEvent::ToolExecutionEnd {
         tool_call_id: id.to_string(),

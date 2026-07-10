@@ -8,6 +8,12 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Telemetry** — `tracing` spans: `agent_loop` (model), `llm_stream` per
+  turn (tokens in/out/cached + `cost_usd` when pricing is configured), and
+  `tool` per execution (name, `is_error`). Bridge to OpenTelemetry
+  app-side with `tracing-opentelemetry`; zero overhead with no subscriber.
+  New `telemetry` example and docs page.
+
 - **Cross-provider thinking (7/7)** — `thinking_level` is now honored by
   every protocol: Gemini and Vertex send `thinkingConfig` (with thought
   summaries streamed back as `Content::Thinking`), Bedrock sends
