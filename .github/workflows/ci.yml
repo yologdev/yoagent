@@ -81,8 +81,12 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: yologdev/gasp
+          ref: 08a60a2ee30d6bc065ffbadec34a7993dc109fdf # pin: checker changes must not break yoagent CI silently
           path: gasp-checker
-      - name: Run conformance checker
+      - name: Run conformance checker against a fresh clone (true restore)
         run: |
+          # GASP restore IS `git clone` — checking the emitting worktree would
+          # pass on untracked scaffolding that a clone doesn't have.
+          git clone -q /tmp/emitted-repo /tmp/restored-repo
           cd gasp-checker/conformance-check
-          cargo run -q -- /tmp/emitted-repo
+          cargo run -q -- /tmp/restored-repo

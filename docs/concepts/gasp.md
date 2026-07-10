@@ -37,21 +37,29 @@ let run_id = record_handle.await??;   // events appended + committed
 
 | Agent activity | GASP events |
 |---|---|
-| loop starts | `run.started` (chained to your goal) |
+| loop starts | `run.started` (the goal is stamped in the run commit's `Goal:` trailer) |
 | each assistant turn | `model.called` / `model.finished` paired nodes |
 | each tool execution | `tool.called` / `tool.finished` (with success flag) |
 | loop ends | `run.finished` with the outcome (`completed` / `error` / `aborted` / ...) |
 
-The semantic log carries **summaries** — task, model, tool names, outcomes —
-never full conversations. Full transcripts belong in GASP's cold
-`transcripts/` tier, which is exactly the shape of
-[`Session::to_jsonl`](session-trees.md): drop your session file there and the
-two tiers compose.
+The semantic log stores bounded one-line summaries — the **task string
+(verbatim)**, model ids, and the **first 200 characters of tool inputs, tool
+outputs, and assistant text** — never full transcripts. If secrets can flow
+through tool arguments or outputs, install a redacting summarizer
+(`recorder.with_summarizer(...)`) before recording: the repo is designed to
+be cloned and shared, and committed history is hard to scrub. Full
+transcripts belong in GASP's cold `transcripts/` tier —
+[`Session::to_jsonl`](session-trees.md) is a natural format for it.
 
 Robustness: a crashed process leaves no open run — the recorder closes stale
-runs as `interrupted` on open, and a dropped event stream finishes the run as
-`interrupted` before committing. One git commit per run keeps the history
-append-only.
+runs as `interrupted` on open, and a dropped event stream finishes the run
+with the outcome derived so far. One git commit per run keeps the history
+append-only, and the init scaffolding (manifest, identity) is committed so a
+fresh clone is a complete, conformant agent. If recording fails mid-run
+(disk, lease, git), recording stops and the error surfaces via the returned
+handle — **always await it** — while event forwarding to your UI continues
+uninterrupted. GASP repos are single-writer: don't share one repo between
+live workers, and record one run at a time.
 
 ## Tested conformance
 

@@ -74,10 +74,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (tx, record_handle) = recorder.recording_sender("touch hello.txt", None);
     agent.prompt_with_sender("touch hello.txt", tx).await;
-    let run_id = record_handle.await??;
+    let run_id = record_handle.await??.expect("run recorded");
 
     println!("recorded run {run_id} into {repo}");
     println!("inspect:  cat {repo}/state/events.jsonl");
-    println!("verify:   conformance-check {repo}");
+    println!("verify:   git clone https://github.com/yologdev/gasp");
+    println!("          cd gasp/conformance-check && cargo run -q -- {repo}");
     Ok(())
 }
