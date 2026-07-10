@@ -31,12 +31,18 @@ rand = "0.10.0"
 base64 = "0.22"
 openapiv3 = { version = "2", optional = true }
 serde_yaml_ng = { version = "0.10", optional = true }
+yoagent-state = { version = "0.4.1", optional = true }
 
 [features]
 openapi = ["dep:openapiv3", "dep:serde_yaml_ng", "reqwest/query"]
+gasp = ["dep:yoagent-state"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
 tracing-subscriber = { version = "0.3", features = ["registry", "fmt"] }
 tempfile = "3"
 wiremock = "0.6"
+
+[[example]]
+name = "gasp_emit"
+required-features = ["gasp"]

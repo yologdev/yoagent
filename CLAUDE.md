@@ -84,6 +84,10 @@ Behind the `openapi` Cargo feature. `OpenApiToolAdapter` parses an OpenAPI 3.0 s
 
 `McpClient` communicates via `McpTransport` trait (stdio or HTTP). `McpToolAdapter` wraps MCP tools to implement `AgentTool`, making them transparent to the agent loop. Added via `Agent::with_mcp_server_stdio()` / `with_mcp_server_http()`.
 
+### GASP Bridge (`gasp.rs`, feature-gated)
+
+Behind the `gasp` Cargo feature (dep: `yoagent-state`, the GASP reference runtime). `GaspRecorder` consumes the `AgentEvent` stream (via `recording_sender`, which also tees to a forward sender) and maps it onto `yoagent_state`'s `YoAgentStateSink`: AgentStart→run.started, assistant MessageEnd→model.called/finished pair, ToolExecutionStart/End→tool.called/finished, AgentEnd→run.finished + one git commit per run. Stale open runs are closed as "interrupted" on open; a dropped sender finishes the run as "interrupted". Zero loop changes. CI job `gasp-conformance` emits a repo via `examples/gasp_emit.rs` and runs the gasp conformance checker (7 checks) against it.
+
 ### Session Trees (`session.rs`)
 
 `Session` stores history as an id/parent_id tree: `append` advances the head, `seek`/`seek_checkpoint` move it, appending after a seek forks a new branch (never overwrites). `path_messages()` feeds a branch into `Agent::with_messages`; `append_new(agent.messages())` is the post-run sync. JSONL persistence (`to_jsonl`/`from_jsonl`, head = last line). Freestanding — no loop changes; maps to GASP's `transcripts/` tier.

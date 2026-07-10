@@ -4,6 +4,18 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- **GASP bridge** (feature `gasp`) — `gasp::GaspRecorder` records agent runs
+  into a [GASP](https://github.com/yologdev/gasp) agent repo via
+  `yoagent-state`: append-only `state/events.jsonl` (goal/run/model/tool
+  events), one git commit per run, stale/interrupted runs closed safely,
+  events teed to your UI. yoagent is now a **tested** GASP-conformant
+  runtime: CI emits a repo and runs the protocol's 7-check conformance suite
+  against it. New `gasp_emit` example and docs page.
+
 ## 0.11.0
 
 ### Fixed (pre-release review of the items below)
