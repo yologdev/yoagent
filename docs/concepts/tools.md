@@ -452,3 +452,57 @@ let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude
 - **Batched**: When you want parallelism but also want steering checkpoints. For example, `Batched { size: 3 }` runs 3 tools concurrently, checks for user interrupts, then runs the next 3.
 
 Steering messages are always checked between execution units (between each tool in Sequential, after all tools in Parallel, between batches in Batched). If a user interrupts, remaining tools are skipped.
+
+## Permissions: Tool Middleware
+
+Every tool call can be gated by an async **middleware chain** — the mechanism
+behind permission prompts, policy engines, and argument rewriting. yoagent
+ships the hook, not a policy: with no middleware installed, every call runs.
+
+```rust
+use yoagent::{ToolDecision, ToolMiddleware};
+
+struct ReadOnlyPolicy;
+
+#[async_trait::async_trait]
+impl ToolMiddleware for ReadOnlyPolicy {
+    async fn before_tool(
+        &self,
+        _tool_call_id: &str,
+        tool_name: &str,
+        _args: &serde_json::Value,
+    ) -> ToolDecision {
+        match tool_name {
+            "write_file" | "edit_file" | "bash" => {
+                ToolDecision::Deny("read-only session".into())
+            }
+            _ => ToolDecision::Allow,
+        }
+    }
+}
+
+let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Sonnet 5"))
+    .with_tools(default_tools())
+    .with_tool_middleware(ReadOnlyPolicy);
+```
+
+Semantics:
+
+- **`Allow`** — the call proceeds (with the current arguments).
+- **`Modify(args)`** — the call proceeds with replacement arguments (e.g.
+  rewrite a path into a sandbox). Later middleware in the chain see the
+  rewritten arguments; the `ToolExecutionStart` event carries what actually
+  runs.
+- **`Deny(reason)`** — the call never executes. The reason is returned to the
+  LLM as an **error tool result** (`"Tool call denied: ..."`), so the model can
+  adapt — pick another tool, ask the user — and the loop continues. A denial
+  never aborts the run.
+
+The hook is `async`, so an interactive app can prompt a human before deciding.
+Note that under the default `Parallel` execution strategy, middleware for
+parallel tool calls run concurrently — if you need one-at-a-time approval UX,
+serialize inside your middleware (e.g. a `tokio::sync::Mutex`) or switch to
+`ToolExecutionStrategy::Sequential`.
+
+Sub-agents gate their own tool calls the same way via
+`SubAgentTool::with_tool_middleware`.

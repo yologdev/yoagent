@@ -73,6 +73,10 @@ pub struct AgentLoopConfig {
     /// Tool execution strategy (sequential, parallel, or batched).
     pub tool_execution: ToolExecutionStrategy,
 
+    /// Tool middleware chain — approve/deny/modify every tool call before it
+    /// executes (see [`ToolMiddleware`]). Empty = allow all.
+    pub tool_middleware: Vec<Arc<dyn ToolMiddleware>>,
+
     /// Retry configuration for transient provider errors.
     pub retry_config: crate::retry::RetryConfig,
 
@@ -462,6 +466,7 @@ async fn run_loop(
                     cancel,
                     config.get_steering_messages.as_ref(),
                     &config.tool_execution,
+                    &config.tool_middleware,
                 )
                 .await;
 
@@ -736,20 +741,21 @@ async fn execute_tool_calls(
     cancel: &tokio_util::sync::CancellationToken,
     get_steering: Option<&GetMessagesFn>,
     strategy: &ToolExecutionStrategy,
+    middleware: &[Arc<dyn ToolMiddleware>],
 ) -> ToolExecutionResult {
     match strategy {
         ToolExecutionStrategy::Sequential => {
-            execute_sequential(tools, tool_calls, tx, cancel, get_steering).await
+            execute_sequential(tools, tool_calls, tx, cancel, get_steering, middleware).await
         }
         ToolExecutionStrategy::Parallel => {
-            execute_batch(tools, tool_calls, tx, cancel, get_steering).await
+            execute_batch(tools, tool_calls, tx, cancel, get_steering, middleware).await
         }
         ToolExecutionStrategy::Batched { size } => {
             let mut results: Vec<Message> = Vec::new();
             let mut steering_messages: Option<Vec<AgentMessage>> = None;
 
             for (batch_idx, batch) in tool_calls.chunks(*size).enumerate() {
-                let batch_result = execute_batch(tools, batch, tx, cancel, None).await;
+                let batch_result = execute_batch(tools, batch, tx, cancel, None, middleware).await;
                 results.extend(batch_result.tool_results);
 
                 // Check steering between batches
@@ -784,12 +790,14 @@ async fn execute_sequential(
     tx: &mpsc::UnboundedSender<AgentEvent>,
     cancel: &tokio_util::sync::CancellationToken,
     get_steering: Option<&GetMessagesFn>,
+    middleware: &[Arc<dyn ToolMiddleware>],
 ) -> ToolExecutionResult {
     let mut results: Vec<Message> = Vec::new();
     let mut steering_messages: Option<Vec<AgentMessage>> = None;
 
     for (index, (id, name, args)) in tool_calls.iter().enumerate() {
-        let (result_msg, _is_error) = execute_single_tool(tools, id, name, args, tx, cancel).await;
+        let (result_msg, _is_error) =
+            execute_single_tool(tools, id, name, args, tx, cancel, middleware).await;
         results.push(result_msg);
 
         // Check for steering — skip remaining tools if user interrupted
@@ -818,12 +826,13 @@ async fn execute_batch(
     tx: &mpsc::UnboundedSender<AgentEvent>,
     cancel: &tokio_util::sync::CancellationToken,
     get_steering: Option<&GetMessagesFn>,
+    middleware: &[Arc<dyn ToolMiddleware>],
 ) -> ToolExecutionResult {
     use futures::future::join_all;
 
     let futures: Vec<_> = tool_calls
         .iter()
-        .map(|(id, name, args)| execute_single_tool(tools, id, name, args, tx, cancel))
+        .map(|(id, name, args)| execute_single_tool(tools, id, name, args, tx, cancel, middleware))
         .collect();
 
     let batch_results = join_all(futures).await;
@@ -856,9 +865,27 @@ async fn execute_single_tool(
     args: &serde_json::Value,
     tx: &mpsc::UnboundedSender<AgentEvent>,
     cancel: &tokio_util::sync::CancellationToken,
+    middleware: &[Arc<dyn ToolMiddleware>],
 ) -> (Message, bool) {
+    // Middleware chain runs first: each hook may rewrite the args seen by
+    // later hooks; the first Deny short-circuits into an error tool result
+    // (the LLM sees the reason and can adapt — the loop continues).
+    let mut effective_args = args.clone();
+    for mw in middleware {
+        match mw.before_tool(id, name, &effective_args).await {
+            ToolDecision::Allow => {}
+            ToolDecision::Modify(new_args) => effective_args = new_args,
+            ToolDecision::Deny(reason) => {
+                return denied_tool_call(id, name, &effective_args, &reason, tx);
+            }
+        }
+    }
+    let args = &effective_args;
+
     let tool = tools.iter().find(|t| t.name() == name);
 
+    // The Start event carries the effective (post-middleware) args — what
+    // actually runs.
     tx.send(AgentEvent::ToolExecutionStart {
         tool_call_id: id.to_string(),
         tool_name: name.to_string(),
@@ -952,6 +979,57 @@ async fn execute_single_tool(
     .ok();
 
     (tool_result_msg, is_error)
+}
+
+/// Emit events and build the error tool result for a middleware-denied call.
+/// Start/End are both emitted so UI event pairing stays intact.
+fn denied_tool_call(
+    id: &str,
+    name: &str,
+    args: &serde_json::Value,
+    reason: &str,
+    tx: &mpsc::UnboundedSender<AgentEvent>,
+) -> (Message, bool) {
+    tx.send(AgentEvent::ToolExecutionStart {
+        tool_call_id: id.to_string(),
+        tool_name: name.to_string(),
+        args: args.clone(),
+    })
+    .ok();
+
+    let result = ToolResult {
+        content: vec![Content::Text {
+            text: format!("Tool call denied: {}", reason),
+        }],
+        details: serde_json::Value::Null,
+    };
+
+    tx.send(AgentEvent::ToolExecutionEnd {
+        tool_call_id: id.to_string(),
+        tool_name: name.to_string(),
+        result: result.clone(),
+        is_error: true,
+    })
+    .ok();
+
+    let msg = Message::ToolResult {
+        tool_call_id: id.to_string(),
+        tool_name: name.to_string(),
+        content: result.content,
+        is_error: true,
+        timestamp: now_ms(),
+    };
+
+    tx.send(AgentEvent::MessageStart {
+        message: msg.clone().into(),
+    })
+    .ok();
+    tx.send(AgentEvent::MessageEnd {
+        message: msg.clone().into(),
+    })
+    .ok();
+
+    (msg, true)
 }
 
 fn skip_tool_call(

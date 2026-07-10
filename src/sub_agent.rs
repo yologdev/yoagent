@@ -63,6 +63,7 @@ pub struct SubAgentTool {
     shared_state: Option<SharedState>,
     turn_delay: Option<std::time::Duration>,
     model_config: Option<ModelConfig>,
+    tool_middleware: Vec<Arc<dyn ToolMiddleware>>,
 }
 
 impl SubAgentTool {
@@ -100,6 +101,7 @@ impl SubAgentTool {
             shared_state: None,
             turn_delay: None,
             model_config: None,
+            tool_middleware: Vec::new(),
         }
     }
 
@@ -198,6 +200,13 @@ impl SubAgentTool {
 
     pub fn with_tools(mut self, tools: Vec<Arc<dyn AgentTool>>) -> Self {
         self.tools = tools;
+        self
+    }
+
+    /// Add a tool middleware for the sub-agent's own tool calls. Mirrors
+    /// [`Agent::with_tool_middleware`](crate::Agent::with_tool_middleware).
+    pub fn with_tool_middleware(mut self, middleware: impl ToolMiddleware + 'static) -> Self {
+        self.tool_middleware.push(Arc::new(middleware));
         self
     }
 
@@ -409,6 +418,7 @@ impl AgentTool for SubAgentTool {
             after_turn: None,
             on_error: None,
             input_filters: vec![],
+            tool_middleware: self.tool_middleware.clone(),
             turn_delay: self.turn_delay,
         };
 

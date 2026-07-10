@@ -33,6 +33,7 @@ fn make_config(provider: MockProvider) -> AgentLoopConfig {
         after_turn: None,
         on_error: None,
         input_filters: vec![],
+        tool_middleware: vec![],
         turn_delay: None,
     }
 }
@@ -868,4 +869,97 @@ fn test_sub_agent_from_config_with_errors_on_empty_registry() {
             yoagent::provider::ApiProtocol::AnthropicMessages
         )
     );
+}
+
+// ---------------------------------------------------------------------------
+// Tool middleware wiring: sub-agent's own tool calls are gated
+// ---------------------------------------------------------------------------
+
+struct DenyAll;
+
+#[async_trait::async_trait]
+impl yoagent::ToolMiddleware for DenyAll {
+    async fn before_tool(
+        &self,
+        _id: &str,
+        _name: &str,
+        _args: &serde_json::Value,
+    ) -> yoagent::ToolDecision {
+        yoagent::ToolDecision::Deny("sub-agent policy".into())
+    }
+}
+
+/// A tool that must never run under DenyAll.
+struct MustNotRun {
+    ran: Arc<std::sync::Mutex<bool>>,
+}
+
+#[async_trait::async_trait]
+impl AgentTool for MustNotRun {
+    fn name(&self) -> &str {
+        "must_not_run"
+    }
+    fn label(&self) -> &str {
+        "Must Not Run"
+    }
+    fn description(&self) -> &str {
+        "test"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    async fn execute(
+        &self,
+        _params: serde_json::Value,
+        _ctx: ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        *self.ran.lock().unwrap() = true;
+        Ok(ToolResult {
+            content: vec![Content::Text { text: "ran".into() }],
+            details: serde_json::Value::Null,
+        })
+    }
+}
+
+#[tokio::test]
+async fn test_sub_agent_tool_middleware_denies() {
+    let ran = Arc::new(std::sync::Mutex::new(false));
+    let provider = Arc::new(MockProvider::new(vec![
+        MockResponse::ToolCalls(vec![MockToolCall {
+            provider_metadata: None,
+            name: "must_not_run".into(),
+            arguments: serde_json::json!({}),
+        }]),
+        MockResponse::Text("finished".into()),
+    ]));
+
+    let tool =
+        SubAgentTool::from_provider("gated", provider, yoagent::provider::ModelConfig::mock())
+            .with_tools(vec![Arc::new(MustNotRun { ran: ran.clone() })])
+            .with_tool_middleware(DenyAll);
+
+    let result = tool
+        .execute(
+            serde_json::json!({"task": "go"}),
+            ToolContext {
+                tool_call_id: "tc-mw".into(),
+                tool_name: "gated".into(),
+                cancel: CancellationToken::new(),
+                on_update: None,
+                on_progress: None,
+            },
+        )
+        .await
+        .expect("sub-agent completes despite denial");
+
+    assert!(
+        !*ran.lock().unwrap(),
+        "denied tool must not run in sub-agent"
+    );
+    // Sub-agent still produced its final text.
+    let text = match &result.content[0] {
+        Content::Text { text } => text,
+        other => panic!("expected text, got {other:?}"),
+    };
+    assert!(text.contains("finished"));
 }

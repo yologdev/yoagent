@@ -607,6 +607,47 @@ pub trait InputFilter: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
+// Tool middleware (permissions)
+// ---------------------------------------------------------------------------
+
+/// Decision returned by a [`ToolMiddleware`] before a tool executes.
+#[derive(Debug, Clone)]
+pub enum ToolDecision {
+    /// Execute the tool with the current arguments.
+    Allow,
+    /// Execute the tool with replacement arguments (e.g. a sandboxed path).
+    Modify(serde_json::Value),
+    /// Block the call. The reason is returned to the LLM as an error tool
+    /// result so it can adapt (pick another tool, ask the user, ...); the
+    /// loop itself continues.
+    Deny(String),
+}
+
+/// Async hook that gates every tool call — the mechanism behind permission
+/// prompts, policy engines, and argument rewriting.
+///
+/// yoagent ships the mechanism, not a policy: install middleware via
+/// [`Agent::with_tool_middleware`](crate::Agent::with_tool_middleware) (or
+/// [`AgentLoopConfig::tool_middleware`](crate::agent_loop::AgentLoopConfig))
+/// and decide per call. Middleware run in a chain: each may rewrite the
+/// arguments seen by later ones; the first `Deny` wins. With no middleware
+/// installed, every call is allowed — behavior is unchanged.
+///
+/// The hook is `async` so an interactive app can prompt a human. Under the
+/// default [`ToolExecutionStrategy::Parallel`], middleware for parallel tool
+/// calls runs concurrently — serialize approval prompts inside your
+/// implementation (or use `Sequential`) if you need one-at-a-time UX.
+#[async_trait::async_trait]
+pub trait ToolMiddleware: Send + Sync {
+    async fn before_tool(
+        &self,
+        tool_call_id: &str,
+        tool_name: &str,
+        args: &serde_json::Value,
+    ) -> ToolDecision;
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 

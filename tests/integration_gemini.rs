@@ -39,6 +39,7 @@ fn make_config(model: &str) -> AgentLoopConfig {
         after_turn: None,
         on_error: None,
         input_filters: vec![],
+        tool_middleware: vec![],
         turn_delay: None,
     }
 }

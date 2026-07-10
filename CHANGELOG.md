@@ -4,6 +4,17 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- **Tool middleware (permissions)** — `ToolMiddleware`, an async
+  approve/deny/modify hook gating every tool call, installed via
+  `Agent::with_tool_middleware` / `SubAgentTool::with_tool_middleware` /
+  `AgentLoopConfig::tool_middleware`. `Deny(reason)` becomes an error tool
+  result the LLM can adapt to (the loop continues); `Modify(args)` rewrites
+  the call. Empty chain = allow all (no behavior change).
+
 ## 0.10.0
 
 The headline change is a **config-first construction API**. You now build an
