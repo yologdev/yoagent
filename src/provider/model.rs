@@ -149,6 +149,18 @@ impl OpenAiCompat {
         }
     }
 
+    /// Compat flags for the Meta Model API (Muse Spark).
+    ///
+    /// OpenAI-compatible chat completions. Conservative flags until Meta
+    /// documents reasoning-effort and streamed-usage support on the chat
+    /// endpoint.
+    pub fn meta() -> Self {
+        Self {
+            max_tokens_field: MaxTokensField::MaxCompletionTokens,
+            ..Default::default()
+        }
+    }
+
     /// Compat flags for xAI (Grok).
     pub fn xai() -> Self {
         Self {
@@ -683,6 +695,34 @@ impl ModelConfig {
         }
     }
 
+    /// Create a new Meta Model API config (Muse Spark).
+    ///
+    /// Models: `muse-spark-1.1` (1M context, 128K max output). Public
+    /// preview; OpenAI-compatible endpoint at `https://api.meta.ai/v1`.
+    /// Key resolves from `META_API_KEY`, then Meta's documented
+    /// `MODEL_API_KEY`.
+    pub fn meta(id: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            api: ApiProtocol::OpenAiCompletions,
+            provider: "meta".into(),
+            base_url: "https://api.meta.ai/v1".into(),
+            reasoning: false,
+            context_window: 1_048_576,
+            max_tokens: 131_072,
+            cost: CostConfig {
+                input_per_million: 1.25,
+                output_per_million: 4.25,
+                cache_read_per_million: 0.0,
+                cache_write_per_million: 0.0,
+            },
+            headers: HashMap::new(),
+            anthropic: None,
+            compat: Some(OpenAiCompat::meta()),
+        }
+    }
+
     /// Create a new MiniMax model config.
     ///
     /// Models: `MiniMax-Text-01`, `MiniMax-M1`, etc.
@@ -828,6 +868,26 @@ impl ModelConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn meta_preset_matches_launch_specs() {
+        let mc = ModelConfig::meta("muse-spark-1.1", "Muse Spark 1.1");
+        assert_eq!(mc.provider, "meta");
+        assert_eq!(mc.api, ApiProtocol::OpenAiCompletions);
+        assert_eq!(mc.base_url, "https://api.meta.ai/v1");
+        assert_eq!(mc.context_window, 1_048_576);
+        assert_eq!(mc.max_tokens, 131_072);
+        assert!(mc.cost.is_configured());
+        assert_eq!(mc.cost.input_per_million, 1.25);
+        assert_eq!(mc.cost.output_per_million, 4.25);
+        let compat = mc.compat.expect("compat flags set");
+        assert!(matches!(
+            compat.max_tokens_field,
+            MaxTokensField::MaxCompletionTokens
+        ));
+        // Conservative until Meta documents these on chat completions:
+        assert!(!compat.supports_reasoning_effort);
+    }
 
     #[test]
     fn test_model_config_anthropic() {

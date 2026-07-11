@@ -100,6 +100,7 @@ async fn main() {
         Some("deepseek") => "deepseek-v4-flash",
         Some("mistral") => "mistral-large-latest",
         Some("minimax") => "MiniMax-Text-01",
+        Some("meta") => "muse-spark-1.1",
         Some("ollama") => "llama3.1:8b",
         Some("google") => "gemini-2.5-pro",
         _ => "claude-sonnet-5",
@@ -342,10 +343,11 @@ fn make_provider_agent(provider: &str, model: &str) -> Agent {
         "deepseek" => ModelConfig::deepseek(model, model),
         "mistral" => ModelConfig::mistral(model, model),
         "minimax" => ModelConfig::minimax(model, model),
+        "meta" => ModelConfig::meta(model, model),
         "ollama" => ModelConfig::ollama("http://localhost:11434/v1", model),
         "google" => ModelConfig::google(model, model),
         other => {
-            eprintln!("Unknown provider: {other}. Supported: zai, qwen, openai, xai, groq, deepseek, mistral, minimax, ollama, google.");
+            eprintln!("Unknown provider: {other}. Supported: zai, qwen, openai, xai, groq, deepseek, mistral, minimax, meta, ollama, google.");
             std::process::exit(1);
         }
     };

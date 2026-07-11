@@ -141,6 +141,7 @@ mod tests {
 /// | `google` | `GEMINI_API_KEY`, `GOOGLE_API_KEY` |
 /// | `xai` / `groq` / `deepseek` / `mistral` / `zai` / `minimax` / `openrouter` / `cerebras` | `<PROVIDER>_API_KEY` |
 /// | `qwen` | `DASHSCOPE_API_KEY` |
+/// | `meta` | `META_API_KEY`, then `MODEL_API_KEY` |
 /// | `opencode-zen` / `opencode-go` | `OPENCODE_API_KEY` |
 /// | `azure` | `AZURE_OPENAI_API_KEY` |
 /// | `bedrock` | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (+ `AWS_SESSION_TOKEN`), composed as `access:secret[:token]` |
@@ -166,6 +167,9 @@ pub fn resolve_api_key(provider: &str) -> Option<String> {
         "mistral" => first(&["MISTRAL_API_KEY"]),
         "zai" => first(&["ZAI_API_KEY"]),
         "minimax" => first(&["MINIMAX_API_KEY"]),
+        // Meta's docs name the generic MODEL_API_KEY; prefer the unambiguous
+        // META_API_KEY, accept the official one.
+        "meta" => first(&["META_API_KEY", "MODEL_API_KEY"]),
         "openrouter" => first(&["OPENROUTER_API_KEY"]),
         "cerebras" => first(&["CEREBRAS_API_KEY"]),
         "qwen" => first(&["DASHSCOPE_API_KEY"]),
@@ -217,6 +221,7 @@ fn api_key_env_hint(provider: &str) -> &'static str {
         "mistral" => "set MISTRAL_API_KEY or call .with_api_key(...)",
         "zai" => "set ZAI_API_KEY or call .with_api_key(...)",
         "minimax" => "set MINIMAX_API_KEY or call .with_api_key(...)",
+        "meta" => "set META_API_KEY (or MODEL_API_KEY) or call .with_api_key(...)",
         "openrouter" => "set OPENROUTER_API_KEY or call .with_api_key(...)",
         "cerebras" => "set CEREBRAS_API_KEY or call .with_api_key(...)",
         "qwen" => "set DASHSCOPE_API_KEY or call .with_api_key(...)",
@@ -242,6 +247,18 @@ mod resolve_key_tests {
         assert_eq!(resolve_api_key("ollama").as_deref(), Some(""));
         // vertex expects an explicit OAuth token — never env-resolved
         assert_eq!(resolve_api_key("vertex"), None);
+    }
+
+    #[test]
+    fn test_meta_env_resolution() {
+        // Own vars, no other test touches them.
+        std::env::set_var("MODEL_API_KEY", "official-var");
+        assert_eq!(resolve_api_key("meta").as_deref(), Some("official-var"));
+        // The unambiguous var wins when both are set.
+        std::env::set_var("META_API_KEY", "preferred-var");
+        assert_eq!(resolve_api_key("meta").as_deref(), Some("preferred-var"));
+        std::env::remove_var("META_API_KEY");
+        std::env::remove_var("MODEL_API_KEY");
     }
 
     #[test]

@@ -206,7 +206,7 @@ let mut agent = Agent::from_config(ModelConfig::google("gemini-2.5-pro", "Gemini
 | Protocol | Providers |
 |----------|-----------|
 | Anthropic Messages | Anthropic (Claude) |
-| OpenAI Completions | OpenAI, xAI, Groq, Mistral, DeepSeek, MiniMax, Z.ai, Qwen, Ollama, local servers, and custom compatible APIs |
+| OpenAI Completions | OpenAI, xAI, Groq, Mistral, DeepSeek, MiniMax, Z.ai, Qwen, Meta (Muse Spark), Ollama, local servers, and custom compatible APIs |
 | OpenAI Responses | OpenAI (newer API) |
 | Azure OpenAI | Azure OpenAI |
 | Google Generative AI | Google Gemini |
