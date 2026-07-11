@@ -8,6 +8,14 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Meta Model API (Muse Spark)** — `ModelConfig::meta("muse-spark-1.1",
+  ...)` preset for Meta's OpenAI-compatible endpoint (US-only public preview
+  at launch): 1M context, 128K output, launch pricing pre-configured
+  ($1.25/$4.25 per M, $0.15/M cached input). `reasoning_effort` is wired
+  (`ThinkingLevel` tunes it; note Meta's server default is `medium`). Key
+  resolves from `META_API_KEY`, then Meta's documented `MODEL_API_KEY`. Also
+  available in the CLI example via `--provider meta`.
+
 - **GASP bridge** (feature `gasp`) — `gasp::GaspRecorder` records agent runs
   into a [GASP](https://github.com/yologdev/gasp) agent repo via
   `yoagent-state`: append-only `state/events.jsonl` (goal/run/model/tool

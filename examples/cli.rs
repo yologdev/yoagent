@@ -81,6 +81,10 @@ async fn main() {
         std::env::var("DASHSCOPE_API_KEY")
             .or_else(|_| std::env::var("API_KEY"))
             .expect("Set DASHSCOPE_API_KEY or API_KEY")
+    } else if provider_name.as_deref() == Some("meta") {
+        std::env::var("META_API_KEY")
+            .or_else(|_| std::env::var("MODEL_API_KEY"))
+            .expect("Set META_API_KEY or MODEL_API_KEY")
     } else if api_key_optional {
         std::env::var("ANTHROPIC_API_KEY")
             .or_else(|_| std::env::var("API_KEY"))
@@ -100,6 +104,7 @@ async fn main() {
         Some("deepseek") => "deepseek-v4-flash",
         Some("mistral") => "mistral-large-latest",
         Some("minimax") => "MiniMax-Text-01",
+        Some("meta") => "muse-spark-1.1",
         Some("ollama") => "llama3.1:8b",
         Some("google") => "gemini-2.5-pro",
         _ => "claude-sonnet-5",
@@ -342,10 +347,11 @@ fn make_provider_agent(provider: &str, model: &str) -> Agent {
         "deepseek" => ModelConfig::deepseek(model, model),
         "mistral" => ModelConfig::mistral(model, model),
         "minimax" => ModelConfig::minimax(model, model),
+        "meta" => ModelConfig::meta(model, model),
         "ollama" => ModelConfig::ollama("http://localhost:11434/v1", model),
         "google" => ModelConfig::google(model, model),
         other => {
-            eprintln!("Unknown provider: {other}. Supported: zai, qwen, openai, xai, groq, deepseek, mistral, minimax, ollama, google.");
+            eprintln!("Unknown provider: {other}. Supported: zai, qwen, openai, xai, groq, deepseek, mistral, minimax, meta, ollama, google.");
             std::process::exit(1);
         }
     };
