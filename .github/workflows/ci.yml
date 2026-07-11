@@ -58,9 +58,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.86
       - uses: Swatinem/rust-cache@v2
       - name: Check
-        # The optional `gasp` feature is excluded: yoagent-state currently
-        # requires a newer rustc (let-chains) than the crate's 1.86 MSRV.
-        run: cargo check --features openapi
+        run: cargo check --all-features
 
   # yoagent claims to be a tested GASP-conformant runtime — this job is the
   # test: emit an agent repo with the gasp bridge (mock provider, no network)
