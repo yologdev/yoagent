@@ -81,6 +81,10 @@ async fn main() {
         std::env::var("DASHSCOPE_API_KEY")
             .or_else(|_| std::env::var("API_KEY"))
             .expect("Set DASHSCOPE_API_KEY or API_KEY")
+    } else if provider_name.as_deref() == Some("meta") {
+        std::env::var("META_API_KEY")
+            .or_else(|_| std::env::var("MODEL_API_KEY"))
+            .expect("Set META_API_KEY or MODEL_API_KEY")
     } else if api_key_optional {
         std::env::var("ANTHROPIC_API_KEY")
             .or_else(|_| std::env::var("API_KEY"))

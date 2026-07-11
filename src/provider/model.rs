@@ -151,11 +151,14 @@ impl OpenAiCompat {
 
     /// Compat flags for the Meta Model API (Muse Spark).
     ///
-    /// OpenAI-compatible chat completions. Conservative flags until Meta
-    /// documents reasoning-effort and streamed-usage support on the chat
-    /// endpoint.
+    /// OpenAI-compatible chat completions. Meta documents `reasoning_effort`
+    /// (default `medium` server-side) and streamed usage via
+    /// `stream_options.include_usage`; `max_tokens` is deprecated in favor of
+    /// `max_completion_tokens`.
     pub fn meta() -> Self {
         Self {
+            supports_reasoning_effort: true,
+            supports_usage_in_streaming: true,
             max_tokens_field: MaxTokensField::MaxCompletionTokens,
             ..Default::default()
         }
@@ -697,10 +700,16 @@ impl ModelConfig {
 
     /// Create a new Meta Model API config (Muse Spark).
     ///
-    /// Models: `muse-spark-1.1` (1M context, 128K max output). Public
-    /// preview; OpenAI-compatible endpoint at `https://api.meta.ai/v1`.
-    /// Key resolves from `META_API_KEY`, then Meta's documented
-    /// `MODEL_API_KEY`.
+    /// Models: `muse-spark-1.1` — 1,048,576-token context; 128K max output
+    /// per Meta's integration examples (no official model card yet).
+    /// US-only public preview as of July 2026. OpenAI-compatible endpoint at
+    /// `https://api.meta.ai/v1`. Key resolves from `META_API_KEY`, then
+    /// Meta's documented `MODEL_API_KEY`.
+    ///
+    /// Reasoning: Meta's endpoint defaults to `reasoning_effort: medium`
+    /// server-side. Set a [`ThinkingLevel`](crate::types::ThinkingLevel) to
+    /// tune it; `Off` omits the field, which means Meta's default (medium)
+    /// applies — not "no reasoning".
     pub fn meta(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -708,13 +717,13 @@ impl ModelConfig {
             api: ApiProtocol::OpenAiCompletions,
             provider: "meta".into(),
             base_url: "https://api.meta.ai/v1".into(),
-            reasoning: false,
+            reasoning: true,
             context_window: 1_048_576,
             max_tokens: 131_072,
             cost: CostConfig {
                 input_per_million: 1.25,
                 output_per_million: 4.25,
-                cache_read_per_million: 0.0,
+                cache_read_per_million: 0.15,
                 cache_write_per_million: 0.0,
             },
             headers: HashMap::new(),
@@ -880,13 +889,17 @@ mod tests {
         assert!(mc.cost.is_configured());
         assert_eq!(mc.cost.input_per_million, 1.25);
         assert_eq!(mc.cost.output_per_million, 4.25);
+        // Meta documents a cached-input rate; cache writes are not charged.
+        assert_eq!(mc.cost.cache_read_per_million, 0.15);
+        assert_eq!(mc.cost.cache_write_per_million, 0.0);
         let compat = mc.compat.expect("compat flags set");
         assert!(matches!(
             compat.max_tokens_field,
             MaxTokensField::MaxCompletionTokens
         ));
-        // Conservative until Meta documents these on chat completions:
-        assert!(!compat.supports_reasoning_effort);
+        // Documented in Meta's chat-completions schemas.
+        assert!(compat.supports_reasoning_effort);
+        assert!(compat.supports_usage_in_streaming);
     }
 
     #[test]

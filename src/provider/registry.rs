@@ -251,7 +251,9 @@ mod resolve_key_tests {
 
     #[test]
     fn test_meta_env_resolution() {
-        // Own vars, no other test touches them.
+        // Own vars as of this writing — grep before reusing MODEL_API_KEY in
+        // another test. Clear first: a developer shell may export these.
+        std::env::remove_var("META_API_KEY");
         std::env::set_var("MODEL_API_KEY", "official-var");
         assert_eq!(resolve_api_key("meta").as_deref(), Some("official-var"));
         // The unambiguous var wins when both are set.

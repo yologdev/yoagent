@@ -53,7 +53,7 @@ Everything is observable via events. Supports 7 API protocols covering 20+ LLM p
 - 7 API protocols, 20+ providers behind one `StreamProvider` trait
 - One OpenAI-compatible implementation covers OpenAI, xAI, Groq, Cerebras, OpenRouter, Mistral, and more
 - Per-provider quirk flags (`OpenAiCompat`, `AnthropicCompat`) handle auth, reasoning format, and tool handling differences
-- Capability notes: thinking/reasoning controls are wired for **all 7 protocols** — Anthropic (adaptive/budget), OpenAI-compatible where the `ModelConfig` opts in (the `openai()`/`deepseek()` presets do; other compat presets silently drop `thinking_level`), OpenAI Responses & Azure (reasoning effort), Gemini & Vertex (`thinkingConfig` with thought summaries streamed back), Bedrock (Anthropic-style budgets, reasoning deltas streamed back). Client-side prompt-cache breakpoints are Anthropic-specific; most other providers cache server-side automatically, but Bedrock has no automatic caching
+- Capability notes: thinking/reasoning controls are wired for **all 7 protocols** — Anthropic (adaptive/budget), OpenAI-compatible where the `ModelConfig` opts in (the `openai()`/`deepseek()`/`meta()` presets do; other compat presets silently drop `thinking_level`), OpenAI Responses & Azure (reasoning effort), Gemini & Vertex (`thinkingConfig` with thought summaries streamed back), Bedrock (Anthropic-style budgets, reasoning deltas streamed back). Client-side prompt-cache breakpoints are Anthropic-specific; most other providers cache server-side automatically, but Bedrock has no automatic caching
 
 **Built-in Tools**
 - `bash` — Shell execution with timeout, output truncation, command deny patterns
