@@ -58,4 +58,35 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.86
       - uses: Swatinem/rust-cache@v2
       - name: Check
-        run: cargo check --all-features
+        # The optional `gasp` feature is excluded: yoagent-state currently
+        # requires a newer rustc (let-chains) than the crate's 1.86 MSRV.
+        run: cargo check --features openapi
+
+  # yoagent claims to be a tested GASP-conformant runtime — this job is the
+  # test: emit an agent repo with the gasp bridge (mock provider, no network)
+  # and run the protocol's conformance checker against it.
+  gasp-conformance:
+    name: GASP conformance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Emit agent repo via the gasp bridge
+        run: |
+          git config --global user.email "ci@yolog.dev"
+          git config --global user.name "yoagent-ci"
+          cargo run --example gasp_emit --features gasp -- /tmp/emitted-repo
+      - name: Checkout gasp (conformance checker)
+        uses: actions/checkout@v4
+        with:
+          repository: yologdev/gasp
+          ref: 08a60a2ee30d6bc065ffbadec34a7993dc109fdf # pin: checker changes must not break yoagent CI silently
+          path: gasp-checker
+      - name: Run conformance checker against a fresh clone (true restore)
+        run: |
+          # GASP restore IS `git clone` — checking the emitting worktree would
+          # pass on untracked scaffolding that a clone doesn't have.
+          git clone -q /tmp/emitted-repo /tmp/restored-repo
+          cd gasp-checker/conformance-check
+          cargo run -q -- /tmp/restored-repo

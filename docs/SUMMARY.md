@@ -20,6 +20,7 @@
 - [Sub-Agents](concepts/sub-agents.md)
 - [State Persistence](concepts/persistence.md)
 - [Session Trees](concepts/session-trees.md)
+- [GASP: Your Agent Is a Git Repo](concepts/gasp.md)
 - [Lifecycle Callbacks](concepts/callbacks.md)
 - [Telemetry](concepts/telemetry.md)
 

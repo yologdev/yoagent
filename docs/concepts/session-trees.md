@@ -71,7 +71,8 @@ remains for single-branch persistence.
 
 ## GASP
 
-This tree is the shape of the [GASP](https://github.com/yologdev/gasp)
-`transcripts/` tier — the raw-conversation cold tier. The semantic event log
-(goals/runs/evals living in a git repo) is a separate adapter layered on the
-`AgentEvent` stream.
+This tree is a natural format for the
+[GASP](https://github.com/yologdev/gasp) `transcripts/` tier — the
+raw-conversation cold tier (the spec leaves its format open). The semantic event log
+lives in the [`gasp` feature](gasp.md): a recorder over the `AgentEvent`
+stream that emits a conformance-checked agent repo.

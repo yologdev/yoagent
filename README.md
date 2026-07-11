@@ -65,6 +65,7 @@ Everything is observable via events. Supports 7 API protocols covering 20+ LLM p
 **Integrations**
 - OpenAPI tool adapter — auto-generate tools from any OpenAPI 3.0 spec (`features = ["openapi"]`)
 - MCP (Model Context Protocol) — connect to MCP tool servers via stdio or HTTP
+- GASP (`features = ["gasp"]`) — record runs into a [GASP](https://github.com/yologdev/gasp) agent repo (append-only semantic event log; restore = clone + replay); yoagent is a **tested** GASP-conformant runtime — the protocol's 7-check conformance suite runs in CI
 
 **Context Management**
 - Context overflow detection across all major providers (Anthropic, OpenAI, Google, Bedrock, xAI, Groq, OpenRouter, llama.cpp, and more)

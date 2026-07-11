@@ -48,6 +48,9 @@
 //!   policy engines (yoagent ships no policy — you install it).
 //! - **Sub-agents** ([`SubAgentTool`]) — delegation with per-sub-agent models
 //!   and [`SharedState`] for passing artifacts by reference.
+//! - **GASP** (feature `gasp`) — record runs into a
+//!   [GASP](https://github.com/yologdev/gasp) agent repo: append-only
+//!   semantic event log, restore = clone + replay, conformance-checked in CI.
 //! - **Session trees** ([`Session`]) — branching conversation history with
 //!   fork, checkpoints, and JSONL persistence; edit an earlier turn and
 //!   re-run without losing the original branch.
@@ -76,6 +79,9 @@ pub mod types;
 
 #[cfg(feature = "openapi")]
 pub mod openapi;
+
+#[cfg(feature = "gasp")]
+pub mod gasp;
 
 pub use agent::{Agent, AgentBuildError, StructuredPromptError};
 pub use agent_loop::{agent_loop, agent_loop_continue};
