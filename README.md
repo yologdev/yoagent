@@ -88,7 +88,7 @@ Or add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-yoagent = "0.11"
+yoagent = "0.12"
 tokio = { version = "1", features = ["full"] }
 ```
 
