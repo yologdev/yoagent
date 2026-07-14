@@ -50,11 +50,15 @@ Messages serialize as a JSON array. Each message is tagged by role:
     "stopReason": "stop",
     "model": "claude-sonnet-5",
     "provider": "anthropic",
-    "usage": {"input": 100, "output": 50, "cache_read": 0, "cache_write": 0, "total_tokens": 150},
+    "usage": {"input": 100, "output": 50, "cacheRead": 0, "cacheWrite": 0, "totalTokens": 150},
     "timestamp": 1700000001000
   }
 ]
 ```
+
+As of 0.13 all field names are camelCase; the pre-0.13 snake_case names
+(`cache_read`, `cache_write`, `total_tokens`, `error_message`,
+`provider_metadata`) are still accepted when loading older files.
 
 Extension messages use a nested structure:
 

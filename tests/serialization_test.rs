@@ -376,7 +376,9 @@ fn test_stream_delta_every_variant_roundtrips() {
 
 /// The frozen `"type"` tag for every `AgentEvent` variant. Exhaustive match
 /// with NO wildcard arm on purpose: adding a variant fails to compile here
-/// until its wire tag is pinned (and a sample added to `all_agent_events`).
+/// until its wire tag is pinned. Keep [`EVENT_VARIANT_COUNT`] and the sample
+/// in `all_agent_events` in step — the count assertion below fails until the
+/// new variant is actually exercised, closing the other half of the freeze.
 /// A tag change is a breaking change for wire clients — do not edit casually.
 fn expected_event_tag(event: &AgentEvent) -> &'static str {
     match event {
@@ -404,9 +406,19 @@ fn expected_delta_tag(delta: &StreamDelta) -> &'static str {
     }
 }
 
+/// Number of arms in `expected_event_tag` — bump together with the match.
+const EVENT_VARIANT_COUNT: usize = 12;
+
 #[test]
 fn test_agent_event_type_tags_are_frozen() {
-    for event in all_agent_events() {
+    let events = all_agent_events();
+    assert_eq!(
+        events.len(),
+        EVENT_VARIANT_COUNT,
+        "a variant was added to expected_event_tag without a sample in all_agent_events — \
+         the new variant's tag and round-trip are untested until one is added"
+    );
+    for event in events {
         let v: serde_json::Value = serde_json::to_value(&event).expect("serialize");
         assert_eq!(
             v["type"],
