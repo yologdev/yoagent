@@ -19,8 +19,16 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- `serde` minimum version is now `1.0.186` (needed for `rename_all_fields`
-  on the event wire format). Released August 2023; no practical impact.
+- **Message payload serialization normalized to camelCase** — the five
+  remaining snake_case fields in serialized messages now match the rest of
+  the wire format: `usage.cacheRead`/`cacheWrite`/`totalTokens`,
+  `errorMessage`, and `providerMetadata`. Session files and `save_messages`
+  blobs written by older versions still load (`serde` aliases accept the old
+  names); files **written** by 0.13 use the new names, so they are not
+  readable by yoagent < 0.13. The full nested payload shape (message,
+  content blocks, usage) is now frozen by an exact-JSON snapshot test.
+- `serde` minimum version is now `1.0.181` (needed for `rename_all_fields`
+  on the event wire format). Released July 2023; no practical impact.
 
 ## 0.12.0
 

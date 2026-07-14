@@ -45,7 +45,12 @@ pub enum Content {
         /// Provider-specific metadata (e.g. Gemini thought signatures).
         /// Not passed to tool execution; used by providers when building
         /// the next request.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            rename = "providerMetadata",
+            alias = "provider_metadata"
+        )]
         provider_metadata: Option<serde_json::Value>,
     },
 }
@@ -124,7 +129,11 @@ pub enum Message {
         provider: String,
         usage: Usage,
         timestamp: u64,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(
+            skip_serializing_if = "Option::is_none",
+            rename = "errorMessage",
+            alias = "error_message"
+        )]
         error_message: Option<String>,
     },
     #[serde(rename = "toolResult")]
@@ -300,11 +309,13 @@ pub enum StopReason {
 pub struct Usage {
     pub input: u64,
     pub output: u64,
-    #[serde(default)]
+    // camelCase on the wire (AgentEvent contract); `alias` keeps session
+    // files written by yoagent < 0.13 loadable.
+    #[serde(default, rename = "cacheRead", alias = "cache_read")]
     pub cache_read: u64,
-    #[serde(default)]
+    #[serde(default, rename = "cacheWrite", alias = "cache_write")]
     pub cache_write: u64,
-    #[serde(default)]
+    #[serde(default, rename = "totalTokens", alias = "total_tokens")]
     pub total_tokens: u64,
 }
 

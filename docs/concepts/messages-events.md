@@ -145,10 +145,13 @@ pipe) can consume the event stream directly:
 ```
 
 This shape is a **public contract** frozen by snapshot tests — variant tags,
-field names, and the tagging scheme won't change in minor releases. Note that
-`MessageUpdate` carries the *cumulative* `message` alongside the incremental
-`delta`, so a client that misses events (e.g. a lagged websocket subscriber)
-resyncs from the next full `message` without replay.
+field names, and the tagging scheme won't change in minor releases.
+
+Streaming semantics: clients accumulate text from each `MessageUpdate`'s
+`delta`; the `message` field during streaming is a placeholder (its `content`
+fills in only when the message completes). The full message arrives with
+`MessageEnd` — a client that misses events (e.g. a lagged websocket
+subscriber) resyncs from the next `MessageEnd` without replay.
 
 ## StreamDelta
 
