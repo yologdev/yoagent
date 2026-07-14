@@ -133,6 +133,26 @@ Events emitted during the agent loop for real-time UI updates:
 | `ProgressMessage { tool_call_id, tool_name, text }` | User-facing progress text from a tool |
 | `InputRejected { reason }` | Input filter rejected the user's message |
 
+### Wire format
+
+`AgentEvent` and `StreamDelta` serialize as internally-tagged camelCase JSON, so
+external frontends (a websocket fanout server, a TypeScript client, a JSONL
+pipe) can consume the event stream directly:
+
+```json
+{"type":"messageUpdate","message":{...},"delta":{"type":"text","delta":"hi"}}
+{"type":"toolExecutionEnd","toolCallId":"tc_1","toolName":"bash","result":{...},"isError":false}
+```
+
+This shape is a **public contract** frozen by snapshot tests — variant tags,
+field names, and the tagging scheme won't change in minor releases.
+
+Streaming semantics: clients accumulate text from each `MessageUpdate`'s
+`delta`; the `message` field during streaming is a placeholder (its `content`
+fills in only when the message completes). The full message arrives with
+`MessageEnd` — a client that misses events (e.g. a lagged websocket
+subscriber) resyncs from the next `MessageEnd` without replay.
+
 ## StreamDelta
 
 Deltas within `MessageUpdate`:

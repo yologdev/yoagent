@@ -4,6 +4,32 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- **Serializable event stream** — `AgentEvent` and `StreamDelta` now derive
+  `Serialize`, `Deserialize`, and `PartialEq`, so external frontends
+  (websocket fanout servers, TypeScript clients, JSONL pipes) can consume
+  the agent's event stream as JSON. The wire format is internally tagged
+  camelCase — `{"type":"toolExecutionEnd","toolCallId":...,"isError":false}`
+  — and is a **frozen public contract** guarded by snapshot tests: variant
+  tags, field names, and the tagging scheme will not change in minor
+  releases. Additive only: no variant, field, or signature changes.
+
+### Changed
+
+- **Message payload serialization normalized to camelCase** — the five
+  remaining snake_case fields in serialized messages now match the rest of
+  the wire format: `usage.cacheRead`/`cacheWrite`/`totalTokens`,
+  `errorMessage`, and `providerMetadata`. Session files and `save_messages`
+  blobs written by older versions still load (`serde` aliases accept the old
+  names); files **written** by 0.13 use the new names, so they are not
+  readable by yoagent < 0.13. The full nested payload shape (message,
+  content blocks, usage) is now frozen by an exact-JSON snapshot test.
+- `serde` minimum version is now `1.0.181` (needed for `rename_all_fields`
+  on the event wire format). Released July 2023; no practical impact.
+
 ## 0.12.0
 
 ### Added
