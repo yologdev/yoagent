@@ -4,6 +4,24 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- **Serializable event stream** — `AgentEvent` and `StreamDelta` now derive
+  `Serialize`, `Deserialize`, and `PartialEq`, so external frontends
+  (websocket fanout servers, TypeScript clients, JSONL pipes) can consume
+  the agent's event stream as JSON. The wire format is internally tagged
+  camelCase — `{"type":"toolExecutionEnd","toolCallId":...,"isError":false}`
+  — and is a **frozen public contract** guarded by snapshot tests: variant
+  tags, field names, and the tagging scheme will not change in minor
+  releases. Additive only: no variant, field, or signature changes.
+
+### Changed
+
+- `serde` minimum version is now `1.0.186` (needed for `rename_all_fields`
+  on the event wire format). Released August 2023; no practical impact.
+
 ## 0.12.0
 
 ### Added

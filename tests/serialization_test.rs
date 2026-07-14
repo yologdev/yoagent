@@ -273,3 +273,183 @@ fn test_tool_call_with_metadata_roundtrip() {
         serde_json::json!({"thought_signature": "sig-xyz"}),
     ));
 }
+
+// ---------------------------------------------------------------------------
+// AgentEvent wire format (public contract — see the doc comment on AgentEvent)
+// ---------------------------------------------------------------------------
+
+fn sample_assistant() -> AgentMessage {
+    AgentMessage::Llm(Message::assistant(
+        vec![Content::Text { text: "hi".into() }],
+        StopReason::Stop,
+        "claude-sonnet",
+        "anthropic",
+        Usage::default(),
+    ))
+}
+
+fn sample_tool_result() -> ToolResult {
+    ToolResult {
+        content: vec![Content::Text {
+            text: "exit code 0".into(),
+        }],
+        details: serde_json::json!({"exit_code": 0}),
+    }
+}
+
+/// One value of every `AgentEvent` variant.
+fn all_agent_events() -> Vec<AgentEvent> {
+    vec![
+        AgentEvent::AgentStart,
+        AgentEvent::AgentEnd {
+            messages: vec![sample_assistant()],
+        },
+        AgentEvent::TurnStart,
+        AgentEvent::TurnEnd {
+            message: sample_assistant(),
+            tool_results: vec![Message::ToolResult {
+                tool_call_id: "tc-1".into(),
+                tool_name: "bash".into(),
+                content: vec![Content::Text { text: "ok".into() }],
+                is_error: false,
+                timestamp: 7,
+            }],
+        },
+        AgentEvent::MessageStart {
+            message: sample_assistant(),
+        },
+        AgentEvent::MessageUpdate {
+            message: sample_assistant(),
+            delta: StreamDelta::Text { delta: "hi".into() },
+        },
+        AgentEvent::MessageEnd {
+            message: sample_assistant(),
+        },
+        AgentEvent::ToolExecutionStart {
+            tool_call_id: "tc-1".into(),
+            tool_name: "bash".into(),
+            args: serde_json::json!({"command": "ls"}),
+        },
+        AgentEvent::ToolExecutionUpdate {
+            tool_call_id: "tc-1".into(),
+            tool_name: "bash".into(),
+            partial_result: sample_tool_result(),
+        },
+        AgentEvent::ToolExecutionEnd {
+            tool_call_id: "tc-1".into(),
+            tool_name: "bash".into(),
+            result: sample_tool_result(),
+            is_error: false,
+        },
+        AgentEvent::ProgressMessage {
+            tool_call_id: "tc-1".into(),
+            tool_name: "bash".into(),
+            text: "50% done".into(),
+        },
+        AgentEvent::InputRejected {
+            reason: "injection detected".into(),
+        },
+    ]
+}
+
+#[test]
+fn test_agent_event_every_variant_roundtrips() {
+    for event in all_agent_events() {
+        roundtrip(&event);
+    }
+}
+
+#[test]
+fn test_stream_delta_every_variant_roundtrips() {
+    roundtrip(&StreamDelta::Text { delta: "a".into() });
+    roundtrip(&StreamDelta::Thinking { delta: "b".into() });
+    roundtrip(&StreamDelta::ToolCallDelta { delta: "c".into() });
+}
+
+/// Freezes the `"type"` discriminant of every variant. A tag change here is a
+/// breaking change for wire clients — do not update this list casually.
+#[test]
+fn test_agent_event_type_tags_are_frozen() {
+    let expected = [
+        "agentStart",
+        "agentEnd",
+        "turnStart",
+        "turnEnd",
+        "messageStart",
+        "messageUpdate",
+        "messageEnd",
+        "toolExecutionStart",
+        "toolExecutionUpdate",
+        "toolExecutionEnd",
+        "progressMessage",
+        "inputRejected",
+    ];
+    let events = all_agent_events();
+    assert_eq!(events.len(), expected.len());
+    for (event, tag) in events.iter().zip(expected) {
+        let v: serde_json::Value = serde_json::to_value(event).expect("serialize");
+        assert_eq!(v["type"], *tag, "tag drifted for {event:?}");
+    }
+}
+
+/// Shape snapshot: camelCase field names on the wire (`rename_all_fields`).
+#[test]
+fn test_agent_event_fields_are_camel_case() {
+    let end = AgentEvent::ToolExecutionEnd {
+        tool_call_id: "tc-1".into(),
+        tool_name: "bash".into(),
+        result: sample_tool_result(),
+        is_error: true,
+    };
+    let v = serde_json::to_value(&end).expect("serialize");
+    assert_eq!(v["toolCallId"], "tc-1");
+    assert_eq!(v["toolName"], "bash");
+    assert_eq!(v["isError"], true);
+    assert!(
+        v.get("tool_call_id").is_none(),
+        "snake_case leaked onto the wire"
+    );
+
+    let update = AgentEvent::MessageUpdate {
+        message: sample_assistant(),
+        delta: StreamDelta::Text { delta: "hi".into() },
+    };
+    let v = serde_json::to_value(&update).expect("serialize");
+    assert_eq!(v["type"], "messageUpdate");
+    assert_eq!(v["delta"]["type"], "text");
+    assert_eq!(v["delta"]["delta"], "hi");
+    assert!(v.get("message").is_some());
+
+    let rejected = AgentEvent::InputRejected {
+        reason: "nope".into(),
+    };
+    let v = serde_json::to_value(&rejected).expect("serialize");
+    assert_eq!(v["reason"], "nope");
+}
+
+/// Unit variants carry only the tag: `{"type":"agentStart"}`.
+#[test]
+fn test_agent_event_unit_variant_shape() {
+    let json = serde_json::to_string(&AgentEvent::AgentStart).expect("serialize");
+    assert_eq!(json, r#"{"type":"agentStart"}"#);
+    let json = serde_json::to_string(&AgentEvent::TurnStart).expect("serialize");
+    assert_eq!(json, r#"{"type":"turnStart"}"#);
+}
+
+/// A wire client's inbound path: parse an event from a raw JSON line.
+#[test]
+fn test_agent_event_deserializes_from_raw_json() {
+    let line = r#"{"type":"toolExecutionStart","toolCallId":"tc-9","toolName":"read","args":{"path":"a.rs"}}"#;
+    let event: AgentEvent = serde_json::from_str(line).expect("deserialize");
+    let AgentEvent::ToolExecutionStart {
+        tool_call_id,
+        tool_name,
+        args,
+    } = event
+    else {
+        panic!("expected ToolExecutionStart");
+    };
+    assert_eq!(tool_call_id, "tc-9");
+    assert_eq!(tool_name, "read");
+    assert_eq!(args["path"], "a.rs");
+}

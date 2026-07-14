@@ -518,7 +518,29 @@ pub enum ToolError {
 // Agent events (for streaming UI updates)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
+/// Events emitted by the agent loop for streaming UI updates.
+///
+/// # Wire format (stability contract)
+///
+/// `AgentEvent` and [`StreamDelta`] serialize as internally-tagged JSON —
+/// `{"type": "<camelCase variant>", ...camelCase fields}` — so external
+/// frontends (websocket fanout servers, TypeScript clients, JSONL pipes) can
+/// consume the event stream directly:
+///
+/// ```json
+/// {"type":"messageUpdate","message":{...},"delta":{"type":"text","delta":"hi"}}
+/// {"type":"toolExecutionEnd","toolCallId":"tc_1","toolName":"bash","result":{...},"isError":false}
+/// ```
+///
+/// This shape is a **public contract**: variant tags, field names, and the
+/// internal tagging are frozen by snapshot tests. Renaming a variant or field
+/// is a breaking change for wire clients, not just for Rust callers.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum AgentEvent {
     AgentStart,
     AgentEnd {
@@ -565,7 +587,16 @@ pub enum AgentEvent {
     },
 }
 
-#[derive(Debug, Clone)]
+/// Incremental content delta carried by [`AgentEvent::MessageUpdate`].
+///
+/// Serializes internally tagged (`{"type":"text","delta":"..."}`); see the
+/// wire-format contract on [`AgentEvent`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum StreamDelta {
     Text { delta: String },
     Thinking { delta: String },
