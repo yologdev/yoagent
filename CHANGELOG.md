@@ -24,11 +24,14 @@ adheres to [Semantic Versioning](https://semver.org/).
   the wire format: `usage.cacheRead`/`cacheWrite`/`totalTokens`,
   `errorMessage`, and `providerMetadata`. Session files and `save_messages`
   blobs written by older versions still load (`serde` aliases accept the old
-  names); files **written** by 0.13 use the new names, so they are not
-  readable by yoagent < 0.13. The full nested payload shape (message,
-  content blocks, usage) is now frozen by an exact-JSON snapshot test.
-- `serde` minimum version is now `1.0.181` (needed for `rename_all_fields`
-  on the event wire format). Released July 2023; no practical impact.
+  names). Files **written** by 0.13 load in older versions *without error*,
+  but the renamed fields are silently dropped there: cache/total token
+  counts read as 0, and `errorMessage`/`providerMetadata` — including
+  Gemini thought signatures — are lost. Don't round-trip session files
+  through yoagent < 0.13. The full nested payload shape (message, content
+  blocks, usage) is frozen by an exact-JSON snapshot test.
+- `serde` minimum version is now `1.0.177` (the release that added
+  `rename_all_fields`, July 2023); no practical impact.
 
 ## 0.12.0
 

@@ -148,10 +148,14 @@ This shape is a **public contract** frozen by snapshot tests — variant tags,
 field names, and the tagging scheme won't change in minor releases.
 
 Streaming semantics: clients accumulate text from each `MessageUpdate`'s
-`delta`; the `message` field during streaming is a placeholder (its `content`
-fills in only when the message completes). The full message arrives with
-`MessageEnd` — a client that misses events (e.g. a lagged websocket
-subscriber) resyncs from the next `MessageEnd` without replay.
+`delta`; the `message` field during streaming is an empty-content
+placeholder (the complete message arrives as a new value in `MessageEnd`).
+Reset accumulation on each `MessageStart` — after a transient provider
+error the stream restarts from a fresh `MessageStart` with no closing
+`MessageEnd` for the abandoned attempt, so a client that doesn't reset
+duplicates the replayed text. A client that misses events entirely (e.g. a
+lagged websocket subscriber) resyncs from the next `MessageEnd` without
+replay.
 
 ## StreamDelta
 
