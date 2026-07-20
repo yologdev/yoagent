@@ -60,6 +60,7 @@ impl StreamProvider for OpenAiCompatProvider {
         let mut content: Vec<Content> = Vec::new();
         let mut usage = Usage::default();
         let mut stop_reason = StopReason::Stop;
+        let mut saw_finish_reason = false;
         let mut tool_call_buffers: Vec<ToolCallBuffer> = Vec::new();
 
         let _ = tx.send(StreamEvent::Start);
@@ -182,6 +183,7 @@ impl StreamProvider for OpenAiCompatProvider {
 
                                 // Handle finish reason
                                 if let Some(reason) = &choice.finish_reason {
+                                    saw_finish_reason = true;
                                     stop_reason = match reason.as_str() {
                                         "stop" => StopReason::Stop,
                                         "length" => StopReason::Length,
@@ -190,6 +192,15 @@ impl StreamProvider for OpenAiCompatProvider {
                                     };
                                 }
                             }
+                        }
+                        // Some providers (e.g. MiniMax) close the connection
+                        // without the OpenAI-standard `data: [DONE]` terminator.
+                        // If a finish_reason was already received, the response
+                        // is complete — treat as clean EOF, same as the graceful
+                        // `None` case. A StreamEnded with NO finish_reason is
+                        // genuine mid-stream truncation and stays an error.
+                        Some(Err(reqwest_eventsource::Error::StreamEnded)) if saw_finish_reason => {
+                            break;
                         }
                         Some(Err(e)) => {
                             let provider_err = classify_eventsource_error(e).await;
