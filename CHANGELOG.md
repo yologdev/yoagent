@@ -4,6 +4,17 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Fixed
+
+- **openai_compat: DONE-less SSE close after `finish_reason` is now a clean
+  EOF** (#76). Providers that close the connection without the
+  OpenAI-standard `data: [DONE]` terminator (MiniMax confirmed in the field)
+  no longer return `ProviderError::Other("Stream ended")` after the complete
+  response already streamed. A `StreamEnded` with no `finish_reason` remains
+  an error — genuine mid-stream truncation still surfaces and retries.
+
 ## 0.13.0
 
 ### Added
