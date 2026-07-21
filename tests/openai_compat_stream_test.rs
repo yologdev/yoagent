@@ -100,3 +100,37 @@ async fn test_stream_ended_without_finish_reason_is_error() {
         "truncation before finish_reason must stay an error, got {result:?}"
     );
 }
+
+/// DONE-less close where a usage chunk arrives AFTER finish_reason (the
+/// OpenAI `stream_options.include_usage` shape): usage must be captured.
+#[tokio::test]
+async fn test_usage_chunk_after_finish_reason_survives_doneless_close() {
+    let server = MockServer::start().await;
+    let body = [
+        chunk(r#"{"choices":[{"delta":{"content":"Hi"},"index":0}]}"#),
+        chunk(r#"{"choices":[{"delta":{},"finish_reason":"stop","index":0}]}"#),
+        chunk(r#"{"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3}}"#),
+    ]
+    .concat();
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_raw(body, "text/event-stream"),
+        )
+        .mount(&server)
+        .await;
+
+    let msg = run_stream(stream_config(&server.uri()))
+        .await
+        .expect("clean");
+    let Message::Assistant { usage, .. } = &msg else {
+        panic!("expected assistant");
+    };
+    assert_eq!(
+        usage.input, 7,
+        "usage chunk after finish_reason must be captured"
+    );
+    assert_eq!(usage.output, 3);
+}

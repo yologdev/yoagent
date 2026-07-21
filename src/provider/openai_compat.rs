@@ -196,10 +196,13 @@ impl StreamProvider for OpenAiCompatProvider {
                         // Some providers (e.g. MiniMax) close the connection
                         // without the OpenAI-standard `data: [DONE]` terminator.
                         // If a finish_reason was already received, the response
-                        // is complete — treat as clean EOF, same as the graceful
-                        // `None` case. A StreamEnded with NO finish_reason is
-                        // genuine mid-stream truncation and stays an error.
+                        // is complete — treat as clean EOF. (This eventsource
+                        // surfaces every body close as StreamEnded; network
+                        // drops surface as Transport instead.) A StreamEnded
+                        // with NO finish_reason is genuine truncation and
+                        // stays an error.
                         Some(Err(reqwest_eventsource::Error::StreamEnded)) if saw_finish_reason => {
+                            debug!("provider closed stream without [DONE] after finish_reason");
                             break;
                         }
                         Some(Err(e)) => {
@@ -214,8 +217,16 @@ impl StreamProvider for OpenAiCompatProvider {
 
         // Finalize tool calls
         for buf in &tool_call_buffers {
-            let args = serde_json::from_str(&buf.arguments)
-                .unwrap_or(serde_json::Value::Object(Default::default()));
+            let args = serde_json::from_str(&buf.arguments).unwrap_or_else(|e| {
+                if !buf.arguments.is_empty() {
+                    warn!(
+                        tool = %buf.name,
+                        len = buf.arguments.len(),
+                        "tool-call arguments failed to parse ({e}); using empty object"
+                    );
+                }
+                serde_json::Value::Object(Default::default())
+            });
             content.push(Content::ToolCall {
                 provider_metadata: None,
                 id: buf.id.clone(),

@@ -13,7 +13,8 @@ adheres to [Semantic Versioning](https://semver.org/).
   OpenAI-standard `data: [DONE]` terminator (MiniMax confirmed in the field)
   no longer return `ProviderError::Other("Stream ended")` after the complete
   response already streamed. A `StreamEnded` with no `finish_reason` remains
-  an error — genuine mid-stream truncation still surfaces and retries.
+  an error — genuine truncation still surfaces (network-level drops retry;
+  deliberate server closes fail fast).
 
 ## 0.13.0
 
