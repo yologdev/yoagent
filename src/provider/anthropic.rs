@@ -296,7 +296,15 @@ impl StreamProvider for AnthropicProvider {
             content,
             stop_reason,
             model: config.model.clone(),
-            provider: "anthropic".into(),
+            // Gateways that speak the Anthropic Messages protocol (OpenCode
+            // Zen, Copilot) carry their own provider name for cost and session
+            // attribution — don't overwrite it. Falls back to "anthropic" when
+            // no ModelConfig was supplied.
+            provider: config
+                .model_config
+                .as_ref()
+                .map(|mc| mc.provider.clone())
+                .unwrap_or_else(|| "anthropic".into()),
             usage,
             timestamp: now_ms(),
             error_message,

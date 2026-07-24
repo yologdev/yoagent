@@ -202,3 +202,35 @@ async fn rate_limit_carries_retry_after_from_header() {
         other => panic!("expected RateLimited, got: {:?}", other),
     }
 }
+
+/// Issue #81: the returned message must carry the `ModelConfig.provider`, not a
+/// hardcoded "anthropic". Gateways that speak the Anthropic Messages protocol
+/// (OpenCode Zen, Copilot) set their own provider name for cost and session
+/// attribution — yoagent's own `ModelConfig::opencode_zen()` preset routes
+/// Claude model ids over this provider, so the hardcoded value mis-attributed
+/// a first-class preset.
+#[tokio::test]
+async fn provider_comes_from_model_config_not_hardcoded() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(sse_empty_with_stop("end_turn"), "text/event-stream"),
+        )
+        .mount(&server)
+        .await;
+
+    let mut config = stream_config(&server.uri(), None);
+    config.model_config.as_mut().unwrap().provider = "opencode-zen".into();
+
+    let message = run_stream(config).await.expect("stream should succeed");
+
+    let Message::Assistant { provider, .. } = &message else {
+        panic!("expected assistant message");
+    };
+    assert_eq!(
+        provider, "opencode-zen",
+        "provider must be propagated from ModelConfig, not hardcoded"
+    );
+}
