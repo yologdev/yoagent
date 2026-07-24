@@ -27,8 +27,8 @@ Uses `reqwest-eventsource` to parse Anthropic's SSE stream. Events handled:
 
 Set `thinking_level` to enable thinking. By default the provider sends
 **adaptive thinking** (`thinking: {"type": "adaptive"}`), which the current
-model generation requires (Claude Fable 5, Opus 4.7/4.8, Sonnet 5 reject
-budget-based thinking with a 400). The level maps to an `output_config.effort`
+model generation requires (Claude Fable 5, Opus 5, Opus 4.7/4.8, Sonnet 5
+reject budget-based thinking with a 400). The level maps to an `output_config.effort`
 hint:
 
 | Level | Effort |

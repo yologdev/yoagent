@@ -258,8 +258,8 @@ impl OpenAiCompat {
 #[serde(default)]
 pub struct AnthropicCompat {
     /// Use adaptive thinking (`thinking: {"type": "adaptive"}` plus
-    /// `output_config.effort`). Required by Claude Fable 5, Opus 4.7/4.8, and
-    /// Sonnet 5; recommended on Opus 4.6 / Sonnet 4.6. Set to `false` for
+    /// `output_config.effort`). Required by Claude Fable 5, Opus 5, Opus 4.7/4.8,
+    /// and Sonnet 5; recommended on Opus 4.6 / Sonnet 4.6. Set to `false` for
     /// pre-4.6 models, which only accept `{"type": "enabled", "budget_tokens": N}`.
     pub adaptive_thinking: bool,
     /// Send the API key as `Authorization: Bearer {key}` instead of the
@@ -445,6 +445,27 @@ impl ModelConfig {
                 cache_write_per_million: 12.5,
             },
             ..Self::anthropic("claude-fable-5", "Claude Fable 5")
+        }
+    }
+
+    /// Claude Opus 5. 1M context; defaults to 64K of the model's 128K max output.
+    ///
+    /// Opus 5 thinks whenever a request omits `thinking`, so `ThinkingLevel::Off`
+    /// does not disable thinking here — the provider omits the field rather than
+    /// sending `{"type": "disabled"}`, and those tokens still count against
+    /// `max_tokens`. Any other level takes the adaptive path that
+    /// `AnthropicCompat::default()` selects, which Opus 5 accepts unchanged.
+    pub fn claude_opus_5() -> Self {
+        Self {
+            context_window: 1_000_000,
+            max_tokens: 64_000,
+            cost: CostConfig {
+                input_per_million: 5.0,
+                output_per_million: 25.0,
+                cache_read_per_million: 0.5,
+                cache_write_per_million: 6.25,
+            },
+            ..Self::anthropic("claude-opus-5", "Claude Opus 5")
         }
     }
 
@@ -941,6 +962,17 @@ mod tests {
         assert_eq!(fable.context_window, 1_000_000);
         assert_eq!(fable.cost.input_per_million, 10.0);
         assert_eq!(fable.cost.output_per_million, 50.0);
+
+        let opus_5 = ModelConfig::claude_opus_5();
+        assert_eq!(opus_5.id, "claude-opus-5");
+        assert_eq!(opus_5.api, ApiProtocol::AnthropicMessages);
+        assert_eq!(opus_5.context_window, 1_000_000);
+        assert_eq!(opus_5.max_tokens, 64_000);
+        assert_eq!(opus_5.cost.input_per_million, 5.0);
+        assert_eq!(opus_5.cost.output_per_million, 25.0);
+        // Derived rates: cache reads bill at 0.1x input, writes at 1.25x.
+        assert_eq!(opus_5.cost.cache_read_per_million, 0.5);
+        assert_eq!(opus_5.cost.cache_write_per_million, 6.25);
 
         let opus = ModelConfig::claude_opus_4_8();
         assert_eq!(opus.id, "claude-opus-4-8");
