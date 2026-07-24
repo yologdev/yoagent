@@ -4,6 +4,35 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Fixed
+
+- **Anthropic messages carry the configured provider** (#81). `AnthropicProvider`
+  hardcoded `provider: "anthropic"`, the sole outlier among providers — every
+  other one propagates `ModelConfig.provider`. This mis-attributed gateways
+  speaking the Anthropic Messages protocol, including yoagent's own
+  `ModelConfig::opencode_zen()` preset, which routes Claude model ids over this
+  provider under the name `"opencode-zen"`. Falls back to `"anthropic"` when no
+  `ModelConfig` is supplied.
+- **Truncated SSE streams retry instead of failing hard** (#83). A stream that
+  ended mid-response mapped to the non-retryable `ProviderError::Other`, so the
+  agent loop gave up immediately. A proxy or load balancer closing mid-response
+  sends a FIN, which surfaces as `StreamEnded` rather than `Transport` — the
+  same transient condition, classified as fatal. It now maps to `Network`, which
+  the retry policy already covers. `anthropic` gains the matching clean-EOF
+  guard `openai_compat` got in #76, so a gateway that delivers a complete
+  response and closes without `message_stop` is not retried and re-billed.
+- **Dropping a streaming `Agent` no longer orphans its task** (#84). `JoinHandle`
+  does not cancel on drop, so the spawned loop kept running — burning tokens,
+  holding the tools, and keeping the event channel open so the caller's receiver
+  never closed. A `Drop` impl now cancels the token and aborts the handle. Tools
+  are dropped rather than recovered (use `reset()`/`finish()` for that), and a
+  tool blocked in synchronous code still runs until it yields — both documented
+  on the impl.
+
+Thanks to @markokocic for reporting all three.
+
 ## 0.13.2
 
 ### Added

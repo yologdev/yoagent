@@ -1189,3 +1189,81 @@ async fn test_tool_middleware_deny_under_batched_strategy() {
     });
     assert!(denied);
 }
+
+// ---------------------------------------------------------------------------
+// Drop: dropping a streaming Agent must not orphan the spawned loop (#84)
+// ---------------------------------------------------------------------------
+
+/// Tool that parks on an await long enough that the agent loop is guaranteed
+/// to still be in flight when the Agent is dropped.
+struct SlowTool;
+
+#[async_trait::async_trait]
+impl AgentTool for SlowTool {
+    fn name(&self) -> &str {
+        "slow_tool"
+    }
+    fn label(&self) -> &str {
+        "Slow Tool"
+    }
+    fn description(&self) -> &str {
+        "Sleeps"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    async fn execute(
+        &self,
+        _params: serde_json::Value,
+        _ctx: ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        Ok(ToolResult {
+            content: vec![Content::Text {
+                text: "done".into(),
+            }],
+            details: serde_json::Value::Null,
+        })
+    }
+}
+
+/// Issue #84: `JoinHandle` does not cancel its task on drop, so before the
+/// `Drop` impl a dropped streaming Agent left the loop running as an orphan —
+/// holding the event channel's sender open, so the caller's receiver never
+/// closed. Dropping the Agent must close the channel promptly.
+///
+/// Without the fix this hangs until the 30s tool sleep completes and the
+/// timeout below fails the test.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_drop_aborts_spawned_loop_and_closes_channel() {
+    let provider = MockProvider::new(vec![MockResponse::ToolCalls(vec![MockToolCall {
+        name: "slow_tool".into(),
+        arguments: serde_json::json!({}),
+        provider_metadata: None,
+    }])]);
+
+    let mut agent = Agent::from_provider(provider, ModelConfig::mock())
+        .with_system_prompt("test")
+        .with_tools(vec![Box::new(SlowTool)]);
+
+    let mut rx = agent.prompt("run the slow tool").await;
+    assert!(agent.is_streaming(), "loop should be in flight");
+
+    // Let the loop reach the tool call so the task is genuinely parked.
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    drop(agent);
+
+    // The aborted task drops its sender, so the receiver closes. Drain any
+    // already-buffered events until the channel ends.
+    let drained = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while rx.recv().await.is_some() {}
+    })
+    .await;
+
+    assert!(
+        drained.is_ok(),
+        "dropping the Agent must abort the spawned loop and close the event \
+         channel; it stayed open, so the task was orphaned"
+    );
+}

@@ -202,3 +202,114 @@ async fn rate_limit_carries_retry_after_from_header() {
         other => panic!("expected RateLimited, got: {:?}", other),
     }
 }
+
+/// Issue #81: the returned message must carry the `ModelConfig.provider`, not a
+/// hardcoded "anthropic". Gateways that speak the Anthropic Messages protocol
+/// (OpenCode Zen, Copilot) set their own provider name for cost and session
+/// attribution — yoagent's own `ModelConfig::opencode_zen()` preset routes
+/// Claude model ids over this provider, so the hardcoded value mis-attributed
+/// a first-class preset.
+#[tokio::test]
+async fn provider_comes_from_model_config_not_hardcoded() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(sse_empty_with_stop("end_turn"), "text/event-stream"),
+        )
+        .mount(&server)
+        .await;
+
+    let mut config = stream_config(&server.uri(), None);
+    config.model_config.as_mut().unwrap().provider = "opencode-zen".into();
+
+    let message = run_stream(config).await.expect("stream should succeed");
+
+    let Message::Assistant { provider, .. } = &message else {
+        panic!("expected assistant message");
+    };
+    assert_eq!(
+        provider, "opencode-zen",
+        "provider must be propagated from ModelConfig, not hardcoded"
+    );
+}
+
+/// Issue #83: a terminator-less close BEFORE any `message_delta` is genuine
+/// truncation. It must surface as a retryable `Network` error, not the
+/// non-retryable `Other` it used to be — a proxy or load balancer closing
+/// mid-response sends a FIN, which the eventsource reports as `StreamEnded`.
+#[tokio::test]
+async fn stream_ended_without_stop_reason_is_retryable_network_error() {
+    let server = MockServer::start().await;
+    // message_start only, then the body ends: no stop_reason, no message_stop.
+    let truncated = "event: message_start\n\
+         data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0}}}\n\n";
+
+    Mock::given(method("POST"))
+        .and(path("/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(truncated, "text/event-stream"))
+        .mount(&server)
+        .await;
+
+    let err = run_stream(stream_config(&server.uri(), None))
+        .await
+        .expect_err("truncation before stop_reason must be an error");
+
+    assert!(
+        matches!(err, yoagent::provider::ProviderError::Network(_)),
+        "expected retryable Network, got: {err:?}"
+    );
+    assert!(err.is_retryable(), "truncation must be retryable");
+}
+
+/// The other half of #83: a terminator-less close AFTER `message_delta` means
+/// the response is already complete (stop_reason and usage arrived), so it is a
+/// clean EOF — NOT a retry. Without this guard, making StreamEnded retryable
+/// would re-bill a finished response, the bug #76 fixed for openai_compat.
+#[tokio::test]
+async fn stream_ended_after_stop_reason_is_clean_eof() {
+    let server = MockServer::start().await;
+    // Complete response, but the body ends without `message_stop`.
+    let no_terminator = "event: message_start\n\
+         data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0}}}\n\n\
+         event: content_block_start\n\
+         data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n\
+         event: content_block_delta\n\
+         data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hello\"}}\n\n\
+         event: message_delta\n\
+         data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\n\n";
+
+    Mock::given(method("POST"))
+        .and(path("/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(no_terminator, "text/event-stream"))
+        .mount(&server)
+        .await;
+
+    let message = run_stream(stream_config(&server.uri(), None))
+        .await
+        .expect("close after message_delta must not be an error");
+
+    let Message::Assistant {
+        stop_reason,
+        content,
+        usage,
+        ..
+    } = &message
+    else {
+        panic!("expected assistant message");
+    };
+    assert_eq!(*stop_reason, StopReason::Stop);
+    assert_eq!(usage.output, 5, "usage from message_delta must survive");
+    let text: String = content
+        .iter()
+        .filter_map(|c| match c {
+            Content::Text { text } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        text, "hello",
+        "content must survive the terminator-less close"
+    );
+}

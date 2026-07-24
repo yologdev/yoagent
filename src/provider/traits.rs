@@ -199,8 +199,17 @@ impl ProviderError {
 /// - `InvalidStatusCode` — reads the response body and classifies via
 ///   [`ProviderError::classify()`] (context overflow, rate limit, auth, etc.).
 /// - `Transport` — maps to [`ProviderError::Network`] (retryable).
-/// - All other variants (protocol/parse errors like `StreamEnded`,
-///   `InvalidContentType`, `Utf8`, `Parser`) — maps to [`ProviderError::Other`]
+/// - `StreamEnded` — the response body reached EOF without a clean SSE
+///   terminator. Reaching here means no complete response was assembled, so
+///   this is genuine truncation (a proxy or load balancer closing mid-response
+///   sends a FIN, which surfaces as `StreamEnded` rather than `Transport`).
+///   Transient, so it maps to [`ProviderError::Network`] (retryable).
+///   Providers that can receive a *complete* response before a terminator-less
+///   close must catch `StreamEnded` themselves and treat it as a clean EOF —
+///   see `openai_compat` (`saw_finish_reason`) and `anthropic`
+///   (`saw_stop_reason`) — otherwise a finished response would be retried.
+/// - All other variants (protocol/parse errors like `InvalidContentType`,
+///   `Utf8`, `Parser`) — maps to [`ProviderError::Other`]
 ///   (non-retryable, fail fast).
 pub async fn classify_eventsource_error(error: reqwest_eventsource::Error) -> ProviderError {
     match error {
@@ -220,6 +229,9 @@ pub async fn classify_eventsource_error(error: reqwest_eventsource::Error) -> Pr
             )
         }
         reqwest_eventsource::Error::Transport(e) => ProviderError::Network(format!("{:?}", e)),
+        reqwest_eventsource::Error::StreamEnded => {
+            ProviderError::Network("stream ended before the response was complete".into())
+        }
         other => ProviderError::Other(other.to_string()),
     }
 }

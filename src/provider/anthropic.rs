@@ -107,6 +107,10 @@ impl StreamProvider for AnthropicProvider {
         let mut content: Vec<Content> = Vec::new();
         let mut usage = Usage::default();
         let mut stop_reason = StopReason::Stop;
+        // Whether `message_delta` (which carries stop_reason + output usage)
+        // arrived — i.e. the response is complete even if `message_stop` never
+        // does. Gates the terminator-less-close guard below.
+        let mut saw_stop_reason = false;
         let mut error_message: Option<String> = None;
 
         let _ = tx.send(StreamEvent::Start);
@@ -233,6 +237,7 @@ impl StreamProvider for AnthropicProvider {
                                 }
                                 "message_delta" => {
                                     if let Ok(data) = serde_json::from_str::<AnthropicMessageDelta>(&msg.data) {
+                                        saw_stop_reason = true;
                                         stop_reason = match data.delta.stop_reason.as_deref() {
                                             Some("tool_use") => StopReason::ToolUse,
                                             Some("max_tokens") => StopReason::Length,
@@ -274,6 +279,17 @@ impl StreamProvider for AnthropicProvider {
                                 }
                             }
                         }
+                        // A gateway can deliver a complete response and then
+                        // close without the `message_stop` terminator —
+                        // `message_delta` already carried stop_reason and
+                        // usage, so the message is whole. Treat as clean EOF;
+                        // classifying it would make it retryable (Network) and
+                        // re-bill a finished response. Same shape as the
+                        // openai_compat DONE-less guard (#76).
+                        Some(Err(reqwest_eventsource::Error::StreamEnded)) if saw_stop_reason => {
+                            debug!("provider closed stream without message_stop after message_delta");
+                            break;
+                        }
                         Some(Err(e)) => {
                             let provider_err = classify_eventsource_error(e).await;
                             warn!("SSE error: {}", provider_err);
@@ -296,7 +312,15 @@ impl StreamProvider for AnthropicProvider {
             content,
             stop_reason,
             model: config.model.clone(),
-            provider: "anthropic".into(),
+            // Gateways that speak the Anthropic Messages protocol (OpenCode
+            // Zen, Copilot) carry their own provider name for cost and session
+            // attribution — don't overwrite it. Falls back to "anthropic" when
+            // no ModelConfig was supplied.
+            provider: config
+                .model_config
+                .as_ref()
+                .map(|mc| mc.provider.clone())
+                .unwrap_or_else(|| "anthropic".into()),
             usage,
             timestamp: now_ms(),
             error_message,
