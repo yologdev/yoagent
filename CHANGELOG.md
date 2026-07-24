@@ -4,6 +4,22 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- **`ModelConfig::claude_opus_5()` preset** (#85). Consumers mapping model
+  strings to presets had no constructor for `claude-opus-5` and fell through
+  to the generic `ModelConfig::anthropic()`, losing cost tracking and context
+  metadata. The preset sets a 1M context window, a 64K default `max_tokens`
+  (of the model's 128K ceiling), and $5 / $25 per M input/output with
+  $0.50 / $6.25 cache read/write — the same base rates as Opus 4.8. No new
+  compat flag was needed: Opus 5 accepts the same adaptive-thinking encoding
+  as Opus 4.7/4.8, which `AnthropicCompat::default()` already emits whenever
+  a thinking level is set. Note that Opus 5 thinks server-side when a request
+  omits `thinking`, so `ThinkingLevel::Off` does not disable thinking on this
+  model — see the preset's doc comment.
+
 ## 0.13.1
 
 ### Fixed
