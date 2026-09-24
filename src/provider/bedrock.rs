@@ -238,15 +238,11 @@ impl StreamProvider for BedrockProvider {
     }
 }
 
-/// Budget for Bedrock's Anthropic-style thinking per level (matches the
-/// legacy Anthropic budget mapping).
+/// Budget for Bedrock's Anthropic-style thinking per level — the legacy
+/// Anthropic budget table, shared so the two cannot drift. Unlike the
+/// first-party path, Bedrock does not raise `maxTokens` above the budget.
 fn bedrock_thinking_budget(level: ThinkingLevel) -> u32 {
-    match level {
-        ThinkingLevel::Off => 0,
-        ThinkingLevel::Minimal | ThinkingLevel::Low => 1024,
-        ThinkingLevel::Medium => 2048,
-        ThinkingLevel::High => 8192,
-    }
+    super::anthropic::legacy_thinking_budget(level)
 }
 
 fn build_bedrock_body(config: &StreamConfig) -> serde_json::Value {
@@ -523,6 +519,30 @@ mod tests {
         let thinking = &body["additionalModelRequestFields"]["thinking"];
         assert_eq!(thinking["type"], "enabled");
         assert_eq!(thinking["budget_tokens"], 8192);
+    }
+
+    #[test]
+    fn xhigh_and_max_use_the_legacy_anthropic_budgets() {
+        for (level, budget) in [(ThinkingLevel::XHigh, 16_384), (ThinkingLevel::Max, 30_720)] {
+            let config = StreamConfig {
+                model: "anthropic.claude-sonnet".into(),
+                system_prompt: "".into(),
+                messages: vec![Message::user("hi")],
+                tools: vec![],
+                thinking_level: level,
+                api_key: "a:b".into(),
+                max_tokens: Some(64_000),
+                temperature: None,
+                model_config: None,
+                cache_config: CacheConfig::default(),
+                output_schema: None,
+            };
+            let body = build_bedrock_body(&config);
+            assert_eq!(
+                body["additionalModelRequestFields"]["thinking"]["budget_tokens"],
+                budget
+            );
+        }
     }
 
     #[test]

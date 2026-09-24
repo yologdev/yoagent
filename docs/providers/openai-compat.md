@@ -84,6 +84,22 @@ let config = ModelConfig::openai_compat(
 
 ## Thinking/Reasoning
 
+With `supports_reasoning_effort`, `ThinkingLevel` becomes `reasoning_effort`:
+
+| Level | Most providers | DeepSeek-style (`supports_thinking_control`) |
+|-------|----------------|----------------------------------------------|
+| `Minimal`, `Low` | `low` | `low` |
+| `Medium` | `medium` | `medium` (DeepSeek rounds it up to `high`) |
+| `High` | `high` | `high` |
+| `XHigh` | `high` (clamped) | `max` |
+| `Max` | `high` (clamped) | `max` |
+
+`high` is the top rung this crate knows most OpenAI-shaped providers accept,
+and an unknown effort string is rejected rather than rounded, so `XHigh` and
+`Max` clamp there. DeepSeek's ladder is `none`/`low`/`high`/`max`; `XHigh`
+rounds up to `max` the same way DeepSeek itself rounds `medium` up. The OpenAI
+Responses and Azure OpenAI providers clamp `XHigh`/`Max` to `high` too.
+
 The `ThinkingFormat` enum controls how reasoning content is parsed from streams:
 
 - `ThinkingFormat::OpenAi` — Uses `reasoning_content` field (DeepSeek, default)

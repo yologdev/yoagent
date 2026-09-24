@@ -63,7 +63,7 @@ All return `Self` for chaining (unless noted as `Result`).
 |--------|-------------|
 | `with_system_prompt(prompt) -> Self` | Set the system prompt |
 | `with_api_key(key) -> Self` | Override the env-resolved API key |
-| `with_thinking(level: ThinkingLevel) -> Self` | Set thinking level (`Off`, `Minimal`, `Low`, `Medium`, `High`) |
+| `with_thinking(level: ThinkingLevel) -> Self` | Set thinking level (`Off`, `Minimal`, `Low`, `Medium`, `High`, `XHigh`, `Max`) |
 | `with_max_tokens(max: u32) -> Self` | Set max output tokens |
 
 **Tools & Integrations**

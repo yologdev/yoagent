@@ -101,18 +101,28 @@ ExecutionLimits::default()
 ## ThinkingLevel
 
 ```rust
+#[non_exhaustive]  // match with a wildcard arm
 pub enum ThinkingLevel {
     Off,        // No thinking (default)
     Minimal,    // Anthropic: effort "low" (adaptive) / 1,024-token budget (legacy)
     Low,        // Anthropic: effort "low" / 1,024
     Medium,     // Anthropic: effort "medium" / 2,048
     High,       // Anthropic: effort "high" / 8,192
+    XHigh,      // Anthropic: effort "xhigh" / 16,384 (serde: "xhigh")
+    Max,        // Anthropic: effort "max" / 30,720
 }
 ```
 
-OpenAI-family providers map these levels to `reasoning_effort` where the
-compat flags enable it; the Google and Bedrock providers currently ignore
-`thinking_level`.
+Where a provider's ladder is shorter, the upper levels are clamped to its top
+rung, never sent as a value it would reject:
+
+| Level | Anthropic effort | Anthropic legacy / Bedrock budget | OpenAI-compat / Responses / Azure effort | DeepSeek effort | Gemini / Vertex budget |
+|-------|------|------|------|------|------|
+| `Minimal`, `Low` | `low` | 1,024 | `low` | `low` | 1,024 |
+| `Medium` | `medium` | 2,048 | `medium` | `medium` | 8,192 |
+| `High` | `high` | 8,192 | `high` | `high` | 24,576 |
+| `XHigh` | `xhigh` | 16,384 | `high` (clamped) | `max` | 24,576 (clamped) |
+| `Max` | `max` | 30,720 | `high` (clamped) | `max` | 24,576 (clamped) |
 
 ## CostConfig
 

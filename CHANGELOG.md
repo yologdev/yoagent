@@ -4,6 +4,46 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Breaking
+
+- **`ThinkingLevel` gains `XHigh` and `Max`, and is now `#[non_exhaustive]`**
+  ([#171](https://github.com/yologdev/yoagent/issues/171)). `High` was the top
+  of the enum, so Anthropic's `xhigh` (Anthropic's recommended setting for
+  coding and agentic work on current models) and `max`, and DeepSeek's `max`,
+  could not be requested at all. Setting the highest level the type offered
+  read as "maximum reasoning" and was not. The ceiling was invisible.
+
+  Each provider now maps the new levels to its own ladder, and where the ladder
+  is shorter it **clamps** to its top rung instead of sending a value it would
+  reject. The full table is on `ThinkingLevel`'s doc comment:
+
+  | Level | Anthropic effort | Anthropic legacy / Bedrock budget | OpenAI-compat / Responses / Azure | DeepSeek | Gemini / Vertex budget |
+  |-------|------|------|------|------|------|
+  | `XHigh` | `xhigh` | 16,384 | `high` (clamped) | `max` | 24,576 (clamped) |
+  | `Max` | `max` | 30,720 | `high` (clamped) | `max` | 24,576 (clamped) |
+
+  Every existing level sends exactly what it sent before. Serde names are
+  `"xhigh"` and `"max"` (lowercase, like the others), so persisted configs keep
+  loading.
+
+  Anthropic effort is passed through, not clamped: Opus 4.6 / Sonnet 4.6 have
+  no `xhigh` rung (it arrived with Opus 4.7) and will reject it. The crate has
+  no per-model effort table.
+
+  This replaces the unreleased `OpenAiCompat::reasoning_effort_max` flag, which
+  never shipped. That flag sent DeepSeek's `High` as `max`, so `High` meant
+  something different on one provider and Anthropic's rungs stayed out of
+  reach. With real variants, `High` is `high` everywhere and `Max` is the
+  top rung wherever one exists.
+
+  **Migration:** an exhaustive `match` on `ThinkingLevel` outside this crate no
+  longer compiles. Add arms for `XHigh` and `Max`, or a wildcard arm. The
+  wildcard is required from now on (`#[non_exhaustive]`), so the next rung a
+  vendor adds is not another breaking change. Code that only constructs or
+  compares levels is unaffected.
+
 ## 0.18.1
 
 ### Changed

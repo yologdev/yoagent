@@ -367,7 +367,9 @@ fn build_azure_request_body(config: &StreamConfig) -> serde_json::Value {
         let effort = match config.thinking_level {
             ThinkingLevel::Minimal | ThinkingLevel::Low => "low",
             ThinkingLevel::Medium => "medium",
-            ThinkingLevel::High => "high",
+            // Clamped: `high` is the top rung this crate knows the provider
+            // accepts, and an unknown effort string is rejected, not rounded.
+            ThinkingLevel::High | ThinkingLevel::XHigh | ThinkingLevel::Max => "high",
             ThinkingLevel::Off => unreachable!(),
         };
         body["reasoning"] = serde_json::json!({"effort": effort});
@@ -436,6 +438,20 @@ mod tests {
     fn thinking_level_sets_reasoning_effort() {
         let body = build_azure_request_body(&config(ThinkingLevel::Medium));
         assert_eq!(body["reasoning"]["effort"], "medium");
+    }
+
+    #[test]
+    fn xhigh_and_max_clamp_to_high() {
+        for level in [
+            ThinkingLevel::XHigh,
+            ThinkingLevel::Max,
+            ThinkingLevel::High,
+        ] {
+            let body = build_azure_request_body(&config(level));
+            assert_eq!(body["reasoning"]["effort"], "high");
+        }
+        let body = build_azure_request_body(&config(ThinkingLevel::Low));
+        assert_eq!(body["reasoning"]["effort"], "low");
     }
 
     #[test]

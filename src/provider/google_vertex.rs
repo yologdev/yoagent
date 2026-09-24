@@ -328,7 +328,10 @@ fn vertex_thinking_budget(level: ThinkingLevel) -> u32 {
         ThinkingLevel::Off => 0,
         ThinkingLevel::Minimal | ThinkingLevel::Low => 1024,
         ThinkingLevel::Medium => 8192,
-        ThinkingLevel::High => 24576,
+        // Clamped: 24,576 is the thinkingBudget ceiling of Gemini 2.5 Flash
+        // and Flash-Lite. 2.5 Pro goes to 32,768, but there is no per-model
+        // table here, and a budget above a model's ceiling is rejected.
+        ThinkingLevel::High | ThinkingLevel::XHigh | ThinkingLevel::Max => 24576,
     }
 }
 
@@ -510,6 +513,22 @@ mod tests {
         assert_eq!(
             body["generationConfig"]["thinkingConfig"]["includeThoughts"],
             true
+        );
+    }
+
+    #[test]
+    fn xhigh_and_max_clamp_to_the_flash_budget_ceiling() {
+        for level in [ThinkingLevel::XHigh, ThinkingLevel::Max] {
+            let body = build_vertex_request_body(&config(level));
+            assert_eq!(
+                body["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+                24576
+            );
+        }
+        let body = build_vertex_request_body(&config(ThinkingLevel::Medium));
+        assert_eq!(
+            body["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+            8192
         );
     }
 
