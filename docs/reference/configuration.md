@@ -140,9 +140,23 @@ CostConfig::new(5.0, 30.0)          // input, output — output is always dearer
     .with_cache_write(6.25)
 ```
 
-All-zero rates mean **pricing unknown**, not free. `is_configured()` reports
-which, and `session_cost_usd()` returns `None` for an unpriced model rather than
-$0.
+`ModelConfig::cost` is an `Option<CostConfig>`. `None` means **pricing
+unknown**, not free: only the named presets whose rates were checked against the
+vendor (`claude_*`, `gpt_5_5`, `meta`) return `Some`; generic constructors such
+as `deepseek(id, name)` or `openai(id, name)` cannot know the model's price and
+return `None`. Supply one when you know it:
+
+```rust
+let mut config = ModelConfig::deepseek("deepseek-v4-flash", "DeepSeek V4 Flash");
+config.cost = Some(CostConfig::new(0.15, 0.60));
+```
+
+`ModelConfig::priced_cost()` is what the crate's own accounting reads. It
+returns `None` for `cost: None` **and** for a `Some` whose rates are all zero
+(`is_configured()` false) — a config persisted before 0.19 stored "unknown" that
+way and still deserializes to it. `session_cost_usd()`, `SessionStats::cost_usd`
+and the `llm_stream` span's `cost_usd` are all absent for an unpriced model
+rather than $0.
 
 ### Context tiers
 

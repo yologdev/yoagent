@@ -70,9 +70,15 @@ impl std::fmt::Display for ApiProtocol {
 /// rate, or load rates from configuration:
 ///
 /// ```
-/// # use yoagent::provider::ModelConfig;
+/// # use yoagent::provider::{CostConfig, ModelConfig};
 /// let mut config = ModelConfig::claude_sonnet_5();
-/// config.cost.input_per_million = 1.80; // your negotiated rate
+/// if let Some(cost) = config.cost.as_mut() {
+///     cost.input_per_million = 1.80; // your negotiated rate
+/// }
+///
+/// // Generic constructors carry no price (`cost: None`); supply one:
+/// let mut deepseek = ModelConfig::deepseek("deepseek-v4-flash", "DeepSeek V4 Flash");
+/// deepseek.cost = Some(CostConfig::new(0.15, 0.60));
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -217,8 +223,10 @@ impl CostConfig {
         self
     }
 
-    /// Whether any rate is set. All-zero rates mean pricing is unknown
-    /// (custom/local models), not that the model is free.
+    /// Whether any rate is set. All-zero rates mean pricing is unknown, not
+    /// that the model is free — unpriced presets now say so with
+    /// `ModelConfig::cost == None`, but an all-zero `Some` still reaches
+    /// here from configs persisted before 0.19.
     pub fn is_configured(&self) -> bool {
         self.input_per_million != 0.0
             || self.output_per_million != 0.0
@@ -566,9 +574,29 @@ pub struct ModelConfig {
     pub context_window: u32,
     /// Default max output tokens.
     pub max_tokens: u32,
-    /// Cost configuration.
-    #[serde(default)]
-    pub cost: CostConfig,
+    /// Per-token rates, or `None` when this crate does not know the price.
+    ///
+    /// `None` means **unknown**, not free: the generic constructors
+    /// ([`openai`](Self::openai), [`deepseek`](Self::deepseek),
+    /// [`anthropic`](Self::anthropic), [`custom`](Self::custom), …) take any
+    /// model id, so they cannot carry a price. Only the named presets whose
+    /// rates were checked against the vendor's page (`claude_fable_5`,
+    /// `gpt_5_5`, …) return `Some`. Before 0.19 this field was a bare
+    /// `CostConfig` and unpriced configs held all-zero rates, which read as a
+    /// $0 model to anyone who did not know to call `is_configured()`.
+    ///
+    /// The built-in accounting ([`Agent::session_cost_usd`](crate::Agent::session_cost_usd),
+    /// the `llm_stream` span's `cost_usd`, `SessionStats::cost_usd`) reads
+    /// [`priced_cost`](Self::priced_cost), which also treats `Some` with
+    /// all-zero rates as unknown — that is what a config persisted by an
+    /// older release deserializes to, and it cannot be told apart from a
+    /// deliberate "free".
+    ///
+    /// Serde: a persisted `cost` object deserializes to `Some` unchanged
+    /// (all-zero included); a missing or `null` `cost` is `None`. `None` is
+    /// omitted on serialize, so older releases still read the output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<CostConfig>,
     /// Additional headers to send with requests.
     ///
     /// May carry credentials (`Authorization`, `x-api-key`). `Debug` prints
@@ -606,8 +634,18 @@ impl std::fmt::Debug for ModelConfig {
 }
 
 impl ModelConfig {
-    /// A minimal config for tests. `provider` is `"mock"`, cost rates are all
-    /// zero, and `base_url` points at a non-routable host.
+    /// The rates to price usage with, or `None` when the price is unknown.
+    ///
+    /// `None` both when [`cost`](Self::cost) is `None` and when it is `Some`
+    /// with every rate zero (see [`CostConfig::is_configured`]). Every cost
+    /// the crate reports goes through here, so "unknown" is never rendered as
+    /// `$0`.
+    pub fn priced_cost(&self) -> Option<&CostConfig> {
+        self.cost.as_ref().filter(|c| c.is_configured())
+    }
+
+    /// A minimal config for tests. `provider` is `"mock"`, `cost` is `None`
+    /// (unpriced), and `base_url` points at a non-routable host.
     ///
     /// Use it **only** with
     /// [`Agent::from_provider`](crate::Agent::from_provider) /
@@ -652,7 +690,7 @@ impl ModelConfig {
             reasoning: false,
             context_window: 128_000,
             max_tokens: 16_000,
-            cost: CostConfig::default(),
+            cost: None,
             headers: HashMap::new(),
             compat: None,
             anthropic: None,
@@ -670,7 +708,7 @@ impl ModelConfig {
             reasoning: true,
             context_window: 200_000,
             max_tokens: 16_000,
-            cost: CostConfig::default(),
+            cost: None,
             headers: HashMap::new(),
             anthropic: None,
             compat: None,
@@ -686,13 +724,11 @@ impl ModelConfig {
         Self {
             context_window: 1_000_000,
             max_tokens: 64_000,
-            cost: CostConfig {
-                input_per_million: 10.0,
-                output_per_million: 50.0,
-                cache_read_per_million: 1.0,
-                cache_write_per_million: 12.5,
-                ..Default::default()
-            },
+            cost: Some(
+                CostConfig::new(10.0, 50.0)
+                    .with_cache_read(1.0)
+                    .with_cache_write(12.5),
+            ),
             ..Self::anthropic("claude-fable-5", "Claude Fable 5")
         }
     }
@@ -711,13 +747,11 @@ impl ModelConfig {
         Self {
             context_window: 1_000_000,
             max_tokens: 64_000,
-            cost: CostConfig {
-                input_per_million: 5.0,
-                output_per_million: 25.0,
-                cache_read_per_million: 0.5,
-                cache_write_per_million: 6.25,
-                ..Default::default()
-            },
+            cost: Some(
+                CostConfig::new(5.0, 25.0)
+                    .with_cache_read(0.5)
+                    .with_cache_write(6.25),
+            ),
             ..Self::anthropic("claude-opus-5", "Claude Opus 5")
         }
     }
@@ -730,13 +764,11 @@ impl ModelConfig {
         Self {
             context_window: 1_000_000,
             max_tokens: 64_000,
-            cost: CostConfig {
-                input_per_million: 5.0,
-                output_per_million: 25.0,
-                cache_read_per_million: 0.5,
-                cache_write_per_million: 6.25,
-                ..Default::default()
-            },
+            cost: Some(
+                CostConfig::new(5.0, 25.0)
+                    .with_cache_read(0.5)
+                    .with_cache_write(6.25),
+            ),
             ..Self::anthropic("claude-opus-4-8", "Claude Opus 4.8")
         }
     }
@@ -749,13 +781,11 @@ impl ModelConfig {
         Self {
             context_window: 1_000_000,
             max_tokens: 64_000,
-            cost: CostConfig {
-                input_per_million: 2.0,
-                output_per_million: 10.0,
-                cache_read_per_million: 0.2,
-                cache_write_per_million: 2.5,
-                ..Default::default()
-            },
+            cost: Some(
+                CostConfig::new(2.0, 10.0)
+                    .with_cache_read(0.2)
+                    .with_cache_write(2.5),
+            ),
             ..Self::anthropic("claude-sonnet-5", "Claude Sonnet 5")
         }
     }
@@ -768,13 +798,11 @@ impl ModelConfig {
         Self {
             context_window: 200_000,
             max_tokens: 32_000,
-            cost: CostConfig {
-                input_per_million: 1.0,
-                output_per_million: 5.0,
-                cache_read_per_million: 0.1,
-                cache_write_per_million: 1.25,
-                ..Default::default()
-            },
+            cost: Some(
+                CostConfig::new(1.0, 5.0)
+                    .with_cache_read(0.1)
+                    .with_cache_write(1.25),
+            ),
             ..Self::anthropic("claude-haiku-4-5", "Claude Haiku 4.5")
         }
     }
@@ -818,13 +846,7 @@ impl ModelConfig {
             reasoning: true,
             context_window: 1_000_000,
             max_tokens: 64_000,
-            cost: CostConfig {
-                input_per_million: 5.0,
-                output_per_million: 30.0,
-                cache_read_per_million: 0.5,
-                cache_write_per_million: 0.0,
-                context_tiers: Vec::new(),
-            },
+            cost: Some(CostConfig::new(5.0, 30.0).with_cache_read(0.5)),
             ..Self::openai("gpt-5.5", "GPT-5.5")
         }
     }
@@ -840,7 +862,7 @@ impl ModelConfig {
             reasoning: false,
             context_window: 128_000,
             max_tokens: 4096,
-            cost: CostConfig::default(),
+            cost: None,
             headers: HashMap::new(),
             anthropic: None,
             compat: Some(OpenAiCompat::openai()),
@@ -859,7 +881,7 @@ impl ModelConfig {
             reasoning: false,
             context_window: 128_000,
             max_tokens: 4096,
-            cost: CostConfig::default(),
+            cost: None,
             headers: HashMap::new(),
             anthropic: None,
             compat: Some(OpenAiCompat::default()),
@@ -945,7 +967,7 @@ impl ModelConfig {
             reasoning,
             context_window: 128_000,
             max_tokens: 16_000,
-            cost: CostConfig::default(),
+            cost: None,
             headers: HashMap::new(),
             compat,
             anthropic,
@@ -969,7 +991,7 @@ impl ModelConfig {
             reasoning: false,
             context_window: 128_000,
             max_tokens: 4096,
-            cost: CostConfig::default(),
+            cost: None,
             headers: HashMap::new(),
             anthropic: None,
             compat: Some(compat),
@@ -990,7 +1012,7 @@ impl ModelConfig {
             reasoning: false,
             context_window: 128_000,
             max_tokens: 4096,
-            cost: CostConfig::default(),
+            cost: None,
             headers: HashMap::new(),
             anthropic: None,
             compat: Some(OpenAiCompat::ollama()),
@@ -1010,7 +1032,7 @@ impl ModelConfig {
             reasoning: false,
             context_window: 128_000,
             max_tokens: 4096,
-            cost: CostConfig::default(),
+            cost: None,
             headers: HashMap::new(),
             anthropic: None,
             compat: Some(OpenAiCompat::zai()),
@@ -1045,13 +1067,7 @@ impl ModelConfig {
             reasoning: true,
             context_window: 1_048_576,
             max_tokens: 131_072,
-            cost: CostConfig {
-                input_per_million: 1.25,
-                output_per_million: 4.25,
-                cache_read_per_million: 0.15,
-                cache_write_per_million: 0.0,
-                ..Default::default()
-            },
+            cost: Some(CostConfig::new(1.25, 4.25).with_cache_read(0.15)),
             headers: HashMap::new(),
             anthropic: None,
             compat: Some(OpenAiCompat::meta()),
@@ -1071,7 +1087,7 @@ impl ModelConfig {
             reasoning: false,
             context_window: 1_000_000,
             max_tokens: 4096,
-            cost: CostConfig::default(),
+            cost: None,
             headers: HashMap::new(),
             anthropic: None,
             compat: Some(OpenAiCompat::minimax()),
@@ -1091,7 +1107,7 @@ impl ModelConfig {
             reasoning: true,
             context_window: 128_000,
             max_tokens: 4096,
-            cost: CostConfig::default(),
+            cost: None,
             headers: HashMap::new(),
             anthropic: None,
             compat: Some(OpenAiCompat::qwen()),
@@ -1111,7 +1127,7 @@ impl ModelConfig {
             reasoning: false,
             context_window: 131_072,
             max_tokens: 4096,
-            cost: CostConfig::default(),
+            cost: None,
             headers: HashMap::new(),
             anthropic: None,
             compat: Some(OpenAiCompat::xai()),
@@ -1131,7 +1147,7 @@ impl ModelConfig {
             reasoning: false,
             context_window: 128_000,
             max_tokens: 4096,
-            cost: CostConfig::default(),
+            cost: None,
             headers: HashMap::new(),
             anthropic: None,
             compat: Some(OpenAiCompat::groq()),
@@ -1154,7 +1170,7 @@ impl ModelConfig {
             reasoning: true,
             context_window: 1_000_000,
             max_tokens: 384_000,
-            cost: CostConfig::default(),
+            cost: None,
             headers: HashMap::new(),
             anthropic: None,
             compat: Some(OpenAiCompat::deepseek()),
@@ -1174,7 +1190,7 @@ impl ModelConfig {
             reasoning: false,
             context_window: 128_000,
             max_tokens: 4096,
-            cost: CostConfig::default(),
+            cost: None,
             headers: HashMap::new(),
             anthropic: None,
             compat: Some(OpenAiCompat::mistral()),
@@ -1192,7 +1208,7 @@ impl ModelConfig {
             reasoning: false,
             context_window: 1_000_000,
             max_tokens: 8192,
-            cost: CostConfig::default(),
+            cost: None,
             headers: HashMap::new(),
             anthropic: None,
             compat: None,
@@ -1212,12 +1228,12 @@ mod tests {
         assert_eq!(mc.base_url, "https://api.meta.ai/v1");
         assert_eq!(mc.context_window, 1_048_576);
         assert_eq!(mc.max_tokens, 131_072);
-        assert!(mc.cost.is_configured());
-        assert_eq!(mc.cost.input_per_million, 1.25);
-        assert_eq!(mc.cost.output_per_million, 4.25);
+        assert!(mc.cost.as_ref().unwrap().is_configured());
+        assert_eq!(mc.cost.as_ref().unwrap().input_per_million, 1.25);
+        assert_eq!(mc.cost.as_ref().unwrap().output_per_million, 4.25);
         // Meta documents a cached-input rate; cache writes are not charged.
-        assert_eq!(mc.cost.cache_read_per_million, 0.15);
-        assert_eq!(mc.cost.cache_write_per_million, 0.0);
+        assert_eq!(mc.cost.as_ref().unwrap().cache_read_per_million, 0.15);
+        assert_eq!(mc.cost.as_ref().unwrap().cache_write_per_million, 0.0);
         let compat = mc.compat.expect("compat flags set");
         assert!(matches!(
             compat.max_tokens_field,
@@ -1266,28 +1282,28 @@ mod tests {
         assert_eq!(fable.id, "claude-fable-5");
         assert_eq!(fable.api, ApiProtocol::AnthropicMessages);
         assert_eq!(fable.context_window, 1_000_000);
-        assert_eq!(fable.cost.input_per_million, 10.0);
-        assert_eq!(fable.cost.output_per_million, 50.0);
+        assert_eq!(fable.cost.as_ref().unwrap().input_per_million, 10.0);
+        assert_eq!(fable.cost.as_ref().unwrap().output_per_million, 50.0);
 
         let opus_5 = ModelConfig::claude_opus_5();
         assert_eq!(opus_5.id, "claude-opus-5");
         assert_eq!(opus_5.api, ApiProtocol::AnthropicMessages);
         assert_eq!(opus_5.context_window, 1_000_000);
         assert_eq!(opus_5.max_tokens, 64_000);
-        assert_eq!(opus_5.cost.input_per_million, 5.0);
-        assert_eq!(opus_5.cost.output_per_million, 25.0);
+        assert_eq!(opus_5.cost.as_ref().unwrap().input_per_million, 5.0);
+        assert_eq!(opus_5.cost.as_ref().unwrap().output_per_million, 25.0);
         // Derived rates: cache reads bill at 0.1x input, writes at 1.25x.
-        assert_eq!(opus_5.cost.cache_read_per_million, 0.5);
-        assert_eq!(opus_5.cost.cache_write_per_million, 6.25);
+        assert_eq!(opus_5.cost.as_ref().unwrap().cache_read_per_million, 0.5);
+        assert_eq!(opus_5.cost.as_ref().unwrap().cache_write_per_million, 6.25);
 
         let opus = ModelConfig::claude_opus_4_8();
         assert_eq!(opus.id, "claude-opus-4-8");
         assert_eq!(opus.context_window, 1_000_000);
-        assert_eq!(opus.cost.input_per_million, 5.0);
+        assert_eq!(opus.cost.as_ref().unwrap().input_per_million, 5.0);
 
         let sonnet = ModelConfig::claude_sonnet_5();
         assert_eq!(sonnet.id, "claude-sonnet-5");
-        assert_eq!(sonnet.cost.output_per_million, 10.0);
+        assert_eq!(sonnet.cost.as_ref().unwrap().output_per_million, 10.0);
 
         let haiku = ModelConfig::claude_haiku_4_5();
         assert_eq!(haiku.id, "claude-haiku-4-5");
@@ -1297,7 +1313,7 @@ mod tests {
         assert_eq!(gpt.id, "gpt-5.5");
         assert_eq!(gpt.api, ApiProtocol::OpenAiCompletions);
         assert_eq!(gpt.context_window, 1_000_000);
-        assert_eq!(gpt.cost.output_per_million, 30.0);
+        assert_eq!(gpt.cost.as_ref().unwrap().output_per_million, 30.0);
         assert!(gpt.compat.is_some());
     }
 
@@ -1538,5 +1554,88 @@ mod tests {
         let cost = CostConfig::default();
         assert_eq!(cost.input_per_million, 0.0);
         assert_eq!(cost.output_per_million, 0.0);
+    }
+
+    /// Generic constructors take any model id, so they cannot know a price and
+    /// must say so with `None` rather than all-zero rates that read as free
+    /// (#172). If one of these gains a real price, move it out of this list
+    /// **and** add it to `tests/price_audit.rs`, which is what keeps a
+    /// compiled-in price honest.
+    #[test]
+    fn generic_constructors_are_unpriced() {
+        let unpriced = [
+            ModelConfig::custom(ApiProtocol::BedrockConverseStream, "p", "u", "m", "M"),
+            ModelConfig::mock(),
+            ModelConfig::anthropic("claude-x", "X"),
+            ModelConfig::openai("gpt-x", "X"),
+            ModelConfig::local("http://localhost:1234/v1", "m"),
+            ModelConfig::opencode_zen("claude-sonnet-5"),
+            ModelConfig::opencode_zen("gpt-5.5"),
+            ModelConfig::opencode_go("glm-5.2"),
+            ModelConfig::openai_compat("http://h/v1", "m", "p", OpenAiCompat::default()),
+            ModelConfig::ollama("http://localhost:11434/v1", "m"),
+            ModelConfig::zai("glm-5", "GLM-5"),
+            ModelConfig::minimax("MiniMax-M1", "M1"),
+            ModelConfig::qwen("qwen-plus", "Qwen"),
+            ModelConfig::xai("grok-4-1-fast", "Grok"),
+            ModelConfig::groq("llama-3.3-70b-versatile", "Llama"),
+            ModelConfig::deepseek("deepseek-v4-flash", "DeepSeek"),
+            ModelConfig::mistral("mistral-large-latest", "Mistral"),
+            ModelConfig::google("gemini-3-pro", "Gemini"),
+        ];
+        for mc in unpriced {
+            assert!(
+                mc.cost.is_none(),
+                "{} ({}) should be unpriced",
+                mc.id,
+                mc.provider
+            );
+            assert!(mc.priced_cost().is_none());
+        }
+    }
+
+    #[test]
+    fn named_presets_are_priced() {
+        for mc in [
+            ModelConfig::claude_fable_5(),
+            ModelConfig::claude_opus_5(),
+            ModelConfig::claude_opus_4_8(),
+            ModelConfig::claude_sonnet_5(),
+            ModelConfig::claude_haiku_4_5(),
+            ModelConfig::gpt_5_5(),
+            ModelConfig::meta("muse-spark-1.2", "Muse Spark 1.2"),
+        ] {
+            assert!(mc.priced_cost().is_some(), "{} lost its price", mc.id);
+        }
+    }
+
+    /// Persisted configs must keep loading across the `Option` change, and
+    /// `None` must not be written as `null` (older releases would reject it).
+    #[test]
+    fn cost_serde_back_compat() {
+        let mut v = serde_json::to_value(ModelConfig::claude_sonnet_5()).unwrap();
+
+        // A priced object round-trips to Some with its rates.
+        let priced: ModelConfig = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(priced.cost.as_ref().unwrap().input_per_million, 2.0);
+
+        // Legacy all-zero object (what pre-0.19 unpriced presets persisted):
+        // stays Some — zero is not reinterpreted — but prices as unknown.
+        v["cost"] = serde_json::json!({"input_per_million": 0.0, "output_per_million": 0.0});
+        let legacy: ModelConfig = serde_json::from_value(v.clone()).unwrap();
+        assert!(legacy.cost.is_some());
+        assert!(legacy.priced_cost().is_none());
+
+        // Missing and null both mean unknown.
+        v["cost"] = serde_json::Value::Null;
+        let null: ModelConfig = serde_json::from_value(v.clone()).unwrap();
+        assert!(null.cost.is_none());
+        v.as_object_mut().unwrap().remove("cost");
+        let missing: ModelConfig = serde_json::from_value(v).unwrap();
+        assert!(missing.cost.is_none());
+
+        // None is omitted on serialize, never `null`.
+        let out = serde_json::to_value(ModelConfig::deepseek("d", "D")).unwrap();
+        assert!(out.get("cost").is_none(), "{out}");
     }
 }

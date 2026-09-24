@@ -248,8 +248,7 @@ async fn llm_stream_records_tokens_and_cost() {
     let mut config = loop_config(MockProvider::text("unused"));
     config.provider = std::sync::Arc::new(UsageProvider);
     let mut mc = yoagent::provider::ModelConfig::mock();
-    mc.cost.input_per_million = 3.0;
-    mc.cost.output_per_million = 15.0;
+    mc.cost = Some(yoagent::provider::CostConfig::new(3.0, 15.0));
     config.model_config = Some(mc);
 
     let mut context = AgentContext {

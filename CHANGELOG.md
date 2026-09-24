@@ -4,6 +4,51 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Changed
+
+- **Breaking: `ModelConfig::cost` is now `Option<CostConfig>`; `None` means
+  pricing unknown** ([#172](https://github.com/yologdev/yoagent/issues/172)).
+  Fifteen constructors — `custom` (and so `mock`), the generic `anthropic`,
+  `openai`, `local`, `opencode_zen`, `opencode_go`, `openai_compat`, `ollama`,
+  `zai`, `minimax`, `qwen`, `xai`, `groq`, `deepseek`, `mistral` and `google` —
+  shipped `CostConfig::default()`, whose rates are all `0.0`. A consumer reading
+  `config.cost` for DeepSeek got a number indistinguishable from a free model;
+  "do you know this price?" could only be answered by knowing to call
+  `is_configured()`. So consumers kept parallel price tables, outside the
+  models.dev audit, and those rotted: yoyo overstated every `deepseek-v4-flash`
+  cost ~3.7x. Those constructors now return `None`; the named presets
+  (`claude_fable_5`, `claude_opus_5`, `claude_opus_4_8`, `claude_sonnet_5`,
+  `claude_haiku_4_5`, `gpt_5_5`, `meta`) return `Some`. No prices were added —
+  that is follow-up work, and each one should land with a price-audit entry.
+
+  New `ModelConfig::priced_cost() -> Option<&CostConfig>` is what the crate's
+  own accounting now reads: `session_cost_usd()`, `SessionStats::cost_usd`, the
+  `llm_stream` span's `cost_usd` and `LlmCompaction`'s summary cost. It is
+  `None` for `cost: None` **and** for an all-zero `Some`, so reported costs are
+  unchanged by this release — an unpriced model was already `None`/absent there,
+  never `$0`. The fix is at the field, where it lied.
+
+  Serde stays compatible both ways: a persisted `cost` object deserializes to
+  `Some` unchanged — including the all-zero object every unpriced preset used to
+  write, which is kept rather than reinterpreted, since zero cannot be told
+  apart from a deliberate "free" — and a missing or `null` `cost` is `None`.
+  `None` is omitted on serialize, so older releases still load the output.
+
+  Migration:
+
+  ```rust
+  // before                                   // after
+  config.cost.input_per_million = 1.80;       if let Some(c) = config.cost.as_mut() { c.input_per_million = 1.80; }
+  config.cost = CostConfig::new(0.15, 0.60);  config.cost = Some(CostConfig::new(0.15, 0.60));
+  config.cost.cost_usd(&usage)                config.priced_cost().map(|c| c.cost_usd(&usage))
+  if config.cost.is_configured() { .. }       if let Some(c) = config.priced_cost() { .. }
+  ```
+
+  Setting rates on an unpriced constructor now needs a whole `CostConfig`
+  (`Some(CostConfig::new(..))`) rather than mutating fields of a zeroed one.
+
 ## 0.18.1
 
 ### Changed

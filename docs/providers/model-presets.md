@@ -33,7 +33,7 @@ Use a preset when the provider is listed here. Use a custom `ModelConfig` when y
 
 The constructors do not validate model IDs. They send the `id` you pass through to the provider, which lets you use newly released model IDs before yoagent updates its examples.
 
-The named presets (`claude_fable_5`, `claude_opus_5`, `claude_opus_4_8`, `claude_sonnet_5`, `claude_haiku_4_5`, `gpt_5_5`) also fill in real `CostConfig` pricing. The OpenCode presets select the API protocol from the model id — see [OpenCode Zen & Go](opencode.md).
+The named presets (`claude_fable_5`, `claude_opus_5`, `claude_opus_4_8`, `claude_sonnet_5`, `claude_haiku_4_5`, `gpt_5_5`) and `meta` also fill in real pricing (`cost: Some(CostConfig)`). Every other constructor takes an arbitrary model id and so carries `cost: None` — pricing **unknown**, not free; set `config.cost = Some(CostConfig::new(input, output))` yourself if you want cost reporting. The OpenCode presets select the API protocol from the model id — see [OpenCode Zen & Go](opencode.md).
 
 ## OpenAI-Compatible Presets
 

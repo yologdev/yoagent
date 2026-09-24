@@ -1079,16 +1079,14 @@ impl Agent {
     /// Total dollar cost of the assistant turns currently in history, using
     /// the model's [`CostConfig`](crate::provider::CostConfig) rates.
     ///
-    /// Returns `None` when no `ModelConfig` is set or when the config's
-    /// rates are all zero (pricing unknown — e.g. custom or local models),
+    /// Returns `None` when no `ModelConfig` is set or when the config is
+    /// unpriced (`cost: None`, or legacy all-zero rates — see
+    /// [`ModelConfig::priced_cost`](crate::provider::ModelConfig::priced_cost)),
     /// so `None` means "can't price this", never "free". Rates come from the
     /// *current* model config; sessions that switched models mid-way are
     /// priced entirely at the current rates.
     pub fn session_cost_usd(&self) -> Option<f64> {
-        let cost = &self.model_config.as_ref()?.cost;
-        if !cost.is_configured() {
-            return None;
-        }
+        let cost = self.model_config.as_ref()?.priced_cost()?;
         Some(
             self.messages
                 .iter()

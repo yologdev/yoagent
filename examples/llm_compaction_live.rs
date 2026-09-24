@@ -87,9 +87,9 @@ impl StreamProvider for BulkProvider {
 
 /// Resolve a model id to a **priced** preset where one exists.
 ///
-/// `ModelConfig::anthropic` leaves `CostConfig` at zero, which makes
-/// `is_configured()` false and blanks the cost column — the one number this
-/// harness exists to surface.
+/// `ModelConfig::anthropic` carries `cost: None` (the generic constructor
+/// cannot know a model's price), which blanks the cost column — the one
+/// number this harness exists to surface.
 fn priced(id: &str) -> ModelConfig {
     match id {
         "claude-sonnet-5" => ModelConfig::claude_sonnet_5(),
@@ -123,7 +123,7 @@ fn priced(id: &str) -> ModelConfig {
 /// DeepSeek has no write category — populating its cache is free.
 fn deepseek_priced(id: &str, input: f64, output: f64, cache_read: f64) -> ModelConfig {
     let mut config = ModelConfig::deepseek(id, id);
-    config.cost = CostConfig::new(input, output).with_cache_read(cache_read);
+    config.cost = Some(CostConfig::new(input, output).with_cache_read(cache_read));
     config
 }
 

@@ -291,7 +291,7 @@ it injects the `shared_state` tool and a state summary into the sub-agent's syst
 <details>
 <summary><b>Production concerns</b></summary>
 
-- **Cost tracking** — `CostConfig` carries separate input/output/cache-read/cache-write rates plus optional context tiers; `session_cost_usd()` gives a running total, `AgentEvent::AgentEnd` carries a `SessionStats` rollup, and `is_configured()` distinguishes "free" from "pricing unknown"
+- **Cost tracking** — `CostConfig` carries separate input/output/cache-read/cache-write rates plus optional context tiers; `session_cost_usd()` gives a running total, `AgentEvent::AgentEnd` carries a `SessionStats` rollup, and `ModelConfig::cost` is an `Option` — `None` means pricing unknown, never $0 (only the named presets carry verified rates)
 - **Loop detection** — a model calling one tool with identical arguments forever trips none of the turn/token/duration limits until the whole budget is spent. On by default: steers on the third consecutive repeat, stops on the next, and emits `AgentEvent::LoopDetected` either way
 - **Retrievable tool output** — head-tail truncation discards the middle irrecoverably. Attach a `SharedState` and the full text is stashed, with the marker naming a key the model can fetch
 - **Telemetry** — `tracing` spans per loop / LLM stream / tool, recording tokens and cost. OpenTelemetry is bridged app-side via `tracing-opentelemetry`; the library carries no OTel dependency by design

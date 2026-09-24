@@ -531,10 +531,9 @@ async fn run_loop(
                 llm_span.record("tokens_in", usage.input);
                 llm_span.record("tokens_out", usage.output);
                 llm_span.record("tokens_cached", usage.cache_read);
-                if let Some(mc) = &config.model_config {
-                    if mc.cost.is_configured() {
-                        llm_span.record("cost_usd", mc.cost.cost_usd(usage));
-                    }
+                // Unpriced models leave the field empty: unknown, never $0.
+                if let Some(cost) = config.model_config.as_ref().and_then(|mc| mc.priced_cost()) {
+                    llm_span.record("cost_usd", cost.cost_usd(usage));
                 }
             }
             // Tool-forcing providers (Anthropic) deliver structured output as
@@ -547,7 +546,10 @@ async fn run_loop(
             new_messages.push(agent_msg.clone());
             if let Message::Assistant { usage, .. } = &message {
                 context_tracker.record_usage(usage, context.messages.len() - 1);
-                stats.record_turn(usage, config.model_config.as_ref().map(|mc| &mc.cost));
+                stats.record_turn(
+                    usage,
+                    config.model_config.as_ref().and_then(|mc| mc.priced_cost()),
+                );
             }
 
             // Check for error/abort
