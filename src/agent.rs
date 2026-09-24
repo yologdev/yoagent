@@ -2,7 +2,8 @@
 //! steering/follow-up queues, and abort support.
 
 use crate::agent_loop::{
-    agent_loop, agent_loop_continue, AfterTurnFn, AgentLoopConfig, BeforeTurnFn, OnErrorFn,
+    agent_loop_continue_with_stats, agent_loop_with_stats, AfterTurnFn, AgentLoopConfig,
+    BeforeTurnFn, OnErrorFn,
 };
 use crate::context::{CompactionStrategy, ContextConfig, ExecutionLimits};
 use crate::mcp::{McpClient, McpError, McpToolAdapter};
@@ -82,7 +83,11 @@ pub struct Agent {
 
     // Pending completion from a spawned agent loop
     #[allow(clippy::type_complexity)]
-    pending_completion: Option<JoinHandle<(Vec<Box<dyn AgentTool>>, Vec<AgentMessage>)>>,
+    pending_completion:
+        Option<JoinHandle<(Vec<Box<dyn AgentTool>>, Vec<AgentMessage>, SessionStats)>>,
+
+    // What sub-agents spent across this agent's runs (see `sub_agent_spend`).
+    sub_agent_spend: SubAgentSpend,
 }
 
 /// Error building an [`Agent`] from a [`ModelConfig`] and a registry.
@@ -279,6 +284,7 @@ impl Agent {
             cancel: None,
             is_streaming: false,
             pending_completion: None,
+            sub_agent_spend: SubAgentSpend::default(),
         }
     }
 
@@ -702,11 +708,12 @@ impl Agent {
         }
         if let Some(handle) = self.pending_completion.take() {
             // Await the cancelled task to recover tools; ignore panic
-            if let Ok((tools, _messages)) = handle.await {
+            if let Ok((tools, _messages, _stats)) = handle.await {
                 self.tools = tools;
             }
         }
         self.messages.clear();
+        self.sub_agent_spend = SubAgentSpend::default();
         self.clear_all_queues();
         self.is_streaming = false;
         self.cancel = None;
@@ -868,8 +875,9 @@ impl Agent {
         config.output_schema = output_schema;
 
         let handle = tokio::spawn(async move {
-            let _new_messages = agent_loop(messages, &mut context, &config, tx, cancel).await;
-            (context.tools, context.messages)
+            let (_new_messages, stats) =
+                agent_loop_with_stats(messages, &mut context, &config, tx, cancel).await;
+            (context.tools, context.messages, stats)
         });
 
         self.pending_completion = Some(handle);
@@ -949,8 +957,10 @@ impl Agent {
 
         let config = self.build_config();
 
-        let _new_messages = agent_loop(messages, &mut context, &config, tx, cancel).await;
+        let (_new_messages, stats) =
+            agent_loop_with_stats(messages, &mut context, &config, tx, cancel).await;
 
+        self.sub_agent_spend.merge(&stats.sub_agents);
         self.tools = context.tools;
         self.messages = context.messages;
         self.is_streaming = false;
@@ -989,8 +999,9 @@ impl Agent {
         let config = self.build_config();
 
         let handle = tokio::spawn(async move {
-            let _new_messages = agent_loop_continue(&mut context, &config, tx, cancel).await;
-            (context.tools, context.messages)
+            let (_new_messages, stats) =
+                agent_loop_continue_with_stats(&mut context, &config, tx, cancel).await;
+            (context.tools, context.messages, stats)
         });
 
         self.pending_completion = Some(handle);
@@ -1025,8 +1036,10 @@ impl Agent {
 
         let config = self.build_config();
 
-        let _new_messages = agent_loop_continue(&mut context, &config, tx, cancel).await;
+        let (_new_messages, stats) =
+            agent_loop_continue_with_stats(&mut context, &config, tx, cancel).await;
 
+        self.sub_agent_spend.merge(&stats.sub_agents);
         self.tools = context.tools;
         self.messages = context.messages;
         self.is_streaming = false;
@@ -1046,9 +1059,10 @@ impl Agent {
     pub async fn finish(&mut self) {
         if let Some(handle) = self.pending_completion.take() {
             match handle.await {
-                Ok((tools, messages)) => {
+                Ok((tools, messages, stats)) => {
                     self.tools = tools;
                     self.messages = messages;
+                    self.sub_agent_spend.merge(&stats.sub_agents);
                 }
                 Err(e) => {
                     // Task panicked or was cancelled — log and leave state as-is
@@ -1100,6 +1114,26 @@ impl Agent {
                 })
                 .sum(),
         )
+    }
+
+    /// What [`SubAgentTool`](crate::SubAgentTool)s spent on this agent's
+    /// behalf, over every run since construction or the last
+    /// [`reset`](Self::reset) — nested sub-agents included, each priced at its
+    /// own model's rates.
+    ///
+    /// Kept apart from [`session_cost_usd`](Self::session_cost_usd), which
+    /// covers only this agent's own turns: add the two for the whole bill.
+    /// Sub-agent spend is not recorded in message history, so unlike
+    /// `session_cost_usd` this is not history-derived —
+    /// [`clear_messages`](Self::clear_messages) and
+    /// [`replace_messages`](Self::replace_messages) leave it untouched.
+    ///
+    /// A run started by [`prompt`](Self::prompt) or
+    /// [`continue_loop`](Self::continue_loop) is counted once it is joined by
+    /// [`finish`](Self::finish) (or the next prompt). Per run, the same figure
+    /// is on [`AgentEvent::AgentEnd`] as `stats.sub_agents`.
+    pub fn sub_agent_spend(&self) -> &SubAgentSpend {
+        &self.sub_agent_spend
     }
 
     fn build_config(&self) -> AgentLoopConfig {

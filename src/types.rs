@@ -601,6 +601,9 @@ pub struct ToolContext {
     pub on_update: Option<ToolUpdateFn>,
     /// Optional callback for emitting user-facing progress messages.
     pub on_progress: Option<ProgressFn>,
+    /// Set by the loop; a [`SubAgentTool`](crate::SubAgentTool) reports its
+    /// run's stats here so they survive a failed delegation.
+    pub(crate) sub_agent_report: Option<SubAgentReport>,
 }
 
 impl ToolContext {
@@ -617,6 +620,7 @@ impl ToolContext {
             cancel: tokio_util::sync::CancellationToken::new(),
             on_update: None,
             on_progress: None,
+            sub_agent_report: None,
         }
     }
 
@@ -647,6 +651,7 @@ impl Clone for ToolContext {
             cancel: self.cancel.clone(),
             on_update: self.on_update.clone(),
             on_progress: self.on_progress.clone(),
+            sub_agent_report: self.sub_agent_report.clone(),
         }
     }
 }
@@ -901,9 +906,9 @@ pub struct SessionStats {
     /// `None` means "cannot price this", never "free" — all-zero rates mean
     /// pricing is unknown, which is the case for custom and local models.
     ///
-    /// Scope: this run's own turns. A [`SubAgentTool`](crate::SubAgentTool)
-    /// runs its own loop on a private channel, so a delegating agent's real
-    /// spend is higher than this reports.
+    /// Scope: this run's own turns. What [`SubAgentTool`](crate::SubAgentTool)s
+    /// spent is kept apart in [`sub_agents`](Self::sub_agents); use
+    /// [`total_cost_usd`](Self::total_cost_usd) for the whole bill.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
     /// Times the loop observed compaction rewrite history.
@@ -927,6 +932,22 @@ pub struct SessionStats {
     /// here would be worse than the gap.
     #[serde(default)]
     pub compactions: u32,
+    /// What this run's [`SubAgentTool`](crate::SubAgentTool) delegations
+    /// spent, summed over the whole delegation tree — a sub-agent's nested
+    /// sub-agents included.
+    ///
+    /// A **separate bucket**: [`usage`](Self::usage), [`turns`](Self::turns)
+    /// and [`cost_usd`](Self::cost_usd) stay this agent's own, so delegation
+    /// remains attributable. Sub-agents run their own loop on a private
+    /// channel, and before this field existed their spend reached the parent
+    /// nowhere, so every total silently under-reported delegation. Read
+    /// [`total_usage`](Self::total_usage) / [`total_cost_usd`](Self::total_cost_usd)
+    /// for the whole bill.
+    ///
+    /// Omitted from the wire when nothing was delegated, so a run without
+    /// sub-agents serializes exactly as it did before.
+    #[serde(default, skip_serializing_if = "SubAgentSpend::is_empty")]
+    pub sub_agents: SubAgentSpend,
 }
 
 impl SessionStats {
@@ -941,7 +962,50 @@ impl SessionStats {
             turns,
             cost_usd,
             compactions,
+            sub_agents: SubAgentSpend::default(),
         }
+    }
+
+    /// This run's own usage plus everything its sub-agents spent.
+    ///
+    /// `total_tokens` stays 0, as in [`usage`](Self::usage), and for the same
+    /// reason: providers disagree on what it counts.
+    pub fn total_usage(&self) -> Usage {
+        add_usage(&self.usage, &self.sub_agents.usage)
+    }
+
+    /// Dollar cost of this run plus its sub-agents, each priced at its **own**
+    /// model's rates.
+    ///
+    /// `None` when any part of that spend cannot be priced — an unpriced
+    /// sub-agent makes the whole figure unknown rather than silently low. Spend
+    /// of zero tokens needs no price.
+    pub fn total_cost_usd(&self) -> Option<f64> {
+        let mut total = SubAgentSpend {
+            usage: self.usage.clone(),
+            cost_usd: self.cost_usd,
+            runs: 0,
+        };
+        total.merge(&self.sub_agents);
+        total.cost_usd
+    }
+
+    /// The [`SessionStats`] of a sub-agent run, if `result` came from a
+    /// [`SubAgentTool`](crate::SubAgentTool).
+    ///
+    /// Present on the tool's own return value and on
+    /// [`AgentEvent::ToolExecutionEnd`] — including when the sub-agent
+    /// **failed**: the loop attaches what it spent before failing to the error
+    /// result. Its [`usage`](Self::usage) is the sub-agent's own spend and its
+    /// [`sub_agents`](Self::sub_agents) what *it* delegated, so own and nested
+    /// spend stay distinguishable; [`total_usage`](Self::total_usage) covers the
+    /// subtree.
+    ///
+    /// Do not add these to [`AgentEvent::AgentEnd`]'s stats as well: the loop
+    /// already folds every delegation into that run's
+    /// [`sub_agents`](Self::sub_agents).
+    pub fn from_sub_agent_result(result: &ToolResult) -> Option<SessionStats> {
+        serde_json::from_value(result.details.get(SUB_AGENT_STATS_KEY)?.clone()).ok()
     }
 
     /// Fraction of prompt tokens served from cache across the whole session
@@ -984,6 +1048,105 @@ impl SessionStats {
         }
     }
 }
+
+/// Key under which a sub-agent's [`SessionStats`] ride in
+/// [`ToolResult::details`]. Read it with
+/// [`SessionStats::from_sub_agent_result`] rather than by hand.
+pub const SUB_AGENT_STATS_KEY: &str = "sub_agent_stats";
+
+fn add_usage(a: &Usage, b: &Usage) -> Usage {
+    Usage {
+        input: a.input + b.input,
+        output: a.output + b.output,
+        cache_read: a.cache_read + b.cache_read,
+        cache_write: a.cache_write + b.cache_write,
+        // Not summed — see `SessionStats::record_turn`.
+        total_tokens: 0,
+    }
+}
+
+fn usage_is_zero(u: &Usage) -> bool {
+    u.input == 0 && u.output == 0 && u.cache_read == 0 && u.cache_write == 0
+}
+
+/// Spend of delegated [`SubAgentTool`](crate::SubAgentTool) runs, carried as
+/// [`SessionStats::sub_agents`] and returned by
+/// [`Agent::sub_agent_spend`](crate::Agent::sub_agent_spend).
+///
+/// Every figure covers the whole delegation tree: a sub-agent's own nested
+/// sub-agents are included, so one top-level number accounts for all of it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct SubAgentSpend {
+    /// Provider usage summed over every delegated run. `total_tokens` stays 0,
+    /// as in [`SessionStats::usage`].
+    #[serde(default)]
+    pub usage: Usage,
+    /// Dollar cost of [`usage`](Self::usage), each run priced at its own
+    /// model's rates — a sub-agent on a cheaper model is billed as such, never
+    /// re-priced at the parent's.
+    ///
+    /// `None` means "cannot price this", never "free": it is `None` as soon as
+    /// any delegated spend came from a model without configured rates, because
+    /// a sum that silently skips the unpriced part is the under-report this
+    /// field exists to remove.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    /// Sub-agent invocations, nested ones included. Non-zero means delegation
+    /// happened even when it cost nothing measurable.
+    #[serde(default)]
+    pub runs: u32,
+}
+
+impl SubAgentSpend {
+    /// Whether nothing was delegated.
+    pub fn is_empty(&self) -> bool {
+        self.runs == 0 && usage_is_zero(&self.usage) && self.cost_usd.is_none()
+    }
+
+    /// Fold another bucket into this one — for a caller accumulating across
+    /// runs.
+    ///
+    /// Use this rather than adding fields by hand: it keeps
+    /// [`cost_usd`](Self::cost_usd) `None` once any part is unpriced, which a
+    /// plain `Option` sum gets wrong in both directions.
+    pub fn merge(&mut self, other: &SubAgentSpend) {
+        let self_unpriced = self.cost_usd.is_none() && !usage_is_zero(&self.usage);
+        let other_unpriced = other.cost_usd.is_none() && !usage_is_zero(&other.usage);
+        self.usage = add_usage(&self.usage, &other.usage);
+        self.runs += other.runs;
+        self.cost_usd = if self_unpriced || other_unpriced {
+            None
+        } else {
+            match (self.cost_usd, other.cost_usd) {
+                (None, None) => None,
+                (a, b) => Some(a.unwrap_or(0.0) + b.unwrap_or(0.0)),
+            }
+        };
+    }
+
+    /// Fold in one sub-agent run, given that run's own stats — its own spend
+    /// and, recursively, everything it delegated.
+    pub(crate) fn record_run(&mut self, child: &SessionStats) {
+        let mut subtree = SubAgentSpend {
+            usage: child.usage.clone(),
+            cost_usd: child.cost_usd,
+            runs: 1,
+        };
+        subtree.merge(&child.sub_agents);
+        self.merge(&subtree);
+    }
+}
+
+/// Where a [`SubAgentTool`](crate::SubAgentTool) reports its run's stats to the
+/// loop that invoked it. A side channel rather than the tool's return value
+/// because a failed delegation returns `Err(ToolError)`, which has nowhere to
+/// carry them — and the spend of a failed run is still spend.
+///
+/// A `Vec` because [`ToolContext`] is `Clone`: a custom tool may hand clones to
+/// several sub-agents within one call, and each run must be counted.
+pub(crate) type SubAgentReport = Arc<std::sync::Mutex<Vec<SessionStats>>>;
 
 /// What a summarization request produced, carried by
 /// [`AgentEvent::ContextCompacted`].
@@ -1284,6 +1447,17 @@ mod wire_tag_freeze {
                 turns: 3,
                 cost_usd: Some(0.02),
                 compactions: 1,
+                sub_agents: SubAgentSpend {
+                    usage: Usage {
+                        input: 50,
+                        output: 60,
+                        cache_read: 70,
+                        cache_write: 80,
+                        total_tokens: 0,
+                    },
+                    cost_usd: Some(0.2),
+                    runs: 2,
+                },
             },
         ),
         AgentEvent::TurnStart => "turnStart" = AgentEvent::TurnStart,

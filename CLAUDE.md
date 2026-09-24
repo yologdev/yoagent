@@ -134,6 +134,16 @@ Other constructors:
 
 `SubAgentTool` mirrors these: `SubAgentTool::from_config(name, config)` and `SubAgentTool::from_provider(name, provider, config)`.
 
+**Sub-agent spend** is a separate bucket, never merged into the parent's own
+figures: `SessionStats::sub_agents` (`SubAgentSpend { usage, cost_usd, runs }`),
+summed over the whole delegation tree, each run priced at its own model's rates;
+`total_usage()`/`total_cost_usd()` add the two. The child's `SessionStats`
+reach the loop through a crate-internal `ToolContext::sub_agent_report` side
+channel (so a failed delegation, which returns `Err`, still reports) and are
+folded in at `execute_single_tool`, which also attaches them to the
+`ToolExecutionEnd` details (`SessionStats::from_sub_agent_result`).
+`Agent::sub_agent_spend()` accumulates across runs.
+
 `AgentLoopConfig` also supports `turn_delay: Option<Duration>` — an inter-turn delay to throttle API calls for rate-limit-sensitive providers. Exposed on `SubAgentTool` via `with_turn_delay()`.
 
 ### Testing

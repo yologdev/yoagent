@@ -148,6 +148,22 @@ pub async fn agent_loop(
     tx: mpsc::UnboundedSender<AgentEvent>,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Vec<AgentMessage> {
+    agent_loop_with_stats(prompts, context, config, tx, cancel)
+        .await
+        .0
+}
+
+/// [`agent_loop`], also returning the [`SessionStats`] it sent on
+/// `AgentEnd` — for callers inside the crate that must not depend on someone
+/// draining the event channel (`Agent`'s sub-agent bucket, `SubAgentTool`'s
+/// spend report).
+pub(crate) async fn agent_loop_with_stats(
+    prompts: Vec<AgentMessage>,
+    context: &mut AgentContext,
+    config: &AgentLoopConfig,
+    tx: mpsc::UnboundedSender<AgentEvent>,
+    cancel: tokio_util::sync::CancellationToken,
+) -> (Vec<AgentMessage>, SessionStats) {
     tx.send(AgentEvent::AgentStart).ok();
 
     // Apply input filters before adding prompts to context
@@ -191,7 +207,7 @@ pub async fn agent_loop(
                         stats: SessionStats::default(),
                     })
                     .ok();
-                    return vec![];
+                    return (vec![], SessionStats::default());
                 }
             }
         }
@@ -250,10 +266,10 @@ pub async fn agent_loop(
 
     tx.send(AgentEvent::AgentEnd {
         messages: new_messages.clone(),
-        stats,
+        stats: stats.clone(),
     })
     .ok();
-    new_messages
+    (new_messages, stats)
 }
 
 /// Continue an agent loop from existing context (for retries).
@@ -263,6 +279,18 @@ pub async fn agent_loop_continue(
     tx: mpsc::UnboundedSender<AgentEvent>,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Vec<AgentMessage> {
+    agent_loop_continue_with_stats(context, config, tx, cancel)
+        .await
+        .0
+}
+
+/// [`agent_loop_continue`], also returning its [`SessionStats`].
+pub(crate) async fn agent_loop_continue_with_stats(
+    context: &mut AgentContext,
+    config: &AgentLoopConfig,
+    tx: mpsc::UnboundedSender<AgentEvent>,
+    cancel: tokio_util::sync::CancellationToken,
+) -> (Vec<AgentMessage>, SessionStats) {
     assert!(
         !context.messages.is_empty(),
         "Cannot continue: no messages in context"
@@ -289,10 +317,10 @@ pub async fn agent_loop_continue(
 
     tx.send(AgentEvent::AgentEnd {
         messages: new_messages.clone(),
-        stats,
+        stats: stats.clone(),
     })
     .ok();
-    new_messages
+    (new_messages, stats)
 }
 
 /// Main loop logic shared by agent_loop and agent_loop_continue.
@@ -734,6 +762,10 @@ async fn run_loop(
 
                 tool_results = execution.tool_results;
                 steering_after_tools = execution.steering_messages;
+                // Separate bucket: `usage`/`cost_usd` stay this agent's own.
+                for child in &execution.sub_agent_stats {
+                    stats.sub_agents.record_run(child);
+                }
 
                 // Cap oversized output on the way in when configured, so
                 // compaction never has to rewrite a tool result the provider
@@ -1149,6 +1181,9 @@ async fn stream_assistant_response(
 struct ToolExecutionResult {
     tool_results: Vec<Message>,
     steering_messages: Option<Vec<AgentMessage>>,
+    /// Stats of every sub-agent run these tool calls delegated to, failed
+    /// ones included, for the run's `SessionStats::sub_agents`.
+    sub_agent_stats: Vec<SessionStats>,
 }
 
 /// Convert a forced structured-output tool call back into a plain-text
@@ -1238,10 +1273,12 @@ async fn execute_tool_calls(
         ToolExecutionStrategy::Batched { size } => {
             let mut results: Vec<Message> = Vec::new();
             let mut steering_messages: Option<Vec<AgentMessage>> = None;
+            let mut sub_agent_stats: Vec<SessionStats> = Vec::new();
 
             for (batch_idx, batch) in tool_calls.chunks(*size).enumerate() {
                 let batch_result = execute_batch(tools, batch, tx, cancel, None, middleware).await;
                 results.extend(batch_result.tool_results);
+                sub_agent_stats.extend(batch_result.sub_agent_stats);
 
                 // Check steering between batches
                 if let Some(get_steering_fn) = get_steering {
@@ -1263,6 +1300,7 @@ async fn execute_tool_calls(
             ToolExecutionResult {
                 tool_results: results,
                 steering_messages,
+                sub_agent_stats,
             }
         }
     }
@@ -1279,11 +1317,13 @@ async fn execute_sequential(
 ) -> ToolExecutionResult {
     let mut results: Vec<Message> = Vec::new();
     let mut steering_messages: Option<Vec<AgentMessage>> = None;
+    let mut sub_agent_stats: Vec<SessionStats> = Vec::new();
 
     for (index, (id, name, args)) in tool_calls.iter().enumerate() {
-        let (result_msg, _is_error) =
+        let (result_msg, delegated) =
             execute_single_tool(tools, id, name, args, tx, cancel, middleware).await;
         results.push(result_msg);
+        sub_agent_stats.extend(delegated);
 
         // Check for steering — skip remaining tools if user interrupted
         if let Some(get_steering_fn) = get_steering {
@@ -1301,6 +1341,7 @@ async fn execute_sequential(
     ToolExecutionResult {
         tool_results: results,
         steering_messages,
+        sub_agent_stats,
     }
 }
 
@@ -1322,7 +1363,14 @@ async fn execute_batch(
 
     let batch_results = join_all(futures).await;
 
-    let results: Vec<Message> = batch_results.into_iter().map(|(msg, _)| msg).collect();
+    let mut sub_agent_stats: Vec<SessionStats> = Vec::new();
+    let results: Vec<Message> = batch_results
+        .into_iter()
+        .map(|(msg, delegated)| {
+            sub_agent_stats.extend(delegated);
+            msg
+        })
+        .collect();
 
     // Check steering after batch completes
     let steering_messages = if let Some(get_steering_fn) = get_steering {
@@ -1339,10 +1387,14 @@ async fn execute_batch(
     ToolExecutionResult {
         tool_results: results,
         steering_messages,
+        sub_agent_stats,
     }
 }
 
 /// Execute a single tool call and emit events.
+///
+/// Also returns the stats of any sub-agent runs the tool reported, so the
+/// caller can fold delegated spend into the run's rollup.
 async fn execute_single_tool(
     tools: &[Box<dyn AgentTool>],
     id: &str,
@@ -1351,7 +1403,7 @@ async fn execute_single_tool(
     tx: &mpsc::UnboundedSender<AgentEvent>,
     cancel: &tokio_util::sync::CancellationToken,
     middleware: &[Arc<dyn ToolMiddleware>],
-) -> (Message, bool) {
+) -> (Message, Vec<SessionStats>) {
     // Middleware chain runs first: each hook may rewrite the args seen by
     // later hooks; the first Deny short-circuits into an error tool result
     // (the LLM sees the reason and can adapt — the loop continues).
@@ -1378,7 +1430,8 @@ async fn execute_single_tool(
             ToolDecision::Allow => {}
             ToolDecision::Modify(new_args) => effective_args = new_args,
             ToolDecision::Deny(reason) => {
-                return denied_tool_call(id, name, &effective_args, &reason, tx);
+                let (msg, _) = denied_tool_call(id, name, &effective_args, &reason, tx);
+                return (msg, Vec::new());
             }
         }
     }
@@ -1423,12 +1476,14 @@ async fn execute_single_tool(
         }))
     };
 
+    let sub_agent_report: SubAgentReport = Arc::default();
     let ctx = ToolContext {
         tool_call_id: id.to_string(),
         tool_name: name.to_string(),
         cancel: cancel.child_token(),
         on_update,
         on_progress,
+        sub_agent_report: Some(sub_agent_report.clone()),
     };
 
     let tool_span = tracing::info_span!(
@@ -1470,6 +1525,18 @@ async fn execute_single_tool(
 
     tool_span.record("is_error", is_error);
 
+    // Delegated spend travels out of band, so it is here even when the
+    // sub-agent failed and the tool returned `Err`. Attach it to the result
+    // too — a streaming consumer reads it off `ToolExecutionEnd` — but only
+    // where the tool did not already: `SubAgentTool` sets it on success, and
+    // a custom tool's own details are not ours to overwrite.
+    let delegated =
+        std::mem::take(&mut *sub_agent_report.lock().unwrap_or_else(|e| e.into_inner()));
+    let mut result = result;
+    if let [stats] = delegated.as_slice() {
+        attach_sub_agent_stats(&mut result.details, stats);
+    }
+
     tx.send(AgentEvent::ToolExecutionEnd {
         tool_call_id: id.to_string(),
         tool_name: name.to_string(),
@@ -1495,7 +1562,23 @@ async fn execute_single_tool(
     })
     .ok();
 
-    (tool_result_msg, is_error)
+    (tool_result_msg, delegated)
+}
+
+/// Put a sub-agent's stats under [`SUB_AGENT_STATS_KEY`] unless the details
+/// already carry them. `Null` (every error result) becomes an object; any
+/// other non-object is left alone rather than clobbered.
+fn attach_sub_agent_stats(details: &mut serde_json::Value, stats: &SessionStats) {
+    if details.is_null() {
+        *details = serde_json::json!({});
+    }
+    if let Some(obj) = details.as_object_mut() {
+        if !obj.contains_key(SUB_AGENT_STATS_KEY) {
+            if let Ok(v) = serde_json::to_value(stats) {
+                obj.insert(SUB_AGENT_STATS_KEY.to_string(), v);
+            }
+        }
+    }
 }
 
 /// Emit events and build the error tool result for a middleware-denied call.

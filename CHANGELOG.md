@@ -4,6 +4,48 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Fixed
+
+- **Sub-agent spend now reaches the parent, in its own bucket**
+  ([#173](https://github.com/yologdev/yoagent/issues/173)). `SubAgentTool` ran
+  its child loop on a private channel and forwarded no usage, so every total a
+  delegating agent reported — `SessionStats`, `session_cost_usd`, anything a
+  consumer summed off the stream — silently left out what its sub-agents spent.
+  The error only ran one way (always under), nothing distinguished a parent
+  that delegated from one that did not, and nesting hid a whole tree of spend
+  behind one number.
+
+  `SessionStats` gains `sub_agents: SubAgentSpend` — `usage`, `cost_usd` and
+  `runs`, summed over the **whole delegation tree** (a sub-agent's own
+  sub-agents included). It is a separate bucket: `usage`, `turns` and
+  `cost_usd` stay the agent's own, so delegation stays attributable.
+  `SessionStats::total_usage()` / `total_cost_usd()` give the whole bill.
+  - **Per delegation**, `ToolExecutionEnd` carries the sub-agent's full
+    `SessionStats` in `details`; read it with
+    `SessionStats::from_sub_agent_result(&result)`. Its `usage` is the
+    sub-agent's own and its `sub_agents` what it delegated, so own and nested
+    spend stay distinguishable.
+  - **Failed delegations count.** A sub-agent that errors or is loop-aborted
+    returns `Err(ToolError)`, which cannot carry data, so it reports through a
+    crate-internal side channel on `ToolContext`; the loop folds it in and
+    attaches the stats to the error result's `details`.
+  - **Each run is priced at its own model's rates** — a sub-agent on a cheaper
+    model is never re-priced at the parent's. `cost_usd` becomes `None` as soon
+    as any delegated spend is unpriceable, rather than a sum that quietly skips
+    it; `SubAgentSpend::merge` keeps that rule for callers accumulating across
+    runs.
+  - **`Agent::sub_agent_spend()`** accumulates the bucket across runs (since
+    construction or `reset()`), alongside the history-derived
+    `session_cost_usd()`.
+
+  Additive on the wire: `subAgents` is omitted when nothing was delegated, so
+  a run without sub-agents serializes exactly as before.
+
+- **`MockResponse::ToolCallsWithUsage` and `MockResponse::ErrorWithUsage`**, so
+  tests can bill a tool-calling turn and a mid-stream failure.
+
 ## 0.18.1
 
 ### Changed

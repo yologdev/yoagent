@@ -19,6 +19,12 @@ pub enum MockResponse {
     /// `Text` reports `Usage::default()`, which cannot distinguish a rollup
     /// that sums from one that copies the last turn.
     TextWithUsage(String, Usage),
+    /// Tool calls plus a chosen `Usage` — a tool-calling turn is billed too.
+    ToolCallsWithUsage(Vec<MockToolCall>, Usage),
+    /// A turn the provider failed mid-stream: `StopReason::Error` with this
+    /// `error_message` and the usage spent before the failure, the way an
+    /// SSE-embedded error arrives. Not retried by the loop.
+    ErrorWithUsage(String, Usage),
 }
 
 #[derive(Debug, Clone)]
@@ -208,42 +214,59 @@ impl StreamProvider for MockProvider {
                     error_message: None,
                 }
             }
-            MockResponse::ToolCalls(calls) => {
-                let content: Vec<Content> = calls
-                    .iter()
-                    .enumerate()
-                    .map(|(i, call)| {
-                        let id = format!("mock-tool-{}", i);
-                        let _ = tx.send(StreamEvent::ToolCallStart {
-                            content_index: i,
-                            id: id.clone(),
-                            name: call.name.clone(),
-                        });
-                        let _ = tx.send(StreamEvent::ToolCallEnd { content_index: i });
-                        Content::ToolCall {
-                            id,
-                            name: call.name.clone(),
-                            arguments: call.arguments.clone(),
-                            provider_metadata: call.provider_metadata.clone(),
-                        }
-                    })
-                    .collect();
-
-                Message::Assistant {
-                    content,
-                    stop_reason: StopReason::ToolUse,
-                    model: "mock".into(),
-                    provider: "mock".into(),
-                    usage: Usage::default(),
-                    timestamp: now_ms(),
-                    error_message: None,
-                }
-            }
+            MockResponse::ErrorWithUsage(error, usage) => Message::Assistant {
+                content: vec![],
+                stop_reason: StopReason::Error,
+                model: "mock".into(),
+                provider: "mock".into(),
+                usage,
+                timestamp: now_ms(),
+                error_message: Some(error),
+            },
+            MockResponse::ToolCalls(calls) => mock_tool_calls(&tx, calls, Usage::default()),
+            MockResponse::ToolCallsWithUsage(calls, usage) => mock_tool_calls(&tx, calls, usage),
         };
 
         let _ = tx.send(StreamEvent::Done {
             message: message.clone(),
         });
         Ok(message)
+    }
+}
+
+/// The assistant message for a tool-calling turn, emitting its stream events.
+fn mock_tool_calls(
+    tx: &mpsc::UnboundedSender<StreamEvent>,
+    calls: Vec<MockToolCall>,
+    usage: Usage,
+) -> Message {
+    let content: Vec<Content> = calls
+        .iter()
+        .enumerate()
+        .map(|(i, call)| {
+            let id = format!("mock-tool-{}", i);
+            let _ = tx.send(StreamEvent::ToolCallStart {
+                content_index: i,
+                id: id.clone(),
+                name: call.name.clone(),
+            });
+            let _ = tx.send(StreamEvent::ToolCallEnd { content_index: i });
+            Content::ToolCall {
+                id,
+                name: call.name.clone(),
+                arguments: call.arguments.clone(),
+                provider_metadata: call.provider_metadata.clone(),
+            }
+        })
+        .collect();
+
+    Message::Assistant {
+        content,
+        stop_reason: StopReason::ToolUse,
+        model: "mock".into(),
+        provider: "mock".into(),
+        usage,
+        timestamp: now_ms(),
+        error_message: None,
     }
 }

@@ -1207,3 +1207,344 @@ async fn a_turn_limited_sub_agent_returns_partial_work_and_says_so() {
         "the turn limit must actually have stopped it: {text:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Sub-agent spend reaches the parent (#173)
+// ---------------------------------------------------------------------------
+
+fn usage(input: u64, output: u64, cache_read: u64, cache_write: u64) -> Usage {
+    Usage {
+        input,
+        output,
+        cache_read,
+        cache_write,
+        total_tokens: 0,
+    }
+}
+
+fn delegate(to: &str) -> MockResponse {
+    delegate_with_usage(to, Usage::default())
+}
+
+fn delegate_with_usage(to: &str, u: Usage) -> MockResponse {
+    MockResponse::ToolCallsWithUsage(
+        vec![MockToolCall {
+            name: to.into(),
+            arguments: serde_json::json!({"task": "do it"}),
+            provider_metadata: None,
+        }],
+        u,
+    )
+}
+
+fn echo_call(u: Usage) -> MockResponse {
+    MockResponse::ToolCallsWithUsage(
+        vec![MockToolCall {
+            name: "echo".into(),
+            arguments: serde_json::json!({"text": "x"}),
+            provider_metadata: None,
+        }],
+        u,
+    )
+}
+
+/// Run a parent loop over `tools` and return its events.
+async fn run_parent(provider: MockProvider, tools: Vec<Box<dyn AgentTool>>) -> Vec<AgentEvent> {
+    run_parent_with(make_config(provider), tools).await
+}
+
+async fn run_parent_with(
+    config: AgentLoopConfig,
+    tools: Vec<Box<dyn AgentTool>>,
+) -> Vec<AgentEvent> {
+    let (tx, rx) = mpsc::unbounded_channel();
+    let mut context = AgentContext {
+        system_prompt: String::new(),
+        messages: vec![],
+        tools,
+    };
+    agent_loop(
+        vec![AgentMessage::Llm(Message::user("go"))],
+        &mut context,
+        &config,
+        tx,
+        CancellationToken::new(),
+    )
+    .await;
+    collect_events(rx)
+}
+
+fn end_stats(events: &[AgentEvent]) -> SessionStats {
+    events
+        .iter()
+        .find_map(|e| match e {
+            AgentEvent::AgentEnd { stats, .. } => Some(stats.clone()),
+            _ => None,
+        })
+        .expect("AgentEnd must be emitted")
+}
+
+fn tool_end(events: &[AgentEvent], name: &str) -> (ToolResult, bool) {
+    events
+        .iter()
+        .find_map(|e| match e {
+            AgentEvent::ToolExecutionEnd {
+                tool_name,
+                result,
+                is_error,
+                ..
+            } if tool_name == name => Some((result.clone(), *is_error)),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no ToolExecutionEnd for {name}"))
+}
+
+/// The main #173 test. Each figure is distinct, so a rollup that drops a turn,
+/// copies the last one, or merges the child into the parent's own bucket
+/// cannot pass.
+#[tokio::test]
+async fn sub_agent_usage_reaches_the_parent_in_a_separate_bucket() {
+    // The child spends over two turns: a tool call, then its answer.
+    let child = SubAgentTool::from_provider(
+        "researcher",
+        Arc::new(MockProvider::new(vec![
+            echo_call(usage(100, 10, 1000, 1)),
+            MockResponse::TextWithUsage("found it".into(), usage(200, 20, 2000, 2)),
+        ])),
+        ModelConfig::mock(),
+    )
+    .with_tools(vec![Arc::new(EchoTool)]);
+
+    let parent = MockProvider::new(vec![
+        delegate_with_usage("researcher", usage(1, 2, 3, 4)),
+        MockResponse::TextWithUsage("done".into(), usage(5, 6, 7, 8)),
+    ]);
+    let events = run_parent(parent, vec![Box::new(child)]).await;
+    let stats = end_stats(&events);
+
+    // Separate bucket: the parent's own figures are its own two turns only.
+    assert_eq!(stats.turns, 2);
+    assert_eq!(stats.usage, usage(6, 8, 10, 12));
+
+    // The child's two turns, summed.
+    assert_eq!(stats.sub_agents.usage, usage(300, 30, 3000, 3));
+    assert_eq!(stats.sub_agents.runs, 1);
+    assert_eq!(stats.total_usage(), usage(306, 38, 3010, 15));
+
+    // Per delegation, a streaming consumer reads the same off ToolExecutionEnd.
+    let (result, is_error) = tool_end(&events, "researcher");
+    assert!(!is_error);
+    let child_stats =
+        SessionStats::from_sub_agent_result(&result).expect("sub-agent stats in details");
+    assert_eq!(child_stats.usage, usage(300, 30, 3000, 3));
+    assert_eq!(child_stats.turns, 2);
+    assert!(child_stats.sub_agents.is_empty());
+}
+
+/// A run with no delegation serializes exactly as before — the bucket is
+/// omitted from the wire rather than written as zeros.
+#[tokio::test]
+async fn no_delegation_leaves_the_bucket_empty_and_off_the_wire() {
+    let events = run_parent(
+        MockProvider::new(vec![MockResponse::TextWithUsage(
+            "hi".into(),
+            usage(1, 1, 0, 0),
+        )]),
+        vec![],
+    )
+    .await;
+    let stats = end_stats(&events);
+    assert!(stats.sub_agents.is_empty());
+    let json = serde_json::to_value(&stats).unwrap();
+    assert!(json.get("subAgents").is_none(), "{json}");
+}
+
+/// Recursion: parent → planner → worker. One top-level number covers the
+/// tree, and the planner's own spend stays distinguishable from its nested
+/// worker's.
+#[tokio::test]
+async fn nested_sub_agent_usage_sums_through_the_tree() {
+    let worker = SubAgentTool::from_provider(
+        "worker",
+        Arc::new(MockProvider::new(vec![MockResponse::TextWithUsage(
+            "worked".into(),
+            usage(1000, 100, 0, 0),
+        )])),
+        ModelConfig::mock(),
+    );
+    let planner = SubAgentTool::from_provider(
+        "planner",
+        Arc::new(MockProvider::new(vec![
+            delegate_with_usage("worker", usage(10, 1, 0, 0)),
+            MockResponse::TextWithUsage("planned".into(), usage(20, 2, 0, 0)),
+        ])),
+        ModelConfig::mock(),
+    )
+    .with_tools(vec![Arc::new(worker)]);
+
+    let parent = MockProvider::new(vec![delegate("planner"), MockResponse::Text("done".into())]);
+    let events = run_parent(parent, vec![Box::new(planner)]).await;
+    let stats = end_stats(&events);
+
+    assert_eq!(stats.usage, Usage::default(), "parent spent nothing itself");
+    assert_eq!(stats.sub_agents.usage, usage(1030, 103, 0, 0));
+    assert_eq!(stats.sub_agents.runs, 2, "planner and its worker");
+
+    let (result, _) = tool_end(&events, "planner");
+    let planner_stats = SessionStats::from_sub_agent_result(&result).unwrap();
+    assert_eq!(planner_stats.usage, usage(30, 3, 0, 0), "planner's own");
+    assert_eq!(
+        planner_stats.sub_agents.usage,
+        usage(1000, 100, 0, 0),
+        "planner's nested worker"
+    );
+    assert_eq!(planner_stats.sub_agents.runs, 1);
+}
+
+/// A sub-agent that fails partway still spent tokens. `SubAgentTool` returns
+/// `Err`, which has nowhere to carry them, so this pins the side channel.
+#[tokio::test]
+async fn failed_sub_agent_still_reports_what_it_spent() {
+    let child = SubAgentTool::from_provider(
+        "flaky",
+        Arc::new(MockProvider::new(vec![
+            echo_call(usage(50, 5, 0, 0)),
+            MockResponse::ErrorWithUsage("upstream exploded".into(), usage(7, 0, 0, 0)),
+        ])),
+        ModelConfig::mock(),
+    )
+    .with_tools(vec![Arc::new(EchoTool)]);
+
+    let parent = MockProvider::new(vec![delegate("flaky"), MockResponse::Text("ok".into())]);
+    let events = run_parent(parent, vec![Box::new(child)]).await;
+
+    let (result, is_error) = tool_end(&events, "flaky");
+    assert!(is_error, "the delegation must still read as failed");
+    let child_stats = SessionStats::from_sub_agent_result(&result)
+        .expect("a failed delegation must still carry its stats");
+    assert_eq!(child_stats.usage, usage(57, 5, 0, 0));
+
+    let stats = end_stats(&events);
+    assert_eq!(stats.sub_agents.usage, usage(57, 5, 0, 0));
+    assert_eq!(stats.sub_agents.runs, 1);
+}
+
+/// A sub-agent on a different model is priced at its own rates, never
+/// re-priced at the parent's.
+#[tokio::test]
+async fn sub_agent_cost_uses_the_childs_own_pricing() {
+    let mut child_config = ModelConfig::mock();
+    child_config.cost = yoagent::provider::CostConfig::new(1.0, 2.0);
+    let mut parent_config = ModelConfig::mock();
+    parent_config.cost = yoagent::provider::CostConfig::new(10.0, 20.0);
+
+    let child_usage = usage(1_000_000, 500_000, 0, 0);
+    let child = SubAgentTool::from_provider(
+        "cheap",
+        Arc::new(MockProvider::new(vec![MockResponse::TextWithUsage(
+            "done".into(),
+            child_usage.clone(),
+        )])),
+        child_config.clone(),
+    );
+
+    let mut config = make_config(MockProvider::new(vec![
+        delegate("cheap"),
+        MockResponse::TextWithUsage("ok".into(), usage(1_000_000, 0, 0, 0)),
+    ]));
+    config.model_config = Some(parent_config);
+    let stats = end_stats(&run_parent_with(config, vec![Box::new(child)]).await);
+
+    let child_cost = child_config.cost.cost_usd(&child_usage);
+    assert!((child_cost - 2.0).abs() < 1e-9, "sanity: {child_cost}");
+    let reported = stats.sub_agents.cost_usd.expect("child is priced");
+    assert!(
+        (reported - child_cost).abs() < 1e-9,
+        "{reported} != {child_cost}"
+    );
+
+    let own = stats.cost_usd.expect("parent is priced");
+    assert!(
+        (own - 10.0).abs() < 1e-9,
+        "own cost unchanged by delegation: {own}"
+    );
+    let total = stats.total_cost_usd().unwrap();
+    assert!((total - 12.0).abs() < 1e-9, "{total}");
+}
+
+/// An unpriced sub-agent makes the delegated cost unknown rather than a
+/// silently low sum — and it stays unknown when a priced one follows.
+#[test]
+fn unpriced_spend_poisons_the_cost_instead_of_under_reporting() {
+    let mut priced = SubAgentSpend::default();
+    priced.usage = usage(10, 0, 0, 0);
+    priced.cost_usd = Some(1.0);
+    priced.runs = 1;
+    let mut unpriced = SubAgentSpend::default();
+    unpriced.usage = usage(10, 0, 0, 0);
+    unpriced.runs = 1;
+
+    let mut acc = SubAgentSpend::default();
+    acc.merge(&priced);
+    assert_eq!(acc.cost_usd, Some(1.0));
+    acc.merge(&unpriced);
+    assert_eq!(acc.cost_usd, None);
+    acc.merge(&priced);
+    assert_eq!(acc.cost_usd, None, "a later priced run must not revive it");
+    assert_eq!(acc.usage, usage(30, 0, 0, 0));
+    assert_eq!(acc.runs, 3);
+
+    // Zero tokens needs no price.
+    let mut free = SubAgentSpend::default();
+    free.runs = 1;
+    let mut acc = SubAgentSpend::default();
+    acc.merge(&priced);
+    acc.merge(&free);
+    assert_eq!(acc.cost_usd, Some(1.0));
+}
+
+/// `Agent` keeps the bucket across runs, apart from its own spend.
+#[tokio::test]
+async fn agent_exposes_sub_agent_spend_across_runs() {
+    let child = SubAgentTool::from_provider(
+        "helper",
+        Arc::new(MockProvider::new(vec![
+            MockResponse::TextWithUsage("a".into(), usage(100, 1, 0, 0)),
+            MockResponse::TextWithUsage("b".into(), usage(200, 2, 0, 0)),
+        ])),
+        ModelConfig::mock(),
+    );
+    let parent = MockProvider::new(vec![
+        delegate("helper"),
+        MockResponse::TextWithUsage("one".into(), usage(1, 0, 0, 0)),
+        delegate("helper"),
+        MockResponse::TextWithUsage("two".into(), usage(2, 0, 0, 0)),
+    ]);
+    let mut agent = Agent::from_provider(parent, ModelConfig::mock()).with_sub_agent(child);
+
+    let mut rx = agent.prompt("first").await;
+    while rx.recv().await.is_some() {}
+    agent.finish().await;
+    assert_eq!(agent.sub_agent_spend().usage, usage(100, 1, 0, 0));
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    agent.prompt_with_sender("second", tx).await;
+    drain.await.unwrap();
+    assert_eq!(agent.sub_agent_spend().usage, usage(300, 3, 0, 0));
+    assert_eq!(agent.sub_agent_spend().runs, 2);
+
+    // The parent's own history holds only its own turns.
+    let own_input: u64 = agent
+        .messages()
+        .iter()
+        .filter_map(|m| match m {
+            AgentMessage::Llm(Message::Assistant { usage, .. }) => Some(usage.input),
+            _ => None,
+        })
+        .sum();
+    assert_eq!(own_input, 3);
+
+    agent.reset().await;
+    assert!(agent.sub_agent_spend().is_empty());
+}
