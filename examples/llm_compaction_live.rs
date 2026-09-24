@@ -97,6 +97,7 @@ fn priced(id: &str) -> ModelConfig {
         "claude-opus-5" => ModelConfig::claude_opus_5(),
         "claude-opus-4-8" => ModelConfig::claude_opus_4_8(),
         "claude-fable-5" => ModelConfig::claude_fable_5(),
+        "claude-fable-5-1" => ModelConfig::claude_fable_5_1(),
         // DeepSeek caches automatically, server-side: this crate sends no
         // `cache_control` on the OpenAI-compat path, and `openai_compat.rs`
         // maps `prompt_cache_hit_tokens` onto `Usage::cache_read`. So a hit

@@ -6,6 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- **`ModelConfig::claude_fable_5_1()`**
+  ([#170](https://github.com/yologdev/yoagent/issues/170)). 1M context, 64K of
+  128K max output, $10 / $50 per MTok input/output, $12.50 5-minute cache
+  writes, and **$0.25 cache hits** — 0.025x input, against 0.1x ($1.00) on
+  Fable 5. That is the only rate that differs, and it is the one that dominates
+  an agent loop's bill: a consumer mapping `claude-fable-5-1` onto
+  `claude_fable_5()` by prefix, which is the natural thing to do with no 5.1
+  preset, reported cache reads 4x high. Rates read from the raw markup of
+  Anthropic's pricing page on 2026-09-24; added to the price audit.
+
+  Fable 5.1 rejects forced `tool_choice` (`any`/`tool`) with a 400, and the
+  Anthropic provider implements structured outputs by forcing a tool, so
+  `prompt_structured` fails on this model. No workaround is wired yet; the
+  preset and the structured-outputs page say so.
+
 ### Changed
 
 - **Breaking: `ModelConfig::cost` is now `Option<CostConfig>`; `None` means

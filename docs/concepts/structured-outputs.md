@@ -62,5 +62,8 @@ passed through as given.
   thinking are mutually exclusive at the API level — a warning is logged).
   Treat structured prompts as **extraction/finalization calls**, not agentic
   tool-using turns.
+- **Claude Fable 5.1 rejects forced `tool_choice`** (`any`/`tool`) with a 400,
+  so `prompt_structured` returns `Provider { .. }` on `claude_fable_5_1()`.
+  There is no fallback yet; use another model for structured calls.
 - Markdown code fences around the JSON are stripped defensively before
   parsing.

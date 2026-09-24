@@ -487,7 +487,7 @@ impl OpenAiCompat {
 #[serde(default)]
 pub struct AnthropicCompat {
     /// Use adaptive thinking (`thinking: {"type": "adaptive"}` plus
-    /// `output_config.effort`). Required by Claude Fable 5, Opus 5, Opus 4.7/4.8,
+    /// `output_config.effort`). Required by Claude Fable 5/5.1, Opus 5, Opus 4.7/4.8,
     /// and Sonnet 5; recommended on Opus 4.6 / Sonnet 4.6. Set to `false` for
     /// pre-4.6 models, which only accept `{"type": "enabled", "budget_tokens": N}`.
     pub adaptive_thinking: bool,
@@ -580,7 +580,7 @@ pub struct ModelConfig {
     /// ([`openai`](Self::openai), [`deepseek`](Self::deepseek),
     /// [`anthropic`](Self::anthropic), [`custom`](Self::custom), …) take any
     /// model id, so they cannot carry a price. Only the named presets whose
-    /// rates were checked against the vendor's page (`claude_fable_5`,
+    /// rates were checked against the vendor's page (`claude_fable_5_1`,
     /// `gpt_5_5`, …) return `Some`. Before 0.19 this field was a bare
     /// `CostConfig` and unpriced configs held all-zero rates, which read as a
     /// $0 model to anyone who did not know to call `is_configured()`.
@@ -730,6 +730,46 @@ impl ModelConfig {
                     .with_cache_write(12.5),
             ),
             ..Self::anthropic("claude-fable-5", "Claude Fable 5")
+        }
+    }
+
+    /// Claude Fable 5.1. 1M context; defaults to 64K of the model's 128K max
+    /// output.
+    ///
+    /// Priced like [`claude_fable_5`](Self::claude_fable_5) in every column but
+    /// one: cache hits bill at **0.025x** input ($0.25/MTok) rather than 0.1x
+    /// ($1.00). On a cache-heavy agent loop that line dominates the bill, so a
+    /// consumer that maps `claude-fable-5-1` onto `claude_fable_5()` by prefix
+    /// reports cache reads 4x high. `cache_write_per_million` is the 5-minute
+    /// write rate ($12.50); the 1-hour rate ($20) is not modelled because this
+    /// crate only places 5-minute (`ephemeral`) breakpoints.
+    ///
+    /// **Not a drop-in for Fable 5 at the API level:**
+    /// - Forced `tool_choice` (`any` / `tool`) is rejected with a 400. The
+    ///   Anthropic provider implements structured outputs by forcing a tool,
+    ///   so [`Agent::prompt_structured`](crate::Agent::prompt_structured)
+    ///   fails on this model with a provider error. Plain prompting (the
+    ///   default `auto` tool choice) is unaffected.
+    /// - Thinking is always on (adaptive); `ThinkingLevel::Off` omits the
+    ///   field rather than sending `disabled`, which this model rejects.
+    /// - Thinking blocks are bound to the model that produced them, and editing
+    ///   earlier turns invalidates them — switching a session to or from this
+    ///   model with [`Agent::set_model`](crate::Agent::set_model) carries
+    ///   blocks the other model cannot read.
+    ///
+    /// Rates verified against the raw markup of
+    /// <https://platform.claude.com/docs/en/about-claude/pricing> on
+    /// 2026-09-24. See [`CostConfig`] — they are a snapshot, not an authority.
+    pub fn claude_fable_5_1() -> Self {
+        Self {
+            context_window: 1_000_000,
+            max_tokens: 64_000,
+            cost: Some(
+                CostConfig::new(10.0, 50.0)
+                    .with_cache_read(0.25)
+                    .with_cache_write(12.5),
+            ),
+            ..Self::anthropic("claude-fable-5-1", "Claude Fable 5.1")
         }
     }
 
@@ -1285,6 +1325,23 @@ mod tests {
         assert_eq!(fable.cost.as_ref().unwrap().input_per_million, 10.0);
         assert_eq!(fable.cost.as_ref().unwrap().output_per_million, 50.0);
 
+        // Fable 5.1 differs from Fable 5 in exactly one rate: cache hits at
+        // 0.025x input rather than 0.1x (#170).
+        let fable_5_1 = ModelConfig::claude_fable_5_1();
+        assert_eq!(fable_5_1.id, "claude-fable-5-1");
+        assert_eq!(fable_5_1.api, ApiProtocol::AnthropicMessages);
+        assert_eq!(fable_5_1.context_window, 1_000_000);
+        assert_eq!(fable_5_1.max_tokens, 64_000);
+        let (c51, c5) = (fable_5_1.cost.unwrap(), fable.cost.unwrap());
+        assert_eq!(c51.input_per_million, 10.0);
+        assert_eq!(c51.output_per_million, 50.0);
+        assert_eq!(c51.cache_write_per_million, 12.5);
+        assert_eq!(c51.cache_read_per_million, 0.25);
+        assert_eq!(c5.cache_read_per_million, 1.0);
+        assert_eq!(c51.input_per_million, c5.input_per_million);
+        assert_eq!(c51.output_per_million, c5.output_per_million);
+        assert_eq!(c51.cache_write_per_million, c5.cache_write_per_million);
+
         let opus_5 = ModelConfig::claude_opus_5();
         assert_eq!(opus_5.id, "claude-opus-5");
         assert_eq!(opus_5.api, ApiProtocol::AnthropicMessages);
@@ -1598,6 +1655,7 @@ mod tests {
     fn named_presets_are_priced() {
         for mc in [
             ModelConfig::claude_fable_5(),
+            ModelConfig::claude_fable_5_1(),
             ModelConfig::claude_opus_5(),
             ModelConfig::claude_opus_4_8(),
             ModelConfig::claude_sonnet_5(),

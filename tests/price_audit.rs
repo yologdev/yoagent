@@ -134,6 +134,11 @@ fn presets() -> Vec<Preset> {
             ModelConfig::claude_fable_5(),
         ),
         claude(
+            "ModelConfig::claude_fable_5_1",
+            "claude-fable-5-1",
+            ModelConfig::claude_fable_5_1(),
+        ),
+        claude(
             "ModelConfig::claude_opus_5",
             "claude-opus-5",
             ModelConfig::claude_opus_5(),
@@ -439,7 +444,7 @@ async fn hardcoded_prices_have_not_drifted() {
     // green pass. Pin the floor against something independent: the number of
     // priced constructors in `src/provider/model.rs`. Raise it when you add
     // one, which is the moment you should also be adding it here.
-    const PRICED_PRESETS: usize = 7;
+    const PRICED_PRESETS: usize = 8;
     assert!(
         all.len() >= PRICED_PRESETS,
         "\n\nThe audit is checking {} presets but the crate ships at least {PRICED_PRESETS}. \
