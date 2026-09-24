@@ -1,5 +1,6 @@
 //! Anthropic Claude provider (Messages API with streaming)
 
+use super::tool_args::UNPARSED_ARGUMENTS_KEY;
 use super::traits::*;
 use crate::types::*;
 use async_trait::async_trait;
@@ -258,11 +259,11 @@ impl StreamProvider for AnthropicProvider {
                                                     // We accumulate the raw JSON string and parse it at content_block_stop
                                                     let buf = arguments
                                                         .as_object_mut()
-                                                        .and_then(|o| o.get_mut("__partial_json"))
+                                                        .and_then(|o| o.get_mut(UNPARSED_ARGUMENTS_KEY))
                                                         .and_then(|v| v.as_str().map(|s| s.to_string()));
                                                     let new_buf = format!("{}{}", buf.unwrap_or_default(), partial_json);
                                                     if let Some(obj) = arguments.as_object_mut() {
-                                                        obj.insert("__partial_json".into(), serde_json::Value::String(new_buf));
+                                                        obj.insert(UNPARSED_ARGUMENTS_KEY.into(), serde_json::Value::String(new_buf));
                                                     }
                                                 }
                                                 let _ = tx.send(StreamEvent::ToolCallDelta {
@@ -308,7 +309,7 @@ impl StreamProvider for AnthropicProvider {
                                             // index), which leak the same way.
                                             if let Some(Content::ToolCall { name, arguments, .. }) = content.get_mut(idx) {
                                                 if let Some(partial) = arguments.as_object()
-                                                    .and_then(|o| o.get("__partial_json"))
+                                                    .and_then(|o| o.get(UNPARSED_ARGUMENTS_KEY))
                                                     .and_then(|v| v.as_str())
                                                     .map(|s| s.to_string())
                                                 {
@@ -382,7 +383,7 @@ impl StreamProvider for AnthropicProvider {
                             // sentinel key as its input — treat as truncation.
                             if content.iter().any(|c| {
                                 matches!(c, Content::ToolCall { arguments, .. }
-                                    if arguments.get("__partial_json").is_some())
+                                    if arguments.get(UNPARSED_ARGUMENTS_KEY).is_some())
                             }) {
                                 warn!(
                                     "stream ended after message_delta with an unterminated \
@@ -421,7 +422,7 @@ impl StreamProvider for AnthropicProvider {
                 Content::ToolCall {
                     name, arguments, ..
                 } => arguments
-                    .get("__partial_json")
+                    .get(UNPARSED_ARGUMENTS_KEY)
                     .and_then(|v| v.as_str())
                     .map(|partial| (name.clone(), partial.to_string())),
                 _ => None,

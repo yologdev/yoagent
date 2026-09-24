@@ -4,6 +4,48 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Changed
+
+- **Fixed: truncated tool arguments no longer run the tool on `{}`**
+  ([#167](https://github.com/yologdev/yoagent/issues/167)). When a stream was
+  cut off mid-`arguments`, `openai_compat.rs` (OpenAI, Groq, Together,
+  DeepSeek, Fireworks, Mistral, xAI, …) fell back to an empty object and
+  warned, so `delete_files({"paths":` became `delete_files({})` — the tool ran
+  on its own defaults and the model saw a plausible result. `openai_responses.rs`
+  and `azure_openai.rs` did the same without even the warning.
+
+  A **non-empty** argument buffer that does not parse is now kept as
+  `{"__partial_json": "<raw text>"}` (`provider::parse_tool_arguments`), and
+  `execute_single_tool` — the choke point every execution strategy shares —
+  answers such a call with an error tool result instead of running it: the
+  arguments "did not parse as JSON (likely truncated): <parse error>… please
+  retry the call with complete arguments". The loop continues, so the model can
+  retry, per the crate's "tools return errors so the LLM can self-correct"
+  convention. The check runs before middleware; there is no real call to
+  approve or rewrite. `provider::unparsed_tool_arguments` recognizes the marker.
+
+  An **empty** buffer is unchanged: a zero-argument tool streams `""`, which
+  still resolves to `{}` and runs. That distinction is what the Anthropic
+  provider once got wrong, and both cases are now pinned together in one loop
+  test.
+
+  The marker key is the one the Anthropic provider already used as its
+  streaming accumulator, now a shared `UNPARSED_ARGUMENTS_KEY` constant.
+  Anthropic's behaviour is **unchanged** — it still fails the turn when an
+  accumulator is left unparsed — but the loop's guard now backs it up.
+
+  **Bedrock** had a worse, third behaviour: it forwarded streamed `toolUse.input`
+  deltas as events but never accumulated them, so every Bedrock tool call ran
+  with `{}` regardless of what the model sent. It now accumulates the input and
+  resolves it through the same path. `ToolCallDelta`/`ToolCallEnd` events also
+  carry the tool call's own content index (previously off by one, and
+  `ToolCallEnd` fired for non-tool blocks once any tool call existed).
+
+  Google and Vertex receive arguments as already-parsed JSON objects, so they
+  have no unparseable-buffer case and are unchanged.
+
 ## 0.18.1
 
 ### Changed

@@ -1352,7 +1352,16 @@ async fn execute_single_tool(
     cancel: &tokio_util::sync::CancellationToken,
     middleware: &[Arc<dyn ToolMiddleware>],
 ) -> (Message, bool) {
-    // Middleware chain runs first: each hook may rewrite the args seen by
+    // A call whose streamed arguments did not parse (a truncated stream, in
+    // practice) is answered with an error, never run: the provider kept the
+    // raw text instead of substituting `{}`, and running the tool on its
+    // defaults would silently replace what the model asked for. This sits
+    // ahead of middleware — there is no real call to approve or rewrite.
+    if let Some(raw) = crate::provider::unparsed_tool_arguments(args) {
+        return unparsed_arguments_tool_call(id, name, args, raw, tx);
+    }
+
+    // Middleware chain runs next: each hook may rewrite the args seen by
     // later hooks; the first Deny short-circuits into an error tool result
     // (the LLM sees the reason and can adapt — the loop continues).
     let mut effective_args = args.clone();
@@ -1499,7 +1508,6 @@ async fn execute_single_tool(
 }
 
 /// Emit events and build the error tool result for a middleware-denied call.
-/// Start/End are both emitted so UI event pairing stays intact.
 fn denied_tool_call(
     id: &str,
     name: &str,
@@ -1515,6 +1523,52 @@ fn denied_tool_call(
         reason,
         "tool call denied by middleware"
     );
+    unexecuted_tool_call(id, name, args, format!("Tool call denied: {}", reason), tx)
+}
+
+/// Emit events and build the error tool result for a call whose arguments
+/// did not parse as JSON. The model sees why and can retry the call.
+fn unparsed_arguments_tool_call(
+    id: &str,
+    name: &str,
+    args: &serde_json::Value,
+    raw: &str,
+    tx: &mpsc::UnboundedSender<AgentEvent>,
+) -> (Message, bool) {
+    let parse_error = match serde_json::from_str::<serde_json::Value>(raw) {
+        Err(e) => e.to_string(),
+        // Unreachable for a provider-built marker, but a hand-built one could
+        // hold valid JSON; say so rather than invent an error.
+        Ok(_) => "arguments were not delivered as a parsed object".to_string(),
+    };
+    tracing::warn!(
+        tool = name,
+        tool_call_id = id,
+        len = raw.len(),
+        parse_error = %parse_error,
+        "tool call not executed: arguments did not parse as JSON"
+    );
+    unexecuted_tool_call(
+        id,
+        name,
+        args,
+        format!(
+            "The arguments for tool `{name}` did not parse as JSON (likely truncated): \
+             {parse_error}. The tool was not run. Please retry the call with complete arguments."
+        ),
+        tx,
+    )
+}
+
+/// Emit events and build an error tool result for a call that was not run.
+/// Start/End are both emitted so UI event pairing stays intact.
+fn unexecuted_tool_call(
+    id: &str,
+    name: &str,
+    args: &serde_json::Value,
+    text: String,
+    tx: &mpsc::UnboundedSender<AgentEvent>,
+) -> (Message, bool) {
     tx.send(AgentEvent::ToolExecutionStart {
         tool_call_id: id.to_string(),
         tool_name: name.to_string(),
@@ -1523,9 +1577,7 @@ fn denied_tool_call(
     .ok();
 
     let result = ToolResult {
-        content: vec![Content::Text {
-            text: format!("Tool call denied: {}", reason),
-        }],
+        content: vec![Content::Text { text }],
         details: serde_json::Value::Null,
     };
 

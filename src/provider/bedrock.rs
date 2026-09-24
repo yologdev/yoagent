@@ -10,6 +10,7 @@
 //! The `base_url` in ModelConfig should be the Bedrock endpoint, e.g.:
 //! `https://bedrock-runtime.us-east-1.amazonaws.com`
 
+use super::tool_args::finalize_tool_arguments;
 use super::traits::*;
 use crate::types::*;
 use async_trait::async_trait;
@@ -97,6 +98,10 @@ impl StreamProvider for BedrockProvider {
         // For simplicity, we parse it as newline-delimited JSON chunks.
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
+        // The tool call currently streaming its `input`, as (content index,
+        // accumulated argument text). Bedrock blocks arrive one at a time, so
+        // at most one is open.
+        let mut open_tool: Option<(usize, String)> = None;
 
         loop {
             tokio::select! {
@@ -147,10 +152,13 @@ impl StreamProvider for BedrockProvider {
                                             });
                                         }
                                         if let Some(tool_use) = delta.tool_use {
-                                            let _ = tx.send(StreamEvent::ToolCallDelta {
-                                                content_index: content.len(),
-                                                delta: tool_use.input,
-                                            });
+                                            if let Some((idx, buf)) = open_tool.as_mut() {
+                                                buf.push_str(&tool_use.input);
+                                                let _ = tx.send(StreamEvent::ToolCallDelta {
+                                                    content_index: *idx,
+                                                    delta: tool_use.input,
+                                                });
+                                            }
                                         }
                                         if let Some(reasoning) = delta.reasoning_content {
                                             let think_idx = content.iter().position(|c| matches!(c, Content::Thinking { .. }));
@@ -188,12 +196,14 @@ impl StreamProvider for BedrockProvider {
                                                 id: tool_use.tool_use_id,
                                                 name: tool_use.name,
                                             });
+                                            open_tool = Some((idx, String::new()));
                                         }
                                     }
                                     BedrockEvent::ContentBlockStop { .. } => {
-                                        if content.iter().any(|c| matches!(c, Content::ToolCall { .. })) {
+                                        if let Some((idx, raw)) = open_tool.take() {
+                                            finalize_bedrock_tool_call(&mut content, idx, &raw);
                                             let _ = tx.send(StreamEvent::ToolCallEnd {
-                                                content_index: content.len() - 1,
+                                                content_index: idx,
                                             });
                                         }
                                     }
@@ -219,6 +229,13 @@ impl StreamProvider for BedrockProvider {
                     }
                 }
             }
+        }
+
+        // A tool call whose block never closed still gets its arguments
+        // resolved: truncated text becomes the unparsed marker rather than
+        // silently staying `{}`.
+        if let Some((idx, raw)) = open_tool.take() {
+            finalize_bedrock_tool_call(&mut content, idx, &raw);
         }
 
         let message = Message::Assistant {
@@ -418,6 +435,18 @@ enum BedrockEvent {
         usage: Option<BedrockUsage>,
     },
     Unknown,
+}
+
+/// Resolve the accumulated `input` text of the tool call at `idx` into its
+/// arguments. Before this, Bedrock tool calls never received their streamed
+/// input at all and always ran with `{}`.
+fn finalize_bedrock_tool_call(content: &mut [Content], idx: usize, raw: &str) {
+    if let Some(Content::ToolCall {
+        name, arguments, ..
+    }) = content.get_mut(idx)
+    {
+        *arguments = finalize_tool_arguments(name, raw);
+    }
 }
 
 #[derive(Deserialize)]
