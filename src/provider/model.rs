@@ -930,6 +930,33 @@ impl ModelConfig {
         }
     }
 
+    /// Create a config for OpenAI's **Responses API** (`POST /v1/responses`).
+    ///
+    /// [`openai`](Self::openai) targets Chat Completions; this targets the
+    /// Responses API, OpenAI's native interface for reasoning models (it
+    /// streams reasoning summaries and reports cache writes). With
+    /// [`Agent::from_config`](crate::Agent::from_config) it resolves to
+    /// [`OpenAiResponsesProvider`](crate::provider::OpenAiResponsesProvider)
+    /// and reads the key from `OPENAI_API_KEY`.
+    ///
+    /// Unpriced (`cost: None`); set `cost` for the model you use.
+    pub fn openai_responses(id: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            api: ApiProtocol::OpenAiResponses,
+            provider: "openai".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            reasoning: true,
+            context_window: 128_000,
+            max_tokens: 16_000,
+            cost: None,
+            headers: HashMap::new(),
+            anthropic: None,
+            compat: None,
+        }
+    }
+
     /// Create a config for a local OpenAI-compatible server (LM Studio, Ollama, etc.).
     /// No API key required — sends an empty Bearer token.
     pub fn local(base_url: impl Into<String>, model_id: impl Into<String>) -> Self {
@@ -1646,6 +1673,7 @@ mod tests {
             ModelConfig::mock(),
             ModelConfig::anthropic("claude-x", "X"),
             ModelConfig::openai("gpt-x", "X"),
+            ModelConfig::openai_responses("gpt-x", "X"),
             ModelConfig::local("http://localhost:1234/v1", "m"),
             ModelConfig::opencode_zen("claude-sonnet-5"),
             ModelConfig::opencode_zen("gpt-5.5"),

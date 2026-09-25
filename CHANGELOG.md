@@ -97,6 +97,14 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`ModelConfig::openai_responses(id, name)`**
+  ([#178](https://github.com/yologdev/yoagent/issues/178)). `ModelConfig::openai()`
+  targets Chat Completions, and there was no first-party constructor for
+  OpenAI's Responses API. The new one sets `ApiProtocol::OpenAiResponses`,
+  `https://api.openai.com/v1`, provider `openai` (key from `OPENAI_API_KEY`),
+  `reasoning: true` and `cost: None`; `Agent::from_config` resolves it to
+  `OpenAiResponsesProvider`.
+
 - **`ModelConfig::claude_fable_5_1()`**
   ([#170](https://github.com/yologdev/yoagent/issues/170)). 1M context, 64K of
   128K max output, $10 / $50 per MTok input/output, $12.50 5-minute cache
@@ -175,6 +183,35 @@ adheres to [Semantic Versioning](https://semver.org/).
   [#174](https://github.com/yologdev/yoagent/issues/174).
 
 ### Fixed
+
+- **Responses and Azure OpenAI: function calls are collected again**
+  ([#178](https://github.com/yologdev/yoagent/issues/178)). Both providers opened
+  a tool-call buffer only on `response.function_call_arguments.start`, an event
+  the Responses API does not send, so every streamed function call was dropped
+  and the turn ended as plain text. The two providers now share one parser
+  written against OpenAI's published event types: a call starts on
+  `response.output_item.added` (`item.type == "function_call"`), argument
+  deltas are routed by `output_index` / `item_id` (parallel calls no longer
+  share "the last buffer"), and the complete arguments from
+  `response.function_call_arguments.done` / `response.output_item.done` are the
+  source of truth, which also covers servers that send no deltas. Truncated
+  arguments still become the `__partial_json` marker and `response.incomplete`
+  still reports `StopReason::Length` (#167). A delta for an unknown item is
+  logged with `warn!`, not dropped silently. Data-only SSE messages take their
+  event name from the payload's `type`.
+- **Responses and Azure OpenAI: reasoning is streamed.** The providers matched
+  `response.reasoning.delta`, which does not exist. They now map
+  `response.reasoning_summary_text.delta` and `response.reasoning_text.delta`
+  to `Content::Thinking` (Azure previously ignored reasoning entirely).
+- **Responses and Azure OpenAI: cache usage is reported.** `usage` read only
+  input and output tokens. `input_tokens_details.cached_tokens` and
+  `.cache_write_tokens` now fill `Usage::cache_read` / `cache_write`, and
+  `Usage::input` is the uncached remainder (the Anthropic and OpenAI-compatible
+  convention), so `CostConfig` prices cache hits and cache writes at their own
+  rates. Previously every cached token was billed at the full input rate.
+  Context-tier selection still sees the whole prompt.
+- **Azure OpenAI** now reports `StopReason::Length` when `response.completed`
+  carries `status: "incomplete"`, as the Responses provider already did.
 
 - **Sub-agent spend now reaches the parent, in its own bucket**
   ([#173](https://github.com/yologdev/yoagent/issues/173)). `SubAgentTool` ran
