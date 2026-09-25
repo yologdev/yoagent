@@ -111,7 +111,8 @@ first:
 |---|-------|--------|
 | 1 | Explicit `config.cost` | assigning the field after construction — it is a plain field, so it always wins |
 | 2 | User override | `PriceTable::install_override(table)`, or the file named by `YOAGENT_PRICES` |
-| 3 | Built-in | `src/provider/prices.json`, compiled in |
+| 3 | Fetched | `PriceTable::install_fetched(table)` — opt-in, see [Live sources](#live-sources) |
+| 4 | Built-in | `src/provider/prices.json`, compiled in |
 
 Each layer replaces **whole entries** per `(provider, id)`. An override file
 may be partial: it overrides exactly the models it lists, and an entry it
@@ -146,6 +147,77 @@ YOAGENT_PRICES=/etc/myapp/prices.json ./myapp
   removes it. `PriceTable::resolved()` returns a snapshot of what a
   constructor would use now.
 - Gateways and custom endpoints ignore every layer; see above.
+
+## Live sources
+
+yoagent **never fetches prices on its own**. When you ask, `PriceTable::fetch`
+downloads a table (10 s timeout; `fetch_with_timeout` to change it) from a
+`PriceSource`:
+
+| Source | What it is |
+|--------|------------|
+| `PriceSource::YoagentMain` | This crate's own `src/provider/prices.json` on GitHub `main`. Same format, same review, same audit as a release — a checked price fix merged to `main` reaches you without waiting for one. |
+| `PriceSource::ModelsDev` | [models.dev](https://models.dev/api.json), mapped into this format. Covers thousands of models. |
+| `PriceSource::ModelsDevAt(url)` | A models.dev-format document elsewhere (a mirror, a pinned snapshot). |
+| `PriceSource::Url(url)` | Any URL serving this crate's format — your own price service. |
+
+A fetched table is installed as the **fetched layer** — above the built-in
+data, below any user override:
+
+```rust
+use std::time::Duration;
+use yoagent::provider::{PriceOrigin, PriceSource, PriceTable};
+
+// Fetch at most once a day; offline, fall back to the cache, then built-in.
+let prices = PriceTable::fetch_cached(
+    &PriceSource::YoagentMain,
+    cache_dir.join("yoagent-prices.json"),
+    Duration::from_secs(24 * 3600),
+)
+.await;
+if prices.origin != PriceOrigin::Builtin {
+    PriceTable::install_fetched(prices.table);
+}
+// ...then build configs.
+```
+
+`fetch_cached` never fails: a cache younger than `max_age` is used without a
+request (`PriceOrigin::Cache`); otherwise it fetches and rewrites the cache,
+always in this crate's format (`Fetched`); if that fails it uses the expired
+cache (`StaleCache`) and then the built-in data (`Builtin`), logging why. Use
+one cache path per source. `PriceTable::clear_fetched()` removes the layer.
+
+### Trust
+
+A fetched table **overrides the built-in data** for every model it lists.
+
+- **`YoagentMain`** is as trustworthy as a release — it is the file releases
+  are cut from. If `main` ever moves to a newer schema than your yoagent
+  reads, the fetch fails with `PriceError::UnsupportedSchema` and nothing
+  changes. Adding any field to the format is such a change for older
+  clients, because unknown fields are rejected.
+- **`ModelsDev` is community-maintained and not authoritative.** It has been
+  provably wrong before — it mis-stated Claude context-tier data and DeepSeek
+  V4 Pro's price. The mapping is conservative: a model whose cost carries
+  structure `CostConfig` cannot express (a separate reasoning rate, a
+  non-context tier, an unknown key) is **skipped**, not approximated; audio
+  rates are ignored; provider keys are models.dev's own, except `alibaba`,
+  which becomes `qwen`; and a document from which nothing maps is an error,
+  never an empty table.
+
+Either way, disagreements are visible, not silent. `install_fetched` compares
+the table with the built-in data **as billed** (a zero cache rate counts as
+the input rate) and logs, at `warn`, how many built-in models it prices
+differently and the first few differences:
+
+```text
+WARN yoagent prices: the fetched table disagrees with the built-in data on 2 model(s)
+     and now takes precedence for them: anthropic/claude-sonnet-5: input 2 -> 1.5, ...
+```
+
+It returns every `PriceChange` (new models have `before: None`), and
+`fetched.changes_from(&PriceTable::builtin())` computes the same list without
+installing anything — use it to decide whether to install at all.
 
 ## Re-pricing a config
 

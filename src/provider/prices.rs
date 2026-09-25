@@ -41,7 +41,10 @@
 //!    field, so it always wins;
 //! 2. the **user layer**: [`PriceTable::install_override`], or on first use
 //!    the file named by the `YOAGENT_PRICES` environment variable;
-//! 3. the built-in `prices.json`.
+//! 3. the **fetched layer**: [`PriceTable::install_fetched`], opt-in, from a
+//!    live [`PriceSource`] (see its trust caveats) — never fetched unless you
+//!    call [`PriceTable::fetch`] or [`PriceTable::fetch_cached`];
+//! 4. the built-in `prices.json`.
 //!
 //! Each layer replaces whole entries per `(provider, id)`; a partial override
 //! file overrides exactly the models it lists. **Constructors resolve when
@@ -69,6 +72,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, PoisonError, RwLock};
+
+mod fetch;
+pub use fetch::{CachedPrices, PriceChange, PriceOrigin, PriceSource, DEFAULT_FETCH_TIMEOUT};
 
 /// The only `schema` value this release reads.
 pub const PRICE_SCHEMA_VERSION: u32 = 1;
@@ -123,6 +129,26 @@ pub enum PriceError {
         model: String,
         reason: String,
     },
+    /// A price source answered with a non-success HTTP status.
+    #[error("GET {url} returned HTTP {status}")]
+    Http { url: String, status: u16 },
+    /// A price source did not answer within the timeout.
+    #[error("GET {url} timed out after {timeout:?}")]
+    Timeout {
+        url: String,
+        timeout: std::time::Duration,
+    },
+    /// A price source could not be reached or its body not read.
+    #[error("GET {url} failed: {source}")]
+    Request {
+        url: String,
+        #[source]
+        source: reqwest::Error,
+    },
+    /// models.dev data this crate cannot map — its envelope changed, or no
+    /// model in it carried a usable price.
+    #[error("cannot map models.dev data: {0}")]
+    ModelsDev(String),
 }
 
 /// One model's price and where it came from.
@@ -420,17 +446,18 @@ fn builtin_ref() -> &'static PriceTable {
 
 /// The process-wide layers and their resolution.
 struct Layers {
+    fetched: Option<PriceTable>,
     user: Option<PriceTable>,
-    /// `builtin` layered with `user`, rebuilt on every install so a lookup
-    /// is one map read.
+    /// `builtin`, then `fetched`, then `user`, rebuilt on every install so a
+    /// lookup is one map read.
     resolved: PriceTable,
 }
 
 impl Layers {
     fn rebuild(&mut self) {
         let mut table = builtin_ref().clone();
-        if let Some(user) = &self.user {
-            table = table.layered(user);
+        for layer in [&self.fetched, &self.user].into_iter().flatten() {
+            table = table.layered(layer);
         }
         self.resolved = table;
     }
@@ -440,6 +467,7 @@ fn layers() -> &'static RwLock<Layers> {
     static LAYERS: OnceLock<RwLock<Layers>> = OnceLock::new();
     LAYERS.get_or_init(|| {
         let mut layers = Layers {
+            fetched: None,
             user: env_override(),
             resolved: PriceTable::default(),
         };
@@ -490,8 +518,8 @@ impl PriceTable {
     /// Install `table` as the process-wide **user layer**, replacing any
     /// previous override (including one loaded from `YOAGENT_PRICES`).
     ///
-    /// Its entries take precedence over the built-in data per
-    /// `(provider, id)`; models it does not list keep their built-in price.
+    /// Its entries take precedence over the fetched layer and the built-in data per
+    /// `(provider, id)`; models it does not list keep their lower-layer price.
     /// Affects configs built **after** this call — constructors resolve when
     /// they run.
     ///

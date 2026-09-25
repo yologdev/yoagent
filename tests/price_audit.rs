@@ -31,7 +31,8 @@
 //! here is a *drift alarm* that sends a human to the vendor's own pricing page.
 //! If the two disagree, the answer is "go read Anthropic", never "copy
 //! models.dev". This test deliberately does not, and should never, update the
-//! data file for you.
+//! data file for you. (`PriceSource::ModelsDev` exists for users who choose to
+//! trust it at runtime, loudly; this audit takes the opposite stance.)
 //!
 //! # How this instrument avoids going quiet
 //!
@@ -683,6 +684,43 @@ async fn hardcoded_prices_have_not_drifted() {
          constant, and never copy models.dev blindly.\n\n{}\n",
         drift.join("\n")
     );
+}
+
+/// `PriceSource::ModelsDev` against the live document: the mapper must still
+/// understand models.dev's schema — it maps thousands of models, and every
+/// built-in entry among them — so a user opting into it is not silently
+/// handed a near-empty table. Disagreements are printed, not failed: the
+/// audit above owns drift.
+#[tokio::test]
+#[ignore = "network: fetches models.dev; run before a release"]
+async fn models_dev_source_still_maps() {
+    use yoagent::provider::PriceSource;
+    let fetched = PriceTable::fetch(&PriceSource::ModelsDev)
+        .await
+        .unwrap_or_else(|e| panic!("PriceSource::ModelsDev: {e}"));
+    let builtin = PriceTable::builtin();
+    println!("models.dev mapped {} entries", fetched.len());
+    assert!(
+        fetched.len() >= 1000,
+        "only {} models mapped — has models.dev's schema changed?",
+        fetched.len()
+    );
+    let missing: Vec<String> = builtin
+        .iter()
+        .filter(|(p, m, e)| e.absent_upstream.is_none() && fetched.entry(p, m).is_none())
+        .map(|(p, m, _)| format!("{p}/{m}"))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "built-in entries the models.dev mapping dropped: {missing:?}"
+    );
+    for change in fetched
+        .changes_from(&builtin)
+        .iter()
+        .filter(|c| c.before.is_some())
+    {
+        println!("  differs from built-in: {change}");
+    }
 }
 
 /// `is_configured` means *any* rate is set. It decides whether a persisted

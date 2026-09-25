@@ -1007,7 +1007,9 @@ pub struct ModelConfig {
     ///
     /// The table is the process-wide resolved one: a user override
     /// ([`PriceTable::install_override`](crate::provider::PriceTable::install_override)
-    /// or the `YOAGENT_PRICES` file) over the built-in data. It is read when
+    /// or the `YOAGENT_PRICES` file) over an opt-in fetched layer
+    /// ([`PriceTable::install_fetched`](crate::provider::PriceTable::install_fetched))
+    /// over the built-in data. It is read when
     /// the constructor runs, so install overrides **before** building
     /// configs. Setting this field yourself after construction always wins
     /// over any table.

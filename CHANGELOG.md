@@ -32,6 +32,20 @@ adheres to [Semantic Versioning](https://semver.org/).
   what they list. `PriceTable::resolved()` snapshots the result. Constructors
   resolve when they run, so install overrides before building configs; an
   explicit `config.cost` set afterwards still wins.
+- **Opt-in live price sources.** `PriceTable::fetch(&PriceSource)` (with a
+  timeout; `fetch_with_timeout`) reads models.dev (`ModelsDev`,
+  `ModelsDevAt(url)` — mapped into this crate's schema, tiers from `tiers`
+  or `context_over_200k`, inexpressible models skipped), this crate's
+  checked `prices.json` on GitHub `main` (`YoagentMain`, so a merged price
+  fix reaches users without a release), or any URL in this crate's format
+  (`Url`). `PriceTable::install_fetched(table)` installs it as a layer above
+  the built-in data and below user overrides, and logs at `warn` how many
+  built-in models it prices differently plus the first few differences
+  (`changes_from` computes them without installing). `fetch_cached(source,
+  path, max_age)` caches to a caller-given file and falls back to the stale
+  cache, then the built-in data, when offline. Nothing is ever fetched
+  implicitly. Precedence, highest first: explicit `config.cost` > user
+  override > fetched > built-in.
 - **`tests/price_audit.rs` audits every `prices.json` entry**, not a
   hand-kept preset list, so an entry cannot be added unaudited. Its
   allowances are now data (`cache_write_at_input`, `absent_upstream`).
