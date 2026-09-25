@@ -119,16 +119,26 @@ value it would reject — except Anthropic's adaptive
 effort, which is passed through unclamped: Opus 4.6 / Sonnet 4.6 have no
 `xhigh` rung and reject it.
 
-| Level | Anthropic effort | Anthropic legacy / Bedrock budget | OpenAI-compat¹ / Responses / Azure effort | DeepSeek effort² | Gemini 2.x / Vertex budget³ |
+| Level | Anthropic effort | Anthropic legacy / Bedrock budget | OpenAI-compat¹ / Responses / Azure effort, by ceiling⁴ | DeepSeek effort² | Gemini 2.x / Vertex budget³ |
 |-------|------|------|------|------|------|
+| `Off` | (no thinking) | (no thinking) | `none` if `supports_effort_none`, else omitted | omitted; `thinking: disabled` | (omitted) |
 | `Minimal`, `Low` | `low` | 1,024 | `low` | `low` | 1,024 |
 | `Medium` | `medium` | 2,048 | `medium` | `medium` | 8,192 |
 | `High` | `high` | 8,192 | `high` | `high` | 24,576 |
-| `XHigh` | `xhigh` | 16,384 | `high` (clamped) | `high` (clamped) | 24,576 (clamped) |
-| `Max` | `max` | 30,720 | `high` (clamped) | `max` | 24,576 (clamped) |
+| `XHigh` | `xhigh` | 16,384 | `High`: `high` (clamped) · `XHigh`/`Max`: `xhigh` | `high` (clamped) | 24,576 (clamped) |
+| `Max` | `max` | 30,720 | `High`: `high` · `XHigh`: `xhigh` (clamped) · `Max`: `max` | `max` | 24,576 (clamped) |
 
 ¹ OpenAI-compat sends `reasoning_effort` only when `supports_reasoning_effort`
-is set. ² The DeepSeek column applies when both `supports_thinking_control` and
+is set; the Responses and Azure providers always send `reasoning.effort`
+(except for an omitted `Off`).
+⁴ `OpenAiCompat::max_reasoning_effort` (a `ReasoningEffortCeiling`, default
+`High`) and `OpenAiCompat::supports_effort_none` are declared per model — the
+Responses and Azure providers read them from `ModelConfig::compat` too. `none`
+matters because omitting the effort runs an OpenAI reasoning model at its
+default (`medium`), not without reasoning. Presets: `gpt_6_astra` — `Max`, no
+`none`; `gpt_6_sol` / `gpt_6_luna` — `Max`, `none`; `gpt_5_5` — `XHigh`,
+`none`; `OpenAiCompat::xai()` — `XHigh` (Grok treats `xhigh` as `high` where
+it lacks the rung); everything else `High`. ² The DeepSeek column applies when both `supports_thinking_control` and
 `supports_reasoning_effort` are set. DeepSeek maps a requested `xhigh` to
 `high` itself, so `XHigh` is sent as `high` and only `Max` selects `max`.
 ³ Gemini 3 and later get `thinkingConfig.thinkingLevel` instead, never both:

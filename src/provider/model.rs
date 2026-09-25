@@ -1,5 +1,6 @@
 //! Model configuration and provider compatibility flags.
 
+use crate::types::ThinkingLevel;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -47,10 +48,12 @@ impl std::fmt::Display for ApiProtocol {
 /// [`context_tier`](Self::context_tier) and `cost_usd` selects by the request's
 /// prompt tokens (`input + cache_read + cache_write`).
 ///
-/// **No preset here sets one** (checked 2026-08-20). Anthropic states that 4.6+
-/// models bill the full 1M window at standard rates, and Meta's page says there
-/// is no long-context premium; Haiku 4.5 is flat because its window is 200K.
-/// `gpt_5_5` is the one contested case — see its docs for why it stays flat.
+/// The OpenAI presets set one at 272K: `gpt_5_5`, `gpt_6_astra`,
+/// `gpt_6_sol` and `gpt_6_luna` (checked 2026-09-25; `gpt_5_5`'s long-band
+/// cache-read rate is unverified — see its docs). The Anthropic presets do
+/// not: Anthropic states that 4.6+ models bill the full 1M window at
+/// standard rates. Meta's page says there is no long-context premium; Haiku
+/// 4.5 is flat because its window is 200K.
 ///
 /// Note the derivation: prompt size is `input + cache_read + cache_write`, which
 /// holds only where the provider subtracts cached tokens out of `input`.
@@ -115,9 +118,10 @@ pub struct CostConfig {
 
 /// Higher rates charged above a context threshold.
 ///
-/// OpenAI prices gpt-5.5 at $5/$30 below ~272K prompt tokens and $10/$45 above
-/// it — published as *columns* on the same pricing row, which is easy to miss
-/// if you go looking for a second row. A flat `CostConfig` under-bills those
+/// OpenAI prices gpt-5.5 at $5/$30 below 272K prompt tokens and $10/$45 above
+/// it, and the GPT-6 models at 2x input and cache rates and 1.5x output above
+/// the same line — published as *columns* on the same pricing row, which is
+/// easy to miss if you go looking for a second row. A flat `CostConfig` under-bills those
 /// requests by 2x on input, and this crate's whole compaction subsystem exists
 /// to run agents at high context, so the case is central rather than exotic.
 ///
@@ -318,6 +322,44 @@ pub enum ThinkingFormat {
     Qwen,
 }
 
+/// The highest OpenAI reasoning-effort rung a model accepts.
+///
+/// OpenAI's effort ladder grew rungs model by model, and a model rejects a
+/// value it does not know with a 400 rather than rounding it. The rungs above
+/// `high`, per OpenAI's model pages and Azure's reasoning guide ("max works
+/// only with GPT-6 or GPT-5.6 models and the Responses API. xhigh works only
+/// with GPT-6, GPT-5.6, GPT-5.5, GPT-5.4, and gpt-5.1-codex-max models"):
+///
+/// | Ceiling | Models (checked 2026-09-25) |
+/// |---------|--------|
+/// | `High`  | gpt-5, gpt-5.1, o-series, and any model not listed |
+/// | `XHigh` | gpt-5.2, gpt-5.4, gpt-5.4-mini, gpt-5.5, gpt-5.1-codex-max |
+/// | `Max`   | the GPT-5.6 and GPT-6 families |
+///
+/// This is a declared capability, never inferred from the model id: a preset
+/// sets it, and a caller on a generic constructor sets it for their model.
+/// [`ThinkingLevel::XHigh`] sends `xhigh` when the ceiling is at least
+/// `XHigh`, else `high`; [`ThinkingLevel::Max`] sends the ceiling itself
+/// (`max`, `xhigh` or `high`). Levels at or below `High` are unaffected.
+///
+/// The default, `High`, is the behaviour before this type existed, and what
+/// a persisted [`OpenAiCompat`] without the field deserializes to. Marked
+/// `#[non_exhaustive]` so the next rung is not a breaking change.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
+#[non_exhaustive]
+pub enum ReasoningEffortCeiling {
+    /// Tops out at `high`. `XHigh` and `Max` are clamped to `high`.
+    #[default]
+    High,
+    /// Accepts `xhigh`. `Max` is sent as `xhigh`.
+    XHigh,
+    /// Accepts `max` (and `xhigh`).
+    Max,
+}
+
 /// Compatibility flags for OpenAI-compatible providers.
 /// Different providers have different quirks even though they share the same base API.
 ///
@@ -375,6 +417,34 @@ pub struct OpenAiCompat {
     /// re-create DeepSeek compat from the preset.
     #[serde(default)]
     pub replays_reasoning_content: bool,
+    /// The highest reasoning-effort rung the model accepts; see
+    /// [`ReasoningEffortCeiling`]. Defaults to `High`.
+    ///
+    /// Read by the Chat Completions provider (when
+    /// [`supports_reasoning_effort`](Self::supports_reasoning_effort) is set)
+    /// **and** by the OpenAI Responses and Azure OpenAI providers, which take
+    /// it from `ModelConfig::compat` and ignore every other flag here. Not
+    /// read on the DeepSeek ladder
+    /// ([`supports_thinking_control`](Self::supports_thinking_control)), which
+    /// has its own `low`/`high`/`max` mapping.
+    #[serde(default)]
+    pub max_reasoning_effort: ReasoningEffortCeiling,
+    /// The model accepts reasoning effort `none`, so
+    /// [`ThinkingLevel::Off`] is sent as `none` rather than omitted.
+    ///
+    /// Omitting the effort does not turn reasoning off on OpenAI's reasoning
+    /// models — it runs them at their default, `medium`. Where `none` exists
+    /// (gpt-5.1 and later, GPT-5.6, GPT-6 Sol/Luna) it is the only way to get
+    /// a non-reasoning request, and on GPT-6 Sol/Luna it is also the only
+    /// effort under which Chat Completions allows function calling. Leave it
+    /// off where `none` is rejected: GPT-6 Astra returns HTTP 400 for it, and
+    /// the o-series and gpt-5 do not have it.
+    ///
+    /// Read by the same providers as
+    /// [`max_reasoning_effort`](Self::max_reasoning_effort), with the same
+    /// DeepSeek exception (DeepSeek's `Off` is `thinking: disabled`).
+    #[serde(default)]
+    pub supports_effort_none: bool,
 }
 
 impl Default for OpenAiCompat {
@@ -391,11 +461,38 @@ impl Default for OpenAiCompat {
             thinking_format: ThinkingFormat::OpenAi,
             supports_prompt_cache_key: false,
             replays_reasoning_content: false,
+            max_reasoning_effort: ReasoningEffortCeiling::High,
+            supports_effort_none: false,
         }
     }
 }
 
 impl OpenAiCompat {
+    /// OpenAI's reasoning-effort string for `level`, or `None` to omit the
+    /// field. Shared by the Chat Completions (`reasoning_effort`), Responses
+    /// and Azure (`reasoning.effort`) request builders.
+    ///
+    /// `Off` is `none` only where [`supports_effort_none`](Self::supports_effort_none)
+    /// is set; `XHigh`/`Max` are capped at
+    /// [`max_reasoning_effort`](Self::max_reasoning_effort). Not the DeepSeek
+    /// ladder — `openai_compat.rs` handles that before reaching here.
+    pub(crate) fn openai_reasoning_effort(&self, level: ThinkingLevel) -> Option<&'static str> {
+        use ReasoningEffortCeiling as Ceiling;
+        Some(match level {
+            ThinkingLevel::Off => return self.supports_effort_none.then_some("none"),
+            ThinkingLevel::Minimal | ThinkingLevel::Low => "low",
+            ThinkingLevel::Medium => "medium",
+            ThinkingLevel::High => "high",
+            ThinkingLevel::XHigh if self.max_reasoning_effort >= Ceiling::XHigh => "xhigh",
+            ThinkingLevel::XHigh => "high",
+            ThinkingLevel::Max => match self.max_reasoning_effort {
+                Ceiling::Max => "max",
+                Ceiling::XHigh => "xhigh",
+                Ceiling::High => "high",
+            },
+        })
+    }
+
     /// Compat flags for native OpenAI.
     pub fn openai() -> Self {
         Self {
@@ -435,12 +532,19 @@ impl OpenAiCompat {
     /// sends no `reasoning_effort` and leaves the model at its default `high`
     /// — it does not turn reasoning off.
     ///
+    /// The effort ceiling is [`ReasoningEffortCeiling::XHigh`] for every Grok
+    /// model, not just 4.6+: xAI documents that on "models that do not
+    /// support it, such as grok-4.5, requests with "xhigh" are treated as
+    /// "high"" — rounded, not rejected — so `ThinkingLevel::XHigh` and `Max`
+    /// send `xhigh`, and older models simply run at `high`.
+    ///
     /// [`ThinkingLevel::Off`]: crate::types::ThinkingLevel::Off
     pub fn xai() -> Self {
         Self {
             supports_reasoning_effort: true,
             supports_usage_in_streaming: true,
             thinking_format: ThinkingFormat::Xai,
+            max_reasoning_effort: ReasoningEffortCeiling::XHigh,
             ..Default::default()
         }
     }
@@ -572,7 +676,7 @@ impl AnthropicCompat {
 #[serde(default)]
 #[non_exhaustive]
 pub struct GoogleCompat {
-    /// Which `thinkingConfig` field carries [`ThinkingLevel`](crate::ThinkingLevel).
+    /// Which `thinkingConfig` field carries [`ThinkingLevel`].
     ///
     /// - `None` (default): read it from the model id. Gemini 3 and later get
     ///   `thinkingLevel`; Gemini 2.x, and any id the rule cannot read, get
@@ -955,44 +1059,172 @@ impl ModelConfig {
     /// GPT-5.5. ~1M context; defaults to 64K of the model's 128K max output.
     /// Uses the Chat Completions API.
     ///
-    /// Rates verified against <https://developers.openai.com/api/docs/pricing>
-    /// on 2026-08-19. See [`CostConfig`] — they are a snapshot, not an authority.
+    /// Reasoning effort: `none`/`low`/`medium` (default)/`high`/`xhigh`, per
+    /// the model page — so the ceiling is [`ReasoningEffortCeiling::XHigh`]
+    /// (`ThinkingLevel::Max` sends `xhigh`) and `ThinkingLevel::Off` sends
+    /// `none` ([`OpenAiCompat::supports_effort_none`]).
     ///
+    /// **Priced in two bands.** The model page
+    /// (<https://developers.openai.com/api/docs/models/gpt-5.5>, read
+    /// 2026-09-25) lists $5 input / $0.50 cached input / $30 output and states:
+    /// "For GPT-5.5, prompts with >272K input tokens are priced at 2x input and
+    /// 1.5x output for the full session". So above 272K prompt tokens this
+    /// preset bills $10 input / $45 output (a [`ContextTier`] at 272,000;
+    /// exclusive, so a prompt of exactly 272,000 stays on the base band).
+    /// OpenAI charges nothing extra for cache writes on this model.
     ///
-    /// **Deliberately flat, over a contested tier claim.** models.dev records a
-    /// 272K tier for this model at $10/$45 with $1.00 cache reads. The preset
-    /// does not, because the evidence does not survive checking:
+    /// **The long-band cached-input rate, $1.00, is UNVERIFIED.** The sentence
+    /// above names input and output only. $1.00 (2x, as the GPT-6 pages state
+    /// for their cache rates) is what models.dev records; the literal reading
+    /// would leave it at $0.50. It is set rather than left unset because an
+    /// unset tier rate is $0, not "inherit the base rate" — leaving it out
+    /// would bill every cached token above 272K as free. OpenAI's pricing
+    /// page no longer lists gpt-5.5, so there is no table cell to settle it.
     ///
-    /// - OpenAI's pricing page does publish a `>272K input tokens` schedule,
-    ///   as a second column group beside `≤272K`. But gpt-5.5 has no row in
-    ///   that table. Across all four Flagship tiers it appears only as
-    ///   `gpt-5.5 (<272K context length)` — Standard $5/$0.50/$30, Batch and
-    ///   Flex $2.50/$15, Fast $12.50/$75 — with no long-context cell.
-    /// - The one gpt-5.5 row that *is* in a long-context table,
-    ///   `gpt-5.5-cyber`, has all four long-context cells set to `-`, and the
-    ///   page hides that row by default.
-    /// - $10/$1/$45 does appear on the page verbatim — as `gpt-5.6-sol`'s
-    ///   long-context rates. Its short-context rates are identical to
-    ///   gpt-5.5's, which is a plausible route for the number to have been
-    ///   copied onto the wrong model.
-    /// - models.dev's own entry contradicts itself: `tiers[0].tier.size` is
-    ///   272000 while the sibling key carrying the same rates is named
-    ///   `context_over_200k`.
-    ///
-    /// Tiering this preset on that would have doubled the input rate every
-    /// caller is charged above 272K prompt tokens. If OpenAI publishes a
-    /// gpt-5.5 long-context row, the machinery is ready —
-    /// [`CostConfig::with_context_tier`]. Until then, flat.
-    ///
-    /// Rates verified against <https://developers.openai.com/api/docs/pricing>
-    /// on 2026-08-20, both column groups read. See [`CostConfig`].
+    /// Rates are a snapshot, not an authority; see [`CostConfig`].
     pub fn gpt_5_5() -> Self {
         Self {
             reasoning: true,
             context_window: 1_000_000,
             max_tokens: 64_000,
-            cost: Some(CostConfig::new(5.0, 30.0).with_cache_read(0.5)),
+            cost: Some(
+                CostConfig::new(5.0, 30.0)
+                    .with_cache_read(0.5)
+                    .with_context_tier(ContextTier::new(272_000, 10.0, 45.0).with_cache_read(1.0)),
+            ),
+            compat: Some(OpenAiCompat {
+                max_reasoning_effort: ReasoningEffortCeiling::XHigh,
+                supports_effort_none: true,
+                ..OpenAiCompat::openai()
+            }),
             ..Self::openai("gpt-5.5", "GPT-5.5")
+        }
+    }
+
+    /// GPT-6 Astra (`gpt-6-astra`), OpenAI's most capable GPT-6 model.
+    /// 1,050,000-token context; defaults to 64K of the model's 128K max output.
+    ///
+    /// **Uses the Responses API**
+    /// ([`openai_responses`](Self::openai_responses)). OpenAI: "Chat
+    /// Completions does not support function calling with GPT-6 Astra" — an
+    /// agent with tools needs Responses.
+    ///
+    /// Reasoning effort: `low`/`medium`/`high`/`xhigh`/`max`, ceiling
+    /// [`ReasoningEffortCeiling::Max`]. **No `none`**: "Setting
+    /// reasoning.effort … to none returns HTTP 400", so
+    /// [`OpenAiCompat::supports_effort_none`] is off and `ThinkingLevel::Off`
+    /// omits the effort — which runs the model at its default, not without
+    /// reasoning. `Minimal` is sent as `low` (GPT-6 has no `minimal`).
+    ///
+    /// **`temperature` is rejected** while reasoning effort is anything but
+    /// `none` ("remove temperature, top_p, and top_logprobs"), and Astra
+    /// cannot run at `none` — do not set a temperature with this preset.
+    ///
+    /// Priced per OpenAI's pricing page (read 2026-09-25): $10 input / $1
+    /// cached / $12.50 cache write / $50 output; above 272K prompt tokens the
+    /// whole request bills at $20 / $2 / $25 / $75. See [`CostConfig`].
+    pub fn gpt_6_astra() -> Self {
+        Self::gpt_6(
+            "gpt-6-astra",
+            "GPT-6 Astra",
+            false,
+            CostConfig::new(10.0, 50.0)
+                .with_cache_read(1.0)
+                .with_cache_write(12.5)
+                .with_context_tier(
+                    ContextTier::new(272_000, 20.0, 75.0)
+                        .with_cache_read(2.0)
+                        .with_cache_write(25.0),
+                ),
+        )
+    }
+
+    /// GPT-6 Sol (`gpt-6-sol`), built for coding and agentic work.
+    /// 1,050,000-token context; defaults to 64K of the model's 128K max output.
+    ///
+    /// **Uses the Responses API**
+    /// ([`openai_responses`](Self::openai_responses)). On Chat Completions,
+    /// OpenAI allows function calling "only with reasoning_effort set to
+    /// none", which would forbid reasoning in any agent with tools.
+    ///
+    /// Reasoning effort: `none`/`low`/`medium` (default)/`high`/`xhigh`/`max`,
+    /// ceiling [`ReasoningEffortCeiling::Max`];
+    /// [`OpenAiCompat::supports_effort_none`] is on, so `ThinkingLevel::Off`
+    /// sends `none` — no reasoning — rather than falling back to `medium`.
+    ///
+    /// **`temperature` is rejected** unless the effort is `none`
+    /// (`ThinkingLevel::Off`): "When reasoning effort is not none, remove
+    /// temperature, top_p, and top_logprobs."
+    ///
+    /// Priced per OpenAI's pricing page (read 2026-09-25): $2 input / $0.20
+    /// cached / $2.50 cache write / $10 output; above 272K prompt tokens the
+    /// whole request bills at $4 / $0.40 / $5 / $15. See [`CostConfig`].
+    pub fn gpt_6_sol() -> Self {
+        Self::gpt_6(
+            "gpt-6-sol",
+            "GPT-6 Sol",
+            true,
+            CostConfig::new(2.0, 10.0)
+                .with_cache_read(0.2)
+                .with_cache_write(2.5)
+                .with_context_tier(
+                    ContextTier::new(272_000, 4.0, 15.0)
+                        .with_cache_read(0.4)
+                        .with_cache_write(5.0),
+                ),
+        )
+    }
+
+    /// GPT-6 Luna (`gpt-6-luna`), the efficient GPT-6 model for focused,
+    /// high-volume tasks. 1,050,000-token context; defaults to 64K of the
+    /// model's 128K max output.
+    ///
+    /// **Uses the Responses API**, for the same reason as
+    /// [`gpt_6_sol`](Self::gpt_6_sol): Chat Completions allows function
+    /// calling only at reasoning effort `none`.
+    ///
+    /// Reasoning effort: `none`/`low`/`medium` (default)/`high`/`xhigh`/`max`,
+    /// ceiling [`ReasoningEffortCeiling::Max`]; `ThinkingLevel::Off` sends
+    /// `none`. **`temperature` is rejected** unless the effort is `none`.
+    ///
+    /// Priced per OpenAI's pricing page (read 2026-09-25): $0.10 input /
+    /// $0.01 cached / $0.125 cache write / $0.50 output; above 272K prompt
+    /// tokens the whole request bills at $0.20 / $0.02 / $0.25 / $0.75. See
+    /// [`CostConfig`].
+    pub fn gpt_6_luna() -> Self {
+        Self::gpt_6(
+            "gpt-6-luna",
+            "GPT-6 Luna",
+            true,
+            CostConfig::new(0.1, 0.5)
+                .with_cache_read(0.01)
+                .with_cache_write(0.125)
+                .with_context_tier(
+                    ContextTier::new(272_000, 0.2, 0.75)
+                        .with_cache_read(0.02)
+                        .with_cache_write(0.25),
+                ),
+        )
+    }
+
+    /// Shared shape of the GPT-6 presets. There is no bare `gpt-6` model id.
+    ///
+    /// `compat` carries only the effort capability here — the Responses
+    /// provider reads nothing else from it. It starts from
+    /// [`OpenAiCompat::openai`] so that switching `api` to Chat Completions
+    /// yields correct flags rather than the bare defaults.
+    fn gpt_6(id: &str, name: &str, supports_effort_none: bool, cost: CostConfig) -> Self {
+        Self {
+            reasoning: true,
+            context_window: 1_050_000,
+            max_tokens: 64_000,
+            cost: Some(cost),
+            compat: Some(OpenAiCompat {
+                max_reasoning_effort: ReasoningEffortCeiling::Max,
+                supports_effort_none,
+                ..OpenAiCompat::openai()
+            }),
+            ..Self::openai_responses(id, name)
         }
     }
 
@@ -1025,6 +1257,13 @@ impl ModelConfig {
     /// and reads the key from `OPENAI_API_KEY`.
     ///
     /// Unpriced (`cost: None`); set `cost` for the model you use.
+    ///
+    /// `compat` is `None`, so reasoning effort tops out at `high` and
+    /// `ThinkingLevel::Off` omits it. For a model with a higher ceiling or a
+    /// `none` rung, set `compat` to an [`OpenAiCompat`] carrying
+    /// [`max_reasoning_effort`](OpenAiCompat::max_reasoning_effort) /
+    /// [`supports_effort_none`](OpenAiCompat::supports_effort_none) — the
+    /// Responses provider reads those two fields and ignores the rest.
     pub fn openai_responses(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -1236,7 +1475,7 @@ impl ModelConfig {
     /// Meta's documented `MODEL_API_KEY`.
     ///
     /// Reasoning: Meta's endpoint defaults to `reasoning_effort: medium`
-    /// server-side. Set a [`ThinkingLevel`](crate::types::ThinkingLevel) to
+    /// server-side. Set a [`ThinkingLevel`] to
     /// tune it; `Off` omits the field, which means Meta's default (medium)
     /// applies — not "no reasoning".
     ///
@@ -1529,7 +1768,135 @@ mod tests {
         assert_eq!(gpt.api, ApiProtocol::OpenAiCompletions);
         assert_eq!(gpt.context_window, 1_000_000);
         assert_eq!(gpt.cost.as_ref().unwrap().output_per_million, 30.0);
-        assert!(gpt.compat.is_some());
+        let compat = gpt.compat.as_ref().unwrap();
+        assert_eq!(compat.max_reasoning_effort, ReasoningEffortCeiling::XHigh);
+        assert!(compat.supports_effort_none);
+        // The rest of the compat is native OpenAI's, unchanged.
+        assert!(compat.supports_reasoning_effort && compat.supports_prompt_cache_key);
+        assert_eq!(compat.max_tokens_field, MaxTokensField::MaxCompletionTokens);
+    }
+
+    #[test]
+    fn gpt_6_presets() {
+        for (mc, id, none) in [
+            (ModelConfig::gpt_6_astra(), "gpt-6-astra", false),
+            (ModelConfig::gpt_6_sol(), "gpt-6-sol", true),
+            (ModelConfig::gpt_6_luna(), "gpt-6-luna", true),
+        ] {
+            assert_eq!(mc.id, id);
+            // Tool calling on GPT-6 needs Responses (Chat Completions refuses
+            // it on Astra, and allows it only at effort `none` on Sol/Luna).
+            assert_eq!(mc.api, ApiProtocol::OpenAiResponses, "{id}");
+            assert_eq!(mc.provider, "openai");
+            assert_eq!(mc.base_url, "https://api.openai.com/v1");
+            assert!(mc.reasoning);
+            assert_eq!(mc.context_window, 1_050_000);
+            assert!(mc.max_tokens <= 128_000);
+            let compat = mc.compat.as_ref().unwrap();
+            assert_eq!(compat.max_reasoning_effort, ReasoningEffortCeiling::Max);
+            assert_eq!(compat.supports_effort_none, none, "{id}");
+            let tiers = &mc.cost.as_ref().unwrap().context_tiers;
+            assert_eq!(tiers.len(), 1, "{id}");
+            assert_eq!(tiers[0].above_prompt_tokens, 272_000);
+        }
+    }
+
+    fn usage(input: u64, cache_read: u64, cache_write: u64, output: u64) -> crate::types::Usage {
+        crate::types::Usage {
+            input,
+            output,
+            cache_read,
+            cache_write,
+            total_tokens: input + output + cache_read + cache_write,
+        }
+    }
+
+    /// Every rate of every band, checked by pricing one million tokens of
+    /// each kind: the dollar figures are OpenAI's published per-1M rates.
+    #[test]
+    fn gpt_6_rates_per_band() {
+        // (preset, short in/cached/write/out, long in/cached/write/out)
+        type Band = [f64; 4];
+        let cases: [(ModelConfig, Band, Band); 3] = [
+            (
+                ModelConfig::gpt_6_astra(),
+                [10.0, 1.0, 12.5, 50.0],
+                [20.0, 2.0, 25.0, 75.0],
+            ),
+            (
+                ModelConfig::gpt_6_sol(),
+                [2.0, 0.2, 2.5, 10.0],
+                [4.0, 0.4, 5.0, 15.0],
+            ),
+            (
+                ModelConfig::gpt_6_luna(),
+                [0.1, 0.01, 0.125, 0.5],
+                [0.2, 0.02, 0.25, 0.75],
+            ),
+        ];
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        for (mc, short, long) in cases {
+            let cost = mc.cost.as_ref().unwrap();
+            // Short band: 100K of one kind, scaled to per-1M.
+            let per_m = |u| cost.cost_usd(&u) * 10.0;
+            assert!(close(per_m(usage(100_000, 0, 0, 0)), short[0]), "{}", mc.id);
+            assert!(close(per_m(usage(0, 100_000, 0, 0)), short[1]), "{}", mc.id);
+            assert!(close(per_m(usage(0, 0, 100_000, 0)), short[2]), "{}", mc.id);
+            assert!(close(per_m(usage(0, 0, 0, 100_000)), short[3]), "{}", mc.id);
+            // Long band: a 1M-token prompt of one kind.
+            let m = 1_000_000;
+            assert!(
+                close(cost.cost_usd(&usage(m, 0, 0, 0)), long[0]),
+                "{}",
+                mc.id
+            );
+            assert!(
+                close(cost.cost_usd(&usage(0, m, 0, 0)), long[1]),
+                "{}",
+                mc.id
+            );
+            assert!(
+                close(cost.cost_usd(&usage(0, 0, m, 0)), long[2]),
+                "{}",
+                mc.id
+            );
+            assert!(
+                close(
+                    cost.cost_usd(&usage(300_000, 0, 0, m)),
+                    0.3 * long[0] + long[3]
+                ),
+                "{}",
+                mc.id
+            );
+            // The threshold is exclusive: exactly 272K stays short.
+            assert!(
+                close(cost.cost_usd(&usage(272_000, 0, 0, 0)), 0.272 * short[0]),
+                "{}",
+                mc.id
+            );
+        }
+    }
+
+    #[test]
+    fn gpt_5_5_long_band() {
+        let cost = ModelConfig::gpt_5_5().cost.unwrap();
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        // Short band unchanged: $5 in, $0.50 cached, $30 out, no cache-write charge.
+        assert!(close(cost.cost_usd(&usage(200_000, 0, 0, 0)), 1.0));
+        assert!(close(cost.cost_usd(&usage(0, 200_000, 0, 0)), 0.1));
+        assert!(close(cost.cost_usd(&usage(0, 0, 0, 100_000)), 3.0));
+        assert!(close(cost.cost_usd(&usage(272_000, 0, 0, 0)), 1.36));
+        // Above 272K: 2x input, 1.5x output — $10 / $45.
+        assert!(close(cost.cost_usd(&usage(1_000_000, 0, 0, 0)), 10.0));
+        assert!(close(
+            cost.cost_usd(&usage(300_000, 0, 0, 1_000_000)),
+            3.0 + 45.0
+        ));
+        // Cached input above 272K: $1.00 (UNVERIFIED — see `gpt_5_5` docs).
+        // What matters structurally is that it is not $0.
+        assert!(close(cost.cost_usd(&usage(0, 1_000_000, 0, 0)), 1.0));
+        assert_eq!(cost.cache_write_per_million, 0.0);
+        assert_eq!(cost.context_tiers[0].cache_write_per_million, 0.0);
     }
 
     #[test]
@@ -1842,6 +2209,9 @@ mod tests {
             ModelConfig::claude_sonnet_5(),
             ModelConfig::claude_haiku_4_5(),
             ModelConfig::gpt_5_5(),
+            ModelConfig::gpt_6_astra(),
+            ModelConfig::gpt_6_sol(),
+            ModelConfig::gpt_6_luna(),
             ModelConfig::meta("muse-spark-1.2", "Muse Spark 1.2"),
         ] {
             let cost = mc.cost.as_ref();

@@ -21,6 +21,7 @@ pub use google_vertex::GoogleVertexProvider;
 pub use mock::MockProvider;
 pub use model::{
     AnthropicCompat, ApiProtocol, ContextTier, CostConfig, GoogleCompat, ModelConfig, OpenAiCompat,
+    ReasoningEffortCeiling,
 };
 pub use openai_compat::OpenAiCompatProvider;
 pub use openai_responses::OpenAiResponsesProvider;

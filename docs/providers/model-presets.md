@@ -18,6 +18,9 @@ Use a preset when the provider is listed here. Use a custom `ModelConfig` when y
 | `ModelConfig::openai(id, name)` | OpenAI | `OpenAiCompletions` | `https://api.openai.com/v1` | 128K | 4,096 |
 | `ModelConfig::openai_responses(id, name)` | OpenAI | `OpenAiResponses` | `https://api.openai.com/v1` | 128K | 16,000 |
 | `ModelConfig::gpt_5_5()` | OpenAI | `OpenAiCompletions` | `https://api.openai.com/v1` | 1M | 64,000 |
+| `ModelConfig::gpt_6_astra()` | OpenAI | `OpenAiResponses` | `https://api.openai.com/v1` | 1,050,000 | 64,000 |
+| `ModelConfig::gpt_6_sol()` | OpenAI | `OpenAiResponses` | `https://api.openai.com/v1` | 1,050,000 | 64,000 |
+| `ModelConfig::gpt_6_luna()` | OpenAI | `OpenAiResponses` | `https://api.openai.com/v1` | 1,050,000 | 64,000 |
 | `ModelConfig::opencode_zen(model_id)` | OpenCode Zen | by model family | `https://opencode.ai/zen/v1` | 128K | 16,000 |
 | `ModelConfig::opencode_go(model_id)` | OpenCode Go | by model family | `https://opencode.ai/zen/go/v1` | 128K | 16,000 |
 | `ModelConfig::google(id, name)` | Google Gemini | `GoogleGenerativeAi` | `https://generativelanguage.googleapis.com` | 1M | 8,192 |
@@ -35,7 +38,7 @@ Use a preset when the provider is listed here. Use a custom `ModelConfig` when y
 
 The constructors do not validate model IDs. They send the `id` you pass through to the provider, which lets you use newly released model IDs before yoagent updates its examples.
 
-The named presets (`claude_fable_5`, `claude_fable_5_1`, `claude_opus_5`, `claude_opus_4_8`, `claude_sonnet_5`, `claude_haiku_4_5`, `gpt_5_5`) and `meta` also fill in real pricing (`cost: Some(CostConfig)`). Every other constructor takes an arbitrary model id and so carries `cost: None` — pricing **unknown**, not free; set `config.cost = Some(CostConfig::new(input, output))` yourself if you want cost reporting. The OpenCode presets select the API protocol from the model id — see [OpenCode Zen & Go](opencode.md).
+The named presets (`claude_fable_5`, `claude_fable_5_1`, `claude_opus_5`, `claude_opus_4_8`, `claude_sonnet_5`, `claude_haiku_4_5`, `gpt_5_5`, `gpt_6_astra`, `gpt_6_sol`, `gpt_6_luna`) and `meta` also fill in real pricing (`cost: Some(CostConfig)`). The OpenAI ones carry a context tier: above 272K prompt tokens the whole request bills at the long-context rates (`gpt_5_5`'s long-band cached-input rate is unverified; see its doc comment). Every other constructor takes an arbitrary model id and so carries `cost: None` — pricing **unknown**, not free; set `config.cost = Some(CostConfig::new(input, output))` yourself if you want cost reporting. The OpenCode presets select the API protocol from the model id — see [OpenCode Zen & Go](opencode.md).
 
 ## OpenAI-Compatible Presets
 
@@ -51,6 +54,24 @@ let agent = Agent::from_config(ModelConfig::deepseek(
 ```
 
 OpenAI-compatible presets also set `OpenAiCompat` flags for provider-specific API differences, such as `max_tokens` vs. `max_completion_tokens`, reasoning fields, tool result formatting, and streaming usage support. See [OpenAI Compatible](openai-compat.md) for the full quirk-flag list.
+
+## OpenAI Presets
+
+The OpenAI presets also declare each model's reasoning-effort capability
+(`OpenAiCompat::max_reasoning_effort`, `supports_effort_none`), so
+`ThinkingLevel::XHigh`/`Max` reach the model's real ceiling and `Off` sends
+`none` where the model has it:
+
+| Preset | Protocol | Effort ceiling | `Off` sends |
+|--------|----------|----------------|-------------|
+| `gpt_5_5()` | Chat Completions | `xhigh` | `none` |
+| `gpt_6_astra()` | Responses | `max` | nothing (`none` is a 400) |
+| `gpt_6_sol()`, `gpt_6_luna()` | Responses | `max` | `none` |
+
+The GPT-6 presets use the Responses API because Chat Completions does not
+support function calling with GPT-6 Astra, and allows it on Sol/Luna only at
+effort `none`. GPT-6 rejects `temperature` while the effort is not `none` — on
+Astra, that means always. There is no bare `gpt-6` model id.
 
 ## Ollama Models
 
