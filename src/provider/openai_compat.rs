@@ -467,21 +467,19 @@ fn build_request_body(
 /// Two ladders. DeepSeek-style providers
 /// ([`OpenAiCompat::supports_thinking_control`]) take `low`/`high`/`max`
 /// (<https://api-docs.deepseek.com/guides/thinking_mode>; `Off` is expressed
-/// as `thinking: disabled`, not as an effort value). `High` stays `high`, and
-/// both `XHigh` and `Max` go to `max`. That is this crate's choice, not
-/// DeepSeek's: DeepSeek's documented mapping sends a requested `xhigh` to
-/// `high` (and `medium` up to `high`), so passing `xhigh` through would make
-/// `XHigh` a silent synonym for `High` while a higher rung exists. Every other
-/// OpenAI-shaped provider tops out at `high` as far as this crate knows, and
-/// rejects an unknown string rather than rounding it, so `XHigh`/`Max` clamp
-/// to `high` there.
+/// as `thinking: disabled`, not as an effort value). `XHigh` is sent as
+/// `high`, matching DeepSeek's own documented mapping of a requested `xhigh`,
+/// so it never silently selects the most expensive rung; only `Max` sends
+/// `max`. Every other OpenAI-shaped provider tops out at `high` as far as this
+/// crate knows, and rejects an unknown string rather than rounding it, so
+/// `XHigh`/`Max` clamp to `high` there.
 fn reasoning_effort(level: ThinkingLevel, compat: &OpenAiCompat) -> &'static str {
     match level {
         ThinkingLevel::Minimal | ThinkingLevel::Low => "low",
         ThinkingLevel::Medium => "medium",
-        ThinkingLevel::High => "high",
-        ThinkingLevel::XHigh | ThinkingLevel::Max if compat.supports_thinking_control => "max",
-        ThinkingLevel::XHigh | ThinkingLevel::Max => "high",
+        ThinkingLevel::High | ThinkingLevel::XHigh => "high",
+        ThinkingLevel::Max if compat.supports_thinking_control => "max",
+        ThinkingLevel::Max => "high",
         ThinkingLevel::Off => unreachable!(),
     }
 }
@@ -932,13 +930,13 @@ mod tests {
     }
 
     #[test]
-    fn test_deepseek_xhigh_and_max_reach_the_max_rung() {
+    fn test_deepseek_max_reaches_the_max_rung_and_xhigh_does_not() {
         // DeepSeek's reasoning_effort ladder is low/high/max (api-docs.deepseek.com
-        // /guides/thinking_mode). Max is its top rung; the crate sends XHigh as
-        // max too, so it is not a synonym for High.
+        // /guides/thinking_mode). Only Max selects max; XHigh goes out as high,
+        // which is what DeepSeek itself maps a requested xhigh to.
         let deepseek = ModelConfig::deepseek("deepseek-v4-pro", "DeepSeek V4 Pro");
         assert_eq!(effort_for(&deepseek, ThinkingLevel::Max), "max");
-        assert_eq!(effort_for(&deepseek, ThinkingLevel::XHigh), "max");
+        assert_eq!(effort_for(&deepseek, ThinkingLevel::XHigh), "high");
         let (config, compat) = thinking_config(&deepseek, ThinkingLevel::Max);
         let body = build_request_body(&config, &deepseek, &compat);
         assert_eq!(body["thinking"]["type"], "enabled");
@@ -946,7 +944,7 @@ mod tests {
 
     #[test]
     fn test_deepseek_lower_levels_are_unchanged() {
-        // Near-miss guard: only the new rungs send `max`. High stays `high`
+        // Near-miss guard: only `Max` sends `max`. High stays `high`
         // (the old flag approach sent High as `max`); Medium goes out as
         // `medium`, which DeepSeek resolves server-side.
         let deepseek = ModelConfig::deepseek("deepseek-v4-pro", "DeepSeek V4 Pro");

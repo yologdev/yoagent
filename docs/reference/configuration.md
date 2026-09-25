@@ -113,8 +113,9 @@ pub enum ThinkingLevel {
 }
 ```
 
-Where a provider's ladder is shorter, the upper levels are clamped to its top
-rung rather than sent as a value it would reject — except Anthropic's adaptive
+Where a provider's ladder is shorter, the upper levels are clamped to the
+highest value this crate knows the provider accepts, rather than sent as a
+value it would reject — except Anthropic's adaptive
 effort, which is passed through unclamped: Opus 4.6 / Sonnet 4.6 have no
 `xhigh` rung and reject it.
 
@@ -123,12 +124,13 @@ effort, which is passed through unclamped: Opus 4.6 / Sonnet 4.6 have no
 | `Minimal`, `Low` | `low` | 1,024 | `low` | `low` | 1,024 |
 | `Medium` | `medium` | 2,048 | `medium` | `medium` | 8,192 |
 | `High` | `high` | 8,192 | `high` | `high` | 24,576 |
-| `XHigh` | `xhigh` | 16,384 | `high` (clamped) | `max` | 24,576 (clamped) |
+| `XHigh` | `xhigh` | 16,384 | `high` (clamped) | `high` (clamped) | 24,576 (clamped) |
 | `Max` | `max` | 30,720 | `high` (clamped) | `max` | 24,576 (clamped) |
 
 ¹ OpenAI-compat sends `reasoning_effort` only when `supports_reasoning_effort`
 is set. ² The DeepSeek column applies when both `supports_thinking_control` and
-`supports_reasoning_effort` are set.
+`supports_reasoning_effort` are set. DeepSeek maps a requested `xhigh` to
+`high` itself, so `XHigh` is sent as `high` and only `Max` selects `max`.
 
 ## CostConfig
 

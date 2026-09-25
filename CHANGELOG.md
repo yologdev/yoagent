@@ -16,16 +16,19 @@ adheres to [Semantic Versioning](https://semver.org/).
   read as "maximum reasoning" and was not. The ceiling was invisible.
 
   Each provider now maps the new levels to its own ladder, and where the ladder
-  is shorter it **clamps** to its top rung instead of sending a value it would
-  reject (Anthropic's adaptive effort excepted, see below). The full table is on `ThinkingLevel`'s doc comment:
+  is shorter it **clamps** to the highest value this crate knows it accepts
+  instead of sending a value it would reject (Anthropic's adaptive effort
+  excepted, see below). The full table is on `ThinkingLevel`'s doc comment:
 
   | Level | Anthropic effort | Anthropic legacy / Bedrock budget | OpenAI-compat¹ / Responses / Azure | DeepSeek² | Gemini / Vertex budget |
   |-------|------|------|------|------|------|
-  | `XHigh` | `xhigh` | 16,384 | `high` (clamped) | `max` | 24,576 (clamped) |
+  | `XHigh` | `xhigh` | 16,384 | `high` (clamped) | `high` (clamped) | 24,576 (clamped) |
   | `Max` | `max` | 30,720 | `high` (clamped) | `max` | 24,576 (clamped) |
 
   ¹ When `supports_reasoning_effort` is set. ² When both
   `supports_thinking_control` and `supports_reasoning_effort` are set.
+  DeepSeek maps a requested `xhigh` to `high` itself, so `XHigh` is sent as
+  `high`; only `Max` selects DeepSeek's `max` rung.
 
   Every existing level sends exactly what it sent before. The new serde names
   are `"xhigh"` and `"max"` (lowercase, like the others). Persisted configs

@@ -557,7 +557,8 @@ pub enum CacheStrategy {
 ///
 /// A provider-neutral ladder. Each provider maps it onto its own knob, and
 /// where a provider's ladder is shorter than this one the upper levels are
-/// **clamped** to its top rung rather than sent as a value it would reject —
+/// **clamped** to the highest value this crate knows the provider accepts
+/// rather than sent as a value it would reject —
 /// with one exception: Anthropic's adaptive `effort` is passed through
 /// unclamped, so a model with a shorter effort ladder can reject it (see
 /// below). What each level becomes, per provider:
@@ -569,7 +570,7 @@ pub enum CacheStrategy {
 /// | `Low`     | `low`    | 1,024  | `low`    | `low`  | `low`    | 1,024  |
 /// | `Medium`  | `medium` | 2,048  | `medium` | `medium` (DeepSeek rounds up to `high`) | `medium` | 8,192  |
 /// | `High`    | `high`   | 8,192  | `high`   | `high` | `high`   | 24,576 |
-/// | `XHigh`   | `xhigh`  | 16,384 | `high` *(clamped)* | `max` | `high` *(clamped)* | 24,576 *(clamped)* |
+/// | `XHigh`   | `xhigh`  | 16,384 | `high` *(clamped)* | `high` *(clamped)* | `high` *(clamped)* | 24,576 *(clamped)* |
 /// | `Max`     | `max`    | 30,720 | `high` *(clamped)* | `max` | `high` *(clamped)* | 24,576 *(clamped)* |
 ///
 /// ¹ Only when [`OpenAiCompat::supports_reasoning_effort`] is set; otherwise
@@ -579,8 +580,10 @@ pub enum CacheStrategy {
 /// [`OpenAiCompat::supports_thinking_control`] and
 /// [`OpenAiCompat::supports_reasoning_effort`] set. DeepSeek's
 /// `reasoning_effort` accepts `low`/`high`/`max`
-/// (<https://api-docs.deepseek.com/guides/thinking_mode>); `Off` is sent as
-/// `thinking: {"type": "disabled"}` rather than as an effort value.
+/// (<https://api-docs.deepseek.com/guides/thinking_mode>), and DeepSeek itself
+/// maps a requested `xhigh` to `high`, so `XHigh` is sent as `high` and only
+/// `Max` selects `max`. `Off` is sent as `thinking: {"type": "disabled"}`
+/// rather than as an effort value.
 ///
 /// Anthropic's adaptive `effort` is passed through as-is, so a model with a
 /// shorter ladder rejects what it does not know: `xhigh` arrived with Opus
@@ -605,7 +608,7 @@ pub enum ThinkingLevel {
     Medium,
     High,
     /// Above `High`, below `Max` — Anthropic's `xhigh`. Where a provider has
-    /// no `xhigh` rung it is sent as that provider's nearest supported rung
+    /// no `xhigh` rung it is clamped down to that provider's `High` value
     /// (see the table above). Serializes as `"xhigh"`.
     XHigh,
     /// The highest setting this crate sends — Anthropic's and DeepSeek's

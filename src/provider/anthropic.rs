@@ -713,7 +713,8 @@ fn build_request_body(config: &StreamConfig, is_oauth: bool) -> serde_json::Valu
     if thinking_requested && config.output_schema.is_none() {
         if compat.adaptive_thinking {
             // Current generation (Claude 4.6+ / Fable 5): adaptive thinking with
-            // an effort hint. Budget-based thinking is rejected with a 400.
+            // an effort hint. Budget-based thinking is deprecated on 4.6 and
+            // rejected with a 400 from 4.7 on.
             let effort = match config.thinking_level {
                 ThinkingLevel::Minimal | ThinkingLevel::Low => "low",
                 ThinkingLevel::Medium => "medium",
