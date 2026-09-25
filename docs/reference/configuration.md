@@ -140,9 +140,52 @@ CostConfig::new(5.0, 30.0)          // input, output — output is always dearer
     .with_cache_write(6.25)
 ```
 
-All-zero rates mean **pricing unknown**, not free. `is_configured()` reports
-which, and `session_cost_usd()` returns `None` for an unpriced model rather than
-$0.
+`ModelConfig::cost` is an `Option<CostConfig>`. `None` means **pricing
+unknown**, not free: only the named presets whose rates were checked against the
+vendor (`claude_*`, `gpt_5_5`, `meta`) return `Some`; generic constructors such
+as `deepseek(id, name)` or `openai(id, name)` cannot know the model's price and
+return `None`. Supply one when you know it:
+
+```rust
+let mut config = ModelConfig::deepseek("deepseek-v4-flash", "DeepSeek V4 Flash");
+config.cost = Some(CostConfig::new(0.15, 0.60));
+```
+
+`Some` with every rate zero means **free** — a model you run locally, say — and
+the crate's accounting reports `0.0` for it. `session_cost_usd()`,
+`SessionStats::cost_usd` and the `llm_stream` span's `cost_usd` are absent only
+for `cost: None`, never `$0` for an unknown price:
+
+```rust
+let mut config = ModelConfig::local("http://localhost:1234/v1", "qwen3");
+config.cost = Some(CostConfig::new(0.0, 0.0)); // free, not unknown
+```
+
+To adjust one rate on a named preset, use `get_or_insert_with` rather than
+`if let Some(c) = config.cost.as_mut()`, which silently does nothing on a
+generic constructor:
+
+```rust
+config.cost.get_or_insert_with(CostConfig::default).input_per_million = 1.80;
+```
+
+On a generic constructor (`cost: None`) that line creates a `CostConfig` whose
+other rates are zero, and zero now means free: output and cache tokens would be
+billed at a real `$0`. Price a generic constructor with every rate you pay
+instead:
+
+```rust
+let mut config = ModelConfig::deepseek("deepseek-v4-flash", "DeepSeek V4 Flash");
+// Rates per million tokens; take them from the vendor's pricing page.
+config.cost = Some(CostConfig::new(INPUT, OUTPUT).with_cache_read(CACHE_READ));
+```
+
+**Persistence caveat.** Before 0.19, unpriced configs were written with an
+all-zero `cost` object. To keep those loading as unknown rather than free, a
+`cost` object whose rates are all zero (`is_configured()` false, context tiers
+included) deserializes to `None`. A free config saved by 0.19 has the same
+encoding, so it too reloads as `None`; set the zero `CostConfig` again after
+loading if you persist one.
 
 ### Context tiers
 

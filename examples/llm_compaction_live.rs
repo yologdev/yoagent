@@ -87,9 +87,9 @@ impl StreamProvider for BulkProvider {
 
 /// Resolve a model id to a **priced** preset where one exists.
 ///
-/// `ModelConfig::anthropic` leaves `CostConfig` at zero, which makes
-/// `is_configured()` false and blanks the cost column — the one number this
-/// harness exists to surface.
+/// `ModelConfig::anthropic` carries `cost: None` (the generic constructor
+/// cannot know a model's price), which blanks the cost column — the one
+/// number this harness exists to surface.
 fn priced(id: &str) -> ModelConfig {
     match id {
         "claude-sonnet-5" => ModelConfig::claude_sonnet_5(),
@@ -97,6 +97,7 @@ fn priced(id: &str) -> ModelConfig {
         "claude-opus-5" => ModelConfig::claude_opus_5(),
         "claude-opus-4-8" => ModelConfig::claude_opus_4_8(),
         "claude-fable-5" => ModelConfig::claude_fable_5(),
+        "claude-fable-5-1" => ModelConfig::claude_fable_5_1(),
         // DeepSeek caches automatically, server-side: this crate sends no
         // `cache_control` on the OpenAI-compat path, and `openai_compat.rs`
         // maps `prompt_cache_hit_tokens` onto `Usage::cache_read`. So a hit
@@ -111,19 +112,26 @@ fn priced(id: &str) -> ModelConfig {
         // is free, which is the asymmetry the provider comparison turns on.
         "deepseek-v4-flash" => deepseek_priced("deepseek-v4-flash", 0.44, 1.32, 0.014),
         "deepseek-v4-pro" => deepseek_priced("deepseek-v4-pro", 1.32, 3.96, 0.044),
-        other if other.starts_with("deepseek") => ModelConfig::deepseek(other, other),
+        other if other.starts_with("deepseek") => {
+            note_unpriced(other);
+            ModelConfig::deepseek(other, other)
+        }
         other => {
-            eprintln!("note: no priced preset for '{other}' — the cost column will be blank");
+            note_unpriced(other);
             ModelConfig::anthropic(other, other)
         }
     }
+}
+
+fn note_unpriced(model: &str) {
+    eprintln!("note: no priced preset for '{model}' — the cost column will be blank");
 }
 
 /// A DeepSeek config carrying peak-window rates. `cache_write` is 0 because
 /// DeepSeek has no write category — populating its cache is free.
 fn deepseek_priced(id: &str, input: f64, output: f64, cache_read: f64) -> ModelConfig {
     let mut config = ModelConfig::deepseek(id, id);
-    config.cost = CostConfig::new(input, output).with_cache_read(cache_read);
+    config.cost = Some(CostConfig::new(input, output).with_cache_read(cache_read));
     config
 }
 
@@ -622,7 +630,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "\n{:<14} {:>10} {:>10} {:>8} {:>10} {:>9}",
         "method", "before", "after", "span", "req in/out", "cost"
     );
-    let mut total_cost = 0.0;
+    // `None` once any summarization request could not be priced: a partial
+    // sum printed as a dollar figure would understate the spend.
+    let mut total_cost = Some(0.0);
     for (method, before, after, summary) in &compactions {
         let (span, io, cost) = match summary {
             Some(s) => (
@@ -632,7 +642,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ),
             None => ("-".into(), "-".into(), None),
         };
-        total_cost += cost.unwrap_or(0.0);
+        // A row with no summary made no request, so it adds nothing; a
+        // request with no cost is unpriced and poisons the total.
+        if summary.is_some() {
+            total_cost = total_cost.zip(cost).map(|(t, c)| t + c);
+        }
         println!(
             "{:<14} {before:>10} {after:>10} {span:>8} {io:>10} {:>9}",
             format!("{method:?}"),
@@ -640,7 +654,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or_else(|| "-".into()),
         );
     }
-    println!("\nsummarization cost: ${total_cost:.4}");
+    match total_cost {
+        Some(c) => println!("\nsummarization cost: ${c:.4}"),
+        None => println!("\nsummarization cost: unpriced"),
+    }
 
     println!("\n{}", "=".repeat(72));
     println!("SESSION TOKENS & PROMPT CACHE");

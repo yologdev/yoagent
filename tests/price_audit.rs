@@ -106,15 +106,24 @@ struct FlatRateGap {
     why: &'static str,
 }
 
+/// The rates a priced preset carries. A preset in this audit that returns
+/// `cost: None` has lost its price — fail naming it, rather than auditing
+/// nothing.
+fn rates(constructor: &str, config: ModelConfig) -> CostConfig {
+    config.cost.unwrap_or_else(|| {
+        panic!("{constructor} is in the price audit but carries `cost: None` (unpriced)")
+    })
+}
+
 fn presets() -> Vec<Preset> {
     let anthropic = "https://platform.claude.com/docs/en/about-claude/pricing";
     let openai = "https://developers.openai.com/api/docs/pricing";
-    let claude = |constructor, model, cost| Preset {
+    let claude = |constructor, model, config: ModelConfig| Preset {
         constructor,
         provider: "anthropic",
         model,
         vendor_page: anthropic,
-        cost,
+        cost: rates(constructor, config),
         absent_upstream: None,
         flat_rate_gap: None,
     };
@@ -122,34 +131,39 @@ fn presets() -> Vec<Preset> {
         claude(
             "ModelConfig::claude_fable_5",
             "claude-fable-5",
-            ModelConfig::claude_fable_5().cost,
+            ModelConfig::claude_fable_5(),
+        ),
+        claude(
+            "ModelConfig::claude_fable_5_1",
+            "claude-fable-5-1",
+            ModelConfig::claude_fable_5_1(),
         ),
         claude(
             "ModelConfig::claude_opus_5",
             "claude-opus-5",
-            ModelConfig::claude_opus_5().cost,
+            ModelConfig::claude_opus_5(),
         ),
         claude(
             "ModelConfig::claude_opus_4_8",
             "claude-opus-4-8",
-            ModelConfig::claude_opus_4_8().cost,
+            ModelConfig::claude_opus_4_8(),
         ),
         claude(
             "ModelConfig::claude_sonnet_5",
             "claude-sonnet-5",
-            ModelConfig::claude_sonnet_5().cost,
+            ModelConfig::claude_sonnet_5(),
         ),
         claude(
             "ModelConfig::claude_haiku_4_5",
             "claude-haiku-4-5",
-            ModelConfig::claude_haiku_4_5().cost,
+            ModelConfig::claude_haiku_4_5(),
         ),
         Preset {
             constructor: "ModelConfig::gpt_5_5",
             provider: "openai",
             model: "gpt-5.5",
             vendor_page: openai,
-            cost: ModelConfig::gpt_5_5().cost,
+            cost: rates("ModelConfig::gpt_5_5", ModelConfig::gpt_5_5()),
             absent_upstream: None,
             flat_rate_gap: Some(FlatRateGap {
                 keys: &["tiers", "context_over_200k"],
@@ -186,7 +200,10 @@ fn presets() -> Vec<Preset> {
             provider: "meta",
             model: "muse-spark-1.2",
             vendor_page: "https://dev.meta.ai/docs/pricing-rate-limits",
-            cost: ModelConfig::meta("muse-spark-1.2", "Muse Spark 1.2").cost,
+            cost: rates(
+                "ModelConfig::meta",
+                ModelConfig::meta("muse-spark-1.2", "Muse Spark 1.2"),
+            ),
             absent_upstream: None,
             flat_rate_gap: None,
         },
@@ -427,7 +444,7 @@ async fn hardcoded_prices_have_not_drifted() {
     // green pass. Pin the floor against something independent: the number of
     // priced constructors in `src/provider/model.rs`. Raise it when you add
     // one, which is the moment you should also be adding it here.
-    const PRICED_PRESETS: usize = 7;
+    const PRICED_PRESETS: usize = 8;
     assert!(
         all.len() >= PRICED_PRESETS,
         "\n\nThe audit is checking {} presets but the crate ships at least {PRICED_PRESETS}. \
@@ -455,8 +472,10 @@ async fn hardcoded_prices_have_not_drifted() {
     );
 }
 
-/// `is_configured` means *any* rate is set — all-zero is "pricing unknown",
-/// never "free".
+/// `is_configured` means *any* rate is set. It decides whether a persisted
+/// `cost` object is a real price or the pre-0.19 all-zero "unknown" encoding
+/// (which deserializes to `ModelConfig::cost == None`), so `any` vs `all`
+/// decides whether a partially-priced config survives a reload.
 ///
 /// Asserted against `CostConfig` values rather than particular presets: pinning
 /// a preset as unpriced would forbid a future improvement (pricing DeepSeek is
@@ -471,7 +490,7 @@ async fn hardcoded_prices_have_not_drifted() {
 fn is_configured_means_any_rate_set() {
     assert!(
         !CostConfig::default().is_configured(),
-        "all-zero rates mean pricing is unknown, not that the model is free"
+        "all-zero rates set no rate"
     );
 
     let no_cache_write = CostConfig::new(5.0, 30.0).with_cache_read(0.5);

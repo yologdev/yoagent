@@ -4,6 +4,78 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- **`ModelConfig::claude_fable_5_1()`**
+  ([#170](https://github.com/yologdev/yoagent/issues/170)). 1M context, 64K of
+  128K max output, $10 / $50 per MTok input/output, $12.50 5-minute cache
+  writes, and **$0.25 cache hits** — 0.025x input, against 0.1x ($1.00) on
+  Fable 5. That is the only rate that differs, and it is the one that dominates
+  an agent loop's bill: a consumer mapping `claude-fable-5-1` onto
+  `claude_fable_5()` by prefix, which is the natural thing to do with no 5.1
+  preset, reported cache reads 4x high. Rates read from the raw markup of
+  Anthropic's pricing page on 2026-09-24; added to the price audit.
+
+  Fable 5.1 rejects forced `tool_choice` (`any`/`tool`) with a 400, and the
+  Anthropic provider implements structured outputs by forcing a tool, so
+  `prompt_structured` fails on this model. No workaround is wired yet; the
+  preset and the structured-outputs page say so.
+
+### Changed
+
+- **Breaking: `ModelConfig::cost` is now `Option<CostConfig>`; `None` means
+  pricing unknown** ([#172](https://github.com/yologdev/yoagent/issues/172)).
+  Sixteen public constructors — `custom`, the generic `anthropic`, `openai`,
+  `local`, `opencode_zen`, `opencode_go`, `openai_compat`, `ollama`, `zai`,
+  `minimax`, `qwen`, `xai`, `groq`, `deepseek`, `mistral` and `google` — plus
+  `mock()`, which delegates to `custom`, shipped `CostConfig::default()`, whose
+  rates are all `0.0`. A consumer reading `config.cost` for DeepSeek got a
+  number indistinguishable from a free model; "do you know this price?" could
+  only be answered by knowing to call `is_configured()`. So consumers kept
+  parallel price tables, outside the models.dev audit, and those rotted: yoyo
+  overstated every `deepseek-v4-flash` cost ~3.7x. Those seventeen now return
+  `None`; the named presets (`claude_fable_5_1`, `claude_fable_5`, `claude_opus_5`,
+  `claude_opus_4_8`, `claude_sonnet_5`, `claude_haiku_4_5`, `gpt_5_5`, `meta`)
+  return `Some`. No prices were added — that is follow-up work, and each one
+  should land with a price-audit entry.
+
+  In memory, `Some` with every rate zero now means **free** (a local model, a
+  free tier): `session_cost_usd()`, `SessionStats::cost_usd`, the `llm_stream`
+  span's `cost_usd` and `LlmCompaction`'s summary cost all report `0.0` for it,
+  and are absent only for `cost: None`. Before, the crate's accounting treated
+  an all-zero config as unknown, so a free model could not be expressed.
+
+  Serde: a missing or `null` `cost` is `None`, and `None` is omitted on
+  serialize, so older releases still load the output. A persisted `cost`
+  object with **every rate zero** — what every unpriced preset wrote before
+  this release — deserializes to `None`, because reading it as free would
+  report $0 for models that bill. The cost of that: **a free config saved by
+  this release also reloads as `None` (unknown)**, since the two encodings are
+  identical on disk. Reapply `Some(CostConfig::new(0.0, 0.0))` after loading if
+  you persist one. Any non-zero rate, including one only in a context tier,
+  loads as `Some` unchanged.
+
+  Migration:
+
+  ```rust
+  // before                                   // after
+  config.cost.input_per_million = 1.80;       config.cost.get_or_insert_with(CostConfig::default).input_per_million = 1.80;
+  config.cost = CostConfig::new(0.15, 0.60);  config.cost = Some(CostConfig::new(0.15, 0.60));
+  config.cost.cost_usd(&usage)                config.cost.as_ref().map(|c| c.cost_usd(&usage))
+  if config.cost.is_configured() { .. }       if let Some(c) = &config.cost { .. }
+  ```
+
+  Do **not** migrate the first row to `if let Some(c) = config.cost.as_mut()`:
+  every generic constructor now returns `None`, so on DeepSeek, `custom`,
+  `openai` and the rest the assignment silently never runs. On a named preset,
+  `get_or_insert_with` edits the existing rates; on a generic constructor it
+  starts from all-zero, so set every rate you are billed for — or build the
+  whole thing with `Some(CostConfig::new(..))`. The last row changes meaning
+  for an all-zero config built in memory, which is now free rather than
+  unknown.
+
 ## 0.18.1
 
 ### Changed

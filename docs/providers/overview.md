@@ -42,7 +42,7 @@ pub struct ModelConfig {
     pub reasoning: bool,         // Supports thinking/reasoning
     pub context_window: u32,     // Context size in tokens
     pub max_tokens: u32,         // Default max output
-    pub cost: CostConfig,        // Pricing per million tokens
+    pub cost: Option<CostConfig>, // Pricing per million tokens; None = unknown
     pub headers: HashMap<String, String>,  // Extra headers
     pub compat: Option<OpenAiCompat>,      // Quirk flags
 }

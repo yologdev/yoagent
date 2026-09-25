@@ -236,8 +236,11 @@ impl yoagent::provider::StreamProvider for UsageProvider {
     }
 }
 
-#[tokio::test]
-async fn llm_stream_records_tokens_and_cost() {
+/// Run one `UsageProvider` turn (1M in, 0.5M out, 7 cached) with the given
+/// `ModelConfig::cost`, returning every `(span, field, value)` recorded.
+async fn llm_stream_records(
+    cost: Option<yoagent::provider::CostConfig>,
+) -> Vec<(String, String, String)> {
     let names = Arc::new(Mutex::new(std::collections::HashMap::new()));
     let records = Arc::new(Mutex::new(Vec::new()));
     let subscriber = tracing_subscriber::registry().with(FieldCollector {
@@ -248,8 +251,7 @@ async fn llm_stream_records_tokens_and_cost() {
     let mut config = loop_config(MockProvider::text("unused"));
     config.provider = std::sync::Arc::new(UsageProvider);
     let mut mc = yoagent::provider::ModelConfig::mock();
-    mc.cost.input_per_million = 3.0;
-    mc.cost.output_per_million = 15.0;
+    mc.cost = cost;
     config.model_config = Some(mc);
 
     let mut context = AgentContext {
@@ -269,10 +271,20 @@ async fn llm_stream_records_tokens_and_cost() {
     .await;
 
     let recs = records.lock().unwrap().clone();
+    recs
+}
+
+fn llm_stream_field(recs: &[(String, String, String)], field: &str) -> Option<String> {
+    recs.iter()
+        .find(|(span, f, _)| span == "llm_stream" && f == field)
+        .map(|(_, _, v)| v.clone())
+}
+
+#[tokio::test]
+async fn llm_stream_records_tokens_and_cost() {
+    let recs = llm_stream_records(Some(yoagent::provider::CostConfig::new(3.0, 15.0))).await;
     let get = |field: &str| -> String {
-        recs.iter()
-            .find(|(span, f, _)| span == "llm_stream" && f == field)
-            .map(|(_, _, v)| v.clone())
+        llm_stream_field(&recs, field)
             .unwrap_or_else(|| panic!("field {field} not recorded; got {recs:?}"))
     };
     assert_eq!(get("tokens_in"), "1000000");
@@ -281,4 +293,22 @@ async fn llm_stream_records_tokens_and_cost() {
     // 1M in @ $3/M + 0.5M out @ $15/M = 10.5
     assert_eq!(get("cost_usd"), "10.5");
     assert_eq!(get("error"), "false");
+}
+
+/// A free model (`Some`, all-zero rates) records a real `0` cost; an unpriced
+/// one (`cost: None`) leaves the field empty. Unknown is never rendered as $0,
+/// and free is never rendered as unknown.
+#[tokio::test]
+async fn llm_stream_cost_distinguishes_free_from_unpriced() {
+    let free = llm_stream_records(Some(yoagent::provider::CostConfig::new(0.0, 0.0))).await;
+    let cost = llm_stream_field(&free, "cost_usd")
+        .unwrap_or_else(|| panic!("a free model must record cost_usd; got {free:?}"));
+    assert_eq!(cost.parse::<f64>().unwrap(), 0.0);
+
+    let unpriced = llm_stream_records(None).await;
+    assert!(
+        llm_stream_field(&unpriced, "tokens_in").is_some(),
+        "{unpriced:?}"
+    );
+    assert_eq!(llm_stream_field(&unpriced, "cost_usd"), None);
 }
