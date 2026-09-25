@@ -6,26 +6,45 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
-### Added
+### Breaking
 
-- **`ModelConfig::claude_fable_5_1()`**
-  ([#170](https://github.com/yologdev/yoagent/issues/170)). 1M context, 64K of
-  128K max output, $10 / $50 per MTok input/output, $12.50 5-minute cache
-  writes, and **$0.25 cache hits** — 0.025x input, against 0.1x ($1.00) on
-  Fable 5. That is the only rate that differs, and it is the one that dominates
-  an agent loop's bill: a consumer mapping `claude-fable-5-1` onto
-  `claude_fable_5()` by prefix, which is the natural thing to do with no 5.1
-  preset, reported cache reads 4x high. Rates read from the raw markup of
-  Anthropic's pricing page on 2026-09-24; added to the price audit.
+- **`ThinkingLevel` gains `XHigh` and `Max`, and is now `#[non_exhaustive]`**
+  ([#171](https://github.com/yologdev/yoagent/issues/171)). `High` was the top
+  of the enum, so Anthropic's `xhigh` (Anthropic's recommended setting for
+  coding and agentic work on current models) and `max`, and DeepSeek's `max`,
+  could not be requested at all. Setting the highest level the type offered
+  read as "maximum reasoning" and was not. The ceiling was invisible.
 
-  Fable 5.1 rejects forced `tool_choice` (`any`/`tool`) with a 400, and the
-  Anthropic provider implements structured outputs by forcing a tool, so
-  `prompt_structured` fails on this model. No workaround is wired yet; the
-  preset and the structured-outputs page say so.
+  Each provider now maps the new levels to its own ladder, and where the ladder
+  is shorter it **clamps** to the highest value this crate knows it accepts
+  instead of sending a value it would reject (Anthropic's adaptive effort
+  excepted, see below). The full table is on `ThinkingLevel`'s doc comment:
 
-### Changed
+  | Level | Anthropic effort | Anthropic legacy / Bedrock budget | OpenAI-compat¹ / Responses / Azure | DeepSeek² | Gemini / Vertex budget |
+  |-------|------|------|------|------|------|
+  | `XHigh` | `xhigh` | 16,384 | `high` (clamped) | `high` (clamped) | 24,576 (clamped) |
+  | `Max` | `max` | 30,720 | `high` (clamped) | `max` | 24,576 (clamped) |
 
-- **Breaking: `ModelConfig::cost` is now `Option<CostConfig>`; `None` means
+  ¹ When `supports_reasoning_effort` is set. ² When both
+  `supports_thinking_control` and `supports_reasoning_effort` are set.
+  DeepSeek maps a requested `xhigh` to `high` itself, so `XHigh` is sent as
+  `high`; only `Max` selects DeepSeek's `max` rung.
+
+  Every existing level sends exactly what it sent before. The new serde names
+  are `"xhigh"` and `"max"` (lowercase, like the others). Persisted configs
+  keep loading because the existing names are unchanged.
+
+  Anthropic effort is passed through, not clamped: Opus 4.6 / Sonnet 4.6 have
+  no `xhigh` rung (it arrived with Opus 4.7) and will reject it. The crate has
+  no per-model effort table.
+
+  **Migration:** an exhaustive `match` on `ThinkingLevel` outside this crate no
+  longer compiles. Add arms for `XHigh` and `Max`, or a wildcard arm. The
+  wildcard is required from now on (`#[non_exhaustive]`), so the next rung a
+  vendor adds is not another breaking change. Code that only constructs or
+  compares levels is unaffected.
+
+- **`ModelConfig::cost` is now `Option<CostConfig>`; `None` means
   pricing unknown** ([#172](https://github.com/yologdev/yoagent/issues/172)).
   Sixteen public constructors — `custom`, the generic `anthropic`, `openai`,
   `local`, `opencode_zen`, `opencode_go`, `openai_compat`, `ollama`, `zai`,
@@ -75,6 +94,25 @@ adheres to [Semantic Versioning](https://semver.org/).
   whole thing with `Some(CostConfig::new(..))`. The last row changes meaning
   for an all-zero config built in memory, which is now free rather than
   unknown.
+
+### Added
+
+- **`ModelConfig::claude_fable_5_1()`**
+  ([#170](https://github.com/yologdev/yoagent/issues/170)). 1M context, 64K of
+  128K max output, $10 / $50 per MTok input/output, $12.50 5-minute cache
+  writes, and **$0.25 cache hits** — 0.025x input, against 0.1x ($1.00) on
+  Fable 5. That is the only rate that differs, and it is the one that dominates
+  an agent loop's bill: a consumer mapping `claude-fable-5-1` onto
+  `claude_fable_5()` by prefix, which is the natural thing to do with no 5.1
+  preset, reported cache reads 4x high. Rates read from the raw markup of
+  Anthropic's pricing page on 2026-09-24; added to the price audit.
+
+  Fable 5.1 rejects forced `tool_choice` (`any`/`tool`) with a 400, and the
+  Anthropic provider implements structured outputs by forcing a tool, so
+  `prompt_structured` fails on this model. No workaround is wired yet; the
+  preset and the structured-outputs page say so.
+
+### Changed
 
 - **`SessionStats::cost_usd` is now sticky-`None` once a turn cannot be
   priced**, the same rule as `SubAgentSpend::merge`. Previously an unpriced

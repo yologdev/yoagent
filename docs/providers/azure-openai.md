@@ -46,6 +46,11 @@ Set this as `ModelConfig.base_url`. The provider appends `/responses?api-version
   - `response.function_call_arguments.delta` — Tool call arguments
   - `response.completed` — Final usage data
 
+## Thinking
+
+`ThinkingLevel` becomes `reasoning.effort` (`XHigh`/`Max` clamp to `high`); see
+the [`ThinkingLevel` table](../reference/configuration.md#thinkinglevel).
+
 ## Message Format
 
 Uses the Responses API input format:

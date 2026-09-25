@@ -447,13 +447,8 @@ fn build_request_body(
     }
 
     if config.thinking_level != ThinkingLevel::Off && compat.supports_reasoning_effort {
-        let effort = match config.thinking_level {
-            ThinkingLevel::Minimal | ThinkingLevel::Low => "low",
-            ThinkingLevel::Medium => "medium",
-            ThinkingLevel::High => "high",
-            ThinkingLevel::Off => unreachable!(),
-        };
-        body["reasoning_effort"] = serde_json::json!(effort);
+        body["reasoning_effort"] =
+            serde_json::json!(reasoning_effort(config.thinking_level, compat));
     }
 
     if let Some(temp) = config.temperature {
@@ -461,6 +456,28 @@ fn build_request_body(
     }
 
     body
+}
+
+/// `reasoning_effort` for a thinking-enabled request.
+///
+/// Two ladders. DeepSeek-style providers
+/// ([`OpenAiCompat::supports_thinking_control`]) take `low`/`high`/`max`
+/// (<https://api-docs.deepseek.com/guides/thinking_mode>; `Off` is expressed
+/// as `thinking: disabled`, not as an effort value). `XHigh` is sent as
+/// `high`, matching DeepSeek's own documented mapping of a requested `xhigh`,
+/// so it never silently selects the most expensive rung; only `Max` sends
+/// `max`. Every other OpenAI-shaped provider tops out at `high` as far as this
+/// crate knows, and rejects an unknown string rather than rounding it, so
+/// `XHigh`/`Max` clamp to `high` there.
+fn reasoning_effort(level: ThinkingLevel, compat: &OpenAiCompat) -> &'static str {
+    match level {
+        ThinkingLevel::Minimal | ThinkingLevel::Low => "low",
+        ThinkingLevel::Medium => "medium",
+        ThinkingLevel::High | ThinkingLevel::XHigh => "high",
+        ThinkingLevel::Max if compat.supports_thinking_control => "max",
+        ThinkingLevel::Max => "high",
+        ThinkingLevel::Off => unreachable!(),
+    }
 }
 
 fn maybe_insert_assistant_after_tool_results(
@@ -881,6 +898,68 @@ mod tests {
         assert_eq!(body["thinking"]["type"], "enabled");
         assert_eq!(body["reasoning_effort"], "high");
         assert_eq!(body["max_tokens"], 384_000);
+    }
+
+    fn thinking_config(
+        model_config: &ModelConfig,
+        level: ThinkingLevel,
+    ) -> (StreamConfig, OpenAiCompat) {
+        let config = StreamConfig {
+            model: model_config.id.clone(),
+            system_prompt: String::new(),
+            messages: vec![Message::user("Solve this")],
+            tools: vec![],
+            thinking_level: level,
+            api_key: "test".into(),
+            max_tokens: None,
+            temperature: None,
+            model_config: Some(model_config.clone()),
+            cache_config: CacheConfig::default(),
+            output_schema: None,
+        };
+        (config, model_config.compat.as_ref().unwrap().clone())
+    }
+
+    fn effort_for(model_config: &ModelConfig, level: ThinkingLevel) -> serde_json::Value {
+        let (config, compat) = thinking_config(model_config, level);
+        build_request_body(&config, model_config, &compat)["reasoning_effort"].clone()
+    }
+
+    #[test]
+    fn test_deepseek_max_reaches_the_max_rung_and_xhigh_does_not() {
+        // DeepSeek's reasoning_effort ladder is low/high/max (api-docs.deepseek.com
+        // /guides/thinking_mode). Only Max selects max; XHigh goes out as high,
+        // which is what DeepSeek itself maps a requested xhigh to.
+        let deepseek = ModelConfig::deepseek("deepseek-v4-pro", "DeepSeek V4 Pro");
+        assert_eq!(effort_for(&deepseek, ThinkingLevel::Max), "max");
+        assert_eq!(effort_for(&deepseek, ThinkingLevel::XHigh), "high");
+        let (config, compat) = thinking_config(&deepseek, ThinkingLevel::Max);
+        let body = build_request_body(&config, &deepseek, &compat);
+        assert_eq!(body["thinking"]["type"], "enabled");
+    }
+
+    #[test]
+    fn test_deepseek_lower_levels_are_unchanged() {
+        // Near-miss guard: only `Max` sends `max`. High stays `high`
+        // (the old flag approach sent High as `max`); Medium goes out as
+        // `medium`, which DeepSeek resolves server-side.
+        let deepseek = ModelConfig::deepseek("deepseek-v4-pro", "DeepSeek V4 Pro");
+        assert_eq!(effort_for(&deepseek, ThinkingLevel::High), "high");
+        assert_eq!(effort_for(&deepseek, ThinkingLevel::Medium), "medium");
+        assert_eq!(effort_for(&deepseek, ThinkingLevel::Low), "low");
+        assert_eq!(effort_for(&deepseek, ThinkingLevel::Minimal), "low");
+    }
+
+    #[test]
+    fn test_openai_xhigh_and_max_clamp_to_high() {
+        // A provider without DeepSeek-style thinking control tops out at
+        // `high` and rejects unknown strings, so the upper rungs clamp.
+        let openai = ModelConfig::openai("gpt-5.5", "GPT-5.5");
+        assert_eq!(effort_for(&openai, ThinkingLevel::XHigh), "high");
+        assert_eq!(effort_for(&openai, ThinkingLevel::Max), "high");
+        assert_eq!(effort_for(&openai, ThinkingLevel::High), "high");
+        assert_eq!(effort_for(&openai, ThinkingLevel::Medium), "medium");
+        assert_eq!(effort_for(&openai, ThinkingLevel::Low), "low");
     }
 
     #[test]

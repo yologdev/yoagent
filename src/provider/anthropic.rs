@@ -714,11 +714,17 @@ fn build_request_body(config: &StreamConfig, is_oauth: bool) -> serde_json::Valu
     if thinking_requested && config.output_schema.is_none() {
         if compat.adaptive_thinking {
             // Current generation (Claude 4.6+ / Fable 5): adaptive thinking with
-            // an effort hint. Budget-based thinking is rejected with a 400.
+            // an effort hint. Budget-based thinking is deprecated on 4.6 and
+            // rejected with a 400 from 4.7 on.
             let effort = match config.thinking_level {
                 ThinkingLevel::Minimal | ThinkingLevel::Low => "low",
                 ThinkingLevel::Medium => "medium",
                 ThinkingLevel::High => "high",
+                // Passed through, not clamped: the effort ladder is per model
+                // (`xhigh` arrived with Opus 4.7) and the crate has no table
+                // of it, so a model that lacks a rung rejects it visibly.
+                ThinkingLevel::XHigh => "xhigh",
+                ThinkingLevel::Max => "max",
                 ThinkingLevel::Off => unreachable!(),
             };
             body["thinking"] = serde_json::json!({ "type": "adaptive" });
@@ -740,13 +746,22 @@ fn build_request_body(config: &StreamConfig, is_oauth: bool) -> serde_json::Valu
 
 /// Budget tokens for legacy (pre-4.6) extended thinking. The API requires a
 /// minimum of 1024. (`Off` returns 0 but never reaches a thinking-enabled
-/// request — both call sites guard on `!= ThinkingLevel::Off`.)
-fn legacy_thinking_budget(level: ThinkingLevel) -> u32 {
+/// request — all call sites guard on `!= ThinkingLevel::Off`.)
+///
+/// `Max` is 30,720 rather than a rounder 32K: the first-party request raises
+/// `max_tokens` to `budget + 1024` when it is too small, and the smallest
+/// output ceiling among budget-thinking models is Opus 4/4.1's 32,000 — so
+/// 30,720 + 1,024 still fits where 32,768 + 1,024 would be rejected. Also used
+/// by Bedrock, which does **not** raise `maxTokens`: Bedrock callers must set
+/// `max_tokens` above the budget themselves (for `Max`, above 30,720).
+pub(crate) fn legacy_thinking_budget(level: ThinkingLevel) -> u32 {
     match level {
         ThinkingLevel::Off => 0,
         ThinkingLevel::Minimal | ThinkingLevel::Low => 1024,
         ThinkingLevel::Medium => 2048,
         ThinkingLevel::High => 8192,
+        ThinkingLevel::XHigh => 16_384,
+        ThinkingLevel::Max => 30_720,
     }
 }
 
@@ -1294,11 +1309,48 @@ mod tests {
             (ThinkingLevel::Low, "low"),
             (ThinkingLevel::Medium, "medium"),
             (ThinkingLevel::High, "high"),
+            (ThinkingLevel::XHigh, "xhigh"),
+            (ThinkingLevel::Max, "max"),
         ] {
             let mut config = make_config(CacheConfig::default());
             config.thinking_level = level;
             let body = build_request_body(&config, false);
             assert_eq!(body["output_config"]["effort"], effort);
+        }
+    }
+
+    #[test]
+    fn test_adaptive_thinking_xhigh_and_max_pass_through() {
+        // Anthropic's effort ladder is low/medium/high/xhigh/max; the two top
+        // rungs were unreachable before XHigh/Max existed (#171).
+        for (level, effort) in [(ThinkingLevel::XHigh, "xhigh"), (ThinkingLevel::Max, "max")] {
+            let mut config = make_config(CacheConfig::default());
+            config.thinking_level = level;
+            let body = build_request_body(&config, false);
+            assert_eq!(body["thinking"]["type"], "adaptive");
+            assert_eq!(body["output_config"]["effort"], effort);
+        }
+    }
+
+    #[test]
+    fn test_legacy_thinking_budget_for_xhigh_and_max() {
+        let mut mc = crate::provider::ModelConfig::anthropic("claude-opus-4-1", "Opus 4.1");
+        mc.anthropic = Some(crate::provider::AnthropicCompat::legacy());
+        for (level, budget) in [
+            (ThinkingLevel::High, 8192),
+            (ThinkingLevel::XHigh, 16_384),
+            (ThinkingLevel::Max, 30_720),
+        ] {
+            let mut config = make_config(CacheConfig::default());
+            config.thinking_level = level;
+            config.max_tokens = Some(1024);
+            config.model_config = Some(mc.clone());
+            let body = build_request_body(&config, false);
+            assert_eq!(body["thinking"]["budget_tokens"], budget);
+            // Raised above the budget, and still inside Opus 4/4.1's 32,000
+            // output ceiling (the smallest among budget-thinking models).
+            let max_tokens = body["max_tokens"].as_u64().unwrap();
+            assert!(max_tokens > budget && max_tokens <= 32_000);
         }
     }
 

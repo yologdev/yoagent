@@ -49,6 +49,16 @@ Bedrock uses its own content block format:
 | Tools | `toolConfig.tools[].toolSpec` |
 | Max tokens | `inferenceConfig.maxTokens` |
 
+## Thinking
+
+`ThinkingLevel` is sent as Anthropic's legacy budget-based thinking
+(`additionalModelRequestFields.thinking.budget_tokens`); budgets per level are in
+the [`ThinkingLevel` table](../reference/configuration.md#thinkinglevel). Bedrock does not raise `maxTokens` above the
+budget, so set `max_tokens` higher yourself (for `Max`, above 30,720). Claude
+4.7+ models (Opus 4.7/4.8 and the generation after; see the
+[Anthropic provider page](anthropic.md#thinking)) reject budget-based thinking,
+so thinking is not usable with them on this provider yet.
+
 ## Stream Events
 
 Bedrock's ConverseStream returns these event types:

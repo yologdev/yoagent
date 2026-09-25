@@ -553,15 +553,69 @@ pub enum CacheStrategy {
 // Thinking level
 // ---------------------------------------------------------------------------
 
+/// How hard the model should reason before answering.
+///
+/// A provider-neutral ladder. Each provider maps it onto its own knob, and
+/// where a provider's ladder is shorter than this one the upper levels are
+/// **clamped** to the highest value this crate knows the provider accepts
+/// rather than sent as a value it would reject —
+/// with one exception: Anthropic's adaptive `effort` is passed through
+/// unclamped, so a model with a shorter effort ladder can reject it (see
+/// below). What each level becomes, per provider:
+///
+/// | Level     | Anthropic (adaptive) | Anthropic legacy / Bedrock budget | OpenAI-compat `reasoning_effort`¹ | DeepSeek `reasoning_effort`² | OpenAI Responses / Azure `reasoning.effort` | Gemini / Vertex `thinkingBudget` |
+/// |-----------|----------|--------|----------|--------|----------|--------|
+/// | `Off`     | (no thinking) | (no thinking) | (omitted) | (omitted; `thinking: disabled`) | (omitted) | (omitted) |
+/// | `Minimal` | `low`    | 1,024  | `low`    | `low`  | `low`    | 1,024  |
+/// | `Low`     | `low`    | 1,024  | `low`    | `low`  | `low`    | 1,024  |
+/// | `Medium`  | `medium` | 2,048  | `medium` | `medium` (DeepSeek rounds up to `high`) | `medium` | 8,192  |
+/// | `High`    | `high`   | 8,192  | `high`   | `high` | `high`   | 24,576 |
+/// | `XHigh`   | `xhigh`  | 16,384 | `high` *(clamped)* | `high` *(clamped)* | `high` *(clamped)* | 24,576 *(clamped)* |
+/// | `Max`     | `max`    | 30,720 | `high` *(clamped)* | `max` | `high` *(clamped)* | 24,576 *(clamped)* |
+///
+/// ¹ Only when [`OpenAiCompat::supports_reasoning_effort`] is set; otherwise
+/// no `reasoning_effort` is sent.
+///
+/// ² "DeepSeek" means any OpenAI-compat provider with both
+/// [`OpenAiCompat::supports_thinking_control`] and
+/// [`OpenAiCompat::supports_reasoning_effort`] set. DeepSeek's
+/// `reasoning_effort` accepts `low`/`high`/`max`
+/// (<https://api-docs.deepseek.com/guides/thinking_mode>), and DeepSeek itself
+/// maps a requested `xhigh` to `high`, so `XHigh` is sent as `high` and only
+/// `Max` selects `max`. `Off` is sent as `thinking: {"type": "disabled"}`
+/// rather than as an effort value.
+///
+/// Anthropic's adaptive `effort` is passed through as-is, so a model with a
+/// shorter ladder rejects what it does not know: `xhigh` arrived with Opus
+/// 4.7, so Opus 4.6 / Sonnet 4.6 accept `max` but not `xhigh`. The crate has
+/// no per-model effort table; pick a level the model supports.
+///
+/// Marked `#[non_exhaustive]` so the next rung a vendor adds is not a breaking
+/// change: `match` on it from outside the crate needs a wildcard arm.
+///
+/// [`OpenAiCompat::supports_thinking_control`]: crate::provider::OpenAiCompat::supports_thinking_control
+/// [`OpenAiCompat::supports_reasoning_effort`]: crate::provider::OpenAiCompat::supports_reasoning_effort
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum ThinkingLevel {
+    /// No reasoning requested.
     #[default]
     Off,
+    /// Currently identical to `Low` on every provider.
     Minimal,
     Low,
     Medium,
     High,
+    /// Above `High`, below `Max` — Anthropic's `xhigh`. Where a provider has
+    /// no `xhigh` rung it is clamped down to that provider's `High` value
+    /// (see the table above). Serializes as `"xhigh"`.
+    XHigh,
+    /// The highest setting this crate sends — Anthropic's and DeepSeek's
+    /// `max`. Elsewhere it is clamped to the highest value this crate knows is
+    /// accepted, which may be below the model's real ceiling (see the table
+    /// above).
+    Max,
 }
 
 // ---------------------------------------------------------------------------
@@ -1791,6 +1845,29 @@ mod wire_tag_freeze {
         let mut seen = BTreeSet::new();
         for sample in &delta_samples() {
             assert_frozen(sample, expected_delta_tag(sample), &mut seen);
+        }
+    }
+}
+
+#[cfg(test)]
+mod thinking_level_tests {
+    use super::ThinkingLevel;
+
+    #[test]
+    fn serde_names_are_lowercase_and_old_values_still_load() {
+        for (level, name) in [
+            (ThinkingLevel::Off, "off"),
+            (ThinkingLevel::Minimal, "minimal"),
+            (ThinkingLevel::Low, "low"),
+            (ThinkingLevel::Medium, "medium"),
+            (ThinkingLevel::High, "high"),
+            (ThinkingLevel::XHigh, "xhigh"),
+            (ThinkingLevel::Max, "max"),
+        ] {
+            let json = serde_json::to_string(&level).unwrap();
+            assert_eq!(json, format!("\"{name}\""));
+            let back: ThinkingLevel = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, level);
         }
     }
 }

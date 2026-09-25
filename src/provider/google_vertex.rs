@@ -322,16 +322,6 @@ async fn parse_google_sse_response(
 }
 
 /// Build the request body for Vertex AI (same format as Google GenAI).
-/// Token budget for Vertex's thinkingConfig per level (same scale as Gemini).
-fn vertex_thinking_budget(level: ThinkingLevel) -> u32 {
-    match level {
-        ThinkingLevel::Off => 0,
-        ThinkingLevel::Minimal | ThinkingLevel::Low => 1024,
-        ThinkingLevel::Medium => 8192,
-        ThinkingLevel::High => 24576,
-    }
-}
-
 fn build_vertex_request_body(config: &StreamConfig) -> serde_json::Value {
     // Same format as Google GenAI
     let mut contents: Vec<serde_json::Value> = Vec::new();
@@ -428,7 +418,7 @@ fn build_vertex_request_body(config: &StreamConfig) -> serde_json::Value {
     // Thinking: same thinkingConfig as the Gemini API.
     if config.thinking_level != ThinkingLevel::Off {
         gen_config["thinkingConfig"] = serde_json::json!({
-            "thinkingBudget": vertex_thinking_budget(config.thinking_level),
+            "thinkingBudget": super::google::gemini_thinking_budget(config.thinking_level),
             "includeThoughts": true,
         });
     }
@@ -510,6 +500,22 @@ mod tests {
         assert_eq!(
             body["generationConfig"]["thinkingConfig"]["includeThoughts"],
             true
+        );
+    }
+
+    #[test]
+    fn xhigh_and_max_clamp_to_the_flash_budget_ceiling() {
+        for level in [ThinkingLevel::XHigh, ThinkingLevel::Max] {
+            let body = build_vertex_request_body(&config(level));
+            assert_eq!(
+                body["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+                24576
+            );
+        }
+        let body = build_vertex_request_body(&config(ThinkingLevel::Medium));
+        assert_eq!(
+            body["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+            8192
         );
     }
 

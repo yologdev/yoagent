@@ -99,7 +99,7 @@ pub struct AgentLoopConfig {
 | `provider` | The `StreamProvider` implementation to use |
 | `model` | Model identifier (e.g., `"claude-sonnet-5"`) |
 | `api_key` | API key for the provider |
-| `thinking_level` | `Off`, `Minimal`, `Low`, `Medium`, `High` |
+| `thinking_level` | `Off`, `Minimal`, `Low`, `Medium`, `High`, `XHigh`, `Max` |
 | `model_config` | Optional `ModelConfig` for multi-provider support (base URL, headers, compat flags) |
 | `convert_to_llm` | Custom `AgentMessage[] → Message[]` conversion |
 | `transform_context` | Pre-processing hook for context pruning |

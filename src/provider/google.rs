@@ -299,13 +299,19 @@ fn part_text(part: &GooglePart) -> Option<&str> {
     part.text.as_deref().filter(|t| !t.is_empty())
 }
 
-/// Token budget for Gemini's thinkingConfig per level.
-fn gemini_thinking_budget(level: ThinkingLevel) -> u32 {
+/// Token budget for Gemini's thinkingConfig per level. Also used by Vertex AI,
+/// so the two cannot drift.
+pub(crate) fn gemini_thinking_budget(level: ThinkingLevel) -> u32 {
     match level {
         ThinkingLevel::Off => 0,
         ThinkingLevel::Minimal | ThinkingLevel::Low => 1024,
         ThinkingLevel::Medium => 8192,
-        ThinkingLevel::High => 24576,
+        // Clamped: 24,576 is the documented thinkingBudget maximum of Gemini
+        // 2.5 Flash and Flash-Lite; 2.5 Pro's is 32,768
+        // (cloud.google.com/vertex-ai/generative-ai/docs/thinking). There is
+        // no per-model table here, so the crate stays within the smallest
+        // documented maximum rather than send an out-of-range budget.
+        ThinkingLevel::High | ThinkingLevel::XHigh | ThinkingLevel::Max => 24576,
     }
 }
 

@@ -390,7 +390,9 @@ fn build_request_body(config: &StreamConfig, _model_config: &ModelConfig) -> ser
         let effort = match config.thinking_level {
             ThinkingLevel::Minimal | ThinkingLevel::Low => "low",
             ThinkingLevel::Medium => "medium",
-            ThinkingLevel::High => "high",
+            // Clamped: `high` is the top rung this crate knows the provider
+            // accepts, and an unknown effort string is rejected, not rounded.
+            ThinkingLevel::High | ThinkingLevel::XHigh | ThinkingLevel::Max => "high",
             ThinkingLevel::Off => unreachable!(),
         };
         body["reasoning"] = serde_json::json!({"effort": effort});
