@@ -27,8 +27,8 @@ pub use model::{
 pub use openai_compat::OpenAiCompatProvider;
 pub use openai_responses::OpenAiResponsesProvider;
 pub use prices::{
-    CachedPrices, PriceChange, PriceEntry, PriceError, PriceOrigin, PriceSource, PriceTable,
-    DEFAULT_FETCH_TIMEOUT, PRICES_ENV_VAR, PRICE_SCHEMA_VERSION,
+    CachedPrices, FetchPolicy, PriceChange, PriceEntry, PriceError, PriceOrigin, PriceSource,
+    PriceTable, SkippedModel, DEFAULT_FETCH_TIMEOUT, PRICES_ENV_VAR, PRICE_SCHEMA_VERSION,
 };
 pub(crate) use registry::resolve_api_key_or_warn;
 pub use registry::{resolve_api_key, ProviderRegistry};

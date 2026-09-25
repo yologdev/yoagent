@@ -46,20 +46,37 @@ adheres to [Semantic Versioning](https://semver.org/).
   read the variable, and the test suite passes with it set. Constructors
   resolve when they run, so install overrides before building configs; an
   explicit `config.cost` set afterwards still wins.
-- **Opt-in live price sources.** `PriceTable::fetch(&PriceSource)` (with a
-  timeout; `fetch_with_timeout`) reads models.dev (`ModelsDev`,
-  `ModelsDevAt(url)` — mapped into this crate's schema, tiers from `tiers`
-  or `context_over_200k`, inexpressible models skipped), this crate's
-  checked `prices.json` on GitHub `main` (`YoagentMain`, so a merged price
-  fix reaches users without a release), or any URL in this crate's format
-  (`Url`). `PriceTable::install_fetched(table)` installs it as a layer above
-  the built-in data and below user overrides, and logs at `warn` how many
-  built-in models it prices differently plus the first few differences
-  (`changes_from` computes them without installing). `fetch_cached(source,
-  path, max_age)` caches to a caller-given file and falls back to the stale
-  cache, then the built-in data, when offline. Nothing is ever fetched
-  implicitly. Precedence, highest first: explicit `config.cost` > user
-  override > fetched > built-in.
+- **Opt-in live price sources.** Nothing is ever fetched implicitly.
+  - **Fetching.** `PriceTable::fetch(&PriceSource)` has a timeout, which
+    `fetch_with_timeout` sets explicitly. It reads one of:
+    - models.dev (`ModelsDev`, `ModelsDevAt(url)`), mapped into this crate's
+      schema. Tiers come from `tiers` or `context_over_200k`, and the
+      provider keys `alibaba` and `opencode` become `qwen` and
+      `opencode-zen`.
+    - This crate's checked `prices.json` on GitHub `main` (`YoagentMain`), so
+      a merged price fix reaches users without a release.
+    - Any URL serving this crate's format (`Url`).
+  - **Skipped models.** A models.dev model the mapping cannot express is
+    skipped, never approximated. `fetch_with_report` and
+    `from_models_dev_json_report` return each skipped model and why
+    (`SkippedModel`), and a skipped model the built-in data lists is named
+    in a `warn` log.
+  - **Installing.** `PriceTable::install_fetched(table)` (`#[must_use]`)
+    installs the table as a layer above the built-in data and below user
+    overrides. It logs at `warn` how many built-in models it prices
+    differently, with the first few differences, and returns every
+    `PriceChange`. `changes_from` computes them without installing.
+    `install_fetched_with(table, FetchPolicy::AddOnly)` installs only the
+    models the built-in data lacks.
+  - **Caching.** `fetch_cached(source, path, max_age, max_stale)` caches to
+    a file you choose. When offline it falls back to a stale cache no older
+    than `max_stale`, then to the built-in data. It returns `CachedPrices`
+    with `origin`, `age` and `error`: the fetch error behind a fallback, or
+    a failed cache write. A cache with a future modification time counts as
+    expired, and cache read errors other than "not found" are logged.
+
+  Precedence, highest first: explicit `config.cost` > user override >
+  fetched > built-in.
 - **`tests/price_audit.rs` audits every `prices.json` entry**, not a
   hand-kept preset list, so an entry cannot be added unaudited. Its
   allowances are now data (`cache_write_at_input`, `absent_upstream`).

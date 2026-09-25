@@ -88,7 +88,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, PoisonError, RwLock};
 
 mod fetch;
-pub use fetch::{CachedPrices, PriceChange, PriceOrigin, PriceSource, DEFAULT_FETCH_TIMEOUT};
+pub use fetch::{
+    CachedPrices, FetchPolicy, PriceChange, PriceOrigin, PriceSource, SkippedModel,
+    DEFAULT_FETCH_TIMEOUT,
+};
 
 /// The only `schema` value this release reads.
 pub const PRICE_SCHEMA_VERSION: u32 = 1;
