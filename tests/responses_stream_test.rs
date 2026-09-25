@@ -585,3 +585,266 @@ async fn from_config_openai_responses_runs_a_function_call_end_to_end() {
     );
     assert_eq!(server.received_requests().await.unwrap().len(), 2);
 }
+
+// ---------------------------------------------------------------------------
+// Refusals, content filters and null usage
+// ---------------------------------------------------------------------------
+
+fn error_message(m: &Message) -> Option<&str> {
+    match m {
+        Message::Assistant { error_message, .. } => error_message.as_deref(),
+        _ => panic!("expected assistant message"),
+    }
+}
+
+fn text_of(content: &[Content]) -> String {
+    content
+        .iter()
+        .filter_map(|c| match c {
+            Content::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn streamed_text(events: &[StreamEvent]) -> String {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            StreamEvent::TextDelta { delta, .. } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+const REFUSAL: &str = "I'm sorry, but I can't help with that.";
+
+/// A refusal the way the API streams it (`ResponseRefusalDeltaEvent`,
+/// `ResponseRefusalDoneEvent`, and the `refusal` part repeated in
+/// `content_part.done` and the finished `message` item).
+fn streamed_refusal_fixture() -> String {
+    let part = json!({"type": "refusal", "refusal": REFUSAL});
+    sse(vec![
+        created(),
+        (
+            "response.output_item.added",
+            json!({"output_index": 0, "item": {"type": "message", "id": "msg_1", "status": "in_progress", "role": "assistant", "content": []}}),
+        ),
+        (
+            "response.content_part.added",
+            json!({"item_id": "msg_1", "output_index": 0, "content_index": 0, "part": {"type": "refusal", "refusal": ""}}),
+        ),
+        (
+            "response.refusal.delta",
+            json!({"item_id": "msg_1", "output_index": 0, "content_index": 0, "delta": "I'm sorry, but "}),
+        ),
+        (
+            "response.refusal.delta",
+            json!({"item_id": "msg_1", "output_index": 0, "content_index": 0, "delta": "I can't help with that."}),
+        ),
+        (
+            "response.refusal.done",
+            json!({"item_id": "msg_1", "output_index": 0, "content_index": 0, "refusal": REFUSAL}),
+        ),
+        (
+            "response.content_part.done",
+            json!({"item_id": "msg_1", "output_index": 0, "content_index": 0, "part": part}),
+        ),
+        (
+            "response.output_item.done",
+            json!({"output_index": 0, "item": {"type": "message", "id": "msg_1", "status": "completed", "role": "assistant", "content": [part]}}),
+        ),
+        completed(plain_usage()),
+    ])
+}
+
+#[tokio::test]
+async fn a_streamed_refusal_is_a_refusal_with_its_text_once() {
+    for which in BOTH {
+        let (m, events) = run(which, streamed_refusal_fixture()).await;
+        let (content, stop, _) = parts(&m);
+        assert_eq!(*stop, StopReason::Refusal, "{which:?}");
+        // Kept as the turn's text, not duplicated by the three places the
+        // complete refusal is repeated.
+        assert_eq!(text_of(content), REFUSAL, "{which:?}");
+        assert_eq!(streamed_text(&events), REFUSAL, "{which:?}");
+    }
+    for which in BOTH {
+        let (m, _) = run(which, streamed_refusal_fixture()).await;
+        let msg = error_message(&m).expect("a refusal explains itself");
+        assert!(
+            msg.contains("refusal") && msg.contains(REFUSAL),
+            "{which:?}: {msg}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_refusal_only_in_the_finished_item_is_still_a_refusal() {
+    for which in BOTH {
+        let body = sse(vec![
+            created(),
+            (
+                "response.output_item.done",
+                json!({"output_index": 0, "item": {"type": "message", "id": "msg_1", "status": "completed", "role": "assistant",
+                       "content": [{"type": "refusal", "refusal": REFUSAL}]}}),
+            ),
+            completed(plain_usage()),
+        ]);
+        let (m, events) = run(which, body).await;
+        let (content, stop, _) = parts(&m);
+        assert_eq!(*stop, StopReason::Refusal, "{which:?}");
+        assert_eq!(text_of(content), REFUSAL, "{which:?}");
+        assert_eq!(streamed_text(&events), REFUSAL, "{which:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_refusal_beside_a_function_call_is_not_masked_as_tool_use() {
+    for which in BOTH {
+        let body = sse(vec![
+            created(),
+            fc_added(0, 1, "read_file"),
+            fc_item_done(0, 1, "read_file", r#"{"path":"a"}"#),
+            (
+                "response.refusal.done",
+                json!({"item_id": "msg_1", "output_index": 1, "content_index": 0, "refusal": REFUSAL}),
+            ),
+            completed(plain_usage()),
+        ]);
+        let (m, _) = run(which, body).await;
+        assert_eq!(*parts(&m).1, StopReason::Refusal, "{which:?}");
+    }
+}
+
+#[tokio::test]
+async fn ordinary_text_is_not_a_refusal() {
+    // Near-miss / positive control for the refusal tests: the same message
+    // shape with an `output_text` part stays `Stop` with no error message.
+    for which in BOTH {
+        let (m, _) = run(which, text_fixture()).await;
+        assert_eq!(*parts(&m).1, StopReason::Stop, "{which:?}");
+        assert_eq!(error_message(&m), None, "{which:?}");
+    }
+}
+
+fn incomplete(event: &'static str, reason: &str) -> String {
+    let mut ev = vec![created()];
+    ev.extend(message_item(0, &["partial"]));
+    ev.push((
+        event,
+        json!({"response": {
+            "id": "resp_1", "object": "response", "status": "incomplete",
+            "incomplete_details": {"reason": reason},
+            "usage": {"input_tokens": 5, "output_tokens": 1, "total_tokens": 6}
+        }}),
+    ));
+    sse(ev)
+}
+
+#[tokio::test]
+async fn content_filter_is_a_refusal_and_max_output_tokens_stays_length() {
+    // `IncompleteDetails.reason`: max_output_tokens | max_messages |
+    // content_filter | steered. Both terminal shapes carry it.
+    for which in BOTH {
+        for event in ["response.incomplete", "response.completed"] {
+            let (m, _) = run(which, incomplete(event, "content_filter")).await;
+            let (content, stop, usage) = parts(&m);
+            assert_eq!(*stop, StopReason::Refusal, "{which:?} {event}");
+            assert_eq!(text_of(content), "partial", "{which:?} {event}");
+            assert_eq!((usage.input, usage.output), (5, 1), "{which:?} {event}");
+
+            for reason in ["max_output_tokens", "max_messages"] {
+                let (m, _) = run(which, incomplete(event, reason)).await;
+                assert_eq!(
+                    *parts(&m).1,
+                    StopReason::Length,
+                    "{which:?} {event} {reason}"
+                );
+                assert_eq!(error_message(&m), None, "{which:?} {event} {reason}");
+            }
+        }
+    }
+    for which in BOTH {
+        let (m, _) = run(which, incomplete("response.incomplete", "content_filter")).await;
+        let msg = error_message(&m).expect("a content-filter stop explains itself");
+        assert!(msg.contains("content_filter"), "{msg}");
+    }
+}
+
+#[tokio::test]
+async fn null_usage_counts_do_not_drop_the_terminal_event() {
+    for which in BOTH {
+        let mut ev = vec![created()];
+        ev.extend(message_item(0, &["ok"]));
+        ev.push((
+            "response.incomplete",
+            json!({"response": {
+                "id": "resp_1", "object": "response", "status": "incomplete",
+                "incomplete_details": {"reason": "content_filter"},
+                "usage": {"input_tokens": 40, "input_tokens_details": {"cached_tokens": null, "cache_write_tokens": null},
+                          "output_tokens": 7, "output_tokens_details": null, "total_tokens": null}
+            }}),
+        ));
+        let (m, _) = run(which, sse(ev)).await;
+        let (_, stop, usage) = parts(&m);
+        // The usage survives, and so does the stop reason parsed alongside it.
+        assert_eq!(
+            (usage.input, usage.output, usage.cache_read),
+            (40, 7, 0),
+            "{which:?}"
+        );
+        assert_eq!(*stop, StopReason::Refusal, "{which:?}");
+    }
+}
+
+/// Azure's mid-stream capacity error reads as a rate limit (retried with
+/// backoff), not a context overflow (which would compact the history): its
+/// message contains "exceeds the maximum", which used to match an overflow
+/// phrase.
+#[tokio::test]
+async fn azure_no_capacity_mid_stream_is_rate_limited() {
+    use yoagent::provider::ProviderError;
+    let body = sse(vec![
+        created(),
+        (
+            "error",
+            json!({"error": {"type": "too_many_requests", "code": "no_capacity",
+                   "message": "The request exceeds the maximum usage size allowed during peak load. Please retry later.",
+                   "param": null}}),
+        ),
+    ]);
+    for which in BOTH {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(body.clone(), "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+        let mut mc = ModelConfig::openai_responses("gpt-5.5", "GPT-5.5");
+        mc.base_url = server.uri();
+        let mut config = StreamConfig::new("gpt-5.5", "test-key");
+        config.messages = vec![Message::user("hi")];
+        config.model_config = Some(mc);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let result = match which {
+            Which::Responses => {
+                OpenAiResponsesProvider
+                    .stream(config, tx, CancellationToken::new())
+                    .await
+            }
+            Which::Azure => {
+                AzureOpenAiProvider
+                    .stream(config, tx, CancellationToken::new())
+                    .await
+            }
+        };
+        let err = result.expect_err("an error event fails the stream");
+        assert!(
+            matches!(err, ProviderError::RateLimited { .. }),
+            "{which:?}: {err:?}"
+        );
+        assert!(!err.is_context_overflow(), "{which:?}");
+    }
+}

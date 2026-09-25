@@ -20,7 +20,21 @@
 //!   `response.reasoning_text.delta` (raw reasoning content).
 //! - `response.completed` / `response.incomplete` carry the final `usage`,
 //!   including `input_tokens_details.cached_tokens` and `.cache_write_tokens`.
+//!   A usage count sent as explicit `null` reads as 0 rather than failing the
+//!   whole terminal event (which would drop the usage and the stop reason).
+//! - A refusal streams as `response.refusal.delta` / `response.refusal.done`
+//!   (`ResponseRefusalDeltaEvent` / `ResponseRefusalDoneEvent`), and appears as
+//!   a `{"type": "refusal", "refusal": …}` content part
+//!   (`ResponseOutputRefusal`) in `response.content_part.done` and in the
+//!   finished `message` item. It becomes [`StopReason::Refusal`], its text is
+//!   kept as the turn's text, and [`error_message`](ResponsesStreamState::error_message)
+//!   explains it — the same shape as the Anthropic and Gemini refusals.
+//! - `incomplete_details.reason` (`Response.IncompleteDetails`) is one of
+//!   `max_output_tokens`, `max_messages`, `content_filter`, `steered`.
+//!   `content_filter` is a [`StopReason::Refusal`]; every other reason stays
+//!   [`StopReason::Length`].
 
+use super::openai_compat::null_as_zero;
 use super::tool_args::finalize_tool_arguments;
 use super::traits::{classify_sse_error_event, ProviderError, StreamEvent};
 use crate::types::{Content, StopReason, Usage};
@@ -70,6 +84,11 @@ pub(crate) struct ResponsesStreamState {
     calls: Vec<CallSlot>,
     usage: Usage,
     stop_reason: StopReason,
+    /// output_index → the refusal text received for it so far. Present once
+    /// any refusal signal arrived for that output item.
+    refusals: HashMap<Option<usize>, String>,
+    /// Why the response was stopped by a content filter, when it was.
+    filtered: Option<String>,
 }
 
 impl ResponsesStreamState {
@@ -83,7 +102,38 @@ impl ResponsesStreamState {
             calls: Vec::new(),
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
+            refusals: HashMap::new(),
+            filtered: None,
         }
+    }
+
+    /// The explanation to put on the assistant message's `error_message`:
+    /// set for a refusal or a content-filter stop, `None` otherwise. Read it
+    /// before [`finish`](Self::finish), which consumes the state.
+    pub(crate) fn error_message(&self) -> Option<String> {
+        if let Some(reason) = &self.filtered {
+            return Some(format!(
+                "Response stopped by the content filter (incomplete_details.reason: {reason})"
+            ));
+        }
+        if self.refusals.is_empty() {
+            return None;
+        }
+        let mut keys: Vec<_> = self.refusals.keys().copied().collect();
+        keys.sort();
+        let text: Vec<&str> = keys
+            .iter()
+            .map(|k| self.refusals[k].as_str())
+            .filter(|t| !t.is_empty())
+            .collect();
+        Some(if text.is_empty() {
+            "Request declined by the model (refusal)".to_string()
+        } else {
+            format!(
+                "Request declined by the model (refusal): {}",
+                text.join("\n\n")
+            )
+        })
     }
 
     /// Process one SSE message. `event` is the SSE `event:` field; when a
@@ -130,6 +180,27 @@ impl ResponsesStreamState {
                     (ReasoningKind::Text, ev.content_index)
                 };
                 self.thinking_delta(ev.output_index, kind, part, ev.delta, tx);
+            }
+            "response.refusal.delta" => {
+                let Some(ev) = self.parse::<RefusalDelta>(event, data) else {
+                    return Ok(Flow::Continue);
+                };
+                self.refusal_delta(ev.output_index, ev.delta, tx);
+            }
+            "response.refusal.done" => {
+                let Some(ev) = self.parse::<RefusalDone>(event, data) else {
+                    return Ok(Flow::Continue);
+                };
+                self.refusal_done(ev.output_index, ev.refusal, tx);
+            }
+            "response.content_part.done" => {
+                let Some(ev) = self.parse::<ContentPartEvent>(event, data) else {
+                    return Ok(Flow::Continue);
+                };
+                if ev.part.kind.as_deref() == Some("refusal") {
+                    let text = ev.part.refusal.unwrap_or_default();
+                    self.refusal_done(ev.output_index, text, tx);
+                }
             }
             "response.output_item.added" => {
                 let Some(ev) = self.parse::<OutputItemEvent>(event, data) else {
@@ -200,8 +271,25 @@ impl ResponsesStreamState {
                         }
                         self.end_call(i, tx);
                     }
-                    // A server that sent the text only in the finished item.
-                    Some("message") if !self.text_slots.contains_key(&ev.output_index) => {
+                    Some("message") => {
+                        // Checked before any refusal below opens a text slot.
+                        let streamed_text = self.text_slots.contains_key(&ev.output_index);
+                        // A refusal part: authoritative even when nothing was
+                        // streamed for it (`refusal_done` dedups streamed text).
+                        let refusal: Option<String> = ev
+                            .item
+                            .content
+                            .iter()
+                            .filter(|p| p.kind.as_deref() == Some("refusal"))
+                            .map(|p| p.refusal.clone().unwrap_or_default())
+                            .reduce(|a, b| a + &b);
+                        if let Some(refusal) = refusal {
+                            self.refusal_done(ev.output_index, refusal, tx);
+                        }
+                        // A server that sent the text only in the finished item.
+                        if streamed_text {
+                            return Ok(Flow::Continue);
+                        }
                         let text: String = ev
                             .item
                             .content
@@ -232,7 +320,7 @@ impl ResponsesStreamState {
                         self.usage = u.into_usage();
                     }
                     if resp.status.as_deref() == Some("incomplete") {
-                        self.stop_reason = StopReason::Length;
+                        self.incomplete(resp.incomplete_details);
                     }
                 }
                 return Ok(Flow::Done);
@@ -242,14 +330,19 @@ impl ResponsesStreamState {
             // StreamEnded is retryable (#83) — re-running an already-billed
             // generation that would fail the same way again.
             "response.incomplete" => {
-                if let Some(u) = self
+                let resp = self
                     .parse::<ResponseEvent>(event, data)
-                    .and_then(|e| e.response)
-                    .and_then(|r| r.usage)
-                {
-                    self.usage = u.into_usage();
-                }
-                self.stop_reason = StopReason::Length;
+                    .and_then(|e| e.response);
+                let details = match resp {
+                    Some(r) => {
+                        if let Some(u) = r.usage {
+                            self.usage = u.into_usage();
+                        }
+                        r.incomplete_details
+                    }
+                    None => None,
+                };
+                self.incomplete(details);
                 return Ok(Flow::Done);
             }
             "response.failed" | "error" => {
@@ -280,12 +373,21 @@ impl ResponsesStreamState {
             };
         }
 
+        // A refusal (streamed, or in a finished item) is the most specific
+        // verdict, as on the Anthropic provider: nothing overrides it.
+        if !self.refusals.is_empty() {
+            warn!("{}: the model declined the request (refusal)", self.label);
+            self.stop_reason = StopReason::Refusal;
+        }
+
         // Tool calls make this a ToolUse turn — unless the response was
         // incomplete (token limit), which is how a call ends up with unparsed
-        // arguments. Length is kept so callers see it; the loop still answers
-        // every tool call either way.
+        // arguments, or refused. Length is kept so callers see it; the loop
+        // still answers every tool call either way.
         let mut stop_reason = self.stop_reason;
-        if stop_reason != StopReason::Length && !self.calls.is_empty() {
+        if !matches!(stop_reason, StopReason::Length | StopReason::Refusal)
+            && !self.calls.is_empty()
+        {
             stop_reason = StopReason::ToolUse;
         }
         (self.content, self.usage, stop_reason)
@@ -299,6 +401,81 @@ impl ResponsesStreamState {
                 None
             }
         }
+    }
+
+    /// Record why a response ended incomplete. `content_filter` is a refusal;
+    /// every other reason (`max_output_tokens`, `max_messages`, `steered`, or
+    /// none given) is reported as `Length`, as before.
+    fn incomplete(&mut self, details: Option<IncompleteDetails>) {
+        let reason = details.and_then(|d| d.reason);
+        if reason.as_deref() == Some("content_filter") {
+            warn!(
+                "{}: response stopped by the content filter (incomplete_details.reason=content_filter)",
+                self.label
+            );
+            self.filtered = reason;
+            self.stop_reason = StopReason::Refusal;
+        } else {
+            self.stop_reason = StopReason::Length;
+        }
+    }
+
+    /// Streamed refusal text: kept as the turn's text (the model's own
+    /// explanation) and recorded for the stop reason.
+    fn refusal_delta(
+        &mut self,
+        output_index: Option<usize>,
+        delta: String,
+        tx: &mpsc::UnboundedSender<StreamEvent>,
+    ) {
+        self.refusals
+            .entry(output_index)
+            .or_default()
+            .push_str(&delta);
+        self.push_text(output_index, delta, tx);
+    }
+
+    /// The complete refusal text. Emits only what the deltas have not already
+    /// delivered, so a server that sends both — or `refusal.done` and then the
+    /// same part again in `content_part.done` / `output_item.done` — does not
+    /// duplicate it.
+    fn refusal_done(
+        &mut self,
+        output_index: Option<usize>,
+        refusal: String,
+        tx: &mpsc::UnboundedSender<StreamEvent>,
+    ) {
+        let seen = self.refusals.entry(output_index).or_default();
+        if *seen == refusal {
+            return;
+        }
+        let Some(rest) = refusal.strip_prefix(seen.as_str()).map(str::to_string) else {
+            debug!(
+                "{}: final refusal text differs from the streamed deltas; keeping the streamed text",
+                self.label
+            );
+            return;
+        };
+        *seen = refusal;
+        if !rest.is_empty() {
+            self.push_text(output_index, rest, tx);
+        }
+    }
+
+    fn push_text(
+        &mut self,
+        output_index: Option<usize>,
+        delta: String,
+        tx: &mpsc::UnboundedSender<StreamEvent>,
+    ) {
+        let idx = self.text_slot(output_index);
+        if let Some(Content::Text { text }) = self.content.get_mut(idx) {
+            text.push_str(&delta);
+        }
+        let _ = tx.send(StreamEvent::TextDelta {
+            content_index: idx,
+            delta,
+        });
     }
 
     fn text_slot(&mut self, output_index: Option<usize>) -> usize {
@@ -493,6 +670,28 @@ struct ArgumentsDone {
 }
 
 #[derive(Deserialize)]
+struct RefusalDelta {
+    delta: String,
+    #[serde(default)]
+    output_index: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct RefusalDone {
+    #[serde(default)]
+    refusal: String,
+    #[serde(default)]
+    output_index: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct ContentPartEvent {
+    #[serde(default)]
+    output_index: Option<usize>,
+    part: OutputPart,
+}
+
+#[derive(Deserialize)]
 struct OutputItemEvent {
     #[serde(default)]
     output_index: Option<usize>,
@@ -522,6 +721,9 @@ struct OutputPart {
     kind: Option<String>,
     #[serde(default)]
     text: Option<String>,
+    /// `refusal` parts.
+    #[serde(default)]
+    refusal: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -536,15 +738,25 @@ struct ResponseData {
     status: Option<String>,
     #[serde(default)]
     usage: Option<ResponseUsage>,
+    #[serde(default)]
+    incomplete_details: Option<IncompleteDetails>,
 }
 
 #[derive(Deserialize)]
+struct IncompleteDetails {
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+// Counts use `null_as_zero`: `#[serde(default)]` covers a missing key only,
+// and one explicit `null` would otherwise fail the whole terminal event.
+#[derive(Deserialize)]
 struct ResponseUsage {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_zero")]
     input_tokens: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_zero")]
     output_tokens: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_zero")]
     total_tokens: u64,
     #[serde(default)]
     input_tokens_details: Option<InputTokensDetails>,
@@ -552,9 +764,9 @@ struct ResponseUsage {
 
 #[derive(Deserialize, Default)]
 struct InputTokensDetails {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_zero")]
     cached_tokens: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_zero")]
     cache_write_tokens: u64,
 }
 
@@ -596,6 +808,21 @@ mod tests {
         assert_eq!(u.cache_write, 300);
         assert_eq!(u.output, 50);
         assert_eq!(u.total_tokens, 1050);
+    }
+
+    #[test]
+    fn usage_tolerates_explicit_nulls() {
+        let u: ResponseUsage = serde_json::from_str(
+            r#"{"input_tokens":10,"input_tokens_details":{"cached_tokens":4,"cache_write_tokens":null},
+                "output_tokens":null,"output_tokens_details":null,"total_tokens":null}"#,
+        )
+        .unwrap();
+        let u = u.into_usage();
+        assert_eq!((u.input, u.cache_read, u.cache_write), (6, 4, 0));
+        assert_eq!((u.output, u.total_tokens), (0, 0));
+        let u: ResponseUsage =
+            serde_json::from_str(r#"{"input_tokens":3,"input_tokens_details":null}"#).unwrap();
+        assert_eq!(u.into_usage().input, 3);
     }
 
     #[test]

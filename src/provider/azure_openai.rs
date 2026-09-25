@@ -100,6 +100,8 @@ impl StreamProvider for AzureOpenAiProvider {
             }
         }
 
+        // Read before `finish`, which consumes the refusal state.
+        let error_message = state.error_message();
         let (content, usage, stop_reason) = state.finish(&tx);
 
         let message = Message::Assistant {
@@ -109,7 +111,7 @@ impl StreamProvider for AzureOpenAiProvider {
             provider: model_config.provider.clone(),
             usage,
             timestamp: now_ms(),
-            error_message: None,
+            error_message,
         };
 
         let _ = tx.send(StreamEvent::Done {
@@ -321,9 +323,8 @@ fn build_azure_request_body(config: &StreamConfig) -> serde_json::Value {
 
     // Thinking: the Responses API's reasoning effort, mapped exactly as the
     // first-party OpenAI Responses provider maps it. The effort capability
-    // comes from `ModelConfig::compat` (`OpenAiCompat::max_reasoning_effort`,
-    // `supports_effort_none`); without one, `high` is the ceiling and `Off`
-    // omits the field.
+    // comes from `ModelConfig::compat` (`OpenAiCompat::max_reasoning_effort`);
+    // without one, `high` is the ceiling. `Off` always omits the field.
     let default_compat = OpenAiCompat::default();
     let compat = config
         .model_config
@@ -450,11 +451,12 @@ mod tests {
     }
 
     #[test]
-    fn compat_ceiling_and_none_are_honoured() {
+    fn compat_ceiling_is_honoured_and_off_omits_effort() {
         // Positive control: Azure used to clamp regardless of the model.
         let sol = || ModelConfig::gpt_6_sol();
+        let body = build_azure_request_body(&deployment(ThinkingLevel::Off, sol()));
+        assert!(body["reasoning"].is_null());
         for (level, want) in [
-            (ThinkingLevel::Off, "none"),
             (ThinkingLevel::XHigh, "xhigh"),
             (ThinkingLevel::Max, "max"),
             (ThinkingLevel::High, "high"),
@@ -462,7 +464,7 @@ mod tests {
             let body = build_azure_request_body(&deployment(level, sol()));
             assert_eq!(body["reasoning"]["effort"], want, "{level:?}");
         }
-        // Astra: max ceiling, no `none`.
+        // Astra: max ceiling; Off omits the effort too.
         let body =
             build_azure_request_body(&deployment(ThinkingLevel::Off, ModelConfig::gpt_6_astra()));
         assert!(body["reasoning"].is_null());

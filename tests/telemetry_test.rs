@@ -290,8 +290,10 @@ async fn llm_stream_records_tokens_and_cost() {
     assert_eq!(get("tokens_in"), "1000000");
     assert_eq!(get("tokens_out"), "500000");
     assert_eq!(get("tokens_cached"), "7");
-    // 1M in @ $3/M + 0.5M out @ $15/M = 10.5
-    assert_eq!(get("cost_usd"), "10.5");
+    // 1M in @ $3/M + 0.5M out @ $15/M = 10.5, plus 7 cached tokens: the
+    // config sets no cache-read rate, so they bill at the $3/M input rate.
+    let cost: f64 = get("cost_usd").parse().unwrap();
+    assert!((cost - (10.5 + 7.0 * 3.0 / 1e6)).abs() < 1e-12, "{cost}");
     assert_eq!(get("error"), "false");
 }
 

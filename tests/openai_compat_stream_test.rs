@@ -359,3 +359,53 @@ async fn complete_tool_call_is_still_tool_use() {
     };
     assert_eq!(*stop_reason, StopReason::ToolUse);
 }
+
+/// `finish_reason: "content_filter"` is a safety cut: it must surface as
+/// `Refusal` with an explanation, not as a normal `Stop` — and an open tool
+/// call must not relabel it `ToolUse`.
+#[tokio::test]
+async fn content_filter_finish_reason_is_a_refusal() {
+    for with_tool_call in [false, true] {
+        let server = MockServer::start().await;
+        let first = if with_tool_call {
+            chunk(
+                r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"search","arguments":"{\"q\":\"x\"}"}}]}}]}"#,
+            )
+        } else {
+            chunk(r#"{"choices":[{"index":0,"delta":{"content":"partial"}}]}"#)
+        };
+        let body = format!(
+            "{}{}{}",
+            first,
+            chunk(r#"{"choices":[{"index":0,"delta":{},"finish_reason":"content_filter"}]}"#),
+            "data: [DONE]\n\n",
+        );
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
+            .mount(&server)
+            .await;
+
+        let message = run_stream(stream_config(&server.uri()))
+            .await
+            .expect("a filtered response is a completed response");
+        let Message::Assistant {
+            stop_reason,
+            error_message,
+            ..
+        } = &message
+        else {
+            panic!("expected assistant message");
+        };
+        assert_eq!(
+            *stop_reason,
+            StopReason::Refusal,
+            "tool call: {with_tool_call}"
+        );
+        assert!(
+            error_message
+                .as_deref()
+                .is_some_and(|m| m.contains("content_filter")),
+            "tool call: {with_tool_call}: {error_message:?}"
+        );
+    }
+}

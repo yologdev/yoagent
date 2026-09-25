@@ -48,7 +48,12 @@
 //!   [`Preset::absent_upstream`] note. A rename silently dropping a model out
 //!   of coverage is the failure this catches.
 //! - **absent is not zero.** A missing `cache_write` prints `—`, never `0`, so
-//!   the table never claims a comparison it did not make.
+//!   the table never claims a comparison it did not make. A rate models.dev
+//!   omits must be `0` in the crate, with one asserted exception:
+//!   [`Preset::cache_write_at_input`], for a vendor with no separate
+//!   cache-write charge whose preset states the input rate explicitly. That
+//!   allowance holds only while the crate's rate equals the band's input rate
+//!   *and* models.dev still omits the field; either changing is drift.
 //! - **unknown cost keys fail.** models.dev carries structure this audit may
 //!   not understand; ignoring it would certify a preset that is knowably
 //!   wrong somewhere.
@@ -98,6 +103,17 @@ struct Preset {
     /// express. Records *exactly* what was acknowledged, so the note cannot
     /// become a blanket amnesty for whatever appears later.
     flat_rate_gap: Option<FlatRateGap>,
+    /// Set when the vendor charges nothing extra for cache writes, models.dev
+    /// omits `cache_write`, and the preset states it explicitly as the input
+    /// rate (what `CostConfig::cost_usd` would bill an unset rate at anyway).
+    /// The reason is printed. Without this, "absent upstream ⇒ must be 0"
+    /// would force the preset to leave the rate implicit.
+    ///
+    /// Asserted, not waived: in every band, the crate's `cache_write` must
+    /// equal that band's `input`, and models.dev must still omit the field.
+    /// If upstream starts listing it, or the crate's rate is 0 or anything
+    /// but the input rate, the allowance is stale and the audit fails.
+    cache_write_at_input: Option<&'static str>,
     /// A caveat printed with the results — a rate that matches upstream but
     /// that the vendor's page does not itself state.
     note: Option<&'static str>,
@@ -148,6 +164,7 @@ fn presets() -> Vec<Preset> {
         cost: rates(constructor, config),
         absent_upstream: None,
         flat_rate_gap: None,
+        cache_write_at_input: None,
         note: None,
     };
     let gpt = |constructor, model, config: ModelConfig| Preset {
@@ -158,6 +175,7 @@ fn presets() -> Vec<Preset> {
         cost: rates(constructor, config),
         absent_upstream: None,
         flat_rate_gap: None,
+        cache_write_at_input: None,
         note: None,
     };
     vec![
@@ -204,8 +222,12 @@ fn presets() -> Vec<Preset> {
                  output for the full session\" — it names no cache rate, and the \
                  pricing page no longer lists gpt-5.5. $1.00 (2x, as the GPT-6 pages \
                  state for their cache rates) matches models.dev; the literal \
-                 reading would keep $0.50. It is set because an unset tier rate \
-                 bills $0, not the base rate. Input $10 and output $45 are stated.",
+                 reading would keep $0.50. Input $10 and output $45 are stated.",
+            ),
+            cache_write_at_input: Some(
+                "OpenAI: no additional cache-write charge before GPT-5.6, so gpt_5_5 \
+                 bills cache writes at the input rate ($5, $10 above 272K); \
+                 models.dev omits cache_write for it.",
             ),
             ..gpt("ModelConfig::gpt_5_5", "gpt-5.5", ModelConfig::gpt_5_5())
         },
@@ -236,6 +258,10 @@ fn presets() -> Vec<Preset> {
             ),
             absent_upstream: None,
             flat_rate_gap: None,
+            cache_write_at_input: Some(
+                "Meta charges no cache-write premium, so writes bill at the $1.25 \
+                 input rate; models.dev omits cache_write for Muse Spark.",
+            ),
             note: None,
         },
     ]
@@ -262,6 +288,50 @@ fn field(cost: &serde_json::Value, name: &str) -> Upstream {
             None => Upstream::Malformed(v.to_string()),
         },
     }
+}
+
+/// The verdict on a field models.dev does not list: `None` if the crate's
+/// value is acceptable, else the drift message.
+///
+/// Absent upstream means the crate must carry `0` — except a `cache_write`
+/// covered by [`Preset::cache_write_at_input`], which must then equal
+/// `input`, the same band's input rate, exactly. An allowance on a preset
+/// whose rate is `0` is stale too: it is recorded for a rate that is not
+/// there.
+fn check_absent(p: &Preset, field_name: &str, ours: f64, input: f64) -> Option<String> {
+    let is_cache_write = field_name.ends_with("cache_write");
+    match (is_cache_write, p.cache_write_at_input) {
+        (true, Some(_)) if ours == 0.0 => Some(format!(
+            "{}: {field_name} is 0 in the crate but `cache_write_at_input` is recorded for \
+             {} — the allowance is stale; set the rate to the input rate or delete it.",
+            p.model, p.constructor
+        )),
+        (true, Some(_)) if (ours - input).abs() < 1e-9 => None,
+        (true, Some(_)) => Some(format!(
+            "{}: {field_name} is {ours} in the crate; `cache_write_at_input` allows an \
+             unlisted cache_write only at the band's input rate ({input}). Check {}.",
+            p.model, p.vendor_page
+        )),
+        _ if ours != 0.0 => Some(format!(
+            "{}: {field_name} is {ours} in the crate and models.dev does not list \
+             it — one of the two is wrong. Check {}.",
+            p.model, p.vendor_page
+        )),
+        _ => None,
+    }
+}
+
+/// The reverse direction of [`check_absent`]: a `cache_write_at_input`
+/// allowance on a field models.dev *does* list has gone stale.
+fn stale_allowance(p: &Preset, field_name: &str) -> Option<String> {
+    (field_name.ends_with("cache_write") && p.cache_write_at_input.is_some()).then(|| {
+        format!(
+            "{}: models.dev now lists {field_name}, so the `cache_write_at_input` \
+             allowance on {} is stale — the value is compared directly now; delete \
+             the allowance.",
+            p.model, p.constructor
+        )
+    })
 }
 
 #[tokio::test]
@@ -407,6 +477,7 @@ async fn hardcoded_prices_have_not_drifted() {
             match field(cost, name) {
                 Upstream::Value(theirs) => {
                     compared += 1;
+                    drift.extend(stale_allowance(p, name));
                     let same = (ours - theirs).abs() < 1e-9;
                     println!(
                         "{:<30} {:<14} {:>10} {:>12}  {}",
@@ -432,13 +503,7 @@ async fn hardcoded_prices_have_not_drifted() {
                         "{:<30} {:<14} {:>10} {:>12}  not listed upstream",
                         p.model, name, ours, "—"
                     );
-                    if ours != 0.0 {
-                        drift.push(format!(
-                            "{}: {name} is {ours} in the crate and models.dev does not list \
-                             it — one of the two is wrong. Check {}.",
-                            p.model, p.vendor_page
-                        ));
-                    }
+                    drift.extend(check_absent(p, name, ours, p.cost.input_per_million));
                 }
                 Upstream::Malformed(raw) => {
                     compared += 1;
@@ -486,6 +551,7 @@ async fn hardcoded_prices_have_not_drifted() {
             }
             for (i, ours) in p.cost.context_tiers.iter().enumerate() {
                 let label = format!("tier{i}");
+                let tier_input = ours.input_per_million;
                 let Some(theirs) = upstream_tiers.get(i) else {
                     compared += 5;
                     continue;
@@ -518,6 +584,7 @@ async fn hardcoded_prices_have_not_drifted() {
                     match field(theirs, name) {
                         Upstream::Value(v) => {
                             compared += 1;
+                            drift.extend(stale_allowance(p, &field_name));
                             let same = (ours - v).abs() < 1e-9;
                             println!(
                                 "{:<30} {:<14} {:>10} {:>12}  {}",
@@ -541,13 +608,7 @@ async fn hardcoded_prices_have_not_drifted() {
                                 "{:<30} {:<14} {:>10} {:>12}  not listed upstream",
                                 p.model, field_name, ours, "—"
                             );
-                            if ours != 0.0 {
-                                drift.push(format!(
-                                    "{}: {field_name} is {ours} in the crate and models.dev \
-                                     does not list it — one of the two is wrong. Check {}.",
-                                    p.model, p.vendor_page
-                                ));
-                            }
+                            drift.extend(check_absent(p, &field_name, ours, tier_input));
                         }
                         Upstream::Malformed(raw) => {
                             compared += 1;
@@ -573,7 +634,17 @@ async fn hardcoded_prices_have_not_drifted() {
                 ] {
                     let theirs = match field(mirror, name) {
                         Upstream::Value(v) => v,
-                        Upstream::Absent => 0.0,
+                        // The same rule as the base and tier fields.
+                        Upstream::Absent => {
+                            let field_name = format!("context_over_200k.{name}");
+                            drift.extend(check_absent(
+                                p,
+                                &field_name,
+                                ours,
+                                first.input_per_million,
+                            ));
+                            continue;
+                        }
                         Upstream::Malformed(raw) => {
                             drift.push(format!(
                                 "{}: context_over_200k.{name} is {raw}, not a number.",
@@ -594,6 +665,9 @@ async fn hardcoded_prices_have_not_drifted() {
         }
         if let Some(n) = p.note {
             notes.push(format!("{}: {n}", p.model));
+        }
+        if let Some(why) = p.cache_write_at_input {
+            notes.push(format!("{}: cache_write at input rate — {why}", p.model));
         }
     }
 
@@ -758,4 +832,44 @@ fn cost_usd_applies_the_context_tier_by_prompt_size() {
         (long_reply - (0.005 + 12.0)).abs() < 1e-9,
         "the tier keys on prompt size, not total, got {long_reply}"
     );
+}
+
+/// The `cache_write_at_input` allowance, offline: it accepts exactly the
+/// band's input rate on an unlisted `cache_write`, and nothing else — so the
+/// audit cannot pass vacuously by recording an allowance.
+#[test]
+fn cache_write_at_input_allowance_is_asserted_both_ways() {
+    let preset = |allowance: Option<&'static str>| Preset {
+        constructor: "ModelConfig::test",
+        provider: "p",
+        model: "m",
+        vendor_page: "https://example.invalid",
+        cost: CostConfig::new(5.0, 30.0),
+        absent_upstream: None,
+        flat_rate_gap: None,
+        cache_write_at_input: allowance,
+        note: None,
+    };
+    let with = preset(Some("no cache-write charge"));
+    let without = preset(None);
+
+    // Positive control: without the allowance, a non-zero unlisted rate is
+    // drift — the rule the allowance relaxes.
+    assert!(check_absent(&without, "cache_write", 5.0, 5.0).is_some());
+    assert!(check_absent(&without, "cache_write", 0.0, 5.0).is_none());
+    // With it: the input rate passes, in the base band and in a tier.
+    assert!(check_absent(&with, "cache_write", 5.0, 5.0).is_none());
+    assert!(check_absent(&with, "tier0.cache_write", 10.0, 10.0).is_none());
+    assert!(check_absent(&with, "context_over_200k.cache_write", 10.0, 10.0).is_none());
+    // Near-misses: another rate (the base rate in a tier), or zero.
+    assert!(check_absent(&with, "cache_write", 6.25, 5.0).is_some());
+    assert!(check_absent(&with, "tier0.cache_write", 5.0, 10.0).is_some());
+    assert!(check_absent(&with, "cache_write", 0.0, 5.0).is_some());
+    // It covers cache_write only.
+    assert!(check_absent(&with, "cache_read", 5.0, 5.0).is_some());
+    // And goes stale the moment upstream lists the field.
+    assert!(stale_allowance(&with, "cache_write").is_some());
+    assert!(stale_allowance(&with, "tier0.cache_write").is_some());
+    assert!(stale_allowance(&with, "cache_read").is_none());
+    assert!(stale_allowance(&without, "cache_write").is_none());
 }

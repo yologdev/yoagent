@@ -34,6 +34,20 @@ impl std::fmt::Display for ApiProtocol {
 
 /// Cost per million tokens (input/output).
 ///
+/// # A cache rate left at zero bills at the input rate
+///
+/// `cache_read_per_million` or `cache_write_per_million` at `0.0` means "not
+/// separately priced", and [`cost_usd`](Self::cost_usd) bills those tokens at
+/// the applicable input rate — the base `input_per_million`, or a
+/// [`ContextTier`]'s own `input_per_million` when that tier applies (a tier's
+/// zero cache rate falls back to the tier's input rate, never to a base cache
+/// rate). A vendor with no separate cache-write charge (OpenAI before
+/// GPT-5.6, Meta) is priced correctly without setting one, and a missing
+/// rate can no longer bill cached tokens as free. The rule applies only
+/// where the input rate is non-zero, so a fully zero config still costs $0.
+/// There is therefore no way to say "cache reads are free but input is
+/// not"; set a tiny positive rate if a vendor ever charges that.
+///
 /// # These are a snapshot, not an authority
 ///
 /// The built-in presets carry rates verified against the vendor's published
@@ -84,7 +98,8 @@ impl std::fmt::Display for ApiProtocol {
 ///
 /// // Generic constructors carry no price (`cost: None`). `get_or_insert_with`
 /// // works here too — `if let Some(c) = config.cost.as_mut()` would silently
-/// // do nothing — but set every rate you pay, since the rest start at zero:
+/// // do nothing — but set every rate you pay, since the rest start at zero
+/// // (an unset cache rate then bills at the input rate):
 /// let mut deepseek = ModelConfig::deepseek("deepseek-flash", "DeepSeek Flash");
 /// assert!(deepseek.cost.is_none());
 /// deepseek.cost = Some(CostConfig::new(0.15, 0.60).with_cache_read(0.003));
@@ -99,8 +114,13 @@ impl std::fmt::Display for ApiProtocol {
 pub struct CostConfig {
     pub input_per_million: f64,
     pub output_per_million: f64,
+    /// Rate for cache-hit prompt tokens. `0.0` (the default) bills them at
+    /// `input_per_million`; see [the zero-rate rule](CostConfig#a-cache-rate-left-at-zero-bills-at-the-input-rate).
     #[serde(default)]
     pub cache_read_per_million: f64,
+    /// Rate for prompt tokens written to the cache. `0.0` (the default)
+    /// bills them at `input_per_million`; see
+    /// [the zero-rate rule](CostConfig#a-cache-rate-left-at-zero-bills-at-the-input-rate).
     #[serde(default)]
     pub cache_write_per_million: f64,
     /// Rates that replace the above once a request's prompt exceeds a
@@ -134,8 +154,12 @@ pub struct ContextTier {
     pub above_prompt_tokens: u64,
     pub input_per_million: f64,
     pub output_per_million: f64,
+    /// Cache-hit rate above the threshold. `0.0` bills at **this tier's**
+    /// `input_per_million`, as for [`CostConfig::cache_read_per_million`].
     #[serde(default)]
     pub cache_read_per_million: f64,
+    /// Cache-write rate above the threshold. `0.0` bills at **this tier's**
+    /// `input_per_million`, as for [`CostConfig::cache_write_per_million`].
     #[serde(default)]
     pub cache_write_per_million: f64,
 }
@@ -145,10 +169,8 @@ impl ContextTier {
     ///
     /// Cache rates are added with [`with_cache_read`](Self::with_cache_read)
     /// and [`with_cache_write`](Self::with_cache_write), mirroring
-    /// [`CostConfig::new`] and for the same reason. The previous shape took
-    /// cache-read positionally and silently zeroed cache-write, which would
-    /// have dropped an Anthropic-style tier's $12.50/M cache writes to $0
-    /// above the threshold.
+    /// [`CostConfig::new`] and for the same reason. A cache rate left unset
+    /// bills at this tier's input rate (see [`CostConfig`]).
     ///
     /// `above_prompt_tokens` is exclusive: a prompt exactly at the threshold
     /// stays on the band below, matching how vendors publish `>272K`.
@@ -214,13 +236,16 @@ impl CostConfig {
         }
     }
 
-    /// Rate for reading a cached prompt prefix.
+    /// Rate for reading a cached prompt prefix. Unset (`0.0`), cache reads
+    /// bill at the input rate.
     pub fn with_cache_read(mut self, per_million: f64) -> Self {
         self.cache_read_per_million = per_million;
         self
     }
 
-    /// Rate for writing a prompt prefix into the cache.
+    /// Rate for writing a prompt prefix into the cache. Unset (`0.0`), cache
+    /// writes bill at the input rate — right for a vendor with no separate
+    /// write charge.
     pub fn with_cache_write(mut self, per_million: f64) -> Self {
         self.cache_write_per_million = per_million;
         self
@@ -257,6 +282,9 @@ impl CostConfig {
 
     /// Dollar cost of a usage record at these per-million-token rates.
     ///
+    /// A cache rate of `0.0` bills at the applicable band's input rate (see
+    /// [the zero-rate rule](CostConfig#a-cache-rate-left-at-zero-bills-at-the-input-rate)).
+    ///
     /// Consumed by [`crate::Agent::session_cost_usd`]; also usable directly
     /// in `after_turn` callbacks for per-turn cost tracking.
     pub fn cost_usd(&self, usage: &crate::types::Usage) -> f64 {
@@ -283,6 +311,10 @@ impl CostConfig {
                 self.cache_write_per_million,
             ),
         };
+        // A zero cache rate means "not separately priced": bill at this
+        // band's input rate. With a zero input rate this is still zero.
+        let or_input = |rate: f64| if rate == 0.0 { input } else { rate };
+        let (cache_read, cache_write) = (or_input(cache_read), or_input(cache_write));
         (usage.input as f64 * input
             + usage.output as f64 * output
             + usage.cache_read as f64 * cache_read
@@ -429,22 +461,6 @@ pub struct OpenAiCompat {
     /// has its own `low`/`high`/`max` mapping.
     #[serde(default)]
     pub max_reasoning_effort: ReasoningEffortCeiling,
-    /// The model accepts reasoning effort `none`, so
-    /// [`ThinkingLevel::Off`] is sent as `none` rather than omitted.
-    ///
-    /// Omitting the effort does not turn reasoning off on OpenAI's reasoning
-    /// models — it runs them at their default, `medium`. Where `none` exists
-    /// (gpt-5.1 and later, GPT-5.6, GPT-6 Sol/Luna) it is the only way to get
-    /// a non-reasoning request, and on GPT-6 Sol/Luna it is also the only
-    /// effort under which Chat Completions allows function calling. Leave it
-    /// off where `none` is rejected: GPT-6 Astra returns HTTP 400 for it, and
-    /// the o-series and gpt-5 do not have it.
-    ///
-    /// Read by the same providers as
-    /// [`max_reasoning_effort`](Self::max_reasoning_effort), with the same
-    /// DeepSeek exception (DeepSeek's `Off` is `thinking: disabled`).
-    #[serde(default)]
-    pub supports_effort_none: bool,
 }
 
 impl Default for OpenAiCompat {
@@ -462,8 +478,47 @@ impl Default for OpenAiCompat {
             supports_prompt_cache_key: false,
             replays_reasoning_content: false,
             max_reasoning_effort: ReasoningEffortCeiling::High,
-            supports_effort_none: false,
         }
+    }
+}
+
+/// One `tracing::warn!` per distinct clamp (requested level, rung sent) per
+/// process.
+///
+/// One-time rather than per request: the clamp is a property of the config,
+/// so it recurs on every turn of every run, and a per-request warning would
+/// flood an agent's log with the same line. Only three clamps exist (`XHigh`
+/// to `high`, `Max` to `high` or `xhigh`), so each gets its own flag and a
+/// second model with a different ceiling still reports its own clamp.
+fn warn_effort_clamp(level: ThinkingLevel, sent: &'static str) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WARNED: [AtomicBool; 3] = [
+        AtomicBool::new(false),
+        AtomicBool::new(false),
+        AtomicBool::new(false),
+    ];
+    let Some(slot) = effort_clamp_slot(level, sent) else {
+        return;
+    };
+    if !WARNED[slot].swap(true, Ordering::Relaxed) {
+        tracing::warn!(
+            requested = ?level,
+            sent,
+            "reasoning effort clamped to the model's declared ceiling \
+             (OpenAiCompat::max_reasoning_effort); set it on the ModelConfig's \
+             compat if the model accepts a higher rung. Logged once per clamp."
+        );
+    }
+}
+
+/// Which clamp `level` → `sent` is, if it is one. Separate from the logging so
+/// the detection is testable without a process-global subscriber.
+fn effort_clamp_slot(level: ThinkingLevel, sent: &str) -> Option<usize> {
+    match (level, sent) {
+        (ThinkingLevel::XHigh, "high") => Some(0),
+        (ThinkingLevel::Max, "high") => Some(1),
+        (ThinkingLevel::Max, "xhigh") => Some(2),
+        _ => None,
     }
 }
 
@@ -472,14 +527,18 @@ impl OpenAiCompat {
     /// field. Shared by the Chat Completions (`reasoning_effort`), Responses
     /// and Azure (`reasoning.effort`) request builders.
     ///
-    /// `Off` is `none` only where [`supports_effort_none`](Self::supports_effort_none)
-    /// is set; `XHigh`/`Max` are capped at
-    /// [`max_reasoning_effort`](Self::max_reasoning_effort). Not the DeepSeek
-    /// ladder — `openai_compat.rs` handles that before reaching here.
+    /// `Off` omits the effort, so the model runs at its own default — on
+    /// OpenAI's reasoning models that is `medium`, not "no reasoning". This
+    /// crate never sends `none`: several models reject it with HTTP 400 (GPT-6
+    /// Astra, gpt-5, the o-series). `XHigh`/`Max` are capped at
+    /// [`max_reasoning_effort`](Self::max_reasoning_effort), with a one-time
+    /// `tracing::warn!` per clamp so a downgrade is never completely silent.
+    /// Not the DeepSeek ladder — `openai_compat.rs` handles that before
+    /// reaching here.
     pub(crate) fn openai_reasoning_effort(&self, level: ThinkingLevel) -> Option<&'static str> {
         use ReasoningEffortCeiling as Ceiling;
-        Some(match level {
-            ThinkingLevel::Off => return self.supports_effort_none.then_some("none"),
+        let effort = match level {
+            ThinkingLevel::Off => return None,
             ThinkingLevel::Minimal | ThinkingLevel::Low => "low",
             ThinkingLevel::Medium => "medium",
             ThinkingLevel::High => "high",
@@ -490,7 +549,9 @@ impl OpenAiCompat {
                 Ceiling::XHigh => "xhigh",
                 Ceiling::High => "high",
             },
-        })
+        };
+        warn_effort_clamp(level, effort);
+        Some(effort)
     }
 
     /// Compat flags for native OpenAI.
@@ -1222,8 +1283,9 @@ impl ModelConfig {
     ///
     /// Reasoning effort: `none`/`low`/`medium` (default)/`high`/`xhigh`, per
     /// the model page — so the ceiling is [`ReasoningEffortCeiling::XHigh`]
-    /// (`ThinkingLevel::Max` sends `xhigh`) and `ThinkingLevel::Off` sends
-    /// `none` ([`OpenAiCompat::supports_effort_none`]).
+    /// (`ThinkingLevel::Max` sends `xhigh`). `ThinkingLevel::Off` omits the
+    /// effort, which runs the model at its default (`medium`); this crate
+    /// does not send `none`.
     ///
     /// **Priced in two bands.** The model page
     /// (<https://developers.openai.com/api/docs/models/gpt-5.5>, read
@@ -1232,15 +1294,16 @@ impl ModelConfig {
     /// 1.5x output for the full session". So above 272K prompt tokens this
     /// preset bills $10 input / $45 output (a [`ContextTier`] at 272,000;
     /// exclusive, so a prompt of exactly 272,000 stays on the base band).
-    /// OpenAI charges nothing extra for cache writes on this model.
+    /// OpenAI charges nothing extra for cache writes on this model ("No
+    /// additional cache-write charge" before GPT-5.6), so cache writes bill
+    /// at the input rate: set explicitly as $5, and $10 above 272K.
     ///
     /// **The long-band cached-input rate, $1.00, is UNVERIFIED.** The sentence
     /// above names input and output only. $1.00 (2x, as the GPT-6 pages state
     /// for their cache rates) is what models.dev records; the literal reading
-    /// would leave it at $0.50. It is set rather than left unset because an
-    /// unset tier rate is $0, not "inherit the base rate" — leaving it out
-    /// would bill every cached token above 272K as free. OpenAI's pricing
-    /// page no longer lists gpt-5.5, so there is no table cell to settle it.
+    /// would leave it at $0.50. (Left unset it would bill at the tier's input
+    /// rate, $10 — see [`CostConfig`].) OpenAI's pricing page no longer lists
+    /// gpt-5.5, so there is no table cell to settle it.
     ///
     /// Rates are a snapshot, not an authority; see [`CostConfig`].
     pub fn gpt_5_5() -> Self {
@@ -1251,11 +1314,15 @@ impl ModelConfig {
             cost: Some(
                 CostConfig::new(5.0, 30.0)
                     .with_cache_read(0.5)
-                    .with_context_tier(ContextTier::new(272_000, 10.0, 45.0).with_cache_read(1.0)),
+                    .with_cache_write(5.0)
+                    .with_context_tier(
+                        ContextTier::new(272_000, 10.0, 45.0)
+                            .with_cache_read(1.0)
+                            .with_cache_write(10.0),
+                    ),
             ),
             compat: Some(OpenAiCompat {
                 max_reasoning_effort: ReasoningEffortCeiling::XHigh,
-                supports_effort_none: true,
                 ..OpenAiCompat::openai()
             }),
             ..Self::openai("gpt-5.5", "GPT-5.5")
@@ -1271,9 +1338,8 @@ impl ModelConfig {
     /// agent with tools needs Responses.
     ///
     /// Reasoning effort: `low`/`medium`/`high`/`xhigh`/`max`, ceiling
-    /// [`ReasoningEffortCeiling::Max`]. **No `none`**: "Setting
-    /// reasoning.effort … to none returns HTTP 400", so
-    /// [`OpenAiCompat::supports_effort_none`] is off and `ThinkingLevel::Off`
+    /// [`ReasoningEffortCeiling::Max`]. (Astra has no `none` rung: "Setting
+    /// reasoning.effort … to none returns HTTP 400".) `ThinkingLevel::Off`
     /// omits the effort — which runs the model at its default, not without
     /// reasoning. `Minimal` is sent as `low` (GPT-6 has no `minimal`).
     ///
@@ -1288,7 +1354,6 @@ impl ModelConfig {
         Self::gpt_6(
             "gpt-6-astra",
             "GPT-6 Astra",
-            false,
             CostConfig::new(10.0, 50.0)
                 .with_cache_read(1.0)
                 .with_cache_write(12.5)
@@ -1309,13 +1374,14 @@ impl ModelConfig {
     /// none", which would forbid reasoning in any agent with tools.
     ///
     /// Reasoning effort: `none`/`low`/`medium` (default)/`high`/`xhigh`/`max`,
-    /// ceiling [`ReasoningEffortCeiling::Max`];
-    /// [`OpenAiCompat::supports_effort_none`] is on, so `ThinkingLevel::Off`
-    /// sends `none` — no reasoning — rather than falling back to `medium`.
+    /// ceiling [`ReasoningEffortCeiling::Max`]. `ThinkingLevel::Off` omits
+    /// the effort, so the model runs at its default (`medium`); this crate
+    /// does not send `none`.
     ///
-    /// **`temperature` is rejected** unless the effort is `none`
-    /// (`ThinkingLevel::Off`): "When reasoning effort is not none, remove
-    /// temperature, top_p, and top_logprobs."
+    /// **`temperature` is rejected** unless the effort is `none`: "When
+    /// reasoning effort is not none, remove temperature, top_p, and
+    /// top_logprobs." Since this crate never sends `none`, do not set a
+    /// temperature with this preset.
     ///
     /// Priced per OpenAI's pricing page (read 2026-09-25): $2 input / $0.20
     /// cached / $2.50 cache write / $10 output; above 272K prompt tokens the
@@ -1324,7 +1390,6 @@ impl ModelConfig {
         Self::gpt_6(
             "gpt-6-sol",
             "GPT-6 Sol",
-            true,
             CostConfig::new(2.0, 10.0)
                 .with_cache_read(0.2)
                 .with_cache_write(2.5)
@@ -1345,8 +1410,9 @@ impl ModelConfig {
     /// calling only at reasoning effort `none`.
     ///
     /// Reasoning effort: `none`/`low`/`medium` (default)/`high`/`xhigh`/`max`,
-    /// ceiling [`ReasoningEffortCeiling::Max`]; `ThinkingLevel::Off` sends
-    /// `none`. **`temperature` is rejected** unless the effort is `none`.
+    /// ceiling [`ReasoningEffortCeiling::Max`]; `ThinkingLevel::Off` omits the
+    /// effort (the model's default, `medium`). **`temperature` is rejected**
+    /// unless the effort is `none`, which this crate never sends.
     ///
     /// Priced per OpenAI's pricing page (read 2026-09-25): $0.10 input /
     /// $0.01 cached / $0.125 cache write / $0.50 output; above 272K prompt
@@ -1356,7 +1422,6 @@ impl ModelConfig {
         Self::gpt_6(
             "gpt-6-luna",
             "GPT-6 Luna",
-            true,
             CostConfig::new(0.1, 0.5)
                 .with_cache_read(0.01)
                 .with_cache_write(0.125)
@@ -1374,7 +1439,7 @@ impl ModelConfig {
     /// provider reads nothing else from it. It starts from
     /// [`OpenAiCompat::openai`] so that switching `api` to Chat Completions
     /// yields correct flags rather than the bare defaults.
-    fn gpt_6(id: &str, name: &str, supports_effort_none: bool, cost: CostConfig) -> Self {
+    fn gpt_6(id: &str, name: &str, cost: CostConfig) -> Self {
         Self {
             reasoning: true,
             context_window: 1_050_000,
@@ -1382,7 +1447,6 @@ impl ModelConfig {
             cost: Some(cost),
             compat: Some(OpenAiCompat {
                 max_reasoning_effort: ReasoningEffortCeiling::Max,
-                supports_effort_none,
                 ..OpenAiCompat::openai()
             }),
             ..Self::openai_responses(id, name)
@@ -1419,12 +1483,11 @@ impl ModelConfig {
     ///
     /// Unpriced (`cost: None`); set `cost` for the model you use.
     ///
-    /// `compat` is `None`, so reasoning effort tops out at `high` and
-    /// `ThinkingLevel::Off` omits it. For a model with a higher ceiling or a
-    /// `none` rung, set `compat` to an [`OpenAiCompat`] carrying
-    /// [`max_reasoning_effort`](OpenAiCompat::max_reasoning_effort) /
-    /// [`supports_effort_none`](OpenAiCompat::supports_effort_none) — the
-    /// Responses provider reads those two fields and ignores the rest.
+    /// `compat` is `None`, so reasoning effort tops out at `high`
+    /// (`ThinkingLevel::Off` always omits it). For a model with a higher
+    /// ceiling, set `compat` to an [`OpenAiCompat`] carrying
+    /// [`max_reasoning_effort`](OpenAiCompat::max_reasoning_effort) — the
+    /// Responses provider reads that field and ignores the rest.
     pub fn openai_responses(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -1676,7 +1739,12 @@ impl ModelConfig {
             reasoning: true,
             context_window: 1_048_576,
             max_tokens: 131_072,
-            cost: Some(CostConfig::new(1.25, 4.25).with_cache_read(0.15)),
+            // No cache-write charge: writes bill at the input rate.
+            cost: Some(
+                CostConfig::new(1.25, 4.25)
+                    .with_cache_read(0.15)
+                    .with_cache_write(1.25),
+            ),
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -1850,9 +1918,10 @@ mod tests {
         assert!(mc.cost.as_ref().unwrap().is_configured());
         assert_eq!(mc.cost.as_ref().unwrap().input_per_million, 1.25);
         assert_eq!(mc.cost.as_ref().unwrap().output_per_million, 4.25);
-        // Meta documents a cached-input rate; cache writes are not charged.
+        // Meta documents a cached-input rate; cache writes carry no extra
+        // charge, so they bill at the input rate.
         assert_eq!(mc.cost.as_ref().unwrap().cache_read_per_million, 0.15);
-        assert_eq!(mc.cost.as_ref().unwrap().cache_write_per_million, 0.0);
+        assert_eq!(mc.cost.as_ref().unwrap().cache_write_per_million, 1.25);
         let compat = mc.compat.expect("compat flags set");
         assert!(matches!(
             compat.max_tokens_field,
@@ -1871,6 +1940,39 @@ mod tests {
         assert_eq!(config.base_url, "https://api.anthropic.com/v1");
         assert!(config.compat.is_none());
         assert!(config.anthropic.is_none());
+    }
+
+    #[test]
+    fn effort_clamps_are_detected_exactly() {
+        use ReasoningEffortCeiling as C;
+        let at = |ceiling| OpenAiCompat {
+            max_reasoning_effort: ceiling,
+            ..OpenAiCompat::openai()
+        };
+        let levels = [
+            ThinkingLevel::Off,
+            ThinkingLevel::Minimal,
+            ThinkingLevel::Low,
+            ThinkingLevel::Medium,
+            ThinkingLevel::High,
+            ThinkingLevel::XHigh,
+            ThinkingLevel::Max,
+        ];
+        for ceiling in [C::High, C::XHigh, C::Max] {
+            for level in levels {
+                let clamped = at(ceiling)
+                    .openai_reasoning_effort(level)
+                    .and_then(|sent| effort_clamp_slot(level, sent))
+                    .is_some();
+                // A clamp is exactly: the level asks for a rung above the
+                // ceiling. Minimal → low is a renaming, not a clamp.
+                let expected = matches!(
+                    (level, ceiling),
+                    (ThinkingLevel::XHigh, C::High) | (ThinkingLevel::Max, C::High | C::XHigh)
+                );
+                assert_eq!(clamped, expected, "{level:?} at {ceiling:?}");
+            }
+        }
     }
 
     #[test]
@@ -1893,6 +1995,46 @@ mod tests {
         assert!((cost.cost_usd(&usage) - 6.6).abs() < 1e-9);
         // zero rates (default) => zero cost
         assert_eq!(CostConfig::default().cost_usd(&usage), 0.0);
+        assert_eq!(CostConfig::new(0.0, 0.0).cost_usd(&usage), 0.0);
+    }
+
+    #[test]
+    fn zero_cache_rates_bill_at_the_input_rate() {
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        // Unset cache rates: cache tokens bill as input ($2/M).
+        let bare = CostConfig::new(2.0, 8.0);
+        assert!(close(bare.cost_usd(&usage(0, 500_000, 0, 0)), 1.0));
+        assert!(close(bare.cost_usd(&usage(0, 0, 500_000, 0)), 1.0));
+        // Near-miss: an explicit rate is used as-is, each field independently.
+        let read_only = CostConfig::new(2.0, 8.0).with_cache_read(0.2);
+        assert!(close(read_only.cost_usd(&usage(0, 500_000, 0, 0)), 0.1));
+        assert!(close(read_only.cost_usd(&usage(0, 0, 500_000, 0)), 1.0));
+        let write_only = CostConfig::new(2.0, 8.0).with_cache_write(2.5);
+        assert!(close(write_only.cost_usd(&usage(0, 0, 100_000, 0)), 0.25));
+        assert!(close(write_only.cost_usd(&usage(0, 100_000, 0, 0)), 0.2));
+        // Tiers fall back to the tier's own input rate, not the base cache
+        // rate and not the base input rate.
+        let tiered = CostConfig::new(2.0, 8.0)
+            .with_cache_read(0.2)
+            .with_cache_write(2.5)
+            .with_context_tier(ContextTier::new(100_000, 4.0, 12.0));
+        let m = 1_000_000;
+        assert!(close(tiered.cost_usd(&usage(0, m, 0, 0)), 4.0));
+        assert!(close(tiered.cost_usd(&usage(0, 0, m, 0)), 4.0));
+        // Below the threshold the base cache rates still apply.
+        assert!(close(tiered.cost_usd(&usage(0, 50_000, 0, 0)), 0.01));
+        // A tier with its own cache rates keeps them.
+        let tier_rates = CostConfig::new(2.0, 8.0).with_context_tier(
+            ContextTier::new(100_000, 4.0, 12.0)
+                .with_cache_read(0.4)
+                .with_cache_write(5.0),
+        );
+        assert!(close(tier_rates.cost_usd(&usage(0, m, 0, 0)), 0.4));
+        assert!(close(tier_rates.cost_usd(&usage(0, 0, m, 0)), 5.0));
+        // Fully free stays free, in every band.
+        let free = CostConfig::new(0.0, 0.0).with_context_tier(ContextTier::new(100_000, 0.0, 0.0));
+        assert_eq!(free.cost_usd(&usage(10, m, m, 10)), 0.0);
+        assert_eq!(free.cost_usd(&usage(10, 10, 10, 10)), 0.0);
     }
 
     #[test]
@@ -1970,7 +2112,6 @@ mod tests {
         assert_eq!(gpt.cost.as_ref().unwrap().output_per_million, 30.0);
         let compat = gpt.compat.as_ref().unwrap();
         assert_eq!(compat.max_reasoning_effort, ReasoningEffortCeiling::XHigh);
-        assert!(compat.supports_effort_none);
         // The rest of the compat is native OpenAI's, unchanged.
         assert!(compat.supports_reasoning_effort && compat.supports_prompt_cache_key);
         assert_eq!(compat.max_tokens_field, MaxTokensField::MaxCompletionTokens);
@@ -1978,10 +2119,10 @@ mod tests {
 
     #[test]
     fn gpt_6_presets() {
-        for (mc, id, none) in [
-            (ModelConfig::gpt_6_astra(), "gpt-6-astra", false),
-            (ModelConfig::gpt_6_sol(), "gpt-6-sol", true),
-            (ModelConfig::gpt_6_luna(), "gpt-6-luna", true),
+        for (mc, id) in [
+            (ModelConfig::gpt_6_astra(), "gpt-6-astra"),
+            (ModelConfig::gpt_6_sol(), "gpt-6-sol"),
+            (ModelConfig::gpt_6_luna(), "gpt-6-luna"),
         ] {
             assert_eq!(mc.id, id);
             // Tool calling on GPT-6 needs Responses (Chat Completions refuses
@@ -1994,7 +2135,6 @@ mod tests {
             assert!(mc.max_tokens <= 128_000);
             let compat = mc.compat.as_ref().unwrap();
             assert_eq!(compat.max_reasoning_effort, ReasoningEffortCeiling::Max);
-            assert_eq!(compat.supports_effort_none, none, "{id}");
             let tiers = &mc.cost.as_ref().unwrap().context_tiers;
             assert_eq!(tiers.len(), 1, "{id}");
             assert_eq!(tiers[0].above_prompt_tokens, 272_000);
@@ -2093,10 +2233,11 @@ mod tests {
             3.0 + 45.0
         ));
         // Cached input above 272K: $1.00 (UNVERIFIED — see `gpt_5_5` docs).
-        // What matters structurally is that it is not $0.
         assert!(close(cost.cost_usd(&usage(0, 1_000_000, 0, 0)), 1.0));
-        assert_eq!(cost.cache_write_per_million, 0.0);
-        assert_eq!(cost.context_tiers[0].cache_write_per_million, 0.0);
+        // No separate cache-write charge: writes bill at the band's input
+        // rate, $5 below 272K and $10 above.
+        assert!(close(cost.cost_usd(&usage(0, 0, 100_000, 0)), 0.5));
+        assert!(close(cost.cost_usd(&usage(0, 0, 1_000_000, 0)), 10.0));
     }
 
     #[test]

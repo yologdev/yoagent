@@ -277,12 +277,16 @@ impl ProviderError {
         message: &str,
         retry_after_ms: Option<u64>,
     ) -> Self {
-        if is_context_overflow(status, message) {
+        // 429 first: a rate-limit body can contain an overflow phrase (Azure's
+        // "exceeds the maximum usage size allowed during peak load"), and
+        // classifying it as overflow compacts the context instead of backing
+        // off.
+        if status == 429 {
+            Self::RateLimited { retry_after_ms }
+        } else if is_context_overflow(status, message) {
             Self::ContextOverflow {
                 message: message.to_string(),
             }
-        } else if status == 429 {
-            Self::RateLimited { retry_after_ms }
         } else if status == 401 || status == 403 {
             Self::Auth(message.to_string())
         } else {
@@ -362,10 +366,17 @@ pub(crate) fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<
 
 /// Classify an SSE-embedded error event message into a [`ProviderError`].
 ///
-/// Checks the error text for known patterns (context overflow, etc.).
-/// Used by providers that receive `"error"` events in the SSE stream.
+/// A structured rate-limit error (see [`is_rate_limit_payload`]) is
+/// [`ProviderError::RateLimited`], checked **before** the overflow phrases —
+/// the same order as the HTTP path, for the same reason. Otherwise the text
+/// is checked for known context-overflow patterns. Used by providers that
+/// receive `"error"` events in the SSE stream.
 pub fn classify_sse_error_event(message: &str) -> ProviderError {
-    if is_context_overflow_message(message) {
+    if is_rate_limit_payload(message) {
+        ProviderError::RateLimited {
+            retry_after_ms: None,
+        }
+    } else if is_context_overflow_message(message) {
         ProviderError::ContextOverflow {
             message: message.to_string(),
         }
@@ -374,16 +385,66 @@ pub fn classify_sse_error_event(message: &str) -> ProviderError {
     }
 }
 
+/// Error `type` / `code` / `status` values that mean "rate limited or out of
+/// capacity, retry later", compared case-insensitively:
+///
+/// - `too_many_requests`, `no_capacity` — Azure OpenAI's mid-stream error
+///   (`{"type":"error","error":{"type":"too_many_requests","code":"no_capacity",
+///   "message":"… exceeds the maximum usage size allowed during peak load …"}}`)
+/// - `rate_limit_exceeded` — OpenAI's error `code`
+/// - `rate_limit_error` — Anthropic's error `type`
+/// - `rate_limit` — generic
+///
+/// Google's in-stream `{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}`
+/// is deliberately not listed: it stays an [`ProviderError::Api`] carrying the
+/// payload, as `google_stream_test` pins. Numeric codes are not read.
+const RATE_LIMIT_CODES: &[&str] = &[
+    "too_many_requests",
+    "no_capacity",
+    "rate_limit_exceeded",
+    "rate_limit_error",
+    "rate_limit",
+];
+
+/// Whether an SSE error payload is a structured rate-limit / capacity error.
+///
+/// Looks at `type`, `code` and `status` on the nested `error` object, on
+/// `response.error` (a Responses `response.failed` event), and at the top
+/// level (a Responses `error` event carries `code` there). Only structured
+/// string fields are read — free text is not, since a message can mention a
+/// rate limit without being one.
+fn is_rate_limit_payload(message: &str) -> bool {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(message) else {
+        return false;
+    };
+    let candidates = [v.get("error"), v.pointer("/response/error"), Some(&v)];
+    let limited = candidates.into_iter().flatten().any(|e| {
+        ["type", "code", "status"]
+            .iter()
+            .any(|key| match e.get(key) {
+                Some(serde_json::Value::String(s)) => {
+                    RATE_LIMIT_CODES.contains(&s.to_ascii_lowercase().as_str())
+                }
+                _ => false,
+            })
+    });
+    limited
+}
+
 /// Known phrases that indicate context overflow across LLM providers.
 ///
 /// Covers: Anthropic, OpenAI, Google Gemini, AWS Bedrock, xAI, Groq,
 /// OpenRouter, llama.cpp, LM Studio, MiniMax, Kimi, GitHub Copilot,
 /// and generic patterns.
 const OVERFLOW_PHRASES: &[&str] = &[
-    "prompt is too long",                 // Anthropic
-    "input is too long",                  // AWS Bedrock
-    "exceeds the context window",         // OpenAI (Completions & Responses)
-    "exceeds the maximum",                // Google Gemini ("input token count exceeds the maximum")
+    "prompt is too long",         // Anthropic
+    "input is too long",          // AWS Bedrock
+    "exceeds the context window", // OpenAI (Completions & Responses)
+    // Google Gemini: "The input token count (N) exceeds the maximum number
+    // of tokens allowed (M)". Kept this specific: the bare "exceeds the
+    // maximum" also matched Azure's rate-limit text ("exceeds the maximum
+    // usage size allowed during peak load").
+    "exceeds the maximum number of tokens",
     "maximum prompt length",              // xAI
     "reduce the length of the messages",  // Groq
     "maximum context length",             // OpenRouter
@@ -535,6 +596,84 @@ mod tests {
         let err = ProviderError::classify(400, "invalid request format");
         assert!(matches!(err, ProviderError::Api(_)));
         assert!(!err.is_context_overflow());
+    }
+
+    /// Azure OpenAI's mid-stream capacity error, verbatim in shape.
+    const AZURE_NO_CAPACITY: &str = r#"{"type":"error","error":{"type":"too_many_requests","code":"no_capacity","message":"The request exceeds the maximum usage size allowed during peak load. Please retry later.","param":null},"sequence_number":3}"#;
+
+    #[test]
+    fn azure_no_capacity_mid_stream_is_rate_limited_not_overflow() {
+        let err = classify_sse_error_event(AZURE_NO_CAPACITY);
+        assert!(
+            matches!(err, ProviderError::RateLimited { .. }),
+            "got {err:?}"
+        );
+        // And the text alone no longer reads as an overflow either.
+        assert!(!is_context_overflow_message(AZURE_NO_CAPACITY));
+    }
+
+    #[test]
+    fn http_429_is_rate_limited_even_with_an_overflow_phrase() {
+        // Positive control: the body does carry an overflow phrase.
+        let body = "HTTP 429: prompt is too long for current capacity";
+        assert!(is_context_overflow_message(body));
+        let err = ProviderError::classify_with_retry_after(429, body, Some(2000));
+        assert!(
+            matches!(
+                err,
+                ProviderError::RateLimited {
+                    retry_after_ms: Some(2000)
+                }
+            ),
+            "got {err:?}"
+        );
+        // Near-miss: the same body at 400 is still an overflow.
+        assert!(ProviderError::classify(400, body).is_context_overflow());
+    }
+
+    #[test]
+    fn structured_rate_limit_codes_in_sse_errors() {
+        for payload in [
+            // OpenAI Responses `error` event: code at the top level.
+            r#"{"type":"error","code":"rate_limit_exceeded","message":"Rate limit reached","param":null}"#,
+            // Responses `response.failed`.
+            r#"{"type":"response.failed","response":{"status":"failed","error":{"code":"rate_limit_exceeded","message":"slow down"}}}"#,
+            // Anthropic mid-stream.
+            r#"{"type":"error","error":{"type":"rate_limit_error","message":"Number of request tokens has exceeded your rate limit"}}"#,
+        ] {
+            let err = classify_sse_error_event(payload);
+            assert!(
+                matches!(err, ProviderError::RateLimited { .. }),
+                "{payload}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sse_overflow_and_plain_errors_are_unchanged() {
+        // Overflow payloads with non-rate-limit codes still read as overflow.
+        for payload in [
+            r#"{"type":"error","error":{"type":"invalid_request_error","message":"prompt is too long: 213462 tokens > 200000 maximum"}}"#,
+            r#"{"type":"response.failed","response":{"error":{"code":"context_length_exceeded","message":"Your input exceeds the context window of this model."}}}"#,
+            r#"{"error":{"code":400,"message":"The input token count (1196265) exceeds the maximum number of tokens allowed (1048576).","status":"INVALID_ARGUMENT"}}"#,
+        ] {
+            assert!(
+                classify_sse_error_event(payload).is_context_overflow(),
+                "{payload}"
+            );
+        }
+        // A message that merely mentions a rate limit is not one: only
+        // structured fields are read.
+        let err = classify_sse_error_event(
+            r#"{"type":"error","error":{"type":"api_error","message":"rate_limit config invalid"}}"#,
+        );
+        assert!(matches!(err, ProviderError::Api(_)), "{err:?}");
+        // Non-JSON text keeps the phrase path.
+        assert!(classify_sse_error_event("context_length_exceeded").is_context_overflow());
+        assert!(matches!(
+            classify_sse_error_event("internal error"),
+            ProviderError::Api(_)
+        ));
     }
 
     #[test]
