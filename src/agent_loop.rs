@@ -1529,12 +1529,18 @@ async fn execute_single_tool(
     // sub-agent failed and the tool returned `Err`. Attach it to the result
     // too — a streaming consumer reads it off `ToolExecutionEnd` — but only
     // where the tool did not already: `SubAgentTool` sets it on success, and
-    // a custom tool's own details are not ours to overwrite.
+    // a custom tool's own details are not ours to overwrite. A call that
+    // reported several runs gets their combination, so the details never
+    // show less than the rollup counted (see `from_sub_agent_result`).
     let delegated =
         std::mem::take(&mut *sub_agent_report.lock().unwrap_or_else(|e| e.into_inner()));
     let mut result = result;
-    if let [stats] = delegated.as_slice() {
-        attach_sub_agent_stats(&mut result.details, stats);
+    if let Some((first, rest)) = delegated.split_first() {
+        let mut combined = first.clone();
+        for stats in rest {
+            combined.merge(stats);
+        }
+        attach_sub_agent_stats(&mut result.details, &combined);
     }
 
     tx.send(AgentEvent::ToolExecutionEnd {

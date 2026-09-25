@@ -601,8 +601,9 @@ pub struct ToolContext {
     pub on_update: Option<ToolUpdateFn>,
     /// Optional callback for emitting user-facing progress messages.
     pub on_progress: Option<ProgressFn>,
-    /// Set by the loop; a [`SubAgentTool`](crate::SubAgentTool) reports its
-    /// run's stats here so they survive a failed delegation.
+    /// Set by the loop; delegation tools report their runs' stats here, via
+    /// [`report_delegated_run`](Self::report_delegated_run), so they survive a
+    /// failed delegation.
     pub(crate) sub_agent_report: Option<SubAgentReport>,
 }
 
@@ -640,6 +641,32 @@ impl ToolContext {
     pub fn with_on_progress(mut self, on_progress: ProgressFn) -> Self {
         self.on_progress = Some(on_progress);
         self
+    }
+
+    /// Report one delegated agent run's stats to the loop that invoked this
+    /// tool, so its spend is counted in that loop's
+    /// [`SessionStats::sub_agents`].
+    ///
+    /// [`SubAgentTool`](crate::SubAgentTool) calls this for you; a **custom**
+    /// delegation tool — one that runs its own [`agent_loop`](crate::agent_loop())
+    /// or [`Agent`](crate::Agent) — calls it once per run it started, with that
+    /// run's stats as carried by its [`AgentEvent::AgentEnd`]. Report even
+    /// when the run failed and the tool is about to return `Err`: the spend of
+    /// a failed delegation is still spend, and this is the only way it reaches
+    /// the parent.
+    ///
+    /// **Call it before [`execute`](AgentTool::execute) returns.** The loop
+    /// collects reports as soon as the tool's future completes; a report made
+    /// after that — from a task the tool spawned and did not await, say — is
+    /// silently lost. Clones of this context report to the same place, so a
+    /// tool that fans out to several runs can hand each a clone.
+    ///
+    /// A no-op on a context the loop did not build (e.g. one from
+    /// [`ToolContext::new`]): there is no parent to report to.
+    pub fn report_delegated_run(&self, stats: SessionStats) {
+        if let Some(report) = &self.sub_agent_report {
+            report.lock().unwrap_or_else(|e| e.into_inner()).push(stats);
+        }
     }
 }
 
@@ -903,8 +930,14 @@ pub struct SessionStats {
     /// Dollar cost of [`usage`](Self::usage), when the model's rates are
     /// configured (see [`CostConfig`](crate::provider::CostConfig)).
     ///
-    /// `None` means "cannot price this", never "free" — all-zero rates mean
-    /// pricing is unknown, which is the case for custom and local models.
+    /// `None` is never "free", but it means one of two things: the spend
+    /// **cannot be priced** (a turn with non-zero usage came from a model
+    /// without configured rates — all-zero rates mean pricing is unknown,
+    /// the case for custom and local models), or there was **nothing to
+    /// price** (a run that took no turns, or whose turns reported no usage).
+    /// [`is_unpriced`](Self::is_unpriced) tells them apart. Unpriced is
+    /// sticky: once any turn cannot be priced this stays `None`, because a
+    /// sum that silently skips the unpriced part under-reports.
     ///
     /// Scope: this run's own turns. What [`SubAgentTool`](crate::SubAgentTool)s
     /// spent is kept apart in [`sub_agents`](Self::sub_agents); use
@@ -966,6 +999,14 @@ impl SessionStats {
         }
     }
 
+    /// Whether this run's **own** spend cannot be priced: non-zero
+    /// [`usage`](Self::usage) with no [`cost_usd`](Self::cost_usd). `false`
+    /// when there is simply nothing to price. Delegated spend is judged
+    /// separately by [`SubAgentSpend::is_unpriced`].
+    pub fn is_unpriced(&self) -> bool {
+        is_unpriced(&self.usage, self.cost_usd)
+    }
+
     /// This run's own usage plus everything its sub-agents spent.
     ///
     /// `total_tokens` stays 0, as in [`usage`](Self::usage), and for the same
@@ -978,16 +1019,27 @@ impl SessionStats {
     /// model's rates.
     ///
     /// `None` when any part of that spend cannot be priced — an unpriced
-    /// sub-agent makes the whole figure unknown rather than silently low. Spend
-    /// of zero tokens needs no price.
+    /// sub-agent makes the whole figure unknown rather than silently low — and
+    /// also when nothing at all was spent. Spend of zero tokens needs no
+    /// price, so a zero-usage part never poisons the rest.
     pub fn total_cost_usd(&self) -> Option<f64> {
-        let mut total = SubAgentSpend {
-            usage: self.usage.clone(),
-            cost_usd: self.cost_usd,
-            runs: 0,
-        };
-        total.merge(&self.sub_agents);
-        total.cost_usd
+        combine_cost(
+            &self.usage,
+            self.cost_usd,
+            &self.sub_agents.usage,
+            self.sub_agents.cost_usd,
+        )
+    }
+
+    /// Fold another run's stats into this one — own figures into own, the
+    /// delegated bucket into the delegated bucket — with the same unpriced
+    /// rule as [`SubAgentSpend::merge`].
+    pub(crate) fn merge(&mut self, other: &SessionStats) {
+        self.cost_usd = combine_cost(&self.usage, self.cost_usd, &other.usage, other.cost_usd);
+        self.usage = add_usage(&self.usage, &other.usage);
+        self.turns = self.turns.saturating_add(other.turns);
+        self.compactions = self.compactions.saturating_add(other.compactions);
+        self.sub_agents.merge(&other.sub_agents);
     }
 
     /// The [`SessionStats`] of a sub-agent run, if `result` came from a
@@ -1000,6 +1052,12 @@ impl SessionStats {
     /// [`sub_agents`](Self::sub_agents) what *it* delegated, so own and nested
     /// spend stay distinguishable; [`total_usage`](Self::total_usage) covers the
     /// subtree.
+    ///
+    /// A custom tool that reported **several** runs from one call (see
+    /// [`ToolContext::report_delegated_run`]) gets their combination: `usage`,
+    /// `turns` and `cost_usd` summed over those runs' own turns, `sub_agents`
+    /// over what they in turn delegated. The subtree totals stay exact; only
+    /// the split between the individual runs is not kept.
     ///
     /// Do not add these to [`AgentEvent::AgentEnd`]'s stats as well: the loop
     /// already folds every delegation into that run's
@@ -1032,20 +1090,21 @@ impl SessionStats {
     /// It is written this way so a per-turn model override stays correct if one
     /// is ever introduced, and so `cost_usd` reflects whether any turn was
     /// priceable rather than requiring a separate check.
+    ///
+    /// Pricing follows [`combine_cost`]: a turn with non-zero usage and no
+    /// configured rates makes [`cost_usd`](Self::cost_usd) `None` for the rest
+    /// of the run, rather than leaving a partial sum that reads as the whole.
     pub(crate) fn record_turn(
         &mut self,
         usage: &Usage,
         cost: Option<&crate::provider::CostConfig>,
     ) {
-        self.usage.input += usage.input;
-        self.usage.output += usage.output;
-        self.usage.cache_read += usage.cache_read;
-        self.usage.cache_write += usage.cache_write;
-        self.turns += 1;
-
-        if let Some(cost) = cost.filter(|c| c.is_configured()) {
-            *self.cost_usd.get_or_insert(0.0) += cost.cost_usd(usage);
-        }
+        let turn_cost = cost
+            .filter(|c| c.is_configured())
+            .map(|c| c.cost_usd(usage));
+        self.cost_usd = combine_cost(&self.usage, self.cost_usd, usage, turn_cost);
+        self.usage = add_usage(&self.usage, usage);
+        self.turns = self.turns.saturating_add(1);
     }
 }
 
@@ -1056,10 +1115,10 @@ pub const SUB_AGENT_STATS_KEY: &str = "sub_agent_stats";
 
 fn add_usage(a: &Usage, b: &Usage) -> Usage {
     Usage {
-        input: a.input + b.input,
-        output: a.output + b.output,
-        cache_read: a.cache_read + b.cache_read,
-        cache_write: a.cache_write + b.cache_write,
+        input: a.input.saturating_add(b.input),
+        output: a.output.saturating_add(b.output),
+        cache_read: a.cache_read.saturating_add(b.cache_read),
+        cache_write: a.cache_write.saturating_add(b.cache_write),
         // Not summed — see `SessionStats::record_turn`.
         total_tokens: 0,
     }
@@ -1067,6 +1126,37 @@ fn add_usage(a: &Usage, b: &Usage) -> Usage {
 
 fn usage_is_zero(u: &Usage) -> bool {
     u.input == 0 && u.output == 0 && u.cache_read == 0 && u.cache_write == 0
+}
+
+/// Spend that happened but has no price: non-zero usage, no cost.
+fn is_unpriced(usage: &Usage, cost: Option<f64>) -> bool {
+    cost.is_none() && !usage_is_zero(usage)
+}
+
+/// The cost of two pieces of spend together — the one rule every rollup
+/// shares ([`SessionStats::record_turn`], [`SessionStats::total_cost_usd`],
+/// [`SubAgentSpend::merge`], `Agent::total_cost_usd`).
+///
+/// `None` if either piece is unpriced — sticky, so a later priced piece never
+/// revives a sum that silently skipped part of the bill. A zero-usage piece
+/// with no cost needs no price and does not poison the other. `None` too when
+/// neither piece carries a cost at all (nothing was spent).
+///
+/// Both naive `Option` sums are wrong: `zip` drops a priced piece when the
+/// other merely spent nothing, and `unwrap_or(0.0)` turns unpriced into free.
+pub(crate) fn combine_cost(
+    a_usage: &Usage,
+    a_cost: Option<f64>,
+    b_usage: &Usage,
+    b_cost: Option<f64>,
+) -> Option<f64> {
+    if is_unpriced(a_usage, a_cost) || is_unpriced(b_usage, b_cost) {
+        return None;
+    }
+    match (a_cost, b_cost) {
+        (None, None) => None,
+        (a, b) => Some(a.unwrap_or(0.0) + b.unwrap_or(0.0)),
+    }
 }
 
 /// Spend of delegated [`SubAgentTool`](crate::SubAgentTool) runs, carried as
@@ -1087,10 +1177,13 @@ pub struct SubAgentSpend {
     /// model's rates — a sub-agent on a cheaper model is billed as such, never
     /// re-priced at the parent's.
     ///
-    /// `None` means "cannot price this", never "free": it is `None` as soon as
-    /// any delegated spend came from a model without configured rates, because
-    /// a sum that silently skips the unpriced part is the under-report this
-    /// field exists to remove.
+    /// `None` is never "free", but it means one of two things: the delegated
+    /// spend **cannot be priced** — sticky as soon as any delegated spend came
+    /// from a model without configured rates, because a sum that silently
+    /// skips the unpriced part is the under-report this field exists to
+    /// remove — or there was **nothing to price** (no delegation, or runs that
+    /// reported no usage). [`is_unpriced`](Self::is_unpriced) tells them
+    /// apart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
     /// Sub-agent invocations, nested ones included. Non-zero means delegation
@@ -1105,6 +1198,14 @@ impl SubAgentSpend {
         self.runs == 0 && usage_is_zero(&self.usage) && self.cost_usd.is_none()
     }
 
+    /// Whether delegated spend happened that cannot be priced: non-zero
+    /// [`usage`](Self::usage) with no [`cost_usd`](Self::cost_usd). `false`
+    /// for an empty bucket, where `cost_usd` is `None` because there is
+    /// nothing to price.
+    pub fn is_unpriced(&self) -> bool {
+        is_unpriced(&self.usage, self.cost_usd)
+    }
+
     /// Fold another bucket into this one — for a caller accumulating across
     /// runs.
     ///
@@ -1112,18 +1213,9 @@ impl SubAgentSpend {
     /// [`cost_usd`](Self::cost_usd) `None` once any part is unpriced, which a
     /// plain `Option` sum gets wrong in both directions.
     pub fn merge(&mut self, other: &SubAgentSpend) {
-        let self_unpriced = self.cost_usd.is_none() && !usage_is_zero(&self.usage);
-        let other_unpriced = other.cost_usd.is_none() && !usage_is_zero(&other.usage);
+        self.cost_usd = combine_cost(&self.usage, self.cost_usd, &other.usage, other.cost_usd);
         self.usage = add_usage(&self.usage, &other.usage);
-        self.runs += other.runs;
-        self.cost_usd = if self_unpriced || other_unpriced {
-            None
-        } else {
-            match (self.cost_usd, other.cost_usd) {
-                (None, None) => None,
-                (a, b) => Some(a.unwrap_or(0.0) + b.unwrap_or(0.0)),
-            }
-        };
+        self.runs = self.runs.saturating_add(other.runs);
     }
 
     /// Fold in one sub-agent run, given that run's own stats — its own spend
@@ -1147,6 +1239,73 @@ impl SubAgentSpend {
 /// A `Vec` because [`ToolContext`] is `Clone`: a custom tool may hand clones to
 /// several sub-agents within one call, and each run must be counted.
 pub(crate) type SubAgentReport = Arc<std::sync::Mutex<Vec<SessionStats>>>;
+
+#[cfg(test)]
+mod spend_rollup_tests {
+    use super::*;
+    use crate::provider::CostConfig;
+
+    fn u(input: u64) -> Usage {
+        Usage {
+            input,
+            ..Usage::default()
+        }
+    }
+
+    /// $1 per million input tokens, so `u(1_000_000)` costs exactly $1.
+    fn priced() -> CostConfig {
+        CostConfig::new(1.0, 0.0)
+    }
+
+    /// An unpriced turn that spent tokens poisons the run's cost, and a
+    /// priced turn after it must not revive a partial sum — the same rule as
+    /// `SubAgentSpend::merge`.
+    #[test]
+    fn record_turn_unpriced_then_priced_is_unknown() {
+        let mut stats = SessionStats::default();
+        stats.record_turn(&u(1_000_000), None);
+        assert_eq!(stats.cost_usd, None);
+        stats.record_turn(&u(1_000_000), Some(&priced()));
+        assert_eq!(stats.cost_usd, None, "a partial sum would under-report");
+        assert!(stats.is_unpriced());
+        assert_eq!(stats.usage, u(2_000_000));
+        assert_eq!(stats.turns, 2);
+    }
+
+    #[test]
+    fn record_turn_priced_then_unpriced_is_unknown() {
+        let mut stats = SessionStats::default();
+        stats.record_turn(&u(1_000_000), Some(&priced()));
+        assert_eq!(stats.cost_usd, Some(1.0));
+        stats.record_turn(&u(1), Some(&CostConfig::default()));
+        assert_eq!(stats.cost_usd, None);
+    }
+
+    #[test]
+    fn record_turn_sums_priced_turns_and_ignores_empty_unpriced_ones() {
+        let mut stats = SessionStats::default();
+        // No usage reported: nothing to price, so no poison.
+        stats.record_turn(&Usage::default(), None);
+        assert_eq!(stats.cost_usd, None);
+        assert!(!stats.is_unpriced(), "nothing spent is not unpriced");
+        stats.record_turn(&u(1_000_000), Some(&priced()));
+        stats.record_turn(&u(2_000_000), Some(&priced()));
+        assert_eq!(stats.cost_usd, Some(3.0));
+        assert!(!stats.is_unpriced());
+    }
+
+    #[test]
+    fn usage_sums_saturate_instead_of_overflowing() {
+        let mut a = SubAgentSpend {
+            usage: u(u64::MAX - 1),
+            cost_usd: Some(1.0),
+            runs: u32::MAX,
+        };
+        a.merge(&a.clone());
+        assert_eq!(a.usage.input, u64::MAX);
+        assert_eq!(a.runs, u32::MAX);
+    }
+}
 
 /// What a summarization request produced, carried by
 /// [`AgentEvent::ContextCompacted`].

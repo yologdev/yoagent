@@ -138,11 +138,19 @@ Other constructors:
 figures: `SessionStats::sub_agents` (`SubAgentSpend { usage, cost_usd, runs }`),
 summed over the whole delegation tree, each run priced at its own model's rates;
 `total_usage()`/`total_cost_usd()` add the two. The child's `SessionStats`
-reach the loop through a crate-internal `ToolContext::sub_agent_report` side
-channel (so a failed delegation, which returns `Err`, still reports) and are
-folded in at `execute_single_tool`, which also attaches them to the
-`ToolExecutionEnd` details (`SessionStats::from_sub_agent_result`).
-`Agent::sub_agent_spend()` accumulates across runs.
+reach the loop through `ToolContext::report_delegated_run` (public, so custom
+delegation tools report too; must be called before `execute` returns) into a
+private side channel — so a failed delegation, which returns `Err`, still
+reports — and are folded in at `execute_single_tool`, which also attaches them
+(combined, when one call reported several runs) to the `ToolExecutionEnd`
+details (`SessionStats::from_sub_agent_result`). Every cost rollup —
+`record_turn`, `SubAgentSpend::merge`, `total_cost_usd` — goes through one
+`combine_cost` rule: non-zero usage with no cost is *unpriced* and sticky-`None`;
+`None` with zero usage is "nothing spent" (`is_unpriced()` tells them apart).
+`Agent` accumulates each run's `SessionStats`: `sub_agent_spend()`,
+`total_cost_usd()` and `total_usage()` share that runs-since-construction-or-
+`reset()` window, unaffected by clearing/replacing history, whereas
+`session_cost_usd()` is history-derived and excludes sub-agents.
 
 `AgentLoopConfig` also supports `turn_delay: Option<Duration>` — an inter-turn delay to throttle API calls for rate-limit-sensitive providers. Exposed on `SubAgentTool` via `with_turn_delay()`.
 

@@ -1548,3 +1548,241 @@ async fn agent_exposes_sub_agent_spend_across_runs() {
     agent.reset().await;
     assert!(agent.sub_agent_spend().is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// Whole-bill totals, the unpriced tri-state, and custom delegation tools
+// ---------------------------------------------------------------------------
+
+/// `ModelConfig::mock()` priced at `dollars_per_k` per thousand input
+/// tokens, so `usage(1_000, ..)` costs exactly that many dollars. (Kept to
+/// thousands so runs stay under the default execution token limit.)
+fn priced_mock(dollars_per_k: f64) -> ModelConfig {
+    let mut config = ModelConfig::mock();
+    config.cost = yoagent::provider::CostConfig::new(dollars_per_k * 1000.0, 0.0);
+    config
+}
+
+fn text_turn(u: Usage) -> MockResponse {
+    MockResponse::TextWithUsage("ok".into(), u)
+}
+
+async fn run_agent(agent: &mut Agent, text: &str) {
+    let mut rx = agent.prompt(text).await;
+    while rx.recv().await.is_some() {}
+    agent.finish().await;
+}
+
+/// With no delegation the whole bill is the agent's own cost. The delegated
+/// bucket's `None` here means "nothing spent", so a naive `zip` of the two
+/// options — which yields `None` — gets this case wrong.
+#[tokio::test]
+async fn total_cost_without_delegation_is_the_agents_own() {
+    let mut agent = Agent::from_provider(
+        MockProvider::new(vec![text_turn(usage(1_000, 0, 0, 0))]),
+        priced_mock(1.0),
+    );
+    assert_eq!(agent.total_cost_usd(), None, "nothing spent yet");
+
+    run_agent(&mut agent, "go").await;
+    assert!(agent.sub_agent_spend().is_empty());
+    assert!(!agent.sub_agent_spend().is_unpriced());
+    assert_eq!(agent.session_cost_usd(), Some(1.0));
+    assert_eq!(agent.total_cost_usd(), Some(1.0));
+    assert_eq!(agent.total_usage(), usage(1_000, 0, 0, 0));
+}
+
+/// The total covers runs, not history: clearing or replacing history lowers
+/// the history-derived `session_cost_usd` but not the bill, which moves only
+/// on `reset` — the same window as `sub_agent_spend`.
+#[tokio::test]
+async fn total_cost_combines_own_and_delegated_spend_over_one_window() {
+    let child = SubAgentTool::from_provider(
+        "helper",
+        Arc::new(MockProvider::new(vec![text_turn(usage(1_000, 0, 0, 0))])),
+        priced_mock(2.0),
+    );
+    let parent = MockProvider::new(vec![
+        delegate_with_usage("helper", usage(1_000, 0, 0, 0)),
+        text_turn(usage(1_000, 0, 0, 0)),
+    ]);
+    let mut agent = Agent::from_provider(parent, priced_mock(1.0)).with_sub_agent(child);
+    run_agent(&mut agent, "go").await;
+
+    // Own: 2k input at $1/k. Delegated: 1k at the child's $2/k.
+    assert_eq!(agent.session_cost_usd(), Some(2.0));
+    assert_eq!(agent.sub_agent_spend().cost_usd, Some(2.0));
+    assert_eq!(agent.total_cost_usd(), Some(4.0));
+    assert_eq!(agent.total_usage(), usage(3_000, 0, 0, 0));
+
+    agent.clear_messages();
+    assert_eq!(agent.session_cost_usd(), Some(0.0), "history-derived");
+    assert_eq!(agent.total_cost_usd(), Some(4.0), "spent is spent");
+    assert_eq!(agent.total_usage(), usage(3_000, 0, 0, 0));
+
+    agent.reset().await;
+    assert_eq!(agent.total_cost_usd(), None);
+    assert_eq!(agent.total_usage(), Usage::default());
+}
+
+/// An unpriced sub-agent that spent tokens makes the bill unknown, not a sum
+/// that treats its spend as free (`unwrap_or(0.0)`).
+#[tokio::test]
+async fn unpriced_delegation_makes_the_total_unknown() {
+    // `ModelConfig::mock()` has no rates.
+    let child = SubAgentTool::from_provider(
+        "helper",
+        Arc::new(MockProvider::new(vec![text_turn(usage(500, 0, 0, 0))])),
+        ModelConfig::mock(),
+    );
+    let parent = MockProvider::new(vec![
+        delegate_with_usage("helper", usage(1_000, 0, 0, 0)),
+        text_turn(Usage::default()),
+    ]);
+    let mut agent = Agent::from_provider(parent, priced_mock(1.0)).with_sub_agent(child);
+    run_agent(&mut agent, "go").await;
+
+    assert_eq!(agent.session_cost_usd(), Some(1.0), "own spend is priced");
+    assert!(agent.sub_agent_spend().is_unpriced());
+    assert_eq!(agent.sub_agent_spend().cost_usd, None);
+    assert_eq!(agent.total_cost_usd(), None);
+}
+
+#[test]
+fn is_unpriced_separates_unknown_from_nothing_spent() {
+    let empty = SubAgentSpend::default();
+    assert_eq!(empty.cost_usd, None);
+    assert!(!empty.is_unpriced(), "nothing to price");
+
+    let mut free_run = SubAgentSpend::default();
+    free_run.runs = 1;
+    assert!(!free_run.is_unpriced(), "a run that spent no tokens");
+
+    let mut unpriced = SubAgentSpend::default();
+    unpriced.usage = usage(1, 0, 0, 0);
+    unpriced.runs = 1;
+    assert!(unpriced.is_unpriced());
+
+    let mut priced = unpriced.clone();
+    priced.cost_usd = Some(0.5);
+    assert!(!priced.is_unpriced());
+
+    // SessionStats: a zero-turn run reports `None` too, and is not unpriced.
+    let zero_turns = SessionStats::default();
+    assert_eq!(zero_turns.cost_usd, None);
+    assert!(!zero_turns.is_unpriced());
+    assert!(SessionStats::new(usage(1, 0, 0, 0), 1, None, 0).is_unpriced());
+}
+
+/// A custom delegation tool: it reports each run it "started" through
+/// `ToolContext::report_delegated_run`, then succeeds or fails.
+struct FanOutTool {
+    runs: Vec<SessionStats>,
+    fail: bool,
+}
+
+#[async_trait::async_trait]
+impl AgentTool for FanOutTool {
+    fn name(&self) -> &str {
+        "fanout"
+    }
+    fn label(&self) -> &str {
+        "Fan out"
+    }
+    fn description(&self) -> &str {
+        "Delegates to several agents"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object", "properties": {}})
+    }
+    async fn execute(
+        &self,
+        _params: serde_json::Value,
+        ctx: ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        for run in &self.runs {
+            ctx.report_delegated_run(run.clone());
+        }
+        if self.fail {
+            return Err(ToolError::Failed("a delegate failed".into()));
+        }
+        Ok(ToolResult {
+            content: vec![Content::Text {
+                text: "fanned out".into(),
+            }],
+            details: serde_json::Value::Null,
+        })
+    }
+}
+
+fn call_fanout() -> MockResponse {
+    MockResponse::ToolCalls(vec![MockToolCall {
+        name: "fanout".into(),
+        arguments: serde_json::json!({}),
+        provider_metadata: None,
+    }])
+}
+
+/// A custom tool's report is counted like `SubAgentTool`'s — including when
+/// the tool then fails.
+#[tokio::test]
+async fn custom_tool_reporting_a_delegated_run_is_counted() {
+    let tool = FanOutTool {
+        runs: vec![SessionStats::new(usage(40, 4, 0, 0), 2, Some(0.25), 0)],
+        fail: true,
+    };
+    let parent = MockProvider::new(vec![call_fanout(), MockResponse::Text("ok".into())]);
+    let events = run_parent(parent, vec![Box::new(tool)]).await;
+
+    let stats = end_stats(&events);
+    assert_eq!(stats.sub_agents.usage, usage(40, 4, 0, 0));
+    assert_eq!(stats.sub_agents.cost_usd, Some(0.25));
+    assert_eq!(stats.sub_agents.runs, 1);
+
+    let (result, is_error) = tool_end(&events, "fanout");
+    assert!(is_error);
+    let reported = SessionStats::from_sub_agent_result(&result).unwrap();
+    assert_eq!(reported.usage, usage(40, 4, 0, 0));
+}
+
+/// Two runs reported from one tool call: the rollup counts both, and the
+/// details carry their combination rather than nothing.
+#[tokio::test]
+async fn two_delegations_in_one_call_attach_combined_stats() {
+    let first = SessionStats::new(usage(100, 10, 0, 0), 2, Some(1.0), 0);
+    let mut second = SessionStats::new(usage(200, 20, 0, 0), 3, Some(2.0), 1);
+    // The second run delegated further itself.
+    second.sub_agents.usage = usage(7, 0, 0, 0);
+    second.sub_agents.cost_usd = Some(0.5);
+    second.sub_agents.runs = 1;
+
+    let tool = FanOutTool {
+        runs: vec![first, second],
+        fail: false,
+    };
+    let parent = MockProvider::new(vec![call_fanout(), MockResponse::Text("ok".into())]);
+    let events = run_parent(parent, vec![Box::new(tool)]).await;
+
+    let stats = end_stats(&events);
+    assert_eq!(stats.sub_agents.usage, usage(307, 30, 0, 0));
+    assert_eq!(stats.sub_agents.runs, 3, "two reported runs and one nested");
+    assert_eq!(stats.sub_agents.cost_usd, Some(3.5));
+
+    let (result, is_error) = tool_end(&events, "fanout");
+    assert!(!is_error);
+    let combined =
+        SessionStats::from_sub_agent_result(&result).expect("several runs must still attach stats");
+    assert_eq!(combined.usage, usage(300, 30, 0, 0), "the runs' own spend");
+    assert_eq!(combined.turns, 5);
+    assert_eq!(combined.cost_usd, Some(3.0));
+    assert_eq!(combined.compactions, 1);
+    assert_eq!(combined.sub_agents.usage, usage(7, 0, 0, 0));
+    assert_eq!(combined.total_usage(), stats.sub_agents.usage);
+    assert_eq!(combined.total_cost_usd(), stats.sub_agents.cost_usd);
+}
+
+/// Outside the loop there is no parent to report to; reporting is a no-op
+/// rather than a panic.
+#[test]
+fn report_delegated_run_without_a_loop_is_a_no_op() {
+    ToolContext::new("id", "tool").report_delegated_run(SessionStats::default());
+}

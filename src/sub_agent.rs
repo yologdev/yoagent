@@ -382,10 +382,9 @@ impl AgentTool for SubAgentTool {
         params: serde_json::Value,
         ctx: ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        let cancel = ctx.cancel;
-        let on_update = ctx.on_update;
-        let on_progress = ctx.on_progress;
-        let sub_agent_report = ctx.sub_agent_report;
+        let cancel = ctx.cancel.clone();
+        let on_update = ctx.on_update.clone();
+        let on_progress = ctx.on_progress.clone();
         // Extract the task parameter
         let task = params
             .get("task")
@@ -526,12 +525,7 @@ impl AgentTool for SubAgentTool {
         // still spent tokens, and `Err(ToolError)` has nowhere to carry them.
         // `run_stats` covers this run's own turns and, recursively, whatever
         // its own sub-agents reported to it.
-        if let Some(report) = sub_agent_report {
-            report
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push(run_stats.clone());
-        }
+        ctx.report_delegated_run(run_stats.clone());
 
         // Check if the last message was an error
         if let Some(error_msg) = extract_error(&new_messages) {
