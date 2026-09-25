@@ -1,6 +1,7 @@
 # Azure OpenAI Provider
 
-`AzureOpenAiProvider` implements the OpenAI Responses API format with Azure-specific authentication and URL patterns.
+`AzureOpenAiProvider` calls the Responses API on Azure OpenAI's **v1 API**, the
+surface Microsoft documents for Responses today.
 
 ## Usage
 
@@ -12,29 +13,66 @@ use yoagent::provider::{ApiProtocol, ModelConfig};
 let agent = Agent::from_config(ModelConfig::custom(
     ApiProtocol::AzureOpenAiResponses,
     "azure",
-    "https://{resource}.openai.azure.com/openai/deployments/{deployment}",
-    "gpt-5.5",
+    "https://{resource}.openai.azure.com/openai/v1",
+    "{deployment}", // the model id is your *deployment name*
     "GPT-5.5",
 ));
 ```
 
+## URL Format
+
+Every request is:
+
+```
+POST https://{resource}.openai.azure.com/openai/v1/responses
+```
+
+with no `api-version` query parameter. Azure's v1 API guide: "`api-version` is
+no longer a required parameter with the v1 GA API." The deployment is named by
+`model` in the request body, not in the path, so the model id must be the
+**deployment name** (Azure's troubleshooting note: "**404**: Confirm `model`
+matches your deployment name.").
+
+`ModelConfig.base_url` can take any of these forms; each resolves to the URL
+above:
+
+| `base_url` | Notes |
+|---|---|
+| `https://{resource}.openai.azure.com` | resource endpoint |
+| `https://{resource}.openai.azure.com/openai/v1` | the base URL Azure's SDK samples use (trailing `/` fine) |
+| `https://{resource}.services.ai.azure.com/openai/v1` | Foundry endpoint form, also accepted by Azure |
+| `https://{resource}.openai.azure.com/openai/deployments/{deployment}` | legacy form, see below |
+
+### Migrating from the deployment-scoped URL
+
+Earlier versions documented
+`https://{resource}.openai.azure.com/openai/deployments/{deployment}` and sent
+`{base_url}/responses?api-version=2025-01-01-preview`. Azure never served
+Responses there: the API arrived in `2025-03-01-preview`, at
+`/openai/responses`, not under `/deployments/`. Those requests failed.
+
+A deployment-scoped `base_url` still works. The provider sends it to
+`/openai/v1/responses` and puts `{deployment}` from the URL in the body's
+`model`, overriding the configured model id. New configs should use the
+`/openai/v1` form with the deployment name as the model id.
+
 ## Authentication
 
-Uses the `api-key` header (not `Authorization: Bearer`):
+With an API key, the provider sends the `api-key` header, as in Azure's REST
+samples:
 
 ```
 api-key: {your_api_key}
 ```
 
-Additional headers can be set via `ModelConfig.headers` (e.g., for Azure AD Bearer tokens).
+For Microsoft Entra ID, leave the key empty (don't set
+`AZURE_OPENAI_API_KEY`) and pass the token in `ModelConfig.headers`:
 
-## URL Format
-
+```rust
+config.headers.insert("Authorization".into(), format!("Bearer {token}"));
 ```
-https://{resource}.openai.azure.com/openai/deployments/{deployment}
-```
 
-Set this as `ModelConfig.base_url`. The provider appends `/responses?api-version=2025-01-01-preview`.
+When the key is empty, the provider sends no `api-key` header.
 
 ## API Details
 
@@ -57,8 +95,8 @@ matching OpenAI preset is simplest:
 let mut config = ModelConfig::custom(
     ApiProtocol::AzureOpenAiResponses,
     "azure",
-    "https://{resource}.openai.azure.com/openai/deployments/{deployment}",
-    "gpt-6-sol",
+    "https://{resource}.openai.azure.com/openai/v1",
+    "{deployment}", // a deployment of gpt-6-sol
     "GPT-6 Sol",
 );
 config.compat = ModelConfig::gpt_6_sol().compat; // ceiling `max`, `Off` → `none`
