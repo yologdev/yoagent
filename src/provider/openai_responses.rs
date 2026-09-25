@@ -87,6 +87,7 @@ impl StreamProvider for OpenAiResponsesProvider {
             }
         }
 
+        let error_message = state.error_message();
         let (content, usage, stop_reason) = state.finish(&tx);
 
         let message = Message::Assistant {
@@ -96,7 +97,7 @@ impl StreamProvider for OpenAiResponsesProvider {
             provider: model_config.provider.clone(),
             usage,
             timestamp: now_ms(),
-            error_message: None,
+            error_message,
         };
 
         let _ = tx.send(StreamEvent::Done {

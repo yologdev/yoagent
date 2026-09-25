@@ -581,13 +581,22 @@ struct OpenAiFunctionDelta {
     arguments: Option<String>,
 }
 
+/// A token count that some servers send as explicit `null`.
+///
+/// `#[serde(default)]` covers only a *missing* key; `null` in a `u64` field
+/// fails the whole payload — on Chat Completions the chunk carrying the usage
+/// (often with the `finish_reason`), on Responses the terminal event.
+pub(crate) fn null_as_zero<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+    Ok(Option::<u64>::deserialize(d)?.unwrap_or(0))
+}
+
 #[derive(Deserialize)]
 struct OpenAiUsage {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_zero")]
     prompt_tokens: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_zero")]
     completion_tokens: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_zero")]
     total_tokens: u64,
     #[serde(default)]
     prompt_tokens_details: Option<OpenAiPromptTokensDetails>,
@@ -599,12 +608,12 @@ struct OpenAiUsage {
 
 #[derive(Deserialize)]
 struct OpenAiPromptTokensDetails {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_zero")]
     cached_tokens: u64,
     /// Prompt tokens written to the cache on this request (openai-python
     /// `PromptTokensDetails.cache_write_tokens`). Billed at a premium on
     /// GPT-5.6 and later.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_zero")]
     cache_write_tokens: u64,
 }
 
@@ -1301,6 +1310,21 @@ mod tests {
         assert_eq!(usage.cache_write, 0);
         assert_eq!(usage.output, 10);
         assert_eq!(usage.total_tokens, 110);
+    }
+
+    #[test]
+    fn test_usage_tolerates_explicit_nulls() {
+        // One `null` count used to fail the whole chunk, dropping the usage
+        // and any finish_reason riding on it.
+        let chunk: OpenAiChunk = serde_json::from_str(
+            r#"{"choices":[{"delta":{},"finish_reason":"stop"}],
+                "usage":{"prompt_tokens":100,"completion_tokens":null,"total_tokens":null,
+                         "prompt_tokens_details":{"cached_tokens":null,"cache_write_tokens":null}}}"#,
+        )
+        .unwrap();
+        assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("stop"));
+        let usage = usage_from_openai(chunk.usage.as_ref().unwrap());
+        assert_eq!((usage.input, usage.output, usage.cache_read), (100, 0, 0));
     }
 
     #[test]
