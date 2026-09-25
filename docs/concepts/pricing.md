@@ -163,6 +163,20 @@ YOAGENT_PRICES=/etc/myapp/prices.json ./myapp
   `PriceTable::resolved` / `install_override`) touches the table. A missing,
   unreadable or invalid file does not panic: it is logged with
   `tracing::warn!` and ignored, and the built-in prices apply.
+- The outcome is visible to the host, not just in the log.
+  `PriceTable::env_override_status()` returns one of:
+  - `None`: the variable was not set;
+  - `Some(Ok(entries))`: the file loaded;
+  - `Some(Err(error))`: the file was rejected and ignored.
+
+  A host that would rather fail than run on prices it did not ask for can
+  check this at startup. It can also call `PriceTable::load_env_override()`,
+  which reads and strictly parses the file right away and returns
+  `Result<Option<PriceTable>, PriceError>`.
+- This crate's own unit tests never read `YOAGENT_PRICES`. Its integration
+  tests and doctests that assert list prices call
+  `PriceTable::clear_override()` first. The suite passes with the variable
+  set.
 - `install_override` **replaces** the user layer — including one loaded from
   `YOAGENT_PRICES` — rather than merging into it. `PriceTable::clear_override()`
   removes it. `PriceTable::resolved()` returns a snapshot of what a

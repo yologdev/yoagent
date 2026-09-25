@@ -85,7 +85,7 @@ use super::model::{ContextTier, CostConfig};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::{OnceLock, PoisonError, RwLock};
+use std::sync::{Arc, OnceLock, PoisonError, RwLock};
 
 mod fetch;
 pub use fetch::{CachedPrices, PriceChange, PriceOrigin, PriceSource, DEFAULT_FETCH_TIMEOUT};
@@ -535,22 +535,33 @@ fn layers() -> &'static RwLock<Layers> {
     })
 }
 
+/// What happened to [`PRICES_ENV_VAR`] when the layers were initialised.
+type EnvStatus = Option<Result<usize, Arc<PriceError>>>;
+
+static ENV_STATUS: OnceLock<EnvStatus> = OnceLock::new();
+
 /// The user layer named by [`PRICES_ENV_VAR`], if set and valid. A bad file
-/// is logged and ignored: a typo in an environment variable must not take
-/// down every constructor in the process.
+/// is logged and ignored — a typo in an environment variable must not take
+/// down every constructor in the process — and the outcome is recorded for
+/// [`PriceTable::env_override_status`].
+///
+/// Never read in this crate's own unit tests, so a developer's
+/// `YOAGENT_PRICES` cannot change what they assert.
 fn env_override() -> Option<PriceTable> {
-    let path = std::env::var_os(PRICES_ENV_VAR)?;
-    if path.is_empty() {
-        return None;
-    }
-    match PriceTable::from_path(&path) {
-        Ok(table) => {
+    #[cfg(test)]
+    let loaded: Result<Option<PriceTable>, PriceError> = Ok(None);
+    #[cfg(not(test))]
+    let loaded = PriceTable::load_env_override();
+    let path = std::env::var_os(PRICES_ENV_VAR).unwrap_or_default();
+    let (status, table) = match loaded {
+        Ok(None) => (None, None),
+        Ok(Some(table)) => {
             tracing::info!(
                 path = %Path::new(&path).display(),
                 entries = table.len(),
                 "yoagent prices: loaded {PRICES_ENV_VAR} override"
             );
-            Some(table)
+            (Some(Ok(table.len())), Some(table))
         }
         Err(e) => {
             tracing::warn!(
@@ -558,9 +569,11 @@ fn env_override() -> Option<PriceTable> {
                 error = %e,
                 "yoagent prices: ignoring {PRICES_ENV_VAR}; using built-in prices"
             );
-            None
+            (Some(Err(Arc::new(e))), None)
         }
-    }
+    };
+    let _ = ENV_STATUS.set(status);
+    table
 }
 
 fn read_layers() -> std::sync::RwLockReadGuard<'static, Layers> {
@@ -610,6 +623,34 @@ impl PriceTable {
     /// called now would use.
     pub fn resolved() -> PriceTable {
         read_layers().resolved.clone()
+    }
+
+    /// What became of `YOAGENT_PRICES` when the process-wide table was
+    /// first used (calling this uses it, reading the variable if nothing
+    /// has yet):
+    ///
+    /// - `None`: the variable was unset or empty;
+    /// - `Some(Ok(n))`: the file loaded as the user layer with `n` entries;
+    /// - `Some(Err(e))`: the file was rejected — logged and ignored, so
+    ///   built-in prices apply.
+    ///
+    /// A host that would rather fail than run on prices it did not ask for
+    /// checks this at startup, or calls
+    /// [`load_env_override`](Self::load_env_override) itself.
+    pub fn env_override_status() -> Option<Result<usize, Arc<PriceError>>> {
+        let _ = layers();
+        ENV_STATUS.get().cloned().flatten()
+    }
+
+    /// Read and strictly parse the file named by `YOAGENT_PRICES` now,
+    /// without installing it: `Ok(None)` when the variable is unset or
+    /// empty. For a host that wants to fail fast on a bad file rather than
+    /// have it logged and ignored.
+    pub fn load_env_override() -> Result<Option<PriceTable>, PriceError> {
+        match std::env::var_os(PRICES_ENV_VAR) {
+            Some(path) if !path.is_empty() => Self::from_path(path).map(Some),
+            _ => Ok(None),
+        }
     }
 }
 
@@ -1049,6 +1090,27 @@ mod tests {
         );
         assert!(t.cost("acme", "rocket-1").is_some());
         assert_eq!(t.len(), base.len() + 1);
+    }
+
+    /// This crate's unit tests never read `YOAGENT_PRICES`, so a developer's
+    /// override cannot change what they assert.
+    #[test]
+    fn unit_tests_ignore_the_env_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prices.json");
+        std::fs::write(
+            &path,
+            r#"{"schema": 1, "providers": {"anthropic": {"claude-sonnet-5": {"input": 9, "output": 9}}}}"#,
+        )
+        .unwrap();
+        std::env::set_var(PRICES_ENV_VAR, &path);
+        // Positive control: the variable is set and names a good file.
+        let loaded = PriceTable::load_env_override().unwrap().unwrap();
+        assert_eq!(loaded.len(), 1);
+        // Yet the layer initialiser does not use it.
+        assert!(env_override().is_none());
+        std::env::remove_var(PRICES_ENV_VAR);
+        assert!(PriceTable::load_env_override().unwrap().is_none());
     }
 
     #[test]

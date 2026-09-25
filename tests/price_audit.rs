@@ -200,6 +200,8 @@ fn presets() -> Vec<Preset> {
 /// `model.rs`) would be priced but unaudited.
 #[test]
 fn every_priced_preset_is_an_audited_entry() {
+    // List prices only: a developer's YOAGENT_PRICES must not change them.
+    PriceTable::clear_override();
     let table = PriceTable::builtin();
     for config in [
         ModelConfig::claude_fable_5(),

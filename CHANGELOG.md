@@ -38,7 +38,12 @@ adheres to [Semantic Versioning](https://semver.org/).
   `clear_override()` removes it) or the `YOAGENT_PRICES=/path/to/prices.json`
   environment variable, read once on first use — a bad file is logged with
   `tracing::warn!` and ignored, never a panic. Partial files override only
-  what they list. `PriceTable::resolved()` snapshots the result. Constructors
+  what they list. `PriceTable::resolved()` snapshots the result.
+  `PriceTable::env_override_status()` reports what became of
+  `YOAGENT_PRICES`: `None` (not set), `Some(Ok(entries))`, or
+  `Some(Err(error))`. `PriceTable::load_env_override()` reads the file
+  strictly on demand, so a host can fail fast. The crate's unit tests never
+  read the variable, and the test suite passes with it set. Constructors
   resolve when they run, so install overrides before building configs; an
   explicit `config.cost` set afterwards still wins.
 - **Opt-in live price sources.** `PriceTable::fetch(&PriceSource)` (with a

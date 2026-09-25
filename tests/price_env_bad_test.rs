@@ -6,7 +6,7 @@
 
 use std::sync::{Arc, Mutex};
 use tracing_subscriber::layer::SubscriberExt;
-use yoagent::provider::{ModelConfig, PriceTable};
+use yoagent::provider::{ModelConfig, PriceError, PriceTable};
 
 /// Captures every event's message and fields on this thread.
 #[derive(Clone, Default)]
@@ -61,4 +61,26 @@ fn a_bad_env_file_is_logged_and_ignored() {
         .unwrap_or_else(|| panic!("no warning about the bad file; logs: {logs:?}"));
     assert!(warning.contains("prices.json"), "{warning}");
     assert!(warning.contains("non-negative"), "{warning}");
+    drop(logs);
+
+    // The host can see it too, and fail fast if it wants.
+    let status = PriceTable::env_override_status().expect("the variable was set");
+    let err = status.expect_err("the file was rejected");
+    assert!(matches!(*err, PriceError::InvalidRate { .. }), "{err}");
+    assert!(matches!(
+        PriceTable::load_env_override(),
+        Err(PriceError::InvalidRate { .. })
+    ));
+    // A typo'd field in a hand-written file is NewerFormat, strictly.
+    std::fs::write(
+        &path,
+        r#"{"schema": 1, "providers": {"anthropic": {"claude-opus-5": {"input": 5, "output": 25, "cache_reed": 0.5}}}}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        PriceTable::load_env_override(),
+        Err(PriceError::NewerFormat { .. })
+    ));
+    std::env::remove_var("YOAGENT_PRICES");
+    assert!(PriceTable::load_env_override().unwrap().is_none());
 }

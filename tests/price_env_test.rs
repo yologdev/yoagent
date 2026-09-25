@@ -35,6 +35,9 @@ fn env_var_file_overrides_what_it_lists_and_is_read_once() {
         PriceTable::builtin().cost("anthropic", "claude-opus-5")
     );
 
+    // The outcome is visible to the host, not just logged.
+    assert!(matches!(PriceTable::env_override_status(), Some(Ok(2))));
+
     // Read once: pointing the variable elsewhere changes nothing.
     std::env::set_var("YOAGENT_PRICES", dir.path().join("missing.json"));
     assert_eq!(
@@ -44,6 +47,12 @@ fn env_var_file_overrides_what_it_lists_and_is_read_once() {
             .input_per_million,
         0.8
     );
+
+    // load_env_override reads now, strictly, without installing.
+    assert!(matches!(
+        PriceTable::load_env_override(),
+        Err(yoagent::provider::PriceError::Io { .. })
+    ));
 
     // install_override replaces the env-loaded layer.
     PriceTable::install_override(PriceTable::new());

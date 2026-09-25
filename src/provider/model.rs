@@ -93,6 +93,7 @@ impl std::fmt::Display for ApiProtocol {
 ///
 /// ```
 /// # use yoagent::provider::{CostConfig, ModelConfig};
+/// # yoagent::provider::PriceTable::clear_override(); // ignore a developer's YOAGENT_PRICES
 /// // A named preset is priced; adjust one rate and keep the rest.
 /// let mut config = ModelConfig::claude_sonnet_5();
 /// config
@@ -1140,6 +1141,7 @@ impl ModelConfig {
     ///
     /// ```
     /// # use yoagent::provider::{ModelConfig, PriceTable};
+    /// # PriceTable::clear_override(); // ignore a developer's YOAGENT_PRICES
     /// let mine = PriceTable::from_json_str(r#"{"schema": 1, "providers": {
     ///     "anthropic": {"claude-sonnet-5": {"input": 1.8, "output": 9.0}}}}"#)?;
     /// let config = ModelConfig::claude_sonnet_5().with_prices(&mine);
