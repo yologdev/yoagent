@@ -529,6 +529,49 @@ impl AnthropicCompat {
     }
 }
 
+/// Quirk flags for the Gemini protocols (`GoogleGenerativeAi` and
+/// `GoogleVertex`).
+///
+/// When `ModelConfig.google` is `None`, providers use `GoogleCompat::default()`,
+/// which infers everything from the model id.
+///
+/// Marked `#[non_exhaustive]` so flags can be added without a breaking change:
+/// start from [`GoogleCompat::default()`] (or a constructor) and assign fields.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+#[non_exhaustive]
+pub struct GoogleCompat {
+    /// Which `thinkingConfig` field carries [`ThinkingLevel`](crate::ThinkingLevel).
+    ///
+    /// - `None` (default): read it from the model id. Gemini 3 and later get
+    ///   `thinkingLevel`; Gemini 2.x, and any id the rule cannot read, get
+    ///   `thinkingBudget`. See `docs/providers/google.md` for the rule.
+    /// - `Some(true)`: always send `thinkingLevel` — for a proxy alias or
+    ///   tuned-model name that hides a Gemini 3 model.
+    /// - `Some(false)`: always send `thinkingBudget`, which Gemini 3 still
+    ///   accepts for backward compatibility.
+    ///
+    /// Gemini rejects `thinkingLevel` on models before Gemini 3, and rejects a
+    /// request that carries both fields, so exactly one is ever sent.
+    pub thinking_level: Option<bool>,
+}
+
+impl GoogleCompat {
+    /// Always send `thinkingConfig.thinkingLevel`, whatever the model id says.
+    pub fn force_thinking_level() -> Self {
+        Self {
+            thinking_level: Some(true),
+        }
+    }
+
+    /// Always send `thinkingConfig.thinkingBudget`, whatever the model id says.
+    pub fn force_thinking_budget() -> Self {
+        Self {
+            thinking_level: Some(false),
+        }
+    }
+}
+
 /// The two OpenCode gateways (<https://opencode.ai>).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OpenCodeGateway {
@@ -633,6 +676,14 @@ pub struct ModelConfig {
     /// `None` behaves like `AnthropicCompat::default()` (current generation).
     #[serde(default)]
     pub anthropic: Option<AnthropicCompat>,
+    /// Gemini quirk flags (only for the `GoogleGenerativeAi` and
+    /// `GoogleVertex` protocols). `None` behaves like
+    /// `GoogleCompat::default()`: everything is inferred from the model id.
+    ///
+    /// Omitted on serialize when `None`, so configs that never set it
+    /// serialize exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub google: Option<GoogleCompat>,
 }
 
 /// `ModelConfig::cost`'s deserializer: an all-zero object is the pre-0.19
@@ -713,6 +764,7 @@ impl ModelConfig {
             max_tokens: 16_000,
             cost: None,
             headers: HashMap::new(),
+            google: None,
             compat: None,
             anthropic: None,
         }
@@ -731,6 +783,7 @@ impl ModelConfig {
             max_tokens: 16_000,
             cost: None,
             headers: HashMap::new(),
+            google: None,
             anthropic: None,
             compat: None,
         }
@@ -925,6 +978,7 @@ impl ModelConfig {
             max_tokens: 4096,
             cost: None,
             headers: HashMap::new(),
+            google: None,
             anthropic: None,
             compat: Some(OpenAiCompat::openai()),
         }
@@ -944,6 +998,7 @@ impl ModelConfig {
             max_tokens: 4096,
             cost: None,
             headers: HashMap::new(),
+            google: None,
             anthropic: None,
             compat: Some(OpenAiCompat::default()),
         }
@@ -1030,6 +1085,7 @@ impl ModelConfig {
             max_tokens: 16_000,
             cost: None,
             headers: HashMap::new(),
+            google: None,
             compat,
             anthropic,
         }
@@ -1054,6 +1110,7 @@ impl ModelConfig {
             max_tokens: 4096,
             cost: None,
             headers: HashMap::new(),
+            google: None,
             anthropic: None,
             compat: Some(compat),
         }
@@ -1075,6 +1132,7 @@ impl ModelConfig {
             max_tokens: 4096,
             cost: None,
             headers: HashMap::new(),
+            google: None,
             anthropic: None,
             compat: Some(OpenAiCompat::ollama()),
         }
@@ -1095,6 +1153,7 @@ impl ModelConfig {
             max_tokens: 4096,
             cost: None,
             headers: HashMap::new(),
+            google: None,
             anthropic: None,
             compat: Some(OpenAiCompat::zai()),
         }
@@ -1130,6 +1189,7 @@ impl ModelConfig {
             max_tokens: 131_072,
             cost: Some(CostConfig::new(1.25, 4.25).with_cache_read(0.15)),
             headers: HashMap::new(),
+            google: None,
             anthropic: None,
             compat: Some(OpenAiCompat::meta()),
         }
@@ -1150,6 +1210,7 @@ impl ModelConfig {
             max_tokens: 4096,
             cost: None,
             headers: HashMap::new(),
+            google: None,
             anthropic: None,
             compat: Some(OpenAiCompat::minimax()),
         }
@@ -1170,6 +1231,7 @@ impl ModelConfig {
             max_tokens: 4096,
             cost: None,
             headers: HashMap::new(),
+            google: None,
             anthropic: None,
             compat: Some(OpenAiCompat::qwen()),
         }
@@ -1190,6 +1252,7 @@ impl ModelConfig {
             max_tokens: 4096,
             cost: None,
             headers: HashMap::new(),
+            google: None,
             anthropic: None,
             compat: Some(OpenAiCompat::xai()),
         }
@@ -1210,6 +1273,7 @@ impl ModelConfig {
             max_tokens: 4096,
             cost: None,
             headers: HashMap::new(),
+            google: None,
             anthropic: None,
             compat: Some(OpenAiCompat::groq()),
         }
@@ -1233,6 +1297,7 @@ impl ModelConfig {
             max_tokens: 384_000,
             cost: None,
             headers: HashMap::new(),
+            google: None,
             anthropic: None,
             compat: Some(OpenAiCompat::deepseek()),
         }
@@ -1253,6 +1318,7 @@ impl ModelConfig {
             max_tokens: 4096,
             cost: None,
             headers: HashMap::new(),
+            google: None,
             anthropic: None,
             compat: Some(OpenAiCompat::mistral()),
         }
@@ -1271,6 +1337,7 @@ impl ModelConfig {
             max_tokens: 8192,
             cost: None,
             headers: HashMap::new(),
+            google: None,
             anthropic: None,
             compat: None,
         }

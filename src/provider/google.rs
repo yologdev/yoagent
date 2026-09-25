@@ -299,8 +299,8 @@ fn part_text(part: &GooglePart) -> Option<&str> {
     part.text.as_deref().filter(|t| !t.is_empty())
 }
 
-/// Token budget for Gemini's thinkingConfig per level. Also used by Vertex AI,
-/// so the two cannot drift.
+/// Token budget for Gemini 2.x's `thinkingConfig.thinkingBudget` per level.
+/// Only reached through [`gemini_thinking_config`], which Vertex AI shares.
 pub(crate) fn gemini_thinking_budget(level: ThinkingLevel) -> u32 {
     match level {
         ThinkingLevel::Off => 0,
@@ -312,6 +312,129 @@ pub(crate) fn gemini_thinking_budget(level: ThinkingLevel) -> u32 {
         // no per-model table here, so the crate stays within the smallest
         // documented maximum rather than send an out-of-range budget.
         ThinkingLevel::High | ThinkingLevel::XHigh | ThinkingLevel::Max => 24576,
+    }
+}
+
+/// Which `thinkingConfig` field a Gemini model takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GeminiThinkingParam {
+    /// `thinkingBudget` — Gemini 2.x, and any id the version rule cannot read
+    /// (Gemini 3 still accepts a budget for backward compatibility).
+    Budget,
+    /// `thinkingLevel` — Gemini 3 and later. `minimal` is true only where
+    /// `MINIMAL` is documented as accepted; elsewhere it is clamped to `LOW`,
+    /// which every Gemini 3 text model accepts.
+    Level { minimal: bool },
+}
+
+/// Reads the Gemini generation off a model id.
+///
+/// Google's rule is version-based: `thinkingLevel` is "Recommended for Gemini
+/// 3 or later models. Use with earlier models results in an error." (REST
+/// reference, `ThinkingConfig`). So the version number decides, not a model
+/// list. Accepts bare ids (`gemini-3.8-flash`), `models/…` names, Vertex
+/// resource paths (`projects/…/publishers/google/models/gemini-3.1-pro-preview`)
+/// and `@version` suffixes.
+///
+/// `MINIMAL` per the Gemini API thinking guide's level table: rejected by 3.8
+/// and 3.7 Flash, not supported by 3.1 Pro; accepted by 3.6 / 3.5 Flash, every
+/// 3.x Flash-Lite and 3 Flash. Unlisted 3.x+ models (Pro variants, future
+/// Flash releases) are treated as not accepting it, so the worst case is
+/// `LOW` where `MINIMAL` would have worked, never a 400.
+///
+/// Aliases: `gemini-flash-latest` (3.5 Flash since 2026-05-19) and
+/// `gemini-pro-latest` (3 Pro preview since 2026-01-21) point at Gemini 3
+/// per the API changelog; they are hot-swapped, so `MINIMAL` is not assumed.
+/// `gemini-flash-lite-latest` has no documented target, so it keeps the
+/// budget, which every generation accepts.
+fn gemini_thinking_param(model: &str) -> GeminiThinkingParam {
+    let name = model.rsplit('/').next().unwrap_or(model);
+    let name = name.split('@').next().unwrap_or(name).to_ascii_lowercase();
+    let Some(rest) = name.strip_prefix("gemini-") else {
+        return GeminiThinkingParam::Budget;
+    };
+    if rest == "flash-latest" || rest == "pro-latest" {
+        return GeminiThinkingParam::Level { minimal: false };
+    }
+
+    let major_len = rest.bytes().take_while(u8::is_ascii_digit).count();
+    let Ok(major) = rest[..major_len].parse::<u32>() else {
+        return GeminiThinkingParam::Budget;
+    };
+    if major < 3 {
+        return GeminiThinkingParam::Budget;
+    }
+    let after_major = &rest[major_len..];
+    let (minor, variant) = match after_major.strip_prefix('.') {
+        Some(tail) => {
+            let len = tail.bytes().take_while(u8::is_ascii_digit).count();
+            (tail[..len].parse::<u32>().ok(), &tail[len..])
+        }
+        None => (Some(0), after_major),
+    };
+
+    let minimal = major == 3
+        && (variant.starts_with("-flash-lite")
+            || (variant.starts_with("-flash") && matches!(minor, Some(0 | 5 | 6))));
+    GeminiThinkingParam::Level { minimal }
+}
+
+/// The `thinkingLevel` string for a [`ThinkingLevel`] on a Gemini 3+ model.
+///
+/// `Off` becomes the lowest level the model accepts: the API guide says
+/// `minimal` "Matches the "no thinking" setting for most queries" and
+/// Vertex calls it "as close as possible to a zero budget for thinking".
+/// Omitting `thinkingConfig` would instead leave the model at its default
+/// (`MEDIUM` or `HIGH`). Gemini 3 cannot fully turn thinking off.
+fn gemini_thinking_level(level: ThinkingLevel, minimal: bool) -> &'static str {
+    match level {
+        ThinkingLevel::Off | ThinkingLevel::Minimal if minimal => "MINIMAL",
+        ThinkingLevel::Off | ThinkingLevel::Minimal | ThinkingLevel::Low => "LOW",
+        ThinkingLevel::Medium => "MEDIUM",
+        ThinkingLevel::High | ThinkingLevel::XHigh | ThinkingLevel::Max => "HIGH",
+    }
+}
+
+/// The `generationConfig.thinkingConfig` object for a request, or `None` to
+/// omit it. Shared by the Gemini API and Vertex AI providers so the two
+/// cannot drift.
+///
+/// Exactly one of `thinkingLevel` / `thinkingBudget` is ever sent: Gemini 3
+/// rejects a request carrying both, and pre-3 models reject `thinkingLevel`.
+/// The choice comes from [`GoogleCompat::thinking_level`] when set, else
+/// from the model id (see `gemini_thinking_param`).
+///
+/// [`GoogleCompat::thinking_level`]: super::GoogleCompat::thinking_level
+pub(crate) fn gemini_thinking_config(config: &StreamConfig) -> Option<serde_json::Value> {
+    let forced = config
+        .model_config
+        .as_ref()
+        .and_then(|mc| mc.google.as_ref())
+        .and_then(|g| g.thinking_level);
+    let param = match (forced, gemini_thinking_param(&config.model)) {
+        (Some(false), _) => GeminiThinkingParam::Budget,
+        (Some(true), GeminiThinkingParam::Budget) => GeminiThinkingParam::Level { minimal: false },
+        (_, inferred) => inferred,
+    };
+
+    match param {
+        // Gemini 2.x: the payload this crate has always sent — budget scales
+        // with the level, includeThoughts streams thought summaries back as
+        // thought parts, and Off omits the object.
+        GeminiThinkingParam::Budget => (config.thinking_level != ThinkingLevel::Off).then(|| {
+            serde_json::json!({
+                "thinkingBudget": gemini_thinking_budget(config.thinking_level),
+                "includeThoughts": true,
+            })
+        }),
+        GeminiThinkingParam::Level { minimal } => {
+            let level = gemini_thinking_level(config.thinking_level, minimal);
+            Some(if config.thinking_level == ThinkingLevel::Off {
+                serde_json::json!({ "thinkingLevel": level })
+            } else {
+                serde_json::json!({ "thinkingLevel": level, "includeThoughts": true })
+            })
+        }
     }
 }
 
@@ -398,13 +521,9 @@ fn build_request_body(config: &StreamConfig) -> serde_json::Value {
         generation_config["responseSchema"] = schema.schema.clone();
     }
 
-    // Thinking: Gemini 2.5's thinkingConfig. Budget scales with the level;
-    // includeThoughts streams thought summaries back as thought parts.
-    if config.thinking_level != ThinkingLevel::Off {
-        generation_config["thinkingConfig"] = serde_json::json!({
-            "thinkingBudget": gemini_thinking_budget(config.thinking_level),
-            "includeThoughts": true,
-        });
+    // Thinking: thinkingLevel on Gemini 3+, thinkingBudget on 2.x.
+    if let Some(thinking) = gemini_thinking_config(config) {
+        generation_config["thinkingConfig"] = thinking;
     }
 
     if generation_config != serde_json::json!({}) {
@@ -525,6 +644,7 @@ struct GoogleUsageMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::{GoogleCompat, ModelConfig};
 
     #[test]
     fn thinking_blocks_are_dropped_on_replay() {
@@ -903,5 +1023,245 @@ mod tests {
             tool_result.get("id").is_none(),
             "Synthetic ID should not be included"
         );
+    }
+
+    // --- thinkingLevel (Gemini 3+) vs thinkingBudget (2.x) -----------------
+
+    const ALL_LEVELS: [ThinkingLevel; 7] = [
+        ThinkingLevel::Off,
+        ThinkingLevel::Minimal,
+        ThinkingLevel::Low,
+        ThinkingLevel::Medium,
+        ThinkingLevel::High,
+        ThinkingLevel::XHigh,
+        ThinkingLevel::Max,
+    ];
+
+    fn thinking_config(model: &str, level: ThinkingLevel) -> serde_json::Value {
+        let mut config = StreamConfig::new(model, "k");
+        config.messages = vec![Message::user("hi")];
+        config.thinking_level = level;
+        build_request_body(&config)["generationConfig"]["thinkingConfig"].clone()
+    }
+
+    fn thinking_config_with(
+        model: &str,
+        level: ThinkingLevel,
+        compat: GoogleCompat,
+    ) -> serde_json::Value {
+        let mut config = StreamConfig::new(model, "k");
+        config.messages = vec![Message::user("hi")];
+        config.thinking_level = level;
+        let mut mc = ModelConfig::google(model, "test");
+        mc.google = Some(compat);
+        config.model_config = Some(mc);
+        build_request_body(&config)["generationConfig"]["thinkingConfig"].clone()
+    }
+
+    /// The payload every release before this one sent, for every level.
+    fn legacy_budget_payload(level: ThinkingLevel) -> serde_json::Value {
+        let budget = match level {
+            ThinkingLevel::Off => return serde_json::Value::Null,
+            ThinkingLevel::Minimal | ThinkingLevel::Low => 1024,
+            ThinkingLevel::Medium => 8192,
+            _ => 24576,
+        };
+        serde_json::json!({"thinkingBudget": budget, "includeThoughts": true})
+    }
+
+    #[test]
+    fn gemini_2x_payload_is_unchanged_budget() {
+        // Near-misses: every id here must keep the pre-3 payload byte for byte.
+        for model in [
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
+            "gemini-2.5-flash-preview-09-2025",
+            "gemini-2.0-flash",
+            "models/gemini-2.5-flash",
+            "projects/p/locations/us-central1/publishers/google/models/gemini-2.5-pro",
+            "gemini-2.5-pro@001",
+            "gemini-flash-lite-latest",
+            "gemini-exp-1206",
+            "gemma-3-27b-it",
+        ] {
+            for level in ALL_LEVELS {
+                let got = thinking_config(model, level);
+                assert_eq!(got, legacy_budget_payload(level), "{model} {level:?}");
+                assert_eq!(
+                    serde_json::to_string(&got).unwrap(),
+                    serde_json::to_string(&legacy_budget_payload(level)).unwrap(),
+                    "{model} {level:?}: byte-identical"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gemini_3_8_flash_sends_level_and_clamps_minimal_to_low() {
+        // 3.8 / 3.7 Flash reject MINIMAL ("Not supported (error)").
+        for model in [
+            "gemini-3.8-flash",
+            "gemini-3.7-flash",
+            "gemini-3.8-flash-cyber",
+        ] {
+            let expect = [
+                ("LOW", false), // Off: lowest accepted level, no thought summaries
+                ("LOW", true),  // Minimal clamped
+                ("LOW", true),
+                ("MEDIUM", true),
+                ("HIGH", true),
+                ("HIGH", true), // XHigh clamped
+                ("HIGH", true), // Max clamped
+            ];
+            for (level, (want, thoughts)) in ALL_LEVELS.into_iter().zip(expect) {
+                let got = thinking_config(model, level);
+                assert_eq!(got["thinkingLevel"], want, "{model} {level:?}");
+                assert!(
+                    got.get("thinkingBudget").is_none(),
+                    "{model} {level:?}: never both"
+                );
+                assert_eq!(
+                    got.get("includeThoughts").is_some(),
+                    thoughts,
+                    "{model} {level:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gemini_3_flash_lite_and_3_5_flash_pass_minimal_through() {
+        for model in [
+            "gemini-3.5-flash-lite",
+            "gemini-3.1-flash-lite",
+            "gemini-3.5-flash",
+            "gemini-3.6-flash",
+            "gemini-3-flash-preview",
+        ] {
+            assert_eq!(
+                thinking_config(model, ThinkingLevel::Minimal),
+                serde_json::json!({"thinkingLevel": "MINIMAL", "includeThoughts": true}),
+                "{model}"
+            );
+            assert_eq!(
+                thinking_config(model, ThinkingLevel::Off),
+                serde_json::json!({"thinkingLevel": "MINIMAL"}),
+                "{model}: Off is MINIMAL, the documented near-zero level"
+            );
+            assert_eq!(
+                thinking_config(model, ThinkingLevel::Low)["thinkingLevel"],
+                "LOW"
+            );
+        }
+    }
+
+    #[test]
+    fn gemini_3_pro_has_no_minimal() {
+        for model in [
+            "gemini-3.1-pro-preview",
+            "gemini-3-pro-preview",
+            "gemini-pro-latest",
+            "gemini-flash-latest", // hot-swapped alias: MINIMAL not assumed
+        ] {
+            assert_eq!(
+                thinking_config(model, ThinkingLevel::Minimal)["thinkingLevel"],
+                "LOW",
+                "{model}"
+            );
+            assert_eq!(
+                thinking_config(model, ThinkingLevel::Off),
+                serde_json::json!({"thinkingLevel": "LOW"}),
+                "{model}"
+            );
+            assert_eq!(
+                thinking_config(model, ThinkingLevel::Max)["thinkingLevel"],
+                "HIGH",
+                "{model}"
+            );
+        }
+    }
+
+    #[test]
+    fn gemini_3_ids_are_read_through_prefixes_and_paths() {
+        for model in [
+            "gemini-3",
+            "models/gemini-3.8-flash",
+            "GEMINI-3.8-FLASH",
+            "projects/p/locations/global/publishers/google/models/gemini-3.8-flash",
+            "gemini-3.8-flash@001",
+            "gemini-4-flash", // later generations inherit the version rule
+        ] {
+            let got = thinking_config(model, ThinkingLevel::Medium);
+            assert_eq!(
+                got,
+                serde_json::json!({"thinkingLevel": "MEDIUM", "includeThoughts": true}),
+                "{model}"
+            );
+        }
+    }
+
+    #[test]
+    fn positive_control_2_5_and_3_x_payloads_differ() {
+        // Guards against a helper that always returns the same shape.
+        let old = thinking_config("gemini-2.5-flash", ThinkingLevel::High);
+        let new = thinking_config("gemini-3.5-flash", ThinkingLevel::High);
+        assert_ne!(old, new);
+        assert_eq!(old["thinkingBudget"], 24576);
+        assert_eq!(new["thinkingLevel"], "HIGH");
+    }
+
+    #[test]
+    fn google_compat_overrides_the_model_id_rule() {
+        // Force level on an id the rule cannot read (a proxy alias).
+        let got = thinking_config_with(
+            "my-gemini-alias",
+            ThinkingLevel::Minimal,
+            GoogleCompat::force_thinking_level(),
+        );
+        assert_eq!(
+            got,
+            serde_json::json!({"thinkingLevel": "LOW", "includeThoughts": true})
+        );
+        // Forcing level on a recognised 3.x id keeps its MINIMAL knowledge.
+        let got = thinking_config_with(
+            "gemini-3.5-flash-lite",
+            ThinkingLevel::Minimal,
+            GoogleCompat::force_thinking_level(),
+        );
+        assert_eq!(got["thinkingLevel"], "MINIMAL");
+        // Force budget on a 3.x id: the legacy payload, exactly.
+        for level in ALL_LEVELS {
+            let got = thinking_config_with(
+                "gemini-3.8-flash",
+                level,
+                GoogleCompat::force_thinking_budget(),
+            );
+            assert_eq!(got, legacy_budget_payload(level), "{level:?}");
+        }
+        // Default compat == no compat.
+        assert_eq!(
+            thinking_config_with(
+                "gemini-3.8-flash",
+                ThinkingLevel::High,
+                GoogleCompat::default()
+            ),
+            thinking_config("gemini-3.8-flash", ThinkingLevel::High)
+        );
+    }
+
+    #[test]
+    fn google_compat_serde_default_and_round_trip() {
+        let compat: GoogleCompat = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(compat, GoogleCompat::default());
+        let mut mc = ModelConfig::google("gemini-2.5-flash", "G");
+        let before = serde_json::to_value(&mc).unwrap();
+        assert!(
+            before.get("google").is_none(),
+            "None is omitted on serialize"
+        );
+        mc.google = Some(GoogleCompat::force_thinking_level());
+        let back: ModelConfig = serde_json::from_value(serde_json::to_value(&mc).unwrap()).unwrap();
+        assert_eq!(back.google, Some(GoogleCompat::force_thinking_level()));
     }
 }

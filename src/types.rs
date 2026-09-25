@@ -563,7 +563,7 @@ pub enum CacheStrategy {
 /// unclamped, so a model with a shorter effort ladder can reject it (see
 /// below). What each level becomes, per provider:
 ///
-/// | Level     | Anthropic (adaptive) | Anthropic legacy / Bedrock budget | OpenAI-compat `reasoning_effort`¹ | DeepSeek `reasoning_effort`² | OpenAI Responses / Azure `reasoning.effort` | Gemini / Vertex `thinkingBudget` |
+/// | Level     | Anthropic (adaptive) | Anthropic legacy / Bedrock budget | OpenAI-compat `reasoning_effort`¹ | DeepSeek `reasoning_effort`² | OpenAI Responses / Azure `reasoning.effort` | Gemini 2.x / Vertex `thinkingBudget`³ |
 /// |-----------|----------|--------|----------|--------|----------|--------|
 /// | `Off`     | (no thinking) | (no thinking) | (omitted) | (omitted; `thinking: disabled`) | (omitted) | (omitted) |
 /// | `Minimal` | `low`    | 1,024  | `low`    | `low`  | `low`    | 1,024  |
@@ -585,6 +585,24 @@ pub enum CacheStrategy {
 /// `Max` selects `max`. `Off` is sent as `thinking: {"type": "disabled"}`
 /// rather than as an effort value.
 ///
+/// ³ Gemini 3 and later take `thinkingLevel` instead (never both — Gemini
+/// rejects a request carrying the two). The generation is read from the model
+/// id's version (`gemini-3*`, `gemini-3.8-flash`, `models/…`, Vertex resource
+/// paths); override with [`GoogleCompat::thinking_level`]:
+///
+/// | Level | Gemini 3+ / Vertex `thinkingLevel` |
+/// |-------|-----------|
+/// | `Off` | `MINIMAL`, or `LOW` where `MINIMAL` is not accepted (no `includeThoughts`) |
+/// | `Minimal` | `MINIMAL`, or `LOW` *(clamped)* on 3.7 / 3.8 Flash, 3.x Pro and unlisted models |
+/// | `Low` | `LOW` |
+/// | `Medium` | `MEDIUM` |
+/// | `High`, `XHigh`, `Max` | `HIGH` (`XHigh`/`Max` *clamped*) |
+///
+/// `Off` does **not** disable thinking on Gemini 3: Google documents
+/// `MINIMAL` as matching "the "no thinking" setting for most queries" but
+/// not guaranteeing it, and thinking cannot be turned off at all on 3 Pro /
+/// 3.1 Pro.
+///
 /// Anthropic's adaptive `effort` is passed through as-is, so a model with a
 /// shorter ladder rejects what it does not know: `xhigh` arrived with Opus
 /// 4.7, so Opus 4.6 / Sonnet 4.6 accept `max` but not `xhigh`. The crate has
@@ -595,6 +613,7 @@ pub enum CacheStrategy {
 ///
 /// [`OpenAiCompat::supports_thinking_control`]: crate::provider::OpenAiCompat::supports_thinking_control
 /// [`OpenAiCompat::supports_reasoning_effort`]: crate::provider::OpenAiCompat::supports_reasoning_effort
+/// [`GoogleCompat::thinking_level`]: crate::provider::GoogleCompat::thinking_level
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
