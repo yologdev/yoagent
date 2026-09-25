@@ -91,18 +91,7 @@ impl StreamProvider for OpenAiCompatProvider {
 
                             // Process usage
                             if let Some(u) = &chunk.usage {
-                                let cache_read = u
-                                    .prompt_cache_hit_tokens
-                                    .or_else(|| {
-                                        u.prompt_tokens_details.as_ref().map(|d| d.cached_tokens)
-                                    })
-                                    .unwrap_or(0);
-                                usage.input = u.prompt_cache_miss_tokens.unwrap_or_else(|| {
-                                    u.prompt_tokens.saturating_sub(cache_read)
-                                });
-                                usage.output = u.completion_tokens;
-                                usage.total_tokens = u.total_tokens;
-                                usage.cache_read = cache_read;
+                                usage = usage_from_openai(u);
                             }
 
                             for choice in &chunk.choices {
@@ -284,6 +273,11 @@ fn build_request_body(
         }));
     }
 
+    // DeepSeek thinking mode with tools: every earlier assistant turn's
+    // reasoning must go back as `reasoning_content`, or the request is a 400.
+    // Without tools DeepSeek ignores it, so it is only sent when it matters.
+    let replay_reasoning = compat.replays_reasoning_content && !config.tools.is_empty();
+
     for msg in &config.messages {
         if !matches!(msg, Message::ToolResult { .. } | Message::Assistant { .. }) {
             maybe_insert_assistant_after_tool_results(&mut messages, compat);
@@ -299,9 +293,13 @@ fn build_request_body(
             Message::Assistant { content, .. } => {
                 let mut parts: Vec<serde_json::Value> = Vec::new();
                 let mut tool_calls: Vec<serde_json::Value> = Vec::new();
+                let mut reasoning = String::new();
 
                 for c in content {
                     match c {
+                        Content::Thinking { thinking, .. } if replay_reasoning => {
+                            reasoning.push_str(thinking);
+                        }
                         Content::Text { text } if text.is_empty() => {}
                         Content::Text { text } => {
                             parts.push(serde_json::json!({"type": "text", "text": text}));
@@ -325,6 +323,9 @@ fn build_request_body(
                 let mut msg_obj = serde_json::json!({"role": "assistant"});
                 if !parts.is_empty() {
                     msg_obj["content"] = serde_json::json!(parts);
+                }
+                if !reasoning.is_empty() {
+                    msg_obj["reasoning_content"] = serde_json::json!(reasoning);
                 }
                 if !tool_calls.is_empty() {
                     msg_obj["tool_calls"] = serde_json::json!(tool_calls);
@@ -466,9 +467,10 @@ fn build_request_body(
 /// as `thinking: disabled`, not as an effort value). `XHigh` is sent as
 /// `high`, matching DeepSeek's own documented mapping of a requested `xhigh`,
 /// so it never silently selects the most expensive rung; only `Max` sends
-/// `max`. Every other OpenAI-shaped provider tops out at `high` as far as this
-/// crate knows, and rejects an unknown string rather than rounding it, so
-/// `XHigh`/`Max` clamp to `high` there.
+/// `max`. Every other OpenAI-shaped provider is treated as topping out at
+/// `high`, since most reject an unknown string rather than rounding it, so
+/// `XHigh`/`Max` clamp to `high` there. That includes xAI, although grok-4.6
+/// and later accept `xhigh`: the crate has no per-model effort table yet.
 fn reasoning_effort(level: ThinkingLevel, compat: &OpenAiCompat) -> &'static str {
     match level {
         ThinkingLevel::Minimal | ThinkingLevel::Low => "low",
@@ -590,6 +592,40 @@ struct OpenAiUsage {
 struct OpenAiPromptTokensDetails {
     #[serde(default)]
     cached_tokens: u64,
+    /// Prompt tokens written to the cache on this request (openai-python
+    /// `PromptTokensDetails.cache_write_tokens`). Billed at a premium on
+    /// GPT-5.6 and later.
+    #[serde(default)]
+    cache_write_tokens: u64,
+}
+
+/// Maps a streamed usage chunk onto [`Usage`].
+///
+/// `prompt_tokens` includes both cached and cache-written tokens — OpenAI's
+/// prompt-caching guide computes ordinary input as
+/// `input_tokens - cached_tokens - cache_write_tokens`
+/// (<https://developers.openai.com/api/docs/guides/prompt-caching>) — so `input`
+/// excludes both, matching how the other providers split `Usage`. DeepSeek
+/// reports the split directly as `prompt_cache_hit_tokens` /
+/// `prompt_cache_miss_tokens`, which take precedence.
+fn usage_from_openai(u: &OpenAiUsage) -> Usage {
+    let details = u.prompt_tokens_details.as_ref();
+    let cache_read = u
+        .prompt_cache_hit_tokens
+        .or_else(|| details.map(|d| d.cached_tokens))
+        .unwrap_or(0);
+    let cache_write = details.map(|d| d.cache_write_tokens).unwrap_or(0);
+    Usage {
+        input: u.prompt_cache_miss_tokens.unwrap_or_else(|| {
+            u.prompt_tokens
+                .saturating_sub(cache_read)
+                .saturating_sub(cache_write)
+        }),
+        output: u.completion_tokens,
+        cache_read,
+        cache_write,
+        total_tokens: u.total_tokens,
+    }
 }
 
 #[cfg(test)]
@@ -1039,14 +1075,57 @@ mod tests {
         }))
         .unwrap();
 
-        let u = chunk.usage.unwrap();
-        let cache_read = u.prompt_cache_hit_tokens.unwrap_or(0);
-        let input = u
-            .prompt_cache_miss_tokens
-            .unwrap_or_else(|| u.prompt_tokens.saturating_sub(cache_read));
-        assert_eq!(input, 30);
-        assert_eq!(cache_read, 70);
-        assert_eq!(u.completion_tokens, 10);
+        let usage = usage_from_openai(&chunk.usage.unwrap());
+        assert_eq!(usage.input, 30);
+        assert_eq!(usage.cache_read, 70);
+        assert_eq!(usage.cache_write, 0);
+        assert_eq!(usage.output, 10);
+        assert_eq!(usage.total_tokens, 110);
+    }
+
+    #[test]
+    fn test_usage_cache_write_tokens_parsed_and_excluded_from_input() {
+        // prompt_tokens includes both the cached and the cache-written tokens
+        // (OpenAI's prompt-caching guide: ordinary input =
+        // input_tokens - cached_tokens - cache_write_tokens).
+        let chunk: OpenAiChunk = serde_json::from_value(serde_json::json!({
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 15000,
+                "completion_tokens": 200,
+                "total_tokens": 15200,
+                "prompt_tokens_details": {
+                    "cached_tokens": 12000,
+                    "cache_write_tokens": 2500
+                }
+            }
+        }))
+        .unwrap();
+        let usage = usage_from_openai(&chunk.usage.unwrap());
+        assert_eq!(usage.cache_read, 12000);
+        assert_eq!(usage.cache_write, 2500);
+        assert_eq!(usage.input, 500);
+        assert_eq!(usage.output, 200);
+        assert_eq!(usage.total_tokens, 15200);
+    }
+
+    #[test]
+    fn test_usage_without_cache_write_tokens_is_unchanged() {
+        // Positive control: a chunk with only cached_tokens splits as before.
+        let chunk: OpenAiChunk = serde_json::from_value(serde_json::json!({
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 1000,
+                "completion_tokens": 5,
+                "total_tokens": 1005,
+                "prompt_tokens_details": {"cached_tokens": 768}
+            }
+        }))
+        .unwrap();
+        let usage = usage_from_openai(&chunk.usage.unwrap());
+        assert_eq!(usage.input, 232);
+        assert_eq!(usage.cache_read, 768);
+        assert_eq!(usage.cache_write, 0);
     }
 
     #[test]
@@ -1337,5 +1416,186 @@ mod tests {
         assert_eq!(msgs[1]["role"], "assistant");
         assert_eq!(msgs[1]["content"][0]["text"], "The file contains a.");
         assert_eq!(msgs[2]["role"], "user");
+    }
+
+    fn thinking_tool_history() -> Vec<Message> {
+        vec![
+            Message::user("What's the weather in Hangzhou?"),
+            Message::assistant(
+                vec![
+                    Content::thinking("Need the date first."),
+                    Content::tool_call("call-1", "get_date", serde_json::json!({})),
+                ],
+                StopReason::ToolUse,
+                "deepseek-v4-pro",
+                "deepseek",
+                Usage::default(),
+            ),
+            Message::ToolResult {
+                tool_call_id: "call-1".into(),
+                tool_name: "get_date".into(),
+                content: vec![Content::Text {
+                    text: "2026-09-25".into(),
+                }],
+                is_error: false,
+                timestamp: 0,
+            },
+            Message::assistant(
+                vec![
+                    Content::thinking("Have the date. "),
+                    Content::thinking("Answer now."),
+                    Content::Text {
+                        text: "Cloudy, 7-13C.".into(),
+                    },
+                ],
+                StopReason::Stop,
+                "deepseek-v4-pro",
+                "deepseek",
+                Usage::default(),
+            ),
+            Message::user("And tomorrow?"),
+        ]
+    }
+
+    fn history_body(
+        model_config: &ModelConfig,
+        messages: Vec<Message>,
+        with_tools: bool,
+    ) -> serde_json::Value {
+        let compat = model_config.compat.as_ref().unwrap().clone();
+        let config = StreamConfig {
+            model: model_config.id.clone(),
+            system_prompt: String::new(),
+            messages,
+            tools: if with_tools {
+                vec![ToolDefinition {
+                    name: "get_date".into(),
+                    description: "Get the current date".into(),
+                    parameters: serde_json::json!({"type": "object"}),
+                }]
+            } else {
+                vec![]
+            },
+            thinking_level: ThinkingLevel::High,
+            api_key: "test".into(),
+            max_tokens: None,
+            temperature: None,
+            model_config: Some(model_config.clone()),
+            cache_config: CacheConfig::default(),
+            output_schema: None,
+        };
+        build_request_body(&config, model_config, &compat)
+    }
+
+    #[test]
+    fn test_deepseek_replays_reasoning_content_with_tools() {
+        // api-docs.deepseek.com/guides/thinking_mode: with tools, the
+        // reasoning_content of all previous turns must be passed back, even
+        // turns without a tool call, or the API returns 400.
+        let deepseek = ModelConfig::deepseek("deepseek-v4-pro", "DeepSeek V4 Pro");
+        let body = history_body(&deepseek, thinking_tool_history(), true);
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs[1]["role"], "assistant");
+        assert_eq!(msgs[1]["reasoning_content"], "Need the date first.");
+        assert_eq!(msgs[1]["tool_calls"][0]["function"]["name"], "get_date");
+        // The turn without a tool call carries its reasoning too, joined.
+        assert_eq!(msgs[3]["role"], "assistant");
+        assert_eq!(msgs[3]["reasoning_content"], "Have the date. Answer now.");
+        assert_eq!(msgs[3]["content"][0]["text"], "Cloudy, 7-13C.");
+        // Never on user or tool messages.
+        assert!(msgs[0].get("reasoning_content").is_none());
+        assert!(msgs[2].get("reasoning_content").is_none());
+        assert!(msgs[4].get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn test_deepseek_omits_reasoning_content_without_tools() {
+        // Without tools DeepSeek ignores reasoning_content, so it is not sent.
+        let deepseek = ModelConfig::deepseek("deepseek-v4-pro", "DeepSeek V4 Pro");
+        let body = history_body(&deepseek, thinking_tool_history(), false);
+        assert!(!body.to_string().contains("reasoning_content"));
+    }
+
+    #[test]
+    fn test_other_providers_never_send_reasoning_content() {
+        // Near-miss: the same history with tools, on providers without the
+        // flag. The body must be byte-identical to the one built from a
+        // history with the thinking blocks removed, i.e. what was sent before.
+        let mut stripped = thinking_tool_history();
+        for m in &mut stripped {
+            if let Message::Assistant { content, .. } = m {
+                content.retain(|c| !matches!(c, Content::Thinking { .. }));
+            }
+        }
+        for mc in [
+            ModelConfig::openai("gpt-5.5", "GPT-5.5"),
+            ModelConfig::xai("grok-4.7", "Grok 4.7"),
+            ModelConfig::qwen("qwen3.6-plus", "Qwen 3.6 Plus"),
+            ModelConfig::groq("llama-3.3-70b-versatile", "Llama 3.3 70B"),
+        ] {
+            let body = history_body(&mc, thinking_tool_history(), true);
+            assert!(
+                !body.to_string().contains("reasoning_content"),
+                "{} sent reasoning_content",
+                mc.provider
+            );
+            let baseline = history_body(&mc, stripped.clone(), true);
+            assert_eq!(body.to_string(), baseline.to_string(), "{}", mc.provider);
+        }
+    }
+
+    #[test]
+    fn test_replays_reasoning_content_is_deepseek_only_among_presets() {
+        assert!(OpenAiCompat::deepseek().replays_reasoning_content);
+        for compat in [
+            OpenAiCompat::default(),
+            OpenAiCompat::openai(),
+            OpenAiCompat::meta(),
+            OpenAiCompat::xai(),
+            OpenAiCompat::groq(),
+            OpenAiCompat::cerebras(),
+            OpenAiCompat::openrouter(),
+            OpenAiCompat::mistral(),
+            OpenAiCompat::zai(),
+            OpenAiCompat::minimax(),
+            OpenAiCompat::qwen(),
+        ] {
+            assert!(!compat.replays_reasoning_content);
+        }
+        // A config persisted before the flag existed still deserializes.
+        let mut v = serde_json::to_value(OpenAiCompat::deepseek()).unwrap();
+        v.as_object_mut()
+            .unwrap()
+            .remove("replays_reasoning_content");
+        let back: OpenAiCompat = serde_json::from_value(v).unwrap();
+        assert!(!back.replays_reasoning_content);
+    }
+
+    #[test]
+    fn test_xai_sends_reasoning_effort() {
+        // docs.x.ai reasoning guide: grok-4.5/4.6/4.7 take reasoning_effort
+        // low/medium/high (xhigh on 4.6+). XHigh/Max clamp to high for now.
+        let xai = ModelConfig::xai("grok-4.7", "Grok 4.7");
+        assert_eq!(effort_for(&xai, ThinkingLevel::Minimal), "low");
+        assert_eq!(effort_for(&xai, ThinkingLevel::Low), "low");
+        assert_eq!(effort_for(&xai, ThinkingLevel::Medium), "medium");
+        assert_eq!(effort_for(&xai, ThinkingLevel::High), "high");
+        assert_eq!(effort_for(&xai, ThinkingLevel::XHigh), "high");
+        assert_eq!(effort_for(&xai, ThinkingLevel::Max), "high");
+        let (config, compat) = thinking_config(&xai, ThinkingLevel::High);
+        let body = build_request_body(&config, &xai, &compat);
+        // xAI has no DeepSeek-style thinking toggle.
+        assert!(body.get("thinking").is_none());
+    }
+
+    #[test]
+    fn test_xai_off_omits_reasoning_effort() {
+        // Reasoning cannot be disabled on xAI: Off sends nothing and the model
+        // runs at its default (high). No invented "none" value.
+        let xai = ModelConfig::xai("grok-4.7", "Grok 4.7");
+        let (config, compat) = thinking_config(&xai, ThinkingLevel::Off);
+        let body = build_request_body(&config, &xai, &compat);
+        assert!(body.get("reasoning_effort").is_none());
+        assert!(body.get("thinking").is_none());
     }
 }
