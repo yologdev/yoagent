@@ -103,7 +103,9 @@ pub struct OverrideReport {
     pub changes: Vec<PriceChange>,
     /// Models whose price changed because a previous user layer listed them
     /// and the new one does not: they revert to the fetched or built-in
-    /// price, or become unpriced.
+    /// price, or become unpriced. Unlike `changes`, this can include
+    /// entries for providers no constructor prices (an inert entry of the
+    /// previous override); those never affected billing.
     pub reverted: Vec<PriceChange>,
     /// `provider/model` of entries whose provider is not in
     /// [`PRICED_PROVIDERS`]: no constructor reads

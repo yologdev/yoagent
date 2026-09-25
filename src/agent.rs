@@ -222,9 +222,10 @@ impl Agent {
     ///
     /// Same rules as [`ModelConfig::reprice`]: it applies only to a config a
     /// first-party pricing constructor built, may set the cost to `None`, and
-    /// replaces a cost you set yourself. Affects spend recorded from now on;
+    /// replaces a cost you set yourself. Affects runs started after this
+    /// call; a run already in flight keeps the rates it started with.
     /// [`session_cost_usd`](Self::session_cost_usd) prices the whole history
-    /// at the current rates.
+    /// at the current rates, so it changes immediately.
     pub fn reprice(&mut self) {
         if let Some(config) = self.model_config.take() {
             self.model_config = Some(config.reprice());
