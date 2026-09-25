@@ -253,6 +253,36 @@ adheres to [Semantic Versioning](https://semver.org/).
   leaves the model at its default (`high`), not "no reasoning"
   ([xAI reasoning guide](https://docs.x.ai/developers/model-capabilities/text/reasoning)).
 
+- **Gemini 3 gets `thinkingLevel`, not a token budget.** Both Gemini
+  providers sent `thinkingConfig.thinkingBudget` for every model. Google's
+  REST reference says `thinkingLevel` is "Recommended for Gemini 3 or later
+  models", and its guide warns that a budget on Gemini 3 Pro "may result in
+  unexpected performance". For Gemini 3 and later, `GoogleProvider` and
+  `GoogleVertexProvider` now send `thinkingLevel` (`Minimal` → `MINIMAL`,
+  `Low` → `LOW`, `Medium` → `MEDIUM`, `High`/`XHigh`/`Max` → `HIGH`) and never
+  a budget alongside it, which Gemini rejects. `Minimal` is clamped to `LOW`
+  on models without a `MINIMAL` rung (3.7 / 3.8 Flash reject it with an error;
+  3.x Pro and unlisted models are treated the same way).
+
+  **Gemini 2.x payloads are byte-identical** to before: `thinkingLevel` on a
+  pre-3 model is an error, so those keep `thinkingBudget`.
+
+  Detection is version-based, as Google's rule is: the last segment of the
+  model id (so `models/…` and Vertex resource paths work), `@version` dropped,
+  `gemini-<major>…` with major ≥ 3. `gemini-flash-latest` / `gemini-pro-latest`
+  count as Gemini 3; `gemini-flash-lite-latest` and unreadable ids keep the
+  budget, which Gemini 3 still accepts. Override per model with the new
+  `ModelConfig::google: Option<GoogleCompat>` —
+  `GoogleCompat::force_thinking_level()` / `force_thinking_budget()`.
+  `None` is omitted on serialize, so existing serialized configs are unchanged.
+
+  **Behaviour change for `ThinkingLevel::Off` on Gemini 3.** It used to omit
+  `thinkingConfig`, which leaves Gemini 3 thinking at its default (`MEDIUM` or
+  `HIGH`). It now sends the lowest level the model accepts — `MINIMAL`, which
+  Google says "Matches the "no thinking" setting for most queries", or `LOW`
+  — without `includeThoughts`. Gemini 3 cannot turn thinking fully off, and
+  3 Pro / 3.1 Pro cannot turn it off at all.
+
 - **Sub-agent spend now reaches the parent, in its own bucket**
   ([#173](https://github.com/yologdev/yoagent/issues/173)). `SubAgentTool` ran
   its child loop on a private channel and forwarded no usage, so every total a

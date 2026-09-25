@@ -119,7 +119,7 @@ value it would reject — except Anthropic's adaptive
 effort, which is passed through unclamped: Opus 4.6 / Sonnet 4.6 have no
 `xhigh` rung and reject it.
 
-| Level | Anthropic effort | Anthropic legacy / Bedrock budget | OpenAI-compat¹ / Responses / Azure effort | DeepSeek effort² | Gemini / Vertex budget |
+| Level | Anthropic effort | Anthropic legacy / Bedrock budget | OpenAI-compat¹ / Responses / Azure effort | DeepSeek effort² | Gemini 2.x / Vertex budget³ |
 |-------|------|------|------|------|------|
 | `Minimal`, `Low` | `low` | 1,024 | `low` | `low` | 1,024 |
 | `Medium` | `medium` | 2,048 | `medium` | `medium` | 8,192 |
@@ -131,6 +131,13 @@ effort, which is passed through unclamped: Opus 4.6 / Sonnet 4.6 have no
 is set. ² The DeepSeek column applies when both `supports_thinking_control` and
 `supports_reasoning_effort` are set. DeepSeek maps a requested `xhigh` to
 `high` itself, so `XHigh` is sent as `high` and only `Max` selects `max`.
+³ Gemini 3 and later get `thinkingConfig.thinkingLevel` instead, never both:
+`Minimal` → `MINIMAL`, `Low` → `LOW`, `Medium` → `MEDIUM`, `High` / `XHigh` /
+`Max` → `HIGH`. `Minimal` is clamped to `LOW` on models without a `MINIMAL`
+rung (3.7 / 3.8 Flash, 3.x Pro, unlisted ids). `Off` sends the lowest accepted
+level (`MINIMAL` or `LOW`) because Gemini 3 cannot turn thinking fully off. The
+generation is read from the model id; override it with `GoogleCompat`. See
+[Google Gemini](../providers/google.md#thinking).
 
 ## CostConfig
 
