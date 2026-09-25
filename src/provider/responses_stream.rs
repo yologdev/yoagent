@@ -200,26 +200,24 @@ impl ResponsesStreamState {
                         }
                         self.end_call(i, tx);
                     }
-                    Some("message") => {
-                        // A server that sent the text only in the finished item.
-                        if !self.text_slots.contains_key(&ev.output_index) {
-                            let text: String = ev
-                                .item
-                                .content
-                                .iter()
-                                .filter(|p| p.kind.as_deref() == Some("output_text"))
-                                .filter_map(|p| p.text.as_deref())
-                                .collect();
-                            if !text.is_empty() {
-                                let idx = self.text_slot(ev.output_index);
-                                if let Some(Content::Text { text: t }) = self.content.get_mut(idx) {
-                                    t.push_str(&text);
-                                }
-                                let _ = tx.send(StreamEvent::TextDelta {
-                                    content_index: idx,
-                                    delta: text,
-                                });
+                    // A server that sent the text only in the finished item.
+                    Some("message") if !self.text_slots.contains_key(&ev.output_index) => {
+                        let text: String = ev
+                            .item
+                            .content
+                            .iter()
+                            .filter(|p| p.kind.as_deref() == Some("output_text"))
+                            .filter_map(|p| p.text.as_deref())
+                            .collect();
+                        if !text.is_empty() {
+                            let idx = self.text_slot(ev.output_index);
+                            if let Some(Content::Text { text: t }) = self.content.get_mut(idx) {
+                                t.push_str(&text);
                             }
+                            let _ = tx.send(StreamEvent::TextDelta {
+                                content_index: idx,
+                                delta: text,
+                            });
                         }
                     }
                     _ => {}
