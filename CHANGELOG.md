@@ -36,7 +36,7 @@ adheres to [Semantic Versioning](https://semver.org/).
   only be answered by knowing to call `is_configured()`. So consumers kept
   parallel price tables, outside the models.dev audit, and those rotted: yoyo
   overstated every `deepseek-v4-flash` cost ~3.7x. Those seventeen now return
-  `None`; the named presets (`claude_fable_5`, `claude_opus_5`,
+  `None`; the named presets (`claude_fable_5_1`, `claude_fable_5`, `claude_opus_5`,
   `claude_opus_4_8`, `claude_sonnet_5`, `claude_haiku_4_5`, `gpt_5_5`, `meta`)
   return `Some`. No prices were added — that is follow-up work, and each one
   should land with a price-audit entry.

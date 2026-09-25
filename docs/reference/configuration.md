@@ -161,12 +161,23 @@ let mut config = ModelConfig::local("http://localhost:1234/v1", "qwen3");
 config.cost = Some(CostConfig::new(0.0, 0.0)); // free, not unknown
 ```
 
-To adjust one rate, use `get_or_insert_with` rather than
+To adjust one rate on a named preset, use `get_or_insert_with` rather than
 `if let Some(c) = config.cost.as_mut()`, which silently does nothing on a
 generic constructor:
 
 ```rust
 config.cost.get_or_insert_with(CostConfig::default).input_per_million = 1.80;
+```
+
+On a generic constructor (`cost: None`) that line creates a `CostConfig` whose
+other rates are zero, and zero now means free: output and cache tokens would be
+billed at a real `$0`. Price a generic constructor with every rate you pay
+instead:
+
+```rust
+let mut config = ModelConfig::deepseek("deepseek-v4-flash", "DeepSeek V4 Flash");
+// Rates per million tokens; take them from the vendor's pricing page.
+config.cost = Some(CostConfig::new(INPUT, OUTPUT).with_cache_read(CACHE_READ));
 ```
 
 **Persistence caveat.** Before 0.19, unpriced configs were written with an
