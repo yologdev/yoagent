@@ -4,13 +4,12 @@
 //! from Chat Completions. It has first-class support for reasoning items.
 
 use super::model::ModelConfig;
-use super::tool_args::finalize_tool_arguments;
+use super::responses_stream::{Flow, ResponsesStreamState};
 use super::traits::*;
 use crate::types::*;
 use async_trait::async_trait;
 use futures::StreamExt;
 use reqwest_eventsource::EventSource;
-use serde::Deserialize;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
@@ -59,11 +58,7 @@ impl StreamProvider for OpenAiResponsesProvider {
         let mut es =
             EventSource::new(request).map_err(|e| ProviderError::Network(e.to_string()))?;
 
-        let mut content: Vec<Content> = Vec::new();
-        let mut usage = Usage::default();
-        let mut stop_reason = StopReason::Stop;
-        let mut tool_call_buffers: std::collections::HashMap<usize, ToolCallBuffer> =
-            std::collections::HashMap::new();
+        let mut state = ResponsesStreamState::new("OpenAI Responses");
 
         let _ = tx.send(StreamEvent::Start);
 
@@ -78,119 +73,8 @@ impl StreamProvider for OpenAiResponsesProvider {
                         None => break,
                         Some(Ok(reqwest_eventsource::Event::Open)) => {}
                         Some(Ok(reqwest_eventsource::Event::Message(msg))) => {
-                            match msg.event.as_str() {
-                                "response.output_text.delta" => {
-                                    if let Ok(data) = serde_json::from_str::<TextDeltaEvent>(&msg.data) {
-                                        let text_idx = content.iter().position(|c| matches!(c, Content::Text { .. }));
-                                        let idx = match text_idx {
-                                            Some(i) => i,
-                                            None => {
-                                                content.push(Content::Text { text: String::new() });
-                                                content.len() - 1
-                                            }
-                                        };
-                                        if let Some(Content::Text { text }) = content.get_mut(idx) {
-                                            text.push_str(&data.delta);
-                                        }
-                                        let _ = tx.send(StreamEvent::TextDelta {
-                                            content_index: idx,
-                                            delta: data.delta,
-                                        });
-                                    }
-                                }
-                                "response.reasoning.delta" => {
-                                    if let Ok(data) = serde_json::from_str::<TextDeltaEvent>(&msg.data) {
-                                        let idx = content.iter().position(|c| matches!(c, Content::Thinking { .. }));
-                                        let idx = match idx {
-                                            Some(i) => i,
-                                            None => {
-                                                content.push(Content::Thinking { thinking: String::new(), signature: None });
-                                                content.len() - 1
-                                            }
-                                        };
-                                        if let Some(Content::Thinking { thinking, .. }) = content.get_mut(idx) {
-                                            thinking.push_str(&data.delta);
-                                        }
-                                        let _ = tx.send(StreamEvent::ThinkingDelta {
-                                            content_index: idx,
-                                            delta: data.delta,
-                                        });
-                                    }
-                                }
-                                "response.function_call_arguments.start" => {
-                                    if let Ok(data) = serde_json::from_str::<FunctionCallStartEvent>(&msg.data) {
-                                        let idx = content.len() + tool_call_buffers.len();
-                                        tool_call_buffers.insert(idx, ToolCallBuffer {
-                                            id: data.call_id.unwrap_or_default(),
-                                            name: data.name.unwrap_or_default(),
-                                            arguments: String::new(),
-                                        });
-                                        let buf = &tool_call_buffers[&idx];
-                                        let _ = tx.send(StreamEvent::ToolCallStart {
-                                            content_index: idx,
-                                            id: buf.id.clone(),
-                                            name: buf.name.clone(),
-                                        });
-                                    }
-                                }
-                                "response.function_call_arguments.delta" => {
-                                    if let Ok(data) = serde_json::from_str::<TextDeltaEvent>(&msg.data) {
-                                        // Find last buffer
-                                        if let Some((&idx, buf)) = tool_call_buffers.iter_mut().last() {
-                                            buf.arguments.push_str(&data.delta);
-                                            let _ = tx.send(StreamEvent::ToolCallDelta {
-                                                content_index: idx,
-                                                delta: data.delta,
-                                            });
-                                        }
-                                    }
-                                }
-                                "response.function_call_arguments.done" => {
-                                    // Tool call complete
-                                }
-                                "response.completed" => {
-                                    if let Ok(data) = serde_json::from_str::<ResponseCompletedEvent>(&msg.data) {
-                                        if let Some(resp) = data.response {
-                                            if let Some(u) = resp.usage {
-                                                usage.input = u.input_tokens;
-                                                usage.output = u.output_tokens;
-                                                usage.total_tokens = u.total_tokens;
-                                            }
-                                            if resp.status == Some("incomplete".to_string()) {
-                                                stop_reason = StopReason::Length;
-                                            }
-                                        }
-                                    }
-                                    break;
-                                }
-                                // Terminal events other than `response.completed`.
-                                // Without these arms the loop never breaks, the
-                                // body closes, and the resulting StreamEnded is
-                                // retryable (#83) — re-running an already-billed
-                                // generation that would fail the same way again.
-                                "response.incomplete" => {
-                                    if let Ok(data) =
-                                        serde_json::from_str::<ResponseCompletedEvent>(&msg.data)
-                                    {
-                                        if let Some(resp) = data.response {
-                                            if let Some(u) = resp.usage {
-                                                usage.input = u.input_tokens;
-                                                usage.output = u.output_tokens;
-                                                usage.total_tokens = u.total_tokens;
-                                            }
-                                        }
-                                    }
-                                    stop_reason = StopReason::Length;
-                                    break;
-                                }
-                                "response.failed" | "error" => {
-                                    let provider_err = classify_sse_error_event(&msg.data);
-                                    warn!("OpenAI Responses error: {}", provider_err);
-                                    return Err(provider_err);
-                                }
-                                _ => {
-                                    debug!("Unknown Responses event: {}", msg.event);
-                                }
+                            if state.handle(&msg.event, &msg.data, &tx)? == Flow::Done {
+                                break;
                             }
                         }
                         Some(Err(e)) => {
@@ -203,28 +87,7 @@ impl StreamProvider for OpenAiResponsesProvider {
             }
         }
 
-        // Finalize tool calls
-        for (_, buf) in tool_call_buffers {
-            let args = finalize_tool_arguments(&buf.name, &buf.arguments);
-            content.push(Content::ToolCall {
-                provider_metadata: None,
-                id: buf.id,
-                name: buf.name,
-                arguments: args,
-            });
-        }
-
-        // Tool calls make this a ToolUse turn — unless the response was
-        // incomplete (token limit), which is how a call ends up with unparsed
-        // arguments. Length is kept so callers see it; the loop still answers
-        // every tool call either way.
-        if stop_reason != StopReason::Length
-            && content
-                .iter()
-                .any(|c| matches!(c, Content::ToolCall { .. }))
-        {
-            stop_reason = StopReason::ToolUse;
-        }
+        let (content, usage, stop_reason) = state.finish(&tx);
 
         let message = Message::Assistant {
             content,
@@ -241,12 +104,6 @@ impl StreamProvider for OpenAiResponsesProvider {
         });
         Ok(message)
     }
-}
-
-struct ToolCallBuffer {
-    id: String,
-    name: String,
-    arguments: String,
 }
 
 fn build_request_body(config: &StreamConfig, _model_config: &ModelConfig) -> serde_json::Value {
@@ -403,42 +260,4 @@ fn build_request_body(config: &StreamConfig, _model_config: &ModelConfig) -> ser
     }
 
     body
-}
-
-// Event types
-#[derive(Deserialize)]
-struct TextDeltaEvent {
-    delta: String,
-}
-
-#[derive(Deserialize)]
-struct FunctionCallStartEvent {
-    #[serde(default)]
-    call_id: Option<String>,
-    #[serde(default)]
-    name: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct ResponseCompletedEvent {
-    #[serde(default)]
-    response: Option<ResponseData>,
-}
-
-#[derive(Deserialize)]
-struct ResponseData {
-    #[serde(default)]
-    status: Option<String>,
-    #[serde(default)]
-    usage: Option<ResponseUsage>,
-}
-
-#[derive(Deserialize)]
-struct ResponseUsage {
-    #[serde(default)]
-    input_tokens: u64,
-    #[serde(default)]
-    output_tokens: u64,
-    #[serde(default)]
-    total_tokens: u64,
 }

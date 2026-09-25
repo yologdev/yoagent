@@ -35,6 +35,7 @@
 - [Model Presets](providers/model-presets.md)
 - [Anthropic](providers/anthropic.md)
 - [OpenAI Compatible](providers/openai-compat.md)
+- [OpenAI Responses](providers/openai-responses.md)
 - [Google Gemini](providers/google.md)
 - [Amazon Bedrock](providers/bedrock.md)
 - [Azure OpenAI](providers/azure-openai.md)

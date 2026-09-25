@@ -40,11 +40,10 @@ Set this as `ModelConfig.base_url`. The provider appends `/responses?api-version
 
 - **Protocol**: `ApiProtocol::AzureOpenAiResponses`
 - **Format**: OpenAI Responses API (not Chat Completions)
-- **Streaming**: SSE with event types:
-  - `response.output_text.delta` — Text content
-  - `response.function_call_arguments.start` — Tool call start
-  - `response.function_call_arguments.delta` — Tool call arguments
-  - `response.completed` — Final usage data
+- **Streaming**: the Responses API event stream, parsed by the same code as the
+  [OpenAI Responses provider](openai-responses.md#streaming-events) (tool calls
+  start on `response.output_item.added`; usage splits cached and cache-written
+  tokens out of `input`)
 
 ## Thinking
 

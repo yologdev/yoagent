@@ -8,6 +8,7 @@ pub mod model;
 pub mod openai_compat;
 pub mod openai_responses;
 pub mod registry;
+mod responses_stream;
 pub mod sse;
 pub mod tool_args;
 pub mod traits;
