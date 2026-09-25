@@ -475,8 +475,7 @@ fn build_request_body(
 /// as `thinking: disabled`, not as an effort value). `XHigh` is sent as
 /// `high`, matching DeepSeek's own documented mapping of a requested `xhigh`,
 /// so it never silently selects the most expensive rung; only `Max` sends
-/// `max`. [`OpenAiCompat::max_reasoning_effort`] and
-/// [`OpenAiCompat::supports_effort_none`] are not consulted here.
+/// `max`. [`OpenAiCompat::max_reasoning_effort`] is not consulted here.
 ///
 /// Every other provider goes through
 /// [`OpenAiCompat::openai_reasoning_effort`], which caps `XHigh`/`Max` at the
@@ -1009,11 +1008,9 @@ mod tests {
     fn with_effort_caps(
         mut model_config: ModelConfig,
         ceiling: ReasoningEffortCeiling,
-        none: bool,
     ) -> ModelConfig {
         let compat = model_config.compat.as_mut().unwrap();
         compat.max_reasoning_effort = ceiling;
-        compat.supports_effort_none = none;
         model_config
     }
 
@@ -1024,7 +1021,6 @@ mod tests {
         let mc = with_effort_caps(
             ModelConfig::openai("gpt-5.4", "GPT-5.4"),
             ReasoningEffortCeiling::XHigh,
-            false,
         );
         assert_eq!(effort_for(&mc, ThinkingLevel::XHigh), "xhigh");
         assert_eq!(effort_for(&mc, ThinkingLevel::Max), "xhigh");
@@ -1038,7 +1034,6 @@ mod tests {
         let mc = with_effort_caps(
             ModelConfig::openai("gpt-5.6", "GPT-5.6"),
             ReasoningEffortCeiling::Max,
-            false,
         );
         assert_eq!(effort_for(&mc, ThinkingLevel::Max), "max");
         assert_eq!(effort_for(&mc, ThinkingLevel::XHigh), "xhigh");
@@ -1047,40 +1042,35 @@ mod tests {
     }
 
     #[test]
-    fn test_off_sends_none_only_where_the_model_accepts_it() {
-        // Omitting reasoning_effort runs an OpenAI reasoning model at its
-        // default (medium) — not without reasoning. Where `none` exists, Off
-        // must send it.
-        let with_none = with_effort_caps(
-            ModelConfig::openai("gpt-5.4", "GPT-5.4"),
-            ReasoningEffortCeiling::XHigh,
-            true,
-        );
-        assert_eq!(effort_for(&with_none, ThinkingLevel::Off), "none");
-        // Near-miss: the flag changes Off and nothing else.
-        assert_eq!(effort_for(&with_none, ThinkingLevel::Minimal), "low");
-        assert_eq!(effort_for(&with_none, ThinkingLevel::High), "high");
-
-        // Without the flag, Off still omits the field.
-        let without = ModelConfig::openai("gpt-5", "GPT-5");
-        let (config, compat) = thinking_config(&without, ThinkingLevel::Off);
-        let body = build_request_body(&config, &without, &compat);
-        assert!(body.get("reasoning_effort").is_none());
-
-        // And a provider that takes no reasoning_effort at all sends nothing,
-        // even when `supports_effort_none` is set on it by mistake.
-        let mut no_effort = ModelConfig::groq("llama", "Llama");
-        no_effort.compat.as_mut().unwrap().supports_effort_none = true;
-        let (config, compat) = thinking_config(&no_effort, ThinkingLevel::Off);
-        let body = build_request_body(&config, &no_effort, &compat);
-        assert!(body.get("reasoning_effort").is_none());
+    fn test_off_omits_reasoning_effort_on_every_ceiling() {
+        // `Off` sends nothing — the model runs at its own default — whatever
+        // the ceiling, including the presets whose models have a `none` rung.
+        for mc in [
+            ModelConfig::gpt_5_5(),
+            with_effort_caps(
+                ModelConfig::openai("gpt-5.6", "GPT-5.6"),
+                ReasoningEffortCeiling::Max,
+            ),
+            ModelConfig::openai("gpt-5", "GPT-5"),
+            ModelConfig::xai("grok-4.7", "Grok 4.7"),
+            ModelConfig::groq("llama", "Llama"),
+        ] {
+            let (config, compat) = thinking_config(&mc, ThinkingLevel::Off);
+            let body = build_request_body(&config, &mc, &compat);
+            assert!(body.get("reasoning_effort").is_none(), "{}", mc.id);
+            // Positive control: the same config does send an effort when
+            // thinking is on, so the omission above is Off's doing.
+            if compat.supports_reasoning_effort {
+                assert_eq!(effort_for(&mc, ThinkingLevel::Low), "low", "{}", mc.id);
+            }
+        }
     }
 
     #[test]
-    fn test_gpt_5_5_preset_reaches_xhigh_and_sends_none_for_off() {
-        // gpt-5.5: none/low/medium/high/xhigh, no max.
+    fn test_gpt_5_5_preset_reaches_xhigh_and_omits_effort_for_off() {
+        // gpt-5.5: low/medium/high/xhigh, no max.
         let gpt = ModelConfig::gpt_5_5();
-        assert_eq!(effort_for(&gpt, ThinkingLevel::Off), "none");
+        assert!(effort_for(&gpt, ThinkingLevel::Off).is_null());
         assert_eq!(effort_for(&gpt, ThinkingLevel::XHigh), "xhigh");
         assert_eq!(effort_for(&gpt, ThinkingLevel::Max), "xhigh");
         assert_eq!(effort_for(&gpt, ThinkingLevel::High), "high");
@@ -1090,13 +1080,12 @@ mod tests {
 
     #[test]
     fn test_deepseek_ignores_the_openai_effort_caps() {
-        // DeepSeek's ladder is its own: even with an OpenAI ceiling and a
-        // `none` rung declared on it, Off stays `thinking: disabled` with no
-        // effort, XHigh stays `high` and Max stays `max`.
+        // DeepSeek's ladder is its own: even with an OpenAI ceiling
+        // declared on it, Off stays `thinking: disabled` with no effort,
+        // XHigh stays `high` and Max stays `max`.
         let deepseek = with_effort_caps(
             ModelConfig::deepseek("deepseek-v4-pro", "DeepSeek V4 Pro"),
             ReasoningEffortCeiling::XHigh,
-            true,
         );
         assert_eq!(effort_for(&deepseek, ThinkingLevel::XHigh), "high");
         assert_eq!(effort_for(&deepseek, ThinkingLevel::Max), "max");
@@ -1106,8 +1095,8 @@ mod tests {
         assert_eq!(body["thinking"]["type"], "disabled");
     }
 
-    /// The mapping every provider used before `max_reasoning_effort` and
-    /// `supports_effort_none` existed, transcribed from the removed code.
+    /// The mapping every provider used before `max_reasoning_effort`
+    /// existed, transcribed from the removed code.
     fn legacy_effort(level: ThinkingLevel, compat: &OpenAiCompat) -> Option<&'static str> {
         if level == ThinkingLevel::Off || !compat.supports_reasoning_effort {
             return None;
@@ -1123,7 +1112,7 @@ mod tests {
     #[test]
     fn test_presets_without_effort_caps_send_byte_identical_bodies() {
         // Near-miss guard for #176: the capability is opt-in. Every preset
-        // that did not gain a ceiling or a `none` rung must produce exactly
+        // that did not gain a ceiling must produce exactly
         // the body it produced before — compared as whole bodies against a
         // copy with the legacy effort spliced in, so a stray field or a
         // moved key fails too.
@@ -1145,7 +1134,6 @@ mod tests {
         for mc in &unchanged {
             let compat = mc.compat.as_ref().unwrap();
             assert_eq!(compat.max_reasoning_effort, ReasoningEffortCeiling::High);
-            assert!(!compat.supports_effort_none);
             for level in ALL_LEVELS {
                 let (config, compat) = thinking_config(mc, level);
                 let body = build_request_body(&config, mc, &compat);
@@ -1165,15 +1153,49 @@ mod tests {
     }
 
     #[test]
+    fn test_off_bodies_are_byte_identical_to_pre_176_for_capped_presets() {
+        // The presets that did gain a ceiling: at `Off` their body is exactly
+        // the pre-#176 one — the body the same config builds when it takes no
+        // effort at all, so no `reasoning_effort` key and nothing else moved.
+        for mc in [
+            ModelConfig::gpt_5_5(),
+            ModelConfig::xai("grok-4.7", "Grok 4.7"),
+            with_effort_caps(
+                ModelConfig::openai("gpt-6-sol", "GPT-6 Sol"),
+                ReasoningEffortCeiling::Max,
+            ),
+        ] {
+            let (config, compat) = thinking_config(&mc, ThinkingLevel::Off);
+            let body = build_request_body(&config, &mc, &compat);
+            let mut legacy_compat = compat.clone();
+            legacy_compat.supports_reasoning_effort = false;
+            let mut legacy_mc = mc.clone();
+            legacy_mc.compat = Some(legacy_compat.clone());
+            let legacy = build_request_body(&config, &legacy_mc, &legacy_compat);
+            assert!(legacy_effort(ThinkingLevel::Off, &compat).is_none());
+            assert_eq!(
+                serde_json::to_string(&body).unwrap(),
+                serde_json::to_string(&legacy).unwrap(),
+                "{}",
+                mc.id
+            );
+        }
+    }
+
+    #[test]
     fn test_effort_caps_deserialize_to_legacy_defaults() {
         // A compat persisted before the fields existed keeps its old behaviour.
         let mut v = serde_json::to_value(OpenAiCompat::openai()).unwrap();
         let obj = v.as_object_mut().unwrap();
         assert_eq!(obj.remove("max_reasoning_effort").unwrap(), "high");
-        assert_eq!(obj.remove("supports_effort_none").unwrap(), false);
+        assert!(obj.get("supports_effort_none").is_none());
+        let back: OpenAiCompat = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(back.max_reasoning_effort, ReasoningEffortCeiling::High);
+        // A compat persisted by a pre-release build that still carried
+        // `supports_effort_none` loads; the key is ignored.
+        v["supports_effort_none"] = serde_json::json!(true);
         let back: OpenAiCompat = serde_json::from_value(v).unwrap();
         assert_eq!(back.max_reasoning_effort, ReasoningEffortCeiling::High);
-        assert!(!back.supports_effort_none);
         // The wire names of the rungs.
         for (ceiling, name) in [
             (ReasoningEffortCeiling::High, "high"),

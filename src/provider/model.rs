@@ -429,22 +429,6 @@ pub struct OpenAiCompat {
     /// has its own `low`/`high`/`max` mapping.
     #[serde(default)]
     pub max_reasoning_effort: ReasoningEffortCeiling,
-    /// The model accepts reasoning effort `none`, so
-    /// [`ThinkingLevel::Off`] is sent as `none` rather than omitted.
-    ///
-    /// Omitting the effort does not turn reasoning off on OpenAI's reasoning
-    /// models — it runs them at their default, `medium`. Where `none` exists
-    /// (gpt-5.1 and later, GPT-5.6, GPT-6 Sol/Luna) it is the only way to get
-    /// a non-reasoning request, and on GPT-6 Sol/Luna it is also the only
-    /// effort under which Chat Completions allows function calling. Leave it
-    /// off where `none` is rejected: GPT-6 Astra returns HTTP 400 for it, and
-    /// the o-series and gpt-5 do not have it.
-    ///
-    /// Read by the same providers as
-    /// [`max_reasoning_effort`](Self::max_reasoning_effort), with the same
-    /// DeepSeek exception (DeepSeek's `Off` is `thinking: disabled`).
-    #[serde(default)]
-    pub supports_effort_none: bool,
 }
 
 impl Default for OpenAiCompat {
@@ -462,8 +446,47 @@ impl Default for OpenAiCompat {
             supports_prompt_cache_key: false,
             replays_reasoning_content: false,
             max_reasoning_effort: ReasoningEffortCeiling::High,
-            supports_effort_none: false,
         }
+    }
+}
+
+/// One `tracing::warn!` per distinct clamp (requested level, rung sent) per
+/// process.
+///
+/// One-time rather than per request: the clamp is a property of the config,
+/// so it recurs on every turn of every run, and a per-request warning would
+/// flood an agent's log with the same line. Only three clamps exist (`XHigh`
+/// to `high`, `Max` to `high` or `xhigh`), so each gets its own flag and a
+/// second model with a different ceiling still reports its own clamp.
+fn warn_effort_clamp(level: ThinkingLevel, sent: &'static str) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WARNED: [AtomicBool; 3] = [
+        AtomicBool::new(false),
+        AtomicBool::new(false),
+        AtomicBool::new(false),
+    ];
+    let Some(slot) = effort_clamp_slot(level, sent) else {
+        return;
+    };
+    if !WARNED[slot].swap(true, Ordering::Relaxed) {
+        tracing::warn!(
+            requested = ?level,
+            sent,
+            "reasoning effort clamped to the model's declared ceiling \
+             (OpenAiCompat::max_reasoning_effort); set it on the ModelConfig's \
+             compat if the model accepts a higher rung. Logged once per clamp."
+        );
+    }
+}
+
+/// Which clamp `level` → `sent` is, if it is one. Separate from the logging so
+/// the detection is testable without a process-global subscriber.
+fn effort_clamp_slot(level: ThinkingLevel, sent: &str) -> Option<usize> {
+    match (level, sent) {
+        (ThinkingLevel::XHigh, "high") => Some(0),
+        (ThinkingLevel::Max, "high") => Some(1),
+        (ThinkingLevel::Max, "xhigh") => Some(2),
+        _ => None,
     }
 }
 
@@ -472,14 +495,18 @@ impl OpenAiCompat {
     /// field. Shared by the Chat Completions (`reasoning_effort`), Responses
     /// and Azure (`reasoning.effort`) request builders.
     ///
-    /// `Off` is `none` only where [`supports_effort_none`](Self::supports_effort_none)
-    /// is set; `XHigh`/`Max` are capped at
-    /// [`max_reasoning_effort`](Self::max_reasoning_effort). Not the DeepSeek
-    /// ladder — `openai_compat.rs` handles that before reaching here.
+    /// `Off` omits the effort, so the model runs at its own default — on
+    /// OpenAI's reasoning models that is `medium`, not "no reasoning". This
+    /// crate never sends `none`: several models reject it with HTTP 400 (GPT-6
+    /// Astra, gpt-5, the o-series). `XHigh`/`Max` are capped at
+    /// [`max_reasoning_effort`](Self::max_reasoning_effort), with a one-time
+    /// `tracing::warn!` per clamp so a downgrade is never completely silent.
+    /// Not the DeepSeek ladder — `openai_compat.rs` handles that before
+    /// reaching here.
     pub(crate) fn openai_reasoning_effort(&self, level: ThinkingLevel) -> Option<&'static str> {
         use ReasoningEffortCeiling as Ceiling;
-        Some(match level {
-            ThinkingLevel::Off => return self.supports_effort_none.then_some("none"),
+        let effort = match level {
+            ThinkingLevel::Off => return None,
             ThinkingLevel::Minimal | ThinkingLevel::Low => "low",
             ThinkingLevel::Medium => "medium",
             ThinkingLevel::High => "high",
@@ -490,7 +517,9 @@ impl OpenAiCompat {
                 Ceiling::XHigh => "xhigh",
                 Ceiling::High => "high",
             },
-        })
+        };
+        warn_effort_clamp(level, effort);
+        Some(effort)
     }
 
     /// Compat flags for native OpenAI.
@@ -1153,8 +1182,9 @@ impl ModelConfig {
     ///
     /// Reasoning effort: `none`/`low`/`medium` (default)/`high`/`xhigh`, per
     /// the model page — so the ceiling is [`ReasoningEffortCeiling::XHigh`]
-    /// (`ThinkingLevel::Max` sends `xhigh`) and `ThinkingLevel::Off` sends
-    /// `none` ([`OpenAiCompat::supports_effort_none`]).
+    /// (`ThinkingLevel::Max` sends `xhigh`). `ThinkingLevel::Off` omits the
+    /// effort, which runs the model at its default (`medium`); this crate
+    /// does not send `none`.
     ///
     /// **Priced in two bands.** The model page
     /// (<https://developers.openai.com/api/docs/models/gpt-5.5>, read
@@ -1186,7 +1216,6 @@ impl ModelConfig {
             ),
             compat: Some(OpenAiCompat {
                 max_reasoning_effort: ReasoningEffortCeiling::XHigh,
-                supports_effort_none: true,
                 ..OpenAiCompat::openai()
             }),
             ..Self::openai("gpt-5.5", "GPT-5.5")
@@ -1202,9 +1231,8 @@ impl ModelConfig {
     /// agent with tools needs Responses.
     ///
     /// Reasoning effort: `low`/`medium`/`high`/`xhigh`/`max`, ceiling
-    /// [`ReasoningEffortCeiling::Max`]. **No `none`**: "Setting
-    /// reasoning.effort … to none returns HTTP 400", so
-    /// [`OpenAiCompat::supports_effort_none`] is off and `ThinkingLevel::Off`
+    /// [`ReasoningEffortCeiling::Max`]. (Astra has no `none` rung: "Setting
+    /// reasoning.effort … to none returns HTTP 400".) `ThinkingLevel::Off`
     /// omits the effort — which runs the model at its default, not without
     /// reasoning. `Minimal` is sent as `low` (GPT-6 has no `minimal`).
     ///
@@ -1219,7 +1247,6 @@ impl ModelConfig {
         Self::gpt_6(
             "gpt-6-astra",
             "GPT-6 Astra",
-            false,
             CostConfig::new(10.0, 50.0)
                 .with_cache_read(1.0)
                 .with_cache_write(12.5)
@@ -1240,13 +1267,14 @@ impl ModelConfig {
     /// none", which would forbid reasoning in any agent with tools.
     ///
     /// Reasoning effort: `none`/`low`/`medium` (default)/`high`/`xhigh`/`max`,
-    /// ceiling [`ReasoningEffortCeiling::Max`];
-    /// [`OpenAiCompat::supports_effort_none`] is on, so `ThinkingLevel::Off`
-    /// sends `none` — no reasoning — rather than falling back to `medium`.
+    /// ceiling [`ReasoningEffortCeiling::Max`]. `ThinkingLevel::Off` omits
+    /// the effort, so the model runs at its default (`medium`); this crate
+    /// does not send `none`.
     ///
-    /// **`temperature` is rejected** unless the effort is `none`
-    /// (`ThinkingLevel::Off`): "When reasoning effort is not none, remove
-    /// temperature, top_p, and top_logprobs."
+    /// **`temperature` is rejected** unless the effort is `none`: "When
+    /// reasoning effort is not none, remove temperature, top_p, and
+    /// top_logprobs." Since this crate never sends `none`, do not set a
+    /// temperature with this preset.
     ///
     /// Priced per OpenAI's pricing page (read 2026-09-25): $2 input / $0.20
     /// cached / $2.50 cache write / $10 output; above 272K prompt tokens the
@@ -1255,7 +1283,6 @@ impl ModelConfig {
         Self::gpt_6(
             "gpt-6-sol",
             "GPT-6 Sol",
-            true,
             CostConfig::new(2.0, 10.0)
                 .with_cache_read(0.2)
                 .with_cache_write(2.5)
@@ -1276,8 +1303,9 @@ impl ModelConfig {
     /// calling only at reasoning effort `none`.
     ///
     /// Reasoning effort: `none`/`low`/`medium` (default)/`high`/`xhigh`/`max`,
-    /// ceiling [`ReasoningEffortCeiling::Max`]; `ThinkingLevel::Off` sends
-    /// `none`. **`temperature` is rejected** unless the effort is `none`.
+    /// ceiling [`ReasoningEffortCeiling::Max`]; `ThinkingLevel::Off` omits the
+    /// effort (the model's default, `medium`). **`temperature` is rejected**
+    /// unless the effort is `none`, which this crate never sends.
     ///
     /// Priced per OpenAI's pricing page (read 2026-09-25): $0.10 input /
     /// $0.01 cached / $0.125 cache write / $0.50 output; above 272K prompt
@@ -1287,7 +1315,6 @@ impl ModelConfig {
         Self::gpt_6(
             "gpt-6-luna",
             "GPT-6 Luna",
-            true,
             CostConfig::new(0.1, 0.5)
                 .with_cache_read(0.01)
                 .with_cache_write(0.125)
@@ -1305,7 +1332,7 @@ impl ModelConfig {
     /// provider reads nothing else from it. It starts from
     /// [`OpenAiCompat::openai`] so that switching `api` to Chat Completions
     /// yields correct flags rather than the bare defaults.
-    fn gpt_6(id: &str, name: &str, supports_effort_none: bool, cost: CostConfig) -> Self {
+    fn gpt_6(id: &str, name: &str, cost: CostConfig) -> Self {
         Self {
             reasoning: true,
             context_window: 1_050_000,
@@ -1313,7 +1340,6 @@ impl ModelConfig {
             cost: Some(cost),
             compat: Some(OpenAiCompat {
                 max_reasoning_effort: ReasoningEffortCeiling::Max,
-                supports_effort_none,
                 ..OpenAiCompat::openai()
             }),
             ..Self::openai_responses(id, name)
@@ -1350,12 +1376,11 @@ impl ModelConfig {
     ///
     /// Unpriced (`cost: None`); set `cost` for the model you use.
     ///
-    /// `compat` is `None`, so reasoning effort tops out at `high` and
-    /// `ThinkingLevel::Off` omits it. For a model with a higher ceiling or a
-    /// `none` rung, set `compat` to an [`OpenAiCompat`] carrying
-    /// [`max_reasoning_effort`](OpenAiCompat::max_reasoning_effort) /
-    /// [`supports_effort_none`](OpenAiCompat::supports_effort_none) — the
-    /// Responses provider reads those two fields and ignores the rest.
+    /// `compat` is `None`, so reasoning effort tops out at `high`
+    /// (`ThinkingLevel::Off` always omits it). For a model with a higher
+    /// ceiling, set `compat` to an [`OpenAiCompat`] carrying
+    /// [`max_reasoning_effort`](OpenAiCompat::max_reasoning_effort) — the
+    /// Responses provider reads that field and ignores the rest.
     pub fn openai_responses(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -1784,6 +1809,39 @@ mod tests {
     }
 
     #[test]
+    fn effort_clamps_are_detected_exactly() {
+        use ReasoningEffortCeiling as C;
+        let at = |ceiling| OpenAiCompat {
+            max_reasoning_effort: ceiling,
+            ..OpenAiCompat::openai()
+        };
+        let levels = [
+            ThinkingLevel::Off,
+            ThinkingLevel::Minimal,
+            ThinkingLevel::Low,
+            ThinkingLevel::Medium,
+            ThinkingLevel::High,
+            ThinkingLevel::XHigh,
+            ThinkingLevel::Max,
+        ];
+        for ceiling in [C::High, C::XHigh, C::Max] {
+            for level in levels {
+                let clamped = at(ceiling)
+                    .openai_reasoning_effort(level)
+                    .and_then(|sent| effort_clamp_slot(level, sent))
+                    .is_some();
+                // A clamp is exactly: the level asks for a rung above the
+                // ceiling. Minimal → low is a renaming, not a clamp.
+                let expected = matches!(
+                    (level, ceiling),
+                    (ThinkingLevel::XHigh, C::High) | (ThinkingLevel::Max, C::High | C::XHigh)
+                );
+                assert_eq!(clamped, expected, "{level:?} at {ceiling:?}");
+            }
+        }
+    }
+
+    #[test]
     fn test_cost_usd() {
         let cost = CostConfig {
             input_per_million: 3.0,
@@ -1880,7 +1938,6 @@ mod tests {
         assert_eq!(gpt.cost.as_ref().unwrap().output_per_million, 30.0);
         let compat = gpt.compat.as_ref().unwrap();
         assert_eq!(compat.max_reasoning_effort, ReasoningEffortCeiling::XHigh);
-        assert!(compat.supports_effort_none);
         // The rest of the compat is native OpenAI's, unchanged.
         assert!(compat.supports_reasoning_effort && compat.supports_prompt_cache_key);
         assert_eq!(compat.max_tokens_field, MaxTokensField::MaxCompletionTokens);
@@ -1888,10 +1945,10 @@ mod tests {
 
     #[test]
     fn gpt_6_presets() {
-        for (mc, id, none) in [
-            (ModelConfig::gpt_6_astra(), "gpt-6-astra", false),
-            (ModelConfig::gpt_6_sol(), "gpt-6-sol", true),
-            (ModelConfig::gpt_6_luna(), "gpt-6-luna", true),
+        for (mc, id) in [
+            (ModelConfig::gpt_6_astra(), "gpt-6-astra"),
+            (ModelConfig::gpt_6_sol(), "gpt-6-sol"),
+            (ModelConfig::gpt_6_luna(), "gpt-6-luna"),
         ] {
             assert_eq!(mc.id, id);
             // Tool calling on GPT-6 needs Responses (Chat Completions refuses
@@ -1904,7 +1961,6 @@ mod tests {
             assert!(mc.max_tokens <= 128_000);
             let compat = mc.compat.as_ref().unwrap();
             assert_eq!(compat.max_reasoning_effort, ReasoningEffortCeiling::Max);
-            assert_eq!(compat.supports_effort_none, none, "{id}");
             let tiers = &mc.cost.as_ref().unwrap().context_tiers;
             assert_eq!(tiers.len(), 1, "{id}");
             assert_eq!(tiers[0].above_prompt_tokens, 272_000);

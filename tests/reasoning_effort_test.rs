@@ -101,13 +101,15 @@ fn azure(preset: ModelConfig) -> ModelConfig {
 }
 
 #[tokio::test]
-async fn gpt_6_sol_off_sends_none_and_max_sends_max_on_responses_and_azure() {
+async fn gpt_6_sol_off_omits_effort_and_max_sends_max_on_responses_and_azure() {
     for (which, mc) in [
         (Which::Responses, ModelConfig::gpt_6_sol()),
         (Which::Azure, azure(ModelConfig::gpt_6_sol())),
     ] {
+        // `Off` sends nothing: the model runs at its own default.
+        let body = sent_body(which, mc.clone(), ThinkingLevel::Off).await;
+        assert!(body.get("reasoning").is_none(), "{which:?}");
         for (level, want) in [
-            (ThinkingLevel::Off, "none"),
             (ThinkingLevel::Medium, "medium"),
             (ThinkingLevel::XHigh, "xhigh"),
             (ThinkingLevel::Max, "max"),
@@ -129,21 +131,18 @@ async fn gpt_6_astra_off_omits_effort_on_responses_and_azure() {
         (Which::Azure, azure(ModelConfig::gpt_6_astra())),
     ] {
         let body = sent_body(which, mc.clone(), ThinkingLevel::Off).await;
-        assert_eq!(
-            effort(which, &body),
-            None,
-            "{which:?}: none is a 400 on Astra"
-        );
+        assert!(body.get("reasoning").is_none(), "{which:?}");
         let body = sent_body(which, mc, ThinkingLevel::Max).await;
         assert_eq!(effort(which, &body).as_deref(), Some("max"), "{which:?}");
     }
 }
 
 #[tokio::test]
-async fn gpt_5_5_on_chat_completions_reaches_xhigh_and_sends_none() {
+async fn gpt_5_5_on_chat_completions_reaches_xhigh_and_omits_effort_for_off() {
     let mc = ModelConfig::gpt_5_5();
+    let body = sent_body(Which::ChatCompletions, mc.clone(), ThinkingLevel::Off).await;
+    assert!(body.get("reasoning_effort").is_none());
     for (level, want) in [
-        (ThinkingLevel::Off, "none"),
         (ThinkingLevel::High, "high"),
         (ThinkingLevel::XHigh, "xhigh"),
         (ThinkingLevel::Max, "xhigh"),

@@ -565,7 +565,7 @@ pub enum CacheStrategy {
 ///
 /// | Level     | Anthropic (adaptive) | Anthropic legacy / Bedrock budget | OpenAI-compat `reasoning_effort`¹ / OpenAI Responses / Azure `reasoning.effort`, by ceiling⁴ | DeepSeek `reasoning_effort`² | Gemini 2.x / Vertex `thinkingBudget`³ |
 /// |-----------|----------|--------|----------|--------|--------|
-/// | `Off`     | (no thinking) | (no thinking) | `none` with [`OpenAiCompat::supports_effort_none`], else (omitted) | (omitted; `thinking: disabled`) | (omitted) |
+/// | `Off`     | (no thinking) | (no thinking) | (omitted) | (omitted; `thinking: disabled`) | (omitted) |
 /// | `Minimal` | `low`    | 1,024  | `low`    | `low`  | 1,024  |
 /// | `Low`     | `low`    | 1,024  | `low`    | `low`  | 1,024  |
 /// | `Medium`  | `medium` | 2,048  | `medium` | `medium` (DeepSeek rounds up to `high`) | 8,192  |
@@ -578,17 +578,17 @@ pub enum CacheStrategy {
 /// `reasoning_effort` is sent. The Responses and Azure providers always send
 /// `reasoning.effort`, except for an omitted `Off`. Omitting it does not mean
 /// "no reasoning": an OpenAI reasoning model runs at its default (`medium`),
-/// which is why `Off` sends `none` where the model has that rung, and xAI's
-/// Grok cannot disable reasoning at all, so `Off` leaves it at its default
-/// (`high`).
+/// and xAI's Grok cannot disable reasoning at all, so `Off` leaves it at its
+/// default (`high`). This crate never sends OpenAI's `none` rung, which some
+/// models reject with HTTP 400. A clamp (`XHigh`/`Max` sent lower) is logged
+/// once per process with `tracing::warn!`.
 ///
 /// ⁴ The ceiling is [`OpenAiCompat::max_reasoning_effort`], a
 /// [`ReasoningEffortCeiling`] declared per model (default `High`); the
-/// Responses and Azure providers read it, and `supports_effort_none`, from
-/// `ModelConfig::compat`. Presets: `gpt_6_astra` — `Max`, no `none` (a 400 on
-/// Astra); `gpt_6_sol`, `gpt_6_luna` — `Max`, `none`; `gpt_5_5` — `XHigh`,
-/// `none`; [`OpenAiCompat::xai`] — `XHigh` (Grok models without the rung
-/// treat `xhigh` as `high`); every other config `High`, no `none`.
+/// Responses and Azure providers read it from `ModelConfig::compat`.
+/// Presets: `gpt_6_astra`, `gpt_6_sol`, `gpt_6_luna` — `Max`; `gpt_5_5` —
+/// `XHigh`; [`OpenAiCompat::xai`] — `XHigh` (Grok models without the rung
+/// treat `xhigh` as `high`); every other config `High`.
 ///
 /// ² "DeepSeek" means any OpenAI-compat provider with both
 /// [`OpenAiCompat::supports_thinking_control`] and
@@ -632,7 +632,6 @@ pub enum CacheStrategy {
 ///
 /// [`OpenAiCompat::supports_thinking_control`]: crate::provider::OpenAiCompat::supports_thinking_control
 /// [`OpenAiCompat::supports_reasoning_effort`]: crate::provider::OpenAiCompat::supports_reasoning_effort
-/// [`OpenAiCompat::supports_effort_none`]: crate::provider::OpenAiCompat::supports_effort_none
 /// [`OpenAiCompat::max_reasoning_effort`]: crate::provider::OpenAiCompat::max_reasoning_effort
 /// [`OpenAiCompat::xai`]: crate::provider::OpenAiCompat::xai
 /// [`ReasoningEffortCeiling`]: crate::provider::ReasoningEffortCeiling

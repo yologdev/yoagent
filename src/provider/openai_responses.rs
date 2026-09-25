@@ -244,8 +244,8 @@ fn build_request_body(config: &StreamConfig, model_config: &ModelConfig) -> serd
     }
 
     // The effort capability comes from `model_config.compat` (see
-    // `OpenAiCompat::max_reasoning_effort`); `None` means a `high` ceiling
-    // and no `none` rung, which is what this provider always sent before.
+    // `OpenAiCompat::max_reasoning_effort`); `None` means a `high` ceiling,
+    // which is what this provider always sent before. `Off` omits it.
     let default_compat = OpenAiCompat::default();
     let compat = model_config.compat.as_ref().unwrap_or(&default_compat);
     if let Some(effort) = compat.openai_reasoning_effort(config.thinking_level) {
@@ -348,12 +348,36 @@ mod tests {
     }
 
     #[test]
-    fn gpt_6_sol_and_luna_send_none_for_off() {
+    fn gpt_6_sol_and_luna_omit_effort_for_off() {
         for mc in [ModelConfig::gpt_6_sol(), ModelConfig::gpt_6_luna()] {
-            assert_eq!(effort(&mc, ThinkingLevel::Off), "none", "{}", mc.id);
+            assert!(body(&mc, ThinkingLevel::Off).get("reasoning").is_none());
             assert_eq!(effort(&mc, ThinkingLevel::Max), "max", "{}", mc.id);
             assert_eq!(effort(&mc, ThinkingLevel::XHigh), "xhigh", "{}", mc.id);
             assert_eq!(effort(&mc, ThinkingLevel::Low), "low", "{}", mc.id);
+        }
+    }
+
+    #[test]
+    fn off_bodies_are_byte_identical_to_the_uncapped_body_for_every_preset() {
+        // `Off` means "send nothing": whatever the preset's ceiling, the body
+        // equals the pre-#176 one (a compat-less config's body with the same
+        // model id), with no `reasoning` key.
+        for mc in [
+            ModelConfig::gpt_6_astra(),
+            ModelConfig::gpt_6_sol(),
+            ModelConfig::gpt_6_luna(),
+            ModelConfig::gpt_5_5(),
+        ] {
+            let mut legacy = mc.clone();
+            legacy.compat = None;
+            let got = body(&mc, ThinkingLevel::Off);
+            assert!(got.get("reasoning").is_none(), "{}", mc.id);
+            assert_eq!(
+                serde_json::to_string(&got).unwrap(),
+                serde_json::to_string(&body(&legacy, ThinkingLevel::Off)).unwrap(),
+                "{}",
+                mc.id
+            );
         }
     }
 }
