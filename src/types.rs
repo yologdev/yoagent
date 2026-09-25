@@ -1110,20 +1110,6 @@ pub enum ToolDecision {
     Deny(String),
 }
 
-/// Async hook that gates every tool call — the mechanism behind permission
-/// prompts, policy engines, and argument rewriting.
-///
-/// yoagent ships the mechanism, not a policy: install middleware via
-/// [`Agent::with_tool_middleware`](crate::Agent::with_tool_middleware) (or
-/// [`AgentLoopConfig::tool_middleware`](crate::agent_loop::AgentLoopConfig))
-/// and decide per call. Middleware run in a chain: each may rewrite the
-/// arguments seen by later ones; the first `Deny` wins. With no middleware
-/// installed, every call is allowed — behavior is unchanged.
-///
-/// The hook is `async` so an interactive app can prompt a human. Under the
-/// default [`ToolExecutionStrategy::Parallel`], middleware for parallel tool
-/// calls runs concurrently — serialize approval prompts inside your
-/// implementation (or use `Sequential`) if you need one-at-a-time UX.
 /// Borrowed view of a pending tool call, passed to
 /// [`ToolMiddleware::before_tool`].
 ///
@@ -1142,6 +1128,26 @@ pub struct ToolCallRequest<'a> {
     pub args: &'a serde_json::Value,
 }
 
+/// Async hook that gates every tool call — the mechanism behind permission
+/// prompts, policy engines, and argument rewriting.
+///
+/// yoagent ships the mechanism, not a policy: install middleware via
+/// [`Agent::with_tool_middleware`](crate::Agent::with_tool_middleware) (or
+/// [`AgentLoopConfig::tool_middleware`](crate::agent_loop::AgentLoopConfig))
+/// and decide per call. Middleware run in a chain: each may rewrite the
+/// arguments seen by later ones; the first `Deny` wins. With no middleware
+/// installed, every call is allowed — behavior is unchanged.
+///
+/// The hook is `async` so an interactive app can prompt a human. Under the
+/// default [`ToolExecutionStrategy::Parallel`], middleware for parallel tool
+/// calls runs concurrently — serialize approval prompts inside your
+/// implementation (or use `Sequential`) if you need one-at-a-time UX.
+///
+/// Middleware never sees a call whose arguments failed to resolve to a JSON
+/// object (cut off mid-stream, or not an object — see
+/// [`parse_tool_arguments`](crate::provider::parse_tool_arguments)). The loop
+/// answers such a call with an error tool result *before* the chain runs, so
+/// there is no real call to approve, deny or rewrite.
 #[async_trait::async_trait]
 pub trait ToolMiddleware: Send + Sync {
     async fn before_tool(&self, call: &ToolCallRequest<'_>) -> ToolDecision;

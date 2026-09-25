@@ -232,7 +232,11 @@ impl StreamProvider for OpenAiCompatProvider {
             });
         }
 
-        if !tool_call_buffers.is_empty() {
+        // Tool calls make this a ToolUse turn — unless the output hit the
+        // token limit. `finish_reason: "length"` mid-arguments is how a call
+        // ends up with unparsed arguments, and Length is the signal a caller
+        // needs to see; the loop still answers every tool call either way.
+        if !tool_call_buffers.is_empty() && stop_reason != StopReason::Length {
             stop_reason = StopReason::ToolUse;
         }
 

@@ -4105,9 +4105,13 @@ async fn an_image_only_result_stashes_nothing() {
 // ---------------------------------------------------------------------------
 
 /// Records the transcript each turn is sent, then delegates to a MockProvider.
+/// With `tool_turn_stop` set, a turn carrying tool calls reports that stop
+/// reason instead of the mock's `ToolUse` — how a real provider reports a
+/// call cut off at the output token limit.
 struct RecordingProvider {
     inner: MockProvider,
     seen: std::sync::Arc<std::sync::Mutex<Vec<Vec<Message>>>>,
+    tool_turn_stop: Option<StopReason>,
 }
 
 #[async_trait::async_trait]
@@ -4119,7 +4123,24 @@ impl StreamProvider for RecordingProvider {
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<yoagent::Message, ProviderError> {
         self.seen.lock().unwrap().push(config.messages.clone());
-        self.inner.stream(config, tx, cancel).await
+        let mut message = self.inner.stream(config, tx, cancel).await?;
+        if let (
+            Some(forced),
+            Message::Assistant {
+                content,
+                stop_reason,
+                ..
+            },
+        ) = (&self.tool_turn_stop, &mut message)
+        {
+            if content
+                .iter()
+                .any(|c| matches!(c, Content::ToolCall { .. }))
+            {
+                *stop_reason = forced.clone();
+            }
+        }
+        Ok(message)
     }
 }
 
@@ -4187,6 +4208,7 @@ async fn unparsed_tool_arguments_are_not_executed() {
             MockResponse::Text("retrying".into()),
         ]),
         seen: seen.clone(),
+        tool_turn_stop: None,
     };
     let mut config = make_config(MockProvider::text("unused"));
     config.provider = std::sync::Arc::new(provider);
@@ -4260,8 +4282,13 @@ async fn unparsed_tool_arguments_are_not_executed() {
         .expect("the truncated call must be answered with a tool result");
     assert!(*is_error, "the answer must be an error result");
     assert!(
-        text.contains("did not parse as JSON") && text.contains("retry"),
-        "the model must be told why and to retry, got: {text}"
+        text.contains("cut off") && text.contains("The tool was not run"),
+        "the model must be told why, got: {text}"
+    );
+    assert!(
+        text.contains("Do not resend the same call unchanged"),
+        "the model must not be told to retry verbatim — the same call would be cut \
+         off again, got: {text}"
     );
     let (_, list_error, _) = results
         .iter()
@@ -4276,4 +4303,114 @@ async fn unparsed_tool_arguments_are_not_executed() {
             if tool_name == "delete_files")
     });
     assert!(ended_as_error);
+}
+
+/// Runs one tool-call turn through the loop with a single `write_file` call
+/// carrying `arguments`, and returns (tool runs, provider requests, the
+/// call's error-result text if it was answered as an error).
+async fn run_single_marked_call(
+    arguments: serde_json::Value,
+    tool_turn_stop: Option<StopReason>,
+) -> (usize, usize, Option<String>) {
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let provider = RecordingProvider {
+        inner: MockProvider::new(vec![
+            MockResponse::ToolCalls(vec![MockToolCall {
+                provider_metadata: None,
+                name: "write_file".into(),
+                arguments,
+            }]),
+            MockResponse::Text("ok".into()),
+        ]),
+        seen: seen.clone(),
+        tool_turn_stop,
+    };
+    let mut config = make_config(MockProvider::text("unused"));
+    config.provider = std::sync::Arc::new(provider);
+
+    let runs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut context = AgentContext {
+        system_prompt: "test".into(),
+        messages: Vec::new(),
+        tools: vec![Box::new(CountingTool {
+            name: "write_file",
+            runs: runs.clone(),
+        })],
+    };
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent_loop(
+        vec![AgentMessage::Llm(Message::user("write it"))],
+        &mut context,
+        &config,
+        tx,
+        CancellationToken::new(),
+    )
+    .await;
+
+    let seen = seen.lock().unwrap();
+    let error_text = seen.get(1).and_then(|msgs| {
+        msgs.iter().find_map(|m| match m {
+            Message::ToolResult {
+                is_error: true,
+                content,
+                ..
+            } => Some(
+                content
+                    .iter()
+                    .filter_map(|c| match c {
+                        Content::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<String>(),
+            ),
+            _ => None,
+        })
+    });
+    (
+        runs.load(std::sync::atomic::Ordering::SeqCst),
+        seen.len(),
+        error_text,
+    )
+}
+
+/// The realistic shape of #167: the provider reports `StopReason::Length`
+/// (max_tokens hit mid-arguments), not `ToolUse`. The loop must still
+/// extract the call, answer it with the error result — not run it — and
+/// continue to the next turn. Only Error/Aborted end the run early.
+#[tokio::test]
+async fn a_length_turn_with_a_truncated_call_is_answered_and_the_loop_continues() {
+    let truncated = yoagent::provider::parse_tool_arguments(r#"{"path":"a.txt","content":"lo"#);
+    let (runs, requests, error_text) =
+        run_single_marked_call(truncated, Some(StopReason::Length)).await;
+    assert_eq!(runs, 0, "a truncated call must not run");
+    assert_eq!(
+        requests, 2,
+        "a Length turn with a tool call must continue to the next turn"
+    );
+    let text = error_text.expect("the truncated call must be answered with an error result");
+    assert!(
+        text.contains("cut off") && text.contains("output token limit"),
+        "got: {text}"
+    );
+}
+
+/// Double-encoded arguments (a JSON string holding the object) are valid
+/// JSON but not an object; they are answered with an error naming that,
+/// never run with every field read as missing.
+#[tokio::test]
+async fn double_encoded_arguments_are_answered_not_run() {
+    let raw = r#""{\"path\":\"src\"}""#;
+    let args = yoagent::provider::parse_tool_arguments(raw);
+    let (runs, requests, error_text) = run_single_marked_call(args, None).await;
+    assert_eq!(
+        runs, 0,
+        "a call whose arguments are a JSON string must not run"
+    );
+    assert_eq!(requests, 2, "the loop continues");
+    let text = error_text.expect("answered with an error result");
+    assert!(
+        text.contains("not a JSON object") && text.contains("a string"),
+        "the error must say what was wrong, not claim truncation; got: {text}"
+    );
+    assert!(!text.contains("cut off"), "got: {text}");
 }

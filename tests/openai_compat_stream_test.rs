@@ -285,3 +285,77 @@ async fn truncated_tool_arguments_are_marked_unparsed_not_defaulted() {
         "the raw text is kept under the unparsed marker so the loop refuses to run it"
     );
 }
+
+/// `finish_reason: "length"` mid-arguments — how truncated arguments arise in
+/// practice (a transport cut without a finish_reason is already an error).
+/// The turn must report `Length`, not be relabelled `ToolUse` just because a
+/// tool call was open: `Length` is the signal a caller needs, and the loop
+/// answers the call either way.
+#[tokio::test]
+async fn length_cut_mid_arguments_keeps_the_length_stop_reason() {
+    let server = MockServer::start().await;
+    let body = format!(
+        "{}{}{}",
+        chunk(
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"a.txt\",\"content\":\"lo"}}]}}]}"#
+        ),
+        chunk(r#"{"choices":[{"index":0,"delta":{},"finish_reason":"length"}]}"#),
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
+        .mount(&server)
+        .await;
+
+    let message = run_stream(stream_config(&server.uri()))
+        .await
+        .expect("a length stop is a completed response, not a transport error");
+    let Message::Assistant {
+        content,
+        stop_reason,
+        ..
+    } = &message
+    else {
+        panic!("expected assistant message");
+    };
+    assert_eq!(
+        *stop_reason,
+        StopReason::Length,
+        "an open tool call must not overwrite the Length stop reason"
+    );
+    let args = content
+        .iter()
+        .find_map(|c| match c {
+            Content::ToolCall { arguments, .. } => Some(arguments),
+            _ => None,
+        })
+        .expect("the cut-off call still reaches the loop, which answers it");
+    assert_eq!(
+        yoagent::provider::unparsed_tool_arguments(args),
+        Some(r#"{"path":"a.txt","content":"lo"#)
+    );
+}
+
+/// A complete tool call still makes the turn `ToolUse`.
+#[tokio::test]
+async fn complete_tool_call_is_still_tool_use() {
+    let server = MockServer::start().await;
+    let body = format!(
+        "{}{}{}",
+        chunk(
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"search","arguments":"{\"q\":\"x\"}"}}]}}]}"#
+        ),
+        chunk(r#"{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#),
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
+        .mount(&server)
+        .await;
+
+    let message = run_stream(stream_config(&server.uri())).await.unwrap();
+    let Message::Assistant { stop_reason, .. } = &message else {
+        panic!("expected assistant message");
+    };
+    assert_eq!(*stop_reason, StopReason::ToolUse);
+}

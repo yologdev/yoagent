@@ -190,9 +190,14 @@ impl StreamProvider for AzureOpenAiProvider {
             });
         }
 
-        if content
-            .iter()
-            .any(|c| matches!(c, Content::ToolCall { .. }))
+        // Tool calls make this a ToolUse turn — unless the response was
+        // incomplete (token limit), which is how a call ends up with unparsed
+        // arguments. Length is kept so callers see it; the loop still answers
+        // every tool call either way.
+        if stop_reason != StopReason::Length
+            && content
+                .iter()
+                .any(|c| matches!(c, Content::ToolCall { .. }))
         {
             stop_reason = StopReason::ToolUse;
         }

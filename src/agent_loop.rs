@@ -1352,8 +1352,9 @@ async fn execute_single_tool(
     cancel: &tokio_util::sync::CancellationToken,
     middleware: &[Arc<dyn ToolMiddleware>],
 ) -> (Message, bool) {
-    // A call whose streamed arguments did not parse (a truncated stream, in
-    // practice) is answered with an error, never run: the provider kept the
+    // A call whose streamed arguments did not resolve to a JSON object (cut
+    // off at the output token limit, in practice, or double-encoded as a
+    // string) is answered with an error, never run: the provider kept the
     // raw text instead of substituting `{}`, and running the tool on its
     // defaults would silently replace what the model asked for. This sits
     // ahead of middleware — there is no real call to approve or rewrite.
@@ -1527,7 +1528,12 @@ fn denied_tool_call(
 }
 
 /// Emit events and build the error tool result for a call whose arguments
-/// did not parse as JSON. The model sees why and can retry the call.
+/// did not resolve to a JSON object: either they did not parse (cut off —
+/// the response likely hit its output token limit) or they parsed to some
+/// other JSON value (e.g. double-encoded as a string).
+///
+/// The text deliberately does not say "retry": the same call resent unchanged
+/// would be cut off at the same point again.
 fn unparsed_arguments_tool_call(
     id: &str,
     name: &str,
@@ -1535,29 +1541,54 @@ fn unparsed_arguments_tool_call(
     raw: &str,
     tx: &mpsc::UnboundedSender<AgentEvent>,
 ) -> (Message, bool) {
-    let parse_error = match serde_json::from_str::<serde_json::Value>(raw) {
-        Err(e) => e.to_string(),
-        // Unreachable for a provider-built marker, but a hand-built one could
-        // hold valid JSON; say so rather than invent an error.
-        Ok(_) => "arguments were not delivered as a parsed object".to_string(),
+    let text = match serde_json::from_str::<serde_json::Value>(raw) {
+        Err(e) => {
+            tracing::warn!(
+                tool = name,
+                tool_call_id = id,
+                len = raw.len(),
+                parse_error = %e,
+                "tool call not executed: arguments did not parse as JSON"
+            );
+            format!(
+                "The arguments for tool `{name}` were cut off before they were complete \
+                 (the response likely hit the output token limit): {e}. The tool was not run. \
+                 Do not resend the same call unchanged — make the arguments smaller (for \
+                 example, split large content across several calls)."
+            )
+        }
+        Ok(v) => {
+            let kind = match v {
+                serde_json::Value::String(_) => "a string",
+                serde_json::Value::Number(_) => "a number",
+                serde_json::Value::Array(_) => "an array",
+                serde_json::Value::Bool(_) => "a boolean",
+                // Unreachable for a provider-built marker (`null` resolves to
+                // `{}`, objects pass through), but a hand-built one could hold
+                // either; say only what is known rather than invent a cause.
+                serde_json::Value::Null | serde_json::Value::Object(_) => "",
+            };
+            tracing::warn!(
+                tool = name,
+                tool_call_id = id,
+                kind,
+                "tool call not executed: arguments were not delivered as a JSON object"
+            );
+            if kind.is_empty() {
+                format!(
+                    "The arguments for tool `{name}` were not delivered as a parsed JSON \
+                     object. The tool was not run."
+                )
+            } else {
+                format!(
+                    "The arguments for tool `{name}` were not a JSON object (got {kind}). \
+                     The tool was not run. Send the arguments as a single JSON object — \
+                     not encoded as a string."
+                )
+            }
+        }
     };
-    tracing::warn!(
-        tool = name,
-        tool_call_id = id,
-        len = raw.len(),
-        parse_error = %parse_error,
-        "tool call not executed: arguments did not parse as JSON"
-    );
-    unexecuted_tool_call(
-        id,
-        name,
-        args,
-        format!(
-            "The arguments for tool `{name}` did not parse as JSON (likely truncated): \
-             {parse_error}. The tool was not run. Please retry the call with complete arguments."
-        ),
-        tx,
-    )
+    unexecuted_tool_call(id, name, args, text, tx)
 }
 
 /// Emit events and build an error tool result for a call that was not run.

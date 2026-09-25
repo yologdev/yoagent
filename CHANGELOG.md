@@ -9,42 +9,54 @@ adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - **Fixed: truncated tool arguments no longer run the tool on `{}`**
-  ([#167](https://github.com/yologdev/yoagent/issues/167)). When a stream was
-  cut off mid-`arguments`, `openai_compat.rs` (OpenAI, Groq, Together,
-  DeepSeek, Fireworks, Mistral, xAI, …) fell back to an empty object and
-  warned, so `delete_files({"paths":` became `delete_files({})` — the tool ran
-  on its own defaults and the model saw a plausible result. `openai_responses.rs`
-  and `azure_openai.rs` did the same without even the warning.
+  ([#167](https://github.com/yologdev/yoagent/issues/167)). When a response hit
+  its output token limit mid-`arguments`, `openai_compat.rs` (OpenAI, Groq,
+  Together, DeepSeek, Fireworks, Mistral, xAI, …) fell back to an empty object
+  and warned, so `delete_files({"paths":` became `delete_files({})` — the tool
+  ran on its own defaults and the model saw a plausible result.
+  `openai_responses.rs` and `azure_openai.rs` did the same without even the
+  warning.
 
   A **non-empty** argument buffer that does not parse is now kept as
   `{"__partial_json": "<raw text>"}` (`provider::parse_tool_arguments`), and
   `execute_single_tool` — the choke point every execution strategy shares —
   answers such a call with an error tool result instead of running it: the
-  arguments "did not parse as JSON (likely truncated): <parse error>… please
-  retry the call with complete arguments". The loop continues, so the model can
-  retry, per the crate's "tools return errors so the LLM can self-correct"
-  convention. The check runs before middleware; there is no real call to
-  approve or rewrite. `provider::unparsed_tool_arguments` recognizes the marker.
+  arguments "were cut off before they were complete (the response likely hit
+  the output token limit)… The tool was not run. Do not resend the same call
+  unchanged — make the arguments smaller". The loop continues so the model can
+  adapt; it is deliberately *not* told to retry, since the same call would be
+  cut off at the same point again. The check runs before middleware, so
+  `ToolMiddleware` never sees such a call. `provider::unparsed_tool_arguments`
+  recognizes the marker.
+
+  **Valid JSON that is not an object** is refused the same way. `null`
+  resolves to `{}` like an empty buffer; a string, number, array or boolean is
+  marked, and the error says the arguments "were not a JSON object (got a
+  string)". The motivating case is double-encoded arguments,
+  `"{\"path\":\"src\"}"`, which parsed to a JSON string — `list_files` then
+  read `path` as missing and silently listed `.`.
 
   An **empty** buffer is unchanged: a zero-argument tool streams `""`, which
   still resolves to `{}` and runs. That distinction is what the Anthropic
   provider once got wrong, and both cases are now pinned together in one loop
   test.
 
+  **`StopReason::Length` is no longer overwritten.** These three providers
+  relabelled any turn that carried a tool call as `ToolUse`, hiding a
+  `finish_reason: "length"` / `response.incomplete` — the very turns that
+  produce cut-off arguments. Such a turn now reports `Length`; the loop still
+  extracts and answers its tool calls (it only stops early on `Error` and
+  `Aborted`).
+
   The marker key is the one the Anthropic provider already used as its
   streaming accumulator, now a shared `UNPARSED_ARGUMENTS_KEY` constant.
   Anthropic's behaviour is **unchanged** — it still fails the turn when an
   accumulator is left unparsed — but the loop's guard now backs it up.
 
-  **Bedrock** had a worse, third behaviour: it forwarded streamed `toolUse.input`
-  deltas as events but never accumulated them, so every Bedrock tool call ran
-  with `{}` regardless of what the model sent. It now accumulates the input and
-  resolves it through the same path. `ToolCallDelta`/`ToolCallEnd` events also
-  carry the tool call's own content index (previously off by one, and
-  `ToolCallEnd` fired for non-tool blocks once any tool call existed).
-
   Google and Vertex receive arguments as already-parsed JSON objects, so they
-  have no unparseable-buffer case and are unchanged.
+  have no unparseable-buffer case and are unchanged. Bedrock is also unchanged
+  here: its stream parsing needs a larger fix, tracked in
+  [#174](https://github.com/yologdev/yoagent/issues/174).
 
 ## 0.18.1
 
