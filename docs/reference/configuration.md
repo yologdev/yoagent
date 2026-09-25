@@ -151,12 +151,30 @@ let mut config = ModelConfig::deepseek("deepseek-v4-flash", "DeepSeek V4 Flash")
 config.cost = Some(CostConfig::new(0.15, 0.60));
 ```
 
-`ModelConfig::priced_cost()` is what the crate's own accounting reads. It
-returns `None` for `cost: None` **and** for a `Some` whose rates are all zero
-(`is_configured()` false) — a config persisted before 0.19 stored "unknown" that
-way and still deserializes to it. `session_cost_usd()`, `SessionStats::cost_usd`
-and the `llm_stream` span's `cost_usd` are all absent for an unpriced model
-rather than $0.
+`Some` with every rate zero means **free** — a model you run locally, say — and
+the crate's accounting reports `0.0` for it. `session_cost_usd()`,
+`SessionStats::cost_usd` and the `llm_stream` span's `cost_usd` are absent only
+for `cost: None`, never `$0` for an unknown price:
+
+```rust
+let mut config = ModelConfig::local("http://localhost:1234/v1", "qwen3");
+config.cost = Some(CostConfig::new(0.0, 0.0)); // free, not unknown
+```
+
+To adjust one rate, use `get_or_insert_with` rather than
+`if let Some(c) = config.cost.as_mut()`, which silently does nothing on a
+generic constructor:
+
+```rust
+config.cost.get_or_insert_with(CostConfig::default).input_per_million = 1.80;
+```
+
+**Persistence caveat.** Before 0.19, unpriced configs were written with an
+all-zero `cost` object. To keep those loading as unknown rather than free, a
+`cost` object whose rates are all zero (`is_configured()` false, context tiers
+included) deserializes to `None`. A free config saved by 0.19 has the same
+encoding, so it too reloads as `None`; set the zero `CostConfig` again after
+loading if you persist one.
 
 ### Context tiers
 

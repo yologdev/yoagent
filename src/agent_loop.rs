@@ -531,8 +531,9 @@ async fn run_loop(
                 llm_span.record("tokens_in", usage.input);
                 llm_span.record("tokens_out", usage.output);
                 llm_span.record("tokens_cached", usage.cache_read);
-                // Unpriced models leave the field empty: unknown, never $0.
-                if let Some(cost) = config.model_config.as_ref().and_then(|mc| mc.priced_cost()) {
+                // Unpriced models (`cost: None`) leave the field empty: unknown,
+                // never $0. A free model (`Some`, all-zero) records 0.0.
+                if let Some(cost) = config.model_config.as_ref().and_then(|mc| mc.cost.as_ref()) {
                     llm_span.record("cost_usd", cost.cost_usd(usage));
                 }
             }
@@ -548,7 +549,7 @@ async fn run_loop(
                 context_tracker.record_usage(usage, context.messages.len() - 1);
                 stats.record_turn(
                     usage,
-                    config.model_config.as_ref().and_then(|mc| mc.priced_cost()),
+                    config.model_config.as_ref().and_then(|mc| mc.cost.as_ref()),
                 );
             }
 

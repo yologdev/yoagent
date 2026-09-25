@@ -14,9 +14,9 @@ agent_loop                (model)
 ```
 
 - `llm_stream` — one per turn, wrapping the provider call. Token counts are
-  recorded from real usage; `cost_usd` is recorded only when the `ModelConfig`
-  is priced (`ModelConfig::priced_cost()` — `cost` is `Some` with a non-zero
-  rate). For an unpriced model the field is left empty, never `0`.
+  recorded from real usage; `cost_usd` is recorded whenever the `ModelConfig`
+  has a `cost` — `0` for a free model (`Some` with zero rates). For an unpriced
+  model (`cost: None`) the field is left empty, never `0`.
 - `tool` — one per tool execution, with the tool name and error status;
   duration comes free with the span.
 

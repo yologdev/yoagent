@@ -71,14 +71,25 @@ impl std::fmt::Display for ApiProtocol {
 ///
 /// ```
 /// # use yoagent::provider::{CostConfig, ModelConfig};
+/// // A named preset is priced; adjust one rate and keep the rest.
 /// let mut config = ModelConfig::claude_sonnet_5();
-/// if let Some(cost) = config.cost.as_mut() {
-///     cost.input_per_million = 1.80; // your negotiated rate
-/// }
+/// config
+///     .cost
+///     .get_or_insert_with(CostConfig::default)
+///     .input_per_million = 1.80; // your negotiated rate
+/// assert_eq!(config.cost.as_ref().unwrap().output_per_million, 10.0);
 ///
-/// // Generic constructors carry no price (`cost: None`); supply one:
+/// // Generic constructors carry no price (`cost: None`). `get_or_insert_with`
+/// // works here too — `if let Some(c) = config.cost.as_mut()` would silently
+/// // do nothing — but set every rate you pay, since the rest start at zero:
 /// let mut deepseek = ModelConfig::deepseek("deepseek-v4-flash", "DeepSeek V4 Flash");
-/// deepseek.cost = Some(CostConfig::new(0.15, 0.60));
+/// assert!(deepseek.cost.is_none());
+/// deepseek.cost = Some(CostConfig::new(0.15, 0.60).with_cache_read(0.015));
+/// assert_eq!(deepseek.cost.as_ref().unwrap().input_per_million, 0.15);
+///
+/// // A model you run for free is `Some` with zero rates, and costs $0:
+/// let mut local = ModelConfig::local("http://localhost:1234/v1", "qwen3");
+/// local.cost = Some(CostConfig::new(0.0, 0.0));
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -163,8 +174,7 @@ impl ContextTier {
         self
     }
 
-    /// Whether this tier sets any rate. Mirrors [`CostConfig::is_configured`]:
-    /// all-zero means unknown, not free.
+    /// Whether this tier sets any rate. Mirrors [`CostConfig::is_configured`].
     pub fn is_configured(&self) -> bool {
         self.input_per_million != 0.0
             || self.output_per_million != 0.0
@@ -223,10 +233,13 @@ impl CostConfig {
         self
     }
 
-    /// Whether any rate is set. All-zero rates mean pricing is unknown, not
-    /// that the model is free — unpriced presets now say so with
-    /// `ModelConfig::cost == None`, but an all-zero `Some` still reaches
-    /// here from configs persisted before 0.19.
+    /// Whether any rate is set.
+    ///
+    /// Not a "known price" check. In memory an all-zero `CostConfig` means
+    /// **free**, and unknown pricing is `ModelConfig::cost == None`. This
+    /// predicate matters at one point: deserializing a `ModelConfig`, where an
+    /// all-zero `cost` object is the pre-0.19 encoding of "unknown" and loads
+    /// as `None` (see [`ModelConfig::cost`]).
     pub fn is_configured(&self) -> bool {
         self.input_per_million != 0.0
             || self.output_per_million != 0.0
@@ -585,17 +598,25 @@ pub struct ModelConfig {
     /// `CostConfig` and unpriced configs held all-zero rates, which read as a
     /// $0 model to anyone who did not know to call `is_configured()`.
     ///
-    /// The built-in accounting ([`Agent::session_cost_usd`](crate::Agent::session_cost_usd),
-    /// the `llm_stream` span's `cost_usd`, `SessionStats::cost_usd`) reads
-    /// [`priced_cost`](Self::priced_cost), which also treats `Some` with
-    /// all-zero rates as unknown — that is what a config persisted by an
-    /// older release deserializes to, and it cannot be told apart from a
-    /// deliberate "free".
+    /// `Some` with every rate zero means **free**: a local model, or a free
+    /// tier. The built-in accounting
+    /// ([`Agent::session_cost_usd`](crate::Agent::session_cost_usd), the
+    /// `llm_stream` span's `cost_usd`, `SessionStats::cost_usd`) reports
+    /// `Some(0.0)` for it and `None` only for `cost: None`.
     ///
-    /// Serde: a persisted `cost` object deserializes to `Some` unchanged
-    /// (all-zero included); a missing or `null` `cost` is `None`. `None` is
-    /// omitted on serialize, so older releases still read the output.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Serde: a missing or `null` `cost` is `None`, and `None` is omitted on
+    /// serialize, so older releases still read the output. A `cost` object
+    /// with **every rate zero** (tiers included — [`CostConfig::is_configured`]
+    /// false) also deserializes to `None`, because that is how every release
+    /// before 0.19 persisted "unknown", and reading those as free would report
+    /// $0 for models that bill. The trade-off: a free config written by this
+    /// release comes back from disk as `None` (unknown), not free. Reapply
+    /// `Some(CostConfig::new(0.0, 0.0))` after loading if you persist one.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_cost"
+    )]
     pub cost: Option<CostConfig>,
     /// Additional headers to send with requests.
     ///
@@ -612,6 +633,16 @@ pub struct ModelConfig {
     /// `None` behaves like `AnthropicCompat::default()` (current generation).
     #[serde(default)]
     pub anthropic: Option<AnthropicCompat>,
+}
+
+/// `ModelConfig::cost`'s deserializer: an all-zero object is the pre-0.19
+/// encoding of "unknown", so it loads as `None` rather than as free.
+fn deserialize_cost<'de, D>(deserializer: D) -> Result<Option<CostConfig>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let cost = Option::<CostConfig>::deserialize(deserializer)?;
+    Ok(cost.filter(CostConfig::is_configured))
 }
 
 /// Redacts header values. Headers routinely carry credentials, and a
@@ -634,16 +665,6 @@ impl std::fmt::Debug for ModelConfig {
 }
 
 impl ModelConfig {
-    /// The rates to price usage with, or `None` when the price is unknown.
-    ///
-    /// `None` both when [`cost`](Self::cost) is `None` and when it is `Some`
-    /// with every rate zero (see [`CostConfig::is_configured`]). Every cost
-    /// the crate reports goes through here, so "unknown" is never rendered as
-    /// `$0`.
-    pub fn priced_cost(&self) -> Option<&CostConfig> {
-        self.cost.as_ref().filter(|c| c.is_configured())
-    }
-
     /// A minimal config for tests. `provider` is `"mock"`, `cost` is `None`
     /// (unpriced), and `base_url` points at a non-routable host.
     ///
@@ -1647,7 +1668,6 @@ mod tests {
                 mc.id,
                 mc.provider
             );
-            assert!(mc.priced_cost().is_none());
         }
     }
 
@@ -1663,7 +1683,12 @@ mod tests {
             ModelConfig::gpt_5_5(),
             ModelConfig::meta("muse-spark-1.2", "Muse Spark 1.2"),
         ] {
-            assert!(mc.priced_cost().is_some(), "{} lost its price", mc.id);
+            let cost = mc.cost.as_ref();
+            assert!(
+                cost.is_some_and(CostConfig::is_configured),
+                "{} lost its price",
+                mc.id
+            );
         }
     }
 
@@ -1677,12 +1702,30 @@ mod tests {
         let priced: ModelConfig = serde_json::from_value(v.clone()).unwrap();
         assert_eq!(priced.cost.as_ref().unwrap().input_per_million, 2.0);
 
-        // Legacy all-zero object (what pre-0.19 unpriced presets persisted):
-        // stays Some — zero is not reinterpreted — but prices as unknown.
+        // Legacy all-zero object (what pre-0.19 unpriced presets persisted)
+        // meant "unknown", so it loads as None — not as a free model.
         v["cost"] = serde_json::json!({"input_per_million": 0.0, "output_per_million": 0.0});
         let legacy: ModelConfig = serde_json::from_value(v.clone()).unwrap();
-        assert!(legacy.cost.is_some());
-        assert!(legacy.priced_cost().is_none());
+        assert!(legacy.cost.is_none());
+
+        // The documented trade-off: a free config written by this release
+        // is indistinguishable from that, and also reloads as None.
+        let mut free = ModelConfig::mock();
+        free.cost = Some(CostConfig::new(0.0, 0.0));
+        let reloaded: ModelConfig =
+            serde_json::from_value(serde_json::to_value(&free).unwrap()).unwrap();
+        assert!(reloaded.cost.is_none());
+
+        // Any single non-zero rate — including only a context tier — is a
+        // real price and survives.
+        v["cost"] = serde_json::json!({
+            "input_per_million": 0.0,
+            "output_per_million": 0.0,
+            "context_tiers": [{"above_prompt_tokens": 1000, "input_per_million": 1.0,
+                               "output_per_million": 2.0}]
+        });
+        let tiered: ModelConfig = serde_json::from_value(v.clone()).unwrap();
+        assert_eq!(tiered.cost.as_ref().unwrap().context_tiers.len(), 1);
 
         // Missing and null both mean unknown.
         v["cost"] = serde_json::Value::Null;

@@ -660,20 +660,36 @@ fn test_model_config_mock_is_unpriced() {
     let mc = yoagent::provider::ModelConfig::mock();
     assert_eq!(mc.provider, "mock");
     assert!(mc.cost.is_none());
-    assert!(mc.priced_cost().is_none());
 }
 
 /// A config persisted before 0.19 stored unknown pricing as an all-zero
-/// `cost` object. It must still deserialize (to `Some`, unchanged — the crate
-/// does not guess whether zero meant "free"), and must still price as
-/// unknown rather than `Some(0.0)`.
+/// `cost` object. It must still load, and load as unknown (`None`) — reading
+/// it as free would report $0 for a model that bills.
 #[test]
 fn session_cost_usd_none_for_legacy_all_zero_cost() {
-    let mut mc = yoagent::provider::ModelConfig::mock();
-    mc.cost = Some(yoagent::provider::CostConfig::default());
+    let mut v = serde_json::to_value(yoagent::provider::ModelConfig::mock()).unwrap();
+    v["cost"] = serde_json::json!({
+        "input_per_million": 0.0,
+        "output_per_million": 0.0,
+        "cache_read_per_million": 0.0,
+        "cache_write_per_million": 0.0
+    });
+    let mc: yoagent::provider::ModelConfig = serde_json::from_value(v).unwrap();
+    assert!(mc.cost.is_none());
     let agent = Agent::from_provider(MockProvider::text("x"), mc)
         .with_messages(vec![assistant_with_usage(some_usage())]);
     assert_eq!(agent.session_cost_usd(), None);
+}
+
+/// In memory, `Some` with zero rates is a free model — a local one, say — and
+/// must report a real `$0`, not "unknown".
+#[test]
+fn session_cost_usd_zero_for_free_model() {
+    let mut mc = yoagent::provider::ModelConfig::mock();
+    mc.cost = Some(yoagent::provider::CostConfig::new(0.0, 0.0));
+    let agent = Agent::from_provider(MockProvider::text("x"), mc)
+        .with_messages(vec![assistant_with_usage(some_usage())]);
+    assert_eq!(agent.session_cost_usd(), Some(0.0));
 }
 
 #[tokio::test]

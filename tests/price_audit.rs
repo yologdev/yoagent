@@ -472,8 +472,10 @@ async fn hardcoded_prices_have_not_drifted() {
     );
 }
 
-/// `is_configured` means *any* rate is set — all-zero is "pricing unknown",
-/// never "free".
+/// `is_configured` means *any* rate is set. It decides whether a persisted
+/// `cost` object is a real price or the pre-0.19 all-zero "unknown" encoding
+/// (which deserializes to `ModelConfig::cost == None`), so `any` vs `all`
+/// decides whether a partially-priced config survives a reload.
 ///
 /// Asserted against `CostConfig` values rather than particular presets: pinning
 /// a preset as unpriced would forbid a future improvement (pricing DeepSeek is
@@ -488,7 +490,7 @@ async fn hardcoded_prices_have_not_drifted() {
 fn is_configured_means_any_rate_set() {
     assert!(
         !CostConfig::default().is_configured(),
-        "all-zero rates mean pricing is unknown, not that the model is free"
+        "all-zero rates set no rate"
     );
 
     let no_cache_write = CostConfig::new(5.0, 30.0).with_cache_read(0.5);

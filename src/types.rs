@@ -896,10 +896,12 @@ pub struct SessionStats {
     #[serde(default)]
     pub turns: u32,
     /// Dollar cost of [`usage`](Self::usage), when the model's rates are
-    /// configured (see [`CostConfig`](crate::provider::CostConfig)).
+    /// known (see [`ModelConfig::cost`](crate::provider::ModelConfig::cost)).
     ///
-    /// `None` means "cannot price this", never "free" — all-zero rates mean
-    /// pricing is unknown, which is the case for custom and local models.
+    /// `None` means "cannot price this", never "free": the model config has
+    /// `cost: None`, which is what the generic constructors (custom, local,
+    /// `deepseek`, …) return. A model configured as free (`Some` with zero
+    /// rates) reports `Some(0.0)`.
     ///
     /// Scope: this run's own turns. A [`SubAgentTool`](crate::SubAgentTool)
     /// runs its own loop on a private channel, so a delegating agent's real
@@ -979,7 +981,7 @@ impl SessionStats {
         self.usage.cache_write += usage.cache_write;
         self.turns += 1;
 
-        if let Some(cost) = cost.filter(|c| c.is_configured()) {
+        if let Some(cost) = cost {
             *self.cost_usd.get_or_insert(0.0) += cost.cost_usd(usage);
         }
     }

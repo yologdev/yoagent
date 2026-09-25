@@ -342,14 +342,14 @@ async fn main() {
         // `ModelConfig::deepseek(id, name)` carries `cost: None` by design —
         // unknown, not free — so failing here would be testing the harness's
         // choice of model, not the library.
-        if cfg.priced_cost().is_some() {
+        if cfg.cost.is_some() {
             let ok = err.is_none() && cost.map(|c| c > 0.0).unwrap_or(false);
             report.record(
                 "session cost is computed from real usage",
                 ok,
                 match cost {
                     Some(c) => format!("session_cost_usd = ${c:.6}"),
-                    None => "priced preset returned None — priced_cost and \
+                    None => "priced preset returned None — cost and \
                              session_cost_usd disagree"
                         .to_string(),
                 },

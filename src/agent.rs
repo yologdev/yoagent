@@ -1080,13 +1080,14 @@ impl Agent {
     /// the model's [`CostConfig`](crate::provider::CostConfig) rates.
     ///
     /// Returns `None` when no `ModelConfig` is set or when the config is
-    /// unpriced (`cost: None`, or legacy all-zero rates — see
-    /// [`ModelConfig::priced_cost`](crate::provider::ModelConfig::priced_cost)),
-    /// so `None` means "can't price this", never "free". Rates come from the
+    /// unpriced (`cost: None` — see
+    /// [`ModelConfig::cost`](crate::provider::ModelConfig::cost)), so `None`
+    /// means "can't price this", never "free". A free model (`Some` with zero
+    /// rates) returns `Some(0.0)`. Rates come from the
     /// *current* model config; sessions that switched models mid-way are
     /// priced entirely at the current rates.
     pub fn session_cost_usd(&self) -> Option<f64> {
-        let cost = self.model_config.as_ref()?.priced_cost()?;
+        let cost = self.model_config.as_ref()?.cost.as_ref()?;
         Some(
             self.messages
                 .iter()

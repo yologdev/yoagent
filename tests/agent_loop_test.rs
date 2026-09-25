@@ -2716,8 +2716,8 @@ fn archived_agent_end_without_stats_still_deserializes() {
     }
 }
 
-/// `cost_usd` accrues only when the model has configured rates. `None` means
-/// "cannot price this", never "free".
+/// `cost_usd` accrues whenever the model has a `cost`, zero rates included.
+/// `None` means "cannot price this", never "free".
 #[tokio::test]
 async fn cost_accrues_when_rates_are_configured_and_stays_none_otherwise() {
     let responses = || {
@@ -2774,6 +2774,32 @@ async fn cost_accrues_when_rates_are_configured_and_stays_none_otherwise() {
         .cost_usd
         .expect("priced model must report a cost");
     assert!((cost - 18.0).abs() < 1e-9, "cost {cost} != 18.0");
+
+    // Free: `Some` with zero rates is a known price of $0, not unknown.
+    let (tx, rx) = mpsc::unbounded_channel();
+    let mut context = AgentContext {
+        messages: vec![],
+        tools: vec![],
+        system_prompt: String::new(),
+    };
+    let mut free = yoagent::provider::ModelConfig::mock();
+    free.cost = Some(yoagent::provider::CostConfig::new(0.0, 0.0));
+    let mut config = make_config(MockProvider::new(responses()));
+    config.model_config = Some(free);
+    config.get_follow_up_messages = follow_up_once();
+    agent_loop(
+        vec![AgentMessage::Llm(Message::user("go"))],
+        &mut context,
+        &config,
+        tx,
+        CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(
+        agent_end_stats(&collect_events(rx)).cost_usd,
+        Some(0.0),
+        "a free model must report Some(0.0), not None"
+    );
 }
 
 /// Hand out exactly one follow-up, so the loop takes two turns.

@@ -734,7 +734,7 @@ impl LlmCompaction {
 
     /// Cost of the summarization request, when the model's rates are known.
     fn summary_cost(&self, usage: &Usage) -> Option<f64> {
-        self.config.priced_cost().map(|cost| cost.cost_usd(usage))
+        self.config.cost.as_ref().map(|cost| cost.cost_usd(usage))
     }
 
     /// The tail budget for this call: explicit if set, else derived from the
