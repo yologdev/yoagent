@@ -553,15 +553,127 @@ pub enum CacheStrategy {
 // Thinking level
 // ---------------------------------------------------------------------------
 
+/// How hard the model should reason before answering.
+///
+/// A provider-neutral ladder. Each provider maps it onto its own knob, and
+/// where a provider's ladder is shorter than this one the upper levels are
+/// **clamped** to the highest value this crate knows the provider accepts
+/// rather than sent as a value it would reject —
+/// with one exception: Anthropic's adaptive `effort` is passed through
+/// unclamped, so a model with a shorter effort ladder can reject it (see
+/// below). What each level becomes, per provider:
+///
+/// | Level     | Anthropic (adaptive) | Anthropic legacy / Bedrock budget | OpenAI-compat `reasoning_effort`¹ / OpenAI Responses / Azure `reasoning.effort`, by ceiling⁴ | DeepSeek `reasoning_effort`² | Gemini 2.x / Vertex `thinkingBudget`³ |
+/// |-----------|----------|--------|----------|--------|--------|
+/// | `Off`     | (omitted) | (omitted) | (omitted) | (omitted; `thinking: disabled`) | (omitted) |
+/// | `Minimal` | `low`    | 1,024  | `low`    | `low`  | 1,024  |
+/// | `Low`     | `low`    | 1,024  | `low`    | `low`  | 1,024  |
+/// | `Medium`  | `medium` | 2,048  | `medium` | `medium` (DeepSeek rounds up to `high`) | 8,192  |
+/// | `High`    | `high`   | 8,192  | `high`   | `high` | 24,576 |
+/// | `XHigh`   | `xhigh`  | 16,384 | `High`: `high` *(clamped)*; `XHigh`, `Max`: `xhigh` | `high` *(clamped)* | 24,576 *(clamped)* |
+/// | `Max`     | `max`    | 30,720 | `High`: `high` *(clamped)*; `XHigh`: `xhigh` *(clamped)*; `Max`: `max` | `max` | 24,576 *(clamped)* |
+///
+/// ¹ On Chat Completions, only when
+/// [`OpenAiCompat::supports_reasoning_effort`] is set; otherwise no
+/// `reasoning_effort` is sent. The Responses and Azure providers always send
+/// `reasoning.effort`, except for an omitted `Off`. Omitting it does not mean
+/// "no reasoning": an OpenAI reasoning model runs at its default (`medium`),
+/// and xAI's Grok cannot disable reasoning at all, so `Off` leaves it at its
+/// default (`high`). This crate never sends OpenAI's `none` rung, which some
+/// models reject with HTTP 400. A clamp (`XHigh`/`Max` sent lower) is logged
+/// once per process with `tracing::warn!`.
+///
+/// ⁴ The ceiling is [`OpenAiCompat::max_reasoning_effort`], a
+/// [`ReasoningEffortCeiling`] declared per model (default `High`); the
+/// Responses and Azure providers read it from `ModelConfig::compat`.
+/// Presets: `gpt_6_astra`, `gpt_6_sol`, `gpt_6_luna` — `Max`; `gpt_5_5` —
+/// `XHigh`; [`OpenAiCompat::xai`] — `XHigh` (Grok models without the rung
+/// treat `xhigh` as `high`); every other config `High`.
+///
+/// ² "DeepSeek" means any OpenAI-compat provider with both
+/// [`OpenAiCompat::supports_thinking_control`] and
+/// [`OpenAiCompat::supports_reasoning_effort`] set. DeepSeek's
+/// `reasoning_effort` accepts `low`/`high`/`max`
+/// (<https://api-docs.deepseek.com/guides/thinking_mode>), and DeepSeek itself
+/// maps a requested `xhigh` to `high`, so `XHigh` is sent as `high` and only
+/// `Max` selects `max`. `Off` is sent as `thinking: {"type": "disabled"}`
+/// rather than as an effort value.
+///
+/// ³ Gemini 3 and later take `thinkingLevel` instead (never both — Gemini
+/// rejects a request carrying the two). The generation is read from the model
+/// id's version (`gemini-3*`, `gemini-3.8-flash`, `models/…`, Vertex resource
+/// paths); override with [`GoogleCompat::thinking_level`]:
+///
+/// | Level | Gemini 3+ / Vertex `thinkingLevel` |
+/// |-------|-----------|
+/// | `Off` | (omitted — the model runs at its **default** level; see below) |
+/// | `Minimal` | `MINIMAL`, or `LOW` *(clamped)* on 3.7 / 3.8 Flash, 3.x Pro and unlisted models |
+/// | `Low` | `LOW` |
+/// | `Medium` | `MEDIUM` |
+/// | `High`, `XHigh`, `Max` | `HIGH` (`XHigh`/`Max` *clamped*) |
+///
+/// `Off` does **not** disable thinking on Gemini 3: it omits
+/// `thinkingConfig`, so the model thinks at its own default — `HIGH` on
+/// 3.1 Pro, `MEDIUM` on 3.5–3.8 Flash, `MINIMAL` on Flash-Lite. Thinking
+/// cannot be turned off at all on 3 Pro / 3.1 Pro. Use `Minimal` to ask for
+/// the least thinking: `MINIMAL` matches "the "no thinking" setting for most
+/// queries" (Google) where the model accepts it. Image models take only the
+/// levels they list (3.1 Flash / Flash-Lite Image: `MINIMAL`, `HIGH` — `Low`
+/// rounds down, `Medium` up; 3 Pro Image: `HIGH` only), and Gemini 3 TTS
+/// models get no `thinkingConfig`.
+///
+/// Anthropic's adaptive `effort` is passed through as-is, so a model with a
+/// shorter ladder rejects what it does not know: `xhigh` arrived with Opus
+/// 4.7, so Opus 4.6 / Sonnet 4.6 accept `max` but not `xhigh`. The crate has
+/// no per-model effort table; pick a level the model supports.
+///
+/// **`Off` sends nothing** on every provider except DeepSeek (which gets an
+/// explicit `thinking: disabled`), and that means "no thinking" only on
+/// models that think on request. On Anthropic `Off` omits the `thinking`
+/// field (it never sends `disabled`): Claude Opus 5.5 and Fable 5.1 always
+/// think (at their default effort), and Opus 5 thinks whenever the field is
+/// absent. OpenAI reasoning models, Grok and Gemini 3 likewise run at their
+/// own defaults (see ¹ and ³).
+///
+/// Marked `#[non_exhaustive]` so the next rung a vendor adds is not a breaking
+/// change: `match` on it from outside the crate needs a wildcard arm.
+///
+/// [`OpenAiCompat::supports_thinking_control`]: crate::provider::OpenAiCompat::supports_thinking_control
+/// [`OpenAiCompat::supports_reasoning_effort`]: crate::provider::OpenAiCompat::supports_reasoning_effort
+/// [`OpenAiCompat::max_reasoning_effort`]: crate::provider::OpenAiCompat::max_reasoning_effort
+/// [`OpenAiCompat::xai`]: crate::provider::OpenAiCompat::xai
+/// [`ReasoningEffortCeiling`]: crate::provider::ReasoningEffortCeiling
+/// [`GoogleCompat::thinking_level`]: crate::provider::GoogleCompat::thinking_level
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum ThinkingLevel {
+    /// Request no reasoning: no thinking or effort field is sent (DeepSeek
+    /// excepted, which gets `thinking: disabled`). A model that always thinks
+    /// then runs at its own default — see the table above.
     #[default]
     Off,
+    /// The least thinking a provider can be asked for. Sent as `MINIMAL` on
+    /// Gemini 3 models that accept it (3.6 / 3.5 Flash, 3.x Flash-Lite,
+    /// 3 Flash, 3.1 Flash / Flash-Lite Image); everywhere else identical to
+    /// `Low`. On Gemini 3 this, not `Off`, is how to ask for least thinking.
     Minimal,
     Low,
     Medium,
     High,
+    /// Above `High`, below `Max` — Anthropic's and OpenAI's `xhigh`. Where a
+    /// provider or model has no `xhigh` rung it is clamped down to that
+    /// provider's `High` value (see the table above), except on Anthropic's
+    /// adaptive path, where `xhigh` is passed through as-is and a model
+    /// without the rung (Opus 4.6 / Sonnet 4.6) rejects it. Serializes as
+    /// `"xhigh"`.
+    XHigh,
+    /// The highest setting this crate sends — Anthropic's, DeepSeek's and
+    /// (on GPT-5.6 / GPT-6) OpenAI's `max`. Elsewhere it is clamped to the
+    /// highest value this crate knows is accepted — for OpenAI-shaped
+    /// providers, the model's declared `max_reasoning_effort` (see the table
+    /// above).
+    Max,
 }
 
 // ---------------------------------------------------------------------------
@@ -601,6 +713,10 @@ pub struct ToolContext {
     pub on_update: Option<ToolUpdateFn>,
     /// Optional callback for emitting user-facing progress messages.
     pub on_progress: Option<ProgressFn>,
+    /// Set by the loop; delegation tools report their runs' stats here, via
+    /// [`report_delegated_run`](Self::report_delegated_run), so they survive a
+    /// failed delegation.
+    pub(crate) sub_agent_report: Option<SubAgentReport>,
 }
 
 impl ToolContext {
@@ -617,6 +733,7 @@ impl ToolContext {
             cancel: tokio_util::sync::CancellationToken::new(),
             on_update: None,
             on_progress: None,
+            sub_agent_report: None,
         }
     }
 
@@ -637,6 +754,32 @@ impl ToolContext {
         self.on_progress = Some(on_progress);
         self
     }
+
+    /// Report one delegated agent run's stats to the loop that invoked this
+    /// tool, so its spend is counted in that loop's
+    /// [`SessionStats::sub_agents`].
+    ///
+    /// [`SubAgentTool`](crate::SubAgentTool) calls this for you; a **custom**
+    /// delegation tool — one that runs its own [`agent_loop`](crate::agent_loop())
+    /// or [`Agent`](crate::Agent) — calls it once per run it started, with that
+    /// run's stats as carried by its [`AgentEvent::AgentEnd`]. Report even
+    /// when the run failed and the tool is about to return `Err`: the spend of
+    /// a failed delegation is still spend, and this is the only way it reaches
+    /// the parent.
+    ///
+    /// **Call it before [`execute`](AgentTool::execute) returns.** The loop
+    /// collects reports as soon as the tool's future completes; a report made
+    /// after that — from a task the tool spawned and did not await, say — is
+    /// silently lost. Clones of this context report to the same place, so a
+    /// tool that fans out to several runs can hand each a clone.
+    ///
+    /// A no-op on a context the loop did not build (e.g. one from
+    /// [`ToolContext::new`]): there is no parent to report to.
+    pub fn report_delegated_run(&self, stats: SessionStats) {
+        if let Some(report) = &self.sub_agent_report {
+            report.lock().unwrap_or_else(|e| e.into_inner()).push(stats);
+        }
+    }
 }
 
 impl Clone for ToolContext {
@@ -647,6 +790,7 @@ impl Clone for ToolContext {
             cancel: self.cancel.clone(),
             on_update: self.on_update.clone(),
             on_progress: self.on_progress.clone(),
+            sub_agent_report: self.sub_agent_report.clone(),
         }
     }
 }
@@ -896,14 +1040,22 @@ pub struct SessionStats {
     #[serde(default)]
     pub turns: u32,
     /// Dollar cost of [`usage`](Self::usage), when the model's rates are
-    /// configured (see [`CostConfig`](crate::provider::CostConfig)).
+    /// known (see [`ModelConfig::cost`](crate::provider::ModelConfig::cost)).
     ///
-    /// `None` means "cannot price this", never "free" — all-zero rates mean
-    /// pricing is unknown, which is the case for custom and local models.
+    /// `None` is never "free", but it means one of two things: the spend
+    /// **cannot be priced** (a turn with non-zero usage came from a model with
+    /// `cost: None`, which is what the generic constructors — custom, local,
+    /// `deepseek`, … — return), or there was **nothing to price** (a run that
+    /// took no turns, or whose turns reported no usage on an unpriced model;
+    /// on a priced model a zero-usage turn makes this `Some(0.0)`).
+    /// [`is_unpriced`](Self::is_unpriced) tells them apart. A model configured
+    /// as free (`Some` with zero rates) reports `Some(0.0)`. Unpriced is
+    /// sticky: once any turn cannot be priced this stays `None`, because a
+    /// sum that silently skips the unpriced part under-reports.
     ///
-    /// Scope: this run's own turns. A [`SubAgentTool`](crate::SubAgentTool)
-    /// runs its own loop on a private channel, so a delegating agent's real
-    /// spend is higher than this reports.
+    /// Scope: this run's own turns. What [`SubAgentTool`](crate::SubAgentTool)s
+    /// spent is kept apart in [`sub_agents`](Self::sub_agents); use
+    /// [`total_cost_usd`](Self::total_cost_usd) for the whole bill.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
     /// Times the loop observed compaction rewrite history.
@@ -927,6 +1079,22 @@ pub struct SessionStats {
     /// here would be worse than the gap.
     #[serde(default)]
     pub compactions: u32,
+    /// What this run's [`SubAgentTool`](crate::SubAgentTool) delegations
+    /// spent, summed over the whole delegation tree — a sub-agent's nested
+    /// sub-agents included.
+    ///
+    /// A **separate bucket**: [`usage`](Self::usage), [`turns`](Self::turns)
+    /// and [`cost_usd`](Self::cost_usd) stay this agent's own, so delegation
+    /// remains attributable. Sub-agents run their own loop on a private
+    /// channel, and before this field existed their spend reached the parent
+    /// nowhere, so every total silently under-reported delegation. Read
+    /// [`total_usage`](Self::total_usage) / [`total_cost_usd`](Self::total_cost_usd)
+    /// for the whole bill.
+    ///
+    /// Omitted from the wire when nothing was delegated, so a run without
+    /// sub-agents serializes exactly as it did before.
+    #[serde(default, skip_serializing_if = "SubAgentSpend::is_empty")]
+    pub sub_agents: SubAgentSpend,
 }
 
 impl SessionStats {
@@ -941,7 +1109,77 @@ impl SessionStats {
             turns,
             cost_usd,
             compactions,
+            sub_agents: SubAgentSpend::default(),
         }
+    }
+
+    /// Whether this run's **own** spend cannot be priced: non-zero
+    /// [`usage`](Self::usage) with no [`cost_usd`](Self::cost_usd). `false`
+    /// when there is simply nothing to price. Delegated spend is judged
+    /// separately by [`SubAgentSpend::is_unpriced`].
+    pub fn is_unpriced(&self) -> bool {
+        is_unpriced(&self.usage, self.cost_usd)
+    }
+
+    /// This run's own usage plus everything its sub-agents spent.
+    ///
+    /// `total_tokens` stays 0, as in [`usage`](Self::usage), and for the same
+    /// reason: providers disagree on what it counts.
+    pub fn total_usage(&self) -> Usage {
+        add_usage(&self.usage, &self.sub_agents.usage)
+    }
+
+    /// Dollar cost of this run plus its sub-agents, each priced at its **own**
+    /// model's rates.
+    ///
+    /// `None` when any part of that spend cannot be priced — an unpriced
+    /// sub-agent makes the whole figure unknown rather than silently low — and
+    /// also when no part carries a cost at all (nothing was spent and nothing
+    /// was priced): a priced turn that reported no usage makes it
+    /// `Some(0.0)`, not `None`. Spend of zero tokens needs no price, so a
+    /// zero-usage part never poisons the rest.
+    pub fn total_cost_usd(&self) -> Option<f64> {
+        combine_cost(
+            &self.usage,
+            self.cost_usd,
+            &self.sub_agents.usage,
+            self.sub_agents.cost_usd,
+        )
+    }
+
+    /// Fold another run's stats into this one — own figures into own, the
+    /// delegated bucket into the delegated bucket — with the same unpriced
+    /// rule as [`SubAgentSpend::merge`].
+    pub(crate) fn merge(&mut self, other: &SessionStats) {
+        self.cost_usd = combine_cost(&self.usage, self.cost_usd, &other.usage, other.cost_usd);
+        self.usage = add_usage(&self.usage, &other.usage);
+        self.turns = self.turns.saturating_add(other.turns);
+        self.compactions = self.compactions.saturating_add(other.compactions);
+        self.sub_agents.merge(&other.sub_agents);
+    }
+
+    /// The [`SessionStats`] of a sub-agent run, if `result` came from a
+    /// [`SubAgentTool`](crate::SubAgentTool).
+    ///
+    /// Present on the tool's own return value and on
+    /// [`AgentEvent::ToolExecutionEnd`] — including when the sub-agent
+    /// **failed**: the loop attaches what it spent before failing to the error
+    /// result. Its [`usage`](Self::usage) is the sub-agent's own spend and its
+    /// [`sub_agents`](Self::sub_agents) what *it* delegated, so own and nested
+    /// spend stay distinguishable; [`total_usage`](Self::total_usage) covers the
+    /// subtree.
+    ///
+    /// A custom tool that reported **several** runs from one call (see
+    /// [`ToolContext::report_delegated_run`]) gets their combination: `usage`,
+    /// `turns` and `cost_usd` summed over those runs' own turns, `sub_agents`
+    /// over what they in turn delegated. The subtree totals stay exact; only
+    /// the split between the individual runs is not kept.
+    ///
+    /// Do not add these to [`AgentEvent::AgentEnd`]'s stats as well: the loop
+    /// already folds every delegation into that run's
+    /// [`sub_agents`](Self::sub_agents).
+    pub fn from_sub_agent_result(result: &ToolResult) -> Option<SessionStats> {
+        serde_json::from_value(result.details.get(SUB_AGENT_STATS_KEY)?.clone()).ok()
     }
 
     /// Fraction of prompt tokens served from cache across the whole session
@@ -968,20 +1206,230 @@ impl SessionStats {
     /// It is written this way so a per-turn model override stays correct if one
     /// is ever introduced, and so `cost_usd` reflects whether any turn was
     /// priceable rather than requiring a separate check.
+    ///
+    /// Pricing follows [`combine_cost`]: a turn with non-zero usage and no
+    /// configured rates makes [`cost_usd`](Self::cost_usd) `None` for the rest
+    /// of the run, rather than leaving a partial sum that reads as the whole.
     pub(crate) fn record_turn(
         &mut self,
         usage: &Usage,
         cost: Option<&crate::provider::CostConfig>,
     ) {
-        self.usage.input += usage.input;
-        self.usage.output += usage.output;
-        self.usage.cache_read += usage.cache_read;
-        self.usage.cache_write += usage.cache_write;
-        self.turns += 1;
+        let turn_cost = cost.map(|c| c.cost_usd(usage));
+        self.cost_usd = combine_cost(&self.usage, self.cost_usd, usage, turn_cost);
+        self.usage = add_usage(&self.usage, usage);
+        self.turns = self.turns.saturating_add(1);
+    }
+}
 
-        if let Some(cost) = cost.filter(|c| c.is_configured()) {
-            *self.cost_usd.get_or_insert(0.0) += cost.cost_usd(usage);
+/// Key under which a sub-agent's [`SessionStats`] ride in
+/// [`ToolResult::details`]. Read it with
+/// [`SessionStats::from_sub_agent_result`] rather than by hand.
+pub const SUB_AGENT_STATS_KEY: &str = "sub_agent_stats";
+
+fn add_usage(a: &Usage, b: &Usage) -> Usage {
+    Usage {
+        input: a.input.saturating_add(b.input),
+        output: a.output.saturating_add(b.output),
+        cache_read: a.cache_read.saturating_add(b.cache_read),
+        cache_write: a.cache_write.saturating_add(b.cache_write),
+        // Not summed — see `SessionStats::record_turn`.
+        total_tokens: 0,
+    }
+}
+
+fn usage_is_zero(u: &Usage) -> bool {
+    u.input == 0 && u.output == 0 && u.cache_read == 0 && u.cache_write == 0
+}
+
+/// Spend that happened but has no price: non-zero usage, no cost.
+fn is_unpriced(usage: &Usage, cost: Option<f64>) -> bool {
+    cost.is_none() && !usage_is_zero(usage)
+}
+
+/// The cost of two pieces of spend together — the one rule every rollup
+/// shares ([`SessionStats::record_turn`], [`SessionStats::total_cost_usd`],
+/// [`SubAgentSpend::merge`], `Agent::total_cost_usd`).
+///
+/// `None` if either piece is unpriced — sticky, so a later priced piece never
+/// revives a sum that silently skipped part of the bill. A zero-usage piece
+/// with no cost needs no price and does not poison the other. `None` too when
+/// neither piece carries a cost at all (nothing was spent and nothing was
+/// priced); a priced piece that spent nothing contributes `Some(0.0)`.
+///
+/// Both naive `Option` sums are wrong: `zip` drops a priced piece when the
+/// other merely spent nothing, and `unwrap_or(0.0)` turns unpriced into free.
+pub(crate) fn combine_cost(
+    a_usage: &Usage,
+    a_cost: Option<f64>,
+    b_usage: &Usage,
+    b_cost: Option<f64>,
+) -> Option<f64> {
+    if is_unpriced(a_usage, a_cost) || is_unpriced(b_usage, b_cost) {
+        return None;
+    }
+    match (a_cost, b_cost) {
+        (None, None) => None,
+        (a, b) => Some(a.unwrap_or(0.0) + b.unwrap_or(0.0)),
+    }
+}
+
+/// Spend of delegated [`SubAgentTool`](crate::SubAgentTool) runs, carried as
+/// [`SessionStats::sub_agents`] and returned by
+/// [`Agent::sub_agent_spend`](crate::Agent::sub_agent_spend).
+///
+/// Every figure covers the whole delegation tree: a sub-agent's own nested
+/// sub-agents are included, so one top-level number accounts for all of it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct SubAgentSpend {
+    /// Provider usage summed over every delegated run. `total_tokens` stays 0,
+    /// as in [`SessionStats::usage`].
+    #[serde(default)]
+    pub usage: Usage,
+    /// Dollar cost of [`usage`](Self::usage), each run priced at its own
+    /// model's rates — a sub-agent on a cheaper model is billed as such, never
+    /// re-priced at the parent's.
+    ///
+    /// `None` is never "free", but it means one of two things: the delegated
+    /// spend **cannot be priced** — sticky as soon as any delegated spend came
+    /// from a model with `cost: None`, because a sum that silently
+    /// skips the unpriced part is the under-report this field exists to
+    /// remove — or there was **nothing to price** (no delegation, or runs that
+    /// reported no usage). [`is_unpriced`](Self::is_unpriced) tells them
+    /// apart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    /// Sub-agent invocations, nested ones included. Non-zero means delegation
+    /// happened even when it cost nothing measurable.
+    #[serde(default)]
+    pub runs: u32,
+}
+
+impl SubAgentSpend {
+    /// Whether nothing was delegated.
+    pub fn is_empty(&self) -> bool {
+        self.runs == 0 && usage_is_zero(&self.usage) && self.cost_usd.is_none()
+    }
+
+    /// Whether delegated spend happened that cannot be priced: non-zero
+    /// [`usage`](Self::usage) with no [`cost_usd`](Self::cost_usd). `false`
+    /// for an empty bucket, where `cost_usd` is `None` because there is
+    /// nothing to price.
+    pub fn is_unpriced(&self) -> bool {
+        is_unpriced(&self.usage, self.cost_usd)
+    }
+
+    /// Fold another bucket into this one — for a caller accumulating across
+    /// runs.
+    ///
+    /// Use this rather than adding fields by hand: it keeps
+    /// [`cost_usd`](Self::cost_usd) `None` once any part is unpriced, which a
+    /// plain `Option` sum gets wrong in both directions.
+    pub fn merge(&mut self, other: &SubAgentSpend) {
+        self.cost_usd = combine_cost(&self.usage, self.cost_usd, &other.usage, other.cost_usd);
+        self.usage = add_usage(&self.usage, &other.usage);
+        self.runs = self.runs.saturating_add(other.runs);
+    }
+
+    /// Fold in one sub-agent run, given that run's own stats — its own spend
+    /// and, recursively, everything it delegated.
+    pub(crate) fn record_run(&mut self, child: &SessionStats) {
+        let mut subtree = SubAgentSpend {
+            usage: child.usage.clone(),
+            cost_usd: child.cost_usd,
+            runs: 1,
+        };
+        subtree.merge(&child.sub_agents);
+        self.merge(&subtree);
+    }
+}
+
+/// Where a [`SubAgentTool`](crate::SubAgentTool) reports its run's stats to the
+/// loop that invoked it. A side channel rather than the tool's return value
+/// because a failed delegation returns `Err(ToolError)`, which has nowhere to
+/// carry them — and the spend of a failed run is still spend.
+///
+/// A `Vec` because [`ToolContext`] is `Clone`: a custom tool may hand clones to
+/// several sub-agents within one call, and each run must be counted.
+pub(crate) type SubAgentReport = Arc<std::sync::Mutex<Vec<SessionStats>>>;
+
+#[cfg(test)]
+mod spend_rollup_tests {
+    use super::*;
+    use crate::provider::CostConfig;
+
+    fn u(input: u64) -> Usage {
+        Usage {
+            input,
+            ..Usage::default()
         }
+    }
+
+    /// $1 per million input tokens, so `u(1_000_000)` costs exactly $1.
+    fn priced() -> CostConfig {
+        CostConfig::new(1.0, 0.0)
+    }
+
+    /// An unpriced turn that spent tokens poisons the run's cost, and a
+    /// priced turn after it must not revive a partial sum — the same rule as
+    /// `SubAgentSpend::merge`.
+    #[test]
+    fn record_turn_unpriced_then_priced_is_unknown() {
+        let mut stats = SessionStats::default();
+        stats.record_turn(&u(1_000_000), None);
+        assert_eq!(stats.cost_usd, None);
+        stats.record_turn(&u(1_000_000), Some(&priced()));
+        assert_eq!(stats.cost_usd, None, "a partial sum would under-report");
+        assert!(stats.is_unpriced());
+        assert_eq!(stats.usage, u(2_000_000));
+        assert_eq!(stats.turns, 2);
+    }
+
+    #[test]
+    fn record_turn_priced_then_unpriced_is_unknown() {
+        let mut stats = SessionStats::default();
+        stats.record_turn(&u(1_000_000), Some(&priced()));
+        assert_eq!(stats.cost_usd, Some(1.0));
+        stats.record_turn(&u(1), None);
+        assert_eq!(stats.cost_usd, None);
+    }
+
+    /// A zero-rate config means free, not unknown: it prices at 0.0 and does
+    /// not poison the sum.
+    #[test]
+    fn record_turn_free_model_prices_at_zero() {
+        let mut stats = SessionStats::default();
+        stats.record_turn(&u(1_000_000), Some(&priced()));
+        stats.record_turn(&u(1_000_000), Some(&CostConfig::default()));
+        assert_eq!(stats.cost_usd, Some(1.0));
+        assert!(!stats.is_unpriced());
+    }
+
+    #[test]
+    fn record_turn_sums_priced_turns_and_ignores_empty_unpriced_ones() {
+        let mut stats = SessionStats::default();
+        // No usage reported: nothing to price, so no poison.
+        stats.record_turn(&Usage::default(), None);
+        assert_eq!(stats.cost_usd, None);
+        assert!(!stats.is_unpriced(), "nothing spent is not unpriced");
+        stats.record_turn(&u(1_000_000), Some(&priced()));
+        stats.record_turn(&u(2_000_000), Some(&priced()));
+        assert_eq!(stats.cost_usd, Some(3.0));
+        assert!(!stats.is_unpriced());
+    }
+
+    #[test]
+    fn usage_sums_saturate_instead_of_overflowing() {
+        let mut a = SubAgentSpend {
+            usage: u(u64::MAX - 1),
+            cost_usd: Some(1.0),
+            runs: u32::MAX,
+        };
+        a.merge(&a.clone());
+        assert_eq!(a.usage.input, u64::MAX);
+        assert_eq!(a.runs, u32::MAX);
     }
 }
 
@@ -1110,20 +1558,6 @@ pub enum ToolDecision {
     Deny(String),
 }
 
-/// Async hook that gates every tool call — the mechanism behind permission
-/// prompts, policy engines, and argument rewriting.
-///
-/// yoagent ships the mechanism, not a policy: install middleware via
-/// [`Agent::with_tool_middleware`](crate::Agent::with_tool_middleware) (or
-/// [`AgentLoopConfig::tool_middleware`](crate::agent_loop::AgentLoopConfig))
-/// and decide per call. Middleware run in a chain: each may rewrite the
-/// arguments seen by later ones; the first `Deny` wins. With no middleware
-/// installed, every call is allowed — behavior is unchanged.
-///
-/// The hook is `async` so an interactive app can prompt a human. Under the
-/// default [`ToolExecutionStrategy::Parallel`], middleware for parallel tool
-/// calls runs concurrently — serialize approval prompts inside your
-/// implementation (or use `Sequential`) if you need one-at-a-time UX.
 /// Borrowed view of a pending tool call, passed to
 /// [`ToolMiddleware::before_tool`].
 ///
@@ -1142,6 +1576,26 @@ pub struct ToolCallRequest<'a> {
     pub args: &'a serde_json::Value,
 }
 
+/// Async hook that gates every tool call — the mechanism behind permission
+/// prompts, policy engines, and argument rewriting.
+///
+/// yoagent ships the mechanism, not a policy: install middleware via
+/// [`Agent::with_tool_middleware`](crate::Agent::with_tool_middleware) (or
+/// [`AgentLoopConfig::tool_middleware`](crate::agent_loop::AgentLoopConfig))
+/// and decide per call. Middleware run in a chain: each may rewrite the
+/// arguments seen by later ones; the first `Deny` wins. With no middleware
+/// installed, every call is allowed — behavior is unchanged.
+///
+/// The hook is `async` so an interactive app can prompt a human. Under the
+/// default [`ToolExecutionStrategy::Parallel`], middleware for parallel tool
+/// calls runs concurrently — serialize approval prompts inside your
+/// implementation (or use `Sequential`) if you need one-at-a-time UX.
+///
+/// Middleware never sees a call whose arguments failed to resolve to a JSON
+/// object (cut off mid-stream, or not an object — see
+/// [`parse_tool_arguments`](crate::provider::parse_tool_arguments)). The loop
+/// answers such a call with an error tool result *before* the chain runs, so
+/// there is no real call to approve, deny or rewrite.
 #[async_trait::async_trait]
 pub trait ToolMiddleware: Send + Sync {
     async fn before_tool(&self, call: &ToolCallRequest<'_>) -> ToolDecision;
@@ -1284,6 +1738,17 @@ mod wire_tag_freeze {
                 turns: 3,
                 cost_usd: Some(0.02),
                 compactions: 1,
+                sub_agents: SubAgentSpend {
+                    usage: Usage {
+                        input: 50,
+                        output: 60,
+                        cache_read: 70,
+                        cache_write: 80,
+                        total_tokens: 0,
+                    },
+                    cost_usd: Some(0.2),
+                    runs: 2,
+                },
             },
         ),
         AgentEvent::TurnStart => "turnStart" = AgentEvent::TurnStart,
@@ -1442,6 +1907,29 @@ mod wire_tag_freeze {
         let mut seen = BTreeSet::new();
         for sample in &delta_samples() {
             assert_frozen(sample, expected_delta_tag(sample), &mut seen);
+        }
+    }
+}
+
+#[cfg(test)]
+mod thinking_level_tests {
+    use super::ThinkingLevel;
+
+    #[test]
+    fn serde_names_are_lowercase_and_old_values_still_load() {
+        for (level, name) in [
+            (ThinkingLevel::Off, "off"),
+            (ThinkingLevel::Minimal, "minimal"),
+            (ThinkingLevel::Low, "low"),
+            (ThinkingLevel::Medium, "medium"),
+            (ThinkingLevel::High, "high"),
+            (ThinkingLevel::XHigh, "xhigh"),
+            (ThinkingLevel::Max, "max"),
+        ] {
+            let json = serde_json::to_string(&level).unwrap();
+            assert_eq!(json, format!("\"{name}\""));
+            let back: ThinkingLevel = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, level);
         }
     }
 }

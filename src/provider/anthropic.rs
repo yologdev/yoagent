@@ -1,5 +1,6 @@
 //! Anthropic Claude provider (Messages API with streaming)
 
+use super::tool_args::UNPARSED_ARGUMENTS_KEY;
 use super::traits::*;
 use crate::types::*;
 use async_trait::async_trait;
@@ -258,11 +259,11 @@ impl StreamProvider for AnthropicProvider {
                                                     // We accumulate the raw JSON string and parse it at content_block_stop
                                                     let buf = arguments
                                                         .as_object_mut()
-                                                        .and_then(|o| o.get_mut("__partial_json"))
+                                                        .and_then(|o| o.get_mut(UNPARSED_ARGUMENTS_KEY))
                                                         .and_then(|v| v.as_str().map(|s| s.to_string()));
                                                     let new_buf = format!("{}{}", buf.unwrap_or_default(), partial_json);
                                                     if let Some(obj) = arguments.as_object_mut() {
-                                                        obj.insert("__partial_json".into(), serde_json::Value::String(new_buf));
+                                                        obj.insert(UNPARSED_ARGUMENTS_KEY.into(), serde_json::Value::String(new_buf));
                                                     }
                                                 }
                                                 let _ = tx.send(StreamEvent::ToolCallDelta {
@@ -308,7 +309,7 @@ impl StreamProvider for AnthropicProvider {
                                             // index), which leak the same way.
                                             if let Some(Content::ToolCall { name, arguments, .. }) = content.get_mut(idx) {
                                                 if let Some(partial) = arguments.as_object()
-                                                    .and_then(|o| o.get("__partial_json"))
+                                                    .and_then(|o| o.get(UNPARSED_ARGUMENTS_KEY))
                                                     .and_then(|v| v.as_str())
                                                     .map(|s| s.to_string())
                                                 {
@@ -382,7 +383,7 @@ impl StreamProvider for AnthropicProvider {
                             // sentinel key as its input — treat as truncation.
                             if content.iter().any(|c| {
                                 matches!(c, Content::ToolCall { arguments, .. }
-                                    if arguments.get("__partial_json").is_some())
+                                    if arguments.get(UNPARSED_ARGUMENTS_KEY).is_some())
                             }) {
                                 warn!(
                                     "stream ended after message_delta with an unterminated \
@@ -421,7 +422,7 @@ impl StreamProvider for AnthropicProvider {
                 Content::ToolCall {
                     name, arguments, ..
                 } => arguments
-                    .get("__partial_json")
+                    .get(UNPARSED_ARGUMENTS_KEY)
                     .and_then(|v| v.as_str())
                     .map(|partial| (name.clone(), partial.to_string())),
                 _ => None,
@@ -684,50 +685,78 @@ fn build_request_body(config: &StreamConfig, is_oauth: bool) -> serde_json::Valu
         body["tools"] = serde_json::json!(tools);
     }
 
-    // Structured outputs via tool-forcing: append a synthetic tool built from
-    // the schema and force the model to call it. The loop unwraps the forced
-    // call back into plain text (`unwrap_structured_tool_call`).
+    // `output_config` collects every key this request sends there — the
+    // native structured-output `format` and the adaptive-thinking `effort` —
+    // so neither overwrites the other.
+    let mut output_config = serde_json::Map::new();
+
+    // Structured outputs, two ways:
+    // - native (`AnthropicCompat::native_structured_output`): the API
+    //   constrains the reply text to the schema via `output_config.format`.
+    //   No tool is added or forced, so this also works on models that reject
+    //   forced `tool_choice` (Fable 5.1, Opus 5.5) and composes with thinking.
+    // - tool-forcing (default): append a synthetic tool built from the schema
+    //   and force the model to call it. The loop unwraps the forced call back
+    //   into plain text (`unwrap_structured_tool_call`).
+    let forced_structured_tool = config.output_schema.is_some() && !compat.native_structured_output;
     if let Some(schema) = &config.output_schema {
-        let synthetic = serde_json::json!({
-            "name": schema.name,
-            "description": "Produce the final answer in the required schema.",
-            "input_schema": schema.schema,
-        });
-        match body.get_mut("tools").and_then(|v| v.as_array_mut()) {
-            Some(arr) => arr.push(synthetic),
-            None => body["tools"] = serde_json::json!([synthetic]),
+        if compat.native_structured_output {
+            output_config.insert(
+                "format".into(),
+                serde_json::json!({ "type": "json_schema", "schema": schema.schema }),
+            );
+        } else {
+            let synthetic = serde_json::json!({
+                "name": schema.name,
+                "description": "Produce the final answer in the required schema.",
+                "input_schema": schema.schema,
+            });
+            match body.get_mut("tools").and_then(|v| v.as_array_mut()) {
+                Some(arr) => arr.push(synthetic),
+                None => body["tools"] = serde_json::json!([synthetic]),
+            }
+            body["tool_choice"] = serde_json::json!({ "type": "tool", "name": schema.name });
         }
-        body["tool_choice"] = serde_json::json!({ "type": "tool", "name": schema.name });
     }
 
     // Forced tool_choice and extended thinking are mutually exclusive at the
-    // API level — a structured-output request wins and thinking is skipped
-    // for this call (warned, not silent).
+    // API level — a tool-forced structured-output request wins and thinking
+    // is skipped for this call (warned, not silent). The native path forces
+    // nothing, so thinking proceeds as requested.
     let thinking_requested = config.thinking_level != ThinkingLevel::Off;
-    if thinking_requested && config.output_schema.is_some() {
+    if thinking_requested && forced_structured_tool {
         tracing::warn!(
             "structured outputs force tool_choice, which Anthropic rejects with \
              extended thinking; thinking is disabled for this request"
         );
     }
-    if thinking_requested && config.output_schema.is_none() {
+    if thinking_requested && !forced_structured_tool {
         if compat.adaptive_thinking {
             // Current generation (Claude 4.6+ / Fable 5): adaptive thinking with
-            // an effort hint. Budget-based thinking is rejected with a 400.
+            // an effort hint. Budget-based thinking is deprecated on 4.6 and
+            // rejected with a 400 from 4.7 on.
             let effort = match config.thinking_level {
                 ThinkingLevel::Minimal | ThinkingLevel::Low => "low",
                 ThinkingLevel::Medium => "medium",
                 ThinkingLevel::High => "high",
+                // Passed through, not clamped: the effort ladder is per model
+                // (`xhigh` arrived with Opus 4.7) and the crate has no table
+                // of it, so a model that lacks a rung rejects it visibly.
+                ThinkingLevel::XHigh => "xhigh",
+                ThinkingLevel::Max => "max",
                 ThinkingLevel::Off => unreachable!(),
             };
             body["thinking"] = serde_json::json!({ "type": "adaptive" });
-            body["output_config"] = serde_json::json!({ "effort": effort });
+            output_config.insert("effort".into(), serde_json::json!(effort));
         } else {
             body["thinking"] = serde_json::json!({
                 "type": "enabled",
                 "budget_tokens": legacy_thinking_budget(config.thinking_level),
             });
         }
+    }
+    if !output_config.is_empty() {
+        body["output_config"] = serde_json::Value::Object(output_config);
     }
 
     if let Some(temp) = config.temperature {
@@ -739,13 +768,22 @@ fn build_request_body(config: &StreamConfig, is_oauth: bool) -> serde_json::Valu
 
 /// Budget tokens for legacy (pre-4.6) extended thinking. The API requires a
 /// minimum of 1024. (`Off` returns 0 but never reaches a thinking-enabled
-/// request — both call sites guard on `!= ThinkingLevel::Off`.)
-fn legacy_thinking_budget(level: ThinkingLevel) -> u32 {
+/// request — all call sites guard on `!= ThinkingLevel::Off`.)
+///
+/// `Max` is 30,720 rather than a rounder 32K: the first-party request raises
+/// `max_tokens` to `budget + 1024` when it is too small, and the smallest
+/// output ceiling among budget-thinking models is Opus 4/4.1's 32,000 — so
+/// 30,720 + 1,024 still fits where 32,768 + 1,024 would be rejected. Also used
+/// by Bedrock, which does **not** raise `maxTokens`: Bedrock callers must set
+/// `max_tokens` above the budget themselves (for `Max`, above 30,720).
+pub(crate) fn legacy_thinking_budget(level: ThinkingLevel) -> u32 {
     match level {
         ThinkingLevel::Off => 0,
         ThinkingLevel::Minimal | ThinkingLevel::Low => 1024,
         ThinkingLevel::Medium => 2048,
         ThinkingLevel::High => 8192,
+        ThinkingLevel::XHigh => 16_384,
+        ThinkingLevel::Max => 30_720,
     }
 }
 
@@ -888,6 +926,7 @@ fn resolve_tool_arguments(partial: &str) -> Option<serde_json::Value> {
 mod tests {
     use super::*;
     use crate::provider::traits::ToolDefinition;
+    use crate::provider::ModelConfig;
 
     fn make_config(cache: CacheConfig) -> StreamConfig {
         StreamConfig {
@@ -1046,6 +1085,207 @@ mod tests {
         );
         assert_eq!(body["tool_choice"]["type"], "tool");
         assert_eq!(body["tool_choice"]["name"], "structured_output");
+    }
+
+    fn structured_schema() -> crate::provider::OutputSchema {
+        crate::provider::OutputSchema::new(
+            "structured_output",
+            serde_json::json!({
+                "type": "object",
+                "properties": {"answer": {"type": "string"}},
+                "required": ["answer"],
+                "additionalProperties": false,
+            }),
+        )
+    }
+
+    /// A config on `mc` (model id taken from it) with a structured schema.
+    fn structured_config(mc: ModelConfig, level: ThinkingLevel) -> StreamConfig {
+        let mut config = make_config(CacheConfig::default());
+        config.model = mc.id.clone();
+        config.model_config = Some(mc);
+        config.thinking_level = level;
+        config.output_schema = Some(structured_schema());
+        config
+    }
+
+    /// The whole tool-forced request, pinned. With the flag off (the default,
+    /// and what every config persisted before the flag deserializes to) the
+    /// body is exactly what it was before `native_structured_output` existed:
+    /// synthetic tool appended, tool forced, thinking dropped, no
+    /// `output_config`.
+    #[test]
+    fn tool_forced_structured_body_is_unchanged() {
+        let expected = serde_json::json!({
+            "model": "claude-fable-5",
+            "max_tokens": 1024,
+            "stream": true,
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "text", "text": "Hello", "cache_control": {"type": "ephemeral"}},
+                ]},
+                {"role": "user", "content": [{"type": "text", "text": "What is 2+2?"}]},
+            ],
+            "system": [
+                {"type": "text", "text": "You are helpful.", "cache_control": {"type": "ephemeral"}},
+            ],
+            "tools": [
+                {
+                    "name": "bash",
+                    "description": "Run commands",
+                    "input_schema": {"type": "object"},
+                    "cache_control": {"type": "ephemeral"},
+                },
+                {
+                    "name": "structured_output",
+                    "description": "Produce the final answer in the required schema.",
+                    "input_schema": structured_schema().schema,
+                },
+            ],
+            "tool_choice": {"type": "tool", "name": "structured_output"},
+        });
+        let mut no_compat = ModelConfig::claude_fable_5();
+        no_compat.anthropic = None;
+        let mut flag_off = ModelConfig::claude_fable_5();
+        flag_off.anthropic = Some(crate::provider::AnthropicCompat::default());
+        for mc in [no_compat, flag_off] {
+            let body = build_request_body(&structured_config(mc, ThinkingLevel::High), false);
+            assert_eq!(body, expected);
+            assert_eq!(
+                serde_json::to_string(&body).unwrap(),
+                serde_json::to_string(&expected).unwrap()
+            );
+        }
+    }
+
+    /// #175: Fable 5.1 and Opus 5.5 reject forced `tool_choice`, so their
+    /// presets constrain the reply natively: `output_config.format`, no
+    /// synthetic tool, no `tool_choice`, user tools left alone.
+    #[test]
+    fn native_structured_output_sends_output_config_format() {
+        for mc in [
+            ModelConfig::claude_fable_5_1(),
+            ModelConfig::claude_opus_5_5(),
+        ] {
+            let id = mc.id.clone();
+            let body = build_request_body(&structured_config(mc, ThinkingLevel::Off), false);
+            assert_eq!(
+                body["output_config"],
+                serde_json::json!({
+                    "format": {"type": "json_schema", "schema": structured_schema().schema},
+                }),
+                "{id}"
+            );
+            assert!(body.get("tool_choice").is_none(), "{id}: {body}");
+            let tools = body["tools"].as_array().unwrap();
+            assert_eq!(tools.len(), 1, "{id}: only the user's tool");
+            assert_eq!(tools[0]["name"], "bash");
+            // Off omits the field (never `disabled`, which both reject).
+            assert!(body.get("thinking").is_none(), "{id}");
+        }
+    }
+
+    /// Near miss for #175: the same model and schema, differing only in the
+    /// flag. Off forces the tool; on sends the format. Nothing else moves.
+    #[test]
+    fn native_flag_is_the_only_switch() {
+        let native = ModelConfig::claude_fable_5_1();
+        let mut forced = ModelConfig::claude_fable_5_1();
+        forced.anthropic.as_mut().unwrap().native_structured_output = false;
+
+        let n = build_request_body(&structured_config(native, ThinkingLevel::Off), false);
+        let f = build_request_body(&structured_config(forced, ThinkingLevel::Off), false);
+        assert_eq!(f["tool_choice"]["name"], "structured_output");
+        assert_eq!(f["tools"].as_array().unwrap().len(), 2);
+        assert!(f.get("output_config").is_none());
+        assert!(n.get("tool_choice").is_none());
+        assert_eq!(n["tools"].as_array().unwrap().len(), 1);
+
+        let strip = |mut v: serde_json::Value| {
+            let o = v.as_object_mut().unwrap();
+            o.remove("tools");
+            o.remove("tool_choice");
+            o.remove("output_config");
+            v
+        };
+        assert_eq!(strip(n), strip(f));
+    }
+
+    /// The native path forces no tool, so thinking is not dropped, and the
+    /// effort must share `output_config` with the format rather than
+    /// overwrite it.
+    #[test]
+    fn native_structured_output_merges_with_effort() {
+        for (level, effort) in [
+            (ThinkingLevel::Low, "low"),
+            (ThinkingLevel::High, "high"),
+            (ThinkingLevel::Max, "max"),
+        ] {
+            let body = build_request_body(
+                &structured_config(ModelConfig::claude_opus_5_5(), level),
+                false,
+            );
+            assert_eq!(body["thinking"], serde_json::json!({"type": "adaptive"}));
+            assert_eq!(
+                body["output_config"],
+                serde_json::json!({
+                    "effort": effort,
+                    "format": {"type": "json_schema", "schema": structured_schema().schema},
+                })
+            );
+            assert!(body.get("tool_choice").is_none());
+        }
+    }
+
+    /// Legacy budget thinking has no `effort`; the format stands alone and
+    /// the budget is still sent.
+    #[test]
+    fn native_structured_output_with_legacy_thinking() {
+        let mut mc = ModelConfig::anthropic("claude-opus-4-5", "Claude Opus 4.5");
+        mc.anthropic =
+            Some(crate::provider::AnthropicCompat::legacy().with_native_structured_output(true));
+        let body = build_request_body(&structured_config(mc, ThinkingLevel::Medium), false);
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(
+            body["thinking"]["budget_tokens"],
+            legacy_thinking_budget(ThinkingLevel::Medium)
+        );
+        assert_eq!(
+            body["output_config"],
+            serde_json::json!({
+                "format": {"type": "json_schema", "schema": structured_schema().schema},
+            })
+        );
+    }
+
+    /// Haiku 4.5 supports only budget thinking (`type: "adaptive"` is a 400),
+    /// so its preset sends `enabled` + `budget_tokens` even alongside the
+    /// native format — and `output_config` carries no `effort`.
+    #[test]
+    fn haiku_4_5_structured_with_thinking_uses_budget() {
+        let body = build_request_body(
+            &structured_config(ModelConfig::claude_haiku_4_5(), ThinkingLevel::Medium),
+            false,
+        );
+        assert_eq!(body["thinking"]["type"], "enabled", "{body}");
+        assert_eq!(
+            body["thinking"]["budget_tokens"],
+            legacy_thinking_budget(ThinkingLevel::Medium)
+        );
+        assert_eq!(
+            body["output_config"],
+            serde_json::json!({
+                "format": {"type": "json_schema", "schema": structured_schema().schema},
+            })
+        );
+        assert!(body.get("tool_choice").is_none());
+
+        // Without a schema, too: never adaptive on Haiku 4.5.
+        let mut plain = structured_config(ModelConfig::claude_haiku_4_5(), ThinkingLevel::High);
+        plain.output_schema = None;
+        let body = build_request_body(&plain, false);
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert!(body.get("output_config").is_none(), "{body}");
     }
 
     #[test]
@@ -1293,11 +1533,48 @@ mod tests {
             (ThinkingLevel::Low, "low"),
             (ThinkingLevel::Medium, "medium"),
             (ThinkingLevel::High, "high"),
+            (ThinkingLevel::XHigh, "xhigh"),
+            (ThinkingLevel::Max, "max"),
         ] {
             let mut config = make_config(CacheConfig::default());
             config.thinking_level = level;
             let body = build_request_body(&config, false);
             assert_eq!(body["output_config"]["effort"], effort);
+        }
+    }
+
+    #[test]
+    fn test_adaptive_thinking_xhigh_and_max_pass_through() {
+        // Anthropic's effort ladder is low/medium/high/xhigh/max; the two top
+        // rungs were unreachable before XHigh/Max existed (#171).
+        for (level, effort) in [(ThinkingLevel::XHigh, "xhigh"), (ThinkingLevel::Max, "max")] {
+            let mut config = make_config(CacheConfig::default());
+            config.thinking_level = level;
+            let body = build_request_body(&config, false);
+            assert_eq!(body["thinking"]["type"], "adaptive");
+            assert_eq!(body["output_config"]["effort"], effort);
+        }
+    }
+
+    #[test]
+    fn test_legacy_thinking_budget_for_xhigh_and_max() {
+        let mut mc = crate::provider::ModelConfig::anthropic("claude-opus-4-1", "Opus 4.1");
+        mc.anthropic = Some(crate::provider::AnthropicCompat::legacy());
+        for (level, budget) in [
+            (ThinkingLevel::High, 8192),
+            (ThinkingLevel::XHigh, 16_384),
+            (ThinkingLevel::Max, 30_720),
+        ] {
+            let mut config = make_config(CacheConfig::default());
+            config.thinking_level = level;
+            config.max_tokens = Some(1024);
+            config.model_config = Some(mc.clone());
+            let body = build_request_body(&config, false);
+            assert_eq!(body["thinking"]["budget_tokens"], budget);
+            // Raised above the budget, and still inside Opus 4/4.1's 32,000
+            // output ceiling (the smallest among budget-thinking models).
+            let max_tokens = body["max_tokens"].as_u64().unwrap();
+            assert!(max_tokens > budget && max_tokens <= 32_000);
         }
     }
 

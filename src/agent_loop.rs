@@ -141,6 +141,12 @@ pub const AGENT_STOPPED_PREFIX: &str = "[Agent stopped:";
 /// the model was emitting the same call forever and there is nothing to keep.
 pub const LOOP_ABORT_PREFIX: &str = "[Agent stopped: repeated tool call —";
 
+/// The error tool result given to each tool call in a response that ended as
+/// [`StopReason::Refusal`] — the model declined, or a content filter stopped
+/// the response. The call is never executed.
+const REFUSAL_TOOL_RESULT_TEXT: &str = "Tool call not run: the response was stopped as a refusal \
+     (declined by the model or stopped by the content filter).";
+
 pub async fn agent_loop(
     prompts: Vec<AgentMessage>,
     context: &mut AgentContext,
@@ -148,6 +154,22 @@ pub async fn agent_loop(
     tx: mpsc::UnboundedSender<AgentEvent>,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Vec<AgentMessage> {
+    agent_loop_with_stats(prompts, context, config, tx, cancel)
+        .await
+        .0
+}
+
+/// [`agent_loop`], also returning the [`SessionStats`] it sent on
+/// `AgentEnd` — for callers inside the crate that must not depend on someone
+/// draining the event channel (`Agent`'s sub-agent bucket, `SubAgentTool`'s
+/// spend report).
+pub(crate) async fn agent_loop_with_stats(
+    prompts: Vec<AgentMessage>,
+    context: &mut AgentContext,
+    config: &AgentLoopConfig,
+    tx: mpsc::UnboundedSender<AgentEvent>,
+    cancel: tokio_util::sync::CancellationToken,
+) -> (Vec<AgentMessage>, SessionStats) {
     tx.send(AgentEvent::AgentStart).ok();
 
     // Apply input filters before adding prompts to context
@@ -191,7 +213,7 @@ pub async fn agent_loop(
                         stats: SessionStats::default(),
                     })
                     .ok();
-                    return vec![];
+                    return (vec![], SessionStats::default());
                 }
             }
         }
@@ -250,10 +272,10 @@ pub async fn agent_loop(
 
     tx.send(AgentEvent::AgentEnd {
         messages: new_messages.clone(),
-        stats,
+        stats: stats.clone(),
     })
     .ok();
-    new_messages
+    (new_messages, stats)
 }
 
 /// Continue an agent loop from existing context (for retries).
@@ -263,6 +285,18 @@ pub async fn agent_loop_continue(
     tx: mpsc::UnboundedSender<AgentEvent>,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Vec<AgentMessage> {
+    agent_loop_continue_with_stats(context, config, tx, cancel)
+        .await
+        .0
+}
+
+/// [`agent_loop_continue`], also returning its [`SessionStats`].
+pub(crate) async fn agent_loop_continue_with_stats(
+    context: &mut AgentContext,
+    config: &AgentLoopConfig,
+    tx: mpsc::UnboundedSender<AgentEvent>,
+    cancel: tokio_util::sync::CancellationToken,
+) -> (Vec<AgentMessage>, SessionStats) {
     assert!(
         !context.messages.is_empty(),
         "Cannot continue: no messages in context"
@@ -289,10 +323,10 @@ pub async fn agent_loop_continue(
 
     tx.send(AgentEvent::AgentEnd {
         messages: new_messages.clone(),
-        stats,
+        stats: stats.clone(),
     })
     .ok();
-    new_messages
+    (new_messages, stats)
 }
 
 /// Main loop logic shared by agent_loop and agent_loop_continue.
@@ -531,23 +565,35 @@ async fn run_loop(
                 llm_span.record("tokens_in", usage.input);
                 llm_span.record("tokens_out", usage.output);
                 llm_span.record("tokens_cached", usage.cache_read);
-                if let Some(mc) = &config.model_config {
-                    if mc.cost.is_configured() {
-                        llm_span.record("cost_usd", mc.cost.cost_usd(usage));
-                    }
+                // Unpriced models (`cost: None`) leave the field empty: unknown,
+                // never $0. A free model (`Some`, all-zero) records 0.0.
+                if let Some(cost) = config.model_config.as_ref().and_then(|mc| mc.cost.as_ref()) {
+                    llm_span.record("cost_usd", cost.cost_usd(usage));
                 }
             }
             // Tool-forcing providers (Anthropic) deliver structured output as
             // a forced tool call — unwrap it into plain text BEFORE tool-call
             // extraction, so the loop never tries to execute the synthetic tool.
-            let message = unwrap_structured_tool_call(message, config.output_schema.as_ref());
+            // Skipped on Anthropic's native path (`native_structured_output`):
+            // no synthetic tool was offered there, so a call named after the
+            // schema is a real user tool and must execute. A no-op for the
+            // other natively-constraining providers (OpenAI-compat, Gemini)
+            // unless a user tool shares the schema's name.
+            let message = if structured_output_is_tool_forced(config.model_config.as_ref()) {
+                unwrap_structured_tool_call(message, config.output_schema.as_ref())
+            } else {
+                message
+            };
 
             let agent_msg: AgentMessage = message.clone().into();
             context.messages.push(agent_msg.clone());
             new_messages.push(agent_msg.clone());
             if let Message::Assistant { usage, .. } = &message {
                 context_tracker.record_usage(usage, context.messages.len() - 1);
-                stats.record_turn(usage, config.model_config.as_ref().map(|mc| &mc.cost));
+                stats.record_turn(
+                    usage,
+                    config.model_config.as_ref().and_then(|mc| mc.cost.as_ref()),
+                );
             }
 
             // Check for error/abort
@@ -576,6 +622,60 @@ async fn run_loop(
                     .ok();
                     return stats;
                 }
+            }
+
+            // A refusal (the model declined, or a content filter cut the
+            // response) is terminal: nothing in it runs, and there is no
+            // further LLM turn — the run ends as Error/Aborted end it, leaving
+            // any queued steering/follow-up messages queued. A tool call in the
+            // refused message may be complete and well-formed (a content filter
+            // can land after it), but executing it would act on a response the
+            // provider withdrew. Every call is still answered with an error
+            // result so the transcript stays one the provider accepts on the
+            // next prompt.
+            if let Message::Assistant {
+                stop_reason: StopReason::Refusal,
+                ref content,
+                ref usage,
+                ..
+            } = message
+            {
+                let mut tool_results: Vec<Message> = Vec::new();
+                for c in content {
+                    if let Content::ToolCall {
+                        id,
+                        name,
+                        arguments,
+                        ..
+                    } = c
+                    {
+                        tracing::warn!(
+                            tool = name.as_str(),
+                            tool_call_id = id.as_str(),
+                            "tool call not executed: the response was a refusal"
+                        );
+                        let (result, _) = unexecuted_tool_call(
+                            id,
+                            name,
+                            arguments,
+                            REFUSAL_TOOL_RESULT_TEXT.to_string(),
+                            tx,
+                        );
+                        let am: AgentMessage = result.clone().into();
+                        context.messages.push(am.clone());
+                        new_messages.push(am);
+                        tool_results.push(result);
+                    }
+                }
+                if let Some(ref after_turn) = config.after_turn {
+                    after_turn(&context.messages, usage);
+                }
+                tx.send(AgentEvent::TurnEnd {
+                    message: agent_msg,
+                    tool_results,
+                })
+                .ok();
+                return stats;
             }
 
             // Extract tool calls
@@ -734,6 +834,10 @@ async fn run_loop(
 
                 tool_results = execution.tool_results;
                 steering_after_tools = execution.steering_messages;
+                // Separate bucket: `usage`/`cost_usd` stay this agent's own.
+                for child in &execution.sub_agent_stats {
+                    stats.sub_agents.record_run(child);
+                }
 
                 // Cap oversized output on the way in when configured, so
                 // compaction never has to rewrite a tool result the provider
@@ -1149,6 +1253,25 @@ async fn stream_assistant_response(
 struct ToolExecutionResult {
     tool_results: Vec<Message>,
     steering_messages: Option<Vec<AgentMessage>>,
+    /// Stats of every sub-agent run these tool calls delegated to, failed
+    /// ones included, for the run's `SessionStats::sub_agents`.
+    sub_agent_stats: Vec<SessionStats>,
+}
+
+/// Whether a structured-output request may have been enforced by forcing a
+/// synthetic tool call, which the loop must unwrap. False only on Anthropic's
+/// native path (`AnthropicCompat::native_structured_output`), where the API
+/// constrains the reply text and offers no synthetic tool. Without a model
+/// config the provider falls back to its defaults (tool-forcing on Anthropic),
+/// so unwrapping stays on.
+fn structured_output_is_tool_forced(model_config: Option<&ModelConfig>) -> bool {
+    !model_config.is_some_and(|mc| {
+        mc.api == crate::provider::ApiProtocol::AnthropicMessages
+            && mc
+                .anthropic
+                .as_ref()
+                .is_some_and(|c| c.native_structured_output)
+    })
 }
 
 /// Convert a forced structured-output tool call back into a plain-text
@@ -1238,10 +1361,12 @@ async fn execute_tool_calls(
         ToolExecutionStrategy::Batched { size } => {
             let mut results: Vec<Message> = Vec::new();
             let mut steering_messages: Option<Vec<AgentMessage>> = None;
+            let mut sub_agent_stats: Vec<SessionStats> = Vec::new();
 
             for (batch_idx, batch) in tool_calls.chunks(*size).enumerate() {
                 let batch_result = execute_batch(tools, batch, tx, cancel, None, middleware).await;
                 results.extend(batch_result.tool_results);
+                sub_agent_stats.extend(batch_result.sub_agent_stats);
 
                 // Check steering between batches
                 if let Some(get_steering_fn) = get_steering {
@@ -1263,6 +1388,7 @@ async fn execute_tool_calls(
             ToolExecutionResult {
                 tool_results: results,
                 steering_messages,
+                sub_agent_stats,
             }
         }
     }
@@ -1279,11 +1405,13 @@ async fn execute_sequential(
 ) -> ToolExecutionResult {
     let mut results: Vec<Message> = Vec::new();
     let mut steering_messages: Option<Vec<AgentMessage>> = None;
+    let mut sub_agent_stats: Vec<SessionStats> = Vec::new();
 
     for (index, (id, name, args)) in tool_calls.iter().enumerate() {
-        let (result_msg, _is_error) =
+        let (result_msg, delegated) =
             execute_single_tool(tools, id, name, args, tx, cancel, middleware).await;
         results.push(result_msg);
+        sub_agent_stats.extend(delegated);
 
         // Check for steering — skip remaining tools if user interrupted
         if let Some(get_steering_fn) = get_steering {
@@ -1301,6 +1429,7 @@ async fn execute_sequential(
     ToolExecutionResult {
         tool_results: results,
         steering_messages,
+        sub_agent_stats,
     }
 }
 
@@ -1322,7 +1451,14 @@ async fn execute_batch(
 
     let batch_results = join_all(futures).await;
 
-    let results: Vec<Message> = batch_results.into_iter().map(|(msg, _)| msg).collect();
+    let mut sub_agent_stats: Vec<SessionStats> = Vec::new();
+    let results: Vec<Message> = batch_results
+        .into_iter()
+        .map(|(msg, delegated)| {
+            sub_agent_stats.extend(delegated);
+            msg
+        })
+        .collect();
 
     // Check steering after batch completes
     let steering_messages = if let Some(get_steering_fn) = get_steering {
@@ -1339,10 +1475,14 @@ async fn execute_batch(
     ToolExecutionResult {
         tool_results: results,
         steering_messages,
+        sub_agent_stats,
     }
 }
 
 /// Execute a single tool call and emit events.
+///
+/// Also returns the stats of any sub-agent runs the tool reported, so the
+/// caller can fold delegated spend into the run's rollup.
 async fn execute_single_tool(
     tools: &[Box<dyn AgentTool>],
     id: &str,
@@ -1351,8 +1491,19 @@ async fn execute_single_tool(
     tx: &mpsc::UnboundedSender<AgentEvent>,
     cancel: &tokio_util::sync::CancellationToken,
     middleware: &[Arc<dyn ToolMiddleware>],
-) -> (Message, bool) {
-    // Middleware chain runs first: each hook may rewrite the args seen by
+) -> (Message, Vec<SessionStats>) {
+    // A call whose streamed arguments did not resolve to a JSON object (cut
+    // off at the output token limit, in practice, or double-encoded as a
+    // string) is answered with an error, never run: the provider kept the
+    // raw text instead of substituting `{}`, and running the tool on its
+    // defaults would silently replace what the model asked for. This sits
+    // ahead of middleware — there is no real call to approve or rewrite.
+    if let Some(raw) = crate::provider::unparsed_tool_arguments(args) {
+        let (msg, _) = unparsed_arguments_tool_call(id, name, args, raw, tx);
+        return (msg, Vec::new());
+    }
+
+    // Middleware chain runs next: each hook may rewrite the args seen by
     // later hooks; the first Deny short-circuits into an error tool result
     // (the LLM sees the reason and can adapt — the loop continues).
     let mut effective_args = args.clone();
@@ -1378,7 +1529,8 @@ async fn execute_single_tool(
             ToolDecision::Allow => {}
             ToolDecision::Modify(new_args) => effective_args = new_args,
             ToolDecision::Deny(reason) => {
-                return denied_tool_call(id, name, &effective_args, &reason, tx);
+                let (msg, _) = denied_tool_call(id, name, &effective_args, &reason, tx);
+                return (msg, Vec::new());
             }
         }
     }
@@ -1423,12 +1575,14 @@ async fn execute_single_tool(
         }))
     };
 
+    let sub_agent_report: SubAgentReport = Arc::default();
     let ctx = ToolContext {
         tool_call_id: id.to_string(),
         tool_name: name.to_string(),
         cancel: cancel.child_token(),
         on_update,
         on_progress,
+        sub_agent_report: Some(sub_agent_report.clone()),
     };
 
     let tool_span = tracing::info_span!(
@@ -1470,6 +1624,24 @@ async fn execute_single_tool(
 
     tool_span.record("is_error", is_error);
 
+    // Delegated spend travels out of band, so it is here even when the
+    // sub-agent failed and the tool returned `Err`. Attach it to the result
+    // too — a streaming consumer reads it off `ToolExecutionEnd` — but only
+    // where the tool did not already: `SubAgentTool` sets it on success, and
+    // a custom tool's own details are not ours to overwrite. A call that
+    // reported several runs gets their combination, so the details never
+    // show less than the rollup counted (see `from_sub_agent_result`).
+    let delegated =
+        std::mem::take(&mut *sub_agent_report.lock().unwrap_or_else(|e| e.into_inner()));
+    let mut result = result;
+    if let Some((first, rest)) = delegated.split_first() {
+        let mut combined = first.clone();
+        for stats in rest {
+            combined.merge(stats);
+        }
+        attach_sub_agent_stats(&mut result.details, &combined);
+    }
+
     tx.send(AgentEvent::ToolExecutionEnd {
         tool_call_id: id.to_string(),
         tool_name: name.to_string(),
@@ -1495,11 +1667,26 @@ async fn execute_single_tool(
     })
     .ok();
 
-    (tool_result_msg, is_error)
+    (tool_result_msg, delegated)
+}
+
+/// Put a sub-agent's stats under [`SUB_AGENT_STATS_KEY`] unless the details
+/// already carry them. `Null` (every error result) becomes an object; any
+/// other non-object is left alone rather than clobbered.
+fn attach_sub_agent_stats(details: &mut serde_json::Value, stats: &SessionStats) {
+    if details.is_null() {
+        *details = serde_json::json!({});
+    }
+    if let Some(obj) = details.as_object_mut() {
+        if !obj.contains_key(SUB_AGENT_STATS_KEY) {
+            if let Ok(v) = serde_json::to_value(stats) {
+                obj.insert(SUB_AGENT_STATS_KEY.to_string(), v);
+            }
+        }
+    }
 }
 
 /// Emit events and build the error tool result for a middleware-denied call.
-/// Start/End are both emitted so UI event pairing stays intact.
 fn denied_tool_call(
     id: &str,
     name: &str,
@@ -1515,6 +1702,93 @@ fn denied_tool_call(
         reason,
         "tool call denied by middleware"
     );
+    unexecuted_tool_call(id, name, args, format!("Tool call denied: {}", reason), tx)
+}
+
+/// Emit events and build the error tool result for a call whose arguments
+/// did not resolve to a JSON object: either they did not parse (cut off —
+/// the response likely hit its output token limit) or they parsed to some
+/// other JSON value (e.g. double-encoded as a string).
+///
+/// The text deliberately does not say "retry": the same call resent unchanged
+/// would be cut off at the same point again.
+fn unparsed_arguments_tool_call(
+    id: &str,
+    name: &str,
+    args: &serde_json::Value,
+    raw: &str,
+    tx: &mpsc::UnboundedSender<AgentEvent>,
+) -> (Message, bool) {
+    let text = match serde_json::from_str::<serde_json::Value>(raw) {
+        Err(e) => {
+            tracing::warn!(
+                tool = name,
+                tool_call_id = id,
+                len = raw.len(),
+                parse_error = %e,
+                "tool call not executed: arguments did not parse as JSON"
+            );
+            // Only an early end of input means the text was cut off. Complete
+            // but malformed JSON (a trailing comma, two objects run together)
+            // must not be answered with "make it smaller": the model would
+            // resend the same syntax error in smaller pieces.
+            if e.is_eof() {
+                format!(
+                    "The arguments for tool `{name}` were cut off before they were complete \
+                     (the response likely hit the output token limit): {e}. The tool was not \
+                     run. Do not resend the same call unchanged — make the arguments smaller \
+                     (for example, split large content across several calls)."
+                )
+            } else {
+                format!(
+                    "The arguments for tool `{name}` are not valid JSON: {e}. The tool was not \
+                     run. Send the arguments as a single valid JSON object."
+                )
+            }
+        }
+        Ok(v) => {
+            let kind = match v {
+                serde_json::Value::String(_) => "a string",
+                serde_json::Value::Number(_) => "a number",
+                serde_json::Value::Array(_) => "an array",
+                serde_json::Value::Bool(_) => "a boolean",
+                // Unreachable for a provider-built marker (`null` resolves to
+                // `{}`, objects pass through), but a hand-built one could hold
+                // either; say only what is known rather than invent a cause.
+                serde_json::Value::Null | serde_json::Value::Object(_) => "",
+            };
+            tracing::warn!(
+                tool = name,
+                tool_call_id = id,
+                kind,
+                "tool call not executed: arguments were not delivered as a JSON object"
+            );
+            if kind.is_empty() {
+                format!(
+                    "The arguments for tool `{name}` were not delivered as a parsed JSON \
+                     object. The tool was not run."
+                )
+            } else {
+                format!(
+                    "The arguments for tool `{name}` were not a JSON object (got {kind}). \
+                     The tool was not run. Send the arguments as a single JSON object — \
+                     not encoded as a string."
+                )
+            }
+        }
+    };
+    unexecuted_tool_call(id, name, args, text, tx)
+}
+
+/// Emit events and build an error tool result for a call that was not run.
+/// Start/End are both emitted so UI event pairing stays intact.
+fn unexecuted_tool_call(
+    id: &str,
+    name: &str,
+    args: &serde_json::Value,
+    text: String,
+    tx: &mpsc::UnboundedSender<AgentEvent>,
+) -> (Message, bool) {
     tx.send(AgentEvent::ToolExecutionStart {
         tool_call_id: id.to_string(),
         tool_name: name.to_string(),
@@ -1523,9 +1797,7 @@ fn denied_tool_call(
     .ok();
 
     let result = ToolResult {
-        content: vec![Content::Text {
-            text: format!("Tool call denied: {}", reason),
-        }],
+        content: vec![Content::Text { text }],
         details: serde_json::Value::Null,
     };
 

@@ -211,6 +211,7 @@ mod tests {
                     cancel: tokio_util::sync::CancellationToken::new(),
                     on_update: None,
                     on_progress: None,
+                    sub_agent_report: None,
                 },
             )
             .await
@@ -255,6 +256,7 @@ mod tests {
                     cancel: tokio_util::sync::CancellationToken::new(),
                     on_update: None,
                     on_progress: None,
+                    sub_agent_report: None,
                 },
             )
             .await;

@@ -122,13 +122,9 @@ async fn bearer_auth_sends_authorization_and_no_x_api_key() {
         .mount(&server)
         .await;
 
-    let config = stream_config(
-        &server.uri(),
-        Some(AnthropicCompat {
-            adaptive_thinking: true,
-            bearer_auth: true,
-        }),
-    );
+    let mut compat = AnthropicCompat::default();
+    compat.bearer_auth = true;
+    let config = stream_config(&server.uri(), Some(compat));
     run_stream(config).await.expect("stream should succeed");
     // Mock expectation (`expect(1)`) verifies the headers on drop.
 }
@@ -985,4 +981,91 @@ async fn a_trailing_empty_delta_preserves_stop_reason_and_usage() {
         usage.output, 42,
         "a usage-less trailing delta must not zero the count"
     );
+}
+
+/// SSE for a native structured-output reply: a thinking block (Opus 5.5 and
+/// Fable 5.1 always think; the text is empty at the default display) followed
+/// by the JSON as a plain text block, ending with `end_turn`.
+fn sse_thinking_then_text(json_text: &str) -> String {
+    let escaped = serde_json::to_string(json_text).unwrap();
+    format!(
+        "event: message_start\n\
+         data: {{\"type\":\"message_start\",\"message\":{{\"usage\":{{\"input_tokens\":10,\"cache_read_input_tokens\":0,\"cache_creation_input_tokens\":0}}}}}}\n\n\
+         event: content_block_start\n\
+         data: {{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{{\"type\":\"thinking\",\"thinking\":\"\"}}}}\n\n\
+         event: content_block_delta\n\
+         data: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"signature_delta\",\"signature\":\"sig\"}}}}\n\n\
+         event: content_block_stop\n\
+         data: {{\"type\":\"content_block_stop\",\"index\":0}}\n\n\
+         event: content_block_start\n\
+         data: {{\"type\":\"content_block_start\",\"index\":1,\"content_block\":{{\"type\":\"text\",\"text\":\"\"}}}}\n\n\
+         event: content_block_delta\n\
+         data: {{\"type\":\"content_block_delta\",\"index\":1,\"delta\":{{\"type\":\"text_delta\",\"text\":{escaped}}}}}\n\n\
+         event: content_block_stop\n\
+         data: {{\"type\":\"content_block_stop\",\"index\":1}}\n\n\
+         event: message_delta\n\
+         data: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"end_turn\"}},\"usage\":{{\"output_tokens\":20}}}}\n\n\
+         event: message_stop\n\
+         data: {{\"type\":\"message_stop\"}}\n\n"
+    )
+}
+
+/// #175 end to end: `prompt_structured` on the Opus 5.5 preset sends the
+/// schema as `output_config.format` (merged with the effort), forces no tool,
+/// keeps thinking on, and parses the reply's text block.
+#[tokio::test]
+async fn prompt_structured_on_opus_5_5_uses_native_output_format() {
+    #[derive(serde::Deserialize, Debug, PartialEq)]
+    struct Extracted {
+        name: String,
+        count: u32,
+    }
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            sse_thinking_then_text(r#"{"name": "a", "count": 3}"#),
+            "text/event-stream",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut mc = ModelConfig::claude_opus_5_5();
+    mc.base_url = server.uri();
+    let mut agent = yoagent::Agent::from_provider(AnthropicProvider, mc)
+        .with_api_key("test-key")
+        .with_thinking(ThinkingLevel::High);
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {"name": {"type": "string"}, "count": {"type": "integer"}},
+        "required": ["name", "count"],
+        "additionalProperties": false,
+    });
+    let got: Extracted = agent
+        .prompt_structured("extract", schema.clone())
+        .await
+        .expect("native structured output parses");
+    assert_eq!(
+        got,
+        Extracted {
+            name: "a".into(),
+            count: 3
+        }
+    );
+
+    let requests = server.received_requests().await.unwrap();
+    let body: serde_json::Value = requests[0].body_json().expect("json body");
+    assert_eq!(body["model"], "claude-opus-5-5");
+    assert_eq!(
+        body["output_config"],
+        serde_json::json!({
+            "effort": "high",
+            "format": {"type": "json_schema", "schema": schema},
+        })
+    );
+    assert_eq!(body["thinking"]["type"], "adaptive");
+    assert!(body.get("tool_choice").is_none(), "no forced tool: {body}");
+    assert!(body.get("tools").is_none(), "no synthetic tool: {body}");
 }

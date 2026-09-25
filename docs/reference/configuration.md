@@ -21,7 +21,10 @@ pub struct AgentLoopConfig {
     pub compaction_strategy: Option<Arc<dyn CompactionStrategy>>,
     pub execution_limits: Option<ExecutionLimits>,
     pub cache_config: CacheConfig,
+    pub tool_output_sink: Option<SharedState>,
     pub tool_execution: ToolExecutionStrategy,
+    pub tool_middleware: Vec<Arc<dyn ToolMiddleware>>,
+    pub output_schema: Option<OutputSchema>,
     pub retry_config: RetryConfig,
     pub before_turn: Option<BeforeTurnFn>,
     pub after_turn: Option<AfterTurnFn>,
@@ -47,6 +50,7 @@ pub struct StreamConfig {
     pub temperature: Option<f32>,
     pub model_config: Option<ModelConfig>,
     pub cache_config: CacheConfig,
+    pub output_schema: Option<OutputSchema>,
 }
 ```
 
@@ -101,18 +105,66 @@ ExecutionLimits::default()
 ## ThinkingLevel
 
 ```rust
+#[non_exhaustive]  // match with a wildcard arm
 pub enum ThinkingLevel {
-    Off,        // No thinking (default)
+    Off,        // Request no thinking: the field is omitted (default)
     Minimal,    // Anthropic: effort "low" (adaptive) / 1,024-token budget (legacy)
     Low,        // Anthropic: effort "low" / 1,024
     Medium,     // Anthropic: effort "medium" / 2,048
     High,       // Anthropic: effort "high" / 8,192
+    XHigh,      // Anthropic: effort "xhigh" / 16,384 (serde: "xhigh")
+    Max,        // Anthropic: effort "max" / 30,720
 }
 ```
 
-OpenAI-family providers map these levels to `reasoning_effort` where the
-compat flags enable it; the Google and Bedrock providers currently ignore
-`thinking_level`.
+Where a provider's ladder is shorter, the upper levels are clamped to the
+highest value this crate knows the provider accepts, rather than sent as a
+value it would reject — except Anthropic's adaptive
+effort, which is passed through unclamped: Opus 4.6 / Sonnet 4.6 have no
+`xhigh` rung and reject it.
+
+| Level | Anthropic effort | Anthropic legacy / Bedrock budget | OpenAI-compat¹ / Responses / Azure effort, by ceiling² | DeepSeek effort³ | Gemini 2.x / Vertex budget⁴ |
+|-------|------|------|------|------|------|
+| `Off` | (omitted) | (omitted) | (omitted) | (omitted); `thinking: disabled` | (omitted) |
+| `Minimal`, `Low` | `low` | 1,024 | `low` | `low` | 1,024 |
+| `Medium` | `medium` | 2,048 | `medium` | `medium` | 8,192 |
+| `High` | `high` | 8,192 | `high` | `high` | 24,576 |
+| `XHigh` | `xhigh` | 16,384 | `High`: `high` (clamped) · `XHigh`/`Max`: `xhigh` | `high` (clamped) | 24,576 (clamped) |
+| `Max` | `max` | 30,720 | `High`: `high` (clamped) · `XHigh`: `xhigh` (clamped) · `Max`: `max` | `max` | 24,576 (clamped) |
+
+**`Off` sends nothing, and that is not always "no thinking".** No provider
+receives a thinking or effort field for `Off` (DeepSeek's explicit
+`thinking: disabled` is the one exception). A model that thinks regardless
+then runs at its own default: Claude Opus 5.5 and Fable 5.1 always think, and
+Opus 5 thinks whenever the field is absent; an OpenAI reasoning model runs at
+its default effort (`medium`); Grok cannot disable reasoning (default `high`);
+Gemini 3 thinks at its default level. The crate never sends OpenAI's `none`
+rung, which several models reject with HTTP 400.
+
+¹ OpenAI-compat sends `reasoning_effort` only when `supports_reasoning_effort`
+is set; the Responses and Azure providers always send `reasoning.effort`
+except for `Off`.
+
+² `OpenAiCompat::max_reasoning_effort` (a `ReasoningEffortCeiling`, default
+`High`) is declared per model — the Responses and Azure providers read it from
+`ModelConfig::compat` too. Presets: `gpt_6_astra` / `gpt_6_sol` /
+`gpt_6_luna` — `Max`; `gpt_5_5` — `XHigh`; `OpenAiCompat::xai()` — `XHigh`
+(Grok treats `xhigh` as `high` where it lacks the rung); everything else
+`High`. A clamp is logged once per process with `tracing::warn!`.
+
+³ The DeepSeek column applies when both `supports_thinking_control` and
+`supports_reasoning_effort` are set. DeepSeek maps a requested `xhigh` to
+`high` itself, so `XHigh` is sent as `high` and only `Max` selects `max`.
+
+⁴ Gemini 3 and later get `thinkingConfig.thinkingLevel` instead, never both:
+`Minimal` → `MINIMAL`, `Low` → `LOW`, `Medium` → `MEDIUM`, `High` / `XHigh` /
+`Max` → `HIGH`. `Minimal` is clamped to `LOW` on models without a `MINIMAL`
+rung (3.7 / 3.8 Flash, 3.x Pro, unlisted ids); it, not `Off`, is how to ask a
+Gemini 3 model for the least thinking. Image models take only the levels they
+list (3.1 Flash / Flash-Lite Image: `MINIMAL` or `HIGH`; 3 Pro Image: `HIGH`),
+and Gemini 3 TTS models get no `thinkingConfig`. The generation is read from
+the model id; override it with `GoogleCompat`. See
+[Google Gemini](../providers/google.md#thinking).
 
 ## CostConfig
 
@@ -140,9 +192,65 @@ CostConfig::new(5.0, 30.0)          // input, output — output is always dearer
     .with_cache_write(6.25)
 ```
 
-All-zero rates mean **pricing unknown**, not free. `is_configured()` reports
-which, and `session_cost_usd()` returns `None` for an unpriced model rather than
-$0.
+**A cache rate left at `0.0` bills at the input rate.** Unset
+`cache_read_per_million` / `cache_write_per_million` mean "not separately
+priced", so `cost_usd` bills those tokens at the applicable input rate — the
+base `input_per_million`, or inside a context tier that tier's own
+`input_per_million` (never the base cache rate). A vendor with no separate
+cache-write charge is priced correctly without setting one, and a forgotten
+cache rate can no longer bill cached tokens as free. A fully zero config still
+costs `$0`. There is no way to say "cache reads are free but input is not";
+set a tiny positive rate if a vendor ever charges that.
+
+`ModelConfig::cost` is an `Option<CostConfig>`. `None` means **pricing
+unknown**, not free: only the named presets whose rates were checked against the
+vendor (`claude_*`, `gpt_5_5`, `gpt_6_astra` / `gpt_6_sol` / `gpt_6_luna`,
+`meta`) return `Some`; generic constructors such as `deepseek(id, name)`,
+`openai(id, name)` or `openai_responses(id, name)` cannot know the model's
+price and return `None`. Supply one when you know it:
+
+```rust
+let mut config = ModelConfig::deepseek("deepseek-flash", "DeepSeek Flash");
+// DeepSeek's peak rates (off-peak is half); cache writes are not a DeepSeek
+// category, so none is set.
+config.cost = Some(CostConfig::new(0.30, 1.20).with_cache_read(0.006));
+```
+
+`Some` with every rate zero means **free** — a model you run locally, say — and
+the crate's accounting reports `0.0` for it. `session_cost_usd()`,
+`SessionStats::cost_usd` and the `llm_stream` span's `cost_usd` are absent only
+for `cost: None`, never `$0` for an unknown price:
+
+```rust
+let mut config = ModelConfig::local("http://localhost:1234/v1", "qwen3");
+config.cost = Some(CostConfig::new(0.0, 0.0)); // free, not unknown
+```
+
+To adjust one rate on a named preset, use `get_or_insert_with` rather than
+`if let Some(c) = config.cost.as_mut()`, which silently does nothing on a
+generic constructor:
+
+```rust
+config.cost.get_or_insert_with(CostConfig::default).input_per_million = 1.80;
+```
+
+On a generic constructor (`cost: None`) that line creates a `CostConfig` whose
+other rates are zero: output tokens would be billed at a real `$0`, and cache
+tokens at the input rate rather than their own. Price a generic constructor
+with every rate you pay instead:
+
+```rust
+let mut config = ModelConfig::deepseek("deepseek-flash", "DeepSeek Flash");
+// Rates per million tokens; take them from the vendor's pricing page.
+config.cost = Some(CostConfig::new(INPUT, OUTPUT).with_cache_read(CACHE_READ));
+```
+
+**Persistence caveat.** Before 0.19, unpriced configs were written with an
+all-zero `cost` object. To keep those loading as unknown rather than free, a
+`cost` object whose rates are all zero (`is_configured()` false, context tiers
+included) deserializes to `None`. A free config saved by 0.19 has the same
+encoding, so it too reloads as `None`; set the zero `CostConfig` again after
+loading if you persist one.
 
 ### Context tiers
 
@@ -156,8 +264,11 @@ CostConfig::new(5.0, 30.0)
 ```
 
 Tiers are kept sorted, and `cost_usd` takes the last one the prompt clears, so a
-multi-step schedule works. **No shipped preset sets one** — see
-`ModelConfig::gpt_5_5`'s docs for why the one candidate stayed flat.
+multi-step schedule works. The whole request moves to the tier's rates. The
+OpenAI presets `gpt_5_5`, `gpt_6_astra`, `gpt_6_sol` and `gpt_6_luna` set one
+at 272,000 prompt tokens (exclusive); `gpt_5_5`'s long-band cache-read rate is
+unverified — see its rustdoc. The Anthropic and Meta presets are flat. A tier's
+cache rate left at `0.0` bills at that tier's input rate.
 
 One caveat if you add a tier: prompt size is derived as
 `input + cache_read + cache_write`, which holds only where the provider

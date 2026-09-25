@@ -33,6 +33,7 @@ pub enum ApiProtocol {
 Full configuration for a model, including provider routing:
 
 ```rust
+#[non_exhaustive]  // build with a constructor, then set fields
 pub struct ModelConfig {
     pub id: String,              // e.g. "gpt-5.5"
     pub name: String,            // e.g. "GPT-5.5"
@@ -42,9 +43,11 @@ pub struct ModelConfig {
     pub reasoning: bool,         // Supports thinking/reasoning
     pub context_window: u32,     // Context size in tokens
     pub max_tokens: u32,         // Default max output
-    pub cost: CostConfig,        // Pricing per million tokens
+    pub cost: Option<CostConfig>, // Pricing per million tokens; None = unknown
     pub headers: HashMap<String, String>,  // Extra headers
-    pub compat: Option<OpenAiCompat>,      // Quirk flags
+    pub compat: Option<OpenAiCompat>,      // OpenAI quirk flags (Chat Completions; effort ceiling also read by Responses/Azure)
+    pub anthropic: Option<AnthropicCompat>, // Anthropic Messages quirk flags (thinking mode, bearer auth, native structured output)
+    pub google: Option<GoogleCompat>,      // Gemini quirk flags (thinkingLevel vs thinkingBudget override)
 }
 ```
 
@@ -53,12 +56,13 @@ First-class model presets are documented in [Model Presets](model-presets.md). C
 ```rust
 let anthropic = ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5");
 let openai = ModelConfig::openai("gpt-5.5", "GPT-5.5");
-let google = ModelConfig::google("gemini-2.5-flash", "Gemini 2.5 Flash");
-let xai = ModelConfig::xai("grok-4-1-fast", "Grok 4.1 Fast");
-let groq = ModelConfig::groq("llama-3.3-70b-versatile", "Llama 3.3 70B");
-let deepseek = ModelConfig::deepseek("deepseek-v4-flash", "DeepSeek V4 Flash");
+let responses = ModelConfig::openai_responses("gpt-5.5", "GPT-5.5");
+let google = ModelConfig::google("gemini-3.8-flash", "Gemini 3.8 Flash");
+let xai = ModelConfig::xai("grok-4.7", "Grok 4.7");
+let groq = ModelConfig::groq("openai/gpt-oss-120b", "GPT-OSS 120B");
+let deepseek = ModelConfig::deepseek("deepseek-flash", "DeepSeek Flash");
 let mistral = ModelConfig::mistral("mistral-large-latest", "Mistral Large");
-let minimax = ModelConfig::minimax("MiniMax-Text-01", "MiniMax Text 01");
+let minimax = ModelConfig::minimax("MiniMax-M3", "MiniMax M3");
 let zai = ModelConfig::zai("glm-4.7", "GLM 4.7");
 let qwen = ModelConfig::qwen("qwen3.6-plus", "Qwen 3.6 Plus");
 let ollama = ModelConfig::ollama("http://localhost:11434/v1", "llama3.1:8b");

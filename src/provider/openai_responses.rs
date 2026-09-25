@@ -3,13 +3,13 @@
 //! This is the newer OpenAI API that uses a different event format
 //! from Chat Completions. It has first-class support for reasoning items.
 
-use super::model::ModelConfig;
+use super::model::{ModelConfig, OpenAiCompat};
+use super::responses_stream::{Flow, ResponsesStreamState};
 use super::traits::*;
 use crate::types::*;
 use async_trait::async_trait;
 use futures::StreamExt;
 use reqwest_eventsource::EventSource;
-use serde::Deserialize;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
@@ -58,11 +58,7 @@ impl StreamProvider for OpenAiResponsesProvider {
         let mut es =
             EventSource::new(request).map_err(|e| ProviderError::Network(e.to_string()))?;
 
-        let mut content: Vec<Content> = Vec::new();
-        let mut usage = Usage::default();
-        let mut stop_reason = StopReason::Stop;
-        let mut tool_call_buffers: std::collections::HashMap<usize, ToolCallBuffer> =
-            std::collections::HashMap::new();
+        let mut state = ResponsesStreamState::new("OpenAI Responses");
 
         let _ = tx.send(StreamEvent::Start);
 
@@ -77,119 +73,8 @@ impl StreamProvider for OpenAiResponsesProvider {
                         None => break,
                         Some(Ok(reqwest_eventsource::Event::Open)) => {}
                         Some(Ok(reqwest_eventsource::Event::Message(msg))) => {
-                            match msg.event.as_str() {
-                                "response.output_text.delta" => {
-                                    if let Ok(data) = serde_json::from_str::<TextDeltaEvent>(&msg.data) {
-                                        let text_idx = content.iter().position(|c| matches!(c, Content::Text { .. }));
-                                        let idx = match text_idx {
-                                            Some(i) => i,
-                                            None => {
-                                                content.push(Content::Text { text: String::new() });
-                                                content.len() - 1
-                                            }
-                                        };
-                                        if let Some(Content::Text { text }) = content.get_mut(idx) {
-                                            text.push_str(&data.delta);
-                                        }
-                                        let _ = tx.send(StreamEvent::TextDelta {
-                                            content_index: idx,
-                                            delta: data.delta,
-                                        });
-                                    }
-                                }
-                                "response.reasoning.delta" => {
-                                    if let Ok(data) = serde_json::from_str::<TextDeltaEvent>(&msg.data) {
-                                        let idx = content.iter().position(|c| matches!(c, Content::Thinking { .. }));
-                                        let idx = match idx {
-                                            Some(i) => i,
-                                            None => {
-                                                content.push(Content::Thinking { thinking: String::new(), signature: None });
-                                                content.len() - 1
-                                            }
-                                        };
-                                        if let Some(Content::Thinking { thinking, .. }) = content.get_mut(idx) {
-                                            thinking.push_str(&data.delta);
-                                        }
-                                        let _ = tx.send(StreamEvent::ThinkingDelta {
-                                            content_index: idx,
-                                            delta: data.delta,
-                                        });
-                                    }
-                                }
-                                "response.function_call_arguments.start" => {
-                                    if let Ok(data) = serde_json::from_str::<FunctionCallStartEvent>(&msg.data) {
-                                        let idx = content.len() + tool_call_buffers.len();
-                                        tool_call_buffers.insert(idx, ToolCallBuffer {
-                                            id: data.call_id.unwrap_or_default(),
-                                            name: data.name.unwrap_or_default(),
-                                            arguments: String::new(),
-                                        });
-                                        let buf = &tool_call_buffers[&idx];
-                                        let _ = tx.send(StreamEvent::ToolCallStart {
-                                            content_index: idx,
-                                            id: buf.id.clone(),
-                                            name: buf.name.clone(),
-                                        });
-                                    }
-                                }
-                                "response.function_call_arguments.delta" => {
-                                    if let Ok(data) = serde_json::from_str::<TextDeltaEvent>(&msg.data) {
-                                        // Find last buffer
-                                        if let Some((&idx, buf)) = tool_call_buffers.iter_mut().last() {
-                                            buf.arguments.push_str(&data.delta);
-                                            let _ = tx.send(StreamEvent::ToolCallDelta {
-                                                content_index: idx,
-                                                delta: data.delta,
-                                            });
-                                        }
-                                    }
-                                }
-                                "response.function_call_arguments.done" => {
-                                    // Tool call complete
-                                }
-                                "response.completed" => {
-                                    if let Ok(data) = serde_json::from_str::<ResponseCompletedEvent>(&msg.data) {
-                                        if let Some(resp) = data.response {
-                                            if let Some(u) = resp.usage {
-                                                usage.input = u.input_tokens;
-                                                usage.output = u.output_tokens;
-                                                usage.total_tokens = u.total_tokens;
-                                            }
-                                            if resp.status == Some("incomplete".to_string()) {
-                                                stop_reason = StopReason::Length;
-                                            }
-                                        }
-                                    }
-                                    break;
-                                }
-                                // Terminal events other than `response.completed`.
-                                // Without these arms the loop never breaks, the
-                                // body closes, and the resulting StreamEnded is
-                                // retryable (#83) — re-running an already-billed
-                                // generation that would fail the same way again.
-                                "response.incomplete" => {
-                                    if let Ok(data) =
-                                        serde_json::from_str::<ResponseCompletedEvent>(&msg.data)
-                                    {
-                                        if let Some(resp) = data.response {
-                                            if let Some(u) = resp.usage {
-                                                usage.input = u.input_tokens;
-                                                usage.output = u.output_tokens;
-                                                usage.total_tokens = u.total_tokens;
-                                            }
-                                        }
-                                    }
-                                    stop_reason = StopReason::Length;
-                                    break;
-                                }
-                                "response.failed" | "error" => {
-                                    let provider_err = classify_sse_error_event(&msg.data);
-                                    warn!("OpenAI Responses error: {}", provider_err);
-                                    return Err(provider_err);
-                                }
-                                _ => {
-                                    debug!("Unknown Responses event: {}", msg.event);
-                                }
+                            if state.handle(&msg.event, &msg.data, &tx)? == Flow::Done {
+                                break;
                             }
                         }
                         Some(Err(e)) => {
@@ -202,24 +87,8 @@ impl StreamProvider for OpenAiResponsesProvider {
             }
         }
 
-        // Finalize tool calls
-        for (_, buf) in tool_call_buffers {
-            let args = serde_json::from_str(&buf.arguments)
-                .unwrap_or(serde_json::Value::Object(Default::default()));
-            content.push(Content::ToolCall {
-                provider_metadata: None,
-                id: buf.id,
-                name: buf.name,
-                arguments: args,
-            });
-        }
-
-        if content
-            .iter()
-            .any(|c| matches!(c, Content::ToolCall { .. }))
-        {
-            stop_reason = StopReason::ToolUse;
-        }
+        let error_message = state.error_message();
+        let (content, usage, stop_reason) = state.finish(&tx);
 
         let message = Message::Assistant {
             content,
@@ -228,7 +97,7 @@ impl StreamProvider for OpenAiResponsesProvider {
             provider: model_config.provider.clone(),
             usage,
             timestamp: now_ms(),
-            error_message: None,
+            error_message,
         };
 
         let _ = tx.send(StreamEvent::Done {
@@ -238,13 +107,7 @@ impl StreamProvider for OpenAiResponsesProvider {
     }
 }
 
-struct ToolCallBuffer {
-    id: String,
-    name: String,
-    arguments: String,
-}
-
-fn build_request_body(config: &StreamConfig, _model_config: &ModelConfig) -> serde_json::Value {
+fn build_request_body(config: &StreamConfig, model_config: &ModelConfig) -> serde_json::Value {
     let mut input: Vec<serde_json::Value> = Vec::new();
 
     for msg in &config.messages {
@@ -381,13 +244,12 @@ fn build_request_body(config: &StreamConfig, _model_config: &ModelConfig) -> ser
         body["tools"] = serde_json::json!(tools);
     }
 
-    if config.thinking_level != ThinkingLevel::Off {
-        let effort = match config.thinking_level {
-            ThinkingLevel::Minimal | ThinkingLevel::Low => "low",
-            ThinkingLevel::Medium => "medium",
-            ThinkingLevel::High => "high",
-            ThinkingLevel::Off => unreachable!(),
-        };
+    // The effort capability comes from `model_config.compat` (see
+    // `OpenAiCompat::max_reasoning_effort`); `None` means a `high` ceiling,
+    // which is what this provider always sent before. `Off` omits it.
+    let default_compat = OpenAiCompat::default();
+    let compat = model_config.compat.as_ref().unwrap_or(&default_compat);
+    if let Some(effort) = compat.openai_reasoning_effort(&config.model, config.thinking_level) {
         body["reasoning"] = serde_json::json!({"effort": effort});
     }
 
@@ -398,40 +260,125 @@ fn build_request_body(config: &StreamConfig, _model_config: &ModelConfig) -> ser
     body
 }
 
-// Event types
-#[derive(Deserialize)]
-struct TextDeltaEvent {
-    delta: String,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::model::ReasoningEffortCeiling;
 
-#[derive(Deserialize)]
-struct FunctionCallStartEvent {
-    #[serde(default)]
-    call_id: Option<String>,
-    #[serde(default)]
-    name: Option<String>,
-}
+    const ALL_LEVELS: [ThinkingLevel; 7] = [
+        ThinkingLevel::Off,
+        ThinkingLevel::Minimal,
+        ThinkingLevel::Low,
+        ThinkingLevel::Medium,
+        ThinkingLevel::High,
+        ThinkingLevel::XHigh,
+        ThinkingLevel::Max,
+    ];
 
-#[derive(Deserialize)]
-struct ResponseCompletedEvent {
-    #[serde(default)]
-    response: Option<ResponseData>,
-}
+    fn body(mc: &ModelConfig, level: ThinkingLevel) -> serde_json::Value {
+        let mut config = StreamConfig::new(mc.id.clone(), "key");
+        config.messages = vec![Message::user("hi")];
+        config.thinking_level = level;
+        config.temperature = Some(0.5);
+        config.model_config = Some(mc.clone());
+        build_request_body(&config, mc)
+    }
 
-#[derive(Deserialize)]
-struct ResponseData {
-    #[serde(default)]
-    status: Option<String>,
-    #[serde(default)]
-    usage: Option<ResponseUsage>,
-}
+    fn effort(mc: &ModelConfig, level: ThinkingLevel) -> serde_json::Value {
+        body(mc, level)["reasoning"]["effort"].clone()
+    }
 
-#[derive(Deserialize)]
-struct ResponseUsage {
-    #[serde(default)]
-    input_tokens: u64,
-    #[serde(default)]
-    output_tokens: u64,
-    #[serde(default)]
-    total_tokens: u64,
+    #[test]
+    fn without_compat_the_body_is_what_it_always_was() {
+        // Near-miss guard: `openai_responses` carries `compat: None`, and a
+        // Responses config built before this fix must send byte-identical
+        // bodies — Off omits `reasoning`, XHigh/Max clamp to `high`.
+        let mc = ModelConfig::openai_responses("gpt-5.5", "GPT-5.5");
+        assert!(mc.compat.is_none());
+        for level in ALL_LEVELS {
+            let expected_effort = match level {
+                ThinkingLevel::Off => None,
+                ThinkingLevel::Minimal | ThinkingLevel::Low => Some("low"),
+                ThinkingLevel::Medium => Some("medium"),
+                _ => Some("high"),
+            };
+            let got = body(&mc, level);
+            let mut expected = serde_json::json!({
+                "model": "gpt-5.5",
+                "stream": true,
+                "input": [{"role": "user", "content": "hi"}],
+                "temperature": 0.5,
+            });
+            if let Some(e) = expected_effort {
+                expected["reasoning"] = serde_json::json!({"effort": e});
+            }
+            assert_eq!(
+                serde_json::to_string(&got).unwrap(),
+                serde_json::to_string(&expected).unwrap(),
+                "{level:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn compat_ceiling_is_honoured() {
+        // Positive control: the Responses builder used to ignore
+        // `model_config.compat` entirely.
+        let mut mc = ModelConfig::openai_responses("gpt-5.4", "GPT-5.4");
+        mc.compat = Some(OpenAiCompat {
+            max_reasoning_effort: ReasoningEffortCeiling::XHigh,
+            ..Default::default()
+        });
+        assert_eq!(effort(&mc, ThinkingLevel::XHigh), "xhigh");
+        assert_eq!(effort(&mc, ThinkingLevel::Max), "xhigh");
+        assert_eq!(effort(&mc, ThinkingLevel::High), "high");
+        assert!(body(&mc, ThinkingLevel::Off).get("reasoning").is_none());
+    }
+
+    #[test]
+    fn gpt_6_astra_reaches_max_and_never_sends_none() {
+        let mc = ModelConfig::gpt_6_astra();
+        assert_eq!(effort(&mc, ThinkingLevel::Max), "max");
+        assert_eq!(effort(&mc, ThinkingLevel::XHigh), "xhigh");
+        assert_eq!(effort(&mc, ThinkingLevel::High), "high");
+        assert_eq!(effort(&mc, ThinkingLevel::Medium), "medium");
+        // GPT-6 has no `minimal`.
+        assert_eq!(effort(&mc, ThinkingLevel::Minimal), "low");
+        // `none` is an HTTP 400 on Astra: Off omits the effort instead.
+        assert!(body(&mc, ThinkingLevel::Off).get("reasoning").is_none());
+    }
+
+    #[test]
+    fn gpt_6_sol_and_luna_omit_effort_for_off() {
+        for mc in [ModelConfig::gpt_6_sol(), ModelConfig::gpt_6_luna()] {
+            assert!(body(&mc, ThinkingLevel::Off).get("reasoning").is_none());
+            assert_eq!(effort(&mc, ThinkingLevel::Max), "max", "{}", mc.id);
+            assert_eq!(effort(&mc, ThinkingLevel::XHigh), "xhigh", "{}", mc.id);
+            assert_eq!(effort(&mc, ThinkingLevel::Low), "low", "{}", mc.id);
+        }
+    }
+
+    #[test]
+    fn off_bodies_are_byte_identical_to_the_uncapped_body_for_every_preset() {
+        // `Off` means "send nothing": whatever the preset's ceiling, the body
+        // equals the pre-#176 one (a compat-less config's body with the same
+        // model id), with no `reasoning` key.
+        for mc in [
+            ModelConfig::gpt_6_astra(),
+            ModelConfig::gpt_6_sol(),
+            ModelConfig::gpt_6_luna(),
+            ModelConfig::gpt_5_5(),
+        ] {
+            let mut legacy = mc.clone();
+            legacy.compat = None;
+            let got = body(&mc, ThinkingLevel::Off);
+            assert!(got.get("reasoning").is_none(), "{}", mc.id);
+            assert_eq!(
+                serde_json::to_string(&got).unwrap(),
+                serde_json::to_string(&body(&legacy, ThinkingLevel::Off)).unwrap(),
+                "{}",
+                mc.id
+            );
+        }
+    }
 }

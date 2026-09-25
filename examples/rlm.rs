@@ -28,7 +28,7 @@ use yoagent::*;
 #[tokio::main]
 async fn main() {
     let api_key = std::env::var("XAI_API_KEY").expect("Set XAI_API_KEY");
-    let mut model_config = ModelConfig::xai("grok-4-1-fast-reasoning", "Grok 4.1 Fast Reasoning");
+    let mut model_config = ModelConfig::xai("grok-4.7", "Grok 4.7");
     model_config.reasoning = true;
     let provider: Arc<dyn StreamProvider> = Arc::new(OpenAiCompatProvider);
 

@@ -10,12 +10,18 @@ Use a preset when the provider is listed here. Use a custom `ModelConfig` when y
 |-------------|----------|----------|------------------|---------|--------------------|
 | `ModelConfig::anthropic(id, name)` | Anthropic | `AnthropicMessages` | `https://api.anthropic.com/v1` | 200K | 16,000 |
 | `ModelConfig::claude_fable_5()` | Anthropic | `AnthropicMessages` | `https://api.anthropic.com/v1` | 1M | 64,000 |
+| `ModelConfig::claude_fable_5_1()` | Anthropic | `AnthropicMessages` | `https://api.anthropic.com/v1` | 1M | 64,000 |
+| `ModelConfig::claude_opus_5_5()` | Anthropic | `AnthropicMessages` | `https://api.anthropic.com/v1` | 1M | 64,000 |
 | `ModelConfig::claude_opus_5()` | Anthropic | `AnthropicMessages` | `https://api.anthropic.com/v1` | 1M | 64,000 |
 | `ModelConfig::claude_opus_4_8()` | Anthropic | `AnthropicMessages` | `https://api.anthropic.com/v1` | 1M | 64,000 |
 | `ModelConfig::claude_sonnet_5()` | Anthropic | `AnthropicMessages` | `https://api.anthropic.com/v1` | 1M | 64,000 |
 | `ModelConfig::claude_haiku_4_5()` | Anthropic | `AnthropicMessages` | `https://api.anthropic.com/v1` | 200K | 32,000 |
 | `ModelConfig::openai(id, name)` | OpenAI | `OpenAiCompletions` | `https://api.openai.com/v1` | 128K | 4,096 |
+| `ModelConfig::openai_responses(id, name)` | OpenAI | `OpenAiResponses` | `https://api.openai.com/v1` | 128K | 16,000 |
 | `ModelConfig::gpt_5_5()` | OpenAI | `OpenAiCompletions` | `https://api.openai.com/v1` | 1M | 64,000 |
+| `ModelConfig::gpt_6_astra()` | OpenAI | `OpenAiResponses` | `https://api.openai.com/v1` | 1,050,000 | 64,000 |
+| `ModelConfig::gpt_6_sol()` | OpenAI | `OpenAiResponses` | `https://api.openai.com/v1` | 1,050,000 | 64,000 |
+| `ModelConfig::gpt_6_luna()` | OpenAI | `OpenAiResponses` | `https://api.openai.com/v1` | 1,050,000 | 64,000 |
 | `ModelConfig::opencode_zen(model_id)` | OpenCode Zen | by model family | `https://opencode.ai/zen/v1` | 128K | 16,000 |
 | `ModelConfig::opencode_go(model_id)` | OpenCode Go | by model family | `https://opencode.ai/zen/go/v1` | 128K | 16,000 |
 | `ModelConfig::google(id, name)` | Google Gemini | `GoogleGenerativeAi` | `https://generativelanguage.googleapis.com` | 1M | 8,192 |
@@ -23,7 +29,7 @@ Use a preset when the provider is listed here. Use a custom `ModelConfig` when y
 | `ModelConfig::groq(id, name)` | Groq | `OpenAiCompletions` | `https://api.groq.com/openai/v1` | 128K | 4,096 |
 | `ModelConfig::deepseek(id, name)` | DeepSeek | `OpenAiCompletions` | `https://api.deepseek.com` | 1M | 384K |
 | `ModelConfig::mistral(id, name)` | Mistral | `OpenAiCompletions` | `https://api.mistral.ai/v1` | 128K | 4,096 |
-| `ModelConfig::minimax(id, name)` | MiniMax | `OpenAiCompletions` | `https://api.minimaxi.chat/v1` | 1M | 4,096 |
+| `ModelConfig::minimax(id, name)` | MiniMax | `OpenAiCompletions` | `https://api.minimax.io/v1` | 1M | 4,096 |
 | `ModelConfig::meta(id, name)` | Meta (Muse Spark) — US-only preview as of 2026-07 | `OpenAiCompletions` | `https://api.meta.ai/v1` | 1M | 131,072 |
 | `ModelConfig::zai(id, name)` | Z.ai | `OpenAiCompletions` | `https://api.z.ai/api/paas/v4` | 128K | 4,096 |
 | `ModelConfig::qwen(id, name)` | Qwen / DashScope | `OpenAiCompletions` | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` | 128K | 4,096 |
@@ -33,7 +39,9 @@ Use a preset when the provider is listed here. Use a custom `ModelConfig` when y
 
 The constructors do not validate model IDs. They send the `id` you pass through to the provider, which lets you use newly released model IDs before yoagent updates its examples.
 
-The named presets (`claude_fable_5`, `claude_opus_5`, `claude_opus_4_8`, `claude_sonnet_5`, `claude_haiku_4_5`, `gpt_5_5`) also fill in real `CostConfig` pricing. The OpenCode presets select the API protocol from the model id — see [OpenCode Zen & Go](opencode.md).
+The named presets (`claude_fable_5`, `claude_fable_5_1`, `claude_opus_5_5`, `claude_opus_5`, `claude_opus_4_8`, `claude_sonnet_5`, `claude_haiku_4_5`, `gpt_5_5`, `gpt_6_astra`, `gpt_6_sol`, `gpt_6_luna`) and `meta` also fill in real pricing (`cost: Some(CostConfig)`). The OpenAI ones carry a context tier: above 272K prompt tokens the whole request bills at the long-context rates (`gpt_5_5`'s long-band cached-input rate is unverified; see its doc comment). Every other constructor takes an arbitrary model id and so carries `cost: None` — pricing **unknown**, not free; set `config.cost = Some(CostConfig::new(input, output))` yourself if you want cost reporting. The OpenCode presets select the API protocol from the model id — see [OpenCode Zen & Go](opencode.md).
+
+The `claude_*` presets also set `AnthropicCompat::native_structured_output`, so `Agent::prompt_structured` uses the API's native JSON outputs instead of a forced tool call. `claude_fable_5_1` and `claude_opus_5_5` depend on it, because both models reject forced `tool_choice`; `ModelConfig::anthropic(id, name)` leaves it off. See [Structured Outputs](../concepts/structured-outputs.md).
 
 ## OpenAI-Compatible Presets
 
@@ -43,12 +51,37 @@ These constructors all use `OpenAiCompatProvider`:
 use yoagent::provider::ModelConfig;
 
 let agent = Agent::from_config(ModelConfig::deepseek(
-    "deepseek-v4-flash",
-    "DeepSeek V4 Flash",
+    "deepseek-flash",
+    "DeepSeek Flash",
 ));
 ```
 
 OpenAI-compatible presets also set `OpenAiCompat` flags for provider-specific API differences, such as `max_tokens` vs. `max_completion_tokens`, reasoning fields, tool result formatting, and streaming usage support. See [OpenAI Compatible](openai-compat.md) for the full quirk-flag list.
+
+## OpenAI Presets
+
+The OpenAI presets also declare each model's reasoning-effort ceiling
+(`OpenAiCompat::max_reasoning_effort`), so `ThinkingLevel::XHigh`/`Max` reach
+the model's real top rung instead of being clamped to `high`:
+
+| Preset | Protocol | Effort ceiling | `XHigh` → | `Max` → |
+|--------|----------|----------------|-----------|---------|
+| `gpt_5_5()` | Chat Completions | `xhigh` | `xhigh` | `xhigh` |
+| `gpt_6_astra()`, `gpt_6_sol()`, `gpt_6_luna()` | Responses | `max` | `xhigh` | `max` |
+
+`ThinkingLevel::Off` omits the effort on every preset, so the model runs at
+its own default (`medium` on GPT-5.5, Sol and Luna) — it does not turn
+reasoning off.
+The crate never sends OpenAI's `none` rung (GPT-6 Astra, among others, rejects
+it with a 400).
+
+The GPT-6 presets use the Responses API because Chat Completions does not
+support function calling with GPT-6 Astra, and allows it on Sol/Luna only at
+effort `none`. GPT-6 rejects `temperature` while the effort is not `none`, and
+this crate never sends `none` — leave `temperature` unset. The Responses
+provider does not enforce `prompt_structured` schemas (it warns and ignores the
+schema), so structured outputs on the GPT-6 presets are not guaranteed to
+match. There is no bare `gpt-6` model id.
 
 ## Ollama Models
 
@@ -108,21 +141,14 @@ let qwen_ollama = ModelConfig::openai_compat(
 
 ## DeepSeek Models
 
-Use the current DeepSeek API model IDs by default:
+Use the current DeepSeek API model IDs:
 
 ```rust
-let flash = ModelConfig::deepseek("deepseek-v4-flash", "DeepSeek V4 Flash");
+let flash = ModelConfig::deepseek("deepseek-flash", "DeepSeek Flash"); // V4.1 Flash
 let pro = ModelConfig::deepseek("deepseek-v4-pro", "DeepSeek V4 Pro");
 ```
 
-Legacy DeepSeek aliases still work because `ModelConfig::deepseek` passes the model ID through unchanged:
-
-```rust
-let chat = ModelConfig::deepseek("deepseek-chat", "DeepSeek Chat");
-let reasoner = ModelConfig::deepseek("deepseek-reasoner", "DeepSeek Reasoner");
-```
-
-DeepSeek documents `deepseek-chat` and `deepseek-reasoner` as compatibility aliases scheduled for deprecation on 2026-07-24. In DeepSeek's current API, `deepseek-chat` maps to the non-thinking mode of `deepseek-v4-flash`, while `deepseek-reasoner` maps to the thinking mode of `deepseek-v4-flash`.
+The legacy names `deepseek-chat` and `deepseek-reasoner` were discontinued on 2026-07-24; requests using them fail. `deepseek-v4-flash` (and `deepseek-v4-flash-vision-exp`) are still accepted, but the V4 Flash model behind them is retired — DeepSeek serves those requests with V4.1 Flash at the Flash price. Prefer `deepseek-flash`.
 
 yoagent also sends DeepSeek's current request shape:
 
@@ -131,17 +157,12 @@ yoagent also sends DeepSeek's current request shape:
 - `reasoning_effort` when `ThinkingLevel` is not `Off`
 - DeepSeek cache hit/miss usage fields when present
 
-For legacy aliases, set `ThinkingLevel` to match the alias behavior:
+Both models default to thinking mode. What used to be `deepseek-chat` is the same model with thinking off:
 
 ```rust
-let chat_agent = Agent::from_config(ModelConfig::deepseek("deepseek-chat", "DeepSeek Chat"))
+let non_thinking = Agent::from_config(ModelConfig::deepseek("deepseek-flash", "DeepSeek Flash"))
     .with_thinking(ThinkingLevel::Off);
-
-let reasoner_agent = Agent::from_config(ModelConfig::deepseek("deepseek-reasoner", "DeepSeek Reasoner"))
-    .with_thinking(ThinkingLevel::High);
 ```
-
-Older DeepSeek reasoning models had stricter feature limits than the current V4 API. In particular, historical `deepseek-reasoner` documentation did not support function calling. If you need tools, prefer current V4 model IDs unless you have tested the legacy alias for your workflow.
 
 ## Compat Flags Without Constructors
 

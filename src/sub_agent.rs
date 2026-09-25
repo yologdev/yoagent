@@ -10,6 +10,9 @@
 //! - **Nesting supported**: sub-agents can contain other SubAgentTools for recursive delegation (use `with_max_turns()` to bound depth)
 //! - **Cancellation propagation**: the parent's cancel token is forwarded
 //! - **Event forwarding**: sub-agent events stream to the parent via `on_update`
+//! - **Spend reporting**: the sub-agent's [`SessionStats`] — its own usage and,
+//!   recursively, its own sub-agents' — reach the parent loop, which keeps them
+//!   in a separate [`SessionStats::sub_agents`] bucket. Failed runs included.
 //!
 //! # Example
 //!
@@ -26,7 +29,7 @@
 //! .with_system_prompt("You are a research assistant.");
 //! ```
 
-use crate::agent_loop::{agent_loop, AgentLoopConfig};
+use crate::agent_loop::{agent_loop_with_stats, AgentLoopConfig};
 use crate::context::ExecutionLimits;
 use crate::provider::model::ModelConfig;
 use crate::provider::StreamProvider;
@@ -379,9 +382,9 @@ impl AgentTool for SubAgentTool {
         params: serde_json::Value,
         ctx: ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        let cancel = ctx.cancel;
-        let on_update = ctx.on_update;
-        let on_progress = ctx.on_progress;
+        let cancel = ctx.cancel.clone();
+        let on_update = ctx.on_update.clone();
+        let on_progress = ctx.on_progress.clone();
         // Extract the task parameter
         let task = params
             .get("task")
@@ -510,12 +513,19 @@ impl AgentTool for SubAgentTool {
 
         // Run the sub-agent loop
         let prompt = AgentMessage::Llm(Message::user(task));
-        let new_messages = agent_loop(vec![prompt], &mut context, &config, tx, cancel).await;
+        let (new_messages, run_stats) =
+            agent_loop_with_stats(vec![prompt], &mut context, &config, tx, cancel).await;
 
         // Wait for event forwarding to complete
         if let Some(handle) = forward_handle {
             let _ = handle.await;
         }
+
+        // Report before deciding success or failure: a failed delegation
+        // still spent tokens, and `Err(ToolError)` has nowhere to carry them.
+        // `run_stats` covers this run's own turns and, recursively, whatever
+        // its own sub-agents reported to it.
+        ctx.report_delegated_run(run_stats.clone());
 
         // Check if the last message was an error
         if let Some(error_msg) = extract_error(&new_messages) {
@@ -529,10 +539,12 @@ impl AgentTool for SubAgentTool {
         let result_text = extract_final_text(&new_messages);
 
         // Include full sub-agent conversation in details for debugging
-        let details = serde_json::json!({
+        let mut details = serde_json::json!({
             "sub_agent": self.tool_name,
             "turns": new_messages.len(),
         });
+        // Read with `SessionStats::from_sub_agent_result`.
+        details[SUB_AGENT_STATS_KEY] = serde_json::to_value(&run_stats).unwrap_or_default();
 
         Ok(ToolResult {
             content: vec![Content::Text { text: result_text }],

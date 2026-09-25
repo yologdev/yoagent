@@ -58,7 +58,7 @@ Point it at a hosted model instead by swapping the flag:
 
 ```bash
 ANTHROPIC_API_KEY=sk-... cargo run --example cli
-GROQ_API_KEY=...        cargo run --example cli -- --provider groq --model llama-3.3-70b-versatile
+GROQ_API_KEY=...        cargo run --example cli -- --provider groq --model openai/gpt-oss-120b
 cargo run --example cli -- --api-url http://localhost:1234/v1 --model my-model   # LM Studio, llama.cpp, vLLM
 ```
 
@@ -106,9 +106,9 @@ Swap the model by swapping the config — the provider follows, and the key is r
 provider's conventional env var:
 
 ```rust
-Agent::from_config(ModelConfig::groq("llama-3.3-70b-versatile", "Llama 3.3 70B")); // GROQ_API_KEY
-Agent::from_config(ModelConfig::google("gemini-2.5-pro", "Gemini 2.5 Pro"));       // GEMINI_API_KEY
-Agent::from_config(ModelConfig::ollama("http://localhost:11434", "llama3.1:8b"));  // no key
+Agent::from_config(ModelConfig::groq("openai/gpt-oss-120b", "GPT-OSS 120B"));    // GROQ_API_KEY
+Agent::from_config(ModelConfig::google("gemini-3.8-flash", "Gemini 3.8 Flash")); // GEMINI_API_KEY
+Agent::from_config(ModelConfig::ollama("http://localhost:11434", "llama3.1:8b")); // no key
 ```
 
 ---
@@ -284,14 +284,14 @@ it injects the `shared_state` tool and a state summary into the sub-agent's syst
   ```
 - **`Session`** — history as an id/parent tree with `append`, `seek`, `checkpoint`, `branch_tips`, and JSONL persistence. Appending after a seek forks a branch; it never overwrites
 - **Skills** — load [AgentSkills](https://agentskills.io)-standard `SKILL.md` directories. The agent sees a compact index and reads the full skill on demand, so skills stay cross-compatible with Claude Code, Codex CLI, Cursor, and others
-- **Structured outputs** — `prompt_structured::<T>()` returns typed, schema-validated replies, enforced natively where supported (Anthropic tool-forcing, OpenAI `json_schema`, Gemini `responseSchema`)
+- **Structured outputs** — `prompt_structured::<T>()` returns typed, schema-validated replies, enforced natively where supported (Anthropic `output_config.format` on the `claude_*` presets and OpenCode Claude ids from 4.5, tool-forcing otherwise; OpenAI Chat Completions `json_schema`; Gemini `responseSchema`)
 
 </details>
 
 <details>
 <summary><b>Production concerns</b></summary>
 
-- **Cost tracking** — `CostConfig` carries separate input/output/cache-read/cache-write rates plus optional context tiers; `session_cost_usd()` gives a running total, `AgentEvent::AgentEnd` carries a `SessionStats` rollup, and `is_configured()` distinguishes "free" from "pricing unknown"
+- **Cost tracking** — `CostConfig` carries separate input/output/cache-read/cache-write rates plus optional context tiers; `session_cost_usd()` gives a running total, `AgentEvent::AgentEnd` carries a `SessionStats` rollup, and `ModelConfig::cost` is an `Option` — `None` means pricing unknown, never $0 (only the named presets and `meta` carry rates)
 - **Loop detection** — a model calling one tool with identical arguments forever trips none of the turn/token/duration limits until the whole budget is spent. On by default: steers on the third consecutive repeat, stops on the next, and emits `AgentEvent::LoopDetected` either way
 - **Retrievable tool output** — head-tail truncation discards the middle irrecoverably. Attach a `SharedState` and the full text is stashed, with the marker naming a key the model can fetch
 - **Telemetry** — `tracing` spans per loop / LLM stream / tool, recording tokens and cost. OpenTelemetry is bridged app-side via `tracing-opentelemetry`; the library carries no OTel dependency by design

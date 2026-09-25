@@ -2716,8 +2716,8 @@ fn archived_agent_end_without_stats_still_deserializes() {
     }
 }
 
-/// `cost_usd` accrues only when the model has configured rates. `None` means
-/// "cannot price this", never "free".
+/// `cost_usd` accrues whenever the model has a `cost`, zero rates included.
+/// `None` means "cannot price this", never "free".
 #[tokio::test]
 async fn cost_accrues_when_rates_are_configured_and_stays_none_otherwise() {
     let responses = || {
@@ -2758,7 +2758,7 @@ async fn cost_accrues_when_rates_are_configured_and_stays_none_otherwise() {
         system_prompt: String::new(),
     };
     let mut priced = yoagent::provider::ModelConfig::anthropic("mock", "Mock");
-    priced.cost = yoagent::provider::CostConfig::new(3.0, 15.0);
+    priced.cost = Some(yoagent::provider::CostConfig::new(3.0, 15.0));
     let mut config = make_config(MockProvider::new(responses()));
     config.model_config = Some(priced);
     config.get_follow_up_messages = follow_up_once();
@@ -2774,6 +2774,32 @@ async fn cost_accrues_when_rates_are_configured_and_stays_none_otherwise() {
         .cost_usd
         .expect("priced model must report a cost");
     assert!((cost - 18.0).abs() < 1e-9, "cost {cost} != 18.0");
+
+    // Free: `Some` with zero rates is a known price of $0, not unknown.
+    let (tx, rx) = mpsc::unbounded_channel();
+    let mut context = AgentContext {
+        messages: vec![],
+        tools: vec![],
+        system_prompt: String::new(),
+    };
+    let mut free = yoagent::provider::ModelConfig::mock();
+    free.cost = Some(yoagent::provider::CostConfig::new(0.0, 0.0));
+    let mut config = make_config(MockProvider::new(responses()));
+    config.model_config = Some(free);
+    config.get_follow_up_messages = follow_up_once();
+    agent_loop(
+        vec![AgentMessage::Llm(Message::user("go"))],
+        &mut context,
+        &config,
+        tx,
+        CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(
+        agent_end_stats(&collect_events(rx)).cost_usd,
+        Some(0.0),
+        "a free model must report Some(0.0), not None"
+    );
 }
 
 /// Hand out exactly one follow-up, so the loop takes two turns.
@@ -4098,4 +4124,335 @@ async fn an_image_only_result_stashes_nothing() {
         state.keys().await.is_empty(),
         "nothing was elided, so nothing may be stored"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Unparsed (truncated) tool arguments — #167
+// ---------------------------------------------------------------------------
+
+/// Records the transcript each turn is sent, then delegates to a MockProvider.
+/// With `tool_turn_stop` set, a turn carrying tool calls reports that stop
+/// reason instead of the mock's `ToolUse` — how a real provider reports a
+/// call cut off at the output token limit.
+struct RecordingProvider {
+    inner: MockProvider,
+    seen: std::sync::Arc<std::sync::Mutex<Vec<Vec<Message>>>>,
+    tool_turn_stop: Option<StopReason>,
+}
+
+#[async_trait::async_trait]
+impl StreamProvider for RecordingProvider {
+    async fn stream(
+        &self,
+        config: StreamConfig,
+        tx: tokio::sync::mpsc::UnboundedSender<StreamEvent>,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<yoagent::Message, ProviderError> {
+        self.seen.lock().unwrap().push(config.messages.clone());
+        let mut message = self.inner.stream(config, tx, cancel).await?;
+        if let (
+            Some(forced),
+            Message::Assistant {
+                content,
+                stop_reason,
+                ..
+            },
+        ) = (&self.tool_turn_stop, &mut message)
+        {
+            if content
+                .iter()
+                .any(|c| matches!(c, Content::ToolCall { .. }))
+            {
+                *stop_reason = forced.clone();
+            }
+        }
+        Ok(message)
+    }
+}
+
+/// Counts its executions; the name is set per instance.
+struct CountingTool {
+    name: &'static str,
+    runs: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl AgentTool for CountingTool {
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn label(&self) -> &str {
+        self.name
+    }
+    fn description(&self) -> &str {
+        "counts runs"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object", "properties": {}})
+    }
+    async fn execute(
+        &self,
+        _params: serde_json::Value,
+        _ctx: ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(ToolResult {
+            content: vec![Content::Text { text: "ran".into() }],
+            details: serde_json::Value::Null,
+        })
+    }
+}
+
+/// A tool call whose streamed arguments were cut off mid-JSON must not run
+/// on `{}` defaults: the loop answers it with an error tool result the model
+/// sees next turn, and keeps going. A zero-argument sibling call (empty
+/// argument stream) in the same turn still runs normally — the empty vs
+/// malformed distinction is the load-bearing one.
+#[tokio::test]
+async fn unparsed_tool_arguments_are_not_executed() {
+    use yoagent::provider::parse_tool_arguments;
+
+    let truncated = parse_tool_arguments(r#"{"paths":"#);
+    let empty = parse_tool_arguments("");
+    assert_eq!(empty, serde_json::json!({}));
+
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let provider = RecordingProvider {
+        inner: MockProvider::new(vec![
+            MockResponse::ToolCalls(vec![
+                MockToolCall {
+                    provider_metadata: None,
+                    name: "delete_files".into(),
+                    arguments: truncated,
+                },
+                MockToolCall {
+                    provider_metadata: None,
+                    name: "list_files".into(),
+                    arguments: empty,
+                },
+            ]),
+            MockResponse::Text("retrying".into()),
+        ]),
+        seen: seen.clone(),
+        tool_turn_stop: None,
+    };
+    let mut config = make_config(MockProvider::text("unused"));
+    config.provider = std::sync::Arc::new(provider);
+
+    let delete_runs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let list_runs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut context = AgentContext {
+        system_prompt: "test".into(),
+        messages: Vec::new(),
+        tools: vec![
+            Box::new(CountingTool {
+                name: "delete_files",
+                runs: delete_runs.clone(),
+            }),
+            Box::new(CountingTool {
+                name: "list_files",
+                runs: list_runs.clone(),
+            }),
+        ],
+    };
+
+    let (tx, rx) = mpsc::unbounded_channel();
+    agent_loop(
+        vec![AgentMessage::Llm(Message::user("clean up"))],
+        &mut context,
+        &config,
+        tx,
+        CancellationToken::new(),
+    )
+    .await;
+
+    assert_eq!(
+        delete_runs.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a call with truncated arguments must not run on its defaults"
+    );
+    assert_eq!(
+        list_runs.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a zero-argument call streamed as \"\" must still run"
+    );
+
+    // The loop continued: the second turn was requested, carrying the error.
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 2, "the loop must continue to a second turn");
+    let results: Vec<(&str, bool, String)> = seen[1]
+        .iter()
+        .filter_map(|m| match m {
+            Message::ToolResult {
+                tool_name,
+                is_error,
+                content,
+                ..
+            } => Some((
+                tool_name.as_str(),
+                *is_error,
+                content
+                    .iter()
+                    .filter_map(|c| match c {
+                        Content::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<String>(),
+            )),
+            _ => None,
+        })
+        .collect();
+    let (_, is_error, text) = results
+        .iter()
+        .find(|(n, ..)| *n == "delete_files")
+        .expect("the truncated call must be answered with a tool result");
+    assert!(*is_error, "the answer must be an error result");
+    assert!(
+        text.contains("cut off") && text.contains("The tool was not run"),
+        "the model must be told why, got: {text}"
+    );
+    assert!(
+        text.contains("Do not resend the same call unchanged"),
+        "the model must not be told to retry verbatim — the same call would be cut \
+         off again, got: {text}"
+    );
+    let (_, list_error, _) = results
+        .iter()
+        .find(|(n, ..)| *n == "list_files")
+        .expect("the zero-argument call's result must be present");
+    assert!(!*list_error);
+
+    // UI pairing: the unexecuted call still gets Start and End events.
+    let events = collect_events(rx);
+    let ended_as_error = events.iter().any(|e| {
+        matches!(e, AgentEvent::ToolExecutionEnd { tool_name, is_error: true, .. }
+            if tool_name == "delete_files")
+    });
+    assert!(ended_as_error);
+}
+
+/// Runs one tool-call turn through the loop with a single `write_file` call
+/// carrying `arguments`, and returns (tool runs, provider requests, the
+/// call's error-result text if it was answered as an error).
+async fn run_single_marked_call(
+    arguments: serde_json::Value,
+    tool_turn_stop: Option<StopReason>,
+) -> (usize, usize, Option<String>) {
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let provider = RecordingProvider {
+        inner: MockProvider::new(vec![
+            MockResponse::ToolCalls(vec![MockToolCall {
+                provider_metadata: None,
+                name: "write_file".into(),
+                arguments,
+            }]),
+            MockResponse::Text("ok".into()),
+        ]),
+        seen: seen.clone(),
+        tool_turn_stop,
+    };
+    let mut config = make_config(MockProvider::text("unused"));
+    config.provider = std::sync::Arc::new(provider);
+
+    let runs = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut context = AgentContext {
+        system_prompt: "test".into(),
+        messages: Vec::new(),
+        tools: vec![Box::new(CountingTool {
+            name: "write_file",
+            runs: runs.clone(),
+        })],
+    };
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent_loop(
+        vec![AgentMessage::Llm(Message::user("write it"))],
+        &mut context,
+        &config,
+        tx,
+        CancellationToken::new(),
+    )
+    .await;
+
+    let seen = seen.lock().unwrap();
+    let error_text = seen.get(1).and_then(|msgs| {
+        msgs.iter().find_map(|m| match m {
+            Message::ToolResult {
+                is_error: true,
+                content,
+                ..
+            } => Some(
+                content
+                    .iter()
+                    .filter_map(|c| match c {
+                        Content::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<String>(),
+            ),
+            _ => None,
+        })
+    });
+    (
+        runs.load(std::sync::atomic::Ordering::SeqCst),
+        seen.len(),
+        error_text,
+    )
+}
+
+/// The realistic shape of #167: the provider reports `StopReason::Length`
+/// (max_tokens hit mid-arguments), not `ToolUse`. The loop must still
+/// extract the call, answer it with the error result — not run it — and
+/// continue to the next turn. Only Error/Aborted end the run early.
+#[tokio::test]
+async fn a_length_turn_with_a_truncated_call_is_answered_and_the_loop_continues() {
+    let truncated = yoagent::provider::parse_tool_arguments(r#"{"path":"a.txt","content":"lo"#);
+    let (runs, requests, error_text) =
+        run_single_marked_call(truncated, Some(StopReason::Length)).await;
+    assert_eq!(runs, 0, "a truncated call must not run");
+    assert_eq!(
+        requests, 2,
+        "a Length turn with a tool call must continue to the next turn"
+    );
+    let text = error_text.expect("the truncated call must be answered with an error result");
+    assert!(
+        text.contains("cut off") && text.contains("output token limit"),
+        "got: {text}"
+    );
+}
+
+/// Double-encoded arguments (a JSON string holding the object) are valid
+/// JSON but not an object; they are answered with an error naming that,
+/// never run with every field read as missing.
+#[tokio::test]
+async fn double_encoded_arguments_are_answered_not_run() {
+    let raw = r#""{\"path\":\"src\"}""#;
+    let args = yoagent::provider::parse_tool_arguments(raw);
+    let (runs, requests, error_text) = run_single_marked_call(args, None).await;
+    assert_eq!(
+        runs, 0,
+        "a call whose arguments are a JSON string must not run"
+    );
+    assert_eq!(requests, 2, "the loop continues");
+    let text = error_text.expect("answered with an error result");
+    assert!(
+        text.contains("not a JSON object") && text.contains("a string"),
+        "the error must say what was wrong, not claim truncation; got: {text}"
+    );
+    assert!(!text.contains("cut off"), "got: {text}");
+}
+
+/// Complete but malformed JSON is a syntax error, not a truncation: telling
+/// the model to "make the arguments smaller" would have it resend the same
+/// mistake in pieces.
+#[tokio::test]
+async fn malformed_but_complete_arguments_are_not_called_cut_off() {
+    for raw in [r#"{"a":1,}"#, r#"{"a":1}{"b":2}"#] {
+        let args = yoagent::provider::parse_tool_arguments(raw);
+        let (runs, requests, error_text) = run_single_marked_call(args, None).await;
+        assert_eq!(runs, 0, "{raw}: malformed arguments must not run");
+        assert_eq!(requests, 2, "{raw}: the loop continues");
+        let text = error_text.expect("answered with an error result");
+        assert!(text.contains("not valid JSON"), "{raw}: got: {text}");
+        assert!(!text.contains("cut off"), "{raw}: got: {text}");
+    }
 }

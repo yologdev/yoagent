@@ -322,16 +322,6 @@ async fn parse_google_sse_response(
 }
 
 /// Build the request body for Vertex AI (same format as Google GenAI).
-/// Token budget for Vertex's thinkingConfig per level (same scale as Gemini).
-fn vertex_thinking_budget(level: ThinkingLevel) -> u32 {
-    match level {
-        ThinkingLevel::Off => 0,
-        ThinkingLevel::Minimal | ThinkingLevel::Low => 1024,
-        ThinkingLevel::Medium => 8192,
-        ThinkingLevel::High => 24576,
-    }
-}
-
 fn build_vertex_request_body(config: &StreamConfig) -> serde_json::Value {
     // Same format as Google GenAI
     let mut contents: Vec<serde_json::Value> = Vec::new();
@@ -425,12 +415,9 @@ fn build_vertex_request_body(config: &StreamConfig) -> serde_json::Value {
     if let Some(temp) = config.temperature {
         gen_config["temperature"] = serde_json::json!(temp);
     }
-    // Thinking: same thinkingConfig as the Gemini API.
-    if config.thinking_level != ThinkingLevel::Off {
-        gen_config["thinkingConfig"] = serde_json::json!({
-            "thinkingBudget": vertex_thinking_budget(config.thinking_level),
-            "includeThoughts": true,
-        });
+    // Thinking: same thinkingConfig as the Gemini API (level on 3+, budget on 2.x).
+    if let Some(thinking) = super::google::gemini_thinking_config(config) {
+        gen_config["thinkingConfig"] = thinking;
     }
     if gen_config != serde_json::json!({}) {
         body["generationConfig"] = gen_config;
@@ -514,8 +501,101 @@ mod tests {
     }
 
     #[test]
+    fn xhigh_and_max_clamp_to_the_flash_budget_ceiling() {
+        for level in [ThinkingLevel::XHigh, ThinkingLevel::Max] {
+            let body = build_vertex_request_body(&config(level));
+            assert_eq!(
+                body["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+                24576
+            );
+        }
+        let body = build_vertex_request_body(&config(ThinkingLevel::Medium));
+        assert_eq!(
+            body["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+            8192
+        );
+    }
+
+    #[test]
     fn thinking_off_omits_thinking_config() {
         let body = build_vertex_request_body(&config(ThinkingLevel::Off));
         assert!(body["generationConfig"]["thinkingConfig"].is_null());
+    }
+
+    fn vertex_thinking(model: &str, level: ThinkingLevel) -> serde_json::Value {
+        let mut c = config(level);
+        c.model = model.into();
+        build_vertex_request_body(&c)["generationConfig"]["thinkingConfig"].clone()
+    }
+
+    #[test]
+    fn gemini_3_on_vertex_sends_thinking_level_not_budget() {
+        // Vertex ids arrive bare or as full publisher resource paths.
+        for model in [
+            "gemini-3.1-pro-preview",
+            "publishers/google/models/gemini-3.1-pro-preview",
+            "projects/p/locations/global/publishers/google/models/gemini-3.1-pro-preview",
+        ] {
+            assert_eq!(
+                vertex_thinking(model, ThinkingLevel::High),
+                serde_json::json!({"thinkingLevel": "HIGH", "includeThoughts": true}),
+                "{model}"
+            );
+            // Off sends nothing: 3.1 Pro then thinks at its default (HIGH).
+            assert!(
+                vertex_thinking(model, ThinkingLevel::Off).is_null(),
+                "{model}"
+            );
+            // 3.1 Pro has no MINIMAL rung.
+            assert_eq!(
+                vertex_thinking(model, ThinkingLevel::Minimal)["thinkingLevel"],
+                "LOW",
+                "{model}"
+            );
+        }
+        // Image models on Vertex: only the levels the Vertex table lists.
+        assert_eq!(
+            vertex_thinking("gemini-3.1-flash-image", ThinkingLevel::Low)["thinkingLevel"],
+            "MINIMAL"
+        );
+        assert_eq!(
+            vertex_thinking("gemini-3-pro-image", ThinkingLevel::Low)["thinkingLevel"],
+            "HIGH"
+        );
+        assert!(vertex_thinking("gemini-3.1-flash-image", ThinkingLevel::Off).is_null());
+        assert_eq!(
+            vertex_thinking(
+                "projects/p/locations/global/publishers/google/models/gemini-3.5-flash-lite",
+                ThinkingLevel::Minimal
+            )["thinkingLevel"],
+            "MINIMAL"
+        );
+        // Positive control: the 2.5 path id on the same route keeps the budget.
+        assert_eq!(
+            vertex_thinking(
+                "projects/p/locations/global/publishers/google/models/gemini-2.5-pro",
+                ThinkingLevel::High
+            ),
+            serde_json::json!({"thinkingBudget": 24576, "includeThoughts": true})
+        );
+    }
+
+    #[test]
+    fn vertex_honours_the_google_compat_override() {
+        let mut c = config(ThinkingLevel::Medium);
+        c.model = "gemini-3.8-flash".into();
+        let mut mc = ModelConfig::custom(
+            crate::provider::ApiProtocol::GoogleVertex,
+            "vertex",
+            "https://example.invalid",
+            "gemini-3.8-flash",
+            "G",
+        );
+        mc.google = Some(crate::provider::GoogleCompat::force_thinking_budget());
+        c.model_config = Some(mc);
+        assert_eq!(
+            build_vertex_request_body(&c)["generationConfig"]["thinkingConfig"],
+            serde_json::json!({"thinkingBudget": 8192, "includeThoughts": true})
+        );
     }
 }

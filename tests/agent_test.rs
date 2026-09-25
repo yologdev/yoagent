@@ -445,7 +445,7 @@ fn session_cost_usd_none_without_model_config() {
 
 #[test]
 fn session_cost_usd_none_when_rates_unconfigured() {
-    // ModelConfig::custom has all-zero cost rates: pricing is unknown, so
+    // ModelConfig::custom carries `cost: None`: pricing is unknown, so
     // the answer must be None ("can't price"), not Some(0.0) ("free").
     let mc = yoagent::provider::ModelConfig::custom(
         yoagent::provider::ApiProtocol::OpenAiCompletions,
@@ -468,9 +468,8 @@ fn session_cost_usd_sums_assistant_turns_only() {
         "m",
         "M",
     );
-    mc.cost.input_per_million = 3.0;
-    mc.cost.output_per_million = 15.0;
-    let expected_per_turn = mc.cost.cost_usd(&some_usage());
+    mc.cost = Some(yoagent::provider::CostConfig::new(3.0, 15.0));
+    let expected_per_turn = mc.cost.as_ref().unwrap().cost_usd(&some_usage());
 
     let agent = Agent::from_provider(MockProvider::text("x"), mc).with_messages(vec![
         AgentMessage::Llm(Message::user("hi")),
@@ -592,7 +591,7 @@ fn test_from_config_wires_model_and_config() {
     // from_config selects a built-in provider from config.api, sets the id,
     // and stashes pricing so session_cost_usd can price the session.
     let mut mc = yoagent::provider::ModelConfig::anthropic("claude-sonnet-5", "Sonnet 5");
-    mc.cost.input_per_million = 3.0;
+    mc.cost = Some(yoagent::provider::CostConfig::new(3.0, 0.0));
     let agent = Agent::from_config(mc).with_messages(vec![assistant_with_usage(some_usage())]);
     assert_eq!(agent.model, "claude-sonnet-5");
     assert!(
@@ -660,7 +659,37 @@ async fn test_set_model_switches_model_id() {
 fn test_model_config_mock_is_unpriced() {
     let mc = yoagent::provider::ModelConfig::mock();
     assert_eq!(mc.provider, "mock");
-    assert!(!mc.cost.is_configured());
+    assert!(mc.cost.is_none());
+}
+
+/// A config persisted before 0.19 stored unknown pricing as an all-zero
+/// `cost` object. It must still load, and load as unknown (`None`) — reading
+/// it as free would report $0 for a model that bills.
+#[test]
+fn session_cost_usd_none_for_legacy_all_zero_cost() {
+    let mut v = serde_json::to_value(yoagent::provider::ModelConfig::mock()).unwrap();
+    v["cost"] = serde_json::json!({
+        "input_per_million": 0.0,
+        "output_per_million": 0.0,
+        "cache_read_per_million": 0.0,
+        "cache_write_per_million": 0.0
+    });
+    let mc: yoagent::provider::ModelConfig = serde_json::from_value(v).unwrap();
+    assert!(mc.cost.is_none());
+    let agent = Agent::from_provider(MockProvider::text("x"), mc)
+        .with_messages(vec![assistant_with_usage(some_usage())]);
+    assert_eq!(agent.session_cost_usd(), None);
+}
+
+/// In memory, `Some` with zero rates is a free model — a local one, say — and
+/// must report a real `$0`, not "unknown".
+#[test]
+fn session_cost_usd_zero_for_free_model() {
+    let mut mc = yoagent::provider::ModelConfig::mock();
+    mc.cost = Some(yoagent::provider::CostConfig::new(0.0, 0.0));
+    let agent = Agent::from_provider(MockProvider::text("x"), mc)
+        .with_messages(vec![assistant_with_usage(some_usage())]);
+    assert_eq!(agent.session_cost_usd(), Some(0.0));
 }
 
 #[tokio::test]
@@ -1137,6 +1166,75 @@ async fn test_middleware_never_sees_synthetic_structured_tool() {
         *calls.lock().unwrap(),
         0,
         "middleware saw the synthetic tool"
+    );
+}
+
+/// A user tool that shares the structured schema's name (`structured_output`).
+struct SchemaNamedTool {
+    ran: Arc<std::sync::Mutex<Option<serde_json::Value>>>,
+}
+
+#[async_trait::async_trait]
+impl AgentTool for SchemaNamedTool {
+    fn name(&self) -> &str {
+        "structured_output"
+    }
+    fn label(&self) -> &str {
+        "Schema-named tool"
+    }
+    fn description(&self) -> &str {
+        "A real tool whose name collides with the structured-output schema"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        _ctx: ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        *self.ran.lock().unwrap() = Some(params);
+        Ok(ToolResult {
+            content: vec![Content::Text { text: "ok".into() }],
+            details: serde_json::Value::Null,
+        })
+    }
+}
+
+/// On Anthropic's native structured-output path no synthetic tool is offered,
+/// so a call named after the schema is the user's own tool: it must execute,
+/// not be unwrapped into the answer. The answer is the final reply text.
+#[tokio::test]
+async fn test_native_structured_output_executes_schema_named_user_tool() {
+    let ran = Arc::new(std::sync::Mutex::new(None));
+    let provider = MockProvider::new(vec![
+        MockResponse::ToolCalls(vec![MockToolCall {
+            provider_metadata: None,
+            name: "structured_output".into(),
+            arguments: serde_json::json!({"name": "tool-args", "count": 1}),
+        }]),
+        MockResponse::Text(r#"{"name":"answer","count":2}"#.into()),
+    ]);
+    let mut mc = ModelConfig::mock();
+    mc.anthropic =
+        Some(yoagent::provider::AnthropicCompat::default().with_native_structured_output(true));
+    let mut agent = Agent::from_provider(provider, mc)
+        .with_tools(vec![Box::new(SchemaNamedTool { ran: ran.clone() })]);
+    let out: Extracted = agent
+        .prompt_structured("extract", serde_json::json!({"type": "object"}))
+        .await
+        .expect("final text parses");
+    assert_eq!(
+        out,
+        Extracted {
+            name: "answer".into(),
+            count: 2
+        }
+    );
+    assert_eq!(
+        *ran.lock().unwrap(),
+        Some(serde_json::json!({"name": "tool-args", "count": 1})),
+        "the user's tool must run on the native path"
     );
 }
 

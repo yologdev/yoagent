@@ -2,7 +2,8 @@
 //! steering/follow-up queues, and abort support.
 
 use crate::agent_loop::{
-    agent_loop, agent_loop_continue, AfterTurnFn, AgentLoopConfig, BeforeTurnFn, OnErrorFn,
+    agent_loop_continue_with_stats, agent_loop_with_stats, AfterTurnFn, AgentLoopConfig,
+    BeforeTurnFn, OnErrorFn,
 };
 use crate::context::{CompactionStrategy, ContextConfig, ExecutionLimits};
 use crate::mcp::{McpClient, McpError, McpToolAdapter};
@@ -82,7 +83,14 @@ pub struct Agent {
 
     // Pending completion from a spawned agent loop
     #[allow(clippy::type_complexity)]
-    pending_completion: Option<JoinHandle<(Vec<Box<dyn AgentTool>>, Vec<AgentMessage>)>>,
+    pending_completion:
+        Option<JoinHandle<(Vec<Box<dyn AgentTool>>, Vec<AgentMessage>, SessionStats)>>,
+
+    // Everything this agent's runs spent since construction or `reset`: its
+    // own turns plus, in `sub_agents`, what they delegated. Accumulated from
+    // each run's `SessionStats`, never derived from history (see
+    // `total_cost_usd`).
+    spend: SessionStats,
 }
 
 /// Error building an [`Agent`] from a [`ModelConfig`] and a registry.
@@ -110,8 +118,12 @@ pub enum StructuredPromptError {
     #[error("model returned no output to parse")]
     NoOutput,
     /// The provider call itself failed (auth, network, rate limits, a
-    /// schema-induced 400, ...). Retrying the parse is pointless; the message
-    /// carries the underlying provider error.
+    /// schema-induced 400, ...), or the response ended as
+    /// [`StopReason::Refusal`] — the model declined, or a content filter
+    /// stopped it. Retrying the parse is pointless; the message carries the
+    /// underlying provider error or the refusal explanation (the assistant
+    /// message's `error_message`, which includes the model's refusal text
+    /// when it gave one).
     #[error("provider error during structured prompt: {message}")]
     Provider { message: String },
     /// The model's output did not deserialize into the requested type.
@@ -279,6 +291,7 @@ impl Agent {
             cancel: None,
             is_streaming: false,
             pending_completion: None,
+            spend: SessionStats::default(),
         }
     }
 
@@ -702,11 +715,12 @@ impl Agent {
         }
         if let Some(handle) = self.pending_completion.take() {
             // Await the cancelled task to recover tools; ignore panic
-            if let Ok((tools, _messages)) = handle.await {
+            if let Ok((tools, _messages, _stats)) = handle.await {
                 self.tools = tools;
             }
         }
         self.messages.clear();
+        self.spend = SessionStats::default();
         self.clear_all_queues();
         self.is_streaming = false;
         self.cancel = None;
@@ -735,7 +749,9 @@ impl Agent {
     }
 
     /// Send a prompt and parse the reply into `T`, with the JSON Schema
-    /// enforced natively by the provider (Anthropic: forced tool call;
+    /// enforced natively by the provider (Anthropic: `output_config.format`
+    /// when [`AnthropicCompat::native_structured_output`](crate::provider::AnthropicCompat::native_structured_output)
+    /// is set, as in every `claude_*` preset, else a forced tool call;
     /// OpenAI-compatible: `json_schema` response format; Gemini:
     /// `responseSchema`; other providers log a warning and return free text,
     /// which still must parse into `T`).
@@ -743,9 +759,9 @@ impl Agent {
     /// Runs the loop to completion internally (no event receiver). Derive the
     /// schema however you like — by hand or e.g. with the `schemars` crate.
     ///
-    /// Note: on Anthropic the forced tool call preempts regular tools for
-    /// that request — treat structured prompts as extraction/finalization
-    /// calls, not agentic tool-using turns.
+    /// Note: on Anthropic's tool-forcing path the forced tool call preempts
+    /// regular tools for that request — treat structured prompts there as
+    /// extraction/finalization calls, not agentic tool-using turns.
     pub async fn prompt_structured<T: serde::de::DeserializeOwned>(
         &mut self,
         text: impl Into<String>,
@@ -790,6 +806,17 @@ impl Agent {
                 message: error_message
                     .clone()
                     .unwrap_or_else(|| "provider error (no detail)".into()),
+            });
+        }
+        // A refusal is not output: its text is the model's explanation, never
+        // the requested JSON, and a content-filtered reply may be cut short.
+        // Reported with the explanation, rather than as a Parse failure over
+        // the refusal text or as NoOutput when the filter left nothing.
+        if *stop_reason == StopReason::Refusal {
+            return Err(StructuredPromptError::Provider {
+                message: error_message
+                    .clone()
+                    .unwrap_or_else(|| "response stopped as a refusal (no detail)".into()),
             });
         }
 
@@ -868,8 +895,9 @@ impl Agent {
         config.output_schema = output_schema;
 
         let handle = tokio::spawn(async move {
-            let _new_messages = agent_loop(messages, &mut context, &config, tx, cancel).await;
-            (context.tools, context.messages)
+            let (_new_messages, stats) =
+                agent_loop_with_stats(messages, &mut context, &config, tx, cancel).await;
+            (context.tools, context.messages, stats)
         });
 
         self.pending_completion = Some(handle);
@@ -949,8 +977,10 @@ impl Agent {
 
         let config = self.build_config();
 
-        let _new_messages = agent_loop(messages, &mut context, &config, tx, cancel).await;
+        let (_new_messages, stats) =
+            agent_loop_with_stats(messages, &mut context, &config, tx, cancel).await;
 
+        self.spend.merge(&stats);
         self.tools = context.tools;
         self.messages = context.messages;
         self.is_streaming = false;
@@ -989,8 +1019,9 @@ impl Agent {
         let config = self.build_config();
 
         let handle = tokio::spawn(async move {
-            let _new_messages = agent_loop_continue(&mut context, &config, tx, cancel).await;
-            (context.tools, context.messages)
+            let (_new_messages, stats) =
+                agent_loop_continue_with_stats(&mut context, &config, tx, cancel).await;
+            (context.tools, context.messages, stats)
         });
 
         self.pending_completion = Some(handle);
@@ -1025,8 +1056,10 @@ impl Agent {
 
         let config = self.build_config();
 
-        let _new_messages = agent_loop_continue(&mut context, &config, tx, cancel).await;
+        let (_new_messages, stats) =
+            agent_loop_continue_with_stats(&mut context, &config, tx, cancel).await;
 
+        self.spend.merge(&stats);
         self.tools = context.tools;
         self.messages = context.messages;
         self.is_streaming = false;
@@ -1046,9 +1079,10 @@ impl Agent {
     pub async fn finish(&mut self) {
         if let Some(handle) = self.pending_completion.take() {
             match handle.await {
-                Ok((tools, messages)) => {
+                Ok((tools, messages, stats)) => {
                     self.tools = tools;
                     self.messages = messages;
+                    self.spend.merge(&stats);
                 }
                 Err(e) => {
                     // Task panicked or was cancelled — log and leave state as-is
@@ -1079,16 +1113,24 @@ impl Agent {
     /// Total dollar cost of the assistant turns currently in history, using
     /// the model's [`CostConfig`](crate::provider::CostConfig) rates.
     ///
-    /// Returns `None` when no `ModelConfig` is set or when the config's
-    /// rates are all zero (pricing unknown — e.g. custom or local models),
-    /// so `None` means "can't price this", never "free". Rates come from the
+    /// Returns `None` when no `ModelConfig` is set or when the config is
+    /// unpriced (`cost: None` — see
+    /// [`ModelConfig::cost`](crate::provider::ModelConfig::cost)), so `None`
+    /// means "can't price this", never "free". A free model (`Some` with zero
+    /// rates) returns `Some(0.0)`. Rates come from the
     /// *current* model config; sessions that switched models mid-way are
     /// priced entirely at the current rates.
+    ///
+    /// **History-derived**: this prices whatever the message history holds,
+    /// so it follows the history — [`clear_messages`](Self::clear_messages),
+    /// [`replace_messages`](Self::replace_messages) and compaction lower it,
+    /// and history loaded with [`with_messages`](Self::with_messages) or
+    /// [`restore_messages`](Self::restore_messages) raises it. It is "what
+    /// the current context cost", not "what this agent spent", and it
+    /// excludes sub-agents. For the bill, use
+    /// [`total_cost_usd`](Self::total_cost_usd).
     pub fn session_cost_usd(&self) -> Option<f64> {
-        let cost = &self.model_config.as_ref()?.cost;
-        if !cost.is_configured() {
-            return None;
-        }
+        let cost = self.model_config.as_ref()?.cost.as_ref()?;
         Some(
             self.messages
                 .iter()
@@ -1100,6 +1142,65 @@ impl Agent {
                 })
                 .sum(),
         )
+    }
+
+    /// What [`SubAgentTool`](crate::SubAgentTool)s spent on this agent's
+    /// behalf, over every run since construction or the last
+    /// [`reset`](Self::reset) — nested sub-agents included, each priced at its
+    /// own model's rates.
+    ///
+    /// Only the delegated part. For the whole bill use
+    /// [`total_cost_usd`](Self::total_cost_usd) /
+    /// [`total_usage`](Self::total_usage), which cover the same window; do not
+    /// add this to [`session_cost_usd`](Self::session_cost_usd) — that is
+    /// history-derived and so covers a different window, and adding two
+    /// `Option<f64>`s by hand gets the unpriced case wrong.
+    ///
+    /// **Window: runs, not history.** Sub-agent spend is not recorded in
+    /// message history, so [`clear_messages`](Self::clear_messages),
+    /// [`replace_messages`](Self::replace_messages) and compaction leave it
+    /// untouched; only [`reset`](Self::reset) zeroes it.
+    ///
+    /// A run started by [`prompt`](Self::prompt) or
+    /// [`continue_loop`](Self::continue_loop) is counted once it is joined by
+    /// [`finish`](Self::finish) (or the next prompt). Per run, the same figure
+    /// is on [`AgentEvent::AgentEnd`] as `stats.sub_agents`.
+    pub fn sub_agent_spend(&self) -> &SubAgentSpend {
+        &self.spend.sub_agents
+    }
+
+    /// Everything this agent's runs spent in dollars — its own turns plus
+    /// every sub-agent they delegated to, each run priced at its own model's
+    /// rates at the time it ran.
+    ///
+    /// **Window: the same as [`sub_agent_spend`](Self::sub_agent_spend)** —
+    /// every run since construction or the last [`reset`](Self::reset),
+    /// accumulated from each run's [`SessionStats`] (the figures on
+    /// [`AgentEvent::AgentEnd`]). Money spent stays spent:
+    /// [`clear_messages`](Self::clear_messages),
+    /// [`replace_messages`](Self::replace_messages) and compaction do not
+    /// lower it, and history loaded with [`with_messages`](Self::with_messages)
+    /// or [`restore_messages`](Self::restore_messages) — spent by some earlier
+    /// agent — does not raise it. That is where it differs from
+    /// [`session_cost_usd`](Self::session_cost_usd), which prices the
+    /// current history.
+    ///
+    /// `None` when any part of the spend cannot be priced (see
+    /// [`SubAgentSpend::is_unpriced`] / [`SessionStats::is_unpriced`]) — an
+    /// unpriced sub-agent makes the bill unknown, not silently low — and when
+    /// no run has carried a cost yet (nothing spent, nothing priced). A priced
+    /// turn that reported no usage makes it `Some(0.0)`. With no delegation it is
+    /// this agent's own cost.
+    pub fn total_cost_usd(&self) -> Option<f64> {
+        self.spend.total_cost_usd()
+    }
+
+    /// Provider usage of everything this agent's runs spent — its own turns
+    /// plus every sub-agent's. Same window as
+    /// [`total_cost_usd`](Self::total_cost_usd). `total_tokens` stays 0, as in
+    /// [`SessionStats::usage`].
+    pub fn total_usage(&self) -> Usage {
+        self.spend.total_usage()
     }
 
     fn build_config(&self) -> AgentLoopConfig {

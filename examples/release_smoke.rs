@@ -209,11 +209,12 @@ fn transcript_is_well_formed(messages: &[AgentMessage]) -> Result<(), String> {
 fn model() -> ModelConfig {
     match std::env::var("SMOKE_MODEL").ok().as_deref() {
         Some("gpt") => ModelConfig::openai("gpt-5.5", "GPT-5.5"),
-        Some("gemini") => ModelConfig::google("gemini-3-pro", "Gemini 3 Pro"),
+        Some("gemini") => ModelConfig::google("gemini-3.1-pro-preview", "Gemini 3.1 Pro Preview"),
         // The OpenAI-compat path is a separate provider implementation from
         // Anthropic's, with its own SSE parsing and tool-call accumulation —
         // worth running before a release, not just one provider.
-        Some("deepseek") => ModelConfig::deepseek("deepseek-chat", "DeepSeek Chat"),
+        Some("deepseek") => ModelConfig::deepseek("deepseek-flash", "DeepSeek Flash"),
+        Some("opus55") => ModelConfig::claude_opus_5_5(),
         _ => ModelConfig::claude_sonnet_5(),
     }
 }
@@ -339,17 +340,17 @@ async fn main() {
 
         let cost = agent.session_cost_usd();
         // Only the priced presets carry rates. A generic constructor like
-        // `ModelConfig::deepseek(id, name)` reports unpriced by design —
-        // all-zero rates mean unknown, not free — so failing here would be
-        // testing the harness's choice of model, not the library.
-        if cfg.cost.is_configured() {
+        // `ModelConfig::deepseek(id, name)` carries `cost: None` by design —
+        // unknown, not free — so failing here would be testing the harness's
+        // choice of model, not the library.
+        if cfg.cost.is_some() {
             let ok = err.is_none() && cost.map(|c| c > 0.0).unwrap_or(false);
             report.record(
                 "session cost is computed from real usage",
                 ok,
                 match cost {
                     Some(c) => format!("session_cost_usd = ${c:.6}"),
-                    None => "priced preset returned None — is_configured and \
+                    None => "priced preset returned None — cost and \
                              session_cost_usd disagree"
                         .to_string(),
                 },

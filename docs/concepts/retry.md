@@ -27,6 +27,14 @@ Request → Error? → Retryable? → Wait (backoff + jitter) → Retry → ...
 | `Api` (400, etc.) | ❌ No | Permanent — bad request won't change on retry |
 | `Cancelled` | ❌ No | User-initiated — respect the cancellation |
 
+HTTP 429 is always `RateLimited`, even when the body contains a phrase that
+would otherwise read as a context overflow. A mid-stream error event is
+`RateLimited` when its structured `type`, `code` or `status` is
+`too_many_requests`, `no_capacity`, `rate_limit_exceeded`, `rate_limit_error`
+or `rate_limit` (Azure OpenAI's peak-load `no_capacity` error is the
+motivating case), and is checked before the overflow phrases, so a capacity
+error is retried rather than compacting the context.
+
 ## Default configuration
 
 ```rust
