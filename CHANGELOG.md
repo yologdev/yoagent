@@ -173,6 +173,11 @@ adheres to [Semantic Versioning](https://semver.org/).
   have no unparseable-buffer case and are unchanged. Bedrock is also unchanged
   here: its stream parsing needs a larger fix, tracked in
   [#174](https://github.com/yologdev/yoagent/issues/174).
+- **`ModelConfig::minimax` now points at `https://api.minimax.io/v1`**
+  instead of `https://api.minimaxi.chat/v1`. MiniMax's OpenAI-compatible API
+  reference names `api.minimax.io/v1` as the base URL. Configs that override
+  `base_url` are unaffected; set it back to the old host if your key is tied to
+  it.
 
 ### Fixed
 
@@ -225,6 +230,19 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 - **`MockResponse::ToolCallsWithUsage` and `MockResponse::ErrorWithUsage`**, so
   tests can bill a tool-calling turn and a mid-stream failure.
+
+- **OpenCode routes `grok-*` and `muse-spark-*` (Zen and Go) and `gpt-*`
+  (Go) to the Responses API.** The gateways' endpoint tables list those
+  families only on `/responses`, but `opencode_zen` / `opencode_go` sent them
+  to `/chat/completions`. Zen's `gpt-*` routing was already right.
+- **Examples no longer default to retired model ids.** `release_smoke`
+  (`gemini-3-pro` → `gemini-3.1-pro-preview`, `deepseek-chat` →
+  `deepseek-flash`), `long_horizon` (`deepseek-chat` → `deepseek-flash`), `rlm`
+  (`grok-4-1-fast-reasoning` → `grok-4.7`) and the `cli` per-provider defaults
+  (xAI `grok-4.7`, Groq `openai/gpt-oss-120b`, DeepSeek `deepseek-flash`,
+  MiniMax `MiniMax-M3`, Google `gemini-3.8-flash`). `llm_compaction_live`
+  prices `deepseek-flash` and corrects the Flash peak rates to $0.30 / $1.20 /
+  $0.006 cache hit per million.
 
 
 ## 0.18.1

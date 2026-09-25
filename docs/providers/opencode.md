@@ -6,15 +6,16 @@ The gateways serve different model families over different protocols. The preset
 
 | Gateway | Model family | Protocol | Pair with |
 |---------|-------------|----------|-----------|
-| Zen | `gpt-*` | OpenAI Responses | `OpenAiResponsesProvider` |
+| Zen | `gpt-*`, `grok-*`, `muse-spark-*` | OpenAI Responses | `OpenAiResponsesProvider` |
 | Zen | `claude-*`, `qwen*` | Anthropic Messages | `AnthropicProvider` |
 | Zen | DeepSeek, MiniMax, GLM, Kimi, ... | Chat Completions | `OpenAiCompatProvider` |
+| Go | `gpt-*`, `grok-*`, `muse-spark-*` | OpenAI Responses | `OpenAiResponsesProvider` |
 | Go | `qwen*`, `minimax-*` | Anthropic Messages | `AnthropicProvider` |
 | Go | GLM, Kimi, DeepSeek, MiMo, ... | Chat Completions | `OpenAiCompatProvider` |
 
 Gemini models on Zen are **not supported** — Zen serves them over a Google-native endpoint shape yoagent does not target. A `gemini-*` id falls through to Chat Completions (with a warning logged) and will fail at request time.
 
-The routing table mirrors the Zen/Go endpoint docs as of mid-2026. OpenCode can change gateway-side routing at any time — if a model errors, verify its protocol against `{base}/models`.
+The routing table mirrors the Zen/Go endpoint docs as of September 2026. OpenCode can change gateway-side routing at any time — if a model errors, verify its protocol against `{base}/models`.
 
 ## Usage
 
@@ -53,6 +54,6 @@ config.context_window = 256_000;
 ## Endpoints
 
 - Zen: `https://opencode.ai/zen/v1/{chat/completions | messages | responses}`
-- Go: `https://opencode.ai/zen/go/v1/{chat/completions | messages}`
+- Go: `https://opencode.ai/zen/go/v1/{chat/completions | messages | responses}`
 
 Model list and metadata: `https://opencode.ai/zen/v1/models` and `https://opencode.ai/zen/go/v1/models`.

@@ -209,11 +209,11 @@ fn transcript_is_well_formed(messages: &[AgentMessage]) -> Result<(), String> {
 fn model() -> ModelConfig {
     match std::env::var("SMOKE_MODEL").ok().as_deref() {
         Some("gpt") => ModelConfig::openai("gpt-5.5", "GPT-5.5"),
-        Some("gemini") => ModelConfig::google("gemini-3-pro", "Gemini 3 Pro"),
+        Some("gemini") => ModelConfig::google("gemini-3.1-pro-preview", "Gemini 3.1 Pro Preview"),
         // The OpenAI-compat path is a separate provider implementation from
         // Anthropic's, with its own SSE parsing and tool-call accumulation —
         // worth running before a release, not just one provider.
-        Some("deepseek") => ModelConfig::deepseek("deepseek-chat", "DeepSeek Chat"),
+        Some("deepseek") => ModelConfig::deepseek("deepseek-flash", "DeepSeek Flash"),
         _ => ModelConfig::claude_sonnet_5(),
     }
 }

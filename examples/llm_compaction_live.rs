@@ -110,7 +110,10 @@ fn priced(id: &str) -> ModelConfig {
         // column over-reports rather than under-reports off-peak runs.
         // DeepSeek has no cache-write category at all: populating its cache
         // is free, which is the asymmetry the provider comparison turns on.
-        "deepseek-v4-flash" => deepseek_priced("deepseek-v4-flash", 0.44, 1.32, 0.014),
+        // `deepseek-v4-flash` is a legacy name DeepSeek still accepts, served
+        // by V4.1 Flash and billed at the Flash price.
+        "deepseek-flash" => deepseek_priced("deepseek-flash", 0.30, 1.20, 0.006),
+        "deepseek-v4-flash" => deepseek_priced("deepseek-v4-flash", 0.30, 1.20, 0.006),
         "deepseek-v4-pro" => deepseek_priced("deepseek-v4-pro", 1.32, 3.96, 0.044),
         other if other.starts_with("deepseek") => {
             note_unpriced(other);

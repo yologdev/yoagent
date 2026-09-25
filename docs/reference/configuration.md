@@ -165,7 +165,7 @@ as `deepseek(id, name)` or `openai(id, name)` cannot know the model's price and
 return `None`. Supply one when you know it:
 
 ```rust
-let mut config = ModelConfig::deepseek("deepseek-v4-flash", "DeepSeek V4 Flash");
+let mut config = ModelConfig::deepseek("deepseek-flash", "DeepSeek Flash");
 config.cost = Some(CostConfig::new(0.15, 0.60));
 ```
 
@@ -193,7 +193,7 @@ billed at a real `$0`. Price a generic constructor with every rate you pay
 instead:
 
 ```rust
-let mut config = ModelConfig::deepseek("deepseek-v4-flash", "DeepSeek V4 Flash");
+let mut config = ModelConfig::deepseek("deepseek-flash", "DeepSeek Flash");
 // Rates per million tokens; take them from the vendor's pricing page.
 config.cost = Some(CostConfig::new(INPUT, OUTPUT).with_cache_read(CACHE_READ));
 ```

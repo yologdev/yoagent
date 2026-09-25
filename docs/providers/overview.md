@@ -53,12 +53,12 @@ First-class model presets are documented in [Model Presets](model-presets.md). C
 ```rust
 let anthropic = ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5");
 let openai = ModelConfig::openai("gpt-5.5", "GPT-5.5");
-let google = ModelConfig::google("gemini-2.5-flash", "Gemini 2.5 Flash");
-let xai = ModelConfig::xai("grok-4-1-fast", "Grok 4.1 Fast");
-let groq = ModelConfig::groq("llama-3.3-70b-versatile", "Llama 3.3 70B");
-let deepseek = ModelConfig::deepseek("deepseek-v4-flash", "DeepSeek V4 Flash");
+let google = ModelConfig::google("gemini-3.8-flash", "Gemini 3.8 Flash");
+let xai = ModelConfig::xai("grok-4.7", "Grok 4.7");
+let groq = ModelConfig::groq("openai/gpt-oss-120b", "GPT-OSS 120B");
+let deepseek = ModelConfig::deepseek("deepseek-flash", "DeepSeek Flash");
 let mistral = ModelConfig::mistral("mistral-large-latest", "Mistral Large");
-let minimax = ModelConfig::minimax("MiniMax-Text-01", "MiniMax Text 01");
+let minimax = ModelConfig::minimax("MiniMax-M3", "MiniMax M3");
 let zai = ModelConfig::zai("glm-4.7", "GLM 4.7");
 let qwen = ModelConfig::qwen("qwen3.6-plus", "Qwen 3.6 Plus");
 let ollama = ModelConfig::ollama("http://localhost:11434/v1", "llama3.1:8b");

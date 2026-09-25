@@ -121,7 +121,7 @@ The primary constructor is `Agent::from_config(ModelConfig)`: it selects the bui
 
 ```rust
 // provider auto-selected, key from XAI_API_KEY
-let agent = Agent::from_config(ModelConfig::xai("grok-4-1-fast", "Grok 4.1 Fast"));
+let agent = Agent::from_config(ModelConfig::xai("grok-4.7", "Grok 4.7"));
 ```
 
 Other constructors:

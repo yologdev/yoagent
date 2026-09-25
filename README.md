@@ -58,7 +58,7 @@ Point it at a hosted model instead by swapping the flag:
 
 ```bash
 ANTHROPIC_API_KEY=sk-... cargo run --example cli
-GROQ_API_KEY=...        cargo run --example cli -- --provider groq --model llama-3.3-70b-versatile
+GROQ_API_KEY=...        cargo run --example cli -- --provider groq --model openai/gpt-oss-120b
 cargo run --example cli -- --api-url http://localhost:1234/v1 --model my-model   # LM Studio, llama.cpp, vLLM
 ```
 
@@ -106,9 +106,9 @@ Swap the model by swapping the config — the provider follows, and the key is r
 provider's conventional env var:
 
 ```rust
-Agent::from_config(ModelConfig::groq("llama-3.3-70b-versatile", "Llama 3.3 70B")); // GROQ_API_KEY
-Agent::from_config(ModelConfig::google("gemini-2.5-pro", "Gemini 2.5 Pro"));       // GEMINI_API_KEY
-Agent::from_config(ModelConfig::ollama("http://localhost:11434", "llama3.1:8b"));  // no key
+Agent::from_config(ModelConfig::groq("openai/gpt-oss-120b", "GPT-OSS 120B"));    // GROQ_API_KEY
+Agent::from_config(ModelConfig::google("gemini-3.8-flash", "Gemini 3.8 Flash")); // GEMINI_API_KEY
+Agent::from_config(ModelConfig::ollama("http://localhost:11434", "llama3.1:8b")); // no key
 ```
 
 ---
