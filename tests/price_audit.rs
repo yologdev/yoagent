@@ -49,9 +49,14 @@
 //!   of coverage is the failure this catches.
 //! - **absent is not zero.** A missing `cache_write` prints `—`, never `0`, so
 //!   the table never claims a comparison it did not make.
-//! - **unknown cost keys fail.** models.dev carries tiered pricing that flat
-//!   [`CostConfig`] cannot express; ignoring the structure would certify a
-//!   preset that is knowably wrong above the tier boundary.
+//! - **unknown cost keys fail.** models.dev carries structure this audit may
+//!   not understand; ignoring it would certify a preset that is knowably
+//!   wrong somewhere.
+//! - **tiers are compared, not waved through.** A preset with context tiers
+//!   is checked tier by tier — threshold and all four rates — against
+//!   models.dev's `tiers` array (and its `context_over_200k` mirror). A tiered
+//!   preset against a flat upstream, or the reverse, or a different number of
+//!   tiers, is drift.
 //! - **HTTP status is checked**, and a non-JSON body reports the status,
 //!   content type and first bytes rather than a bare parse error.
 
@@ -60,8 +65,18 @@ use yoagent::provider::{CostConfig, ModelConfig};
 const DB_URL: &str = "https://models.dev/api.json";
 
 /// Cost keys this audit understands. Anything else means models.dev is
-/// describing pricing structure the flat [`CostConfig`] cannot represent.
+/// describing pricing structure this audit does not compare.
 const KNOWN_COST_KEYS: [&str; 4] = ["input", "output", "cache_read", "cache_write"];
+
+/// models.dev's context-tier keys. Understood — and compared — only for a
+/// preset that is itself tiered; on a flat preset they are unknown structure
+/// and fail like any other unrecognised key.
+///
+/// `context_over_200k` is models.dev's older single-tier encoding, still
+/// emitted beside `tiers` with the same rates (whatever its name says, on the
+/// OpenAI entries it mirrors a 272K tier). It is compared against the
+/// preset's first tier so the two encodings cannot drift apart unnoticed.
+const TIER_KEYS: [&str; 2] = ["tiers", "context_over_200k"];
 
 /// A priced preset and where to look when it drifts.
 struct Preset {
@@ -83,6 +98,9 @@ struct Preset {
     /// express. Records *exactly* what was acknowledged, so the note cannot
     /// become a blanket amnesty for whatever appears later.
     flat_rate_gap: Option<FlatRateGap>,
+    /// A caveat printed with the results — a rate that matches upstream but
+    /// that the vendor's page does not itself state.
+    note: Option<&'static str>,
 }
 
 /// A recorded, verified gap between what models.dev carries and what a flat
@@ -97,6 +115,10 @@ struct Preset {
 ///
 /// So the acknowledgement names the keys and the rates it was made against, and
 /// both directions are assertions.
+///
+/// No preset records one today: `gpt_5_5`, the only one that ever did, is now
+/// tiered and compared tier by tier. Kept for the next genuine disagreement.
+#[allow(dead_code)]
 struct FlatRateGap {
     /// Cost keys this gap covers. Any *other* unknown key is drift.
     keys: &'static [&'static str],
@@ -126,6 +148,17 @@ fn presets() -> Vec<Preset> {
         cost: rates(constructor, config),
         absent_upstream: None,
         flat_rate_gap: None,
+        note: None,
+    };
+    let gpt = |constructor, model, config: ModelConfig| Preset {
+        constructor,
+        provider: "openai",
+        model,
+        vendor_page: openai,
+        cost: rates(constructor, config),
+        absent_upstream: None,
+        flat_rate_gap: None,
+        note: None,
     };
     vec![
         claude(
@@ -164,41 +197,33 @@ fn presets() -> Vec<Preset> {
             ModelConfig::claude_haiku_4_5(),
         ),
         Preset {
-            constructor: "ModelConfig::gpt_5_5",
-            provider: "openai",
-            model: "gpt-5.5",
-            vendor_page: openai,
-            cost: rates("ModelConfig::gpt_5_5", ModelConfig::gpt_5_5()),
-            absent_upstream: None,
-            flat_rate_gap: Some(FlatRateGap {
-                keys: &["tiers", "context_over_200k"],
-                rates: &[
-                    ("/context_over_200k/input", 10.0),
-                    ("/context_over_200k/output", 45.0),
-                    ("/context_over_200k/cache_read", 1.0),
-                    ("/tiers/0/input", 10.0),
-                    ("/tiers/0/output", 45.0),
-                    ("/tiers/0/cache_read", 1.0),
-                    ("/tiers/0/tier/size", 272000.0),
-                ],
-                why: "models.dev says gpt-5.5 is tiered at 272K; the preset is \
-                      deliberately flat and `ModelConfig::gpt_5_5` documents why. \
-                      Short version: OpenAI publishes a >272K schedule but gpt-5.5 \
-                      has no row in it, the one gpt-5.5 row that appears in a \
-                      long-context table has `-` in every long-context cell, and \
-                      $10/$1/$45 is verbatim `gpt-5.6-sol`'s long-context rates \
-                      on a model with identical short-context rates. models.dev \
-                      also contradicts itself here — `tiers[0].tier.size` is \
-                      272000 beside a key named `context_over_200k`. \
-                      \
-                      The `rates` above are asserted, so this stays honest in both \
-                      directions: if upstream revises the numbers or drops the \
-                      claim, this fails and the decision gets re-made against new \
-                      evidence rather than silently inheriting an old one. \
-                      `CostConfig::with_context_tier` is ready if OpenAI publishes \
-                      a gpt-5.5 long-context row.",
-            }),
+            note: Some(
+                "gpt_5_5's >272K cache_read ($1.00) is UNVERIFIED. The model page \
+                 (developers.openai.com/api/docs/models/gpt-5.5) says only that \
+                 \"prompts with >272K input tokens are priced at 2x input and 1.5x \
+                 output for the full session\" — it names no cache rate, and the \
+                 pricing page no longer lists gpt-5.5. $1.00 (2x, as the GPT-6 pages \
+                 state for their cache rates) matches models.dev; the literal \
+                 reading would keep $0.50. It is set because an unset tier rate \
+                 bills $0, not the base rate. Input $10 and output $45 are stated.",
+            ),
+            ..gpt("ModelConfig::gpt_5_5", "gpt-5.5", ModelConfig::gpt_5_5())
         },
+        gpt(
+            "ModelConfig::gpt_6_astra",
+            "gpt-6-astra",
+            ModelConfig::gpt_6_astra(),
+        ),
+        gpt(
+            "ModelConfig::gpt_6_sol",
+            "gpt-6-sol",
+            ModelConfig::gpt_6_sol(),
+        ),
+        gpt(
+            "ModelConfig::gpt_6_luna",
+            "gpt-6-luna",
+            ModelConfig::gpt_6_luna(),
+        ),
         Preset {
             // Generic over the model id; these rates are Muse Spark 1.1/1.2.
             constructor: "ModelConfig::meta",
@@ -211,6 +236,7 @@ fn presets() -> Vec<Preset> {
             ),
             absent_upstream: None,
             flat_rate_gap: None,
+            note: None,
         },
     ]
 }
@@ -304,9 +330,11 @@ async fn hardcoded_prices_have_not_drifted() {
         // Structure this audit does not understand is a reason to fail, not to
         // read past. Tiered rates mean the flat preset is wrong somewhere.
         if let Some(obj) = cost.as_object() {
+            let tiered = !p.cost.context_tiers.is_empty();
             let unknown: Vec<String> = obj
                 .keys()
                 .filter(|k| !KNOWN_COST_KEYS.contains(&k.as_str()))
+                .filter(|k| !(tiered && TIER_KEYS.contains(&k.as_str())))
                 .cloned()
                 .collect();
 
@@ -422,6 +450,151 @@ async fn hardcoded_prices_have_not_drifted() {
                 }
             }
         }
+
+        // Context tiers, when the preset has any: threshold and every rate of
+        // every tier. A flat preset never reaches here — upstream tiers on it
+        // were reported as unknown keys above.
+        if !p.cost.context_tiers.is_empty() {
+            let upstream_tiers = cost.get("tiers").and_then(|t| t.as_array());
+            let Some(upstream_tiers) = upstream_tiers else {
+                drift.push(format!(
+                    "{}: {} is tiered at {:?} but models.dev carries no `tiers` array. \
+                     Either upstream flattened it or the key moved — check {}.",
+                    p.model,
+                    p.constructor,
+                    p.cost
+                        .context_tiers
+                        .iter()
+                        .map(|t| t.above_prompt_tokens)
+                        .collect::<Vec<_>>(),
+                    p.vendor_page
+                ));
+                // Account for the fields as compared-and-failed so the
+                // coverage assertion does not fire on top of the real error.
+                compared += 5 * p.cost.context_tiers.len();
+                continue;
+            };
+            if upstream_tiers.len() != p.cost.context_tiers.len() {
+                drift.push(format!(
+                    "{}: {} has {} context tier(s), models.dev has {}. Check {}.",
+                    p.model,
+                    p.constructor,
+                    p.cost.context_tiers.len(),
+                    upstream_tiers.len(),
+                    p.vendor_page
+                ));
+            }
+            for (i, ours) in p.cost.context_tiers.iter().enumerate() {
+                let label = format!("tier{i}");
+                let Some(theirs) = upstream_tiers.get(i) else {
+                    compared += 5;
+                    continue;
+                };
+                let size = theirs.pointer("/tier/size").and_then(|v| v.as_f64());
+                compared += 1;
+                let same_size = size == Some(ours.above_prompt_tokens as f64);
+                println!(
+                    "{:<30} {:<14} {:>10} {:>12}  {}",
+                    p.model,
+                    format!("{label}.above"),
+                    ours.above_prompt_tokens,
+                    size.map_or("—".into(), |s| s.to_string()),
+                    if same_size { "ok" } else { "DRIFT" }
+                );
+                if !same_size {
+                    drift.push(format!(
+                        "{}: {label} starts above {} prompt tokens in the crate, models.dev \
+                         says {size:?}. Check {}.",
+                        p.model, ours.above_prompt_tokens, p.vendor_page
+                    ));
+                }
+                for (name, ours) in [
+                    ("input", ours.input_per_million),
+                    ("output", ours.output_per_million),
+                    ("cache_read", ours.cache_read_per_million),
+                    ("cache_write", ours.cache_write_per_million),
+                ] {
+                    let field_name = format!("{label}.{name}");
+                    match field(theirs, name) {
+                        Upstream::Value(v) => {
+                            compared += 1;
+                            let same = (ours - v).abs() < 1e-9;
+                            println!(
+                                "{:<30} {:<14} {:>10} {:>12}  {}",
+                                p.model,
+                                field_name,
+                                ours,
+                                v,
+                                if same { "ok" } else { "DRIFT" }
+                            );
+                            if !same {
+                                drift.push(format!(
+                                    "{}: {field_name} is {ours} in the crate, {v} in models.dev \
+                                     — check {} and edit {} if the vendor agrees",
+                                    p.model, p.vendor_page, p.constructor
+                                ));
+                            }
+                        }
+                        Upstream::Absent => {
+                            absent += 1;
+                            println!(
+                                "{:<30} {:<14} {:>10} {:>12}  not listed upstream",
+                                p.model, field_name, ours, "—"
+                            );
+                            if ours != 0.0 {
+                                drift.push(format!(
+                                    "{}: {field_name} is {ours} in the crate and models.dev \
+                                     does not list it — one of the two is wrong. Check {}.",
+                                    p.model, p.vendor_page
+                                ));
+                            }
+                        }
+                        Upstream::Malformed(raw) => {
+                            compared += 1;
+                            drift.push(format!(
+                                "{}: {field_name} is {raw} in models.dev, not a number.",
+                                p.model
+                            ));
+                        }
+                    }
+                }
+            }
+            // The legacy mirror must agree with the first tier. Not counted
+            // toward coverage — it duplicates `tiers[0]` — but a disagreement
+            // is drift either way.
+            if let (Some(mirror), Some(first)) =
+                (cost.get("context_over_200k"), p.cost.context_tiers.first())
+            {
+                for (name, ours) in [
+                    ("input", first.input_per_million),
+                    ("output", first.output_per_million),
+                    ("cache_read", first.cache_read_per_million),
+                    ("cache_write", first.cache_write_per_million),
+                ] {
+                    let theirs = match field(mirror, name) {
+                        Upstream::Value(v) => v,
+                        Upstream::Absent => 0.0,
+                        Upstream::Malformed(raw) => {
+                            drift.push(format!(
+                                "{}: context_over_200k.{name} is {raw}, not a number.",
+                                p.model
+                            ));
+                            continue;
+                        }
+                    };
+                    if (ours - theirs).abs() >= 1e-9 {
+                        drift.push(format!(
+                            "{}: context_over_200k.{name} is {theirs} in models.dev but the \
+                             crate's first tier says {ours}. Check {}.",
+                            p.model, p.vendor_page
+                        ));
+                    }
+                }
+            }
+        }
+        if let Some(n) = p.note {
+            notes.push(format!("{}: {n}", p.model));
+        }
     }
 
     println!("{}", "-".repeat(72));
@@ -449,7 +622,7 @@ async fn hardcoded_prices_have_not_drifted() {
     // green pass. Pin the floor against something independent: the number of
     // priced constructors in `src/provider/model.rs`. Raise it when you add
     // one, which is the moment you should also be adding it here.
-    const PRICED_PRESETS: usize = 9;
+    const PRICED_PRESETS: usize = 12;
     assert!(
         all.len() >= PRICED_PRESETS,
         "\n\nThe audit is checking {} presets but the crate ships at least {PRICED_PRESETS}. \
@@ -458,7 +631,8 @@ async fn hardcoded_prices_have_not_drifted() {
         all.len()
     );
 
-    let expected = all.len() * 4;
+    // Four base rates per preset, plus threshold + four rates per tier.
+    let expected: usize = all.iter().map(|p| 4 + 5 * p.cost.context_tiers.len()).sum();
     assert_eq!(
         compared + absent,
         expected,
@@ -521,8 +695,8 @@ fn is_configured_means_any_rate_set() {
 
 /// A request above the tier boundary must cost the tier rate.
 ///
-/// Built from a literal, not a preset: no shipped preset is tiered today, and
-/// this must keep testing the mechanism if that stays true. The boundary is
+/// Built from a literal, not a preset, so it keeps testing the mechanism
+/// whatever happens to the shipped presets' rates. The boundary is
 /// compared against *prompt* tokens — `input + cache_read + cache_write` — so a
 /// long reply to a short prompt stays on the base rate.
 #[test]

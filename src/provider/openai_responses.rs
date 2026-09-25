@@ -3,7 +3,7 @@
 //! This is the newer OpenAI API that uses a different event format
 //! from Chat Completions. It has first-class support for reasoning items.
 
-use super::model::ModelConfig;
+use super::model::{ModelConfig, OpenAiCompat};
 use super::responses_stream::{Flow, ResponsesStreamState};
 use super::traits::*;
 use crate::types::*;
@@ -106,7 +106,7 @@ impl StreamProvider for OpenAiResponsesProvider {
     }
 }
 
-fn build_request_body(config: &StreamConfig, _model_config: &ModelConfig) -> serde_json::Value {
+fn build_request_body(config: &StreamConfig, model_config: &ModelConfig) -> serde_json::Value {
     let mut input: Vec<serde_json::Value> = Vec::new();
 
     for msg in &config.messages {
@@ -243,15 +243,12 @@ fn build_request_body(config: &StreamConfig, _model_config: &ModelConfig) -> ser
         body["tools"] = serde_json::json!(tools);
     }
 
-    if config.thinking_level != ThinkingLevel::Off {
-        let effort = match config.thinking_level {
-            ThinkingLevel::Minimal | ThinkingLevel::Low => "low",
-            ThinkingLevel::Medium => "medium",
-            // Clamped: `high` is the top rung this crate knows the provider
-            // accepts, and an unknown effort string is rejected, not rounded.
-            ThinkingLevel::High | ThinkingLevel::XHigh | ThinkingLevel::Max => "high",
-            ThinkingLevel::Off => unreachable!(),
-        };
+    // The effort capability comes from `model_config.compat` (see
+    // `OpenAiCompat::max_reasoning_effort`); `None` means a `high` ceiling
+    // and no `none` rung, which is what this provider always sent before.
+    let default_compat = OpenAiCompat::default();
+    let compat = model_config.compat.as_ref().unwrap_or(&default_compat);
+    if let Some(effort) = compat.openai_reasoning_effort(config.thinking_level) {
         body["reasoning"] = serde_json::json!({"effort": effort});
     }
 
@@ -260,4 +257,103 @@ fn build_request_body(config: &StreamConfig, _model_config: &ModelConfig) -> ser
     }
 
     body
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::model::ReasoningEffortCeiling;
+
+    const ALL_LEVELS: [ThinkingLevel; 7] = [
+        ThinkingLevel::Off,
+        ThinkingLevel::Minimal,
+        ThinkingLevel::Low,
+        ThinkingLevel::Medium,
+        ThinkingLevel::High,
+        ThinkingLevel::XHigh,
+        ThinkingLevel::Max,
+    ];
+
+    fn body(mc: &ModelConfig, level: ThinkingLevel) -> serde_json::Value {
+        let mut config = StreamConfig::new(mc.id.clone(), "key");
+        config.messages = vec![Message::user("hi")];
+        config.thinking_level = level;
+        config.temperature = Some(0.5);
+        config.model_config = Some(mc.clone());
+        build_request_body(&config, mc)
+    }
+
+    fn effort(mc: &ModelConfig, level: ThinkingLevel) -> serde_json::Value {
+        body(mc, level)["reasoning"]["effort"].clone()
+    }
+
+    #[test]
+    fn without_compat_the_body_is_what_it_always_was() {
+        // Near-miss guard: `openai_responses` carries `compat: None`, and a
+        // Responses config built before this fix must send byte-identical
+        // bodies — Off omits `reasoning`, XHigh/Max clamp to `high`.
+        let mc = ModelConfig::openai_responses("gpt-5.5", "GPT-5.5");
+        assert!(mc.compat.is_none());
+        for level in ALL_LEVELS {
+            let expected_effort = match level {
+                ThinkingLevel::Off => None,
+                ThinkingLevel::Minimal | ThinkingLevel::Low => Some("low"),
+                ThinkingLevel::Medium => Some("medium"),
+                _ => Some("high"),
+            };
+            let got = body(&mc, level);
+            let mut expected = serde_json::json!({
+                "model": "gpt-5.5",
+                "stream": true,
+                "input": [{"role": "user", "content": "hi"}],
+                "temperature": 0.5,
+            });
+            if let Some(e) = expected_effort {
+                expected["reasoning"] = serde_json::json!({"effort": e});
+            }
+            assert_eq!(
+                serde_json::to_string(&got).unwrap(),
+                serde_json::to_string(&expected).unwrap(),
+                "{level:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn compat_ceiling_is_honoured() {
+        // Positive control: the Responses builder used to ignore
+        // `model_config.compat` entirely.
+        let mut mc = ModelConfig::openai_responses("gpt-5.4", "GPT-5.4");
+        mc.compat = Some(OpenAiCompat {
+            max_reasoning_effort: ReasoningEffortCeiling::XHigh,
+            ..Default::default()
+        });
+        assert_eq!(effort(&mc, ThinkingLevel::XHigh), "xhigh");
+        assert_eq!(effort(&mc, ThinkingLevel::Max), "xhigh");
+        assert_eq!(effort(&mc, ThinkingLevel::High), "high");
+        assert!(body(&mc, ThinkingLevel::Off).get("reasoning").is_none());
+    }
+
+    #[test]
+    fn gpt_6_astra_reaches_max_and_never_sends_none() {
+        let mc = ModelConfig::gpt_6_astra();
+        assert_eq!(effort(&mc, ThinkingLevel::Max), "max");
+        assert_eq!(effort(&mc, ThinkingLevel::XHigh), "xhigh");
+        assert_eq!(effort(&mc, ThinkingLevel::High), "high");
+        assert_eq!(effort(&mc, ThinkingLevel::Medium), "medium");
+        // GPT-6 has no `minimal`.
+        assert_eq!(effort(&mc, ThinkingLevel::Minimal), "low");
+        // `none` is an HTTP 400 on Astra: Off omits the effort instead.
+        assert!(body(&mc, ThinkingLevel::Off).get("reasoning").is_none());
+    }
+
+    #[test]
+    fn gpt_6_sol_and_luna_send_none_for_off() {
+        for mc in [ModelConfig::gpt_6_sol(), ModelConfig::gpt_6_luna()] {
+            assert_eq!(effort(&mc, ThinkingLevel::Off), "none", "{}", mc.id);
+            assert_eq!(effort(&mc, ThinkingLevel::Max), "max", "{}", mc.id);
+            assert_eq!(effort(&mc, ThinkingLevel::XHigh), "xhigh", "{}", mc.id);
+            assert_eq!(effort(&mc, ThinkingLevel::Low), "low", "{}", mc.id);
+        }
+    }
 }

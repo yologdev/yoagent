@@ -563,20 +563,32 @@ pub enum CacheStrategy {
 /// unclamped, so a model with a shorter effort ladder can reject it (see
 /// below). What each level becomes, per provider:
 ///
-/// | Level     | Anthropic (adaptive) | Anthropic legacy / Bedrock budget | OpenAI-compat `reasoning_effort`¹ | DeepSeek `reasoning_effort`² | OpenAI Responses / Azure `reasoning.effort` | Gemini 2.x / Vertex `thinkingBudget`³ |
-/// |-----------|----------|--------|----------|--------|----------|--------|
-/// | `Off`     | (no thinking) | (no thinking) | (omitted) | (omitted; `thinking: disabled`) | (omitted) | (omitted) |
-/// | `Minimal` | `low`    | 1,024  | `low`    | `low`  | `low`    | 1,024  |
-/// | `Low`     | `low`    | 1,024  | `low`    | `low`  | `low`    | 1,024  |
-/// | `Medium`  | `medium` | 2,048  | `medium` | `medium` (DeepSeek rounds up to `high`) | `medium` | 8,192  |
-/// | `High`    | `high`   | 8,192  | `high`   | `high` | `high`   | 24,576 |
-/// | `XHigh`   | `xhigh`  | 16,384 | `high` *(clamped)* | `high` *(clamped)* | `high` *(clamped)* | 24,576 *(clamped)* |
-/// | `Max`     | `max`    | 30,720 | `high` *(clamped)* | `max` | `high` *(clamped)* | 24,576 *(clamped)* |
+/// | Level     | Anthropic (adaptive) | Anthropic legacy / Bedrock budget | OpenAI-compat `reasoning_effort`¹ / OpenAI Responses / Azure `reasoning.effort`, by ceiling⁴ | DeepSeek `reasoning_effort`² | Gemini 2.x / Vertex `thinkingBudget`³ |
+/// |-----------|----------|--------|----------|--------|--------|
+/// | `Off`     | (no thinking) | (no thinking) | `none` with [`OpenAiCompat::supports_effort_none`], else (omitted) | (omitted; `thinking: disabled`) | (omitted) |
+/// | `Minimal` | `low`    | 1,024  | `low`    | `low`  | 1,024  |
+/// | `Low`     | `low`    | 1,024  | `low`    | `low`  | 1,024  |
+/// | `Medium`  | `medium` | 2,048  | `medium` | `medium` (DeepSeek rounds up to `high`) | 8,192  |
+/// | `High`    | `high`   | 8,192  | `high`   | `high` | 24,576 |
+/// | `XHigh`   | `xhigh`  | 16,384 | `High`: `high` *(clamped)*; `XHigh`, `Max`: `xhigh` | `high` *(clamped)* | 24,576 *(clamped)* |
+/// | `Max`     | `max`    | 30,720 | `High`: `high` *(clamped)*; `XHigh`: `xhigh` *(clamped)*; `Max`: `max` | `max` | 24,576 *(clamped)* |
 ///
-/// ¹ Only when [`OpenAiCompat::supports_reasoning_effort`] is set; otherwise
-/// no `reasoning_effort` is sent. Omitting it does not always mean "no
-/// reasoning": xAI's Grok cannot disable reasoning, so `Off` leaves it at its
-/// default (`high`).
+/// ¹ On Chat Completions, only when
+/// [`OpenAiCompat::supports_reasoning_effort`] is set; otherwise no
+/// `reasoning_effort` is sent. The Responses and Azure providers always send
+/// `reasoning.effort`, except for an omitted `Off`. Omitting it does not mean
+/// "no reasoning": an OpenAI reasoning model runs at its default (`medium`),
+/// which is why `Off` sends `none` where the model has that rung, and xAI's
+/// Grok cannot disable reasoning at all, so `Off` leaves it at its default
+/// (`high`).
+///
+/// ⁴ The ceiling is [`OpenAiCompat::max_reasoning_effort`], a
+/// [`ReasoningEffortCeiling`] declared per model (default `High`); the
+/// Responses and Azure providers read it, and `supports_effort_none`, from
+/// `ModelConfig::compat`. Presets: `gpt_6_astra` — `Max`, no `none` (a 400 on
+/// Astra); `gpt_6_sol`, `gpt_6_luna` — `Max`, `none`; `gpt_5_5` — `XHigh`,
+/// `none`; [`OpenAiCompat::xai`] — `XHigh` (Grok models without the rung
+/// treat `xhigh` as `high`); every other config `High`, no `none`.
 ///
 /// ² "DeepSeek" means any OpenAI-compat provider with both
 /// [`OpenAiCompat::supports_thinking_control`] and
@@ -620,6 +632,10 @@ pub enum CacheStrategy {
 ///
 /// [`OpenAiCompat::supports_thinking_control`]: crate::provider::OpenAiCompat::supports_thinking_control
 /// [`OpenAiCompat::supports_reasoning_effort`]: crate::provider::OpenAiCompat::supports_reasoning_effort
+/// [`OpenAiCompat::supports_effort_none`]: crate::provider::OpenAiCompat::supports_effort_none
+/// [`OpenAiCompat::max_reasoning_effort`]: crate::provider::OpenAiCompat::max_reasoning_effort
+/// [`OpenAiCompat::xai`]: crate::provider::OpenAiCompat::xai
+/// [`ReasoningEffortCeiling`]: crate::provider::ReasoningEffortCeiling
 /// [`GoogleCompat::thinking_level`]: crate::provider::GoogleCompat::thinking_level
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -633,13 +649,15 @@ pub enum ThinkingLevel {
     Low,
     Medium,
     High,
-    /// Above `High`, below `Max` — Anthropic's `xhigh`. Where a provider has
-    /// no `xhigh` rung it is clamped down to that provider's `High` value
-    /// (see the table above). Serializes as `"xhigh"`.
+    /// Above `High`, below `Max` — Anthropic's and OpenAI's `xhigh`. Where a
+    /// provider or model has no `xhigh` rung it is clamped down to that
+    /// provider's `High` value (see the table above). Serializes as
+    /// `"xhigh"`.
     XHigh,
-    /// The highest setting this crate sends — Anthropic's and DeepSeek's
-    /// `max`. Elsewhere it is clamped to the highest value this crate knows is
-    /// accepted, which may be below the model's real ceiling (see the table
+    /// The highest setting this crate sends — Anthropic's, DeepSeek's and
+    /// (on GPT-5.6 / GPT-6) OpenAI's `max`. Elsewhere it is clamped to the
+    /// highest value this crate knows is accepted — for OpenAI-shaped
+    /// providers, the model's declared `max_reasoning_effort` (see the table
     /// above).
     Max,
 }

@@ -6,6 +6,7 @@
 //! Base URL format: `https://{resource}.openai.azure.com/openai/deployments/{deployment}`
 //! Auth: `api-key` header or Azure AD Bearer token.
 
+use super::model::OpenAiCompat;
 use super::responses_stream::{Flow, ResponsesStreamState};
 use super::traits::*;
 use crate::types::*;
@@ -251,17 +252,18 @@ fn build_azure_request_body(config: &StreamConfig) -> serde_json::Value {
         body["temperature"] = serde_json::json!(temp);
     }
 
-    // Thinking: the Responses API's reasoning effort (same mapping as the
-    // first-party OpenAI Responses provider).
-    if config.thinking_level != ThinkingLevel::Off {
-        let effort = match config.thinking_level {
-            ThinkingLevel::Minimal | ThinkingLevel::Low => "low",
-            ThinkingLevel::Medium => "medium",
-            // Clamped: `high` is the top rung this crate knows the provider
-            // accepts, and an unknown effort string is rejected, not rounded.
-            ThinkingLevel::High | ThinkingLevel::XHigh | ThinkingLevel::Max => "high",
-            ThinkingLevel::Off => unreachable!(),
-        };
+    // Thinking: the Responses API's reasoning effort, mapped exactly as the
+    // first-party OpenAI Responses provider maps it. The effort capability
+    // comes from `ModelConfig::compat` (`OpenAiCompat::max_reasoning_effort`,
+    // `supports_effort_none`); without one, `high` is the ceiling and `Off`
+    // omits the field.
+    let default_compat = OpenAiCompat::default();
+    let compat = config
+        .model_config
+        .as_ref()
+        .and_then(|m| m.compat.as_ref())
+        .unwrap_or(&default_compat);
+    if let Some(effort) = compat.openai_reasoning_effort(config.thinking_level) {
         body["reasoning"] = serde_json::json!({"effort": effort});
     }
 
@@ -312,5 +314,66 @@ mod tests {
     fn thinking_off_omits_reasoning() {
         let body = build_azure_request_body(&config(ThinkingLevel::Off));
         assert!(body["reasoning"].is_null());
+    }
+
+    /// An Azure deployment config carrying `compat`, the way the docs show:
+    /// copied from the matching OpenAI preset.
+    fn deployment(level: ThinkingLevel, compat_from: ModelConfig) -> StreamConfig {
+        let mut mc = crate::provider::ModelConfig::custom(
+            crate::provider::ApiProtocol::AzureOpenAiResponses,
+            "azure",
+            "https://r.openai.azure.com/openai/deployments/d",
+            "gpt-6-sol",
+            "GPT-6 Sol",
+        );
+        mc.compat = compat_from.compat;
+        let mut c = config(level);
+        c.model_config = Some(mc);
+        c
+    }
+
+    use crate::provider::ModelConfig;
+
+    #[test]
+    fn compat_ceiling_and_none_are_honoured() {
+        // Positive control: Azure used to clamp regardless of the model.
+        let sol = || ModelConfig::gpt_6_sol();
+        for (level, want) in [
+            (ThinkingLevel::Off, "none"),
+            (ThinkingLevel::XHigh, "xhigh"),
+            (ThinkingLevel::Max, "max"),
+            (ThinkingLevel::High, "high"),
+        ] {
+            let body = build_azure_request_body(&deployment(level, sol()));
+            assert_eq!(body["reasoning"]["effort"], want, "{level:?}");
+        }
+        // Astra: max ceiling, no `none`.
+        let body =
+            build_azure_request_body(&deployment(ThinkingLevel::Off, ModelConfig::gpt_6_astra()));
+        assert!(body["reasoning"].is_null());
+    }
+
+    #[test]
+    fn a_model_config_without_compat_keeps_the_clamp() {
+        // Near-miss: a ModelConfig present but carrying no compat behaves
+        // exactly like no ModelConfig at all.
+        for level in [
+            ThinkingLevel::Off,
+            ThinkingLevel::Low,
+            ThinkingLevel::High,
+            ThinkingLevel::XHigh,
+            ThinkingLevel::Max,
+        ] {
+            let mut with = deployment(level, ModelConfig::mock());
+            assert!(with.model_config.as_ref().unwrap().compat.is_none());
+            with.temperature = Some(0.2);
+            let mut without = config(level);
+            without.temperature = Some(0.2);
+            assert_eq!(
+                serde_json::to_string(&build_azure_request_body(&with)).unwrap(),
+                serde_json::to_string(&build_azure_request_body(&without)).unwrap(),
+                "{level:?}"
+            );
+        }
     }
 }

@@ -47,8 +47,27 @@ Set this as `ModelConfig.base_url`. The provider appends `/responses?api-version
 
 ## Thinking
 
-`ThinkingLevel` becomes `reasoning.effort` (`XHigh`/`Max` clamp to `high`); see
-the [`ThinkingLevel` table](../reference/configuration.md#thinkinglevel).
+`ThinkingLevel` becomes `reasoning.effort`, mapped exactly as the
+[OpenAI Responses provider](openai-responses.md#thinking) maps it. A `custom`
+config has `compat: None`, so the ceiling is `high` and `Off` omits the effort.
+Declare the deployed model's capability on `compat` — copying it from the
+matching OpenAI preset is simplest:
+
+```rust
+let mut config = ModelConfig::custom(
+    ApiProtocol::AzureOpenAiResponses,
+    "azure",
+    "https://{resource}.openai.azure.com/openai/deployments/{deployment}",
+    "gpt-6-sol",
+    "GPT-6 Sol",
+);
+config.compat = ModelConfig::gpt_6_sol().compat; // ceiling `max`, `Off` → `none`
+```
+
+Azure's reasoning guide: "max works only with GPT-6 or GPT-5.6 models and the
+Responses API. xhigh works only with GPT-6, GPT-5.6, GPT-5.5, GPT-5.4, and
+gpt-5.1-codex-max models." See the
+[`ThinkingLevel` table](../reference/configuration.md#thinkinglevel).
 
 ## Message Format
 

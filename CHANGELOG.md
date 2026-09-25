@@ -137,6 +137,30 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **GPT-6 presets: `ModelConfig::gpt_6_astra()`, `gpt_6_sol()`,
+  `gpt_6_luna()`.** There is no bare `gpt-6` id. All three use the **Responses
+  API** (`openai_responses`): OpenAI's Chat Completions "does not support
+  function calling with GPT-6 Astra", and on Sol/Luna allows it "only with
+  reasoning_effort set to none", so an agent with tools needs Responses.
+  1,050,000-token context, 64K of 128K max output, effort ceiling `max`
+  (`ReasoningEffortCeiling::Max`). Sol and Luna accept effort `none`, so
+  `ThinkingLevel::Off` sends it; Astra returns 400 for `none`, so there `Off`
+  omits the effort. `temperature` is rejected while effort is not `none` — do
+  not set one with Astra. Priced per 1M tokens, with a 272K context tier (the
+  whole request moves to the long rates):
+
+  | Preset | Input | Cached | Cache write | Output | >272K in / cached / write / out |
+  |--------|------:|------:|------:|------:|------|
+  | `gpt_6_astra` | $10 | $1 | $12.50 | $50 | $20 / $2 / $25 / $75 |
+  | `gpt_6_sol` | $2 | $0.20 | $2.50 | $10 | $4 / $0.40 / $5 / $15 |
+  | `gpt_6_luna` | $0.10 | $0.01 | $0.125 | $0.50 | $0.20 / $0.02 / $0.25 / $0.75 |
+
+  Read from the raw markup of OpenAI's pricing and model pages on 2026-09-25;
+  added to the price audit, which now compares context tiers field by field.
+
+- **`OpenAiCompat::max_reasoning_effort` (`ReasoningEffortCeiling`) and
+  `OpenAiCompat::supports_effort_none`** — see Fixed (#176).
+
 - **`ModelConfig::openai_responses(id, name)`**
   ([#178](https://github.com/yologdev/yoagent/issues/178)). `ModelConfig::openai()`
   targets Chat Completions, and there was no first-party constructor for
@@ -177,6 +201,18 @@ adheres to [Semantic Versioning](https://semver.org/).
   `AnthropicCompat::with_native_structured_output` (see Breaking).
 
 ### Changed
+
+- **`ModelConfig::gpt_5_5()` bills the long-context band.** OpenAI's gpt-5.5
+  model page: "prompts with >272K input tokens are priced at 2x input and 1.5x
+  output for the full session". The preset was flat at $5/$30 and now carries a
+  `ContextTier` above 272,000 prompt tokens at $10 input / $45 output, so a
+  long-context request is no longer under-billed by half on input. The
+  long-band **cached-input rate, $1.00, is unverified**: the page names input
+  and output only, and the pricing page no longer lists gpt-5.5. It matches
+  models.dev and the 2x the GPT-6 pages state for cache rates; the literal
+  reading would keep $0.50. It is set rather than left out because an unset
+  tier rate bills $0. The old "deliberately flat" rationale — no gpt-5.5 row in
+  the pricing page's long-context table — is superseded by the model page.
 
 - **`SessionStats::cost_usd` is now sticky-`None` once a turn cannot be
   priced**, the same rule as `SubAgentSpend::merge`. Previously an unpriced
@@ -244,6 +280,41 @@ adheres to [Semantic Versioning](https://semver.org/).
   it.
 
 ### Fixed
+
+- **`ThinkingLevel::XHigh` / `Max` no longer clamp to `high` on OpenAI models
+  that accept more** ([#176](https://github.com/yologdev/yoagent/issues/176)).
+  Closes #176. The clamp was there because nothing recorded which models take
+  `xhigh`; now a model declares it. `OpenAiCompat::max_reasoning_effort` is a
+  `ReasoningEffortCeiling` (`High` / `XHigh` / `Max`, `#[non_exhaustive]`,
+  serde default `High`): `XHigh` sends `xhigh` when the ceiling is at least
+  `XHigh`; `Max` sends `max`, `xhigh` or `high` — whatever the ceiling is. It
+  is a declared capability, never inferred from the model id. Honoured by
+  Chat Completions **and** by the Responses and Azure providers, which until
+  now ignored `ModelConfig::compat` entirely; they read these two fields from
+  it and nothing else, so a Responses config opts in the same way a Chat
+  Completions one does. Per OpenAI and Azure: `max` exists on GPT-5.6 and
+  GPT-6; `xhigh` on GPT-6, GPT-5.6, GPT-5.5, GPT-5.4 (and gpt-5.2,
+  gpt-5.1-codex-max); gpt-5 and gpt-5.1 top out at `high`.
+
+  `OpenAiCompat::supports_effort_none` makes `ThinkingLevel::Off` send effort
+  `none` instead of omitting it. Omitting it never turned reasoning off on an
+  OpenAI reasoning model — it ran at the model's default, `medium` — so `Off`
+  was silently a medium-effort request.
+
+  | Preset | Ceiling | `none` | `XHigh` → | `Max` → | `Off` → |
+  |--------|---------|--------|-----------|---------|---------|
+  | `gpt_6_astra` | `Max` | no | `xhigh` | `max` | (omitted) |
+  | `gpt_6_sol`, `gpt_6_luna` | `Max` | yes | `xhigh` | `max` | `none` |
+  | `gpt_5_5` | `XHigh` | yes | `xhigh` | `xhigh` | `none` (was omitted) |
+  | `OpenAiCompat::xai()` | `XHigh` | no | `xhigh` | `xhigh` | (omitted) |
+  | everything else | `High` | no | `high` | `high` | (omitted) |
+
+  xAI gets `XHigh` on every Grok model: xAI documents that models without
+  `xhigh` treat it as `high` rather than rejecting it. DeepSeek's
+  `low`/`high`/`max` ladder (`supports_thinking_control`) is unchanged and
+  does not read the new fields. Every other existing preset sends
+  byte-identical bodies (whole-body tests across all levels); persisted
+  `OpenAiCompat` values without the fields load with the old behaviour.
 
 - **Responses and Azure OpenAI: function calls are collected again**
   ([#178](https://github.com/yologdev/yoagent/issues/178)). Both providers opened

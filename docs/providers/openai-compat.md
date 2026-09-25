@@ -29,15 +29,22 @@ pub struct OpenAiCompat {
     pub requires_tool_result_name: bool,
     pub requires_assistant_after_tool_result: bool,
     pub thinking_format: ThinkingFormat,        // OpenAi, Xai, or Qwen
+    pub supports_prompt_cache_key: bool,
+    pub replays_reasoning_content: bool,
+    pub max_reasoning_effort: ReasoningEffortCeiling, // High (default), XHigh, Max
+    pub supports_effort_none: bool,             // Off sends effort "none"
 }
 ```
+
+`OpenAiCompat` is `#[non_exhaustive]`: start from a preset or
+`Default::default()` and set fields.
 
 ## Provider Presets
 
 | Provider | Constructor | Key Differences |
 |----------|-------------|-----------------|
 | OpenAI | `OpenAiCompat::openai()` | `developer` role, `max_completion_tokens`, `store`, `reasoning_effort` |
-| xAI (Grok) | `OpenAiCompat::xai()` | `reasoning` field for thinking (not `reasoning_content`) |
+| xAI (Grok) | `OpenAiCompat::xai()` | `reasoning` field for thinking (not `reasoning_content`); effort ceiling `xhigh` |
 | Groq | `OpenAiCompat::groq()` | Standard defaults |
 | Cerebras | `OpenAiCompat::cerebras()` | Standard defaults |
 | OpenRouter | `OpenAiCompat::openrouter()` | `max_completion_tokens` |
@@ -84,27 +91,52 @@ let config = ModelConfig::openai_compat(
 
 ## Thinking/Reasoning
 
-With `supports_reasoning_effort`, `ThinkingLevel` becomes `reasoning_effort`:
+With `supports_reasoning_effort`, `ThinkingLevel` becomes `reasoning_effort`.
+How far up the ladder it goes is the model's declared
+`max_reasoning_effort` (a `ReasoningEffortCeiling`):
 
-| Level | Most providers | DeepSeek-style (`supports_thinking_control`) |
-|-------|----------------|----------------------------------------------|
-| `Minimal`, `Low` | `low` | `low` |
-| `Medium` | `medium` | `medium` (DeepSeek rounds it up to `high`) |
-| `High` | `high` | `high` |
-| `XHigh` | `high` (clamped) | `high` (clamped) |
-| `Max` | `high` (clamped) | `max` |
+| Level | Ceiling `High` (default) | Ceiling `XHigh` | Ceiling `Max` | DeepSeek-style (`supports_thinking_control`) |
+|-------|------|------|------|------|
+| `Off` | omitted, or `none`¹ | omitted, or `none`¹ | omitted, or `none`¹ | omitted; `thinking: disabled` |
+| `Minimal`, `Low` | `low` | `low` | `low` | `low` |
+| `Medium` | `medium` | `medium` | `medium` | `medium` (DeepSeek rounds it up to `high`) |
+| `High` | `high` | `high` | `high` | `high` |
+| `XHigh` | `high` (clamped) | `xhigh` | `xhigh` | `high` (clamped) |
+| `Max` | `high` (clamped) | `xhigh` (clamped) | `max` | `max` |
+
+¹ `none` when `supports_effort_none` is set. Omitting the effort does not turn
+reasoning off on an OpenAI reasoning model — it runs at the model's default,
+`medium` — so where the model has a `none` rung, `Off` must send it.
+
+A model rejects an effort string it does not know rather than rounding it,
+which is why the ceiling is declared per model and never guessed from the id.
+Per OpenAI's model pages and Azure's reasoning guide (2026-09-25): `max` exists
+on GPT-5.6 and GPT-6; `xhigh` on those plus GPT-5.5, GPT-5.4, gpt-5.2 and
+gpt-5.1-codex-max; gpt-5 and gpt-5.1 top out at `high`. `none` exists on
+gpt-5.1 and later except GPT-6 Astra. The `gpt_5_5()` preset declares `XHigh`
+and `none`; `OpenAiCompat::xai()` declares `XHigh`, because xAI treats `xhigh`
+as `high` on Grok models without the rung instead of rejecting it. For a
+model with no preset:
+
+```rust
+use yoagent::provider::{ModelConfig, ReasoningEffortCeiling};
+
+let mut config = ModelConfig::openai("gpt-5.4", "GPT-5.4");
+let compat = config.compat.as_mut().unwrap();
+compat.max_reasoning_effort = ReasoningEffortCeiling::XHigh;
+compat.supports_effort_none = true;
+```
 
 The DeepSeek-style column needs both `supports_thinking_control` and
-`supports_reasoning_effort`; `Off` is sent there as `thinking: {"type":
-"disabled"}`, not as an effort value.
-
-`high` is the top rung this crate knows most OpenAI-shaped providers accept,
-and an unknown effort string is rejected rather than rounded, so `XHigh` and
-`Max` clamp there. DeepSeek's `reasoning_effort` accepts `low`/`high`/`max`
+`supports_reasoning_effort`, and ignores `max_reasoning_effort` and
+`supports_effort_none`. DeepSeek's `reasoning_effort` accepts
+`low`/`high`/`max`
 ([DeepSeek thinking-mode docs](https://api-docs.deepseek.com/guides/thinking_mode)).
 DeepSeek itself maps a requested `xhigh` to `high`, so this crate sends `XHigh`
-as `high` there too and only `Max` selects DeepSeek's `max` rung. The OpenAI
-Responses and Azure OpenAI providers clamp `XHigh`/`Max` to `high` too.
+as `high` there too and only `Max` selects DeepSeek's `max` rung.
+
+The OpenAI Responses and Azure OpenAI providers apply the same ceiling and
+`none` columns, read from `ModelConfig::compat`.
 
 The `ThinkingFormat` enum controls how reasoning content is parsed from streams:
 
