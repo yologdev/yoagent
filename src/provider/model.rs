@@ -702,6 +702,60 @@ impl AnthropicCompat {
         self.native_structured_output = on;
         self
     }
+
+    /// Set [`bearer_auth`](Self::bearer_auth).
+    pub fn with_bearer_auth(mut self, on: bool) -> Self {
+        self.bearer_auth = on;
+        self
+    }
+
+    /// Compat flags inferred from a Claude model id, for configs built from
+    /// a bare id (the OpenCode gateways) rather than a preset.
+    ///
+    /// - Thinking: models before 4.6 (Claude 3.x, 4, 4.1, and Sonnet/Opus/
+    ///   Haiku 4.5) accept only budget-based extended thinking and reject
+    ///   `type: "adaptive"` with a 400, so they get [`legacy`](Self::legacy);
+    ///   4.6 and later get adaptive thinking.
+    /// - Structured outputs: `output_config.format` is supported from 4.5
+    ///   onwards (Haiku 4.5, Sonnet/Opus 4.5+, Fable 5+), so those ids turn on
+    ///   [`native_structured_output`](Self::native_structured_output) — needed
+    ///   for Fable 5.1 and Opus 5.5, which reject forced tool choice.
+    ///
+    /// An id with no recognizable version (a new family name, say) is treated
+    /// as current generation: adaptive thinking, native structured outputs.
+    pub fn for_claude_id(id: &str) -> Self {
+        match claude_version(id) {
+            Some(v) => {
+                let base = if v < (4, 6) {
+                    Self::legacy()
+                } else {
+                    Self::default()
+                };
+                base.with_native_structured_output(v >= (4, 5))
+            }
+            None => Self::default().with_native_structured_output(true),
+        }
+    }
+}
+
+/// `(major, minor)` of a Claude model id, in either naming scheme:
+/// `claude-{family}-{major}[-{minor}][-{date}]` (`claude-haiku-4-5`,
+/// `claude-sonnet-4-20250514`, `claude-opus-4.5`) or the older
+/// `claude-{major}[-{minor}]-{family}` (`claude-3-5-sonnet-20241022`).
+/// A date suffix is not a minor version. `None` when no version is found.
+fn claude_version(id: &str) -> Option<(u32, u32)> {
+    let lower = id.to_ascii_lowercase();
+    let rest = lower.strip_prefix("claude-")?;
+    let mut tokens = rest
+        .split(['-', '.'])
+        .skip_while(|t| t.parse::<u32>().is_err());
+    let major: u32 = tokens.next()?.parse().ok()?;
+    let minor = tokens
+        .next()
+        .filter(|t| t.len() <= 2)
+        .and_then(|t| t.parse().ok())
+        .unwrap_or(0);
+    Some((major, minor))
 }
 
 /// Quirk flags for the Gemini protocols (`GoogleGenerativeAi` and
@@ -1132,6 +1186,9 @@ impl ModelConfig {
 
     /// Claude Haiku 4.5. 200K context; defaults to 32K of the model's 64K max output.
     ///
+    /// Uses budget-based extended thinking ([`AnthropicCompat::legacy`]):
+    /// Haiku 4.5 does not support adaptive thinking.
+    ///
     /// Rates verified against <https://platform.claude.com/docs/en/about-claude/pricing>
     /// on 2026-08-19. See [`CostConfig`] — they are a snapshot, not an authority.
     pub fn claude_haiku_4_5() -> Self {
@@ -1143,7 +1200,10 @@ impl ModelConfig {
                     .with_cache_read(0.1)
                     .with_cache_write(1.25),
             ),
-            anthropic: Some(AnthropicCompat::default().with_native_structured_output(true)),
+            // Haiku 4.5 predates adaptive thinking: it accepts only
+            // `{"type": "enabled", "budget_tokens": N}` and rejects
+            // `{"type": "adaptive"}` with a 400.
+            anthropic: Some(AnthropicCompat::legacy().with_native_structured_output(true)),
             ..Self::anthropic("claude-haiku-4-5", "Claude Haiku 4.5")
         }
     }
@@ -1408,6 +1468,13 @@ impl ModelConfig {
     /// Gemini models are not supported — Zen serves them over a Google-native
     /// endpoint shape yoagent does not target. A `gemini-*` id falls through to
     /// Chat Completions (with a warning) and will likely fail at request time.
+    /// Jev models (`jev-*`) are not supported either: Zen serves them on its
+    /// `/systemone` evaluation endpoint. They fall through the same way, with
+    /// a warning.
+    ///
+    /// `claude-*` ids get [`AnthropicCompat::for_claude_id`]: budget thinking
+    /// before Claude 4.6, adaptive from 4.6, and native structured outputs
+    /// from 4.5 (so `prompt_structured` works on Fable 5.1 and Opus 5.5).
     ///
     /// The routing mirrors the Zen endpoint table as of September 2026; if a model
     /// errors, verify its protocol against `https://opencode.ai/zen/v1/models`.
@@ -1443,6 +1510,13 @@ impl ModelConfig {
                  fail at request time",
                 id
             );
+        } else if lower.starts_with("jev-") {
+            tracing::warn!(
+                "OpenCode serves Jev models on its /systemone evaluation endpoint, \
+                 which yoagent does not target; '{}' is routed to /chat/completions \
+                 and will likely fail at request time",
+                id
+            );
         }
         let anthropic_protocol = match gateway {
             OpenCodeGateway::Zen => lower.starts_with("claude-") || lower.starts_with("qwen"),
@@ -1454,10 +1528,17 @@ impl ModelConfig {
                 true,
                 None,
                 // Gateways use OpenAI-style Bearer auth, not x-api-key.
-                Some(AnthropicCompat {
-                    bearer_auth: true,
-                    ..AnthropicCompat::default()
-                }),
+                // Claude ids carry their generation's thinking mode and
+                // structured-output support; other families (Qwen, MiniMax)
+                // keep the defaults.
+                Some(
+                    if lower.starts_with("claude-") {
+                        AnthropicCompat::for_claude_id(&lower)
+                    } else {
+                        AnthropicCompat::default()
+                    }
+                    .with_bearer_auth(true),
+                ),
             )
         } else if lower.starts_with("gpt-")
             || lower.starts_with("grok-")
@@ -2040,6 +2121,79 @@ mod tests {
             assert_eq!(config.api, ApiProtocol::OpenAiCompletions, "{id}");
             assert!(config.compat.is_some());
         }
+
+        // Unsupported families fall through to Chat Completions (with a warning).
+        for id in ["gemini-3.5-pro", "jev-1"] {
+            let config = ModelConfig::opencode_zen(id);
+            assert_eq!(config.api, ApiProtocol::OpenAiCompletions, "{id}");
+        }
+    }
+
+    /// OpenCode Claude routes carry the same thinking mode and structured-output
+    /// support as the matching direct-API presets: without native structured
+    /// output, `prompt_structured` forces a tool, which Fable 5.1 and Opus 5.5
+    /// reject with a 400.
+    #[test]
+    fn opencode_claude_compat_matches_presets() {
+        for preset in [
+            ModelConfig::claude_fable_5(),
+            ModelConfig::claude_fable_5_1(),
+            ModelConfig::claude_opus_5_5(),
+            ModelConfig::claude_opus_5(),
+            ModelConfig::claude_opus_4_8(),
+            ModelConfig::claude_sonnet_5(),
+            ModelConfig::claude_haiku_4_5(),
+        ] {
+            let want = preset.anthropic.unwrap();
+            let got = ModelConfig::opencode_zen(preset.id.clone())
+                .anthropic
+                .unwrap();
+            assert!(got.bearer_auth, "{}", preset.id);
+            assert_eq!(
+                got.adaptive_thinking, want.adaptive_thinking,
+                "{}",
+                preset.id
+            );
+            assert_eq!(
+                got.native_structured_output, want.native_structured_output,
+                "{}",
+                preset.id
+            );
+        }
+
+        // Non-Claude Anthropic-protocol families keep the defaults: adaptive,
+        // tool-forced structured output.
+        let qwen = ModelConfig::opencode_zen("qwen3.7-max").anthropic.unwrap();
+        assert!(qwen.bearer_auth && qwen.adaptive_thinking && !qwen.native_structured_output);
+        let minimax = ModelConfig::opencode_go("minimax-m3").anthropic.unwrap();
+        assert!(minimax.bearer_auth && minimax.adaptive_thinking);
+        assert!(!minimax.native_structured_output);
+    }
+
+    #[test]
+    fn claude_id_compat_by_generation() {
+        // (id, adaptive thinking, native structured output)
+        for (id, adaptive, native) in [
+            ("claude-3-5-sonnet-20241022", false, false),
+            ("claude-3-7-sonnet", false, false),
+            ("claude-sonnet-4", false, false),
+            ("claude-sonnet-4-20250514", false, false),
+            ("claude-opus-4-1", false, false),
+            ("claude-opus-4-5", false, true),
+            ("claude-sonnet-4.5", false, true),
+            ("claude-haiku-4-5-20251001", false, true),
+            ("claude-sonnet-4-6", true, true),
+            ("claude-opus-4-8", true, true),
+            ("claude-sonnet-5", true, true),
+            ("claude-fable-5-1", true, true),
+            ("Claude-Opus-5-5", true, true),
+            ("claude-nextgen", true, true),
+        ] {
+            let c = AnthropicCompat::for_claude_id(id);
+            assert_eq!(c.adaptive_thinking, adaptive, "{id}");
+            assert_eq!(c.native_structured_output, native, "{id}");
+            assert!(!c.bearer_auth, "{id}");
+        }
     }
 
     #[test]
@@ -2167,8 +2321,14 @@ mod tests {
         ] {
             let compat = mc.anthropic.as_ref().expect("preset sets compat");
             assert!(compat.native_structured_output, "{}", mc.id);
-            // Everything else stays at the defaults the presets had before.
-            assert!(compat.adaptive_thinking, "{}", mc.id);
+            // Adaptive thinking from 4.6 on; Haiku 4.5 accepts only budget
+            // thinking and 400s on `type: "adaptive"`.
+            assert_eq!(
+                compat.adaptive_thinking,
+                mc.id != "claude-haiku-4-5",
+                "{}",
+                mc.id
+            );
             assert!(!compat.bearer_auth, "{}", mc.id);
         }
         assert!(ModelConfig::anthropic("claude-x", "X").anthropic.is_none());

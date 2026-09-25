@@ -1258,6 +1258,36 @@ mod tests {
         );
     }
 
+    /// Haiku 4.5 supports only budget thinking (`type: "adaptive"` is a 400),
+    /// so its preset sends `enabled` + `budget_tokens` even alongside the
+    /// native format — and `output_config` carries no `effort`.
+    #[test]
+    fn haiku_4_5_structured_with_thinking_uses_budget() {
+        let body = build_request_body(
+            &structured_config(ModelConfig::claude_haiku_4_5(), ThinkingLevel::Medium),
+            false,
+        );
+        assert_eq!(body["thinking"]["type"], "enabled", "{body}");
+        assert_eq!(
+            body["thinking"]["budget_tokens"],
+            legacy_thinking_budget(ThinkingLevel::Medium)
+        );
+        assert_eq!(
+            body["output_config"],
+            serde_json::json!({
+                "format": {"type": "json_schema", "schema": structured_schema().schema},
+            })
+        );
+        assert!(body.get("tool_choice").is_none());
+
+        // Without a schema, too: never adaptive on Haiku 4.5.
+        let mut plain = structured_config(ModelConfig::claude_haiku_4_5(), ThinkingLevel::High);
+        plain.output_schema = None;
+        let body = build_request_body(&plain, false);
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert!(body.get("output_config").is_none(), "{body}");
+    }
+
     #[test]
     fn test_tool_result_with_image() {
         let config = StreamConfig {

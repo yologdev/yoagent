@@ -52,8 +52,10 @@ thinks whenever the field is absent. The thinking tokens count against
 `max_tokens` and bill as output. To think less, pick a low level (`Low` sends
 `effort: low`) rather than `Off`.
 
-For pre-4.6 models, opt into legacy budget-based thinking via
-`AnthropicCompat::legacy()`:
+Pre-4.6 models (Sonnet 4.5, Opus 4.5, Haiku 4.5 and earlier Claude 4) accept
+only budget-based thinking and reject `{"type": "adaptive"}` with a 400.
+`ModelConfig::claude_haiku_4_5()` already selects it; for other pre-4.6
+models, opt into legacy budget-based thinking via `AnthropicCompat::legacy()`:
 
 ```rust
 let mut config = ModelConfig::anthropic("claude-sonnet-4-5", "Claude Sonnet 4.5");
@@ -83,7 +85,8 @@ Thinking content is streamed as `Content::Thinking` with a cryptographic `signat
 - **Tool-forcing** (flag off, the default for `ModelConfig::anthropic(..)`): a
   synthetic tool built from the schema is appended and forced with
   `tool_choice`, thinking is dropped for that request, and the agent loop
-  unwraps the forced call into text.
+  unwraps the forced call into text. On the native path nothing is unwrapped:
+  a call to a tool named after the schema is a real tool call and executes.
 
 The flag is off by default because gateways that speak the Messages protocol
 may not accept `output_config.format`. See
