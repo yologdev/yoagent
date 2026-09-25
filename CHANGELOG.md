@@ -76,6 +76,65 @@ adheres to [Semantic Versioning](https://semver.org/).
   for an all-zero config built in memory, which is now free rather than
   unknown.
 
+- **`SessionStats::cost_usd` is now sticky-`None` once a turn cannot be
+  priced**, the same rule as `SubAgentSpend::merge`. Previously an unpriced
+  turn followed by a priced one produced a partial sum that read as the whole
+  cost. Only reachable when rates change mid-run, which the built-in loop does
+  not do today.
+- Usage and run counts in the spend rollups saturate instead of overflowing.
+
+### Fixed
+
+- **Sub-agent spend now reaches the parent, in its own bucket**
+  ([#173](https://github.com/yologdev/yoagent/issues/173)). `SubAgentTool` ran
+  its child loop on a private channel and forwarded no usage, so every total a
+  delegating agent reported — `SessionStats`, `session_cost_usd`, anything a
+  consumer summed off the stream — silently left out what its sub-agents spent.
+  The error only ran one way (always under), nothing distinguished a parent
+  that delegated from one that did not, and nesting hid a whole tree of spend
+  behind one number.
+
+  `SessionStats` gains `sub_agents: SubAgentSpend` — `usage`, `cost_usd` and
+  `runs`, summed over the **whole delegation tree** (a sub-agent's own
+  sub-agents included). It is a separate bucket: `usage`, `turns` and
+  `cost_usd` stay the agent's own, so delegation stays attributable.
+  `SessionStats::total_usage()` / `total_cost_usd()` give the whole bill.
+  - **Per delegation**, `ToolExecutionEnd` carries the sub-agent's full
+    `SessionStats` in `details`; read it with
+    `SessionStats::from_sub_agent_result(&result)`. Its `usage` is the
+    sub-agent's own and its `sub_agents` what it delegated, so own and nested
+    spend stay distinguishable. A tool call that reported several runs carries
+    their combination (own figures summed, nested buckets merged).
+  - **Failed delegations count.** A sub-agent that errors or is loop-aborted
+    returns `Err(ToolError)`, which cannot carry data, so it reports through a
+    side channel on `ToolContext`; the loop folds it in and attaches the stats
+    to the error result's `details`.
+  - **Custom delegation tools** report the same way with
+    `ToolContext::report_delegated_run(stats)` — once per run, before
+    `execute` returns (a report after that is lost). `SubAgentTool` uses it
+    too.
+  - **Each run is priced at its own model's rates** — a sub-agent on a cheaper
+    model is never re-priced at the parent's. `cost_usd` becomes `None` as soon
+    as any delegated spend is unpriceable, rather than a sum that quietly skips
+    it; `SubAgentSpend::merge` keeps that rule for callers accumulating across
+    runs. `None` therefore means "unpriced" *or* "nothing spent";
+    `SubAgentSpend::is_unpriced()` / `SessionStats::is_unpriced()` tell them
+    apart.
+  - **`Agent::total_cost_usd()` / `Agent::total_usage()`** give the whole bill
+    — own turns plus every sub-agent — so callers never add two `Option<f64>`s
+    by hand (both `zip` and `unwrap_or(0.0)` are wrong in some case). They and
+    **`Agent::sub_agent_spend()`** share one window: every run since
+    construction or `reset()`, accumulated from each run's stats. Clearing,
+    replacing or compacting history does not lower them. `session_cost_usd()`
+    is unchanged and stays history-derived — it prices the current context at
+    the current model's rates, excludes sub-agents, and is not the bill.
+
+  Additive on the wire: `subAgents` is omitted when nothing was delegated, so
+  a run without sub-agents serializes exactly as before.
+
+- **`MockResponse::ToolCallsWithUsage` and `MockResponse::ErrorWithUsage`**, so
+  tests can bill a tool-calling turn and a mid-stream failure.
+
 ## 0.18.1
 
 ### Changed
