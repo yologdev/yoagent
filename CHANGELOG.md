@@ -20,7 +20,7 @@ adheres to [Semantic Versioning](https://semver.org/).
   instead of sending a value it would reject (Anthropic's adaptive effort
   excepted, see below). The full table is on `ThinkingLevel`'s doc comment:
 
-  | Level | Anthropic effort | Anthropic legacy / Bedrock budget | OpenAI-compat¹ / Responses / Azure | DeepSeek² | Gemini 2.x / Vertex budget |
+  | Level | Anthropic effort | Anthropic legacy / Bedrock budget | OpenAI-compat¹ / Responses / Azure | DeepSeek² | Gemini / Vertex 2.x budget (3.x: `thinkingLevel`, see Fixed) |
   |-------|------|------|------|------|------|
   | `XHigh` | `xhigh` | 16,384 | `xhigh`, or `high` (clamped) below an `XHigh` ceiling³ | `high` (clamped) | 24,576 (clamped) |
   | `Max` | `max` | 30,720 | the model's ceiling: `max`, `xhigh` or `high`³ | `max` | 24,576 (clamped) |
@@ -33,8 +33,10 @@ adheres to [Semantic Versioning](https://semver.org/).
   Fixed, [#176](https://github.com/yologdev/yoagent/issues/176).
 
   Adding the variants did not change what any existing level sends. (Other
-  entries below do: xAI now receives an effort, and Gemini 3 gets
-  `thinkingLevel`.) The new serde names are `"xhigh"` and `"max"`
+  entries below do, among them: xAI now receives an effort; Gemini 3 gets
+  `thinkingLevel`; `claude_haiku_4_5()` and OpenCode Claude ids before 4.6
+  send budget rather than adaptive thinking; and structured calls on the
+  Claude presets keep their thinking.) The new serde names are `"xhigh"` and `"max"`
   (lowercase, like the others). Persisted configs keep loading because the
   existing names are unchanged.
 
@@ -131,8 +133,9 @@ adheres to [Semantic Versioning](https://semver.org/).
   - the schema goes out as `output_config.format`, not as a synthetic tool
     plus `tool_choice`;
   - thinking is no longer dropped for that request (a set `ThinkingLevel`
-    sends its `effort` alongside the format), so the call can cost more output
-    tokens;
+    keeps its thinking alongside the format — an `effort`, or a
+    `budget_tokens` budget on `claude_haiku_4_5()`), so the call can cost more
+    output tokens;
   - tool choice stays `auto`, so the model may call regular tools before
     answering;
   - the API compiles the schema into a grammar and rejects features the tool
@@ -237,6 +240,15 @@ adheres to [Semantic Versioning](https://semver.org/).
   tests can bill a tool-calling turn and a mid-stream failure.
 
 ### Changed
+
+- **`MockProvider` panics on a transcript a real provider would reject**
+  ([#160](https://github.com/yologdev/yoagent/pull/160)). It used to accept
+  any message sequence, so a test could pass on a history — an orphan tool
+  call, a tool result with no matching call — that every real provider
+  returns a 400 for. It now panics with the offending messages.
+  **Migration:** a test that builds a malformed history on purpose should
+  use `MockProvider::without_transcript_validation()` (added) and say why at
+  the call site.
 
 - **Behaviour change: a cache rate left at `0.0` bills at the input rate.**
   `CostConfig::cost_usd` used to bill cache-read / cache-write tokens at a

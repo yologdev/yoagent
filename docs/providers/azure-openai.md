@@ -39,6 +39,7 @@ above:
 | `base_url` | Notes |
 |---|---|
 | `https://{resource}.openai.azure.com` | resource endpoint |
+| `https://{resource}.openai.azure.com/openai` | resource `/openai` root |
 | `https://{resource}.openai.azure.com/openai/v1` | the base URL Azure's SDK samples use (trailing `/` fine) |
 | `https://{resource}.services.ai.azure.com/openai/v1` | Foundry endpoint form, also accepted by Azure |
 | `https://{resource}.openai.azure.com/openai/deployments/{deployment}` | legacy form, see below |
@@ -55,6 +56,10 @@ A deployment-scoped `base_url` still works. The provider sends it to
 `/openai/v1/responses` and puts `{deployment}` from the URL in the body's
 `model`, overriding the configured model id. New configs should use the
 `/openai/v1` form with the deployment name as the model id.
+
+A query string or fragment on `base_url` (such as an old
+`?api-version=2024-10-21`) is dropped, with an `info` log: the v1 endpoint
+takes no `api-version`.
 
 ## Authentication
 

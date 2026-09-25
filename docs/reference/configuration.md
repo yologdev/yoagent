@@ -21,7 +21,10 @@ pub struct AgentLoopConfig {
     pub compaction_strategy: Option<Arc<dyn CompactionStrategy>>,
     pub execution_limits: Option<ExecutionLimits>,
     pub cache_config: CacheConfig,
+    pub tool_output_sink: Option<SharedState>,
     pub tool_execution: ToolExecutionStrategy,
+    pub tool_middleware: Vec<Arc<dyn ToolMiddleware>>,
+    pub output_schema: Option<OutputSchema>,
     pub retry_config: RetryConfig,
     pub before_turn: Option<BeforeTurnFn>,
     pub after_turn: Option<AfterTurnFn>,
@@ -47,6 +50,7 @@ pub struct StreamConfig {
     pub temperature: Option<f32>,
     pub model_config: Option<ModelConfig>,
     pub cache_config: CacheConfig,
+    pub output_schema: Option<OutputSchema>,
 }
 ```
 

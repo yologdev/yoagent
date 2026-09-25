@@ -284,14 +284,14 @@ it injects the `shared_state` tool and a state summary into the sub-agent's syst
   ```
 - **`Session`** — history as an id/parent tree with `append`, `seek`, `checkpoint`, `branch_tips`, and JSONL persistence. Appending after a seek forks a branch; it never overwrites
 - **Skills** — load [AgentSkills](https://agentskills.io)-standard `SKILL.md` directories. The agent sees a compact index and reads the full skill on demand, so skills stay cross-compatible with Claude Code, Codex CLI, Cursor, and others
-- **Structured outputs** — `prompt_structured::<T>()` returns typed, schema-validated replies, enforced natively where supported (Anthropic `output_config.format` on the `claude_*` presets, tool-forcing otherwise; OpenAI Chat Completions `json_schema`; Gemini `responseSchema`)
+- **Structured outputs** — `prompt_structured::<T>()` returns typed, schema-validated replies, enforced natively where supported (Anthropic `output_config.format` on the `claude_*` presets and OpenCode Claude ids from 4.5, tool-forcing otherwise; OpenAI Chat Completions `json_schema`; Gemini `responseSchema`)
 
 </details>
 
 <details>
 <summary><b>Production concerns</b></summary>
 
-- **Cost tracking** — `CostConfig` carries separate input/output/cache-read/cache-write rates plus optional context tiers; `session_cost_usd()` gives a running total, `AgentEvent::AgentEnd` carries a `SessionStats` rollup, and `ModelConfig::cost` is an `Option` — `None` means pricing unknown, never $0 (only the named presets carry verified rates)
+- **Cost tracking** — `CostConfig` carries separate input/output/cache-read/cache-write rates plus optional context tiers; `session_cost_usd()` gives a running total, `AgentEvent::AgentEnd` carries a `SessionStats` rollup, and `ModelConfig::cost` is an `Option` — `None` means pricing unknown, never $0 (only the named presets and `meta` carry rates)
 - **Loop detection** — a model calling one tool with identical arguments forever trips none of the turn/token/duration limits until the whole budget is spent. On by default: steers on the third consecutive repeat, stops on the next, and emits `AgentEvent::LoopDetected` either way
 - **Retrievable tool output** — head-tail truncation discards the middle irrecoverably. Attach a `SharedState` and the full text is stashed, with the marker naming a key the model can fetch
 - **Telemetry** — `tracing` spans per loop / LLM stream / tool, recording tokens and cost. OpenTelemetry is bridged app-side via `tracing-opentelemetry`; the library carries no OTel dependency by design
