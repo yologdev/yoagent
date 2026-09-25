@@ -57,9 +57,10 @@ impl std::fmt::Display for ApiProtocol {
 /// 4.6's rates across 18 releases, v0.9.0 through v0.16.5, overstating every
 /// `cost_usd` for that model by 50%, and nothing detected it. You can
 /// override the built-in data without waiting for a release: process-wide
-/// with [`PriceTable::install_override`](crate::provider::PriceTable::install_override)
+/// with [`global::install_override`](crate::provider::prices::global::install_override)
 /// or the `YOAGENT_PRICES` environment variable (both apply to configs built
-/// afterwards), or per config with [`ModelConfig::with_prices`].
+/// afterwards), or per config with [`ModelConfig::with_prices`] and
+/// [`ModelConfig::reprice`].
 ///
 /// # Context tiers
 ///
@@ -93,7 +94,7 @@ impl std::fmt::Display for ApiProtocol {
 ///
 /// ```
 /// # use yoagent::provider::{CostConfig, ModelConfig};
-/// # yoagent::provider::PriceTable::clear_override(); // ignore a developer's YOAGENT_PRICES
+/// # yoagent::provider::prices::global::clear_override(); // ignore a developer's YOAGENT_PRICES
 /// // A named preset is priced; adjust one rate and keep the rest.
 /// let mut config = ModelConfig::claude_sonnet_5();
 /// config
@@ -1006,14 +1007,18 @@ pub struct ModelConfig {
     /// `CostConfig` and unpriced configs held all-zero rates, which read as a
     /// $0 model to anyone who did not know to call `is_configured()`.
     ///
-    /// The table is the process-wide resolved one: a user override
-    /// ([`PriceTable::install_override`](crate::provider::PriceTable::install_override)
+    /// The table is the process-wide resolved one
+    /// ([`prices::global`](crate::provider::prices::global)): a user override
+    /// ([`install_override`](crate::provider::prices::global::install_override)
     /// or the `YOAGENT_PRICES` file) over an opt-in fetched layer
-    /// ([`PriceTable::install_fetched`](crate::provider::PriceTable::install_fetched))
-    /// over the built-in data. It is read when
-    /// the constructor runs, so install overrides **before** building
-    /// configs. Setting this field yourself after construction always wins
-    /// over any table.
+    /// ([`install_fetched`](crate::provider::prices::global::install_fetched))
+    /// over the built-in data. It is read when the constructor runs, so
+    /// install prices **before** building configs, or call
+    /// [`reprice`](Self::reprice) afterwards.
+    ///
+    /// A value you set on this field wins over every process-wide layer —
+    /// only constructors read them — but [`reprice`](Self::reprice) and
+    /// [`with_prices`](Self::with_prices) overwrite it.
     ///
     /// `Some` with every rate zero means **free**: a local model, or a free
     /// tier. The built-in accounting
@@ -1123,50 +1128,57 @@ impl ModelConfig {
         )
     }
 
-    /// Set `cost` from the price table for this config's `(provider, id)`:
-    /// `Some` when the table lists the model, `None` otherwise. Called by
-    /// the first-party constructors only — a gateway or custom endpoint does
-    /// not bill the vendor's list price.
-    fn priced(mut self) -> Self {
+    /// Set `cost` from the process-wide price table for this config's
+    /// `(provider, id)`: `Some` when the table lists the model, `None`
+    /// otherwise. Called by the first-party constructors only — a gateway or
+    /// custom endpoint does not bill the vendor's list price.
+    fn priced(self) -> Self {
         debug_assert!(
             super::prices::PRICED_PROVIDERS.contains(&self.provider.as_str()),
             "{} looks prices up but is not in PRICED_PROVIDERS",
             self.provider
         );
-        self.cost = super::prices::resolved_cost(&self.provider, &self.id);
+        self.lookup_price()
+    }
+
+    fn lookup_price(mut self) -> Self {
+        self.cost = super::prices::global::resolved_cost(&self.provider, &self.id);
         self.list_priced = true;
         self
     }
 
     /// Repeat the constructor's price lookup against the process-wide table
     /// **now** — for a config built before
-    /// [`PriceTable::install_override`](super::PriceTable::install_override)
-    /// or [`PriceTable::install_fetched`](super::PriceTable::install_fetched).
+    /// [`global::install_override`](super::prices::global::install_override)
+    /// or [`global::install_fetched`](super::prices::global::install_fetched).
     ///
     /// Only for configs built by a first-party constructor that looks prices
     /// up ([`anthropic`](Self::anthropic), [`openai`](Self::openai), the
-    /// named presets, …): `cost` becomes exactly what that constructor would
-    /// set today, **including `None`** when the model is no longer listed,
-    /// and a `cost` you assigned yourself is replaced. Any other config —
-    /// gateways, custom endpoints, a config deserialized from disk — is
-    /// returned unchanged, since no constructor would have priced it.
+    /// named presets, …) whose `provider` is still one constructors look up
+    /// ([`PRICED_PROVIDERS`](super::PRICED_PROVIDERS)): `cost` becomes
+    /// exactly what that constructor would set today, **including `None`**
+    /// when the model is no longer listed, and **a `cost` you assigned
+    /// yourself is replaced**. Any other config — gateways, custom
+    /// endpoints, a config deserialized from disk, a first-party config whose
+    /// `provider` you changed — is returned unchanged.
     ///
     /// ```
     /// # use yoagent::provider::{ModelConfig, PriceTable};
-    /// # PriceTable::clear_override(); // ignore a developer's YOAGENT_PRICES
+    /// use yoagent::provider::prices::global;
+    /// # global::clear_override(); // ignore a developer's YOAGENT_PRICES
     /// let config = ModelConfig::claude_sonnet_5(); // built early
-    /// let _ = PriceTable::install_override(PriceTable::from_json_str(
+    /// let _ = global::install_override(PriceTable::from_json_str(
     ///     r#"{"schema": 1, "providers": {"anthropic": {"claude-sonnet-5": {"input": 1.8, "output": 9.0}}}}"#,
     /// )?);
     /// assert_eq!(config.cost.as_ref().unwrap().input_per_million, 2.0);
     /// let config = config.reprice();
     /// assert_eq!(config.cost.unwrap().input_per_million, 1.8);
-    /// # PriceTable::clear_override();
+    /// # global::clear_override();
     /// # Ok::<(), yoagent::provider::PriceError>(())
     /// ```
     pub fn reprice(self) -> Self {
-        if self.list_priced {
-            self.priced()
+        if self.list_priced && super::prices::PRICED_PROVIDERS.contains(&self.provider.as_str()) {
+            self.lookup_price()
         } else {
             self
         }
@@ -1190,7 +1202,7 @@ impl ModelConfig {
     ///
     /// ```
     /// # use yoagent::provider::{ModelConfig, PriceTable};
-    /// # PriceTable::clear_override(); // ignore a developer's YOAGENT_PRICES
+    /// # yoagent::provider::prices::global::clear_override(); // ignore a developer's YOAGENT_PRICES
     /// let mine = PriceTable::from_json_str(r#"{"schema": 1, "providers": {
     ///     "anthropic": {"claude-sonnet-5": {"input": 1.8, "output": 9.0}}}}"#)?;
     /// let config = ModelConfig::claude_sonnet_5().with_prices(&mine);

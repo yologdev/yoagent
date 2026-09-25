@@ -166,6 +166,22 @@ impl SubAgentTool {
         self
     }
 
+    /// Re-price the sub-agent's model config against the process-wide price
+    /// table now — [`ModelConfig::reprice`] on the stored config. Builder
+    /// style: call it before handing the tool to an agent, because a
+    /// registered tool is shared and immutable. Constructors resolve prices
+    /// when they run, so either install prices
+    /// ([`global::install_override`](crate::provider::prices::global::install_override),
+    /// [`global::install_fetched`](crate::provider::prices::global::install_fetched))
+    /// before building the config, or call this afterwards. Same rules as
+    /// [`ModelConfig::reprice`].
+    pub fn reprice(mut self) -> Self {
+        if let Some(config) = self.model_config.take() {
+            self.model_config = Some(config.reprice());
+        }
+        self
+    }
+
     pub fn with_description(mut self, desc: impl Into<String>) -> Self {
         self.tool_description = desc.into();
         self

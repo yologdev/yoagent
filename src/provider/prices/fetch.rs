@@ -1,36 +1,36 @@
 //! Opt-in live price sources: models.dev, this crate's own checked file on
 //! GitHub, or any URL serving the `prices.json` format.
 //!
-//! Nothing here runs unless the caller asks. A fetched table becomes the
-//! **fetched layer** only through [`PriceTable::install_fetched`], which sits
-//! above the built-in data and below any user override, and logs every
-//! disagreement with the built-in data.
+//! Nothing here runs unless the caller asks, and nothing here installs a
+//! table: pass the result to [`global::install_fetched`](super::global::install_fetched)
+//! (process-wide, above the built-in data and below any user override) or
+//! [`ModelConfig::with_prices`](crate::provider::ModelConfig::with_prices)
+//! (one config).
 
-use super::{builtin_ref, write_layers, PriceError, PriceTable};
+use super::{builtin_ref, PriceEntry, PriceError, PriceTable, Strictness};
 use crate::provider::model::{ContextTier, CostConfig};
 use serde_json::{Map, Value};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-/// How long [`PriceTable::fetch`] and [`PriceTable::fetch_cached`] wait for a
-/// source before giving up.
+/// How long a fetch waits for a source before giving up, unless
+/// [`FetchOptions`] or [`CacheOptions`] say otherwise.
 pub const DEFAULT_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 const MODELS_DEV_URL: &str = "https://models.dev/api.json";
 const YOAGENT_MAIN_URL: &str =
     "https://raw.githubusercontent.com/yologdev/yoagent/main/src/provider/prices.json";
 
-/// How many differing entries [`PriceTable::install_fetched`] spells out in
-/// its log line; the rest are counted.
-const LOGGED_CHANGES: usize = 5;
+/// Marks a file written by [`PriceTable::fetch_cached`], and its version.
+const CACHE_MARKER: &str = "yoagent_price_cache";
 
 /// Where [`PriceTable::fetch`] gets prices from.
 ///
 /// # Trust
 ///
-/// A fetched table overrides the built-in data for every model it lists, so
-/// pick a source you trust for the models you use:
+/// A table installed with the default policy overrides the built-in data for
+/// every model it lists, so pick a source you trust for the models you use:
 ///
 /// - [`YoagentMain`](Self::YoagentMain) is this crate's own `prices.json` on
 ///   the `main` branch: the same format, the same review and the same price
@@ -38,8 +38,12 @@ const LOGGED_CHANGES: usize = 5;
 /// - [`ModelsDev`](Self::ModelsDev) is [models.dev](https://models.dev), a
 ///   community-maintained database covering far more models. It is **not
 ///   authoritative** and has been provably wrong before (Claude context-tier
-///   data, DeepSeek V4 Pro's price). Installing it logs every model where it
-///   disagrees with the built-in data, but the fetched rates win.
+///   data, DeepSeek V4 Pro's price). Installing it logs the built-in models
+///   where it disagrees (the first few, and a count) and returns them all;
+///   the fetched rates win unless you install with
+///   [`InstallPolicy::AddOnly`](super::global::InstallPolicy::AddOnly).
+/// - [`Url`](Self::Url) is yours: typically a hand-maintained file, so it is
+///   parsed **strictly** — an unknown field is [`PriceError::UnknownField`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PriceSource {
@@ -49,13 +53,13 @@ pub enum PriceSource {
     /// snapshot, a test server).
     ModelsDevAt(String),
     /// This crate's checked `src/provider/prices.json` on GitHub `main`, so
-    /// a price fix merged to `main` reaches you without a release. If `main`
-    /// moves to a newer schema than this release reads — a field that
-    /// changes billing was added — the fetch fails with
-    /// [`PriceError::UnsupportedSchema`] and nothing changes. Metadata-only
-    /// fields do not bump the schema, and this release ignores them.
+    /// a price fix merged to `main` reaches you without a release. Parsed
+    /// leniently: a metadata field a newer release added is ignored, logged
+    /// and returned in [`FetchReport::ignored_fields`]. If `main` moves to a
+    /// newer schema — a field that changes billing was added — the fetch
+    /// fails with [`PriceError::UnsupportedSchema`] and nothing changes.
     YoagentMain,
-    /// Any URL serving this crate's `prices.json` format.
+    /// Any URL serving this crate's `prices.json` format, parsed strictly.
     Url(String),
 }
 
@@ -68,195 +72,220 @@ impl PriceSource {
             Self::YoagentMain => YOAGENT_MAIN_URL,
         }
     }
+}
 
-    fn is_models_dev(&self) -> bool {
-        matches!(self, Self::ModelsDev | Self::ModelsDevAt(_))
+/// Options for [`PriceTable::fetch_with`].
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct FetchOptions {
+    /// How long the whole request, body included, may take. Default
+    /// [`DEFAULT_FETCH_TIMEOUT`].
+    pub timeout: Duration,
+}
+
+impl Default for FetchOptions {
+    fn default() -> Self {
+        Self {
+            timeout: DEFAULT_FETCH_TIMEOUT,
+        }
     }
 }
 
-/// Where the table from [`PriceTable::fetch_cached`] came from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+impl FetchOptions {
+    /// The defaults.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the timeout.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+}
+
+/// A fetched table and what the fetch left out.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct FetchReport {
+    pub table: PriceTable,
+    /// Models a models.dev source listed but could not be mapped, and why
+    /// (always empty for this crate's format).
+    pub skipped: Vec<SkippedModel>,
+    /// Dotted paths of fields a lenient parse ignored
+    /// ([`PriceSource::YoagentMain`], or a cache file); always empty for
+    /// strict and models.dev sources.
+    pub ignored_fields: Vec<String>,
+}
+
+/// A model a models.dev document listed but [`PriceTable`] could not
+/// express, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SkippedModel {
+    /// This crate's provider name (after the renames `alibaba` → `qwen` and
+    /// `opencode` → `opencode-zen`).
+    pub provider: String,
+    pub model: String,
+    pub reason: String,
+}
+
+/// Options for [`PriceTable::fetch_cached`].
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct CacheOptions {
+    /// A cache younger than this is used without a request. Default: one
+    /// day.
+    pub max_age: Duration,
+    /// When the fetch fails, an expired cache no older than this is used
+    /// instead of the built-in data. Default: seven days. `Duration::MAX`
+    /// accepts a cache of any age, including one whose age is unknown.
+    pub max_stale: Duration,
+    /// The fetch timeout. Default [`DEFAULT_FETCH_TIMEOUT`].
+    pub timeout: Duration,
+}
+
+impl Default for CacheOptions {
+    fn default() -> Self {
+        Self {
+            max_age: Duration::from_secs(24 * 3600),
+            max_stale: Duration::from_secs(7 * 24 * 3600),
+            timeout: DEFAULT_FETCH_TIMEOUT,
+        }
+    }
+}
+
+impl CacheOptions {
+    /// The defaults: refetch after a day, fall back to a cache at most a
+    /// week old, time out after [`DEFAULT_FETCH_TIMEOUT`].
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set [`max_age`](Self::max_age).
+    pub fn with_max_age(mut self, max_age: Duration) -> Self {
+        self.max_age = max_age;
+        self
+    }
+
+    /// Set [`max_stale`](Self::max_stale).
+    pub fn with_max_stale(mut self, max_stale: Duration) -> Self {
+        self.max_stale = max_stale;
+        self
+    }
+
+    /// Set [`timeout`](Self::timeout).
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+}
+
+/// Where the table from [`PriceTable::fetch_cached`] came from — with the
+/// data that only makes sense for that origin.
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum PriceOrigin {
-    /// Fetched just now; the cache was refreshed.
-    Fetched,
-    /// The cache, still within `max_age`. No request was made.
-    Cache,
-    /// The fetch failed, so an expired cache was used.
-    StaleCache,
+    /// Fetched just now. The cache was rewritten, unless
+    /// `cache_write_error` says otherwise (the table is still good).
+    #[non_exhaustive]
+    Fetched {
+        cache_write_error: Option<PriceError>,
+    },
+    /// The cache, younger than `max_age`. No request was made.
+    #[non_exhaustive]
+    Cache { age: Duration },
+    /// The fetch failed, so an expired cache no older than `max_stale` was
+    /// used. `age` is `None` when it is unknown (a modification time in the
+    /// future, or none on this platform), which only `max_stale ==
+    /// Duration::MAX` accepts.
+    #[non_exhaustive]
+    StaleCache {
+        age: Option<Duration>,
+        fetch_error: PriceError,
+    },
     /// The fetch failed and there was no usable cache: the built-in data.
-    Builtin,
+    #[non_exhaustive]
+    Builtin { fetch_error: PriceError },
+}
+
+impl PriceOrigin {
+    /// Whether this is [`PriceOrigin::Builtin`]: installing the table would
+    /// change nothing.
+    pub fn is_builtin(&self) -> bool {
+        matches!(self, Self::Builtin { .. })
+    }
+
+    /// The fetch error behind a [`StaleCache`](Self::StaleCache) or
+    /// [`Builtin`](Self::Builtin) fallback.
+    pub fn fetch_error(&self) -> Option<&PriceError> {
+        match self {
+            Self::StaleCache { fetch_error, .. } | Self::Builtin { fetch_error } => {
+                Some(fetch_error)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Why [`PriceTable::fetch_cached`] could not use the cache file it found.
+/// Logged at `warn` too; the file is treated as absent.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub enum CacheProblem {
+    /// The file exists but could not be read.
+    #[non_exhaustive]
+    Unreadable { error: PriceError },
+    /// The file is not a valid price cache.
+    #[non_exhaustive]
+    Invalid { error: PriceError },
+    /// The file caches a different source (`cached` is its URL, or `None`
+    /// if it does not say). Use one cache path per source.
+    #[non_exhaustive]
+    SourceMismatch {
+        cached: Option<String>,
+        expected: String,
+    },
 }
 
 /// The result of [`PriceTable::fetch_cached`].
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct CachedPrices {
+    /// The table to use. Built-in data when
+    /// [`origin`](Self::origin) is [`PriceOrigin::Builtin`].
     pub table: PriceTable,
     pub origin: PriceOrigin,
-    /// Age of the cache file used ([`PriceOrigin::Cache`] or
-    /// [`PriceOrigin::StaleCache`]), when known; `None` otherwise.
-    pub age: Option<Duration>,
-    /// What went wrong, if anything: the fetch error behind a
-    /// [`PriceOrigin::StaleCache`] or [`PriceOrigin::Builtin`] fallback, or a
-    /// failed cache write after a successful fetch ([`PriceOrigin::Fetched`]).
-    pub error: Option<Arc<PriceError>>,
-}
-
-/// Which fetched entries [`PriceTable::install_fetched_with`] installs.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum FetchPolicy {
-    /// Every entry, overriding the built-in data where both list a model.
-    /// What [`PriceTable::install_fetched`] does.
-    #[default]
-    ReplaceAll,
-    /// Only models the built-in data does not list: extend coverage, never
-    /// override a price yoagent checked.
-    AddOnly,
-}
-
-/// A model a models.dev document listed but [`PriceTable`] could not
-/// express, and why (see [`PriceTable::from_models_dev_json_report`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct SkippedModel {
-    /// This crate's provider name (after renames such as `alibaba` → `qwen`).
-    pub provider: String,
-    pub model: String,
-    pub reason: String,
-}
-
-/// One model where a table differs from a base table (see
-/// [`PriceTable::changes_from`]).
-///
-/// Rates are compared as billed: a cache rate of `0` counts as the band's
-/// input rate, so writing a no-premium cache rate out explicitly is not a
-/// change.
-#[derive(Debug, Clone, PartialEq)]
-#[non_exhaustive]
-pub struct PriceChange {
-    pub provider: String,
-    pub model: String,
-    /// The base table's rates; `None` when the base does not list the model.
-    pub before: Option<CostConfig>,
-    pub after: CostConfig,
-}
-
-impl std::fmt::Display for PriceChange {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}/{}: ", self.provider, self.model)?;
-        let Some(before) = &self.before else {
-            return write!(f, "new ({})", describe(&self.after));
-        };
-        let (b, a) = (effective(before), effective(&self.after));
-        let mut parts = Vec::new();
-        for (name, x, y) in [
-            ("input", b.input_per_million, a.input_per_million),
-            ("output", b.output_per_million, a.output_per_million),
-            (
-                "cache_read",
-                b.cache_read_per_million,
-                a.cache_read_per_million,
-            ),
-            (
-                "cache_write",
-                b.cache_write_per_million,
-                a.cache_write_per_million,
-            ),
-        ] {
-            if x != y {
-                parts.push(format!("{name} {x} -> {y}"));
-            }
-        }
-        if b.context_tiers != a.context_tiers {
-            parts.push(format!(
-                "tiers {} -> {}",
-                describe_tiers(&before.context_tiers),
-                describe_tiers(&self.after.context_tiers)
-            ));
-        }
-        write!(f, "{}", parts.join(", "))
-    }
-}
-
-fn describe(c: &CostConfig) -> String {
-    let mut s = format!(
-        "input {}, output {}, cache_read {}, cache_write {}",
-        c.input_per_million,
-        c.output_per_million,
-        c.cache_read_per_million,
-        c.cache_write_per_million
-    );
-    if !c.context_tiers.is_empty() {
-        s.push_str(&format!(", tiers {}", describe_tiers(&c.context_tiers)));
-    }
-    s
-}
-
-fn describe_tiers(tiers: &[ContextTier]) -> String {
-    let items: Vec<String> = tiers
-        .iter()
-        .map(|t| {
-            format!(
-                ">{}: {}/{}/{}/{}",
-                t.above_prompt_tokens,
-                t.input_per_million,
-                t.output_per_million,
-                t.cache_read_per_million,
-                t.cache_write_per_million
-            )
-        })
-        .collect();
-    format!("[{}]", items.join("; "))
-}
-
-/// `c` as billed: every zero cache rate replaced by its band's input rate.
-fn effective(c: &CostConfig) -> CostConfig {
-    let or = |rate: f64, input: f64| if rate == 0.0 { input } else { rate };
-    let mut e = c.clone();
-    e.cache_read_per_million = or(c.cache_read_per_million, c.input_per_million);
-    e.cache_write_per_million = or(c.cache_write_per_million, c.input_per_million);
-    for t in &mut e.context_tiers {
-        t.cache_read_per_million = or(t.cache_read_per_million, t.input_per_million);
-        t.cache_write_per_million = or(t.cache_write_per_million, t.input_per_million);
-    }
-    e
+    /// Models the fetch skipped (models.dev sources, [`PriceOrigin::Fetched`]
+    /// only; a cache holds the mapped table).
+    pub skipped: Vec<SkippedModel>,
+    /// Fields a lenient parse ignored — in the fetched document, or in the
+    /// cache file used.
+    pub ignored_fields: Vec<String>,
+    /// A cache file that existed but could not be used.
+    pub cache_problem: Option<CacheProblem>,
 }
 
 impl PriceTable {
-    /// Fetch a table from `source`, with [`DEFAULT_FETCH_TIMEOUT`].
+    /// Fetch a table from `source` with the default [`FetchOptions`].
     ///
-    /// Never called implicitly. The result is not installed: pass it to
-    /// [`install_fetched`](Self::install_fetched) (process-wide) or
-    /// [`ModelConfig::with_prices`](crate::provider::ModelConfig::with_prices)
-    /// (one config). Mind the trust caveats on [`PriceSource`]. Our-format
-    /// sources are parsed leniently (unknown fields ignored); models.dev
-    /// models that cannot be mapped are skipped — see
-    /// [`fetch_with_report`](Self::fetch_with_report) for which and why.
+    /// Never called implicitly, and not installed: see the
+    /// [`global`](super::global) module. Mind the trust caveats on
+    /// [`PriceSource`].
     pub async fn fetch(source: &PriceSource) -> Result<PriceTable, PriceError> {
-        Self::fetch_with_timeout(source, DEFAULT_FETCH_TIMEOUT).await
-    }
-
-    /// [`fetch`](Self::fetch) with an explicit timeout covering the whole
-    /// request, body included.
-    pub async fn fetch_with_timeout(
-        source: &PriceSource,
-        timeout: Duration,
-    ) -> Result<PriceTable, PriceError> {
-        Self::fetch_with_report(source, timeout)
+        Self::fetch_with(source, FetchOptions::default())
             .await
-            .map(|(table, _)| table)
+            .map(|report| report.table)
     }
 
-    /// [`fetch_with_timeout`](Self::fetch_with_timeout), also returning the
-    /// models a models.dev source listed but could not map, with the reason
-    /// (always empty for our-format sources).
-    pub async fn fetch_with_report(
+    /// Fetch a table from `source`, also reporting what the fetch left out
+    /// (models.dev models it could not map, fields a lenient parse ignored).
+    pub async fn fetch_with(
         source: &PriceSource,
-        timeout: Duration,
-    ) -> Result<(PriceTable, Vec<SkippedModel>), PriceError> {
+        options: FetchOptions,
+    ) -> Result<FetchReport, PriceError> {
         let url = source.url().to_string();
+        let timeout = options.timeout;
         let request_error = |e: reqwest::Error| {
             if e.is_timeout() {
                 PriceError::Timeout {
@@ -266,7 +295,7 @@ impl PriceTable {
             } else {
                 PriceError::Request {
                     url: url.clone(),
-                    source: e,
+                    source: Arc::new(e),
                 }
             }
         };
@@ -283,10 +312,25 @@ impl PriceTable {
             });
         }
         let body = resp.text().await.map_err(request_error)?;
-        if source.is_models_dev() {
-            Self::from_models_dev_value(&serde_json::from_str(&body)?, &url)
-        } else {
-            Ok((Self::from_json_str_lenient(&body)?, Vec::new()))
+        match source {
+            PriceSource::ModelsDev | PriceSource::ModelsDevAt(_) => {
+                let value: Value =
+                    serde_json::from_str(&body).map_err(|e| PriceError::json(Some(&url), e))?;
+                Self::from_models_dev_value(&value, &url)
+            }
+            PriceSource::YoagentMain | PriceSource::Url(_) => {
+                let strictness = if matches!(source, PriceSource::Url(_)) {
+                    Strictness::Strict
+                } else {
+                    Strictness::Lenient
+                };
+                let (table, ignored_fields) = Self::parse(&body, strictness, Some(&url))?;
+                Ok(FetchReport {
+                    table,
+                    skipped: Vec::new(),
+                    ignored_fields,
+                })
+            }
         }
     }
 
@@ -309,25 +353,25 @@ impl PriceTable {
     /// which no model maps is an error, so a changed envelope cannot install
     /// an empty table.
     pub fn from_models_dev_json(json: &str) -> Result<PriceTable, PriceError> {
-        Self::from_models_dev_json_report(json).map(|(table, _)| table)
+        Self::from_models_dev_json_report(json).map(|report| report.table)
     }
 
-    /// [`from_models_dev_json`](Self::from_models_dev_json), also returning
+    /// [`from_models_dev_json`](Self::from_models_dev_json), also reporting
     /// every model it skipped and why (including models models.dev lists
     /// with no cost at all).
-    pub fn from_models_dev_json_report(
-        json: &str,
-    ) -> Result<(PriceTable, Vec<SkippedModel>), PriceError> {
-        Self::from_models_dev_value(&serde_json::from_str(json)?, MODELS_DEV_URL)
+    pub fn from_models_dev_json_report(json: &str) -> Result<FetchReport, PriceError> {
+        let value: Value = serde_json::from_str(json).map_err(|e| PriceError::json(None, e))?;
+        Self::from_models_dev_value(&value, MODELS_DEV_URL)
     }
 
-    fn from_models_dev_value(
-        db: &Value,
-        source: &str,
-    ) -> Result<(PriceTable, Vec<SkippedModel>), PriceError> {
+    fn from_models_dev_value(db: &Value, source: &str) -> Result<FetchReport, PriceError> {
+        let models_dev_error = |reason: String| PriceError::ModelsDev {
+            url: source.to_string(),
+            reason,
+        };
         let providers = db
             .as_object()
-            .ok_or_else(|| PriceError::ModelsDev("the document is not a JSON object".into()))?;
+            .ok_or_else(|| models_dev_error("the document is not a JSON object".into()))?;
         let mut table = PriceTable::new();
         let mut skipped = Vec::new();
         for (provider_key, provider) in providers {
@@ -354,7 +398,7 @@ impl PriceTable {
                         continue;
                     }
                 };
-                let entry = super::PriceEntry::new(cost).with_source(source);
+                let entry = PriceEntry::new(cost).with_source(source);
                 if let Err(e) = table.insert(provider, model.as_str(), entry) {
                     skip(e.to_string());
                 }
@@ -379,223 +423,134 @@ impl PriceTable {
             "yoagent prices: mapped models.dev data"
         );
         if table.is_empty() {
-            return Err(PriceError::ModelsDev(format!(
+            return Err(models_dev_error(format!(
                 "no model carried a usable price ({} providers, {} models skipped); \
                  the schema may have changed",
                 providers.len(),
                 skipped.len()
             )));
         }
-        Ok((table, skipped))
-    }
-
-    /// Every model in `self` whose billed rates differ from `base`, or that
-    /// `base` does not list. Models only `base` lists are not reported —
-    /// layering never removes an entry.
-    pub fn changes_from(&self, base: &PriceTable) -> Vec<PriceChange> {
-        self.iter()
-            .filter_map(|(provider, model, entry)| {
-                let before = base.entry(provider, model).map(|b| &b.cost);
-                if before.is_some_and(|b| effective(b) == effective(&entry.cost)) {
-                    return None;
-                }
-                Some(PriceChange {
-                    provider: provider.to_string(),
-                    model: model.to_string(),
-                    before: before.cloned(),
-                    after: entry.cost.clone(),
-                })
-            })
-            .collect()
-    }
-
-    /// Install `table` as the process-wide **fetched layer**, overriding the
-    /// built-in data for every model it lists — the same as
-    /// [`install_fetched_with`](Self::install_fetched_with) with
-    /// [`FetchPolicy::ReplaceAll`]. The layer sits below any user override
-    /// ([`install_override`](Self::install_override)) and replaces a previous
-    /// fetched layer. Affects configs built afterwards.
-    ///
-    /// Disagreements are made visible rather than silent: every built-in
-    /// model the fetched table prices differently is logged with
-    /// `tracing::warn!` (the count and the first few differences), and new
-    /// models are counted at `info`. The returned list holds all of them
-    /// ([`PriceChange::before`] is `None` for a new model) — look at it:
-    ///
-    /// ```no_run
-    /// # use yoagent::provider::{PriceSource, PriceTable};
-    /// # async fn run() -> Result<(), yoagent::provider::PriceError> {
-    /// let fetched = PriceTable::fetch(&PriceSource::ModelsDev).await?;
-    /// let changes = PriceTable::install_fetched(fetched);
-    /// for change in changes.iter().filter(|c| c.before.is_some()) {
-    ///     eprintln!("price differs from yoagent's data: {change}");
-    /// }
-    /// # Ok(()) }
-    /// ```
-    #[must_use = "the returned changes are how you see where the fetched prices differ"]
-    pub fn install_fetched(table: PriceTable) -> Vec<PriceChange> {
-        Self::install_fetched_with(table, FetchPolicy::ReplaceAll)
-    }
-
-    /// [`install_fetched`](Self::install_fetched) under an explicit
-    /// [`FetchPolicy`]. With [`FetchPolicy::AddOnly`] only the models the
-    /// built-in data lacks are installed — a fetched table can extend
-    /// coverage without overriding a price yoagent checked.
-    #[must_use = "the returned changes are how you see where the fetched prices differ"]
-    pub fn install_fetched_with(table: PriceTable, policy: FetchPolicy) -> Vec<PriceChange> {
-        let builtin = builtin_ref();
-        let table = match policy {
-            FetchPolicy::ReplaceAll => table,
-            FetchPolicy::AddOnly => {
-                let mut added = PriceTable::new();
-                for (provider, model, entry) in table.iter() {
-                    if builtin.entry(provider, model).is_none() {
-                        added
-                            .entries
-                            .entry(provider.to_string())
-                            .or_default()
-                            .insert(model.to_string(), entry.clone());
-                    }
-                }
-                added
-            }
-        };
-        let changes = table.changes_from(builtin);
-        let differing: Vec<&PriceChange> = changes.iter().filter(|c| c.before.is_some()).collect();
-        let added = changes.len() - differing.len();
-        if !differing.is_empty() {
-            let first: Vec<String> = differing
-                .iter()
-                .take(LOGGED_CHANGES)
-                .map(|c| c.to_string())
-                .collect();
-            tracing::warn!(
-                differing = differing.len(),
-                "yoagent prices: the fetched table disagrees with the built-in data on {} \
-                 model(s) and now takes precedence for them: {}{}",
-                differing.len(),
-                first.join("; "),
-                if differing.len() > LOGGED_CHANGES {
-                    format!("; and {} more", differing.len() - LOGGED_CHANGES)
-                } else {
-                    String::new()
-                }
-            );
-        }
-        tracing::info!(
-            entries = table.len(),
-            differing = differing.len(),
-            added,
-            ?policy,
-            "yoagent prices: installed fetched prices"
-        );
-        let mut layers = write_layers();
-        layers.fetched = Some(table);
-        layers.rebuild();
-        drop(layers);
-        changes
-    }
-
-    /// Remove the fetched layer.
-    pub fn clear_fetched() {
-        let mut layers = write_layers();
-        layers.fetched = None;
-        layers.rebuild();
+        Ok(FetchReport {
+            table,
+            skipped,
+            ignored_fields: Vec::new(),
+        })
     }
 
     /// Fetch `source` through a cache file at `cache_path`, never failing.
     ///
-    /// 1. A cache younger than `max_age` (by modification time) is returned
-    ///    without a request — [`PriceOrigin::Cache`].
-    /// 2. Otherwise `source` is fetched; on success the cache is rewritten
-    ///    (in this crate's format, whatever the source) —
-    ///    [`PriceOrigin::Fetched`]. A failed cache write is logged and
-    ///    reported in [`CachedPrices::error`]; the fetched table is still
-    ///    returned.
+    /// 1. A cache of this source younger than `max_age` (by modification
+    ///    time) is used without a request — [`PriceOrigin::Cache`].
+    /// 2. Otherwise `source` is fetched and the cache rewritten (in this
+    ///    crate's format, recording the source URL) — [`PriceOrigin::Fetched`].
+    ///    A failed cache write is logged and reported in the origin; the
+    ///    fetched table is still returned.
     /// 3. If the fetch fails, an expired cache no older than `max_stale` is
     ///    used — [`PriceOrigin::StaleCache`] — and failing that the built-in
     ///    data — [`PriceOrigin::Builtin`]. The fetch error is logged and in
-    ///    [`CachedPrices::error`].
+    ///    the origin.
     ///
-    /// A cache whose modification time is in the future, or unavailable on
-    /// this platform, has an unknown age: it is never fresh, and serves as a
-    /// stale fallback only when `max_stale` is `Duration::MAX`. The cache is
-    /// parsed leniently. Use one cache path per source. The result is not
-    /// installed — decide from it:
+    /// A cache whose age is unknown (modification time in the future, or
+    /// none on this platform) is never fresh, and a stale fallback only when
+    /// `max_stale` is `Duration::MAX`. A cache file that exists but is
+    /// unreadable, invalid, or caches a different source is logged, ignored
+    /// and reported in [`CachedPrices::cache_problem`]; only a missing file
+    /// is silent. The cache is parsed leniently.
+    ///
+    /// The result is not installed — decide from it, and install **before**
+    /// building configs (or [`reprice`](crate::provider::ModelConfig::reprice)
+    /// the ones you hold):
     ///
     /// ```no_run
     /// # use std::time::Duration;
-    /// # use yoagent::provider::{PriceOrigin, PriceSource, PriceTable};
+    /// # use yoagent::provider::{CacheOptions, PriceSource, PriceTable};
+    /// # use yoagent::provider::prices::global;
     /// # async fn run() {
-    /// const DAY: Duration = Duration::from_secs(24 * 3600);
     /// let prices = PriceTable::fetch_cached(
     ///     &PriceSource::YoagentMain,
     ///     "/var/cache/myapp/yoagent-prices.json",
-    ///     DAY,     // refetch after a day
-    ///     7 * DAY, // offline, use a cache at most a week old
+    ///     CacheOptions::new(), // refetch daily; offline, accept a week-old cache
     /// )
     /// .await;
-    /// if let Some(e) = &prices.error {
-    ///     eprintln!("price refresh: {e} (using {:?}, age {:?})", prices.origin, prices.age);
+    /// if let Some(e) = prices.origin.fetch_error() {
+    ///     eprintln!("price refresh failed ({e}); using {:?}", prices.origin);
     /// }
-    /// if prices.origin != PriceOrigin::Builtin {
-    ///     let changes = PriceTable::install_fetched(prices.table);
-    ///     eprintln!("{} model prices differ from yoagent's data", changes.len());
+    /// if !prices.origin.is_builtin() {
+    ///     let changes = global::install_fetched(prices.table);
+    ///     eprintln!("{} model prices changed", changes.len());
     /// }
+    /// // ...now build configs.
     /// # }
     /// ```
     pub async fn fetch_cached(
         source: &PriceSource,
         cache_path: impl AsRef<Path>,
-        max_age: Duration,
-        max_stale: Duration,
+        options: CacheOptions,
     ) -> CachedPrices {
         let path = cache_path.as_ref();
-        let cached = read_cache(path).await;
-        if let Some((table, Some(age))) = &cached {
-            if *age < max_age {
+        let url = source.url();
+        let (cached, cache_problem) = match read_cache(path, url).await {
+            CacheRead::Missing => (None, None),
+            CacheRead::Problem(problem) => (None, Some(problem)),
+            CacheRead::Found(cached) => (Some(cached), None),
+        };
+        if let Some(Cached {
+            table,
+            age: Some(age),
+            ignored,
+        }) = &cached
+        {
+            if *age < options.max_age {
                 return CachedPrices {
                     table: table.clone(),
-                    origin: PriceOrigin::Cache,
-                    age: Some(*age),
-                    error: None,
+                    origin: PriceOrigin::Cache { age: *age },
+                    skipped: Vec::new(),
+                    ignored_fields: ignored.clone(),
+                    cache_problem,
                 };
             }
         }
-        match Self::fetch(source).await {
-            Ok(table) => {
-                let error = write_cache(path, &table).await.err().map(Arc::new);
+        let fetched =
+            Self::fetch_with(source, FetchOptions::new().with_timeout(options.timeout)).await;
+        match fetched {
+            Ok(report) => {
+                let cache_write_error = write_cache(path, url, &report.table).await.err();
                 CachedPrices {
-                    table,
-                    origin: PriceOrigin::Fetched,
-                    age: None,
-                    error,
+                    table: report.table,
+                    origin: PriceOrigin::Fetched { cache_write_error },
+                    skipped: report.skipped,
+                    ignored_fields: report.ignored_fields,
+                    cache_problem,
                 }
             }
-            Err(e) => {
-                let usable = cached.filter(|(_, age)| match age {
-                    Some(age) => *age <= max_stale,
-                    None => max_stale == Duration::MAX,
+            Err(fetch_error) => {
+                let usable = cached.filter(|c| match c.age {
+                    Some(age) => age <= options.max_stale,
+                    None => options.max_stale == Duration::MAX,
                 });
                 tracing::warn!(
-                    url = source.url(),
-                    error = %e,
+                    url,
+                    error = %fetch_error,
                     "yoagent prices: fetch failed; falling back to {}",
                     if usable.is_some() { "the expired cache" } else { "built-in prices" }
                 );
-                let error = Some(Arc::new(e));
                 match usable {
-                    Some((table, age)) => CachedPrices {
-                        table,
-                        origin: PriceOrigin::StaleCache,
-                        age,
-                        error,
+                    Some(c) => CachedPrices {
+                        table: c.table,
+                        origin: PriceOrigin::StaleCache {
+                            age: c.age,
+                            fetch_error,
+                        },
+                        skipped: Vec::new(),
+                        ignored_fields: c.ignored,
+                        cache_problem,
                     },
                     None => CachedPrices {
                         table: PriceTable::builtin(),
-                        origin: PriceOrigin::Builtin,
-                        age: None,
-                        error,
+                        origin: PriceOrigin::Builtin { fetch_error },
+                        skipped: Vec::new(),
+                        ignored_fields: Vec::new(),
+                        cache_problem,
                     },
                 }
             }
@@ -612,23 +567,39 @@ fn models_dev_provider(key: &str) -> &str {
     }
 }
 
-/// The cached table and its age (`None` when unknown), if the cache exists
-/// and parses. A missing cache is silent; any other read failure, or a
-/// corrupt cache, is logged and treated as absent.
-async fn read_cache(path: &Path) -> Option<(PriceTable, Option<Duration>)> {
-    let warn = |what: &str, e: &dyn std::fmt::Display| {
+struct Cached {
+    table: PriceTable,
+    /// `None` when unknown.
+    age: Option<Duration>,
+    ignored: Vec<String>,
+}
+
+enum CacheRead {
+    Missing,
+    Problem(CacheProblem),
+    Found(Cached),
+}
+
+/// Read the cache at `path`, which must cache `url`. Every problem but a
+/// missing file is logged.
+async fn read_cache(path: &Path, url: &str) -> CacheRead {
+    let problem = |p: CacheProblem| {
         tracing::warn!(
             path = %path.display(),
-            error = %e,
-            "yoagent prices: ignoring the price cache: {what}"
-        )
+            problem = ?p,
+            "yoagent prices: ignoring the price cache"
+        );
+        CacheRead::Problem(p)
+    };
+    let io_error = |e: std::io::Error| PriceError::Io {
+        path: path.to_path_buf(),
+        source: Arc::new(e),
     };
     let meta = match tokio::fs::metadata(path).await {
         Ok(meta) => meta,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return CacheRead::Missing,
         Err(e) => {
-            warn("cannot stat it", &e);
-            return None;
+            return problem(CacheProblem::Unreadable { error: io_error(e) });
         }
     };
     // A modification time in the future (clock skew, a copied file) or none
@@ -639,30 +610,56 @@ async fn read_cache(path: &Path) -> Option<(PriceTable, Option<Duration>)> {
         .and_then(|modified| SystemTime::now().duration_since(modified).ok());
     let text = match tokio::fs::read_to_string(path).await {
         Ok(text) => text,
-        Err(e) => {
-            warn("cannot read it", &e);
-            return None;
-        }
+        Err(e) => return problem(CacheProblem::Unreadable { error: io_error(e) }),
     };
-    match PriceTable::from_json_str_lenient(&text) {
-        Ok(table) => Some((table, age)),
-        Err(e) => {
-            warn("it is not a valid price table", &e);
-            None
-        }
+    let origin = path.display().to_string();
+    let invalid = |error: PriceError| problem(CacheProblem::Invalid { error });
+    let mut value: Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(e) => return invalid(PriceError::json(Some(&origin), e)),
+    };
+    if value.get(CACHE_MARKER).and_then(Value::as_u64) != Some(1) {
+        return invalid(PriceError::Json {
+            origin: Some(origin),
+            message: format!("not a yoagent price cache (no `{CACHE_MARKER}: 1`)"),
+        });
+    }
+    let cached_url = value.get("source").and_then(Value::as_str);
+    if cached_url != Some(url) {
+        return problem(CacheProblem::SourceMismatch {
+            cached: cached_url.map(str::to_string),
+            expected: url.to_string(),
+        });
+    }
+    let prices = value
+        .as_object_mut()
+        .and_then(|o| o.remove("prices"))
+        .unwrap_or(Value::Null);
+    match PriceTable::parse_value(prices, Strictness::Lenient, Some(&origin)) {
+        Ok((table, ignored)) => CacheRead::Found(Cached {
+            table,
+            age,
+            ignored,
+        }),
+        Err(e) => invalid(e),
     }
 }
 
 /// Write the cache through a temporary file and a rename, so a concurrent
 /// reader never sees half a file. A failure is logged and returned.
-async fn write_cache(path: &Path, table: &PriceTable) -> Result<(), PriceError> {
+async fn write_cache(path: &Path, url: &str, table: &PriceTable) -> Result<(), PriceError> {
+    let body = serde_json::json!({
+        CACHE_MARKER: 1,
+        "source": url,
+        "prices": table.to_wire(),
+    });
     let result = async {
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
             tokio::fs::create_dir_all(dir).await?;
         }
         let mut tmp = path.as_os_str().to_owned();
         tmp.push(".tmp");
-        tokio::fs::write(&tmp, table.to_json()).await?;
+        tokio::fs::write(&tmp, body.to_string()).await?;
         tokio::fs::rename(&tmp, path).await
     }
     .await;
@@ -674,7 +671,7 @@ async fn write_cache(path: &Path, table: &PriceTable) -> Result<(), PriceError> 
         );
         PriceError::Io {
             path: path.to_path_buf(),
-            source,
+            source: Arc::new(source),
         }
     })
 }
@@ -826,6 +823,7 @@ mod tests {
 
     #[test]
     fn effective_rates_treat_zero_cache_as_input() {
+        use crate::provider::prices::effective;
         let implicit = CostConfig::new(5.0, 30.0).with_cache_read(0.5);
         let explicit = implicit.clone().with_cache_write(5.0);
         assert_eq!(effective(&implicit), effective(&explicit));

@@ -6,6 +6,7 @@
 
 use std::sync::{Arc, Mutex};
 use tracing_subscriber::layer::SubscriberExt;
+use yoagent::provider::prices::global::{self, EnvOverride};
 use yoagent::provider::{ModelConfig, PriceError, PriceTable};
 
 /// Captures every event's message and fields on this thread.
@@ -51,7 +52,7 @@ fn a_bad_env_file_is_logged_and_ignored() {
         opus.cost,
         PriceTable::builtin().cost("anthropic", "claude-opus-5")
     );
-    assert_eq!(PriceTable::resolved(), PriceTable::builtin());
+    assert_eq!(global::resolved(), PriceTable::builtin());
 
     // Positive control: the rejection was reported, naming the file and why.
     let logs = logs.0.lock().unwrap();
@@ -64,23 +65,31 @@ fn a_bad_env_file_is_logged_and_ignored() {
     drop(logs);
 
     // The host can see it too, and fail fast if it wants.
-    let status = PriceTable::env_override_status().expect("the variable was set");
-    let err = status.expect_err("the file was rejected");
-    assert!(matches!(*err, PriceError::InvalidRate { .. }), "{err}");
+    match global::env_override_status() {
+        EnvOverride::Rejected {
+            path: rejected,
+            error,
+            ..
+        } => {
+            assert_eq!(rejected, path);
+            assert!(matches!(error, PriceError::InvalidRate { .. }), "{error}");
+        }
+        other => panic!("expected Rejected, got {other:?}"),
+    }
     assert!(matches!(
-        PriceTable::load_env_override(),
+        global::load_env_override(),
         Err(PriceError::InvalidRate { .. })
     ));
-    // A typo'd field in a hand-written file is NewerFormat, strictly.
+    // A typo'd field in a hand-written file is UnknownField, strictly.
     std::fs::write(
         &path,
         r#"{"schema": 1, "providers": {"anthropic": {"claude-opus-5": {"input": 5, "output": 25, "cache_reed": 0.5}}}}"#,
     )
     .unwrap();
     assert!(matches!(
-        PriceTable::load_env_override(),
-        Err(PriceError::NewerFormat { .. })
+        global::load_env_override(),
+        Err(PriceError::UnknownField { .. })
     ));
     std::env::remove_var("YOAGENT_PRICES");
-    assert!(PriceTable::load_env_override().unwrap().is_none());
+    assert!(global::load_env_override().unwrap().is_none());
 }

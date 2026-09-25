@@ -1,4 +1,5 @@
-//! Model prices as data: the built-in `prices.json` and [`PriceTable`].
+//! Model prices as data: the built-in `prices.json`, [`PriceTable`], runtime
+//! overrides ([`global`]) and opt-in live sources ([`PriceSource`]).
 //!
 //! Every price this crate knows lives in `src/provider/prices.json`, embedded
 //! at compile time, keyed by [`ModelConfig::provider`] then [`ModelConfig::id`]:
@@ -20,9 +21,9 @@
 //!
 //! Rates are USD per million tokens. An entry may add `"tiers"` (context
 //! tiers: `above_prompt_tokens` plus the four rates, strictly ascending) and
-//! metadata (`note`, `source`, `verified`, `cache_write_at_input`,
-//! `absent_upstream`). A cache rate that is omitted or `0` bills at the band's
-//! input rate, as for [`CostConfig`].
+//! metadata (`note`, `source`, `verified` as `YYYY-MM-DD`,
+//! `cache_write_at_input`, `absent_upstream`). A cache rate that is omitted or
+//! `0` bills at the band's input rate, as for [`CostConfig`].
 //!
 //! # Format evolution
 //!
@@ -30,47 +31,53 @@
 //!   must bump `schema`. An older release then rejects the file with
 //!   [`PriceError::UnsupportedSchema`] instead of billing without the field.
 //! - A **metadata-only** field (like `note`) must **not** bump `schema`, so
-//!   older releases keep reading remote data. They parse remote and cached
-//!   tables leniently (unknown fields ignored, logged at `debug`); only
-//!   hand-written input is strict and reports an unknown field as
-//!   [`PriceError::NewerFormat`].
+//!   older releases keep reading this crate's published file. They parse
+//!   [`PriceSource::YoagentMain`] and the [`fetch_cached`](PriceTable::fetch_cached)
+//!   cache leniently: unknown fields are ignored, logged at `warn` and
+//!   returned to the caller. Everything else — [`PriceTable::from_json_str`],
+//!   [`PriceTable::from_path`], `YOAGENT_PRICES`, [`PriceSource::Url`] — is
+//!   usually maintained by hand and is strict: an unknown field is
+//!   [`PriceError::UnknownField`].
 //!
 //! A test pins the field set to [`PRICE_SCHEMA_VERSION`], so changing it
 //! without deciding which of the two it is fails CI.
 //!
-//! The first-party constructors ([`ModelConfig::anthropic`],
-//! [`ModelConfig::openai`], [`ModelConfig::google`], …) look their
-//! `(provider, id)` up when they build a config and get `Some` for a listed
-//! model, `None` otherwise. Gateways and custom endpoints
+//! # Which constructors look prices up
+//!
+//! The first-party constructors whose provider is in [`PRICED_PROVIDERS`]
+//! ([`ModelConfig::anthropic`], [`ModelConfig::openai`],
+//! [`ModelConfig::google`], …, and the named presets built on them) look
+//! their `(provider, id)` up when they build a config and get `Some` for a
+//! listed model, `None` otherwise. Gateways and custom endpoints
 //! ([`ModelConfig::custom`], [`ModelConfig::openai_compat`],
 //! [`ModelConfig::local`], [`ModelConfig::ollama`], the OpenCode gateways)
 //! never look up: what they bill is not the vendor's list price.
 //!
 //! # Runtime overrides and precedence
 //!
-//! Constructors read a process-wide **resolved table**, built in layers
-//! (highest first):
+//! Constructors read a process-wide **resolved table** ([`global`]), built in
+//! layers, highest first:
 //!
-//! 1. an explicit `config.cost` you set after construction — it is a plain
-//!    field, so it always wins;
-//! 2. the **user layer**: [`PriceTable::install_override`], or on first use
-//!    the file named by the `YOAGENT_PRICES` environment variable;
-//! 3. the **fetched layer**: [`PriceTable::install_fetched`], opt-in, from a
-//!    live [`PriceSource`] (see its trust caveats) — never fetched unless you
+//! 1. the **user layer**: [`global::install_override`], or on first use the
+//!    file named by the `YOAGENT_PRICES` environment variable;
+//! 2. the **fetched layer**: [`global::install_fetched`], opt-in, from a live
+//!    [`PriceSource`] (see its trust caveats) — nothing is fetched unless you
 //!    call [`PriceTable::fetch`] or [`PriceTable::fetch_cached`];
-//! 4. the built-in `prices.json`.
+//! 3. the built-in `prices.json`.
 //!
-//! Each layer replaces whole entries per `(provider, id)`; a partial override
-//! file overrides exactly the models it lists. **Constructors resolve when
-//! they run**, so install overrides before building configs — a config built
-//! earlier keeps the price it was built with (re-price it with
-//! [`ModelConfig::reprice`]).
+//! Each layer replaces whole entries per `(provider, id)`. **Constructors
+//! resolve when they run**, so install prices before building configs, or
+//! re-price existing ones with [`ModelConfig::reprice`] (or
+//! `Agent::reprice` / `SubAgentTool::reprice`).
 //!
-//! See `docs/concepts/pricing.md` for the format, precedence and trust
-//! caveats.
+//! A `cost` you set on a config yourself wins over every process-wide layer,
+//! because constructors are the only thing that read them — but
+//! [`ModelConfig::reprice`] and [`ModelConfig::with_prices`] overwrite it.
+//!
+//! See `docs/concepts/pricing.md` for the full guide.
 //!
 //! [`ModelConfig::reprice`]: crate::provider::ModelConfig::reprice
-//!
+//! [`ModelConfig::with_prices`]: crate::provider::ModelConfig::with_prices
 //! [`ModelConfig::provider`]: crate::provider::ModelConfig::provider
 //! [`ModelConfig::id`]: crate::provider::ModelConfig::id
 //! [`ModelConfig::anthropic`]: crate::provider::ModelConfig::anthropic
@@ -83,27 +90,28 @@
 
 use super::model::{ContextTier, CostConfig};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock, PoisonError, RwLock};
+use std::sync::{Arc, OnceLock};
 
 mod fetch;
+pub mod global;
 pub use fetch::{
-    CachedPrices, FetchPolicy, PriceChange, PriceOrigin, PriceSource, SkippedModel,
-    DEFAULT_FETCH_TIMEOUT,
+    CacheOptions, CacheProblem, CachedPrices, FetchOptions, FetchReport, PriceOrigin, PriceSource,
+    SkippedModel, DEFAULT_FETCH_TIMEOUT,
 };
 
 /// The only `schema` value this release reads.
 pub const PRICE_SCHEMA_VERSION: u32 = 1;
 
 /// Environment variable naming a price file for the user layer, read once
-/// when the process-wide table is first used.
+/// when the process-wide table is first used. Unset or empty means no file.
 pub const PRICES_ENV_VAR: &str = "YOAGENT_PRICES";
 
 /// The `ModelConfig::provider` values whose constructors look prices up:
-/// `anthropic`, `openai` (also `openai_responses`), `google`, `xai`, `groq`,
-/// `deepseek`, `mistral`, `zai`, `minimax`, `qwen`, `meta`. Entries for any
-/// other provider are read only by
+/// `anthropic`, `openai` (set by both the `openai` and `openai_responses`
+/// constructors), `google`, `xai`, `groq`, `deepseek`, `mistral`, `zai`,
+/// `minimax`, `qwen`, `meta`. Entries for any other provider are read only by
 /// [`ModelConfig::with_prices`](crate::provider::ModelConfig::with_prices).
 pub const PRICED_PROVIDERS: &[&str] = &[
     "anthropic",
@@ -122,42 +130,57 @@ pub const PRICED_PROVIDERS: &[&str] = &[
 /// The built-in data, embedded at compile time.
 const BUILTIN_JSON: &str = include_str!("prices.json");
 
-/// Why price data was rejected.
-#[derive(Debug, thiserror::Error)]
+/// Why price data was rejected, or could not be fetched.
+///
+/// `Clone`, so one error can be both logged and returned; the underlying I/O
+/// and HTTP errors are shared behind `Arc`.
+#[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum PriceError {
-    /// Not JSON, or JSON that does not match the schema (a missing rate, a
-    /// misspelled or unknown field, a string where a number belongs).
-    #[error("price data does not match the price schema: {0}")]
-    Json(#[from] serde_json::Error),
-    /// The file could not be read.
-    #[error("cannot read price file {}: {source}", path.display())]
+    /// Malformed JSON, a missing required field (`input`, `output`,
+    /// `above_prompt_tokens`), or a value of the wrong type. `origin` is the
+    /// file path or URL, when there is one.
+    #[error(
+        "invalid price JSON{}: {message}",
+        .origin.as_deref().map(|o| format!(" from {o}")).unwrap_or_default()
+    )]
+    #[non_exhaustive]
+    Json {
+        origin: Option<String>,
+        message: String,
+    },
+    /// A price file (or cache file) could not be read or written.
+    #[error("price file {}: {source}", .path.display())]
+    #[non_exhaustive]
     Io {
         path: PathBuf,
         #[source]
-        source: std::io::Error,
+        source: Arc<std::io::Error>,
     },
-    /// `schema` is missing or is a version this release does not read.
-    #[error("unsupported price schema {found}; this yoagent reads schema {PRICE_SCHEMA_VERSION}")]
-    UnsupportedSchema {
-        /// The `schema` value as found, or `missing`.
-        found: String,
-    },
-    /// A field this release does not know, in input parsed strictly
-    /// (hand-written files). Either a typo, or data written for a newer
-    /// yoagent that added a metadata field — upgrade, or remove the field.
-    /// Remote and cached tables are parsed leniently and never return this.
+    /// `schema` is missing (`found: None`) or a version this release does
+    /// not read.
     #[error(
-        "unknown price field `{field}`: a typo, or a file written for a newer yoagent \
+        "unsupported price schema {}; this yoagent reads schema {PRICE_SCHEMA_VERSION}",
+        .found.as_deref().unwrap_or("(missing)")
+    )]
+    #[non_exhaustive]
+    UnsupportedSchema { found: Option<String> },
+    /// A field this release does not know, in input parsed strictly. Either
+    /// a typo, or data written for a newer yoagent that added a field —
+    /// upgrade, or remove the field.
+    #[error(
+        "unknown price field `{field}`: a typo, or data written for a newer yoagent \
          (upgrade yoagent, or remove the field)"
     )]
-    NewerFormat {
+    #[non_exhaustive]
+    UnknownField {
         /// Dotted path of the first unknown field, e.g.
         /// `providers.anthropic.claude-opus-5.cache_reed`.
         field: String,
     },
     /// A rate is negative or not finite.
     #[error("{provider}/{model}: {field} is {value}; rates must be finite and non-negative")]
+    #[non_exhaustive]
     InvalidRate {
         provider: String,
         model: String,
@@ -166,13 +189,17 @@ pub enum PriceError {
     },
     /// Context tier thresholds are not strictly ascending.
     #[error("{provider}/{model}: tier thresholds must be strictly ascending, got {thresholds:?}")]
+    #[non_exhaustive]
     TiersNotAscending {
         provider: String,
         model: String,
         thresholds: Vec<u64>,
     },
-    /// Any other inconsistency inside one entry.
+    /// Any other inconsistency inside one entry (an empty provider or model
+    /// id, a malformed `verified` date, a tier at 0, a
+    /// `cache_write_at_input` flag the rates contradict).
     #[error("{provider}/{model}: {reason}")]
+    #[non_exhaustive]
     InvalidEntry {
         provider: String,
         model: String,
@@ -180,24 +207,39 @@ pub enum PriceError {
     },
     /// A price source answered with a non-success HTTP status.
     #[error("GET {url} returned HTTP {status}")]
+    #[non_exhaustive]
     Http { url: String, status: u16 },
     /// A price source did not answer within the timeout.
     #[error("GET {url} timed out after {timeout:?}")]
+    #[non_exhaustive]
     Timeout {
         url: String,
         timeout: std::time::Duration,
     },
-    /// A price source could not be reached or its body not read.
+    /// A price source could not be reached, or its body not read.
     #[error("GET {url} failed: {source}")]
+    #[non_exhaustive]
     Request {
         url: String,
+        /// The transport error, opaque so no HTTP client type is part of
+        /// this crate's API.
         #[source]
-        source: reqwest::Error,
+        source: Arc<dyn std::error::Error + Send + Sync>,
     },
     /// models.dev data this crate cannot map — its envelope changed, or no
     /// model in it carried a usable price.
-    #[error("cannot map models.dev data: {0}")]
-    ModelsDev(String),
+    #[error("cannot map models.dev data from {url}: {reason}")]
+    #[non_exhaustive]
+    ModelsDev { url: String, reason: String },
+}
+
+impl PriceError {
+    fn json(origin: Option<&str>, e: serde_json::Error) -> Self {
+        PriceError::Json {
+            origin: origin.map(str::to_string),
+            message: e.to_string(),
+        }
+    }
 }
 
 /// One model's price and where it came from.
@@ -221,7 +263,8 @@ pub struct PriceEntry {
     /// The vendor page the rates were checked against. The authority when
     /// this data and any other source disagree.
     pub source: Option<String>,
-    /// The date (`YYYY-MM-DD`) the rates were last checked against `source`.
+    /// The date (`YYYY-MM-DD`, validated) the rates were last checked
+    /// against `source`.
     pub verified: Option<String>,
     /// Set only when models.dev genuinely lacks this model: why, and the date
     /// that was checked. The price audit otherwise treats absence as drift.
@@ -266,7 +309,18 @@ impl PriceEntry {
         self
     }
 
-    fn validate(&self, provider: &str, model: &str) -> Result<(), PriceError> {
+    /// Record why models.dev lacks this model, and when that was checked.
+    pub fn with_absent_upstream(mut self, why: impl Into<String>) -> Self {
+        self.absent_upstream = Some(why.into());
+        self
+    }
+
+    /// Check this entry as it would be checked when stored under
+    /// `(provider, model)`: non-empty ids, finite non-negative rates, tier
+    /// thresholds above 0 and strictly ascending, a `YYYY-MM-DD` `verified`
+    /// date, and a `cache_write_at_input` flag the rates agree with.
+    /// [`PriceTable::insert`] and every parser call this.
+    pub fn validate(&self, provider: &str, model: &str) -> Result<(), PriceError> {
         let entry_err = |reason: String| PriceError::InvalidEntry {
             provider: provider.to_string(),
             model: model.to_string(),
@@ -316,6 +370,13 @@ impl PriceEntry {
                 thresholds,
             });
         }
+        if let Some(date) = &self.verified {
+            if !is_iso_date(date) {
+                return Err(entry_err(format!(
+                    "verified is {date:?}; expected a YYYY-MM-DD date"
+                )));
+            }
+        }
         if self.cache_write_at_input {
             let base = (c.input_per_million, c.cache_write_per_million);
             let bands = std::iter::once(base).chain(
@@ -336,17 +397,38 @@ impl PriceEntry {
     }
 }
 
+/// `YYYY-MM-DD` with a plausible month and day.
+fn is_iso_date(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+        return false;
+    }
+    let digits = |r: std::ops::Range<usize>| {
+        b[r.clone()]
+            .iter()
+            .all(u8::is_ascii_digit)
+            .then(|| s[r].parse::<u32>().ok())
+            .flatten()
+    };
+    matches!(
+        (digits(0..4), digits(5..7), digits(8..10)),
+        (Some(_), Some(1..=12), Some(1..=31))
+    )
+}
+
 /// Prices keyed by provider, then model id.
 ///
 /// Parse one with [`from_json_str`](Self::from_json_str) or
 /// [`from_path`](Self::from_path), start from [`builtin`](Self::builtin), and
-/// combine with [`layered`](Self::layered). Every way in validates: rates must
-/// be finite and non-negative, tier thresholds strictly ascending, and
-/// `schema` must be [`PRICE_SCHEMA_VERSION`]. Hand-written input
-/// ([`from_json_str`](Self::from_json_str), [`from_path`](Self::from_path),
-/// `YOAGENT_PRICES`) rejects unknown fields as [`PriceError::NewerFormat`],
-/// so a misspelled `"cache_reed"` fails loudly instead of billing at the
-/// input rate; remote and cached input ignores them.
+/// combine with [`layered`](Self::layered). Every way in goes through
+/// [`insert`](Self::insert), which calls [`PriceEntry::validate`]; `schema`
+/// must be [`PRICE_SCHEMA_VERSION`]. [`from_json_str`](Self::from_json_str)
+/// and [`from_path`](Self::from_path) reject unknown fields as
+/// [`PriceError::UnknownField`], so a misspelled `"cache_reed"` fails loudly
+/// instead of billing at the input rate.
+///
+/// A `PriceTable` is plain data. The process-wide tables constructors read
+/// are managed by [`global`].
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PriceTable {
     entries: BTreeMap<String, BTreeMap<String, PriceEntry>>,
@@ -365,52 +447,63 @@ impl PriceTable {
     }
 
     /// Parse and validate a table in this crate's JSON format, **strictly**:
-    /// an unknown field is [`PriceError::NewerFormat`]. This is the parser
-    /// for data people write by hand ([`from_path`](Self::from_path),
-    /// `YOAGENT_PRICES`), where an unknown field is most likely a typo.
-    /// Remote and cached tables ([`fetch`](Self::fetch),
-    /// [`fetch_cached`](Self::fetch_cached)) are parsed leniently instead.
+    /// an unknown field is [`PriceError::UnknownField`].
     pub fn from_json_str(json: &str) -> Result<PriceTable, PriceError> {
-        Self::parse(json, Strictness::Strict)
+        Self::parse(json, Strictness::Strict, None).map(|(t, _)| t)
     }
 
-    /// [`from_json_str`](Self::from_json_str), but unknown fields are
-    /// ignored (logged at `debug`): metadata a newer yoagent added without a
-    /// schema bump must not stop an older one from reading remote data.
-    pub(crate) fn from_json_str_lenient(json: &str) -> Result<PriceTable, PriceError> {
-        Self::parse(json, Strictness::Lenient)
+    /// Read, strictly parse and validate a table file. Errors name the path.
+    pub fn from_path(path: impl AsRef<Path>) -> Result<PriceTable, PriceError> {
+        let path = path.as_ref();
+        let text = std::fs::read_to_string(path).map_err(|source| PriceError::Io {
+            path: path.to_path_buf(),
+            source: Arc::new(source),
+        })?;
+        let origin = path.display().to_string();
+        Self::parse(&text, Strictness::Strict, Some(&origin)).map(|(t, _)| t)
     }
 
-    fn parse(json: &str, strictness: Strictness) -> Result<PriceTable, PriceError> {
-        let value: serde_json::Value = serde_json::from_str(json)?;
+    /// Parse `json`; with [`Strictness::Lenient`], also return the dotted
+    /// paths of the fields it ignored.
+    pub(crate) fn parse(
+        json: &str,
+        strictness: Strictness,
+        origin: Option<&str>,
+    ) -> Result<(PriceTable, Vec<String>), PriceError> {
+        let value: serde_json::Value =
+            serde_json::from_str(json).map_err(|e| PriceError::json(origin, e))?;
+        Self::parse_value(value, strictness, origin)
+    }
+
+    pub(crate) fn parse_value(
+        value: serde_json::Value,
+        strictness: Strictness,
+        origin: Option<&str>,
+    ) -> Result<(PriceTable, Vec<String>), PriceError> {
         match value.get("schema") {
             Some(v) if v.as_u64() == Some(u64::from(PRICE_SCHEMA_VERSION)) => {}
-            Some(v) => {
+            found => {
                 return Err(PriceError::UnsupportedSchema {
-                    found: v.to_string(),
-                })
-            }
-            None => {
-                return Err(PriceError::UnsupportedSchema {
-                    found: "missing".into(),
+                    found: found.map(|v| v.to_string()),
                 })
             }
         }
         let unknown = unknown_fields(&value);
-        if !unknown.is_empty() {
-            match strictness {
-                Strictness::Strict => {
-                    return Err(PriceError::NewerFormat {
-                        field: unknown[0].clone(),
-                    })
-                }
-                Strictness::Lenient => tracing::debug!(
-                    ?unknown,
-                    "yoagent prices: ignoring fields this release does not know"
-                ),
-            }
+        if let (Strictness::Strict, Some(first)) = (strictness, unknown.first()) {
+            return Err(PriceError::UnknownField {
+                field: first.clone(),
+            });
         }
-        let wire: FileWire = serde_json::from_value(value)?;
+        if !unknown.is_empty() {
+            tracing::warn!(
+                origin = origin.unwrap_or("<string>"),
+                ?unknown,
+                "yoagent prices: ignoring fields this release does not know \
+                 (metadata a newer yoagent added?)"
+            );
+        }
+        let wire: FileWire =
+            serde_json::from_value(value).map_err(|e| PriceError::json(origin, e))?;
         let mut table = PriceTable {
             entries: BTreeMap::new(),
             comment: wire.comment,
@@ -420,23 +513,18 @@ impl PriceTable {
                 table.insert(&provider, &model, entry.into())?;
             }
         }
-        Ok(table)
-    }
-
-    /// Read, parse and validate a table file.
-    pub fn from_path(path: impl AsRef<Path>) -> Result<PriceTable, PriceError> {
-        let path = path.as_ref();
-        let text = std::fs::read_to_string(path).map_err(|source| PriceError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
-        Self::from_json_str(&text)
+        Ok((table, unknown))
     }
 
     /// Serialize to this crate's JSON format (pretty-printed, sorted), which
     /// [`from_json_str`](Self::from_json_str) reads back to an equal table.
     pub fn to_json(&self) -> String {
-        let wire = FileWire {
+        // Only strings, finite numbers and maps: serialization cannot fail.
+        serde_json::to_string_pretty(&self.to_wire()).expect("a validated price table serializes")
+    }
+
+    fn to_wire(&self) -> FileWire {
+        FileWire {
             schema: PRICE_SCHEMA_VERSION,
             comment: self.comment.clone(),
             providers: self
@@ -450,13 +538,12 @@ impl PriceTable {
                     (p.clone(), models)
                 })
                 .collect(),
-        };
-        // Only strings, finite numbers and maps: serialization cannot fail.
-        serde_json::to_string_pretty(&wire).expect("a validated price table serializes")
+        }
     }
 
-    /// Add or replace one model's entry, validating it. Returns the entry it
-    /// replaced.
+    /// Add or replace one model's entry, validating it with
+    /// [`PriceEntry::validate`]. Returns the entry it replaced. The one way
+    /// entries get into a table.
     pub fn insert(
         &mut self,
         provider: impl Into<String>,
@@ -513,6 +600,165 @@ impl PriceTable {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Every model in `self` whose billed rates differ from `base`, or that
+    /// `base` does not list. Models only `base` lists are not reported (use
+    /// this to preview what layering `self` over `base` would change).
+    /// Nothing is installed.
+    pub fn changes_from(&self, base: &PriceTable) -> Vec<PriceChange> {
+        self.iter()
+            .filter_map(|(provider, model, entry)| {
+                let before = base.entry(provider, model).map(|b| &b.cost);
+                if before.is_some_and(|b| effective(b) == effective(&entry.cost)) {
+                    return None;
+                }
+                Some(PriceChange {
+                    provider: provider.to_string(),
+                    model: model.to_string(),
+                    before: before.cloned(),
+                    after: Some(entry.cost.clone()),
+                    shadowed: false,
+                })
+            })
+            .collect()
+    }
+}
+
+/// Every model whose billed price differs between `before` and `after`,
+/// including models only one of them lists.
+pub(crate) fn diff_tables(before: &PriceTable, after: &PriceTable) -> Vec<PriceChange> {
+    let keys: BTreeSet<(&str, &str)> = before
+        .iter()
+        .chain(after.iter())
+        .map(|(p, m, _)| (p, m))
+        .collect();
+    keys.into_iter()
+        .filter_map(|(p, m)| {
+            let (b, a) = (before.cost(p, m), after.cost(p, m));
+            let same = match (&b, &a) {
+                (Some(b), Some(a)) => effective(b) == effective(a),
+                (None, None) => true,
+                _ => false,
+            };
+            (!same).then(|| PriceChange {
+                provider: p.to_string(),
+                model: m.to_string(),
+                before: b,
+                after: a,
+                shadowed: false,
+            })
+        })
+        .collect()
+}
+
+/// One model whose price differs between two states (see
+/// [`PriceTable::changes_from`] and the [`global`] install functions).
+///
+/// Rates are compared as billed: a cache rate of `0` counts as the band's
+/// input rate, so writing a no-premium cache rate out explicitly is not a
+/// change.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct PriceChange {
+    pub provider: String,
+    pub model: String,
+    /// The earlier rates; `None` when the model was not priced.
+    pub before: Option<CostConfig>,
+    /// The new rates; `None` when the model is no longer priced.
+    pub after: Option<CostConfig>,
+    /// The change happened in a layer the user layer overrides for this
+    /// model, so it does not affect what constructors bill (yet: it will if
+    /// the override is cleared).
+    pub shadowed: bool,
+}
+
+impl std::fmt::Display for PriceChange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}: ", self.provider, self.model)?;
+        match (&self.before, &self.after) {
+            (None, None) => write!(f, "unpriced")?,
+            (None, Some(after)) => write!(f, "new ({})", describe(after))?,
+            (Some(before), None) => write!(f, "no longer priced (was {})", describe(before))?,
+            (Some(before), Some(after)) => {
+                let (b, a) = (effective(before), effective(after));
+                let mut parts = Vec::new();
+                for (name, x, y) in [
+                    ("input", b.input_per_million, a.input_per_million),
+                    ("output", b.output_per_million, a.output_per_million),
+                    (
+                        "cache_read",
+                        b.cache_read_per_million,
+                        a.cache_read_per_million,
+                    ),
+                    (
+                        "cache_write",
+                        b.cache_write_per_million,
+                        a.cache_write_per_million,
+                    ),
+                ] {
+                    if x != y {
+                        parts.push(format!("{name} {x} -> {y}"));
+                    }
+                }
+                if b.context_tiers != a.context_tiers {
+                    parts.push(format!(
+                        "tiers {} -> {}",
+                        describe_tiers(&before.context_tiers),
+                        describe_tiers(&after.context_tiers)
+                    ));
+                }
+                write!(f, "{}", parts.join(", "))?;
+            }
+        }
+        if self.shadowed {
+            write!(f, " [shadowed by the user layer]")?;
+        }
+        Ok(())
+    }
+}
+
+fn describe(c: &CostConfig) -> String {
+    let mut s = format!(
+        "input {}, output {}, cache_read {}, cache_write {}",
+        c.input_per_million,
+        c.output_per_million,
+        c.cache_read_per_million,
+        c.cache_write_per_million
+    );
+    if !c.context_tiers.is_empty() {
+        s.push_str(&format!(", tiers {}", describe_tiers(&c.context_tiers)));
+    }
+    s
+}
+
+fn describe_tiers(tiers: &[ContextTier]) -> String {
+    let items: Vec<String> = tiers
+        .iter()
+        .map(|t| {
+            format!(
+                ">{}: {}/{}/{}/{}",
+                t.above_prompt_tokens,
+                t.input_per_million,
+                t.output_per_million,
+                t.cache_read_per_million,
+                t.cache_write_per_million
+            )
+        })
+        .collect();
+    format!("[{}]", items.join("; "))
+}
+
+/// `c` as billed: every zero cache rate replaced by its band's input rate.
+fn effective(c: &CostConfig) -> CostConfig {
+    let or = |rate: f64, input: f64| if rate == 0.0 { input } else { rate };
+    let mut e = c.clone();
+    e.cache_read_per_million = or(c.cache_read_per_million, c.input_per_million);
+    e.cache_write_per_million = or(c.cache_write_per_million, c.input_per_million);
+    for t in &mut e.context_tiers {
+        t.cache_read_per_million = or(t.cache_read_per_million, t.input_per_million);
+        t.cache_write_per_million = or(t.cache_write_per_million, t.input_per_million);
+    }
+    e
 }
 
 /// The parsed built-in table. The data is checked by this crate's tests, so
@@ -525,246 +771,6 @@ fn builtin_ref() -> &'static PriceTable {
     })
 }
 
-/// The process-wide layers and their resolution.
-struct Layers {
-    fetched: Option<PriceTable>,
-    user: Option<PriceTable>,
-    /// `builtin`, then `fetched`, then `user`, rebuilt on every install so a
-    /// lookup is one map read.
-    resolved: PriceTable,
-}
-
-impl Layers {
-    fn rebuild(&mut self) {
-        let mut table = builtin_ref().clone();
-        for layer in [&self.fetched, &self.user].into_iter().flatten() {
-            table = table.layered(layer);
-        }
-        self.resolved = table;
-    }
-}
-
-fn layers() -> &'static RwLock<Layers> {
-    static LAYERS: OnceLock<RwLock<Layers>> = OnceLock::new();
-    LAYERS.get_or_init(|| {
-        let mut layers = Layers {
-            fetched: None,
-            user: env_override(),
-            resolved: PriceTable::default(),
-        };
-        layers.rebuild();
-        RwLock::new(layers)
-    })
-}
-
-/// The mistakes an override can make silently, as messages (see
-/// [`PriceTable::install_override`]).
-fn override_warnings(table: &PriceTable, lower: &PriceTable) -> Vec<String> {
-    let mut out = Vec::new();
-    let unlooked: Vec<&str> = table
-        .entries
-        .keys()
-        .map(String::as_str)
-        .filter(|p| !PRICED_PROVIDERS.contains(p))
-        .collect();
-    if !unlooked.is_empty() {
-        out.push(format!(
-            "entries for provider(s) {unlooked:?} are never looked up by a constructor — only \
-             ModelConfig::with_prices reads them (constructors that look prices up: \
-             {PRICED_PROVIDERS:?})"
-        ));
-    }
-    for (provider, model, entry) in table.iter() {
-        let Some(old) = lower.entry(provider, model) else {
-            continue;
-        };
-        let (old, new) = (&old.cost, &entry.cost);
-        if !old.context_tiers.is_empty() && new.context_tiers.is_empty() {
-            out.push(format!(
-                "{provider}/{model} drops the {} context tier(s) of the entry it replaces; \
-                 every request now bills at the base rates",
-                old.context_tiers.len()
-            ));
-        }
-        for (name, was, now) in [
-            (
-                "cache_read",
-                old.cache_read_per_million,
-                new.cache_read_per_million,
-            ),
-            (
-                "cache_write",
-                old.cache_write_per_million,
-                new.cache_write_per_million,
-            ),
-        ] {
-            if was != 0.0 && now == 0.0 {
-                out.push(format!(
-                    "{provider}/{model} leaves {name} unset, so it bills at the input rate \
-                     ({}); the entry it replaces set {was}",
-                    new.input_per_million
-                ));
-            }
-        }
-    }
-    out
-}
-
-/// What happened to [`PRICES_ENV_VAR`] when the layers were initialised.
-type EnvStatus = Option<Result<usize, Arc<PriceError>>>;
-
-static ENV_STATUS: OnceLock<EnvStatus> = OnceLock::new();
-
-/// The user layer named by [`PRICES_ENV_VAR`], if set and valid. A bad file
-/// is logged and ignored — a typo in an environment variable must not take
-/// down every constructor in the process — and the outcome is recorded for
-/// [`PriceTable::env_override_status`].
-///
-/// Never read in this crate's own unit tests, so a developer's
-/// `YOAGENT_PRICES` cannot change what they assert.
-fn env_override() -> Option<PriceTable> {
-    #[cfg(test)]
-    let loaded: Result<Option<PriceTable>, PriceError> = Ok(None);
-    #[cfg(not(test))]
-    let loaded = PriceTable::load_env_override();
-    let path = std::env::var_os(PRICES_ENV_VAR).unwrap_or_default();
-    let (status, table) = match loaded {
-        Ok(None) => (None, None),
-        Ok(Some(table)) => {
-            tracing::info!(
-                path = %Path::new(&path).display(),
-                entries = table.len(),
-                "yoagent prices: loaded {PRICES_ENV_VAR} override"
-            );
-            for warning in override_warnings(&table, builtin_ref()) {
-                tracing::warn!("yoagent prices: {PRICES_ENV_VAR}: {warning}");
-            }
-            (Some(Ok(table.len())), Some(table))
-        }
-        Err(e) => {
-            tracing::warn!(
-                path = %Path::new(&path).display(),
-                error = %e,
-                "yoagent prices: ignoring {PRICES_ENV_VAR}; using built-in prices"
-            );
-            (Some(Err(Arc::new(e))), None)
-        }
-    };
-    let _ = ENV_STATUS.set(status);
-    table
-}
-
-fn read_layers() -> std::sync::RwLockReadGuard<'static, Layers> {
-    // A panic while holding the lock cannot leave `Layers` half-written
-    // (every write replaces whole fields), so a poisoned lock is still valid.
-    layers().read().unwrap_or_else(PoisonError::into_inner)
-}
-
-fn write_layers() -> std::sync::RwLockWriteGuard<'static, Layers> {
-    layers().write().unwrap_or_else(PoisonError::into_inner)
-}
-
-impl PriceTable {
-    /// Install `table` as the process-wide **user layer**, replacing any
-    /// previous override (including one loaded from `YOAGENT_PRICES`).
-    ///
-    /// Its entries take precedence over the fetched layer and the built-in
-    /// data per `(provider, id)`; models it does not list keep their
-    /// lower-layer price. Affects configs built **after** this call —
-    /// constructors resolve when they run; re-price older ones with
-    /// [`ModelConfig::reprice`](crate::provider::ModelConfig::reprice).
-    ///
-    /// Returns every model it prices differently from the layers below
-    /// (built-in and fetched), as billed. An entry replaces the lower entry
-    /// **whole**, so a few mistakes are logged at `warn` rather than left
-    /// silent:
-    /// - an entry for a provider no constructor looks up ([`PRICED_PROVIDERS`])
-    ///   — only [`ModelConfig::with_prices`](crate::provider::ModelConfig::with_prices)
-    ///   will ever read it;
-    /// - an entry that drops the context tiers the replaced entry had;
-    /// - an entry that leaves a cache rate unset (billing at the input rate)
-    ///   where the replaced entry set one.
-    ///
-    /// ```
-    /// # use yoagent::provider::{ModelConfig, PriceTable};
-    /// # PriceTable::clear_override(); // ignore a developer's YOAGENT_PRICES
-    /// let mine = PriceTable::from_json_str(r#"{"schema": 1, "providers": {
-    ///     "deepseek": {"deepseek-flash": {"input": 0.3, "output": 1.2, "cache_read": 0.006}}}}"#)?;
-    /// let changes = PriceTable::install_override(mine);
-    /// assert_eq!(changes.len(), 1); // a model the built-in data did not price
-    /// let config = ModelConfig::deepseek("deepseek-flash", "DeepSeek Flash");
-    /// assert_eq!(config.cost.unwrap().input_per_million, 0.3);
-    /// # PriceTable::clear_override();
-    /// # Ok::<(), yoagent::provider::PriceError>(())
-    /// ```
-    #[must_use = "the returned changes are how you see what the override changed"]
-    pub fn install_override(table: PriceTable) -> Vec<PriceChange> {
-        let lower = {
-            let layers = read_layers();
-            match &layers.fetched {
-                Some(fetched) => builtin_ref().layered(fetched),
-                None => builtin_ref().clone(),
-            }
-        };
-        let changes = table.changes_from(&lower);
-        for warning in override_warnings(&table, &lower) {
-            tracing::warn!("yoagent prices: override: {warning}");
-        }
-        let mut layers = write_layers();
-        layers.user = Some(table);
-        layers.rebuild();
-        changes
-    }
-
-    /// Remove the user layer, including one loaded from `YOAGENT_PRICES`
-    /// (which is not re-read).
-    pub fn clear_override() {
-        let mut layers = write_layers();
-        layers.user = None;
-        layers.rebuild();
-    }
-
-    /// A snapshot of the process-wide resolved table — what a constructor
-    /// called now would use.
-    pub fn resolved() -> PriceTable {
-        read_layers().resolved.clone()
-    }
-
-    /// What became of `YOAGENT_PRICES` when the process-wide table was
-    /// first used (calling this uses it, reading the variable if nothing
-    /// has yet):
-    ///
-    /// - `None`: the variable was unset or empty;
-    /// - `Some(Ok(n))`: the file loaded as the user layer with `n` entries;
-    /// - `Some(Err(e))`: the file was rejected — logged and ignored, so
-    ///   built-in prices apply.
-    ///
-    /// A host that would rather fail than run on prices it did not ask for
-    /// checks this at startup, or calls
-    /// [`load_env_override`](Self::load_env_override) itself.
-    pub fn env_override_status() -> Option<Result<usize, Arc<PriceError>>> {
-        let _ = layers();
-        ENV_STATUS.get().cloned().flatten()
-    }
-
-    /// Read and strictly parse the file named by `YOAGENT_PRICES` now,
-    /// without installing it: `Ok(None)` when the variable is unset or
-    /// empty. For a host that wants to fail fast on a bad file rather than
-    /// have it logged and ignored.
-    pub fn load_env_override() -> Result<Option<PriceTable>, PriceError> {
-        match std::env::var_os(PRICES_ENV_VAR) {
-            Some(path) if !path.is_empty() => Self::from_path(path).map(Some),
-            _ => Ok(None),
-        }
-    }
-}
-
-/// The rates a first-party constructor gets for `(provider, id)`, from the
-/// process-wide resolved table.
-pub(crate) fn resolved_cost(provider: &str, id: &str) -> Option<CostConfig> {
-    read_layers().resolved.cost(provider, id)
-}
-
 // ---- wire format ---------------------------------------------------------
 
 fn is_zero(v: &f64) -> bool {
@@ -775,12 +781,13 @@ fn is_false(v: &bool) -> bool {
     !*v
 }
 
-/// How [`PriceTable::parse`] treats a field it does not know.
-#[derive(Clone, Copy)]
-enum Strictness {
-    /// [`PriceError::NewerFormat`]: hand-written input, where it is a typo.
+/// How a parse treats a field it does not know.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Strictness {
+    /// [`PriceError::UnknownField`]: input people maintain by hand.
     Strict,
-    /// Ignored and logged: remote or cached input a newer release wrote.
+    /// Ignored, logged and returned: this crate's published file and caches
+    /// of it, which a newer release may have written.
     Lenient,
 }
 
@@ -958,6 +965,10 @@ mod tests {
         format!(r#"{{"schema": 1, "providers": {{"p": {{"m": {entry}}}}}}}"#)
     }
 
+    fn lenient(json: &str) -> Result<(PriceTable, Vec<String>), PriceError> {
+        PriceTable::parse(json, Strictness::Lenient, None)
+    }
+
     #[test]
     fn builtin_parses_and_round_trips() {
         let t = PriceTable::builtin();
@@ -969,9 +980,15 @@ mod tests {
     #[test]
     fn schema_version_is_checked() {
         let e = PriceTable::from_json_str(r#"{"schema": 2, "providers": {}}"#).unwrap_err();
-        assert!(matches!(e, PriceError::UnsupportedSchema { .. }), "{e}");
+        assert!(
+            matches!(e, PriceError::UnsupportedSchema { ref found } if found.as_deref() == Some("2")),
+            "{e}"
+        );
         let e = PriceTable::from_json_str(r#"{"providers": {}}"#).unwrap_err();
-        assert!(matches!(e, PriceError::UnsupportedSchema { .. }), "{e}");
+        assert!(
+            matches!(e, PriceError::UnsupportedSchema { found: None }),
+            "{e}"
+        );
         // Positive control.
         assert!(PriceTable::from_json_str(r#"{"schema": 1, "providers": {}}"#).is_ok());
     }
@@ -1016,46 +1033,90 @@ mod tests {
     }
 
     #[test]
+    fn empty_ids_are_invalid_entries() {
+        let entry = PriceEntry::new(CostConfig::new(1.0, 2.0));
+        for (p, m) in [("", "m"), ("p", "")] {
+            assert!(matches!(
+                PriceTable::new().insert(p, m, entry.clone()).unwrap_err(),
+                PriceError::InvalidEntry { .. }
+            ));
+        }
+        let e = PriceTable::from_json_str(
+            r#"{"schema": 1, "providers": {"p": {"": {"input": 1, "output": 2}}}}"#,
+        )
+        .unwrap_err();
+        assert!(matches!(e, PriceError::InvalidEntry { .. }), "{e}");
+        // Positive control.
+        assert!(PriceTable::new().insert("p", "m", entry).is_ok());
+    }
+
+    #[test]
+    fn verified_must_be_an_iso_date() {
+        for bad in [
+            "2026-9-25",
+            "25/09/2026",
+            "2026-13-01",
+            "2026-09-32",
+            "yesterday",
+            "2026-09-2x",
+        ] {
+            let e = PriceTable::from_json_str(&one(&format!(
+                r#"{{"input": 1, "output": 2, "verified": "{bad}"}}"#
+            )))
+            .unwrap_err();
+            assert!(matches!(e, PriceError::InvalidEntry { .. }), "{bad}: {e}");
+        }
+        assert!(PriceTable::from_json_str(&one(
+            r#"{"input": 1, "output": 2, "verified": "2026-09-25"}"#
+        ))
+        .is_ok());
+        let entry = PriceEntry::new(CostConfig::new(1.0, 2.0)).with_verified("soon");
+        assert!(entry.validate("p", "m").is_err());
+        assert!(entry.with_verified("2026-01-31").validate("p", "m").is_ok());
+    }
+
+    #[test]
     fn unknown_fields_are_rejected_strictly() {
         let e = PriceTable::from_json_str(&one(r#"{"input": 1, "output": 2, "cache_reed": 0.1}"#))
             .unwrap_err();
         assert!(
-            matches!(e, PriceError::NewerFormat { ref field } if field == "providers.p.m.cache_reed"),
+            matches!(e, PriceError::UnknownField { ref field } if field == "providers.p.m.cache_reed"),
             "{e}"
         );
         // At every level: top, entry, tier.
         let top = r#"{"schema": 1, "providers": {}, "generated": "x"}"#;
         assert!(matches!(
             PriceTable::from_json_str(top).unwrap_err(),
-            PriceError::NewerFormat { .. }
+            PriceError::UnknownField { .. }
         ));
         let tier = one(
             r#"{"input": 1, "output": 2, "tiers": [{"above_prompt_tokens": 9, "input": 2, "output": 3, "kind": "x"}]}"#,
         );
         assert!(matches!(
             PriceTable::from_json_str(&tier).unwrap_err(),
-            PriceError::NewerFormat { ref field } if field.ends_with("tiers[0].kind")
+            PriceError::UnknownField { ref field } if field.ends_with("tiers[0].kind")
         ));
-        // A missing required field is corrupt data, not a newer format.
+        // A missing required field is corrupt data, not an unknown field.
         assert!(matches!(
             PriceTable::from_json_str(&one(r#"{"input": 1}"#)).unwrap_err(),
-            PriceError::Json(_)
+            PriceError::Json { .. }
         ));
     }
 
     #[test]
-    fn unknown_fields_are_ignored_leniently() {
+    fn unknown_fields_are_returned_leniently() {
         let json = one(r#"{"input": 1, "output": 2, "deprecated": true}"#);
         // Positive control: strict rejects exactly this document.
         assert!(PriceTable::from_json_str(&json).is_err());
-        let t = PriceTable::from_json_str_lenient(&json).unwrap();
+        let (t, ignored) = lenient(&json).unwrap();
         assert_eq!(t.cost("p", "m"), Some(CostConfig::new(1.0, 2.0)));
+        assert_eq!(ignored, ["providers.p.m.deprecated"]);
         // Lenient still enforces the schema version and validation.
         assert!(matches!(
-            PriceTable::from_json_str_lenient(r#"{"schema": 2, "providers": {}}"#).unwrap_err(),
+            lenient(r#"{"schema": 2, "providers": {}}"#).unwrap_err(),
             PriceError::UnsupportedSchema { .. }
         ));
-        assert!(PriceTable::from_json_str_lenient(&one(r#"{"input": -1, "output": 2}"#)).is_err());
+        assert!(lenient(&one(r#"{"input": -1, "output": 2}"#)).is_err());
     }
 
     /// The format contract: a field that changes billing bumps `schema`; a
@@ -1063,7 +1124,7 @@ mod tests {
     /// a decision, and this test forces it: add the new set under a new
     /// version (billing field — also bump `PRICE_SCHEMA_VERSION`), or extend
     /// the current version's set (metadata only — older releases ignore it
-    /// in remote data).
+    /// in this crate's published file).
     #[test]
     fn wire_fields_are_pinned_to_the_schema_version() {
         type Fields = (
@@ -1109,34 +1170,39 @@ mod tests {
         assert_eq!(sorted(ENTRY_FIELDS), sorted(entry));
         assert_eq!(sorted(TIER_FIELDS), sorted(tier));
 
-        // And the consts are what serde actually reads and writes: serialize
-        // a wire value with every field populated and compare its keys.
-        let full = PriceEntry::new(
-            CostConfig::new(1.0, 2.0)
-                .with_cache_read(0.1)
-                .with_cache_write(1.0)
-                .with_context_tier(
-                    ContextTier::new(10, 2.0, 3.0)
-                        .with_cache_read(0.2)
-                        .with_cache_write(2.0),
-                ),
-        )
-        .with_cache_write_at_input(true)
-        .with_note("n")
-        .with_source("s")
-        .with_verified("v");
-        let full = PriceEntry {
-            absent_upstream: Some("a".into()),
-            ..full
+        // The consts must be exactly what the wire structs read and write.
+        // Built as struct literals with no `..`, so a field added to a wire
+        // struct fails to compile here until it is populated — and then
+        // fails the key comparison until it is in the consts.
+        let wire = FileWire {
+            schema: 1,
+            comment: Some("c".into()),
+            providers: BTreeMap::from([(
+                "p".to_string(),
+                BTreeMap::from([(
+                    "m".to_string(),
+                    EntryWire {
+                        input: 1.0,
+                        output: 2.0,
+                        cache_read: 0.1,
+                        cache_write: 1.0,
+                        tiers: vec![TierWire {
+                            above_prompt_tokens: 10,
+                            input: 2.0,
+                            output: 3.0,
+                            cache_read: 0.2,
+                            cache_write: 2.0,
+                        }],
+                        cache_write_at_input: true,
+                        note: Some("n".into()),
+                        source: Some("s".into()),
+                        verified: Some("2026-01-01".into()),
+                        absent_upstream: Some("a".into()),
+                    },
+                )]),
+            )]),
         };
-        let mut table = PriceTable::new();
-        table
-            .entries
-            .entry("p".into())
-            .or_default()
-            .insert("m".into(), full);
-        table.comment = Some("c".into());
-        let v: serde_json::Value = serde_json::from_str(&table.to_json()).unwrap();
+        let v = serde_json::to_value(&wire).unwrap();
         let keys = |v: &serde_json::Value| {
             let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
             k.sort();
@@ -1146,6 +1212,12 @@ mod tests {
         let e = &v["providers"]["p"]["m"];
         assert_eq!(keys(e), sorted(ENTRY_FIELDS));
         assert_eq!(keys(&e["tiers"][0]), sorted(TIER_FIELDS));
+
+        // And a document with every field parses strictly and round-trips
+        // every one of them: nothing in the consts is dropped on the floor.
+        let text = v.to_string();
+        let table = PriceTable::from_json_str(&text).unwrap();
+        assert_eq!(serde_json::to_value(table.to_wire()).unwrap(), v);
     }
 
     #[test]
@@ -1176,19 +1248,10 @@ mod tests {
         )
         .unwrap();
         let t = base.layered(&over);
-        assert_eq!(
-            t.cost("anthropic", "claude-sonnet-5")
-                .unwrap()
-                .input_per_million,
-            1.8
-        );
+        let sonnet = t.cost("anthropic", "claude-sonnet-5").unwrap();
+        assert_eq!(sonnet.input_per_million, 1.8);
         // The override's entry replaces the whole entry, not single fields.
-        assert_eq!(
-            t.cost("anthropic", "claude-sonnet-5")
-                .unwrap()
-                .cache_read_per_million,
-            0.0
-        );
+        assert_eq!(sonnet.cache_read_per_million, 0.0);
         assert_eq!(
             t.cost("anthropic", "claude-opus-5"),
             base.cost("anthropic", "claude-opus-5")
@@ -1197,30 +1260,50 @@ mod tests {
         assert_eq!(t.len(), base.len() + 1);
     }
 
-    /// This crate's unit tests never read `YOAGENT_PRICES`, so a developer's
-    /// override cannot change what they assert.
     #[test]
-    fn unit_tests_ignore_the_env_override() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("prices.json");
-        std::fs::write(
-            &path,
-            r#"{"schema": 1, "providers": {"anthropic": {"claude-sonnet-5": {"input": 9, "output": 9}}}}"#,
+    fn diff_reports_added_removed_and_changed() {
+        let a = PriceTable::from_json_str(
+            r#"{"schema": 1, "providers": {"p": {
+                "same": {"input": 1, "output": 2, "cache_write": 1},
+                "changed": {"input": 1, "output": 2},
+                "gone": {"input": 1, "output": 2}}}}"#,
         )
         .unwrap();
-        std::env::set_var(PRICES_ENV_VAR, &path);
-        // Positive control: the variable is set and names a good file.
-        let loaded = PriceTable::load_env_override().unwrap().unwrap();
-        assert_eq!(loaded.len(), 1);
-        // Yet the layer initialiser does not use it.
-        assert!(env_override().is_none());
-        std::env::remove_var(PRICES_ENV_VAR);
-        assert!(PriceTable::load_env_override().unwrap().is_none());
+        let b = PriceTable::from_json_str(
+            r#"{"schema": 1, "providers": {"p": {
+                "same": {"input": 1, "output": 2},
+                "changed": {"input": 3, "output": 2},
+                "new": {"input": 1, "output": 2}}}}"#,
+        )
+        .unwrap();
+        let d = diff_tables(&a, &b);
+        let shown: Vec<String> = d.iter().map(ToString::to_string).collect();
+        assert_eq!(d.len(), 3, "{shown:?}");
+        assert!(
+            shown.contains(
+                &"p/changed: input 1 -> 3, cache_read 1 -> 3, cache_write 1 -> 3".to_string()
+            ),
+            "{shown:?}"
+        );
+        assert!(shown
+            .iter()
+            .any(|s| s.starts_with("p/gone: no longer priced")));
+        assert!(shown.iter().any(|s| s.starts_with("p/new: new")));
     }
 
     #[test]
-    fn io_errors_name_the_path() {
+    fn io_and_json_errors_name_their_origin() {
         let e = PriceTable::from_path("/nonexistent/prices.json").unwrap_err();
+        assert!(matches!(e, PriceError::Io { .. }));
         assert!(e.to_string().contains("/nonexistent/prices.json"), "{e}");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.json");
+        std::fs::write(&path, "{not json").unwrap();
+        let e = PriceTable::from_path(&path).unwrap_err();
+        assert!(matches!(e, PriceError::Json { .. }));
+        assert!(e.to_string().contains("bad.json"), "{e}");
+        // Errors are Clone.
+        let copy = e.clone();
+        assert_eq!(copy.to_string(), e.to_string());
     }
 }

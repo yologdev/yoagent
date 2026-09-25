@@ -11,8 +11,8 @@
 //! 18 tagged releases, overstating every `cost_usd` for that model by 50%.
 //! It was found by someone asking, not by any mechanism.
 //!
-//! It is **still uncorrected on the `release/0.16.x` maintenance line**, which
-//! does not carry this test — a 0.16.6 would re-ship it.
+//! The 0.16.x maintenance line got the correction in 0.16.6, a back-port;
+//! that line does not carry this audit.
 //!
 //! ```text
 //! cargo test --test price_audit -- --ignored --nocapture
@@ -201,7 +201,7 @@ fn presets() -> Vec<Preset> {
 #[test]
 fn every_priced_preset_is_an_audited_entry() {
     // List prices only: a developer's YOAGENT_PRICES must not change them.
-    PriceTable::clear_override();
+    yoagent::provider::prices::global::clear_override();
     let table = PriceTable::builtin();
     for config in [
         ModelConfig::claude_fable_5(),
@@ -329,6 +329,24 @@ async fn hardcoded_prices_have_not_drifted() {
         )
     });
 
+    let all = presets();
+    let outcome = audit(&db, &all);
+    assert_clean(&all, &outcome);
+}
+
+/// What one audit run found.
+struct Outcome {
+    drift: Vec<String>,
+    unexpectedly_missing: Vec<String>,
+    notes: Vec<String>,
+    compared: usize,
+    absent: usize,
+}
+
+/// Compare every entry of `all` against a models.dev document. Shared by the
+/// live audit and the offline fixture test, so the comparison logic itself
+/// runs in CI.
+fn audit(db: &serde_json::Value, all: &[Preset]) -> Outcome {
     let mut drift: Vec<String> = Vec::new();
     let mut unexpectedly_missing: Vec<String> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
@@ -340,8 +358,7 @@ async fn hardcoded_prices_have_not_drifted() {
     );
     println!("{}", "-".repeat(72));
 
-    let all = presets();
-    for p in &all {
+    for p in all {
         let Some(cost) = db
             .get(p.provider.as_str())
             .and_then(|v| v.get("models"))
@@ -350,7 +367,7 @@ async fn hardcoded_prices_have_not_drifted() {
         else {
             match &p.absent_upstream {
                 Some(why) => {
-                    absent += 4;
+                    absent += 4 + 5 * p.cost.context_tiers.len();
                     notes.push(format!("{} absent upstream — {why}", p.model));
                 }
                 None => unexpectedly_missing.push(format!(
@@ -650,15 +667,26 @@ async fn hardcoded_prices_have_not_drifted() {
         println!("  note: {n}");
     }
 
+    Outcome {
+        drift,
+        unexpectedly_missing,
+        notes,
+        compared,
+        absent,
+    }
+}
+
+/// The pass condition (see the module docs).
+fn assert_clean(all: &[Preset], o: &Outcome) {
     // A rename must not quietly reduce coverage.
     assert!(
-        unexpectedly_missing.is_empty(),
+        o.unexpectedly_missing.is_empty(),
         "\n\nPresets vanished from models.dev:\n\n{}\n",
-        unexpectedly_missing.join("\n")
+        o.unexpectedly_missing.join("\n")
     );
 
     // The load-bearing assertion. Without it, every schema change at or above
-    // the `cost` level yields drift.is_empty() == true and a green pass having
+    // the `cost` level yields o.drift.is_empty() == true and a green pass having
     // verified nothing.
     assert!(
         all.len() >= MIN_ENTRIES,
@@ -671,21 +699,130 @@ async fn hardcoded_prices_have_not_drifted() {
     // Four base rates per preset, plus threshold + four rates per tier.
     let expected: usize = all.iter().map(|p| 4 + 5 * p.cost.context_tiers.len()).sum();
     assert_eq!(
-        compared + absent,
+        o.compared + o.absent,
         expected,
         "\n\nThe audit accounted for {} of {expected} fields. It is not reporting \
          clean prices — it is reporting nothing. models.dev's schema or hosting \
          changed underneath this test; re-derive the key path against {DB_URL}.\n",
-        compared + absent
+        o.compared + o.absent
     );
 
     assert!(
-        drift.is_empty(),
+        o.drift.is_empty(),
         "\n\nPrice drift detected. models.dev is community-maintained and NOT \
          authoritative — confirm against the vendor page before changing any \
          constant, and never copy models.dev blindly.\n\n{}\n",
-        drift.join("\n")
+        o.drift.join("\n")
     );
+}
+
+/// A slice of the real models.dev document (see
+/// `tests/fixtures/models_dev_slice.json`).
+const FIXTURE: &str = include_str!("fixtures/models_dev_slice.json");
+
+/// The `prices.json` entries the fixture covers.
+fn fixture_presets(db: &serde_json::Value) -> Vec<Preset> {
+    presets()
+        .into_iter()
+        .filter(|p| {
+            db.get(p.provider.as_str())
+                .and_then(|v| v.get("models"))
+                .and_then(|v| v.get(p.model.as_str()))
+                .is_some()
+        })
+        .collect()
+}
+
+fn fields(all: &[Preset]) -> usize {
+    all.iter().map(|p| 4 + 5 * p.cost.context_tiers.len()).sum()
+}
+
+/// The audit's comparison logic, offline: flat entries, tiers (and the
+/// `context_over_200k` mirror) and the `cache_write_at_input` allowance all
+/// run in CI against a checked-in slice of models.dev, not only in the
+/// `--ignored` live run.
+#[test]
+fn the_audit_logic_runs_offline_against_the_fixture() {
+    let db: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+    let all = fixture_presets(&db);
+    let names: Vec<&str> = all.iter().map(|p| p.model.as_str()).collect();
+    for covered in ["claude-opus-5-5", "gpt-5.5", "gpt-6-sol", "muse-spark-1.2"] {
+        assert!(
+            names.contains(&covered),
+            "fixture lost {covered}: {names:?}"
+        );
+    }
+    let o = audit(&db, &all);
+    assert!(o.drift.is_empty(), "{:#?}", o.drift);
+    assert!(
+        o.unexpectedly_missing.is_empty(),
+        "{:?}",
+        o.unexpectedly_missing
+    );
+    assert_eq!(o.compared + o.absent, fields(&all));
+    // The caveats recorded in the data are surfaced.
+    assert!(
+        o.notes.iter().any(|n| n.starts_with("gpt-5.5: The >272K")),
+        "{:?}",
+        o.notes
+    );
+    // Unlisted cache_write accepted by the allowance: gpt-5.5 base and tier,
+    // and Muse Spark 1.2.
+    assert_eq!(o.absent, 3);
+
+    // Positive controls: each kind of drift is caught.
+    let drift_after = |mutate: &dyn Fn(&mut Preset)| {
+        let mut all = fixture_presets(&db);
+        for p in &mut all {
+            mutate(p);
+        }
+        audit(&db, &all).drift
+    };
+    let base = drift_after(&|p| {
+        if p.model == "claude-sonnet-5" {
+            p.cost.input_per_million = 3.0;
+        }
+    });
+    assert_eq!(base.len(), 1, "{base:?}");
+    let tier = drift_after(&|p| {
+        if p.model == "gpt-6-sol" {
+            p.cost.context_tiers[0].cache_read_per_million = 0.5;
+        }
+    });
+    // The tier field and its context_over_200k mirror both disagree.
+    assert_eq!(tier.len(), 2, "{tier:?}");
+    let allowance = drift_after(&|p| {
+        if p.model == "gpt-5.5" {
+            p.cache_write_at_input = false;
+        }
+    });
+    // Base, tier and mirror cache_write are now unexplained.
+    assert_eq!(allowance.len(), 3, "{allowance:?}");
+}
+
+/// An entry models.dev lacks is drift unless it records `absent_upstream` —
+/// and then all its fields, tiers included, count as accounted for.
+#[test]
+fn absent_upstream_accounts_for_every_field() {
+    let db: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+    let renamed = |absent: Option<&str>| {
+        let mut all: Vec<Preset> = fixture_presets(&db)
+            .into_iter()
+            .filter(|p| p.model == "gpt-6-sol")
+            .collect();
+        all[0].model = "gpt-6-sol-renamed".into();
+        all[0].absent_upstream = absent.map(str::to_string);
+        all
+    };
+    let missing = audit(&db, &renamed(None));
+    assert_eq!(missing.unexpectedly_missing.len(), 1);
+    let all = renamed(Some("not on models.dev yet, checked 2026-09-26"));
+    let o = audit(&db, &all);
+    assert!(o.unexpectedly_missing.is_empty());
+    assert_eq!(o.compared, 0);
+    // Four base rates plus threshold and four rates for its one tier.
+    assert_eq!(o.absent, 9);
+    assert_eq!(o.compared + o.absent, fields(&all));
 }
 
 /// `PriceSource::ModelsDev` against the live document: the mapper must still

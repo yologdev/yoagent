@@ -212,6 +212,25 @@ impl Agent {
         Self::with_provider_arc(Arc::new(provider)).configured_for(config)
     }
 
+    /// Re-price this agent's model config against the process-wide price
+    /// table now — [`ModelConfig::reprice`] on the stored config. For an
+    /// agent built before
+    /// [`global::install_override`](crate::provider::prices::global::install_override)
+    /// or [`global::install_fetched`](crate::provider::prices::global::install_fetched):
+    /// constructors resolve prices when they run, so either install prices
+    /// before building the config, or call this afterwards.
+    ///
+    /// Same rules as [`ModelConfig::reprice`]: it applies only to a config a
+    /// first-party pricing constructor built, may set the cost to `None`, and
+    /// replaces a cost you set yourself. Affects spend recorded from now on;
+    /// [`session_cost_usd`](Self::session_cost_usd) prices the whole history
+    /// at the current rates.
+    pub fn reprice(&mut self) {
+        if let Some(config) = self.model_config.take() {
+            self.model_config = Some(config.reprice());
+        }
+    }
+
     /// Switch the model mid-session, re-resolving the environment API key from
     /// the new config's provider (an explicit key set via
     /// [`with_api_key`](Self::with_api_key) is preserved, since the key is

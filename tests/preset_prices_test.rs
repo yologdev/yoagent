@@ -9,7 +9,7 @@
 //! Each test first drops the user layer (a developer's `YOAGENT_PRICES`),
 //! so presets resolve against the built-in data alone.
 
-use yoagent::provider::{ContextTier, CostConfig, ModelConfig, PriceTable};
+use yoagent::provider::{ContextTier, CostConfig, ModelConfig};
 
 fn pinned() -> Vec<(&'static str, ModelConfig, CostConfig)> {
     let flat = |i, o, r, w| CostConfig::new(i, o).with_cache_read(r).with_cache_write(w);
@@ -92,7 +92,7 @@ fn pinned() -> Vec<(&'static str, ModelConfig, CostConfig)> {
 #[test]
 fn every_preset_cost_config_is_pinned() {
     // List prices only: a developer's YOAGENT_PRICES must not change them.
-    PriceTable::clear_override();
+    yoagent::provider::prices::global::clear_override();
     for (name, config, expected) in pinned() {
         assert_eq!(
             config.cost.as_ref(),
@@ -105,7 +105,7 @@ fn every_preset_cost_config_is_pinned() {
 /// Positive control: the pin is exact, so a one-ULP change is caught.
 #[test]
 fn the_pin_detects_a_one_ulp_change() {
-    PriceTable::clear_override();
+    yoagent::provider::prices::global::clear_override();
     let (_, config, expected) = pinned().remove(0);
     let mut nudged = config.cost.unwrap();
     nudged.input_per_million = f64::from_bits(nudged.input_per_million.to_bits() + 1);

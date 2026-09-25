@@ -1044,8 +1044,9 @@ pub struct SessionStats {
     ///
     /// `None` is never "free", but it means one of two things: the spend
     /// **cannot be priced** (a turn with non-zero usage came from a model with
-    /// `cost: None`, which is what the generic constructors — custom, local,
-    /// `deepseek`, … — return), or there was **nothing to price** (a run that
+    /// `cost: None`, which is what gateways and custom endpoints return, and
+    /// first-party constructors for a model the price table does not list),
+    /// or there was **nothing to price** (a run that
     /// took no turns, or whose turns reported no usage on an unpriced model;
     /// on a priced model a zero-usage turn makes this `Some(0.0)`).
     /// [`is_unpriced`](Self::is_unpriced) tells them apart. A model configured
