@@ -1037,6 +1037,7 @@ impl ModelConfig {
             max_tokens: 16_000,
             cost: None,
             headers: HashMap::new(),
+            google: None,
             anthropic: None,
             compat: None,
         }
