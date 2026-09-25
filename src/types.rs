@@ -574,7 +574,9 @@ pub enum CacheStrategy {
 /// | `Max`     | `max`    | 30,720 | `high` *(clamped)* | `max` | `high` *(clamped)* | 24,576 *(clamped)* |
 ///
 /// ¹ Only when [`OpenAiCompat::supports_reasoning_effort`] is set; otherwise
-/// no `reasoning_effort` is sent.
+/// no `reasoning_effort` is sent. Omitting it does not always mean "no
+/// reasoning": xAI's Grok cannot disable reasoning, so `Off` leaves it at its
+/// default (`high`).
 ///
 /// ² "DeepSeek" means any OpenAI-compat provider with both
 /// [`OpenAiCompat::supports_thinking_control`] and

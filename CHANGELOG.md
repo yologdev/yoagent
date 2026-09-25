@@ -176,6 +176,41 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **DeepSeek thinking mode with tools no longer fails on the second turn.**
+  DeepSeek requires that "for requests carrying the tools parameter, the
+  reasoning_content must be fully passed back to the API in all subsequent
+  requests — even for turns where the model did not perform a tool call",
+  and answers a request that does not with a 400
+  ([thinking mode guide](https://api-docs.deepseek.com/guides/thinking_mode)).
+  The OpenAI-compat provider dropped `Content::Thinking` when rebuilding
+  assistant messages, so any tool-using DeepSeek agent with thinking on broke
+  after its first tool call. Assistant turns now carry their thinking as
+  `reasoning_content` (multiple thinking blocks are concatenated) when the
+  request has tools. Without tools DeepSeek ignores the field, so it is not
+  sent. Gated on a new `OpenAiCompat::replays_reasoning_content` flag, set only
+  by `OpenAiCompat::deepseek()`; every other provider's request body is
+  byte-identical to before. A DeepSeek compat persisted before this flag
+  deserializes it as `false`, so rebuild it from the preset.
+
+- **Chat Completions usage now reports cache writes.** `prompt_tokens_details.
+  cache_write_tokens` (GPT-5.6 and later bill cache writes at 1.25x input) was
+  ignored, so `Usage::cache_write` stayed 0 and those tokens were counted as
+  ordinary `input`. It is now parsed into `cache_write` and excluded from
+  `input`, alongside `cached_tokens` — OpenAI's
+  [prompt-caching guide](https://developers.openai.com/api/docs/guides/prompt-caching)
+  computes ordinary input as `input_tokens - cached_tokens -
+  cache_write_tokens`. Responses without the field split exactly as before.
+
+- **xAI (Grok) now receives `ThinkingLevel`.** `OpenAiCompat::xai()` did not
+  set `supports_reasoning_effort`, so every level was silently dropped and Grok
+  always ran at its default. It now sends `reasoning_effort` like other
+  OpenAI-compat providers: `Minimal`/`Low` → `low`, `Medium` → `medium`,
+  `High`/`XHigh`/`Max` → `high`. grok-4.6 and later also accept `xhigh`, but
+  without a per-model effort table `XHigh`/`Max` stay clamped to `high` for
+  now. xAI reasoning cannot be disabled, so `Off` still sends nothing and
+  leaves the model at its default (`high`), not "no reasoning"
+  ([xAI reasoning guide](https://docs.x.ai/developers/model-capabilities/text/reasoning)).
+
 - **Sub-agent spend now reaches the parent, in its own bucket**
   ([#173](https://github.com/yologdev/yoagent/issues/173)). `SubAgentTool` ran
   its child loop on a private channel and forwarded no usage, so every total a

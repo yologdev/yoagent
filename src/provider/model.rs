@@ -358,6 +358,23 @@ pub struct OpenAiCompat {
     /// nothing by leaving this off — they were never reading it.
     #[serde(default)]
     pub supports_prompt_cache_key: bool,
+    /// Sends an assistant turn's thinking back as `reasoning_content` when the
+    /// request carries tools.
+    ///
+    /// DeepSeek's thinking mode requires it: "for requests carrying the tools
+    /// parameter, the reasoning_content must be fully passed back to the API in
+    /// all subsequent requests — even for turns where the model did not perform
+    /// a tool call. If your code does not correctly pass back
+    /// reasoning_content, the API will return a 400 error"
+    /// (<https://api-docs.deepseek.com/guides/thinking_mode>). Without tools
+    /// DeepSeek ignores the field, so it is not sent then.
+    ///
+    /// Off by default: `reasoning_content` is not an OpenAI request field, and
+    /// a strict server may reject it. Set by [`OpenAiCompat::deepseek`].
+    /// A config persisted before this flag existed deserializes it as `false`;
+    /// re-create DeepSeek compat from the preset.
+    #[serde(default)]
+    pub replays_reasoning_content: bool,
 }
 
 impl Default for OpenAiCompat {
@@ -373,6 +390,7 @@ impl Default for OpenAiCompat {
             requires_assistant_after_tool_result: false,
             thinking_format: ThinkingFormat::OpenAi,
             supports_prompt_cache_key: false,
+            replays_reasoning_content: false,
         }
     }
 }
@@ -407,8 +425,20 @@ impl OpenAiCompat {
     }
 
     /// Compat flags for xAI (Grok).
+    ///
+    /// xAI documents `reasoning_effort` on Chat Completions ("the supported
+    /// values and the default depend on the model";
+    /// <https://docs.x.ai/developers/rest-api-reference/inference/chat-completions>).
+    /// On grok-4.5/4.6/4.7 it takes `low`/`medium`/`high`, plus `xhigh` on 4.6
+    /// and later; it defaults to `high`, and reasoning cannot be disabled
+    /// (<https://docs.x.ai/developers/model-capabilities/text/reasoning>). So [`ThinkingLevel::Off`]
+    /// sends no `reasoning_effort` and leaves the model at its default `high`
+    /// — it does not turn reasoning off.
+    ///
+    /// [`ThinkingLevel::Off`]: crate::types::ThinkingLevel::Off
     pub fn xai() -> Self {
         Self {
+            supports_reasoning_effort: true,
             supports_usage_in_streaming: true,
             thinking_format: ThinkingFormat::Xai,
             ..Default::default()
@@ -453,6 +483,7 @@ impl OpenAiCompat {
             supports_thinking_control: true,
             supports_usage_in_streaming: true,
             max_tokens_field: MaxTokensField::MaxTokens,
+            replays_reasoning_content: true,
             ..Default::default()
         }
     }
