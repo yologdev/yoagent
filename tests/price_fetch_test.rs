@@ -390,3 +390,31 @@ fn an_agreeing_fetch_logs_no_warning() {
     PriceTable::clear_fetched();
     assert!(ModelConfig::deepseek("deepseek-flash", "D").cost.is_none());
 }
+
+/// Remote and cached data are parsed leniently: a metadata field a newer
+/// yoagent added (without a schema bump) must not break an older client.
+#[tokio::test]
+async fn remote_and_cached_tables_ignore_unknown_fields() {
+    let newer = r#"{"schema": 1, "generated_at": "2027-01-01", "providers": {"anthropic": {
+        "claude-sonnet-5": {"input": 1.5, "output": 7.5, "deprecated": false}}}}"#;
+    // Positive control: hand-written input rejects exactly this document.
+    assert!(matches!(
+        PriceTable::from_json_str(newer).unwrap_err(),
+        PriceError::NewerFormat { .. }
+    ));
+
+    let server = serve("/prices.json", ok(newer)).await;
+    let source = PriceSource::Url(format!("{}/prices.json", server.uri()));
+    let t = PriceTable::fetch(&source).await.unwrap();
+    assert_eq!(
+        t.cost("anthropic", "claude-sonnet-5"),
+        Some(CostConfig::new(1.5, 7.5))
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("prices.json");
+    std::fs::write(&cache, newer).unwrap();
+    let got = PriceTable::fetch_cached(&source, &cache, Duration::from_secs(3600)).await;
+    assert_eq!(got.origin, PriceOrigin::Cache);
+    assert_eq!(got.table, t);
+}

@@ -61,9 +61,30 @@ embedded at compile time. It is keyed by `ModelConfig::provider`, then by
 | `verified` | The date (`YYYY-MM-DD`) they were checked. |
 | `absent_upstream` | Why models.dev lacks this model, and when that was checked (read by the price audit). |
 
-Parsing validates: rates must be finite and non-negative, tier thresholds
-strictly ascending and above zero, and unknown fields are rejected — a
-misspelled `"cache_reed"` is an error, not a silently unpriced cache.
+Parsing validates: rates must be finite and non-negative, and tier
+thresholds strictly ascending and above zero.
+
+**Unknown fields** depend on where the data comes from:
+
+- **Hand-written input** — `PriceTable::from_json_str`, `from_path` and the
+  `YOAGENT_PRICES` file — is **strict**. An unknown field is
+  `PriceError::NewerFormat`, so a misspelled `"cache_reed"` is an error, not
+  a silently unpriced cache. The error also covers a file written for a
+  newer yoagent, and tells you to upgrade or remove the field.
+- **Remote and cached input** — `PriceTable::fetch` from `YoagentMain` or
+  `Url`, and the `fetch_cached` cache file — is **lenient**. Unknown fields
+  are ignored and logged at `debug`.
+
+### Format evolution
+
+- A field that **changes what is billed** (a new rate, a new kind of tier)
+  **bumps `schema`**. An older yoagent then rejects the file with
+  `PriceError::UnsupportedSchema`, rather than billing without the field.
+- A **metadata-only** field (like `note`) does **not** bump `schema`. Older
+  releases ignore it in remote data.
+
+A test pins the set of field names to the schema version. Changing the set
+fails CI until someone decides which of the two cases it is.
 
 In code the file is a `PriceTable`:
 
@@ -193,9 +214,10 @@ A fetched table **overrides the built-in data** for every model it lists.
 
 - **`YoagentMain`** is as trustworthy as a release — it is the file releases
   are cut from. If `main` ever moves to a newer schema than your yoagent
-  reads, the fetch fails with `PriceError::UnsupportedSchema` and nothing
-  changes. Adding any field to the format is such a change for older
-  clients, because unknown fields are rejected.
+  reads — because a field that changes billing was added — the fetch fails
+  with `PriceError::UnsupportedSchema` and nothing changes. Metadata-only
+  fields do not bump the schema, and remote data is parsed leniently, so
+  older releases keep reading it (see [Format evolution](#format-evolution)).
 - **`ModelsDev` is community-maintained and not authoritative.** It has been
   provably wrong before — it mis-stated Claude context-tier data and DeepSeek
   V4 Pro's price. The mapping is conservative: a model whose cost carries

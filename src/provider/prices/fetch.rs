@@ -49,8 +49,10 @@ pub enum PriceSource {
     ModelsDevAt(String),
     /// This crate's checked `src/provider/prices.json` on GitHub `main`, so
     /// a price fix merged to `main` reaches you without a release. If `main`
-    /// moves to a newer schema than this release reads, the fetch fails with
-    /// [`PriceError::UnsupportedSchema`] and nothing changes.
+    /// moves to a newer schema than this release reads — a field that
+    /// changes billing was added — the fetch fails with
+    /// [`PriceError::UnsupportedSchema`] and nothing changes. Metadata-only
+    /// fields do not bump the schema, and this release ignores them.
     YoagentMain,
     /// Any URL serving this crate's `prices.json` format.
     Url(String),
@@ -237,7 +239,7 @@ impl PriceTable {
         if source.is_models_dev() {
             Self::from_models_dev_value(&serde_json::from_str(&body)?, &url)
         } else {
-            Self::from_json_str(&body)
+            Self::from_json_str_lenient(&body)
         }
     }
 
@@ -464,7 +466,7 @@ async fn read_cache(path: &Path) -> Option<(PriceTable, Duration)> {
         Err(_) => Duration::MAX,
     };
     let text = tokio::fs::read_to_string(path).await.ok()?;
-    match PriceTable::from_json_str(&text) {
+    match PriceTable::from_json_str_lenient(&text) {
         Ok(table) => Some((table, age)),
         Err(e) => {
             tracing::warn!(

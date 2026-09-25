@@ -24,6 +24,20 @@
 //! `absent_upstream`). A cache rate that is omitted or `0` bills at the band's
 //! input rate, as for [`CostConfig`].
 //!
+//! # Format evolution
+//!
+//! - A field that **changes what is billed** (a new rate, a new kind of tier)
+//!   must bump `schema`. An older release then rejects the file with
+//!   [`PriceError::UnsupportedSchema`] instead of billing without the field.
+//! - A **metadata-only** field (like `note`) must **not** bump `schema`, so
+//!   older releases keep reading remote data. They parse remote and cached
+//!   tables leniently (unknown fields ignored, logged at `debug`); only
+//!   hand-written input is strict and reports an unknown field as
+//!   [`PriceError::NewerFormat`].
+//!
+//! A test pins the field set to [`PRICE_SCHEMA_VERSION`], so changing it
+//! without deciding which of the two it is fails CI.
+//!
 //! The first-party constructors ([`ModelConfig::anthropic`],
 //! [`ModelConfig::openai`], [`ModelConfig::google`], …) look their
 //! `(provider, id)` up when they build a config and get `Some` for a listed
@@ -106,6 +120,19 @@ pub enum PriceError {
     UnsupportedSchema {
         /// The `schema` value as found, or `missing`.
         found: String,
+    },
+    /// A field this release does not know, in input parsed strictly
+    /// (hand-written files). Either a typo, or data written for a newer
+    /// yoagent that added a metadata field — upgrade, or remove the field.
+    /// Remote and cached tables are parsed leniently and never return this.
+    #[error(
+        "unknown price field `{field}`: a typo, or a file written for a newer yoagent \
+         (upgrade yoagent, or remove the field)"
+    )]
+    NewerFormat {
+        /// Dotted path of the first unknown field, e.g.
+        /// `providers.anthropic.claude-opus-5.cache_reed`.
+        field: String,
     },
     /// A rate is negative or not finite.
     #[error("{provider}/{model}: {field} is {value}; rates must be finite and non-negative")]
@@ -293,9 +320,11 @@ impl PriceEntry {
 /// [`from_path`](Self::from_path), start from [`builtin`](Self::builtin), and
 /// combine with [`layered`](Self::layered). Every way in validates: rates must
 /// be finite and non-negative, tier thresholds strictly ascending, and
-/// `schema` must be [`PRICE_SCHEMA_VERSION`]. Unknown fields are rejected, so
-/// a misspelled `"cache_reed"` fails loudly instead of billing at the input
-/// rate.
+/// `schema` must be [`PRICE_SCHEMA_VERSION`]. Hand-written input
+/// ([`from_json_str`](Self::from_json_str), [`from_path`](Self::from_path),
+/// `YOAGENT_PRICES`) rejects unknown fields as [`PriceError::NewerFormat`],
+/// so a misspelled `"cache_reed"` fails loudly instead of billing at the
+/// input rate; remote and cached input ignores them.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PriceTable {
     entries: BTreeMap<String, BTreeMap<String, PriceEntry>>,
@@ -313,8 +342,24 @@ impl PriceTable {
         builtin_ref().clone()
     }
 
-    /// Parse and validate a table in this crate's JSON format.
+    /// Parse and validate a table in this crate's JSON format, **strictly**:
+    /// an unknown field is [`PriceError::NewerFormat`]. This is the parser
+    /// for data people write by hand ([`from_path`](Self::from_path),
+    /// `YOAGENT_PRICES`), where an unknown field is most likely a typo.
+    /// Remote and cached tables ([`fetch`](Self::fetch),
+    /// [`fetch_cached`](Self::fetch_cached)) are parsed leniently instead.
     pub fn from_json_str(json: &str) -> Result<PriceTable, PriceError> {
+        Self::parse(json, Strictness::Strict)
+    }
+
+    /// [`from_json_str`](Self::from_json_str), but unknown fields are
+    /// ignored (logged at `debug`): metadata a newer yoagent added without a
+    /// schema bump must not stop an older one from reading remote data.
+    pub(crate) fn from_json_str_lenient(json: &str) -> Result<PriceTable, PriceError> {
+        Self::parse(json, Strictness::Lenient)
+    }
+
+    fn parse(json: &str, strictness: Strictness) -> Result<PriceTable, PriceError> {
         let value: serde_json::Value = serde_json::from_str(json)?;
         match value.get("schema") {
             Some(v) if v.as_u64() == Some(u64::from(PRICE_SCHEMA_VERSION)) => {}
@@ -327,6 +372,20 @@ impl PriceTable {
                 return Err(PriceError::UnsupportedSchema {
                     found: "missing".into(),
                 })
+            }
+        }
+        let unknown = unknown_fields(&value);
+        if !unknown.is_empty() {
+            match strictness {
+                Strictness::Strict => {
+                    return Err(PriceError::NewerFormat {
+                        field: unknown[0].clone(),
+                    })
+                }
+                Strictness::Lenient => tracing::debug!(
+                    ?unknown,
+                    "yoagent prices: ignoring fields this release does not know"
+                ),
             }
         }
         let wire: FileWire = serde_json::from_value(value)?;
@@ -570,8 +629,83 @@ fn is_false(v: &bool) -> bool {
     !*v
 }
 
+/// How [`PriceTable::parse`] treats a field it does not know.
+#[derive(Clone, Copy)]
+enum Strictness {
+    /// [`PriceError::NewerFormat`]: hand-written input, where it is a typo.
+    Strict,
+    /// Ignored and logged: remote or cached input a newer release wrote.
+    Lenient,
+}
+
+/// The field names of schema [`PRICE_SCHEMA_VERSION`]. Changing any of these
+/// sets is a format change; `wire_fields_are_pinned_to_the_schema_version`
+/// makes it a deliberate one (see the module docs for when it needs a bump).
+const FILE_FIELDS: &[&str] = &["schema", "comment", "providers"];
+const ENTRY_FIELDS: &[&str] = &[
+    "input",
+    "output",
+    "cache_read",
+    "cache_write",
+    "tiers",
+    "cache_write_at_input",
+    "note",
+    "source",
+    "verified",
+    "absent_upstream",
+];
+const TIER_FIELDS: &[&str] = &[
+    "above_prompt_tokens",
+    "input",
+    "output",
+    "cache_read",
+    "cache_write",
+];
+
+/// Dotted paths of every field in `value` that the schema does not define.
+/// Shapes that are not objects are left to serde to reject.
+fn unknown_fields(value: &serde_json::Value) -> Vec<String> {
+    fn extra(
+        obj: &serde_json::Map<String, serde_json::Value>,
+        known: &[&str],
+        at: &str,
+        out: &mut Vec<String>,
+    ) {
+        for key in obj.keys() {
+            if !known.contains(&key.as_str()) {
+                out.push(if at.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{at}.{key}")
+                });
+            }
+        }
+    }
+    let mut out = Vec::new();
+    let Some(top) = value.as_object() else {
+        return out;
+    };
+    extra(top, FILE_FIELDS, "", &mut out);
+    let providers = top.get("providers").and_then(|p| p.as_object());
+    for (provider, models) in providers.into_iter().flatten() {
+        for (model, entry) in models.as_object().into_iter().flatten() {
+            let Some(entry) = entry.as_object() else {
+                continue;
+            };
+            let at = format!("providers.{provider}.{model}");
+            extra(entry, ENTRY_FIELDS, &at, &mut out);
+            let tiers = entry.get("tiers").and_then(|t| t.as_array());
+            for (i, tier) in tiers.into_iter().flatten().enumerate() {
+                if let Some(tier) = tier.as_object() {
+                    extra(tier, TIER_FIELDS, &format!("{at}.tiers[{i}]"), &mut out);
+                }
+            }
+        }
+    }
+    out
+}
+
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct FileWire {
     schema: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -581,7 +715,6 @@ struct FileWire {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct EntryWire {
     input: f64,
     output: f64,
@@ -604,7 +737,6 @@ struct EntryWire {
 }
 
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct TierWire {
     above_prompt_tokens: u64,
     input: f64,
@@ -738,11 +870,136 @@ mod tests {
     }
 
     #[test]
-    fn unknown_fields_are_rejected() {
+    fn unknown_fields_are_rejected_strictly() {
         let e = PriceTable::from_json_str(&one(r#"{"input": 1, "output": 2, "cache_reed": 0.1}"#))
             .unwrap_err();
-        assert!(matches!(e, PriceError::Json(_)), "{e}");
-        assert!(PriceTable::from_json_str(&one(r#"{"input": 1}"#)).is_err());
+        assert!(
+            matches!(e, PriceError::NewerFormat { ref field } if field == "providers.p.m.cache_reed"),
+            "{e}"
+        );
+        // At every level: top, entry, tier.
+        let top = r#"{"schema": 1, "providers": {}, "generated": "x"}"#;
+        assert!(matches!(
+            PriceTable::from_json_str(top).unwrap_err(),
+            PriceError::NewerFormat { .. }
+        ));
+        let tier = one(
+            r#"{"input": 1, "output": 2, "tiers": [{"above_prompt_tokens": 9, "input": 2, "output": 3, "kind": "x"}]}"#,
+        );
+        assert!(matches!(
+            PriceTable::from_json_str(&tier).unwrap_err(),
+            PriceError::NewerFormat { ref field } if field.ends_with("tiers[0].kind")
+        ));
+        // A missing required field is corrupt data, not a newer format.
+        assert!(matches!(
+            PriceTable::from_json_str(&one(r#"{"input": 1}"#)).unwrap_err(),
+            PriceError::Json(_)
+        ));
+    }
+
+    #[test]
+    fn unknown_fields_are_ignored_leniently() {
+        let json = one(r#"{"input": 1, "output": 2, "deprecated": true}"#);
+        // Positive control: strict rejects exactly this document.
+        assert!(PriceTable::from_json_str(&json).is_err());
+        let t = PriceTable::from_json_str_lenient(&json).unwrap();
+        assert_eq!(t.cost("p", "m"), Some(CostConfig::new(1.0, 2.0)));
+        // Lenient still enforces the schema version and validation.
+        assert!(matches!(
+            PriceTable::from_json_str_lenient(r#"{"schema": 2, "providers": {}}"#).unwrap_err(),
+            PriceError::UnsupportedSchema { .. }
+        ));
+        assert!(PriceTable::from_json_str_lenient(&one(r#"{"input": -1, "output": 2}"#)).is_err());
+    }
+
+    /// The format contract: a field that changes billing bumps `schema`; a
+    /// metadata-only field does not. Changing the field set therefore needs
+    /// a decision, and this test forces it: add the new set under a new
+    /// version (billing field — also bump `PRICE_SCHEMA_VERSION`), or extend
+    /// the current version's set (metadata only — older releases ignore it
+    /// in remote data).
+    #[test]
+    fn wire_fields_are_pinned_to_the_schema_version() {
+        type Fields = (
+            &'static [&'static str],
+            &'static [&'static str],
+            &'static [&'static str],
+        );
+        let pinned: &[(u32, Fields)] = &[(
+            1,
+            (
+                &["schema", "comment", "providers"],
+                &[
+                    "input",
+                    "output",
+                    "cache_read",
+                    "cache_write",
+                    "tiers",
+                    "cache_write_at_input",
+                    "note",
+                    "source",
+                    "verified",
+                    "absent_upstream",
+                ],
+                &[
+                    "above_prompt_tokens",
+                    "input",
+                    "output",
+                    "cache_read",
+                    "cache_write",
+                ],
+            ),
+        )];
+        let (_, (file, entry, tier)) = pinned
+            .iter()
+            .find(|(v, _)| *v == PRICE_SCHEMA_VERSION)
+            .expect("pin the field set of the new PRICE_SCHEMA_VERSION here");
+        let sorted = |s: &[&str]| {
+            let mut v: Vec<String> = s.iter().map(|x| x.to_string()).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(sorted(FILE_FIELDS), sorted(file));
+        assert_eq!(sorted(ENTRY_FIELDS), sorted(entry));
+        assert_eq!(sorted(TIER_FIELDS), sorted(tier));
+
+        // And the consts are what serde actually reads and writes: serialize
+        // a wire value with every field populated and compare its keys.
+        let full = PriceEntry::new(
+            CostConfig::new(1.0, 2.0)
+                .with_cache_read(0.1)
+                .with_cache_write(1.0)
+                .with_context_tier(
+                    ContextTier::new(10, 2.0, 3.0)
+                        .with_cache_read(0.2)
+                        .with_cache_write(2.0),
+                ),
+        )
+        .with_cache_write_at_input(true)
+        .with_note("n")
+        .with_source("s")
+        .with_verified("v");
+        let full = PriceEntry {
+            absent_upstream: Some("a".into()),
+            ..full
+        };
+        let mut table = PriceTable::new();
+        table
+            .entries
+            .entry("p".into())
+            .or_default()
+            .insert("m".into(), full);
+        table.comment = Some("c".into());
+        let v: serde_json::Value = serde_json::from_str(&table.to_json()).unwrap();
+        let keys = |v: &serde_json::Value| {
+            let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+            k.sort();
+            k
+        };
+        assert_eq!(keys(&v), sorted(FILE_FIELDS));
+        let e = &v["providers"]["p"]["m"];
+        assert_eq!(keys(e), sorted(ENTRY_FIELDS));
+        assert_eq!(keys(&e["tiers"][0]), sorted(TIER_FIELDS));
     }
 
     #[test]

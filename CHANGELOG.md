@@ -20,6 +20,15 @@ adheres to [Semantic Versioning](https://semver.org/).
   `cost(provider, id)`, `entry`, `iter`, `insert` and `to_json`. Every
   preset's resulting `CostConfig` is bit-for-bit what 0.19.0 shipped; a new
   test pins each one. `CostConfig` and `ContextTier` now derive `PartialEq`.
+  Unknown fields depend on where the data comes from:
+  - **Hand-written input** (`from_json_str`, `from_path`, `YOAGENT_PRICES`)
+    is strict. An unknown field is `PriceError::NewerFormat`: a typo, or a
+    file written for a newer yoagent.
+  - **Remote and cached input** is lenient. Unknown fields are ignored.
+
+  The format contract: a field that changes billing bumps `schema`; a
+  metadata-only field does not. A test pins the field set to
+  `PRICE_SCHEMA_VERSION`.
 - **`ModelConfig::with_prices(&table)`** re-resolves a config's cost from a
   table you hold, without global state. Listed models get the table's rates;
   unlisted ones keep theirs.
