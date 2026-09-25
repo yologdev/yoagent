@@ -339,10 +339,10 @@ async fn main() {
         agent.finish().await;
 
         let cost = agent.session_cost_usd();
-        // Only the priced presets carry rates. A generic constructor like
-        // `ModelConfig::deepseek(id, name)` carries `cost: None` by design —
-        // unknown, not free — so failing here would be testing the harness's
-        // choice of model, not the library.
+        // Only models `prices.json` lists carry rates. Any other id — say a
+        // `ModelConfig::deepseek(id, name)` the table does not know — carries
+        // `cost: None` by design (unknown, not free), so failing here would
+        // be testing the harness's choice of model, not the library.
         if cfg.cost.is_some() {
             let ok = err.is_none() && cost.map(|c| c > 0.0).unwrap_or(false);
             report.record(

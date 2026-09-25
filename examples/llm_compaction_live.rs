@@ -85,11 +85,14 @@ impl StreamProvider for BulkProvider {
     }
 }
 
-/// Resolve a model id to a **priced** preset where one exists.
+/// Resolve a model id to its named preset where one exists.
 ///
-/// `ModelConfig::anthropic` carries `cost: None` (the generic constructor
-/// cannot know a model's price), which blanks the cost column — the one
-/// number this harness exists to surface.
+/// Prices alone would not need this: the generic constructors look a listed
+/// id up in `prices.json` too. The presets matter for everything else they
+/// set — the 1M context window this harness measures compaction against, the
+/// max output, and for GPT-6 the Responses API. Ids the price table does not
+/// list come back unpriced, which blanks the cost column — the one number
+/// this harness exists to surface — so that is noted.
 fn priced(id: &str) -> ModelConfig {
     match id {
         "claude-sonnet-5" => ModelConfig::claude_sonnet_5(),
@@ -120,18 +123,21 @@ fn priced(id: &str) -> ModelConfig {
         "deepseek-v4-flash" => deepseek_priced("deepseek-v4-flash", 0.30, 1.20, 0.006),
         "deepseek-v4-pro" => deepseek_priced("deepseek-v4-pro", 1.32, 3.96, 0.044),
         other if other.starts_with("deepseek") => {
-            note_unpriced(other);
-            ModelConfig::deepseek(other, other)
+            noting_unpriced(ModelConfig::deepseek(other, other))
         }
-        other => {
-            note_unpriced(other);
-            ModelConfig::anthropic(other, other)
-        }
+        other => noting_unpriced(ModelConfig::anthropic(other, other)),
     }
 }
 
+fn noting_unpriced(config: ModelConfig) -> ModelConfig {
+    if config.cost.is_none() {
+        note_unpriced(&config.id);
+    }
+    config
+}
+
 fn note_unpriced(model: &str) {
-    eprintln!("note: no priced preset for '{model}' — the cost column will be blank");
+    eprintln!("note: prices.json does not list '{model}' — the cost column will be blank");
 }
 
 /// A DeepSeek config carrying peak-window rates. `cache_write` is left unset

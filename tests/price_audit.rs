@@ -1,16 +1,18 @@
 //! Price drift audit — do this crate's hardcoded token prices still match
 //! reality?
 //!
-//! `ModelConfig`'s priced presets are `f64` literals compiled into the crate.
-//! When a vendor reprices, they keep billing at the old numbers until someone
-//! edits the source and cuts a release, and nothing detects the gap. That is
+//! This crate's prices live in `src/provider/prices.json`, compiled into the
+//! crate; every priced preset and first-party constructor reads it. When a
+//! vendor reprices, the built-in data keeps the old numbers until someone
+//! edits the file (users can override at runtime; see
+//! `docs/concepts/pricing.md`), and nothing detects the gap. That is
 //! not hypothetical: `claude_sonnet_5` carried Sonnet **4.6's** rates —
 //! $3/$15 against the published $2/$10 — from **v0.9.0 through v0.16.5**,
 //! 18 tagged releases, overstating every `cost_usd` for that model by 50%.
 //! It was found by someone asking, not by any mechanism.
 //!
-//! It is **still uncorrected on the `release/0.16.x` maintenance line**, which
-//! does not carry this test — a 0.16.6 would re-ship it.
+//! The 0.16.x maintenance line got the correction in 0.16.6, a back-port;
+//! that line does not carry this audit.
 //!
 //! ```text
 //! cargo test --test price_audit -- --ignored --nocapture
@@ -29,7 +31,8 @@
 //! here is a *drift alarm* that sends a human to the vendor's own pricing page.
 //! If the two disagree, the answer is "go read Anthropic", never "copy
 //! models.dev". This test deliberately does not, and should never, update the
-//! constants for you.
+//! data file for you. (`PriceSource::ModelsDev` exists for users who choose to
+//! trust it at runtime, loudly; this audit takes the opposite stance.)
 //!
 //! # How this instrument avoids going quiet
 //!
@@ -44,28 +47,28 @@
 //!
 //! - **every field is accounted for** — compared against a number, or recorded
 //!   as absent upstream. A count short of the expected total fails.
-//! - **every preset is found** unless it carries an explicit, dated
-//!   [`Preset::absent_upstream`] note. A rename silently dropping a model out
+//! - **every `prices.json` entry is found** unless it carries an explicit, dated
+//!   `absent_upstream` note. A rename silently dropping a model out
 //!   of coverage is the failure this catches.
 //! - **absent is not zero.** A missing `cache_write` prints `—`, never `0`, so
 //!   the table never claims a comparison it did not make. A rate models.dev
 //!   omits must be `0` in the crate, with one asserted exception:
-//!   [`Preset::cache_write_at_input`], for a vendor with no separate
-//!   cache-write charge whose preset states the input rate explicitly. That
+//!   the entry's `cache_write_at_input` flag, for a vendor with no separate
+//!   cache-write charge whose entry states the input rate explicitly. That
 //!   allowance holds only while the crate's rate equals the band's input rate
 //!   *and* models.dev still omits the field; either changing is drift.
 //! - **unknown cost keys fail.** models.dev carries structure this audit may
-//!   not understand; ignoring it would certify a preset that is knowably
+//!   not understand; ignoring it would certify an entry that is knowably
 //!   wrong somewhere.
-//! - **tiers are compared, not waved through.** A preset with context tiers
+//! - **tiers are compared, not waved through.** An entry with context tiers
 //!   is checked tier by tier — threshold and all four rates — against
 //!   models.dev's `tiers` array (and its `context_over_200k` mirror). A tiered
-//!   preset against a flat upstream, or the reverse, or a different number of
+//!   entry against a flat upstream, or the reverse, or a different number of
 //!   tiers, is drift.
 //! - **HTTP status is checked**, and a non-JSON body reports the status,
 //!   content type and first bytes rather than a bare parse error.
 
-use yoagent::provider::{CostConfig, ModelConfig};
+use yoagent::provider::{CostConfig, ModelConfig, PriceTable};
 
 const DB_URL: &str = "https://models.dev/api.json";
 
@@ -73,50 +76,59 @@ const DB_URL: &str = "https://models.dev/api.json";
 /// describing pricing structure this audit does not compare.
 const KNOWN_COST_KEYS: [&str; 4] = ["input", "output", "cache_read", "cache_write"];
 
-/// models.dev's context-tier keys. Understood — and compared — only for a
-/// preset that is itself tiered; on a flat preset they are unknown structure
+/// models.dev's context-tier keys. Understood — and compared — only for an
+/// entry that is itself tiered; on a flat entry they are unknown structure
 /// and fail like any other unrecognised key.
 ///
 /// `context_over_200k` is models.dev's older single-tier encoding, still
 /// emitted beside `tiers` with the same rates (whatever its name says, on the
 /// OpenAI entries it mirrors a 272K tier). It is compared against the
-/// preset's first tier so the two encodings cannot drift apart unnoticed.
+/// entry's first tier so the two encodings cannot drift apart unnoticed.
 const TIER_KEYS: [&str; 2] = ["tiers", "context_over_200k"];
 
-/// A priced preset and where to look when it drifts.
+/// The fewest entries `prices.json` may hold. `expected` below is derived
+/// from the entries themselves, so it cannot notice the file shrinking — an
+/// empty table produced "0 compared, 0 drifted" and a green pass. Raise this
+/// when you add an entry.
+const MIN_ENTRIES: usize = 13;
+
+/// A `prices.json` entry and where to look when it drifts.
 struct Preset {
-    /// The constructor, so a failure names the function to edit.
-    constructor: &'static str,
-    /// models.dev provider key.
-    provider: &'static str,
-    /// models.dev model key.
-    model: &'static str,
-    /// The vendor's own page — the authority when the two disagree.
-    vendor_page: &'static str,
+    /// Where to edit, so a failure names the entry: `prices.json provider/id`.
+    constructor: String,
+    /// models.dev provider key (ours, mapped where the two differ).
+    provider: String,
+    /// models.dev model key — the same as ours.
+    model: String,
+    /// The vendor's own page (the entry's `source`) — the authority when the
+    /// two disagree.
+    vendor_page: String,
     cost: CostConfig,
-    /// Set only when models.dev genuinely lacks this model, with the date it
-    /// was checked by hand. `None` means "must be present": absence is a
-    /// failure, because a rename dropping a model out of coverage looks
-    /// exactly like a database that has not caught up yet.
-    absent_upstream: Option<&'static str>,
+    /// The entry's `absent_upstream`: set only when models.dev genuinely
+    /// lacks this model, with the date it was checked by hand. `None` means
+    /// "must be present": absence is a failure, because a rename dropping a
+    /// model out of coverage looks exactly like a database that has not
+    /// caught up yet.
+    absent_upstream: Option<String>,
     /// Set when models.dev lists cost structure a flat `CostConfig` cannot
     /// express. Records *exactly* what was acknowledged, so the note cannot
-    /// become a blanket amnesty for whatever appears later.
-    flat_rate_gap: Option<FlatRateGap>,
-    /// Set when the vendor charges nothing extra for cache writes, models.dev
-    /// omits `cache_write`, and the preset states it explicitly as the input
-    /// rate (what `CostConfig::cost_usd` would bill an unset rate at anyway).
-    /// The reason is printed. Without this, "absent upstream ⇒ must be 0"
-    /// would force the preset to leave the rate implicit.
+    /// become a blanket amnesty for whatever appears later. Audit-local (see
+    /// [`FLAT_RATE_GAPS`]), not data: it records a decision about models.dev.
+    flat_rate_gap: Option<&'static FlatRateGap>,
+    /// The entry's `cache_write_at_input`: the vendor charges nothing extra
+    /// for cache writes, models.dev omits `cache_write`, and the entry states
+    /// it explicitly as the input rate (what `CostConfig::cost_usd` would
+    /// bill an unset rate at anyway). Without this, "absent upstream ⇒ must
+    /// be 0" would force the entry to leave the rate implicit.
     ///
     /// Asserted, not waived: in every band, the crate's `cache_write` must
     /// equal that band's `input`, and models.dev must still omit the field.
     /// If upstream starts listing it, or the crate's rate is 0 or anything
     /// but the input rate, the allowance is stale and the audit fails.
-    cache_write_at_input: Option<&'static str>,
-    /// A caveat printed with the results — a rate that matches upstream but
-    /// that the vendor's page does not itself state.
-    note: Option<&'static str>,
+    cache_write_at_input: bool,
+    /// The entry's `note`, printed with the results — e.g. a rate that
+    /// matches upstream but that the vendor's page does not itself state.
+    note: Option<String>,
 }
 
 /// A recorded, verified gap between what models.dev carries and what a flat
@@ -124,7 +136,7 @@ struct Preset {
 ///
 /// Prose alone made this a waiver: the audit checked only that a note existed,
 /// so a *new* unknown key — a second tier, an audio rate, a reasoning rate —
-/// folded silently into the old note and the preset stayed green forever. The
+/// folded silently into the old note and the entry stayed green forever. The
 /// reverse went unnoticed too: if the upstream claim vanished, or its key was
 /// renamed (indistinguishable from removal), nothing said the recorded decision
 /// had gone stale.
@@ -132,7 +144,7 @@ struct Preset {
 /// So the acknowledgement names the keys and the rates it was made against, and
 /// both directions are assertions.
 ///
-/// No preset records one today: `gpt_5_5`, the only one that ever did, is now
+/// No entry records one today: `gpt-5.5`, the only one that ever did, is now
 /// tiered and compared tier by tier. Kept for the next genuine disagreement.
 #[allow(dead_code)]
 struct FlatRateGap {
@@ -144,127 +156,81 @@ struct FlatRateGap {
     why: &'static str,
 }
 
-/// The rates a priced preset carries. A preset in this audit that returns
-/// `cost: None` has lost its price — fail naming it, rather than auditing
-/// nothing.
-fn rates(constructor: &str, config: ModelConfig) -> CostConfig {
-    config.cost.unwrap_or_else(|| {
-        panic!("{constructor} is in the price audit but carries `cost: None` (unpriced)")
-    })
+/// Recorded gaps, as `(provider, model, gap)`. Empty today.
+const FLAT_RATE_GAPS: &[(&str, &str, FlatRateGap)] = &[];
+
+/// models.dev's provider key for one of ours. The two agree except where
+/// models.dev names the vendor differently.
+fn upstream_provider(ours: &str) -> &str {
+    match ours {
+        "qwen" => "alibaba",
+        other => other,
+    }
 }
 
+/// Every entry of the built-in `prices.json`, as an audit row. The audit
+/// covers the data file, not a hand-kept list of presets, so an entry cannot
+/// be added without being audited.
 fn presets() -> Vec<Preset> {
-    let anthropic = "https://platform.claude.com/docs/en/about-claude/pricing";
-    let openai = "https://developers.openai.com/api/docs/pricing";
-    let claude = |constructor, model, config: ModelConfig| Preset {
-        constructor,
-        provider: "anthropic",
-        model,
-        vendor_page: anthropic,
-        cost: rates(constructor, config),
-        absent_upstream: None,
-        flat_rate_gap: None,
-        cache_write_at_input: None,
-        note: None,
-    };
-    let gpt = |constructor, model, config: ModelConfig| Preset {
-        constructor,
-        provider: "openai",
-        model,
-        vendor_page: openai,
-        cost: rates(constructor, config),
-        absent_upstream: None,
-        flat_rate_gap: None,
-        cache_write_at_input: None,
-        note: None,
-    };
-    vec![
-        claude(
-            "ModelConfig::claude_fable_5",
-            "claude-fable-5",
-            ModelConfig::claude_fable_5(),
-        ),
-        claude(
-            "ModelConfig::claude_fable_5_1",
-            "claude-fable-5-1",
-            ModelConfig::claude_fable_5_1(),
-        ),
-        claude(
-            "ModelConfig::claude_opus_5_5",
-            "claude-opus-5-5",
-            ModelConfig::claude_opus_5_5(),
-        ),
-        claude(
-            "ModelConfig::claude_opus_5",
-            "claude-opus-5",
-            ModelConfig::claude_opus_5(),
-        ),
-        claude(
-            "ModelConfig::claude_opus_4_8",
-            "claude-opus-4-8",
-            ModelConfig::claude_opus_4_8(),
-        ),
-        claude(
-            "ModelConfig::claude_sonnet_5",
-            "claude-sonnet-5",
-            ModelConfig::claude_sonnet_5(),
-        ),
-        claude(
-            "ModelConfig::claude_haiku_4_5",
-            "claude-haiku-4-5",
-            ModelConfig::claude_haiku_4_5(),
-        ),
-        Preset {
-            note: Some(
-                "gpt_5_5's >272K cache_read ($1.00) is UNVERIFIED. The model page \
-                 (developers.openai.com/api/docs/models/gpt-5.5) says only that \
-                 \"prompts with >272K input tokens are priced at 2x input and 1.5x \
-                 output for the full session\" — it names no cache rate, and the \
-                 pricing page no longer lists gpt-5.5. $1.00 (2x, as the GPT-6 pages \
-                 state for their cache rates) matches models.dev; the literal \
-                 reading would keep $0.50. Input $10 and output $45 are stated.",
-            ),
-            cache_write_at_input: Some(
-                "OpenAI: no additional cache-write charge before GPT-5.6, so gpt_5_5 \
-                 bills cache writes at the input rate ($5, $10 above 272K); \
-                 models.dev omits cache_write for it.",
-            ),
-            ..gpt("ModelConfig::gpt_5_5", "gpt-5.5", ModelConfig::gpt_5_5())
-        },
-        gpt(
-            "ModelConfig::gpt_6_astra",
-            "gpt-6-astra",
-            ModelConfig::gpt_6_astra(),
-        ),
-        gpt(
-            "ModelConfig::gpt_6_sol",
-            "gpt-6-sol",
-            ModelConfig::gpt_6_sol(),
-        ),
-        gpt(
-            "ModelConfig::gpt_6_luna",
-            "gpt-6-luna",
-            ModelConfig::gpt_6_luna(),
-        ),
-        Preset {
-            // Generic over the model id; these rates are Muse Spark 1.1/1.2.
-            constructor: "ModelConfig::meta",
-            provider: "meta",
-            model: "muse-spark-1.2",
-            vendor_page: "https://dev.meta.ai/docs/pricing-rate-limits",
-            cost: rates(
-                "ModelConfig::meta",
-                ModelConfig::meta("muse-spark-1.2", "Muse Spark 1.2"),
-            ),
-            absent_upstream: None,
-            flat_rate_gap: None,
-            cache_write_at_input: Some(
-                "Meta charges no cache-write premium, so writes bill at the $1.25 \
-                 input rate; models.dev omits cache_write for Muse Spark.",
-            ),
-            note: None,
-        },
-    ]
+    PriceTable::builtin()
+        .iter()
+        .map(|(provider, model, entry)| Preset {
+            constructor: format!("prices.json {provider}/{model}"),
+            provider: upstream_provider(provider).to_string(),
+            model: model.to_string(),
+            vendor_page: entry
+                .source
+                .clone()
+                .unwrap_or_else(|| panic!("prices.json {provider}/{model} has no `source`")),
+            cost: entry.cost.clone(),
+            absent_upstream: entry.absent_upstream.clone(),
+            flat_rate_gap: FLAT_RATE_GAPS
+                .iter()
+                .find(|(p, m, _)| *p == provider && *m == model)
+                .map(|(_, _, gap)| gap),
+            cache_write_at_input: entry.cache_write_at_input,
+            note: entry.note.clone(),
+        })
+        .collect()
+}
+
+/// Every priced preset constructor must resolve through an audited entry.
+/// Independent of `presets()`, which is derived from the data file: a preset
+/// that stopped reading the table (a literal creeping back into
+/// `model.rs`) would be priced but unaudited.
+#[test]
+fn every_priced_preset_is_an_audited_entry() {
+    // List prices only: a developer's YOAGENT_PRICES must not change them.
+    yoagent::provider::prices::global::clear_override();
+    let table = PriceTable::builtin();
+    for config in [
+        ModelConfig::claude_fable_5(),
+        ModelConfig::claude_fable_5_1(),
+        ModelConfig::claude_opus_5_5(),
+        ModelConfig::claude_opus_5(),
+        ModelConfig::claude_opus_4_8(),
+        ModelConfig::claude_sonnet_5(),
+        ModelConfig::claude_haiku_4_5(),
+        ModelConfig::gpt_5_5(),
+        ModelConfig::gpt_6_astra(),
+        ModelConfig::gpt_6_sol(),
+        ModelConfig::gpt_6_luna(),
+        ModelConfig::meta("muse-spark-1.1", "Muse Spark 1.1"),
+        ModelConfig::meta("muse-spark-1.2", "Muse Spark 1.2"),
+    ] {
+        let entry = table
+            .entry(&config.provider, &config.id)
+            .unwrap_or_else(|| {
+                panic!("{}/{} has no prices.json entry", config.provider, config.id)
+            });
+        assert_eq!(
+            config.cost.as_ref(),
+            Some(&entry.cost),
+            "{} is not priced from its entry",
+            config.id
+        );
+    }
+    assert!(presets().len() >= MIN_ENTRIES);
 }
 
 /// What models.dev says about one cost field.
@@ -301,13 +267,13 @@ fn field(cost: &serde_json::Value, name: &str) -> Upstream {
 fn check_absent(p: &Preset, field_name: &str, ours: f64, input: f64) -> Option<String> {
     let is_cache_write = field_name.ends_with("cache_write");
     match (is_cache_write, p.cache_write_at_input) {
-        (true, Some(_)) if ours == 0.0 => Some(format!(
+        (true, true) if ours == 0.0 => Some(format!(
             "{}: {field_name} is 0 in the crate but `cache_write_at_input` is recorded for \
              {} — the allowance is stale; set the rate to the input rate or delete it.",
             p.model, p.constructor
         )),
-        (true, Some(_)) if (ours - input).abs() < 1e-9 => None,
-        (true, Some(_)) => Some(format!(
+        (true, true) if (ours - input).abs() < 1e-9 => None,
+        (true, true) => Some(format!(
             "{}: {field_name} is {ours} in the crate; `cache_write_at_input` allows an \
              unlisted cache_write only at the band's input rate ({input}). Check {}.",
             p.model, p.vendor_page
@@ -324,7 +290,7 @@ fn check_absent(p: &Preset, field_name: &str, ours: f64, input: f64) -> Option<S
 /// The reverse direction of [`check_absent`]: a `cache_write_at_input`
 /// allowance on a field models.dev *does* list has gone stale.
 fn stale_allowance(p: &Preset, field_name: &str) -> Option<String> {
-    (field_name.ends_with("cache_write") && p.cache_write_at_input.is_some()).then(|| {
+    (field_name.ends_with("cache_write") && p.cache_write_at_input).then(|| {
         format!(
             "{}: models.dev now lists {field_name}, so the `cache_write_at_input` \
              allowance on {} is stale — the value is compared directly now; delete \
@@ -363,6 +329,24 @@ async fn hardcoded_prices_have_not_drifted() {
         )
     });
 
+    let all = presets();
+    let outcome = audit(&db, &all);
+    assert_clean(&all, &outcome);
+}
+
+/// What one audit run found.
+struct Outcome {
+    drift: Vec<String>,
+    unexpectedly_missing: Vec<String>,
+    notes: Vec<String>,
+    compared: usize,
+    absent: usize,
+}
+
+/// Compare every entry of `all` against a models.dev document. Shared by the
+/// live audit and the offline fixture test, so the comparison logic itself
+/// runs in CI.
+fn audit(db: &serde_json::Value, all: &[Preset]) -> Outcome {
     let mut drift: Vec<String> = Vec::new();
     let mut unexpectedly_missing: Vec<String> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
@@ -374,17 +358,16 @@ async fn hardcoded_prices_have_not_drifted() {
     );
     println!("{}", "-".repeat(72));
 
-    let all = presets();
-    for p in &all {
+    for p in all {
         let Some(cost) = db
-            .get(p.provider)
+            .get(p.provider.as_str())
             .and_then(|v| v.get("models"))
-            .and_then(|v| v.get(p.model))
+            .and_then(|v| v.get(p.model.as_str()))
             .and_then(|v| v.get("cost"))
         else {
-            match p.absent_upstream {
+            match &p.absent_upstream {
                 Some(why) => {
-                    absent += 4;
+                    absent += 4 + 5 * p.cost.context_tiers.len();
                     notes.push(format!("{} absent upstream — {why}", p.model));
                 }
                 None => unexpectedly_missing.push(format!(
@@ -408,7 +391,7 @@ async fn hardcoded_prices_have_not_drifted() {
                 .cloned()
                 .collect();
 
-            match &p.flat_rate_gap {
+            match p.flat_rate_gap {
                 Some(gap) => {
                     // Anything beyond what was acknowledged is new structure,
                     // not covered by an old decision. Without this the note is
@@ -663,11 +646,14 @@ async fn hardcoded_prices_have_not_drifted() {
                 }
             }
         }
-        if let Some(n) = p.note {
+        if let Some(n) = &p.note {
             notes.push(format!("{}: {n}", p.model));
         }
-        if let Some(why) = p.cache_write_at_input {
-            notes.push(format!("{}: cache_write at input rate — {why}", p.model));
+        if p.cache_write_at_input {
+            notes.push(format!(
+                "{}: cache_write at input rate (allowance recorded in prices.json)",
+                p.model
+            ));
         }
     }
 
@@ -681,26 +667,31 @@ async fn hardcoded_prices_have_not_drifted() {
         println!("  note: {n}");
     }
 
+    Outcome {
+        drift,
+        unexpectedly_missing,
+        notes,
+        compared,
+        absent,
+    }
+}
+
+/// The pass condition (see the module docs).
+fn assert_clean(all: &[Preset], o: &Outcome) {
     // A rename must not quietly reduce coverage.
     assert!(
-        unexpectedly_missing.is_empty(),
+        o.unexpectedly_missing.is_empty(),
         "\n\nPresets vanished from models.dev:\n\n{}\n",
-        unexpectedly_missing.join("\n")
+        o.unexpectedly_missing.join("\n")
     );
 
     // The load-bearing assertion. Without it, every schema change at or above
-    // the `cost` level yields drift.is_empty() == true and a green pass having
+    // the `cost` level yields o.drift.is_empty() == true and a green pass having
     // verified nothing.
-    // `expected` below is derived from `all`, so it cannot notice `all` itself
-    // shrinking — an empty `presets()` produced "0 compared, 0 drifted" and a
-    // green pass. Pin the floor against something independent: the number of
-    // priced constructors in `src/provider/model.rs`. Raise it when you add
-    // one, which is the moment you should also be adding it here.
-    const PRICED_PRESETS: usize = 12;
     assert!(
-        all.len() >= PRICED_PRESETS,
-        "\n\nThe audit is checking {} presets but the crate ships at least {PRICED_PRESETS}. \
-         A priced preset is unaudited — its rates can drift for as many releases as it takes \
+        all.len() >= MIN_ENTRIES,
+        "\n\nThe audit is checking {} entries but prices.json shipped at least {MIN_ENTRIES}. \
+         A price is unaudited — its rates can drift for as many releases as it takes \
          someone to notice, which for `claude_sonnet_5` was 18.\n",
         all.len()
     );
@@ -708,21 +699,167 @@ async fn hardcoded_prices_have_not_drifted() {
     // Four base rates per preset, plus threshold + four rates per tier.
     let expected: usize = all.iter().map(|p| 4 + 5 * p.cost.context_tiers.len()).sum();
     assert_eq!(
-        compared + absent,
+        o.compared + o.absent,
         expected,
         "\n\nThe audit accounted for {} of {expected} fields. It is not reporting \
          clean prices — it is reporting nothing. models.dev's schema or hosting \
          changed underneath this test; re-derive the key path against {DB_URL}.\n",
-        compared + absent
+        o.compared + o.absent
     );
 
     assert!(
-        drift.is_empty(),
+        o.drift.is_empty(),
         "\n\nPrice drift detected. models.dev is community-maintained and NOT \
          authoritative — confirm against the vendor page before changing any \
          constant, and never copy models.dev blindly.\n\n{}\n",
-        drift.join("\n")
+        o.drift.join("\n")
     );
+}
+
+/// A slice of the real models.dev document (see
+/// `tests/fixtures/models_dev_slice.json`).
+const FIXTURE: &str = include_str!("fixtures/models_dev_slice.json");
+
+/// The `prices.json` entries the fixture covers.
+fn fixture_presets(db: &serde_json::Value) -> Vec<Preset> {
+    presets()
+        .into_iter()
+        .filter(|p| {
+            db.get(p.provider.as_str())
+                .and_then(|v| v.get("models"))
+                .and_then(|v| v.get(p.model.as_str()))
+                .is_some()
+        })
+        .collect()
+}
+
+fn fields(all: &[Preset]) -> usize {
+    all.iter().map(|p| 4 + 5 * p.cost.context_tiers.len()).sum()
+}
+
+/// The audit's comparison logic, offline: flat entries, tiers (and the
+/// `context_over_200k` mirror) and the `cache_write_at_input` allowance all
+/// run in CI against a checked-in slice of models.dev, not only in the
+/// `--ignored` live run.
+#[test]
+fn the_audit_logic_runs_offline_against_the_fixture() {
+    let db: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+    let all = fixture_presets(&db);
+    let names: Vec<&str> = all.iter().map(|p| p.model.as_str()).collect();
+    for covered in ["claude-opus-5-5", "gpt-5.5", "gpt-6-sol", "muse-spark-1.2"] {
+        assert!(
+            names.contains(&covered),
+            "fixture lost {covered}: {names:?}"
+        );
+    }
+    let o = audit(&db, &all);
+    assert!(o.drift.is_empty(), "{:#?}", o.drift);
+    assert!(
+        o.unexpectedly_missing.is_empty(),
+        "{:?}",
+        o.unexpectedly_missing
+    );
+    assert_eq!(o.compared + o.absent, fields(&all));
+    // The caveats recorded in the data are surfaced.
+    assert!(
+        o.notes.iter().any(|n| n.starts_with("gpt-5.5: The >272K")),
+        "{:?}",
+        o.notes
+    );
+    // Unlisted cache_write accepted by the allowance: gpt-5.5 base and tier,
+    // and Muse Spark 1.2.
+    assert_eq!(o.absent, 3);
+
+    // Positive controls: each kind of drift is caught.
+    let drift_after = |mutate: &dyn Fn(&mut Preset)| {
+        let mut all = fixture_presets(&db);
+        for p in &mut all {
+            mutate(p);
+        }
+        audit(&db, &all).drift
+    };
+    let base = drift_after(&|p| {
+        if p.model == "claude-sonnet-5" {
+            p.cost.input_per_million = 3.0;
+        }
+    });
+    assert_eq!(base.len(), 1, "{base:?}");
+    let tier = drift_after(&|p| {
+        if p.model == "gpt-6-sol" {
+            p.cost.context_tiers[0].cache_read_per_million = 0.5;
+        }
+    });
+    // The tier field and its context_over_200k mirror both disagree.
+    assert_eq!(tier.len(), 2, "{tier:?}");
+    let allowance = drift_after(&|p| {
+        if p.model == "gpt-5.5" {
+            p.cache_write_at_input = false;
+        }
+    });
+    // Base, tier and mirror cache_write are now unexplained.
+    assert_eq!(allowance.len(), 3, "{allowance:?}");
+}
+
+/// An entry models.dev lacks is drift unless it records `absent_upstream` —
+/// and then all its fields, tiers included, count as accounted for.
+#[test]
+fn absent_upstream_accounts_for_every_field() {
+    let db: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+    let renamed = |absent: Option<&str>| {
+        let mut all: Vec<Preset> = fixture_presets(&db)
+            .into_iter()
+            .filter(|p| p.model == "gpt-6-sol")
+            .collect();
+        all[0].model = "gpt-6-sol-renamed".into();
+        all[0].absent_upstream = absent.map(str::to_string);
+        all
+    };
+    let missing = audit(&db, &renamed(None));
+    assert_eq!(missing.unexpectedly_missing.len(), 1);
+    let all = renamed(Some("not on models.dev yet, checked 2026-09-26"));
+    let o = audit(&db, &all);
+    assert!(o.unexpectedly_missing.is_empty());
+    assert_eq!(o.compared, 0);
+    // Four base rates plus threshold and four rates for its one tier.
+    assert_eq!(o.absent, 9);
+    assert_eq!(o.compared + o.absent, fields(&all));
+}
+
+/// `PriceSource::ModelsDev` against the live document: the mapper must still
+/// understand models.dev's schema — it maps thousands of models, and every
+/// built-in entry among them — so a user opting into it is not silently
+/// handed a near-empty table. Disagreements are printed, not failed: the
+/// audit above owns drift.
+#[tokio::test]
+#[ignore = "network: fetches models.dev; run before a release"]
+async fn models_dev_source_still_maps() {
+    use yoagent::provider::PriceSource;
+    let fetched = PriceTable::fetch(&PriceSource::ModelsDev)
+        .await
+        .unwrap_or_else(|e| panic!("PriceSource::ModelsDev: {e}"));
+    let builtin = PriceTable::builtin();
+    println!("models.dev mapped {} entries", fetched.len());
+    assert!(
+        fetched.len() >= 1000,
+        "only {} models mapped — has models.dev's schema changed?",
+        fetched.len()
+    );
+    let missing: Vec<String> = builtin
+        .iter()
+        .filter(|(p, m, e)| e.absent_upstream.is_none() && fetched.entry(p, m).is_none())
+        .map(|(p, m, _)| format!("{p}/{m}"))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "built-in entries the models.dev mapping dropped: {missing:?}"
+    );
+    for change in fetched
+        .changes_from(&builtin)
+        .iter()
+        .filter(|c| c.before.is_some())
+    {
+        println!("  differs from built-in: {change}");
+    }
 }
 
 /// `is_configured` means *any* rate is set. It decides whether a persisted
@@ -839,19 +976,19 @@ fn cost_usd_applies_the_context_tier_by_prompt_size() {
 /// audit cannot pass vacuously by recording an allowance.
 #[test]
 fn cache_write_at_input_allowance_is_asserted_both_ways() {
-    let preset = |allowance: Option<&'static str>| Preset {
-        constructor: "ModelConfig::test",
-        provider: "p",
-        model: "m",
-        vendor_page: "https://example.invalid",
+    let preset = |allowance: bool| Preset {
+        constructor: "prices.json p/m".into(),
+        provider: "p".into(),
+        model: "m".into(),
+        vendor_page: "https://example.invalid".into(),
         cost: CostConfig::new(5.0, 30.0),
         absent_upstream: None,
         flat_rate_gap: None,
         cache_write_at_input: allowance,
         note: None,
     };
-    let with = preset(Some("no cache-write charge"));
-    let without = preset(None);
+    let with = preset(true);
+    let without = preset(false);
 
     // Positive control: without the allowance, a non-zero unlisted rate is
     // drift — the rule the allowance relaxes.

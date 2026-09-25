@@ -4,6 +4,144 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+This release is 0.20.0: two constructor behaviours change (see Breaking).
+
+### Breaking
+
+- **`ModelConfig::meta` returns `None` for an id the price table does not
+  list.** It used to price every id at Muse Spark 1.1/1.2's standard rates,
+  so `meta("muse-spark-1.2-contributor", ..)` overstated the contributor
+  tier by 12x–75x. `muse-spark-1.1` and `muse-spark-1.2` keep their rates.
+  *Migration:* for any other Meta id, set `config.cost` yourself, or add the
+  id to a user override (`YOAGENT_PRICES` or
+  `prices::global::install_override`) and build the config afterwards.
+- **Generic first-party constructors return `Some` for a listed id.**
+  `anthropic`, `openai`, `openai_responses`, `google`, `xai`, `groq`,
+  `deepseek`, `mistral`, `zai`, `minimax`, `qwen` and `meta` look
+  `(provider, id)` up in the price table:
+  `ModelConfig::anthropic("claude-sonnet-5", ..)` now carries
+  `claude_sonnet_5()`'s rates instead of `None`, so
+  `session_cost_usd()` and the telemetry `cost_usd` field report a number
+  where they reported nothing. An id the table does not list is still
+  `None`. Gateways and custom endpoints (`custom`, `openai_compat`, `local`,
+  `ollama`, `opencode_zen` / `opencode_go`, `mock`) stay `None` — their bill
+  is not the vendor's list price. This replaces 0.19's "generic
+  constructors are unpriced" rule.
+  *Migration:* code that relied on `cost.is_none()` for a generic
+  constructor should check the id against `PriceTable::builtin()` instead,
+  or set `config.cost = None` after construction to keep a model unpriced.
+
+### Added
+
+- **Prices are data: `src/provider/prices.json` and `PriceTable`.** Every
+  rate, tier and caveat that was an `f64` literal in a `ModelConfig`
+  constructor now lives in one JSON file (schema 1, keyed by provider then
+  model id, with `source`, `verified` and `note` per entry), embedded with
+  `include_str!`. Every preset's resulting `CostConfig` is bit-for-bit what
+  0.19.0 shipped; a new test pins each one.
+  - `PriceTable` (plain data) offers `builtin()`, `from_json_str` /
+    `from_path`, `layered(&over)` (per-model replacement), `cost`, `entry`,
+    `iter`, `len`, `insert`, `changes_from` and `to_json`.
+  - Every entry is validated through `PriceTable::insert` and the public
+    `PriceEntry::validate`: non-empty ids, finite non-negative rates,
+    strictly ascending tier thresholds above 0, a `YYYY-MM-DD` `verified`
+    date, and a `cache_write_at_input` flag the rates agree with.
+    `PriceEntry` has `new` and `with_*` builders, including
+    `with_absent_upstream`.
+  - `PriceError` is `Clone` and `#[non_exhaustive]`, as is each struct
+    variant. `Json`, `Io` and `Http` errors name the file or URL. Transport
+    errors are kept as an opaque source, so no HTTP client type is part of
+    the API.
+  - Unknown fields: data people maintain by hand (`from_json_str`,
+    `from_path`, `YOAGENT_PRICES`, `PriceSource::Url`) is strict — an
+    unknown field is `PriceError::UnknownField`, a typo or data for a newer
+    yoagent. This crate's published file (`PriceSource::YoagentMain`) and
+    caches are lenient: unknown fields are ignored, logged at `warn` and
+    returned to the caller.
+  - The format contract: a field that changes billing bumps `schema`; a
+    metadata-only field does not. A test pins the field set to
+    `PRICE_SCHEMA_VERSION`.
+  - `CostConfig` and `ContextTier` now derive `PartialEq`.
+- **Runtime price overrides, in `provider::prices::global`.** Constructors
+  read a process-wide table: a user layer over an opt-in fetched layer over
+  the built-in data, each replacing whole entries per `(provider, id)`.
+  - `install_override(table) -> OverrideReport` installs the user layer
+    under one lock. The report (`#[must_use]`) lists the models it changed
+    (`changes`, excluding entries no constructor reads), the models that
+    revert because a previous user layer listed them (`reverted`), entries
+    for providers outside `PRICED_PROVIDERS` (`inert`), and `warnings`. It
+    warns about inert entries, entries that drop the replaced entry's
+    context tiers, cache rates left unset where the replaced entry set
+    them, and replacing an existing user layer (including one from
+    `YOAGENT_PRICES`). `clear_override()` removes the layer; `resolved()`
+    snapshots the table.
+  - `YOAGENT_PRICES=/path/to/prices.json` seeds the user layer, read once on
+    first use; unset or empty means no file. A bad file is logged with
+    `tracing::warn!` and ignored, never a panic.
+    `env_override_status() -> EnvOverride` reports `Unset`,
+    `Loaded { path, entries, warnings }` or `Rejected { path, error }`, and
+    `load_env_override()` reads the file strictly on demand, so a host can
+    fail fast. The crate's unit tests never read the variable, and the test
+    suite passes with it set.
+  - Constructors resolve when they run: install prices before building
+    configs, or re-price afterwards (below). A `cost` set on a config wins
+    over every process-wide layer — but `reprice()` and `with_prices()`
+    overwrite it.
+- **Re-pricing.** `ModelConfig::reprice()` repeats a first-party
+  constructor's lookup against the current table, and may set `None` when
+  the model is no longer listed. It applies only to a config a pricing
+  constructor built whose `provider` is still in `PRICED_PROVIDERS` (a
+  private, unserialized marker records the first); anything else is
+  returned unchanged. `Agent::reprice()` and `SubAgentTool::reprice()` do
+  the same for the config they hold. `ModelConfig::with_prices(&table)`
+  re-resolves from a table you hold, without global state: listed models
+  get the table's rates, unlisted ones keep theirs (it never clears a
+  price), and it applies to gateways and custom endpoints too.
+- **Opt-in live price sources.** Nothing is ever fetched implicitly.
+  - `PriceTable::fetch(&source)` and `fetch_with(&source, FetchOptions) ->
+    FetchReport { table, skipped, ignored_fields }` read models.dev
+    (`ModelsDev`, `ModelsDevAt(url)` — mapped into this crate's schema,
+    tiers from `tiers` or `context_over_200k`, provider keys `alibaba` and
+    `opencode` renamed to `qwen` and `opencode-zen`), this crate's checked
+    `prices.json` on GitHub `main` (`YoagentMain`, so a merged price fix
+    reaches users without a release), or a URL in this crate's format
+    (`Url`). `FetchOptions` sets the timeout (default 10 s).
+  - A models.dev model the mapping cannot express is skipped, never
+    approximated, and reported as a `SkippedModel` with the reason
+    (`from_models_dev_json_report` does the same offline). A skipped model
+    the built-in data lists is named in a `warn` log.
+  - `global::install_fetched(table)` installs the fetched layer, above the
+    built-in data and below the user layer; `install_fetched_with(table,
+    InstallPolicy::AddOnly)` instead merges in only models no lower layer
+    lists. Both are `#[must_use]` and return the `PriceChange`s against the
+    previous built-in-plus-fetched table, so reverts show up, marking
+    changes the user layer overrides as `shadowed`. Replacing a non-empty
+    fetched layer is logged at `warn`. Separately, the built-in models the
+    new layer prices differently are logged at `warn` — the first five, and
+    a count of the rest; `changes_from` computes the full list without
+    installing.
+  - `PriceTable::fetch_cached(&source, path, CacheOptions) -> CachedPrices`
+    caches to a file you choose (defaults: refetch after a day, accept a
+    stale cache up to a week old, 10 s timeout). The cache records its
+    source URL; a cache of another source is a miss. `PriceOrigin` carries
+    what fits each origin: `Fetched { cache_write_error }`,
+    `Cache { age }`, `StaleCache { age, fetch_error }` or
+    `Builtin { fetch_error }`. `CachedPrices` also returns the skip list,
+    ignored fields, and any `CacheProblem` (an unreadable or invalid cache,
+    or a source mismatch), each also logged. A cache whose age is unknown (a
+    future modification time) is never fresh, and is a stale fallback only
+    when `max_stale` is `Duration::MAX`.
+
+  Precedence for what constructors set, highest first: user override >
+  fetched > built-in.
+- **`tests/price_audit.rs` audits every `prices.json` entry**, not a
+  hand-kept preset list, so an entry cannot be added unaudited. Its
+  allowances are now data (`cache_write_at_input`, `absent_upstream`), and
+  its comparison logic also runs offline in CI against a checked-in slice of
+  models.dev.
+
 ## 0.19.0
 
 ### Breaking

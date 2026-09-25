@@ -14,9 +14,11 @@ use yoagent::provider::ModelConfig;
 let agent = Agent::from_config(ModelConfig::openai_responses("gpt-5.5", "GPT-5.5"));
 ```
 
-`openai_responses` is unpriced (`cost: None`). Set `cost` to a `CostConfig`
-for the model you use if you want `session_cost_usd` and the telemetry
-`cost_usd` field.
+`openai_responses` is priced when the id is listed in the price data
+(`gpt-5.5`, the GPT-6 models — see [Model Pricing](../concepts/pricing.md))
+and unpriced (`cost: None`) otherwise. For an unlisted model, set `cost` to a
+`CostConfig` if you want `session_cost_usd` and the telemetry `cost_usd`
+field.
 
 The GPT-6 presets — `ModelConfig::gpt_6_astra()`, `gpt_6_sol()`,
 `gpt_6_luna()` — are built on `openai_responses` and priced, including their
