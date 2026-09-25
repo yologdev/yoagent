@@ -134,8 +134,6 @@ Other constructors:
 
 `SubAgentTool` mirrors these: `from_config`, `from_config_with`, `from_provider`.
 
-`SubAgentTool` mirrors these: `SubAgentTool::from_config(name, config)` and `SubAgentTool::from_provider(name, provider, config)`.
-
 **Sub-agent spend** is a separate bucket, never merged into the parent's own
 figures: `SessionStats::sub_agents` (`SubAgentSpend { usage, cost_usd, runs }`),
 summed over the whole delegation tree, each run priced at its own model's rates;
