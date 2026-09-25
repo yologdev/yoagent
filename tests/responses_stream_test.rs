@@ -796,3 +796,54 @@ async fn null_usage_counts_do_not_drop_the_terminal_event() {
         assert_eq!(*stop, StopReason::Refusal, "{which:?}");
     }
 }
+
+/// Azure's mid-stream capacity error reads as a rate limit (retried with
+/// backoff), not a context overflow (which would compact the history): its
+/// message contains "exceeds the maximum", which used to match an overflow
+/// phrase.
+#[tokio::test]
+async fn azure_no_capacity_mid_stream_is_rate_limited() {
+    use yoagent::provider::ProviderError;
+    let body = sse(vec![
+        created(),
+        (
+            "error",
+            json!({"error": {"type": "too_many_requests", "code": "no_capacity",
+                   "message": "The request exceeds the maximum usage size allowed during peak load. Please retry later.",
+                   "param": null}}),
+        ),
+    ]);
+    for which in BOTH {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(body.clone(), "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+        let mut mc = ModelConfig::openai_responses("gpt-5.5", "GPT-5.5");
+        mc.base_url = server.uri();
+        let mut config = StreamConfig::new("gpt-5.5", "test-key");
+        config.messages = vec![Message::user("hi")];
+        config.model_config = Some(mc);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let result = match which {
+            Which::Responses => {
+                OpenAiResponsesProvider
+                    .stream(config, tx, CancellationToken::new())
+                    .await
+            }
+            Which::Azure => {
+                AzureOpenAiProvider
+                    .stream(config, tx, CancellationToken::new())
+                    .await
+            }
+        };
+        let err = result.expect_err("an error event fails the stream");
+        assert!(
+            matches!(err, ProviderError::RateLimited { .. }),
+            "{which:?}: {err:?}"
+        );
+        assert!(!err.is_context_overflow(), "{which:?}");
+    }
+}
