@@ -10,7 +10,7 @@ Two providers for Google's Gemini models:
 ```rust
 use yoagent::provider::ModelConfig;
 
-let agent = Agent::from_config(ModelConfig::google("gemini-2.5-flash", "Gemini 2.5 Flash"));
+let agent = Agent::from_config(ModelConfig::google("gemini-3.8-flash", "Gemini 3.8 Flash"));
 ```
 
 ### API Details
@@ -42,8 +42,8 @@ Both Google AI Studio and Vertex AI map `ThinkingLevel` onto
 
 - **Gemini 3 and later: `thinkingLevel`.** Google documents `thinkingLevel` as
   "Recommended for Gemini 3 or later models. Use with earlier models results
-  in an error." `Minimal` → `MINIMAL`, `Low` → `LOW`, `Medium` → `MEDIUM`,
-  `High` / `XHigh` / `Max` → `HIGH`.
+  in an error." `Off` → (omitted), `Minimal` → `MINIMAL`, `Low` → `LOW`,
+  `Medium` → `MEDIUM`, `High` / `XHigh` / `Max` → `HIGH`.
 - **Gemini 2.x: `thinkingBudget`**, unchanged: 1,024 / 8,192 / 24,576 tokens
   (see the [`ThinkingLevel` table](../reference/configuration.md#thinkinglevel)).
 
@@ -68,17 +68,32 @@ only where it is documented as accepted — 3.6 / 3.5 Flash, every 3.x
 Flash-Lite, 3 Flash — and clamps `Minimal` to `LOW` everywhere else, including
 the `-latest` aliases, which Google swaps to new models without notice.
 
-**`Off` does not disable thinking on Gemini 3.** Omitting `thinkingConfig`
-would leave the model at its default level (e.g. `MEDIUM` on 3.5–3.8 Flash, `HIGH`
-on 3.1 Pro), so on Gemini 3 `Off` sends the lowest level the model accepts
-instead — `MINIMAL`, which Google says "Matches the "no thinking" setting for
-most queries" but "does not guarantee that thinking is off", or `LOW` where
-`MINIMAL` is not accepted — without `includeThoughts`. Thinking cannot be
-turned off at all on Gemini 3 Pro / 3.1 Pro. On 2.x, `Off` still omits
-`thinkingConfig`.
+**`Off` sends nothing — and does not disable thinking on Gemini 3.** On
+every Gemini model `Off` omits `thinkingConfig`. On 2.x that is the crate's
+long-standing behaviour. On Gemini 3 thinking cannot be switched off this way:
+with no `thinkingConfig` the model thinks at its own **default** level —
+`HIGH` on 3.1 Pro, `MEDIUM` on 3.5–3.8 Flash, `MINIMAL` on 3.x Flash-Lite
+(`HIGH` on 3 Flash) — per Google's level tables. Google: "If you don't
+specify a thinking level, Gemini will use the Gemini 3 models' default
+thinking level (e.g., "high" for Gemini 3.1 Pro, and "medium" for Gemini 3.5
+Flash)", and "You cannot disable thinking for Gemini 3.1 Pro. Gemini 3 Flash
+and Flash-Lite also do not support full thinking-off."
 
-Image models (e.g. 3.1 Flash Image, `MINIMAL`/`HIGH` only) are not modelled;
-pick a level they accept.
+**To ask for the least thinking, use `ThinkingLevel::Minimal`.** It sends
+`MINIMAL` where the model accepts it — which Google says "Matches the "no
+thinking" setting for most queries" but "does not guarantee that thinking is
+off" — and `LOW` elsewhere.
+
+**Image and TTS models.** Google's Vertex AI thinking table lists narrower
+level sets for the image models: Gemini 3.1 Flash Image and 3.1 Flash-Lite
+Image accept "MINIMAL , HIGH", and Gemini 3 Pro Image accepts "HIGH" only.
+The crate reads any Gemini 3+ `-image` id that way: on the `MINIMAL`/`HIGH`
+models `Minimal` and `Low` send `MINIMAL` and `Medium` and above send `HIGH`;
+on `-pro…-image` ids every level sends `HIGH`. Gemini 3 TTS models
+(`gemini-3.8-flash-tts`, `gemini-3.8-flash-lite-tts`,
+`gemini-3.1-flash-tts-preview`) are not in either guide's list of thinking
+models, so they get no `thinkingConfig` at any level. 2.x image and TTS ids
+keep the `thinkingBudget` payload unchanged.
 
 **Override.** When the id does not say what the model is, set `GoogleCompat`:
 
@@ -89,8 +104,9 @@ let mut config = ModelConfig::google("my-gemini-proxy-alias", "Gemini via proxy"
 config.google = Some(GoogleCompat::force_thinking_level()); // or force_thinking_budget()
 ```
 
-A forced `thinkingLevel` on an unrecognised id clamps `Minimal` / `Off` to
-`LOW`, since the crate cannot know whether that model accepts `MINIMAL`.
+A forced `thinkingLevel` on an unrecognised id clamps `Minimal` to `LOW`,
+since the crate cannot know whether that model accepts `MINIMAL`; `Off` still
+sends nothing.
 
 ### Streaming
 

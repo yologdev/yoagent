@@ -541,13 +541,28 @@ mod tests {
                 serde_json::json!({"thinkingLevel": "HIGH", "includeThoughts": true}),
                 "{model}"
             );
-            // 3.1 Pro has no MINIMAL rung and cannot turn thinking off.
+            // Off sends nothing: 3.1 Pro then thinks at its default (HIGH).
+            assert!(
+                vertex_thinking(model, ThinkingLevel::Off).is_null(),
+                "{model}"
+            );
+            // 3.1 Pro has no MINIMAL rung.
             assert_eq!(
-                vertex_thinking(model, ThinkingLevel::Off),
-                serde_json::json!({"thinkingLevel": "LOW"}),
+                vertex_thinking(model, ThinkingLevel::Minimal)["thinkingLevel"],
+                "LOW",
                 "{model}"
             );
         }
+        // Image models on Vertex: only the levels the Vertex table lists.
+        assert_eq!(
+            vertex_thinking("gemini-3.1-flash-image", ThinkingLevel::Low)["thinkingLevel"],
+            "MINIMAL"
+        );
+        assert_eq!(
+            vertex_thinking("gemini-3-pro-image", ThinkingLevel::Low)["thinkingLevel"],
+            "HIGH"
+        );
+        assert!(vertex_thinking("gemini-3.1-flash-image", ThinkingLevel::Off).is_null());
         assert_eq!(
             vertex_thinking(
                 "projects/p/locations/global/publishers/google/models/gemini-3.5-flash-lite",
