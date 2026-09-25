@@ -89,6 +89,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.86
       - uses: Swatinem/rust-cache@v2
+      # resolver = "3" skips dependency versions whose declared rust-version is
+      # too new, but a crate that declares none is taken at its newest.
+      # yoke-derive 0.8.3 (2026-09-15, no rust-version) needs a std API newer
+      # than 1.86; hold it at 0.8.2 here only — published consumers resolve
+      # their own lockfile and are unaffected.
+      - name: Pin transitive deps that dropped 1.86 without declaring it
+        run: cargo update -p yoke-derive --precise 0.8.2
       - name: Check
         run: cargo check --all-features
 
