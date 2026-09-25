@@ -6,6 +6,7 @@
 //! Base URL format: `https://{resource}.openai.azure.com/openai/deployments/{deployment}`
 //! Auth: `api-key` header or Azure AD Bearer token.
 
+use super::tool_args::finalize_tool_arguments;
 use super::traits::*;
 use crate::types::*;
 use async_trait::async_trait;
@@ -177,8 +178,7 @@ impl StreamProvider for AzureOpenAiProvider {
         }
 
         for buf in &tool_call_buffers {
-            let args = serde_json::from_str(&buf.arguments)
-                .unwrap_or(serde_json::Value::Object(Default::default()));
+            let args = finalize_tool_arguments(&buf.name, &buf.arguments);
             content.push(Content::ToolCall {
                 provider_metadata: None,
                 id: buf.id.clone(),
@@ -190,9 +190,14 @@ impl StreamProvider for AzureOpenAiProvider {
             });
         }
 
-        if content
-            .iter()
-            .any(|c| matches!(c, Content::ToolCall { .. }))
+        // Tool calls make this a ToolUse turn — unless the response was
+        // incomplete (token limit), which is how a call ends up with unparsed
+        // arguments. Length is kept so callers see it; the loop still answers
+        // every tool call either way.
+        if stop_reason != StopReason::Length
+            && content
+                .iter()
+                .any(|c| matches!(c, Content::ToolCall { .. }))
         {
             stop_reason = StopReason::ToolUse;
         }

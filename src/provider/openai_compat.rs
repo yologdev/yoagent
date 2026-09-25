@@ -7,6 +7,7 @@
 //! Behavioral differences are handled via `OpenAiCompat` flags in ModelConfig.
 
 use super::model::{MaxTokensField, ModelConfig, OpenAiCompat, ThinkingFormat};
+use super::tool_args::finalize_tool_arguments;
 use super::traits::*;
 use crate::types::*;
 use async_trait::async_trait;
@@ -219,16 +220,7 @@ impl StreamProvider for OpenAiCompatProvider {
 
         // Finalize tool calls
         for buf in &tool_call_buffers {
-            let args = serde_json::from_str(&buf.arguments).unwrap_or_else(|e| {
-                if !buf.arguments.is_empty() {
-                    warn!(
-                        tool = %buf.name,
-                        len = buf.arguments.len(),
-                        "tool-call arguments failed to parse ({e}); using empty object"
-                    );
-                }
-                serde_json::Value::Object(Default::default())
-            });
+            let args = finalize_tool_arguments(&buf.name, &buf.arguments);
             content.push(Content::ToolCall {
                 provider_metadata: None,
                 id: buf.id.clone(),
@@ -240,7 +232,11 @@ impl StreamProvider for OpenAiCompatProvider {
             });
         }
 
-        if !tool_call_buffers.is_empty() {
+        // Tool calls make this a ToolUse turn — unless the output hit the
+        // token limit. `finish_reason: "length"` mid-arguments is how a call
+        // ends up with unparsed arguments, and Length is the signal a caller
+        // needs to see; the loop still answers every tool call either way.
+        if !tool_call_buffers.is_empty() && stop_reason != StopReason::Length {
             stop_reason = StopReason::ToolUse;
         }
 

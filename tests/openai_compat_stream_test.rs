@@ -186,9 +186,10 @@ async fn tool_call_arguments_reassemble_across_chunks() {
 /// A tool with no parameters is callable here too.
 ///
 /// The Anthropic sibling of this shipped a bug: an empty argument stream was
-/// treated as malformed and failed the whole turn. This module reaches the same
-/// outcome by a different route — `from_str("")` fails and it falls back to
-/// `{}` — so the behaviour is correct but incidental. Pinned so it stays.
+/// treated as malformed and failed the whole turn. Here the empty buffer is
+/// resolved to `{}` explicitly by `parse_tool_arguments`, while a *non-empty*
+/// buffer that fails to parse is marked instead (see the next test). Pinned so
+/// the two stay distinct.
 #[tokio::test]
 async fn a_zero_argument_tool_call_is_usable() {
     let server = MockServer::start().await;
@@ -233,18 +234,16 @@ async fn a_zero_argument_tool_call_is_usable() {
     assert_eq!(*args, serde_json::json!({}));
 }
 
-/// **Documents a provider divergence, deliberately.**
+/// Truncated arguments are marked unparsed, never defaulted to `{}` (#167).
 ///
-/// Anthropic fails the turn on unparseable tool arguments, and says why: "a
-/// tool handed `{"__partial_json": ...}` runs on its defaults instead of what
-/// the model asked for". This module does the opposite — it falls back to `{}`
-/// and warns, so the tool *does* run on its defaults.
-///
-/// Pinned rather than fixed, because changing it is a behavioural decision
-/// affecting 15+ providers, not a test fix. If the divergence is ever closed,
-/// this test should fail and be updated deliberately.
+/// This used to pin a divergence: Anthropic fails the turn on unparseable tool
+/// arguments, while this module fell back to `{}` and warned — so the tool ran
+/// on its defaults instead of what the model asked for. Now the raw text is
+/// kept under the unparsed marker, and the agent loop answers the call with an
+/// error tool result instead of running it (see
+/// `unparsed_tool_arguments_are_not_executed` in `agent_loop_test.rs`).
 #[tokio::test]
-async fn truncated_tool_arguments_fall_back_to_empty_unlike_anthropic() {
+async fn truncated_tool_arguments_are_marked_unparsed_not_defaulted() {
     let server = MockServer::start().await;
     let body = format!(
         "{}{}{}",
@@ -274,11 +273,89 @@ async fn truncated_tool_arguments_fall_back_to_empty_unlike_anthropic() {
             _ => None,
         })
         .expect("the call still reaches the caller here");
-    assert_eq!(
+    assert_ne!(
         *args,
         serde_json::json!({}),
-        "truncated arguments currently degrade to an empty object — the tool runs on its \
-         defaults. Anthropic fails the turn instead. If this assertion changes, the \
-         divergence was closed on purpose"
+        "truncated arguments must not degrade to an empty object — the tool would run \
+         on its defaults"
     );
+    assert_eq!(
+        yoagent::provider::unparsed_tool_arguments(args),
+        Some(r#"{"q":"#),
+        "the raw text is kept under the unparsed marker so the loop refuses to run it"
+    );
+}
+
+/// `finish_reason: "length"` mid-arguments — how truncated arguments arise in
+/// practice (a transport cut without a finish_reason is already an error).
+/// The turn must report `Length`, not be relabelled `ToolUse` just because a
+/// tool call was open: `Length` is the signal a caller needs, and the loop
+/// answers the call either way.
+#[tokio::test]
+async fn length_cut_mid_arguments_keeps_the_length_stop_reason() {
+    let server = MockServer::start().await;
+    let body = format!(
+        "{}{}{}",
+        chunk(
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"write_file","arguments":"{\"path\":\"a.txt\",\"content\":\"lo"}}]}}]}"#
+        ),
+        chunk(r#"{"choices":[{"index":0,"delta":{},"finish_reason":"length"}]}"#),
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
+        .mount(&server)
+        .await;
+
+    let message = run_stream(stream_config(&server.uri()))
+        .await
+        .expect("a length stop is a completed response, not a transport error");
+    let Message::Assistant {
+        content,
+        stop_reason,
+        ..
+    } = &message
+    else {
+        panic!("expected assistant message");
+    };
+    assert_eq!(
+        *stop_reason,
+        StopReason::Length,
+        "an open tool call must not overwrite the Length stop reason"
+    );
+    let args = content
+        .iter()
+        .find_map(|c| match c {
+            Content::ToolCall { arguments, .. } => Some(arguments),
+            _ => None,
+        })
+        .expect("the cut-off call still reaches the loop, which answers it");
+    assert_eq!(
+        yoagent::provider::unparsed_tool_arguments(args),
+        Some(r#"{"path":"a.txt","content":"lo"#)
+    );
+}
+
+/// A complete tool call still makes the turn `ToolUse`.
+#[tokio::test]
+async fn complete_tool_call_is_still_tool_use() {
+    let server = MockServer::start().await;
+    let body = format!(
+        "{}{}{}",
+        chunk(
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"search","arguments":"{\"q\":\"x\"}"}}]}}]}"#
+        ),
+        chunk(r#"{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#),
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
+        .mount(&server)
+        .await;
+
+    let message = run_stream(stream_config(&server.uri())).await.unwrap();
+    let Message::Assistant { stop_reason, .. } = &message else {
+        panic!("expected assistant message");
+    };
+    assert_eq!(*stop_reason, StopReason::ToolUse);
 }

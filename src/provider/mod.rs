@@ -9,6 +9,7 @@ pub mod openai_compat;
 pub mod openai_responses;
 pub mod registry;
 pub mod sse;
+pub mod tool_args;
 pub mod traits;
 
 pub use anthropic::AnthropicProvider;
@@ -22,4 +23,5 @@ pub use openai_compat::OpenAiCompatProvider;
 pub use openai_responses::OpenAiResponsesProvider;
 pub(crate) use registry::resolve_api_key_or_warn;
 pub use registry::{resolve_api_key, ProviderRegistry};
+pub use tool_args::{parse_tool_arguments, unparsed_tool_arguments, UNPARSED_ARGUMENTS_KEY};
 pub use traits::*;
