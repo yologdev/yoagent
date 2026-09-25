@@ -134,8 +134,9 @@ fn note_unpriced(model: &str) {
     eprintln!("note: no priced preset for '{model}' — the cost column will be blank");
 }
 
-/// A DeepSeek config carrying peak-window rates. `cache_write` is 0 because
-/// DeepSeek has no write category — populating its cache is free.
+/// A DeepSeek config carrying peak-window rates. `cache_write` is left unset
+/// because DeepSeek has no write category (it would bill at the input rate,
+/// but DeepSeek never reports cache-write tokens — a miss is plain input).
 fn deepseek_priced(id: &str, input: f64, output: f64, cache_read: f64) -> ModelConfig {
     let mut config = ModelConfig::deepseek(id, id);
     config.cost = Some(CostConfig::new(input, output).with_cache_read(cache_read));

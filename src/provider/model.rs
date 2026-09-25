@@ -34,6 +34,20 @@ impl std::fmt::Display for ApiProtocol {
 
 /// Cost per million tokens (input/output).
 ///
+/// # A cache rate left at zero bills at the input rate
+///
+/// `cache_read_per_million` or `cache_write_per_million` at `0.0` means "not
+/// separately priced", and [`cost_usd`](Self::cost_usd) bills those tokens at
+/// the applicable input rate — the base `input_per_million`, or a
+/// [`ContextTier`]'s own `input_per_million` when that tier applies (a tier's
+/// zero cache rate falls back to the tier's input rate, never to a base cache
+/// rate). A vendor with no separate cache-write charge (OpenAI before
+/// GPT-5.6, Meta) is priced correctly without setting one, and a missing
+/// rate can no longer bill cached tokens as free. The rule applies only
+/// where the input rate is non-zero, so a fully zero config still costs $0.
+/// There is therefore no way to say "cache reads are free but input is
+/// not"; set a tiny positive rate if a vendor ever charges that.
+///
 /// # These are a snapshot, not an authority
 ///
 /// The built-in presets carry rates verified against the vendor's published
@@ -84,7 +98,8 @@ impl std::fmt::Display for ApiProtocol {
 ///
 /// // Generic constructors carry no price (`cost: None`). `get_or_insert_with`
 /// // works here too — `if let Some(c) = config.cost.as_mut()` would silently
-/// // do nothing — but set every rate you pay, since the rest start at zero:
+/// // do nothing — but set every rate you pay, since the rest start at zero
+/// // (an unset cache rate then bills at the input rate):
 /// let mut deepseek = ModelConfig::deepseek("deepseek-flash", "DeepSeek Flash");
 /// assert!(deepseek.cost.is_none());
 /// deepseek.cost = Some(CostConfig::new(0.15, 0.60).with_cache_read(0.003));
@@ -99,8 +114,13 @@ impl std::fmt::Display for ApiProtocol {
 pub struct CostConfig {
     pub input_per_million: f64,
     pub output_per_million: f64,
+    /// Rate for cache-hit prompt tokens. `0.0` (the default) bills them at
+    /// `input_per_million`; see [the zero-rate rule](CostConfig#a-cache-rate-left-at-zero-bills-at-the-input-rate).
     #[serde(default)]
     pub cache_read_per_million: f64,
+    /// Rate for prompt tokens written to the cache. `0.0` (the default)
+    /// bills them at `input_per_million`; see
+    /// [the zero-rate rule](CostConfig#a-cache-rate-left-at-zero-bills-at-the-input-rate).
     #[serde(default)]
     pub cache_write_per_million: f64,
     /// Rates that replace the above once a request's prompt exceeds a
@@ -134,8 +154,12 @@ pub struct ContextTier {
     pub above_prompt_tokens: u64,
     pub input_per_million: f64,
     pub output_per_million: f64,
+    /// Cache-hit rate above the threshold. `0.0` bills at **this tier's**
+    /// `input_per_million`, as for [`CostConfig::cache_read_per_million`].
     #[serde(default)]
     pub cache_read_per_million: f64,
+    /// Cache-write rate above the threshold. `0.0` bills at **this tier's**
+    /// `input_per_million`, as for [`CostConfig::cache_write_per_million`].
     #[serde(default)]
     pub cache_write_per_million: f64,
 }
@@ -145,10 +169,8 @@ impl ContextTier {
     ///
     /// Cache rates are added with [`with_cache_read`](Self::with_cache_read)
     /// and [`with_cache_write`](Self::with_cache_write), mirroring
-    /// [`CostConfig::new`] and for the same reason. The previous shape took
-    /// cache-read positionally and silently zeroed cache-write, which would
-    /// have dropped an Anthropic-style tier's $12.50/M cache writes to $0
-    /// above the threshold.
+    /// [`CostConfig::new`] and for the same reason. A cache rate left unset
+    /// bills at this tier's input rate (see [`CostConfig`]).
     ///
     /// `above_prompt_tokens` is exclusive: a prompt exactly at the threshold
     /// stays on the band below, matching how vendors publish `>272K`.
@@ -214,13 +236,16 @@ impl CostConfig {
         }
     }
 
-    /// Rate for reading a cached prompt prefix.
+    /// Rate for reading a cached prompt prefix. Unset (`0.0`), cache reads
+    /// bill at the input rate.
     pub fn with_cache_read(mut self, per_million: f64) -> Self {
         self.cache_read_per_million = per_million;
         self
     }
 
-    /// Rate for writing a prompt prefix into the cache.
+    /// Rate for writing a prompt prefix into the cache. Unset (`0.0`), cache
+    /// writes bill at the input rate — right for a vendor with no separate
+    /// write charge.
     pub fn with_cache_write(mut self, per_million: f64) -> Self {
         self.cache_write_per_million = per_million;
         self
@@ -257,6 +282,9 @@ impl CostConfig {
 
     /// Dollar cost of a usage record at these per-million-token rates.
     ///
+    /// A cache rate of `0.0` bills at the applicable band's input rate (see
+    /// [the zero-rate rule](CostConfig#a-cache-rate-left-at-zero-bills-at-the-input-rate)).
+    ///
     /// Consumed by [`crate::Agent::session_cost_usd`]; also usable directly
     /// in `after_turn` callbacks for per-turn cost tracking.
     pub fn cost_usd(&self, usage: &crate::types::Usage) -> f64 {
@@ -283,6 +311,10 @@ impl CostConfig {
                 self.cache_write_per_million,
             ),
         };
+        // A zero cache rate means "not separately priced": bill at this
+        // band's input rate. With a zero input rate this is still zero.
+        let or_input = |rate: f64| if rate == 0.0 { input } else { rate };
+        let (cache_read, cache_write) = (or_input(cache_read), or_input(cache_write));
         (usage.input as f64 * input
             + usage.output as f64 * output
             + usage.cache_read as f64 * cache_read
@@ -1193,15 +1225,16 @@ impl ModelConfig {
     /// 1.5x output for the full session". So above 272K prompt tokens this
     /// preset bills $10 input / $45 output (a [`ContextTier`] at 272,000;
     /// exclusive, so a prompt of exactly 272,000 stays on the base band).
-    /// OpenAI charges nothing extra for cache writes on this model.
+    /// OpenAI charges nothing extra for cache writes on this model ("No
+    /// additional cache-write charge" before GPT-5.6), so cache writes bill
+    /// at the input rate: set explicitly as $5, and $10 above 272K.
     ///
     /// **The long-band cached-input rate, $1.00, is UNVERIFIED.** The sentence
     /// above names input and output only. $1.00 (2x, as the GPT-6 pages state
     /// for their cache rates) is what models.dev records; the literal reading
-    /// would leave it at $0.50. It is set rather than left unset because an
-    /// unset tier rate is $0, not "inherit the base rate" — leaving it out
-    /// would bill every cached token above 272K as free. OpenAI's pricing
-    /// page no longer lists gpt-5.5, so there is no table cell to settle it.
+    /// would leave it at $0.50. (Left unset it would bill at the tier's input
+    /// rate, $10 — see [`CostConfig`].) OpenAI's pricing page no longer lists
+    /// gpt-5.5, so there is no table cell to settle it.
     ///
     /// Rates are a snapshot, not an authority; see [`CostConfig`].
     pub fn gpt_5_5() -> Self {
@@ -1212,7 +1245,12 @@ impl ModelConfig {
             cost: Some(
                 CostConfig::new(5.0, 30.0)
                     .with_cache_read(0.5)
-                    .with_context_tier(ContextTier::new(272_000, 10.0, 45.0).with_cache_read(1.0)),
+                    .with_cache_write(5.0)
+                    .with_context_tier(
+                        ContextTier::new(272_000, 10.0, 45.0)
+                            .with_cache_read(1.0)
+                            .with_cache_write(10.0),
+                    ),
             ),
             compat: Some(OpenAiCompat {
                 max_reasoning_effort: ReasoningEffortCeiling::XHigh,
@@ -1611,7 +1649,12 @@ impl ModelConfig {
             reasoning: true,
             context_window: 1_048_576,
             max_tokens: 131_072,
-            cost: Some(CostConfig::new(1.25, 4.25).with_cache_read(0.15)),
+            // No cache-write charge: writes bill at the input rate.
+            cost: Some(
+                CostConfig::new(1.25, 4.25)
+                    .with_cache_read(0.15)
+                    .with_cache_write(1.25),
+            ),
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -1785,9 +1828,10 @@ mod tests {
         assert!(mc.cost.as_ref().unwrap().is_configured());
         assert_eq!(mc.cost.as_ref().unwrap().input_per_million, 1.25);
         assert_eq!(mc.cost.as_ref().unwrap().output_per_million, 4.25);
-        // Meta documents a cached-input rate; cache writes are not charged.
+        // Meta documents a cached-input rate; cache writes carry no extra
+        // charge, so they bill at the input rate.
         assert_eq!(mc.cost.as_ref().unwrap().cache_read_per_million, 0.15);
-        assert_eq!(mc.cost.as_ref().unwrap().cache_write_per_million, 0.0);
+        assert_eq!(mc.cost.as_ref().unwrap().cache_write_per_million, 1.25);
         let compat = mc.compat.expect("compat flags set");
         assert!(matches!(
             compat.max_tokens_field,
@@ -1861,6 +1905,46 @@ mod tests {
         assert!((cost.cost_usd(&usage) - 6.6).abs() < 1e-9);
         // zero rates (default) => zero cost
         assert_eq!(CostConfig::default().cost_usd(&usage), 0.0);
+        assert_eq!(CostConfig::new(0.0, 0.0).cost_usd(&usage), 0.0);
+    }
+
+    #[test]
+    fn zero_cache_rates_bill_at_the_input_rate() {
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        // Unset cache rates: cache tokens bill as input ($2/M).
+        let bare = CostConfig::new(2.0, 8.0);
+        assert!(close(bare.cost_usd(&usage(0, 500_000, 0, 0)), 1.0));
+        assert!(close(bare.cost_usd(&usage(0, 0, 500_000, 0)), 1.0));
+        // Near-miss: an explicit rate is used as-is, each field independently.
+        let read_only = CostConfig::new(2.0, 8.0).with_cache_read(0.2);
+        assert!(close(read_only.cost_usd(&usage(0, 500_000, 0, 0)), 0.1));
+        assert!(close(read_only.cost_usd(&usage(0, 0, 500_000, 0)), 1.0));
+        let write_only = CostConfig::new(2.0, 8.0).with_cache_write(2.5);
+        assert!(close(write_only.cost_usd(&usage(0, 0, 100_000, 0)), 0.25));
+        assert!(close(write_only.cost_usd(&usage(0, 100_000, 0, 0)), 0.2));
+        // Tiers fall back to the tier's own input rate, not the base cache
+        // rate and not the base input rate.
+        let tiered = CostConfig::new(2.0, 8.0)
+            .with_cache_read(0.2)
+            .with_cache_write(2.5)
+            .with_context_tier(ContextTier::new(100_000, 4.0, 12.0));
+        let m = 1_000_000;
+        assert!(close(tiered.cost_usd(&usage(0, m, 0, 0)), 4.0));
+        assert!(close(tiered.cost_usd(&usage(0, 0, m, 0)), 4.0));
+        // Below the threshold the base cache rates still apply.
+        assert!(close(tiered.cost_usd(&usage(0, 50_000, 0, 0)), 0.01));
+        // A tier with its own cache rates keeps them.
+        let tier_rates = CostConfig::new(2.0, 8.0).with_context_tier(
+            ContextTier::new(100_000, 4.0, 12.0)
+                .with_cache_read(0.4)
+                .with_cache_write(5.0),
+        );
+        assert!(close(tier_rates.cost_usd(&usage(0, m, 0, 0)), 0.4));
+        assert!(close(tier_rates.cost_usd(&usage(0, 0, m, 0)), 5.0));
+        // Fully free stays free, in every band.
+        let free = CostConfig::new(0.0, 0.0).with_context_tier(ContextTier::new(100_000, 0.0, 0.0));
+        assert_eq!(free.cost_usd(&usage(10, m, m, 10)), 0.0);
+        assert_eq!(free.cost_usd(&usage(10, 10, 10, 10)), 0.0);
     }
 
     #[test]
@@ -2059,10 +2143,11 @@ mod tests {
             3.0 + 45.0
         ));
         // Cached input above 272K: $1.00 (UNVERIFIED — see `gpt_5_5` docs).
-        // What matters structurally is that it is not $0.
         assert!(close(cost.cost_usd(&usage(0, 1_000_000, 0, 0)), 1.0));
-        assert_eq!(cost.cache_write_per_million, 0.0);
-        assert_eq!(cost.context_tiers[0].cache_write_per_million, 0.0);
+        // No separate cache-write charge: writes bill at the band's input
+        // rate, $5 below 272K and $10 above.
+        assert!(close(cost.cost_usd(&usage(0, 0, 100_000, 0)), 0.5));
+        assert!(close(cost.cost_usd(&usage(0, 0, 1_000_000, 0)), 10.0));
     }
 
     #[test]
