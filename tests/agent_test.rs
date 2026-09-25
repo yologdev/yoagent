@@ -1169,6 +1169,75 @@ async fn test_middleware_never_sees_synthetic_structured_tool() {
     );
 }
 
+/// A user tool that shares the structured schema's name (`structured_output`).
+struct SchemaNamedTool {
+    ran: Arc<std::sync::Mutex<Option<serde_json::Value>>>,
+}
+
+#[async_trait::async_trait]
+impl AgentTool for SchemaNamedTool {
+    fn name(&self) -> &str {
+        "structured_output"
+    }
+    fn label(&self) -> &str {
+        "Schema-named tool"
+    }
+    fn description(&self) -> &str {
+        "A real tool whose name collides with the structured-output schema"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        _ctx: ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        *self.ran.lock().unwrap() = Some(params);
+        Ok(ToolResult {
+            content: vec![Content::Text { text: "ok".into() }],
+            details: serde_json::Value::Null,
+        })
+    }
+}
+
+/// On Anthropic's native structured-output path no synthetic tool is offered,
+/// so a call named after the schema is the user's own tool: it must execute,
+/// not be unwrapped into the answer. The answer is the final reply text.
+#[tokio::test]
+async fn test_native_structured_output_executes_schema_named_user_tool() {
+    let ran = Arc::new(std::sync::Mutex::new(None));
+    let provider = MockProvider::new(vec![
+        MockResponse::ToolCalls(vec![MockToolCall {
+            provider_metadata: None,
+            name: "structured_output".into(),
+            arguments: serde_json::json!({"name": "tool-args", "count": 1}),
+        }]),
+        MockResponse::Text(r#"{"name":"answer","count":2}"#.into()),
+    ]);
+    let mut mc = ModelConfig::mock();
+    mc.anthropic =
+        Some(yoagent::provider::AnthropicCompat::default().with_native_structured_output(true));
+    let mut agent = Agent::from_provider(provider, mc)
+        .with_tools(vec![Box::new(SchemaNamedTool { ran: ran.clone() })]);
+    let out: Extracted = agent
+        .prompt_structured("extract", serde_json::json!({"type": "object"}))
+        .await
+        .expect("final text parses");
+    assert_eq!(
+        out,
+        Extracted {
+            name: "answer".into(),
+            count: 2
+        }
+    );
+    assert_eq!(
+        *ran.lock().unwrap(),
+        Some(serde_json::json!({"name": "tool-args", "count": 1})),
+        "the user's tool must run on the native path"
+    );
+}
+
 #[tokio::test]
 async fn test_tool_middleware_panic_denies_and_loop_survives() {
     // A panicking middleware must not kill the loop task (which would strip

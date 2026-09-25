@@ -15,6 +15,10 @@ The gateways serve different model families over different protocols. The preset
 
 Gemini models on Zen are **not supported** — Zen serves them over a Google-native endpoint shape yoagent does not target. A `gemini-*` id falls through to Chat Completions (with a warning logged) and will fail at request time.
 
+Jev models (`jev-*`) are **not supported** either — Zen serves them on its `/systemone` evaluation endpoint. They fall through the same way, with a warning.
+
+`claude-*` ids get the same compat flags as the matching `ModelConfig::claude_*` preset, inferred from the version in the id (`AnthropicCompat::for_claude_id`): budget-based thinking before Claude 4.6 (e.g. Haiku 4.5), adaptive thinking from 4.6, and native structured outputs from 4.5 — so `prompt_structured` works on models that reject forced tool choice, such as Opus 5.5 and Fable 5.1.
+
 The routing table mirrors the Zen/Go endpoint docs as of September 2026. OpenCode can change gateway-side routing at any time — if a model errors, verify its protocol against `{base}/models`.
 
 ## Usage
@@ -38,7 +42,15 @@ For OpenCode Go, use `ModelConfig::opencode_go("kimi-k2.7-code")` — the base U
 
 ## Authentication
 
-Both gateways use `Authorization: Bearer {api_key}`. For the Anthropic-protocol models the presets set `AnthropicCompat { bearer_auth: true, .. }` so the Anthropic provider sends Bearer auth instead of its native `x-api-key` header.
+Both gateways use `Authorization: Bearer {api_key}`. For the Anthropic-protocol models the presets set `AnthropicCompat::bearer_auth`, so the Anthropic provider sends Bearer auth instead of its native `x-api-key` header. To do the same for another Messages-protocol gateway:
+
+```rust
+use yoagent::provider::{AnthropicCompat, ModelConfig};
+
+let mut config = ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5");
+config.base_url = "https://gateway.example.com/v1".into();
+config.anthropic = Some(AnthropicCompat::default().with_bearer_auth(true));
+```
 
 Get an API key by signing in at [opencode.ai](https://opencode.ai) (Zen) or subscribing to Go.
 
