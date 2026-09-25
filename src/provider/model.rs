@@ -728,6 +728,15 @@ pub struct GoogleCompat {
     ///
     /// Gemini rejects `thinkingLevel` on models before Gemini 3, and rejects a
     /// request that carries both fields, so exactly one is ever sent.
+    ///
+    /// [`ThinkingLevel::Off`] sends no `thinkingConfig` whichever field is
+    /// chosen. On Gemini 3 that does **not** disable thinking: the model runs
+    /// at its own default level (3.1 Pro `HIGH`, 3.5–3.8 Flash `MEDIUM`,
+    /// Flash-Lite `MINIMAL`). Use [`ThinkingLevel::Minimal`] to ask for the
+    /// least thinking.
+    ///
+    /// [`ThinkingLevel::Off`]: crate::types::ThinkingLevel::Off
+    /// [`ThinkingLevel::Minimal`]: crate::types::ThinkingLevel::Minimal
     pub thinking_level: Option<bool>,
 }
 

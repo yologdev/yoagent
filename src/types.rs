@@ -606,16 +606,21 @@ pub enum CacheStrategy {
 ///
 /// | Level | Gemini 3+ / Vertex `thinkingLevel` |
 /// |-------|-----------|
-/// | `Off` | `MINIMAL`, or `LOW` where `MINIMAL` is not accepted (no `includeThoughts`) |
+/// | `Off` | (omitted — the model runs at its **default** level; see below) |
 /// | `Minimal` | `MINIMAL`, or `LOW` *(clamped)* on 3.7 / 3.8 Flash, 3.x Pro and unlisted models |
 /// | `Low` | `LOW` |
 /// | `Medium` | `MEDIUM` |
 /// | `High`, `XHigh`, `Max` | `HIGH` (`XHigh`/`Max` *clamped*) |
 ///
-/// `Off` does **not** disable thinking on Gemini 3: Google documents
-/// `MINIMAL` as matching "the "no thinking" setting for most queries" but
-/// not guaranteeing it, and thinking cannot be turned off at all on 3 Pro /
-/// 3.1 Pro.
+/// `Off` does **not** disable thinking on Gemini 3: it omits
+/// `thinkingConfig`, so the model thinks at its own default — `HIGH` on
+/// 3.1 Pro, `MEDIUM` on 3.5–3.8 Flash, `MINIMAL` on Flash-Lite. Thinking
+/// cannot be turned off at all on 3 Pro / 3.1 Pro. Use `Minimal` to ask for
+/// the least thinking: `MINIMAL` matches "the "no thinking" setting for most
+/// queries" (Google) where the model accepts it. Image models take only the
+/// levels they list (3.1 Flash / Flash-Lite Image: `MINIMAL`, `HIGH` — `Low`
+/// rounds down, `Medium` up; 3 Pro Image: `HIGH` only), and Gemini 3 TTS
+/// models get no `thinkingConfig`.
 ///
 /// Anthropic's adaptive `effort` is passed through as-is, so a model with a
 /// shorter ladder rejects what it does not know: `xhigh` arrived with Opus
@@ -644,7 +649,10 @@ pub enum ThinkingLevel {
     /// No reasoning requested.
     #[default]
     Off,
-    /// Currently identical to `Low` on every provider.
+    /// The least thinking a provider can be asked for. Sent as `MINIMAL` on
+    /// Gemini 3 models that accept it (3.6 / 3.5 Flash, 3.x Flash-Lite,
+    /// 3 Flash, 3.1 Flash / Flash-Lite Image); everywhere else identical to
+    /// `Low`. On Gemini 3 this, not `Off`, is how to ask for least thinking.
     Minimal,
     Low,
     Medium,
