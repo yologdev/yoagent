@@ -745,7 +745,9 @@ impl Agent {
     }
 
     /// Send a prompt and parse the reply into `T`, with the JSON Schema
-    /// enforced natively by the provider (Anthropic: forced tool call;
+    /// enforced natively by the provider (Anthropic: `output_config.format`
+    /// when [`AnthropicCompat::native_structured_output`](crate::provider::AnthropicCompat::native_structured_output)
+    /// is set, as in every `claude_*` preset, else a forced tool call;
     /// OpenAI-compatible: `json_schema` response format; Gemini:
     /// `responseSchema`; other providers log a warning and return free text,
     /// which still must parse into `T`).
@@ -753,9 +755,9 @@ impl Agent {
     /// Runs the loop to completion internally (no event receiver). Derive the
     /// schema however you like — by hand or e.g. with the `schemars` crate.
     ///
-    /// Note: on Anthropic the forced tool call preempts regular tools for
-    /// that request — treat structured prompts as extraction/finalization
-    /// calls, not agentic tool-using turns.
+    /// Note: on Anthropic's tool-forcing path the forced tool call preempts
+    /// regular tools for that request — treat structured prompts there as
+    /// extraction/finalization calls, not agentic tool-using turns.
     pub async fn prompt_structured<T: serde::de::DeserializeOwned>(
         &mut self,
         text: impl Into<String>,

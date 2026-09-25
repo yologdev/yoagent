@@ -527,18 +527,51 @@ impl OpenAiCompat {
 ///
 /// When `ModelConfig.anthropic` is `None`, providers use `AnthropicCompat::default()`,
 /// which targets the current model generation (Claude 4.6+ / Fable 5).
+///
+/// Marked `#[non_exhaustive]`, like [`OpenAiCompat`]: construct from
+/// [`Default::default`] or [`AnthropicCompat::legacy`] and adjust fields.
+/// The struct carries `#[serde(default)]`, so persisted configs keep
+/// deserializing when a flag is added.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[non_exhaustive]
 pub struct AnthropicCompat {
     /// Use adaptive thinking (`thinking: {"type": "adaptive"}` plus
-    /// `output_config.effort`). Required by Claude Fable 5/5.1, Opus 5, Opus 4.7/4.8,
-    /// and Sonnet 5; recommended on Opus 4.6 / Sonnet 4.6. Set to `false` for
-    /// pre-4.6 models, which only accept `{"type": "enabled", "budget_tokens": N}`.
+    /// `output_config.effort`). Required by Claude Fable 5/5.1, Opus 5.5,
+    /// Opus 5, Opus 4.7/4.8, and Sonnet 5; recommended on Opus 4.6 / Sonnet
+    /// 4.6. Set to `false` for pre-4.6 models, which only accept
+    /// `{"type": "enabled", "budget_tokens": N}`.
+    ///
+    /// `ThinkingLevel::Off` omits the `thinking` field rather than sending
+    /// `{"type": "disabled"}`. That disables thinking only on models that
+    /// think on request: Opus 5.5 and Fable 5.1 always think (at their
+    /// default effort, `medium` and `high` respectively), and Opus 5 thinks
+    /// whenever the field is absent.
     pub adaptive_thinking: bool,
     /// Send the API key as `Authorization: Bearer {key}` instead of the
     /// Anthropic-native `x-api-key` header. Needed for OpenAI-style gateways
     /// that speak the Anthropic Messages protocol (e.g. OpenCode Zen/Go).
     pub bearer_auth: bool,
+    /// Enforce [`Agent::prompt_structured`](crate::Agent::prompt_structured)
+    /// schemas with the API's native JSON outputs
+    /// (`output_config.format = {"type": "json_schema", "schema": ...}`)
+    /// instead of forcing a synthetic tool call.
+    ///
+    /// Required on models that reject forced `tool_choice` (`any` / `tool`)
+    /// with a 400 — Claude Fable 5.1 and Opus 5.5 — and supported by Fable 5,
+    /// Opus 4.5–5.5, Sonnet 4.5/4.6/5 and Haiku 4.5 on the Claude API. The
+    /// Claude presets for those models set it. Unlike tool-forcing it leaves
+    /// thinking on and tool choice at `auto`, so regular tools stay callable.
+    ///
+    /// The API compiles the schema into a grammar and rejects some JSON
+    /// Schema features: objects need `"additionalProperties": false`, and
+    /// numeric and length constraints (`minimum`, `maxLength`, …) are
+    /// unsupported, much as in OpenAI's strict mode.
+    ///
+    /// Off by default: gateways and older models may not accept
+    /// `output_config.format`, while tool-forcing works wherever forced tool
+    /// choice does.
+    pub native_structured_output: bool,
 }
 
 impl Default for AnthropicCompat {
@@ -546,6 +579,7 @@ impl Default for AnthropicCompat {
         Self {
             adaptive_thinking: true,
             bearer_auth: false,
+            native_structured_output: false,
         }
     }
 }
@@ -555,8 +589,14 @@ impl AnthropicCompat {
     pub fn legacy() -> Self {
         Self {
             adaptive_thinking: false,
-            bearer_auth: false,
+            ..Self::default()
         }
+    }
+
+    /// Set [`native_structured_output`](Self::native_structured_output).
+    pub fn with_native_structured_output(mut self, on: bool) -> Self {
+        self.native_structured_output = on;
+        self
     }
 }
 
@@ -834,6 +874,7 @@ impl ModelConfig {
                     .with_cache_read(1.0)
                     .with_cache_write(12.5),
             ),
+            anthropic: Some(AnthropicCompat::default().with_native_structured_output(true)),
             ..Self::anthropic("claude-fable-5", "Claude Fable 5")
         }
     }
@@ -851,12 +892,14 @@ impl ModelConfig {
     ///
     /// **Not a drop-in for Fable 5 at the API level:**
     /// - Forced `tool_choice` (`any` / `tool`) is rejected with a 400. The
-    ///   Anthropic provider implements structured outputs by forcing a tool,
-    ///   so [`Agent::prompt_structured`](crate::Agent::prompt_structured)
-    ///   fails on this model with a provider error. Plain prompting (the
-    ///   default `auto` tool choice) is unaffected.
+    ///   preset sets [`AnthropicCompat::native_structured_output`], so
+    ///   [`Agent::prompt_structured`](crate::Agent::prompt_structured) uses
+    ///   `output_config.format` and never forces a tool. A hand-built
+    ///   `ModelConfig::anthropic("claude-fable-5-1", ..)` without that flag
+    ///   still forces one and gets the 400.
     /// - Thinking is always on (adaptive); `ThinkingLevel::Off` omits the
-    ///   field rather than sending `disabled`, which this model rejects.
+    ///   field rather than sending `disabled`, which this model rejects, and
+    ///   the model still thinks at its default effort (`high`).
     /// - Thinking blocks are bound to the model that produced them, and editing
     ///   earlier turns invalidates them — switching a session to or from this
     ///   model with [`Agent::set_model`](crate::Agent::set_model) carries
@@ -874,7 +917,52 @@ impl ModelConfig {
                     .with_cache_read(0.25)
                     .with_cache_write(12.5),
             ),
+            anthropic: Some(AnthropicCompat::default().with_native_structured_output(true)),
             ..Self::anthropic("claude-fable-5-1", "Claude Fable 5.1")
+        }
+    }
+
+    /// Claude Opus 5.5. 1M context; defaults to 64K of the model's 128K max
+    /// output.
+    ///
+    /// Cache hits bill at **0.05x** input ($0.20/MTok), not the usual 0.1x.
+    /// `cache_write_per_million` is the 5-minute write rate ($5); the 1-hour
+    /// rate ($8) is not modelled because this crate only places 5-minute
+    /// (`ephemeral`) breakpoints.
+    ///
+    /// **Not a drop-in for Opus 5 at the API level:**
+    /// - Thinking is always on (adaptive) and cannot be disabled.
+    ///   `ThinkingLevel::Off` omits the `thinking` field (the API rejects
+    ///   `disabled` and budget-based thinking), so the model still thinks at
+    ///   its default effort, `medium` — thinking tokens count against
+    ///   `max_tokens` and bill as output. Other levels send `output_config.effort`
+    ///   (`low` through `max` are all accepted).
+    /// - Forced `tool_choice` (`any` / `tool`) is rejected with a 400. The
+    ///   preset sets [`AnthropicCompat::native_structured_output`], so
+    ///   [`Agent::prompt_structured`](crate::Agent::prompt_structured) uses
+    ///   `output_config.format` and never forces a tool.
+    /// - `temperature` (and `top_p` / `top_k`) other than the default is
+    ///   rejected with a 400: leave `StreamConfig::temperature` unset.
+    /// - Thinking blocks are bound to the model and the conversation prefix:
+    ///   editing earlier turns invalidates them, and switching a session to
+    ///   or from this model with [`Agent::set_model`](crate::Agent::set_model)
+    ///   carries blocks the other model cannot read (Opus 5.5 reads Opus 5
+    ///   and earlier Opus/Sonnet/Haiku thinking, but not Fable's).
+    ///
+    /// Rates verified against the raw markup of
+    /// <https://platform.claude.com/docs/en/about-claude/pricing> on
+    /// 2026-09-25. See [`CostConfig`] — they are a snapshot, not an authority.
+    pub fn claude_opus_5_5() -> Self {
+        Self {
+            context_window: 1_000_000,
+            max_tokens: 64_000,
+            cost: Some(
+                CostConfig::new(4.0, 20.0)
+                    .with_cache_read(0.2)
+                    .with_cache_write(5.0),
+            ),
+            anthropic: Some(AnthropicCompat::default().with_native_structured_output(true)),
+            ..Self::anthropic("claude-opus-5-5", "Claude Opus 5.5")
         }
     }
 
@@ -897,6 +985,7 @@ impl ModelConfig {
                     .with_cache_read(0.5)
                     .with_cache_write(6.25),
             ),
+            anthropic: Some(AnthropicCompat::default().with_native_structured_output(true)),
             ..Self::anthropic("claude-opus-5", "Claude Opus 5")
         }
     }
@@ -914,6 +1003,7 @@ impl ModelConfig {
                     .with_cache_read(0.5)
                     .with_cache_write(6.25),
             ),
+            anthropic: Some(AnthropicCompat::default().with_native_structured_output(true)),
             ..Self::anthropic("claude-opus-4-8", "Claude Opus 4.8")
         }
     }
@@ -931,6 +1021,7 @@ impl ModelConfig {
                     .with_cache_read(0.2)
                     .with_cache_write(2.5),
             ),
+            anthropic: Some(AnthropicCompat::default().with_native_structured_output(true)),
             ..Self::anthropic("claude-sonnet-5", "Claude Sonnet 5")
         }
     }
@@ -948,6 +1039,7 @@ impl ModelConfig {
                     .with_cache_read(0.1)
                     .with_cache_write(1.25),
             ),
+            anthropic: Some(AnthropicCompat::default().with_native_structured_output(true)),
             ..Self::anthropic("claude-haiku-4-5", "Claude Haiku 4.5")
         }
     }
@@ -1124,8 +1216,8 @@ impl ModelConfig {
                 None,
                 // Gateways use OpenAI-style Bearer auth, not x-api-key.
                 Some(AnthropicCompat {
-                    adaptive_thinking: true,
                     bearer_auth: true,
+                    ..AnthropicCompat::default()
                 }),
             )
         } else if lower.starts_with("gpt-")
@@ -1500,6 +1592,24 @@ mod tests {
         assert_eq!(c51.output_per_million, c5.output_per_million);
         assert_eq!(c51.cache_write_per_million, c5.cache_write_per_million);
 
+        // Opus 5.5: cheaper than Opus 5 in every column, and cache hits at
+        // 0.05x input rather than 0.1x.
+        let opus_5_5 = ModelConfig::claude_opus_5_5();
+        assert_eq!(opus_5_5.id, "claude-opus-5-5");
+        assert_eq!(opus_5_5.name, "Claude Opus 5.5");
+        assert_eq!(opus_5_5.api, ApiProtocol::AnthropicMessages);
+        assert_eq!(opus_5_5.context_window, 1_000_000);
+        assert_eq!(opus_5_5.max_tokens, 64_000);
+        let c55 = opus_5_5.cost.as_ref().unwrap();
+        assert_eq!(c55.input_per_million, 4.0);
+        assert_eq!(c55.output_per_million, 20.0);
+        assert_eq!(c55.cache_read_per_million, 0.2);
+        assert_eq!(c55.cache_write_per_million, 5.0);
+        let compat = opus_5_5.anthropic.as_ref().unwrap();
+        assert!(compat.adaptive_thinking);
+        assert!(!compat.bearer_auth);
+        assert!(compat.native_structured_output);
+
         let opus_5 = ModelConfig::claude_opus_5();
         assert_eq!(opus_5.id, "claude-opus-5");
         assert_eq!(opus_5.api, ApiProtocol::AnthropicMessages);
@@ -1667,6 +1777,34 @@ mod tests {
             serde_json::from_value(serde_json::json!({"bearer_auth": true})).unwrap();
         assert!(compat.adaptive_thinking);
         assert!(compat.bearer_auth);
+        // Configs persisted before the flag existed load with it off, so
+        // they keep tool-forcing exactly as before.
+        assert!(!compat.native_structured_output);
+        assert!(!AnthropicCompat::default().native_structured_output);
+        assert!(!AnthropicCompat::legacy().native_structured_output);
+    }
+
+    /// Every Claude preset names a model that the structured-outputs page
+    /// lists as supporting `output_config.format`, so each opts into it.
+    /// A bare `ModelConfig::anthropic(..)` does not.
+    #[test]
+    fn claude_presets_use_native_structured_output() {
+        for mc in [
+            ModelConfig::claude_fable_5(),
+            ModelConfig::claude_fable_5_1(),
+            ModelConfig::claude_opus_5_5(),
+            ModelConfig::claude_opus_5(),
+            ModelConfig::claude_opus_4_8(),
+            ModelConfig::claude_sonnet_5(),
+            ModelConfig::claude_haiku_4_5(),
+        ] {
+            let compat = mc.anthropic.as_ref().expect("preset sets compat");
+            assert!(compat.native_structured_output, "{}", mc.id);
+            // Everything else stays at the defaults the presets had before.
+            assert!(compat.adaptive_thinking, "{}", mc.id);
+            assert!(!compat.bearer_auth, "{}", mc.id);
+        }
+        assert!(ModelConfig::anthropic("claude-x", "X").anthropic.is_none());
     }
 
     #[test]
@@ -1837,6 +1975,7 @@ mod tests {
         for mc in [
             ModelConfig::claude_fable_5(),
             ModelConfig::claude_fable_5_1(),
+            ModelConfig::claude_opus_5_5(),
             ModelConfig::claude_opus_5(),
             ModelConfig::claude_opus_4_8(),
             ModelConfig::claude_sonnet_5(),

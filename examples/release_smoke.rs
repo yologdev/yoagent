@@ -214,6 +214,7 @@ fn model() -> ModelConfig {
         // Anthropic's, with its own SSE parsing and tool-call accumulation —
         // worth running before a release, not just one provider.
         Some("deepseek") => ModelConfig::deepseek("deepseek-flash", "DeepSeek Flash"),
+        Some("opus55") => ModelConfig::claude_opus_5_5(),
         _ => ModelConfig::claude_sonnet_5(),
     }
 }

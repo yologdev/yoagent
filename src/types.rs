@@ -610,6 +610,11 @@ pub enum CacheStrategy {
 /// 4.7, so Opus 4.6 / Sonnet 4.6 accept `max` but not `xhigh`. The crate has
 /// no per-model effort table; pick a level the model supports.
 ///
+/// On Anthropic, `Off` omits the `thinking` field; it never sends
+/// `disabled`. "(no thinking)" holds only for models that think on request:
+/// Claude Opus 5.5 and Fable 5.1 always think (at their default effort), and
+/// Opus 5 thinks whenever the field is absent.
+///
 /// Marked `#[non_exhaustive]` so the next rung a vendor adds is not a breaking
 /// change: `match` on it from outside the crate needs a wildcard arm.
 ///

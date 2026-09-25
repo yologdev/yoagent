@@ -568,6 +568,9 @@ async fn run_loop(
             // Tool-forcing providers (Anthropic) deliver structured output as
             // a forced tool call — unwrap it into plain text BEFORE tool-call
             // extraction, so the loop never tries to execute the synthetic tool.
+            // A no-op for providers that constrain the reply text natively
+            // (Anthropic with `native_structured_output`, OpenAI-compat,
+            // Gemini): no tool named after the schema was offered.
             let message = unwrap_structured_tool_call(message, config.output_schema.as_ref());
 
             let agent_msg: AgentMessage = message.clone().into();
