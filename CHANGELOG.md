@@ -95,6 +95,46 @@ adheres to [Semantic Versioning](https://semver.org/).
   for an all-zero config built in memory, which is now free rather than
   unknown.
 
+- **`AnthropicCompat` is now `#[non_exhaustive]` and gains
+  `native_structured_output`** ([#175](https://github.com/yologdev/yoagent/issues/175)).
+  A struct literal no longer compiles outside the crate, the same rule as
+  `OpenAiCompat`: start from `AnthropicCompat::default()` or
+  `AnthropicCompat::legacy()` and set fields, or use
+  `with_native_structured_output(true)`. Serde is unchanged: a persisted
+  config without the new key loads with it off.
+
+  ```rust
+  // before
+  AnthropicCompat { adaptive_thinking: true, bearer_auth: true }
+  // after
+  let mut compat = AnthropicCompat::default();
+  compat.bearer_auth = true;
+  ```
+
+- **`prompt_structured` on the `claude_*` presets uses Anthropic's native JSON
+  outputs** instead of a forced tool call
+  ([#175](https://github.com/yologdev/yoagent/issues/175)). Every Claude preset
+  (`claude_fable_5`, `claude_fable_5_1`, `claude_opus_5_5`, `claude_opus_5`,
+  `claude_opus_4_8`, `claude_sonnet_5`, `claude_haiku_4_5`) now sets
+  `anthropic: Some(..)` with `native_structured_output` on; each of those
+  models is on Anthropic's supported list for `output_config.format`. What
+  changes for a structured call on a preset:
+  - the schema goes out as `output_config.format`, not as a synthetic tool
+    plus `tool_choice`;
+  - thinking is no longer dropped for that request (a set `ThinkingLevel`
+    sends its `effort` alongside the format), so the call can cost more output
+    tokens;
+  - tool choice stays `auto`, so the model may call regular tools before
+    answering;
+  - the API compiles the schema into a grammar and rejects features the tool
+    path tolerated: objects need `"additionalProperties": false`, and numeric
+    and length constraints (`minimum`, `maxLength`, …) are unsupported. A
+    schema that worked before can now fail as `StructuredPromptError::Provider`
+    with a 400. Fix the schema, or turn the flag off to keep tool-forcing.
+
+  `ModelConfig::anthropic(id, name)` and `AnthropicCompat::default()` leave the
+  flag off, and with it off the request body is byte-identical to before.
+
 ### Added
 
 - **`ModelConfig::claude_fable_5_1()`**
@@ -107,10 +147,26 @@ adheres to [Semantic Versioning](https://semver.org/).
   preset, reported cache reads 4x high. Rates read from the raw markup of
   Anthropic's pricing page on 2026-09-24; added to the price audit.
 
-  Fable 5.1 rejects forced `tool_choice` (`any`/`tool`) with a 400, and the
-  Anthropic provider implements structured outputs by forcing a tool, so
-  `prompt_structured` fails on this model. No workaround is wired yet; the
-  preset and the structured-outputs page say so.
+  Fable 5.1 rejects forced `tool_choice` (`any`/`tool`) with a 400. The preset
+  sets `native_structured_output`, so `prompt_structured` works on it (see
+  Fixed, #175).
+
+- **`ModelConfig::claude_opus_5_5()`**. 1M context, 64K of 128K max output,
+  $4 / $20 per MTok input/output, $5 5-minute cache writes, and **$0.20 cache
+  hits** (0.05x input, not the usual 0.1x). The 1-hour write rate ($8) is not
+  modelled, since the crate only places 5-minute breakpoints. Rates read from
+  the raw markup of Anthropic's pricing page on 2026-09-25 and matched against
+  models.dev; added to the price audit (floor raised to 9),
+  `llm_compaction_live`'s id map and `release_smoke` (`SMOKE_MODEL=opus55`).
+
+  Not a drop-in for Opus 5. Thinking is always on: `ThinkingLevel::Off` omits
+  the field, and the model still thinks at its default effort, `medium`. The
+  API rejects forced `tool_choice` (the preset uses native structured outputs,
+  so `prompt_structured` works), and rejects non-default `temperature`/`top_p`/
+  `top_k`. Thinking blocks are bound to the model and the conversation prefix.
+
+- **`AnthropicCompat::native_structured_output`** and
+  `AnthropicCompat::with_native_structured_output` (see Breaking).
 
 ### Changed
 
@@ -175,6 +231,17 @@ adheres to [Semantic Versioning](https://semver.org/).
   [#174](https://github.com/yologdev/yoagent/issues/174).
 
 ### Fixed
+
+- **`prompt_structured` works on Claude Fable 5.1 and Opus 5.5**
+  ([#175](https://github.com/yologdev/yoagent/issues/175)). Both models reject
+  forced `tool_choice` with a 400, and the Anthropic provider forced a
+  synthetic tool for every structured call, so every call failed as
+  `StructuredPromptError::Provider`. With `native_structured_output` set (the
+  presets set it) the provider sends
+  `output_config.format = {"type": "json_schema", "schema": ...}` and no tool
+  or `tool_choice`, and thinking is kept: `format` and the adaptive-thinking
+  `effort` share one `output_config` object. A hand-built `ModelConfig::anthropic("claude-fable-5-1", ..)` without the
+  flag still forces the tool and gets the 400.
 
 - **Sub-agent spend now reaches the parent, in its own bucket**
   ([#173](https://github.com/yologdev/yoagent/issues/173)). `SubAgentTool` ran

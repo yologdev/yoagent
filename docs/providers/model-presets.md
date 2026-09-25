@@ -11,6 +11,7 @@ Use a preset when the provider is listed here. Use a custom `ModelConfig` when y
 | `ModelConfig::anthropic(id, name)` | Anthropic | `AnthropicMessages` | `https://api.anthropic.com/v1` | 200K | 16,000 |
 | `ModelConfig::claude_fable_5()` | Anthropic | `AnthropicMessages` | `https://api.anthropic.com/v1` | 1M | 64,000 |
 | `ModelConfig::claude_fable_5_1()` | Anthropic | `AnthropicMessages` | `https://api.anthropic.com/v1` | 1M | 64,000 |
+| `ModelConfig::claude_opus_5_5()` | Anthropic | `AnthropicMessages` | `https://api.anthropic.com/v1` | 1M | 64,000 |
 | `ModelConfig::claude_opus_5()` | Anthropic | `AnthropicMessages` | `https://api.anthropic.com/v1` | 1M | 64,000 |
 | `ModelConfig::claude_opus_4_8()` | Anthropic | `AnthropicMessages` | `https://api.anthropic.com/v1` | 1M | 64,000 |
 | `ModelConfig::claude_sonnet_5()` | Anthropic | `AnthropicMessages` | `https://api.anthropic.com/v1` | 1M | 64,000 |
@@ -34,7 +35,9 @@ Use a preset when the provider is listed here. Use a custom `ModelConfig` when y
 
 The constructors do not validate model IDs. They send the `id` you pass through to the provider, which lets you use newly released model IDs before yoagent updates its examples.
 
-The named presets (`claude_fable_5`, `claude_fable_5_1`, `claude_opus_5`, `claude_opus_4_8`, `claude_sonnet_5`, `claude_haiku_4_5`, `gpt_5_5`) and `meta` also fill in real pricing (`cost: Some(CostConfig)`). Every other constructor takes an arbitrary model id and so carries `cost: None` — pricing **unknown**, not free; set `config.cost = Some(CostConfig::new(input, output))` yourself if you want cost reporting. The OpenCode presets select the API protocol from the model id — see [OpenCode Zen & Go](opencode.md).
+The named presets (`claude_fable_5`, `claude_fable_5_1`, `claude_opus_5_5`, `claude_opus_5`, `claude_opus_4_8`, `claude_sonnet_5`, `claude_haiku_4_5`, `gpt_5_5`) and `meta` also fill in real pricing (`cost: Some(CostConfig)`). Every other constructor takes an arbitrary model id and so carries `cost: None` — pricing **unknown**, not free; set `config.cost = Some(CostConfig::new(input, output))` yourself if you want cost reporting. The OpenCode presets select the API protocol from the model id — see [OpenCode Zen & Go](opencode.md).
+
+The `claude_*` presets also set `AnthropicCompat::native_structured_output`, so `Agent::prompt_structured` uses the API's native JSON outputs instead of a forced tool call. `claude_fable_5_1` and `claude_opus_5_5` depend on it, because both models reject forced `tool_choice`; `ModelConfig::anthropic(id, name)` leaves it off. See [Structured Outputs](../concepts/structured-outputs.md).
 
 ## OpenAI-Compatible Presets
 
