@@ -232,8 +232,9 @@ config.cost = Some(CostConfig::new(0.0, 0.0)); // free, not unknown
 ```
 
 To re-price from a table of your own (a negotiated rate, a price change
-yoagent has not released yet), use `config.with_prices(&table)`; see
-[Model Pricing](../concepts/pricing.md).
+yoagent has not released yet), use `config.with_prices(&table)` for one
+config, or `PriceTable::install_override(table)` / `YOAGENT_PRICES=path` for
+every config built afterwards; see [Model Pricing](../concepts/pricing.md).
 
 To adjust one rate on a priced config, use `get_or_insert_with` rather than
 `if let Some(c) = config.cost.as_mut()`, which silently does nothing on an

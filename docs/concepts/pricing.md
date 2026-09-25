@@ -101,6 +101,52 @@ Constructors look `(provider, id)` up **when the config is built**:
 `None` means **unknown**, never free. Set `config.cost` yourself for a model
 the table does not list; a value you set after construction always wins.
 
+## Overriding prices at runtime
+
+A price change should not have to wait for a yoagent release. Constructors
+read a process-wide **resolved table**, built in layers. Highest precedence
+first:
+
+| # | Layer | Set by |
+|---|-------|--------|
+| 1 | Explicit `config.cost` | assigning the field after construction — it is a plain field, so it always wins |
+| 2 | User override | `PriceTable::install_override(table)`, or the file named by `YOAGENT_PRICES` |
+| 3 | Built-in | `src/provider/prices.json`, compiled in |
+
+Each layer replaces **whole entries** per `(provider, id)`. An override file
+may be partial: it overrides exactly the models it lists, and an entry it
+lists replaces the built-in one entirely (a rate it omits is not inherited —
+a missing cache rate bills at the input rate).
+
+```rust
+use yoagent::provider::{ModelConfig, PriceTable};
+
+// At startup, before building any config:
+PriceTable::install_override(PriceTable::from_path("prices.override.json")?);
+
+let config = ModelConfig::claude_sonnet_5();   // priced from the override
+```
+
+Or, with no code change:
+
+```text
+YOAGENT_PRICES=/etc/myapp/prices.json ./myapp
+```
+
+- **Constructors resolve when they run.** A config built before
+  `install_override` keeps the price it was built with. Install overrides
+  first, or re-price an existing config with
+  `config.with_prices(&PriceTable::resolved())`.
+- `YOAGENT_PRICES` is read **once**, the first time any constructor (or
+  `PriceTable::resolved` / `install_override`) touches the table. A missing,
+  unreadable or invalid file does not panic: it is logged with
+  `tracing::warn!` and ignored, and the built-in prices apply.
+- `install_override` **replaces** the user layer — including one loaded from
+  `YOAGENT_PRICES` — rather than merging into it. `PriceTable::clear_override()`
+  removes it. `PriceTable::resolved()` returns a snapshot of what a
+  constructor would use now.
+- Gateways and custom endpoints ignore every layer; see above.
+
 ## Re-pricing a config
 
 `ModelConfig::with_prices(&table)` re-resolves one config against a table you

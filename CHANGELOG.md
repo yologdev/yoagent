@@ -23,6 +23,15 @@ adheres to [Semantic Versioning](https://semver.org/).
 - **`ModelConfig::with_prices(&table)`** re-resolves a config's cost from a
   table you hold, without global state. Listed models get the table's rates;
   unlisted ones keep theirs.
+- **Runtime price overrides.** Constructors read a process-wide table: a
+  user layer over the built-in data, per `(provider, id)`. Set it with
+  `PriceTable::install_override(table)` (replaces the layer;
+  `clear_override()` removes it) or the `YOAGENT_PRICES=/path/to/prices.json`
+  environment variable, read once on first use — a bad file is logged with
+  `tracing::warn!` and ignored, never a panic. Partial files override only
+  what they list. `PriceTable::resolved()` snapshots the result. Constructors
+  resolve when they run, so install overrides before building configs; an
+  explicit `config.cost` set afterwards still wins.
 - **`tests/price_audit.rs` audits every `prices.json` entry**, not a
   hand-kept preset list, so an entry cannot be added unaudited. Its
   allowances are now data (`cache_write_at_input`, `absent_upstream`).

@@ -32,8 +32,27 @@
 //! [`ModelConfig::local`], [`ModelConfig::ollama`], the OpenCode gateways)
 //! never look up: what they bill is not the vendor's list price.
 //!
+//! # Runtime overrides and precedence
+//!
+//! Constructors read a process-wide **resolved table**, built in layers
+//! (highest first):
+//!
+//! 1. an explicit `config.cost` you set after construction — it is a plain
+//!    field, so it always wins;
+//! 2. the **user layer**: [`PriceTable::install_override`], or on first use
+//!    the file named by the `YOAGENT_PRICES` environment variable;
+//! 3. the built-in `prices.json`.
+//!
+//! Each layer replaces whole entries per `(provider, id)`; a partial override
+//! file overrides exactly the models it lists. **Constructors resolve when
+//! they run**, so install overrides before building configs — a config built
+//! earlier keeps the price it was built with (re-price it with
+//! [`ModelConfig::with_prices`] and [`PriceTable::resolved`]).
+//!
 //! See `docs/concepts/pricing.md` for the format, precedence and trust
 //! caveats.
+//!
+//! [`ModelConfig::with_prices`]: crate::provider::ModelConfig::with_prices
 //!
 //! [`ModelConfig::provider`]: crate::provider::ModelConfig::provider
 //! [`ModelConfig::id`]: crate::provider::ModelConfig::id
@@ -49,10 +68,14 @@ use super::model::{ContextTier, CostConfig};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{OnceLock, PoisonError, RwLock};
 
 /// The only `schema` value this release reads.
 pub const PRICE_SCHEMA_VERSION: u32 = 1;
+
+/// Environment variable naming a price file for the user layer, read once
+/// when the process-wide table is first used.
+pub const PRICES_ENV_VAR: &str = "YOAGENT_PRICES";
 
 /// The built-in data, embedded at compile time.
 const BUILTIN_JSON: &str = include_str!("prices.json");
@@ -395,9 +418,118 @@ fn builtin_ref() -> &'static PriceTable {
     })
 }
 
-/// The rates a first-party constructor gets for `(provider, id)`.
+/// The process-wide layers and their resolution.
+struct Layers {
+    user: Option<PriceTable>,
+    /// `builtin` layered with `user`, rebuilt on every install so a lookup
+    /// is one map read.
+    resolved: PriceTable,
+}
+
+impl Layers {
+    fn rebuild(&mut self) {
+        let mut table = builtin_ref().clone();
+        if let Some(user) = &self.user {
+            table = table.layered(user);
+        }
+        self.resolved = table;
+    }
+}
+
+fn layers() -> &'static RwLock<Layers> {
+    static LAYERS: OnceLock<RwLock<Layers>> = OnceLock::new();
+    LAYERS.get_or_init(|| {
+        let mut layers = Layers {
+            user: env_override(),
+            resolved: PriceTable::default(),
+        };
+        layers.rebuild();
+        RwLock::new(layers)
+    })
+}
+
+/// The user layer named by [`PRICES_ENV_VAR`], if set and valid. A bad file
+/// is logged and ignored: a typo in an environment variable must not take
+/// down every constructor in the process.
+fn env_override() -> Option<PriceTable> {
+    let path = std::env::var_os(PRICES_ENV_VAR)?;
+    if path.is_empty() {
+        return None;
+    }
+    match PriceTable::from_path(&path) {
+        Ok(table) => {
+            tracing::info!(
+                path = %Path::new(&path).display(),
+                entries = table.len(),
+                "yoagent prices: loaded {PRICES_ENV_VAR} override"
+            );
+            Some(table)
+        }
+        Err(e) => {
+            tracing::warn!(
+                path = %Path::new(&path).display(),
+                error = %e,
+                "yoagent prices: ignoring {PRICES_ENV_VAR}; using built-in prices"
+            );
+            None
+        }
+    }
+}
+
+fn read_layers() -> std::sync::RwLockReadGuard<'static, Layers> {
+    // A panic while holding the lock cannot leave `Layers` half-written
+    // (every write replaces whole fields), so a poisoned lock is still valid.
+    layers().read().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn write_layers() -> std::sync::RwLockWriteGuard<'static, Layers> {
+    layers().write().unwrap_or_else(PoisonError::into_inner)
+}
+
+impl PriceTable {
+    /// Install `table` as the process-wide **user layer**, replacing any
+    /// previous override (including one loaded from `YOAGENT_PRICES`).
+    ///
+    /// Its entries take precedence over the built-in data per
+    /// `(provider, id)`; models it does not list keep their built-in price.
+    /// Affects configs built **after** this call — constructors resolve when
+    /// they run.
+    ///
+    /// ```
+    /// # use yoagent::provider::{ModelConfig, PriceTable};
+    /// let mine = PriceTable::from_json_str(r#"{"schema": 1, "providers": {
+    ///     "deepseek": {"deepseek-flash": {"input": 0.3, "output": 1.2, "cache_read": 0.006}}}}"#)?;
+    /// PriceTable::install_override(mine);
+    /// let config = ModelConfig::deepseek("deepseek-flash", "DeepSeek Flash");
+    /// assert_eq!(config.cost.unwrap().input_per_million, 0.3);
+    /// # PriceTable::clear_override();
+    /// # Ok::<(), yoagent::provider::PriceError>(())
+    /// ```
+    pub fn install_override(table: PriceTable) {
+        let mut layers = write_layers();
+        layers.user = Some(table);
+        layers.rebuild();
+    }
+
+    /// Remove the user layer, including one loaded from `YOAGENT_PRICES`
+    /// (which is not re-read).
+    pub fn clear_override() {
+        let mut layers = write_layers();
+        layers.user = None;
+        layers.rebuild();
+    }
+
+    /// A snapshot of the process-wide resolved table — what a constructor
+    /// called now would use.
+    pub fn resolved() -> PriceTable {
+        read_layers().resolved.clone()
+    }
+}
+
+/// The rates a first-party constructor gets for `(provider, id)`, from the
+/// process-wide resolved table.
 pub(crate) fn resolved_cost(provider: &str, id: &str) -> Option<CostConfig> {
-    builtin_ref().cost(provider, id)
+    read_layers().resolved.cost(provider, id)
 }
 
 // ---- wire format ---------------------------------------------------------

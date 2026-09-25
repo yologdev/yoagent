@@ -56,8 +56,10 @@ impl std::fmt::Display for ApiProtocol {
 /// and a compiled-in number cannot notice — `claude_sonnet_5` shipped Sonnet
 /// 4.6's rates across 18 releases, v0.9.0 through v0.16.5, overstating every
 /// `cost_usd` for that model by 50%, and nothing detected it. You can
-/// re-price a config from your own table without waiting for a release:
-/// [`ModelConfig::with_prices`].
+/// override the built-in data without waiting for a release: process-wide
+/// with [`PriceTable::install_override`](crate::provider::PriceTable::install_override)
+/// or the `YOAGENT_PRICES` environment variable (both apply to configs built
+/// afterwards), or per config with [`ModelConfig::with_prices`].
 ///
 /// # Context tiers
 ///
@@ -1003,8 +1005,12 @@ pub struct ModelConfig {
     /// `CostConfig` and unpriced configs held all-zero rates, which read as a
     /// $0 model to anyone who did not know to call `is_configured()`.
     ///
-    /// Setting this field yourself after construction always wins over any
-    /// table.
+    /// The table is the process-wide resolved one: a user override
+    /// ([`PriceTable::install_override`](crate::provider::PriceTable::install_override)
+    /// or the `YOAGENT_PRICES` file) over the built-in data. It is read when
+    /// the constructor runs, so install overrides **before** building
+    /// configs. Setting this field yourself after construction always wins
+    /// over any table.
     ///
     /// `Some` with every rate zero means **free**: a local model, or a free
     /// tier. The built-in accounting
