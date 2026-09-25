@@ -20,19 +20,23 @@ adheres to [Semantic Versioning](https://semver.org/).
   instead of sending a value it would reject (Anthropic's adaptive effort
   excepted, see below). The full table is on `ThinkingLevel`'s doc comment:
 
-  | Level | Anthropic effort | Anthropic legacy / Bedrock budget | OpenAI-compat¹ / Responses / Azure | DeepSeek² | Gemini / Vertex budget |
+  | Level | Anthropic effort | Anthropic legacy / Bedrock budget | OpenAI-compat¹ / Responses / Azure | DeepSeek² | Gemini 2.x / Vertex budget |
   |-------|------|------|------|------|------|
-  | `XHigh` | `xhigh` | 16,384 | `high` (clamped) | `high` (clamped) | 24,576 (clamped) |
-  | `Max` | `max` | 30,720 | `high` (clamped) | `max` | 24,576 (clamped) |
+  | `XHigh` | `xhigh` | 16,384 | `xhigh`, or `high` (clamped) below an `XHigh` ceiling³ | `high` (clamped) | 24,576 (clamped) |
+  | `Max` | `max` | 30,720 | the model's ceiling: `max`, `xhigh` or `high`³ | `max` | 24,576 (clamped) |
 
   ¹ When `supports_reasoning_effort` is set. ² When both
   `supports_thinking_control` and `supports_reasoning_effort` are set.
   DeepSeek maps a requested `xhigh` to `high` itself, so `XHigh` is sent as
-  `high`; only `Max` selects DeepSeek's `max` rung.
+  `high`; only `Max` selects DeepSeek's `max` rung. ³ The ceiling is declared
+  per model with `OpenAiCompat::max_reasoning_effort` (default `high`); see
+  Fixed, [#176](https://github.com/yologdev/yoagent/issues/176).
 
-  Every existing level sends exactly what it sent before. The new serde names
-  are `"xhigh"` and `"max"` (lowercase, like the others). Persisted configs
-  keep loading because the existing names are unchanged.
+  Adding the variants did not change what any existing level sends. (Other
+  entries below do: xAI now receives an effort, and Gemini 3 gets
+  `thinkingLevel`.) The new serde names are `"xhigh"` and `"max"`
+  (lowercase, like the others). Persisted configs keep loading because the
+  existing names are unchanged.
 
   Anthropic effort is passed through, not clamped: Opus 4.6 / Sonnet 4.6 have
   no `xhigh` rung (it arrived with Opus 4.7) and will reject it. The crate has
@@ -55,10 +59,13 @@ adheres to [Semantic Versioning](https://semver.org/).
   only be answered by knowing to call `is_configured()`. So consumers kept
   parallel price tables, outside the models.dev audit, and those rotted: yoyo
   overstated every `deepseek-v4-flash` cost ~3.7x. Those seventeen now return
-  `None`; the named presets (`claude_fable_5_1`, `claude_fable_5`, `claude_opus_5`,
-  `claude_opus_4_8`, `claude_sonnet_5`, `claude_haiku_4_5`, `gpt_5_5`, `meta`)
-  return `Some`. No prices were added — that is follow-up work, and each one
-  should land with a price-audit entry.
+  `None`, as does the new `openai_responses` constructor. The twelve priced
+  presets return `Some`: `claude_fable_5_1`, `claude_fable_5`,
+  `claude_opus_5_5`, `claude_opus_5`, `claude_opus_4_8`, `claude_sonnet_5`,
+  `claude_haiku_4_5`, `gpt_5_5`, `gpt_6_astra`, `gpt_6_sol`, `gpt_6_luna` and
+  `meta` — every one in the price audit (`tests/price_audit.rs`, which now
+  requires at least 12). The generic constructors gained no prices: each one
+  added later should land with a price-audit entry.
 
   In memory, `Some` with every rate zero now means **free** (a local model, a
   free tier): `session_cost_usd()`, `SessionStats::cost_usd`, the `llm_stream`
@@ -90,7 +97,8 @@ adheres to [Semantic Versioning](https://semver.org/).
   every generic constructor now returns `None`, so on DeepSeek, `custom`,
   `openai` and the rest the assignment silently never runs. On a named preset,
   `get_or_insert_with` edits the existing rates; on a generic constructor it
-  starts from all-zero, so set every rate you are billed for — or build the
+  starts from all-zero — output then bills at $0 and cache tokens at the input
+  rate (see Changed) — so set every rate you are billed for, or build the
   whole thing with `Some(CostConfig::new(..))`. The last row changes meaning
   for an all-zero config built in memory, which is now free rather than
   unknown.
@@ -98,17 +106,17 @@ adheres to [Semantic Versioning](https://semver.org/).
 - **`AnthropicCompat` is now `#[non_exhaustive]` and gains
   `native_structured_output`** ([#175](https://github.com/yologdev/yoagent/issues/175)).
   A struct literal no longer compiles outside the crate, the same rule as
-  `OpenAiCompat`: start from `AnthropicCompat::default()` or
-  `AnthropicCompat::legacy()` and set fields, or use
-  `with_native_structured_output(true)`. Serde is unchanged: a persisted
-  config without the new key loads with it off.
+  `OpenAiCompat`: start from `AnthropicCompat::default()`,
+  `AnthropicCompat::legacy()` or `AnthropicCompat::for_claude_id(id)` and set
+  fields, or chain `with_native_structured_output(..)` /
+  `with_bearer_auth(..)`. Serde is unchanged: a persisted config without the
+  new key loads with it off.
 
   ```rust
   // before
   AnthropicCompat { adaptive_thinking: true, bearer_auth: true }
   // after
-  let mut compat = AnthropicCompat::default();
-  compat.bearer_auth = true;
+  AnthropicCompat::default().with_bearer_auth(true)
   ```
 
 - **`prompt_structured` on the `claude_*` presets uses Anthropic's native JSON
@@ -116,9 +124,10 @@ adheres to [Semantic Versioning](https://semver.org/).
   ([#175](https://github.com/yologdev/yoagent/issues/175)). Every Claude preset
   (`claude_fable_5`, `claude_fable_5_1`, `claude_opus_5_5`, `claude_opus_5`,
   `claude_opus_4_8`, `claude_sonnet_5`, `claude_haiku_4_5`) now sets
-  `anthropic: Some(..)` with `native_structured_output` on; each of those
+  `anthropic: Some(..)` with `native_structured_output` on, and so do
+  `opencode_zen("claude-…")` ids from Claude 4.5 on (see Fixed); each of those
   models is on Anthropic's supported list for `output_config.format`. What
-  changes for a structured call on a preset:
+  changes for a structured call on those configs:
   - the schema goes out as `output_config.format`, not as a synthetic tool
     plus `tool_choice`;
   - thinking is no longer dropped for that request (a set `ThinkingLevel`
@@ -130,7 +139,14 @@ adheres to [Semantic Versioning](https://semver.org/).
     path tolerated: objects need `"additionalProperties": false`, and numeric
     and length constraints (`minimum`, `maxLength`, …) are unsupported. A
     schema that worked before can now fail as `StructuredPromptError::Provider`
-    with a 400. Fix the schema, or turn the flag off to keep tool-forcing.
+    with a 400.
+
+  **Migration:** add `"additionalProperties": false` to every object in the
+  schema and drop numeric/length constraints (validate those after parsing),
+  or turn the flag off to keep tool-forcing:
+  `config.anthropic = Some(AnthropicCompat::default())` (or `legacy()` for a
+  pre-4.6 model). Fable 5.1 and Opus 5.5 reject forced `tool_choice`, so on
+  those the flag must stay on.
 
   `ModelConfig::anthropic(id, name)` and `AnthropicCompat::default()` leave the
   flag off, and with it off the request body is byte-identical to before.
@@ -138,16 +154,19 @@ adheres to [Semantic Versioning](https://semver.org/).
 ### Added
 
 - **GPT-6 presets: `ModelConfig::gpt_6_astra()`, `gpt_6_sol()`,
-  `gpt_6_luna()`.** There is no bare `gpt-6` id. All three use the **Responses
-  API** (`openai_responses`): OpenAI's Chat Completions "does not support
-  function calling with GPT-6 Astra", and on Sol/Luna allows it "only with
+  `gpt_6_luna()`** ([#176](https://github.com/yologdev/yoagent/issues/176)).
+  There is no bare `gpt-6` id. All three use the **Responses API**
+  (`openai_responses`): OpenAI's Chat Completions "does not support function
+  calling with GPT-6 Astra", and on Sol/Luna allows it "only with
   reasoning_effort set to none", so an agent with tools needs Responses.
   1,050,000-token context, 64K of 128K max output, effort ceiling `max`
-  (`ReasoningEffortCeiling::Max`). Sol and Luna accept effort `none`, so
-  `ThinkingLevel::Off` sends it; Astra returns 400 for `none`, so there `Off`
-  omits the effort. `temperature` is rejected while effort is not `none` — do
-  not set one with Astra. Priced per 1M tokens, with a 272K context tier (the
-  whole request moves to the long rates):
+  (`ReasoningEffortCeiling::Max`). `ThinkingLevel::Off` omits the effort, so
+  the model runs at its default; the crate never sends `none` (Astra rejects
+  it with a 400). `temperature` is rejected while the effort is not `none` —
+  leave it unset. The Responses provider does not enforce `prompt_structured`
+  schemas (it warns and ignores them), so structured outputs are not
+  guaranteed on these presets. Priced per 1M tokens, with a 272K context tier
+  (the whole request moves to the long rates):
 
   | Preset | Input | Cached | Cache write | Output | >272K in / cached / write / out |
   |--------|------:|------:|------:|------:|------|
@@ -158,8 +177,8 @@ adheres to [Semantic Versioning](https://semver.org/).
   Read from the raw markup of OpenAI's pricing and model pages on 2026-09-25;
   added to the price audit, which now compares context tiers field by field.
 
-- **`OpenAiCompat::max_reasoning_effort` (`ReasoningEffortCeiling`) and
-  `OpenAiCompat::supports_effort_none`** — see Fixed (#176).
+- **`OpenAiCompat::max_reasoning_effort` (`ReasoningEffortCeiling`)** — see
+  Fixed ([#176](https://github.com/yologdev/yoagent/issues/176)).
 
 - **`ModelConfig::openai_responses(id, name)`**
   ([#178](https://github.com/yologdev/yoagent/issues/178)). `ModelConfig::openai()`
@@ -181,14 +200,15 @@ adheres to [Semantic Versioning](https://semver.org/).
 
   Fable 5.1 rejects forced `tool_choice` (`any`/`tool`) with a 400. The preset
   sets `native_structured_output`, so `prompt_structured` works on it (see
-  Fixed, #175).
+  Fixed, [#175](https://github.com/yologdev/yoagent/issues/175)).
 
-- **`ModelConfig::claude_opus_5_5()`**. 1M context, 64K of 128K max output,
-  $4 / $20 per MTok input/output, $5 5-minute cache writes, and **$0.20 cache
-  hits** (0.05x input, not the usual 0.1x). The 1-hour write rate ($8) is not
-  modelled, since the crate only places 5-minute breakpoints. Rates read from
-  the raw markup of Anthropic's pricing page on 2026-09-25 and matched against
-  models.dev; added to the price audit (floor raised to 9),
+- **`ModelConfig::claude_opus_5_5()`**
+  ([#175](https://github.com/yologdev/yoagent/issues/175)). 1M context, 64K of
+  128K max output, $4 / $20 per MTok input/output, $5 5-minute cache writes,
+  and **$0.20 cache hits** (0.05x input, not the usual 0.1x). The 1-hour write
+  rate ($8) is not modelled, since the crate only places 5-minute breakpoints.
+  Rates read from the raw markup of Anthropic's pricing page on 2026-09-25 and
+  matched against models.dev; added to the price audit,
   `llm_compaction_live`'s id map and `release_smoke` (`SMOKE_MODEL=opus55`).
 
   Not a drop-in for Opus 5. Thinking is always on: `ThinkingLevel::Off` omits
@@ -200,7 +220,43 @@ adheres to [Semantic Versioning](https://semver.org/).
 - **`AnthropicCompat::native_structured_output`** and
   `AnthropicCompat::with_native_structured_output` (see Breaking).
 
+- **`AnthropicCompat::for_claude_id(id)`** infers compat flags from a Claude
+  model id: budget thinking (`legacy()`) before Claude 4.6, adaptive from 4.6,
+  and `native_structured_output` from 4.5; an id with no recognizable version
+  is treated as current generation. **`AnthropicCompat::with_bearer_auth(on)`**
+  sets `bearer_auth` without a struct literal.
+
+- **`ModelConfig::google: Option<GoogleCompat>`** with
+  `GoogleCompat::force_thinking_level()` / `force_thinking_budget()`, to
+  override which Gemini thinking field is sent (see Fixed, Gemini 3).
+
+- **`MockResponse::ToolCallsWithUsage` and `MockResponse::ErrorWithUsage`**, so
+  tests can bill a tool-calling turn and a mid-stream failure.
+
 ### Changed
+
+- **Behaviour change: a cache rate left at `0.0` bills at the input rate.**
+  `CostConfig::cost_usd` used to bill cache-read / cache-write tokens at a
+  zero rate as free, so a forgotten cache rate silently under-reported. A zero
+  `cache_read_per_million` / `cache_write_per_million` now means "not
+  separately priced" and bills at the applicable input rate: the base
+  `input_per_million`, or inside a `ContextTier` that tier's own input rate
+  (never the base cache rate). A vendor with no cache-write charge is now
+  priced correctly without setting one. A fully zero config still costs $0,
+  so "free" keeps working. `tests/price_audit.rs` accepts a crate cache-write
+  rate that models.dev omits only while it equals the band's input rate.
+
+  **Migration:** a config that set a cache rate to `0.0` to mean "these tokens
+  are free" while charging for input now reports a higher cost. Zero can no
+  longer express that; set a tiny positive rate (e.g. `with_cache_read(1e-9)`)
+  if a vendor genuinely charges nothing for cache hits. Configs that leave
+  cache rates unset on a vendor that does charge for them now report closer
+  to the real bill, but should still set the real rate.
+
+- **`gpt_5_5()` and `meta()` state their cache-write rate explicitly** as the
+  input rate ($5, and $10 above 272K, for GPT-5.5; $1.25 for Muse Spark):
+  neither vendor charges extra for cache writes. Under the old zero-is-free
+  rule those tokens billed at $0.
 
 - **`ModelConfig::gpt_5_5()` bills the long-context band.** OpenAI's gpt-5.5
   model page: "prompts with >272K input tokens are priced at 2x input and 1.5x
@@ -211,17 +267,40 @@ adheres to [Semantic Versioning](https://semver.org/).
   and output only, and the pricing page no longer lists gpt-5.5. It matches
   models.dev and the 2x the GPT-6 pages state for cache rates; the literal
   reading would keep $0.50. It is set rather than left out because an unset
-  tier rate bills $0. The old "deliberately flat" rationale — no gpt-5.5 row in
-  the pricing page's long-context table — is superseded by the model page.
+  tier cache rate bills at the tier's input rate ($10). The old "deliberately
+  flat" rationale — no gpt-5.5 row in the pricing page's long-context table —
+  is superseded by the model page.
+
+- **A clamped reasoning effort is logged.** When `XHigh` / `Max` is sent lower
+  than requested because of the model's `max_reasoning_effort` (`XHigh` →
+  `high`, `Max` → `high` or `xhigh`), the Chat Completions, Responses and
+  Azure providers log one `tracing::warn!` per distinct clamp per process
+  instead of downgrading silently.
 
 - **`SessionStats::cost_usd` is now sticky-`None` once a turn cannot be
   priced**, the same rule as `SubAgentSpend::merge`. Previously an unpriced
   turn followed by a priced one produced a partial sum that read as the whole
   cost. Only reachable when rates change mid-run, which the built-in loop does
   not do today.
-- Usage and run counts in the spend rollups saturate instead of overflowing.
 
-- **Fixed: truncated tool arguments no longer run the tool on `{}`**
+- **`ModelConfig::minimax` now points at `https://api.minimax.io/v1`**
+  instead of `https://api.minimaxi.chat/v1`. MiniMax's OpenAI-compatible API
+  reference names `api.minimax.io/v1` as the base URL. Configs that override
+  `base_url` are unaffected; set it back to the old host if your key is tied to
+  it.
+
+- **Examples no longer default to retired model ids.** `release_smoke`
+  (`gemini-3-pro` → `gemini-3.1-pro-preview`, `deepseek-chat` →
+  `deepseek-flash`), `long_horizon` (`deepseek-chat` → `deepseek-flash`), `rlm`
+  (`grok-4-1-fast-reasoning` → `grok-4.7`) and the `cli` per-provider defaults
+  (xAI `grok-4.7`, Groq `openai/gpt-oss-120b`, DeepSeek `deepseek-flash`,
+  MiniMax `MiniMax-M3`, Google `gemini-3.8-flash`). `llm_compaction_live`
+  prices `deepseek-flash` and corrects the Flash peak rates to $0.30 / $1.20 /
+  $0.006 cache hit per million.
+
+### Fixed
+
+- **Truncated tool arguments no longer run the tool on `{}`**
   ([#167](https://github.com/yologdev/yoagent/issues/167)). When a response hit
   its output token limit mid-`arguments`, `openai_compat.rs` (OpenAI, Groq,
   Together, DeepSeek, Fireworks, Mistral, xAI, …) fell back to an empty object
@@ -273,48 +352,150 @@ adheres to [Semantic Versioning](https://semver.org/).
   have no unparseable-buffer case and are unchanged. Bedrock is also unchanged
   here: its stream parsing needs a larger fix, tracked in
   [#174](https://github.com/yologdev/yoagent/issues/174).
-- **`ModelConfig::minimax` now points at `https://api.minimax.io/v1`**
-  instead of `https://api.minimaxi.chat/v1`. MiniMax's OpenAI-compatible API
-  reference names `api.minimax.io/v1` as the base URL. Configs that override
-  `base_url` are unaffected; set it back to the old host if your key is tied to
-  it.
-
-### Fixed
 
 - **`ThinkingLevel::XHigh` / `Max` no longer clamp to `high` on OpenAI models
   that accept more** ([#176](https://github.com/yologdev/yoagent/issues/176)).
-  Closes #176. The clamp was there because nothing recorded which models take
-  `xhigh`; now a model declares it. `OpenAiCompat::max_reasoning_effort` is a
+  The clamp was there because nothing recorded which models take `xhigh`; now
+  a model declares it. `OpenAiCompat::max_reasoning_effort` is a
   `ReasoningEffortCeiling` (`High` / `XHigh` / `Max`, `#[non_exhaustive]`,
   serde default `High`): `XHigh` sends `xhigh` when the ceiling is at least
   `XHigh`; `Max` sends `max`, `xhigh` or `high` — whatever the ceiling is. It
   is a declared capability, never inferred from the model id. Honoured by
   Chat Completions **and** by the Responses and Azure providers, which until
-  now ignored `ModelConfig::compat` entirely; they read these two fields from
+  now ignored `ModelConfig::compat` entirely; they read this one field from
   it and nothing else, so a Responses config opts in the same way a Chat
   Completions one does. Per OpenAI and Azure: `max` exists on GPT-5.6 and
   GPT-6; `xhigh` on GPT-6, GPT-5.6, GPT-5.5, GPT-5.4 (and gpt-5.2,
   gpt-5.1-codex-max); gpt-5 and gpt-5.1 top out at `high`.
 
-  `OpenAiCompat::supports_effort_none` makes `ThinkingLevel::Off` send effort
-  `none` instead of omitting it. Omitting it never turned reasoning off on an
-  OpenAI reasoning model — it ran at the model's default, `medium` — so `Off`
-  was silently a medium-effort request.
+  | Preset | Ceiling | `XHigh` → | `Max` → |
+  |--------|---------|-----------|---------|
+  | `gpt_6_astra`, `gpt_6_sol`, `gpt_6_luna` | `Max` | `xhigh` | `max` |
+  | `gpt_5_5` | `XHigh` | `xhigh` | `xhigh` |
+  | `OpenAiCompat::xai()` | `XHigh` | `xhigh` | `xhigh` |
+  | everything else | `High` | `high` | `high` |
 
-  | Preset | Ceiling | `none` | `XHigh` → | `Max` → | `Off` → |
-  |--------|---------|--------|-----------|---------|---------|
-  | `gpt_6_astra` | `Max` | no | `xhigh` | `max` | (omitted) |
-  | `gpt_6_sol`, `gpt_6_luna` | `Max` | yes | `xhigh` | `max` | `none` |
-  | `gpt_5_5` | `XHigh` | yes | `xhigh` | `xhigh` | `none` (was omitted) |
-  | `OpenAiCompat::xai()` | `XHigh` | no | `xhigh` | `xhigh` | (omitted) |
-  | everything else | `High` | no | `high` | `high` | (omitted) |
+  `ThinkingLevel::Off` still omits the effort on every model — the model runs
+  at its default (`medium` on OpenAI reasoning models), not without
+  reasoning. The crate never sends OpenAI's `none` rung, which several models
+  (GPT-6 Astra, gpt-5, the o-series) reject with a 400. (A
+  `supports_effort_none` flag existed briefly during development and was
+  removed before release; a persisted `OpenAiCompat` carrying that key still
+  loads and the key is ignored.)
 
   xAI gets `XHigh` on every Grok model: xAI documents that models without
   `xhigh` treat it as `high` rather than rejecting it. DeepSeek's
   `low`/`high`/`max` ladder (`supports_thinking_control`) is unchanged and
-  does not read the new fields. Every other existing preset sends
+  does not read the new field. Every other existing preset sends
   byte-identical bodies (whole-body tests across all levels); persisted
-  `OpenAiCompat` values without the fields load with the old behaviour.
+  `OpenAiCompat` values without the field load with the old behaviour.
+
+- **xAI (Grok) now receives `ThinkingLevel`.** `OpenAiCompat::xai()` did not
+  set `supports_reasoning_effort`, so every level was silently dropped and Grok
+  always ran at its default. It now sends `reasoning_effort` like other
+  OpenAI-compat providers: `Minimal`/`Low` → `low`, `Medium` → `medium`,
+  `High` → `high`, `XHigh`/`Max` → `xhigh` (ceiling `XHigh`, above; grok-4.6
+  and later accept `xhigh`, and earlier models treat it as `high`). xAI
+  reasoning cannot be disabled, so `Off` still sends nothing and leaves the
+  model at its default (`high`), not "no reasoning"
+  ([xAI reasoning guide](https://docs.x.ai/developers/model-capabilities/text/reasoning)).
+
+- **Gemini 3 gets `thinkingLevel`, not a token budget.** Both Gemini
+  providers sent `thinkingConfig.thinkingBudget` for every model. Google's
+  REST reference says `thinkingLevel` is "Recommended for Gemini 3 or later
+  models", and its guide warns that a budget on Gemini 3 Pro "may result in
+  unexpected performance". For Gemini 3 and later, `GoogleProvider` and
+  `GoogleVertexProvider` now send `thinkingLevel` (`Minimal` → `MINIMAL`,
+  `Low` → `LOW`, `Medium` → `MEDIUM`, `High`/`XHigh`/`Max` → `HIGH`) and never
+  a budget alongside it, which Gemini rejects. `Minimal` is clamped to `LOW`
+  on models without a `MINIMAL` rung (3.7 / 3.8 Flash reject it with an error;
+  3.x Pro and unlisted models are treated the same way).
+
+  Image models take only the levels Google's Vertex thinking table lists:
+  3.1 Flash Image / 3.1 Flash-Lite Image accept `MINIMAL` and `HIGH`
+  (`Minimal`/`Low` → `MINIMAL`, `Medium` and up → `HIGH`); 3 Pro Image
+  accepts `HIGH` only. Gemini 3 TTS models are in neither thinking guide's
+  list of thinking models, so they get no `thinkingConfig` at any level.
+
+  **`ThinkingLevel::Off` still omits `thinkingConfig` on every Gemini model.**
+  On Gemini 3 that does not disable thinking: the model runs at its own
+  default level (3.1 Pro `HIGH`, 3.5–3.8 Flash `MEDIUM`, Flash-Lite
+  `MINIMAL`), and 3 Pro / 3.1 Pro cannot turn thinking off at all. Use
+  `ThinkingLevel::Minimal` to ask for the least thinking — `MINIMAL` "Matches
+  the "no thinking" setting for most queries" (Google) where the model accepts
+  it.
+
+  **Gemini 2.x payloads are byte-identical** to before: `thinkingLevel` on a
+  pre-3 model is an error, so those keep `thinkingBudget`.
+
+  Detection is version-based, as Google's rule is: the last segment of the
+  model id (so `models/…` and Vertex resource paths work), `@version` dropped,
+  `gemini-<major>…` with major ≥ 3. `gemini-flash-latest` / `gemini-pro-latest`
+  count as Gemini 3; `gemini-flash-lite-latest` and unreadable ids keep the
+  budget, which Gemini 3 still accepts. Override per model with the new
+  `ModelConfig::google: Option<GoogleCompat>` —
+  `GoogleCompat::force_thinking_level()` / `force_thinking_budget()`.
+  `None` is omitted on serialize, so existing serialized configs are unchanged.
+
+- **`prompt_structured` works on Claude Fable 5.1 and Opus 5.5**
+  ([#175](https://github.com/yologdev/yoagent/issues/175)). Both models reject
+  forced `tool_choice` with a 400, and the Anthropic provider forced a
+  synthetic tool for every structured call, so every call failed as
+  `StructuredPromptError::Provider`. With `native_structured_output` set (the
+  presets set it) the provider sends
+  `output_config.format = {"type": "json_schema", "schema": ...}` and no tool
+  or `tool_choice`, and thinking is kept: `format` and the adaptive-thinking
+  `effort` share one `output_config` object. A hand-built
+  `ModelConfig::anthropic("claude-fable-5-1", ..)` without the flag still
+  forces the tool and gets the 400.
+
+- **On the native structured-output path, a user tool named like the schema
+  runs.** The loop unwrapped any tool call named after the `OutputSchema` into
+  the answer text. That is right when the provider forced a synthetic tool,
+  but on Anthropic's native path no synthetic tool exists, so a real tool
+  that happened to share the name (e.g. `structured_output`) was swallowed
+  instead of executed. The unwrap now runs only on the tool-forcing path.
+  (Only the native path added in this release was affected.)
+
+- **`claude_haiku_4_5()` uses budget thinking.** The preset inherited adaptive
+  thinking (`AnthropicCompat::default()`), which Haiku 4.5 rejects with a 400,
+  so any `ThinkingLevel` other than `Off` failed. It now uses
+  `AnthropicCompat::legacy()` (`budget_tokens`), with native structured
+  outputs on.
+
+- **OpenCode `claude-*` routes get per-generation compat.** `opencode_zen`
+  gave every Claude id adaptive thinking and bearer auth and nothing else, so
+  a pre-4.6 model (Haiku 4.5, Sonnet/Opus 4.5 and older) 400ed on any
+  thinking level, and `prompt_structured` tool-forced and 400ed on Opus 5.5 /
+  Fable 5.1. Claude ids now get `AnthropicCompat::for_claude_id` (budget
+  thinking before 4.6, adaptive from 4.6, native structured outputs from 4.5)
+  plus bearer auth. Qwen and MiniMax routes are unchanged. `jev-*` ids, which
+  OpenCode serves on its `/systemone` endpoint that yoagent does not target,
+  now log a warning like `gemini-*` ids do.
+
+- **OpenCode routes `grok-*` and `muse-spark-*` (Zen and Go) and `gpt-*`
+  (Go) to the Responses API.** The gateways' endpoint tables list those
+  families only on `/responses`, but `opencode_zen` / `opencode_go` sent them
+  to `/chat/completions`. Zen's `gpt-*` routing was already right.
+
+- **Azure OpenAI requests go to the v1 endpoint.** The provider posted to
+  `{base_url}/responses?api-version=2025-01-01-preview` with a
+  deployment-scoped `base_url`, a path where Azure never served the Responses
+  API, so requests failed (tests passed because the mocks matched any path).
+  Requests now go to `POST {resource}/openai/v1/responses` with no
+  `api-version`, the deployment name as the body's `model`. `base_url` may be
+  the resource endpoint, `…/openai` or `…/openai/v1` (`*.services.ai.azure.com`
+  too). An empty API key no longer sends an empty `api-key` header, so a
+  Microsoft Entra ID `Authorization: Bearer` token set in `ModelConfig::headers`
+  works on its own.
+
+  **Migration:** a legacy `…/openai/deployments/{deployment}` `base_url` still
+  works — it is routed to `/openai/v1/responses` and `{deployment}` replaces
+  the configured model id in the body. New configs should use
+  `https://{resource}.openai.azure.com/openai/v1` with the **deployment name**
+  as the model id. Any other `base_url` (a proxy path, say) now gets
+  `/openai/v1/responses` appended rather than `/responses?api-version=…`;
+  point a proxy at a path that forwards that.
 
 - **Responses and Azure OpenAI: function calls are collected again**
   ([#178](https://github.com/yologdev/yoagent/issues/178)). Both providers opened
@@ -331,10 +512,12 @@ adheres to [Semantic Versioning](https://semver.org/).
   still reports `StopReason::Length` (#167). A delta for an unknown item is
   logged with `warn!`, not dropped silently. Data-only SSE messages take their
   event name from the payload's `type`.
+
 - **Responses and Azure OpenAI: reasoning is streamed.** The providers matched
   `response.reasoning.delta`, which does not exist. They now map
   `response.reasoning_summary_text.delta` and `response.reasoning_text.delta`
   to `Content::Thinking` (Azure previously ignored reasoning entirely).
+
 - **Responses and Azure OpenAI: cache usage is reported.** `usage` read only
   input and output tokens. `input_tokens_details.cached_tokens` and
   `.cache_write_tokens` now fill `Usage::cache_read` / `cache_write`, and
@@ -342,8 +525,39 @@ adheres to [Semantic Versioning](https://semver.org/).
   convention), so `CostConfig` prices cache hits and cache writes at their own
   rates. Previously every cached token was billed at the full input rate.
   Context-tier selection still sees the whole prompt.
+
 - **Azure OpenAI** now reports `StopReason::Length` when `response.completed`
   carries `status: "incomplete"`, as the Responses provider already did.
+
+- **Refusals and content-filter stops are reported as `StopReason::Refusal`.**
+  The shared Responses parser (OpenAI Responses and Azure) dropped refusals:
+  `response.refusal.delta` / `.done` were ignored and a finished message kept
+  only `output_text` parts. A refusal — streamed, in a `content_part.done`, or
+  in the finished `message` item — now sets `StopReason::Refusal`, keeps the
+  refusal text as the turn's text (deduplicated), and is never relabelled
+  `ToolUse`. `incomplete_details.reason == "content_filter"` (on
+  `response.incomplete` or an incomplete `response.completed`) is `Refusal`
+  too; every other reason stays `Length`. On Chat Completions,
+  `finish_reason: "content_filter"` is `Refusal` (it was `Stop`), and an open
+  tool call no longer relabels it `ToolUse`. All three providers set the
+  assistant message's `error_message` to say why.
+
+- **A `null` usage count no longer drops the usage.** Some servers send
+  explicit `null` token counts; `#[serde(default)]` covers only a missing
+  key, so one `null` failed the whole Chat Completions chunk or Responses
+  terminal event — losing the usage and the stop reason carried with it. A
+  `null` count now reads as 0.
+
+- **Rate limits are no longer mistaken for context overflow.** Azure OpenAI's
+  mid-stream capacity error (`too_many_requests` / `no_capacity`, "…exceeds
+  the maximum usage size allowed during peak load…") matched the Gemini
+  overflow phrase "exceeds the maximum", so it triggered compaction instead of
+  a backoff retry. HTTP 429 is now classified `RateLimited` before the
+  overflow phrases are checked, and an SSE error event whose structured
+  `type` / `code` / `status` is `too_many_requests`, `no_capacity`,
+  `rate_limit_exceeded`, `rate_limit_error` or `rate_limit` is `RateLimited`
+  (retried). The Gemini phrase is narrowed to "exceeds the maximum number of
+  tokens", matching Gemini's actual overflow message.
 
 - **DeepSeek thinking mode with tools no longer fails on the second turn.**
   DeepSeek requires that "for requests carrying the tools parameter, the
@@ -369,57 +583,6 @@ adheres to [Semantic Versioning](https://semver.org/).
   [prompt-caching guide](https://developers.openai.com/api/docs/guides/prompt-caching)
   computes ordinary input as `input_tokens - cached_tokens -
   cache_write_tokens`. Responses without the field split exactly as before.
-
-- **xAI (Grok) now receives `ThinkingLevel`.** `OpenAiCompat::xai()` did not
-  set `supports_reasoning_effort`, so every level was silently dropped and Grok
-  always ran at its default. It now sends `reasoning_effort` like other
-  OpenAI-compat providers: `Minimal`/`Low` → `low`, `Medium` → `medium`,
-  `High`/`XHigh`/`Max` → `high`. grok-4.6 and later also accept `xhigh`, but
-  without a per-model effort table `XHigh`/`Max` stay clamped to `high` for
-  now. xAI reasoning cannot be disabled, so `Off` still sends nothing and
-  leaves the model at its default (`high`), not "no reasoning"
-  ([xAI reasoning guide](https://docs.x.ai/developers/model-capabilities/text/reasoning)).
-
-- **Gemini 3 gets `thinkingLevel`, not a token budget.** Both Gemini
-  providers sent `thinkingConfig.thinkingBudget` for every model. Google's
-  REST reference says `thinkingLevel` is "Recommended for Gemini 3 or later
-  models", and its guide warns that a budget on Gemini 3 Pro "may result in
-  unexpected performance". For Gemini 3 and later, `GoogleProvider` and
-  `GoogleVertexProvider` now send `thinkingLevel` (`Minimal` → `MINIMAL`,
-  `Low` → `LOW`, `Medium` → `MEDIUM`, `High`/`XHigh`/`Max` → `HIGH`) and never
-  a budget alongside it, which Gemini rejects. `Minimal` is clamped to `LOW`
-  on models without a `MINIMAL` rung (3.7 / 3.8 Flash reject it with an error;
-  3.x Pro and unlisted models are treated the same way).
-
-  **Gemini 2.x payloads are byte-identical** to before: `thinkingLevel` on a
-  pre-3 model is an error, so those keep `thinkingBudget`.
-
-  Detection is version-based, as Google's rule is: the last segment of the
-  model id (so `models/…` and Vertex resource paths work), `@version` dropped,
-  `gemini-<major>…` with major ≥ 3. `gemini-flash-latest` / `gemini-pro-latest`
-  count as Gemini 3; `gemini-flash-lite-latest` and unreadable ids keep the
-  budget, which Gemini 3 still accepts. Override per model with the new
-  `ModelConfig::google: Option<GoogleCompat>` —
-  `GoogleCompat::force_thinking_level()` / `force_thinking_budget()`.
-  `None` is omitted on serialize, so existing serialized configs are unchanged.
-
-  **Behaviour change for `ThinkingLevel::Off` on Gemini 3.** It used to omit
-  `thinkingConfig`, which leaves Gemini 3 thinking at its default (`MEDIUM` or
-  `HIGH`). It now sends the lowest level the model accepts — `MINIMAL`, which
-  Google says "Matches the "no thinking" setting for most queries", or `LOW`
-  — without `includeThoughts`. Gemini 3 cannot turn thinking fully off, and
-  3 Pro / 3.1 Pro cannot turn it off at all.
-
-- **`prompt_structured` works on Claude Fable 5.1 and Opus 5.5**
-  ([#175](https://github.com/yologdev/yoagent/issues/175)). Both models reject
-  forced `tool_choice` with a 400, and the Anthropic provider forced a
-  synthetic tool for every structured call, so every call failed as
-  `StructuredPromptError::Provider`. With `native_structured_output` set (the
-  presets set it) the provider sends
-  `output_config.format = {"type": "json_schema", "schema": ...}` and no tool
-  or `tool_choice`, and thinking is kept: `format` and the adaptive-thinking
-  `effort` share one `output_config` object. A hand-built `ModelConfig::anthropic("claude-fable-5-1", ..)` without the
-  flag still forces the tool and gets the 400.
 
 - **Sub-agent spend now reaches the parent, in its own bucket**
   ([#173](https://github.com/yologdev/yoagent/issues/173)). `SubAgentTool` ran
@@ -453,7 +616,8 @@ adheres to [Semantic Versioning](https://semver.org/).
     model is never re-priced at the parent's. `cost_usd` becomes `None` as soon
     as any delegated spend is unpriceable, rather than a sum that quietly skips
     it; `SubAgentSpend::merge` keeps that rule for callers accumulating across
-    runs. `None` therefore means "unpriced" *or* "nothing spent";
+    runs. `None` therefore means "unpriced" *or* "nothing spent and nothing
+    priced" (a priced run that used no tokens is `Some(0.0)`);
     `SubAgentSpend::is_unpriced()` / `SessionStats::is_unpriced()` tell them
     apart.
   - **`Agent::total_cost_usd()` / `Agent::total_usage()`** give the whole bill
@@ -464,25 +628,11 @@ adheres to [Semantic Versioning](https://semver.org/).
     replacing or compacting history does not lower them. `session_cost_usd()`
     is unchanged and stays history-derived — it prices the current context at
     the current model's rates, excludes sub-agents, and is not the bill.
+  - Usage and run counts in the spend rollups saturate instead of
+    overflowing.
 
   Additive on the wire: `subAgents` is omitted when nothing was delegated, so
   a run without sub-agents serializes exactly as before.
-
-- **`MockResponse::ToolCallsWithUsage` and `MockResponse::ErrorWithUsage`**, so
-  tests can bill a tool-calling turn and a mid-stream failure.
-
-- **OpenCode routes `grok-*` and `muse-spark-*` (Zen and Go) and `gpt-*`
-  (Go) to the Responses API.** The gateways' endpoint tables list those
-  families only on `/responses`, but `opencode_zen` / `opencode_go` sent them
-  to `/chat/completions`. Zen's `gpt-*` routing was already right.
-- **Examples no longer default to retired model ids.** `release_smoke`
-  (`gemini-3-pro` → `gemini-3.1-pro-preview`, `deepseek-chat` →
-  `deepseek-flash`), `long_horizon` (`deepseek-chat` → `deepseek-flash`), `rlm`
-  (`grok-4-1-fast-reasoning` → `grok-4.7`) and the `cli` per-provider defaults
-  (xAI `grok-4.7`, Groq `openai/gpt-oss-120b`, DeepSeek `deepseek-flash`,
-  MiniMax `MiniMax-M3`, Google `gemini-3.8-flash`). `llm_compaction_live`
-  prices `deepseek-flash` and corrects the Flash peak rates to $0.30 / $1.20 /
-  $0.006 cache hit per million.
 
 
 ## 0.18.1

@@ -48,15 +48,17 @@ The loop: stream assistant response → extract tool calls → execute tools (pa
 
 | Protocol | File | Covers |
 |----------|------|--------|
-| `Anthropic` | `anthropic.rs` | Claude models |
-| `OpenAiCompat` | `openai_compat.rs` | OpenAI, Groq, Together, DeepSeek, Fireworks, Mistral, xAI, etc. (15+) |
-| `OpenAiResponses` | `openai_responses.rs` | OpenAI Responses API |
-| `AzureOpenAi` | `azure_openai.rs` | Azure OpenAI |
-| `Google` | `google.rs` | Gemini |
+| `AnthropicMessages` | `anthropic.rs` | Claude models |
+| `OpenAiCompletions` | `openai_compat.rs` | OpenAI, Groq, Together, DeepSeek, Fireworks, Mistral, xAI, etc. (15+) |
+| `OpenAiResponses` | `openai_responses.rs` | OpenAI Responses API (GPT-6 presets) |
+| `AzureOpenAiResponses` | `azure_openai.rs` | Azure OpenAI v1 Responses (`{resource}/openai/v1/responses`) |
+| `GoogleGenerativeAi` | `google.rs` | Gemini |
 | `GoogleVertex` | `google_vertex.rs` | Vertex AI |
-| `Bedrock` | `bedrock.rs` | Amazon Bedrock (ConverseStream) |
+| `BedrockConverseStream` | `bedrock.rs` | Amazon Bedrock (ConverseStream) |
 
-`ModelConfig` + `OpenAiCompat` flags handle per-provider quirks (auth style, reasoning format, max_tokens field name, etc.).
+The Responses and Azure providers share one SSE parser (`responses_stream.rs`).
+
+`ModelConfig` + quirk structs handle per-provider differences: `OpenAiCompat` (auth style, reasoning format, max_tokens field name, `max_reasoning_effort` ceiling — the ceiling is also read by Responses/Azure), `AnthropicCompat` (adaptive vs budget thinking, bearer auth, `native_structured_output`; `for_claude_id` infers them from an id), `GoogleCompat` (`thinkingLevel` vs `thinkingBudget`). `ThinkingLevel::Off` sends no thinking/effort field on any provider (DeepSeek's explicit `thinking: disabled` aside), so always-thinking models run at their default.
 
 ### Key Types
 
@@ -79,7 +81,7 @@ The loop: stream assistant response → extract tool calls → execute tools (pa
 - `Sequential` — one at a time, checks steering queue between each
 - `Batched { size }` — concurrent within batch, steering check between batches
 
-**Structured outputs** (`Agent::prompt_structured::<T>(text, schema)`): the schema is threaded per-call through `prompt_messages_internal` into `StreamConfig.output_schema` (`OutputSchema` in `provider/traits.rs`) — never stored on the Agent. Errors: `Provider` (API failure), `Parse { source, raw }`, `NoOutput`; only this call's messages are scanned. Anthropic enforces it by tool-forcing (a synthetic tool + `tool_choice`; the loop's `unwrap_structured_tool_call` converts the forced call back to text **before** tool-call extraction); OpenAI-compat uses `response_format: json_schema`; Gemini uses `responseSchema`. Responses/Azure/Vertex/Bedrock warn and ignore.
+**Structured outputs** (`Agent::prompt_structured::<T>(text, schema)`): the schema is threaded per-call through `prompt_messages_internal` into `StreamConfig.output_schema` (`OutputSchema` in `provider/traits.rs`) — never stored on the Agent. Errors: `Provider` (API failure), `Parse { source, raw }`, `NoOutput`; only this call's messages are scanned. Anthropic uses native JSON outputs (`output_config.format`, no tool, thinking kept, tool choice `auto`) when `AnthropicCompat::native_structured_output` is set — every `claude_*` preset and OpenCode Claude ids from 4.5 set it — and otherwise falls back to tool-forcing (a synthetic tool + `tool_choice`; the loop's `unwrap_structured_tool_call` converts the forced call back to text **before** tool-call extraction, and runs only on the tool-forcing path — `structured_output_is_tool_forced` — so a user tool named like the schema still executes on the native path); OpenAI-compat uses `response_format: json_schema`; Gemini uses `responseSchema`. Responses/Azure/Vertex/Bedrock warn and ignore.
 
 **Tool middleware** (`ToolMiddleware` in `types.rs`): async approve/deny/modify hooks gating every tool call, run in a chain at the single choke point (`execute_single_tool`) shared by all three strategies. `before_tool` takes a `#[non_exhaustive]` `ToolCallRequest` context struct (extensible without breaking implementors). `Deny(reason)` becomes an error tool result the LLM sees (loop continues); `Modify(args)` rewrites the call; a panicking middleware is contained as a denial. Installed via `Agent::with_tool_middleware` / `SubAgentTool::with_tool_middleware` / `AgentLoopConfig::tool_middleware`. Empty chain = allow all.
 
@@ -164,7 +166,7 @@ The loop emits `tracing` spans: `agent_loop` → `llm_stream` per turn (records 
 
 ## Key Design Conventions
 
-- Context overflow detection is centralized in `OVERFLOW_PHRASES` (`provider/traits.rs`) covering 15+ provider-specific error strings; both HTTP errors and SSE-embedded errors are classified
+- Context overflow detection is centralized in `OVERFLOW_PHRASES` (`provider/traits.rs`) covering 15+ provider-specific error strings; both HTTP errors and SSE-embedded errors are classified. Rate limits are checked first (HTTP 429; structured SSE `type`/`code`/`status` such as `too_many_requests`, `no_capacity`, `rate_limit_exceeded`) so a capacity error whose text resembles an overflow phrase is retried, not compacted
 - Tools return stdout/stderr even on failure so the LLM can self-correct
 - Retry logic (`retry.rs`) uses exponential backoff with ±20% jitter; only retries `RateLimited` and `Network` errors
 - The `skills.rs` module loads `<name>/SKILL.md` files with YAML frontmatter per the AgentSkills standard

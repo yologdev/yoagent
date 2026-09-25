@@ -565,7 +565,7 @@ pub enum CacheStrategy {
 ///
 /// | Level     | Anthropic (adaptive) | Anthropic legacy / Bedrock budget | OpenAI-compat `reasoning_effort`¹ / OpenAI Responses / Azure `reasoning.effort`, by ceiling⁴ | DeepSeek `reasoning_effort`² | Gemini 2.x / Vertex `thinkingBudget`³ |
 /// |-----------|----------|--------|----------|--------|--------|
-/// | `Off`     | (no thinking) | (no thinking) | (omitted) | (omitted; `thinking: disabled`) | (omitted) |
+/// | `Off`     | (omitted) | (omitted) | (omitted) | (omitted; `thinking: disabled`) | (omitted) |
 /// | `Minimal` | `low`    | 1,024  | `low`    | `low`  | 1,024  |
 /// | `Low`     | `low`    | 1,024  | `low`    | `low`  | 1,024  |
 /// | `Medium`  | `medium` | 2,048  | `medium` | `medium` (DeepSeek rounds up to `high`) | 8,192  |
@@ -627,10 +627,13 @@ pub enum CacheStrategy {
 /// 4.7, so Opus 4.6 / Sonnet 4.6 accept `max` but not `xhigh`. The crate has
 /// no per-model effort table; pick a level the model supports.
 ///
-/// On Anthropic, `Off` omits the `thinking` field; it never sends
-/// `disabled`. "(no thinking)" holds only for models that think on request:
-/// Claude Opus 5.5 and Fable 5.1 always think (at their default effort), and
-/// Opus 5 thinks whenever the field is absent.
+/// **`Off` sends nothing** on every provider except DeepSeek (which gets an
+/// explicit `thinking: disabled`), and that means "no thinking" only on
+/// models that think on request. On Anthropic `Off` omits the `thinking`
+/// field (it never sends `disabled`): Claude Opus 5.5 and Fable 5.1 always
+/// think (at their default effort), and Opus 5 thinks whenever the field is
+/// absent. OpenAI reasoning models, Grok and Gemini 3 likewise run at their
+/// own defaults (see ¹ and ³).
 ///
 /// Marked `#[non_exhaustive]` so the next rung a vendor adds is not a breaking
 /// change: `match` on it from outside the crate needs a wildcard arm.
@@ -645,7 +648,9 @@ pub enum CacheStrategy {
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
 pub enum ThinkingLevel {
-    /// No reasoning requested.
+    /// Request no reasoning: no thinking or effort field is sent (DeepSeek
+    /// excepted, which gets `thinking: disabled`). A model that always thinks
+    /// then runs at its own default — see the table above.
     #[default]
     Off,
     /// The least thinking a provider can be asked for. Sent as `MINIMAL` on
@@ -658,7 +663,9 @@ pub enum ThinkingLevel {
     High,
     /// Above `High`, below `Max` — Anthropic's and OpenAI's `xhigh`. Where a
     /// provider or model has no `xhigh` rung it is clamped down to that
-    /// provider's `High` value (see the table above). Serializes as
+    /// provider's `High` value (see the table above), except on Anthropic's
+    /// adaptive path, where `xhigh` is passed through as-is and a model
+    /// without the rung (Opus 4.6 / Sonnet 4.6) rejects it. Serializes as
     /// `"xhigh"`.
     XHigh,
     /// The highest setting this crate sends — Anthropic's, DeepSeek's and
@@ -1039,7 +1046,8 @@ pub struct SessionStats {
     /// **cannot be priced** (a turn with non-zero usage came from a model with
     /// `cost: None`, which is what the generic constructors — custom, local,
     /// `deepseek`, … — return), or there was **nothing to price** (a run that
-    /// took no turns, or whose turns reported no usage).
+    /// took no turns, or whose turns reported no usage on an unpriced model;
+    /// on a priced model a zero-usage turn makes this `Some(0.0)`).
     /// [`is_unpriced`](Self::is_unpriced) tells them apart. A model configured
     /// as free (`Some` with zero rates) reports `Some(0.0)`. Unpriced is
     /// sticky: once any turn cannot be priced this stays `None`, because a
@@ -1126,8 +1134,10 @@ impl SessionStats {
     ///
     /// `None` when any part of that spend cannot be priced — an unpriced
     /// sub-agent makes the whole figure unknown rather than silently low — and
-    /// also when nothing at all was spent. Spend of zero tokens needs no
-    /// price, so a zero-usage part never poisons the rest.
+    /// also when no part carries a cost at all (nothing was spent and nothing
+    /// was priced): a priced turn that reported no usage makes it
+    /// `Some(0.0)`, not `None`. Spend of zero tokens needs no price, so a
+    /// zero-usage part never poisons the rest.
     pub fn total_cost_usd(&self) -> Option<f64> {
         combine_cost(
             &self.usage,
@@ -1244,7 +1254,8 @@ fn is_unpriced(usage: &Usage, cost: Option<f64>) -> bool {
 /// `None` if either piece is unpriced — sticky, so a later priced piece never
 /// revives a sum that silently skipped part of the bill. A zero-usage piece
 /// with no cost needs no price and does not poison the other. `None` too when
-/// neither piece carries a cost at all (nothing was spent).
+/// neither piece carries a cost at all (nothing was spent and nothing was
+/// priced); a priced piece that spent nothing contributes `Some(0.0)`.
 ///
 /// Both naive `Option` sums are wrong: `zip` drops a priced piece when the
 /// other merely spent nothing, and `unwrap_or(0.0)` turns unpriced into free.

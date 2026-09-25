@@ -366,7 +366,9 @@ pub(crate) fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<
 
 /// Classify an SSE-embedded error event message into a [`ProviderError`].
 ///
-/// A structured rate-limit error (see [`is_rate_limit_payload`]) is
+/// A structured rate-limit error — an `error` / `response.error` / top-level
+/// `type`, `code` or `status` of `too_many_requests`, `no_capacity`,
+/// `rate_limit_exceeded`, `rate_limit_error` or `rate_limit` — is
 /// [`ProviderError::RateLimited`], checked **before** the overflow phrases —
 /// the same order as the HTTP path, for the same reason. Otherwise the text
 /// is checked for known context-overflow patterns. Used by providers that

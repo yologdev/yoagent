@@ -60,21 +60,28 @@ OpenAI-compatible presets also set `OpenAiCompat` flags for provider-specific AP
 
 ## OpenAI Presets
 
-The OpenAI presets also declare each model's reasoning-effort capability
-(`OpenAiCompat::max_reasoning_effort`, `supports_effort_none`), so
-`ThinkingLevel::XHigh`/`Max` reach the model's real ceiling and `Off` sends
-`none` where the model has it:
+The OpenAI presets also declare each model's reasoning-effort ceiling
+(`OpenAiCompat::max_reasoning_effort`), so `ThinkingLevel::XHigh`/`Max` reach
+the model's real top rung instead of being clamped to `high`:
 
-| Preset | Protocol | Effort ceiling | `Off` sends |
-|--------|----------|----------------|-------------|
-| `gpt_5_5()` | Chat Completions | `xhigh` | `none` |
-| `gpt_6_astra()` | Responses | `max` | nothing (`none` is a 400) |
-| `gpt_6_sol()`, `gpt_6_luna()` | Responses | `max` | `none` |
+| Preset | Protocol | Effort ceiling | `XHigh` → | `Max` → |
+|--------|----------|----------------|-----------|---------|
+| `gpt_5_5()` | Chat Completions | `xhigh` | `xhigh` | `xhigh` |
+| `gpt_6_astra()`, `gpt_6_sol()`, `gpt_6_luna()` | Responses | `max` | `xhigh` | `max` |
+
+`ThinkingLevel::Off` omits the effort on every preset, so the model runs at
+its own default (`medium` on GPT-5.5, Sol and Luna) — it does not turn
+reasoning off.
+The crate never sends OpenAI's `none` rung (GPT-6 Astra, among others, rejects
+it with a 400).
 
 The GPT-6 presets use the Responses API because Chat Completions does not
 support function calling with GPT-6 Astra, and allows it on Sol/Luna only at
-effort `none`. GPT-6 rejects `temperature` while the effort is not `none` — on
-Astra, that means always. There is no bare `gpt-6` model id.
+effort `none`. GPT-6 rejects `temperature` while the effort is not `none`, and
+this crate never sends `none` — leave `temperature` unset. The Responses
+provider does not enforce `prompt_structured` schemas (it warns and ignores the
+schema), so structured outputs on the GPT-6 presets are not guaranteed to
+match. There is no bare `gpt-6` model id.
 
 ## Ollama Models
 

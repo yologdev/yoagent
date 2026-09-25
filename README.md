@@ -284,7 +284,7 @@ it injects the `shared_state` tool and a state summary into the sub-agent's syst
   ```
 - **`Session`** — history as an id/parent tree with `append`, `seek`, `checkpoint`, `branch_tips`, and JSONL persistence. Appending after a seek forks a branch; it never overwrites
 - **Skills** — load [AgentSkills](https://agentskills.io)-standard `SKILL.md` directories. The agent sees a compact index and reads the full skill on demand, so skills stay cross-compatible with Claude Code, Codex CLI, Cursor, and others
-- **Structured outputs** — `prompt_structured::<T>()` returns typed, schema-validated replies, enforced natively where supported (Anthropic tool-forcing, OpenAI `json_schema`, Gemini `responseSchema`)
+- **Structured outputs** — `prompt_structured::<T>()` returns typed, schema-validated replies, enforced natively where supported (Anthropic `output_config.format` on the `claude_*` presets, tool-forcing otherwise; OpenAI Chat Completions `json_schema`; Gemini `responseSchema`)
 
 </details>
 

@@ -45,7 +45,7 @@ passed through as given.
 
 | Protocol | Mechanism |
 |----------|-----------|
-| Anthropic, `native_structured_output` on (every `ModelConfig::claude_*` preset) | `output_config.format: {type: "json_schema", schema}` — the reply's text block is constrained to the schema; no tool is forced, thinking stays on, and the key shares `output_config` with the thinking `effort` |
+| Anthropic, `native_structured_output` on (every `ModelConfig::claude_*` preset, and `opencode_zen("claude-…")` ids from Claude 4.5 on) | `output_config.format: {type: "json_schema", schema}` — the reply's text block is constrained to the schema; no tool is forced, thinking stays on, and the key shares `output_config` with the thinking `effort` |
 | Anthropic, flag off (default, e.g. a bare `ModelConfig::anthropic(..)`) | Forced tool call — a synthetic tool is built from your schema and `tool_choice` forces it; the loop unwraps the call back into text |
 | OpenAI-compatible | `response_format: {type: "json_schema", strict: true}` |
 | Google Gemini | `generationConfig.responseSchema` + JSON mime type (note: Gemini uses an OpenAPI-style schema dialect — your schema is passed through as given) |
@@ -67,7 +67,10 @@ passed through as given.
   a warning is logged). Treat such structured prompts as
   **extraction/finalization calls**, not agentic tool-using turns. The native
   path has neither restriction: tool choice stays `auto`, so the model may
-  call your tools first, and the last text block is parsed.
+  call your tools first, and the last text block is parsed. The loop's
+  unwrap of the synthetic call runs only on the tool-forcing path, so on the
+  native path a tool of yours that happens to share the schema's name is
+  executed normally.
 - **Claude Fable 5.1 and Opus 5.5 reject forced `tool_choice`** (`any`/`tool`)
   with a 400. Their presets (`claude_fable_5_1()`, `claude_opus_5_5()`) set
   `AnthropicCompat::native_structured_output`, so `prompt_structured` works on

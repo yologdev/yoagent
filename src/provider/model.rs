@@ -102,8 +102,10 @@ impl std::fmt::Display for ApiProtocol {
 /// // (an unset cache rate then bills at the input rate):
 /// let mut deepseek = ModelConfig::deepseek("deepseek-flash", "DeepSeek Flash");
 /// assert!(deepseek.cost.is_none());
-/// deepseek.cost = Some(CostConfig::new(0.15, 0.60).with_cache_read(0.003));
-/// assert_eq!(deepseek.cost.as_ref().unwrap().input_per_million, 0.15);
+/// // DeepSeek Flash peak rates (off-peak is half); DeepSeek has no
+/// // cache-write category.
+/// deepseek.cost = Some(CostConfig::new(0.30, 1.20).with_cache_read(0.006));
+/// assert_eq!(deepseek.cost.as_ref().unwrap().input_per_million, 0.30);
 ///
 /// // A model you run for free is `Some` with zero rates, and costs $0:
 /// let mut local = ModelConfig::local("http://localhost:1234/v1", "qwen3");
@@ -968,7 +970,11 @@ pub struct ModelConfig {
     /// logs or telemetry.
     #[serde(default)]
     pub headers: HashMap<String, String>,
-    /// OpenAI-compat quirk flags (only for OpenAiCompletions protocol).
+    /// OpenAI quirk flags. The Chat Completions provider (`OpenAiCompletions`)
+    /// reads all of them; the OpenAI Responses and Azure OpenAI providers read
+    /// only [`OpenAiCompat::max_reasoning_effort`] (the reasoning-effort
+    /// ceiling) and ignore the rest. `None` means `OpenAiCompat::default()`
+    /// on Chat Completions and a `high` ceiling on Responses/Azure.
     #[serde(default)]
     pub compat: Option<OpenAiCompat>,
     /// Anthropic Messages quirk flags (only for AnthropicMessages protocol).
@@ -1347,6 +1353,10 @@ impl ModelConfig {
     /// `none` ("remove temperature, top_p, and top_logprobs"), and Astra
     /// cannot run at `none` — do not set a temperature with this preset.
     ///
+    /// **Structured outputs are not enforced:** the Responses provider warns
+    /// and ignores [`Agent::prompt_structured`](crate::Agent::prompt_structured)'s
+    /// schema, so the reply is not constrained to it.
+    ///
     /// Priced per OpenAI's pricing page (read 2026-09-25): $10 input / $1
     /// cached / $12.50 cache write / $50 output; above 272K prompt tokens the
     /// whole request bills at $20 / $2 / $25 / $75. See [`CostConfig`].
@@ -1383,6 +1393,10 @@ impl ModelConfig {
     /// top_logprobs." Since this crate never sends `none`, do not set a
     /// temperature with this preset.
     ///
+    /// **Structured outputs are not enforced:** the Responses provider warns
+    /// and ignores [`Agent::prompt_structured`](crate::Agent::prompt_structured)'s
+    /// schema, so the reply is not constrained to it.
+    ///
     /// Priced per OpenAI's pricing page (read 2026-09-25): $2 input / $0.20
     /// cached / $2.50 cache write / $10 output; above 272K prompt tokens the
     /// whole request bills at $4 / $0.40 / $5 / $15. See [`CostConfig`].
@@ -1413,6 +1427,10 @@ impl ModelConfig {
     /// ceiling [`ReasoningEffortCeiling::Max`]; `ThinkingLevel::Off` omits the
     /// effort (the model's default, `medium`). **`temperature` is rejected**
     /// unless the effort is `none`, which this crate never sends.
+    ///
+    /// **Structured outputs are not enforced:** the Responses provider warns
+    /// and ignores [`Agent::prompt_structured`](crate::Agent::prompt_structured)'s
+    /// schema, so the reply is not constrained to it.
     ///
     /// Priced per OpenAI's pricing page (read 2026-09-25): $0.10 input /
     /// $0.01 cached / $0.125 cache write / $0.50 output; above 272K prompt

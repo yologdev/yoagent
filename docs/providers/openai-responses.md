@@ -22,7 +22,9 @@ The GPT-6 presets — `ModelConfig::gpt_6_astra()`, `gpt_6_sol()`,
 `gpt_6_luna()` — are built on `openai_responses` and priced, including their
 272K context tier. They use Responses because Chat Completions does not
 support function calling with GPT-6 Astra, and on Sol/Luna allows it only at
-reasoning effort `none`.
+reasoning effort `none`. This provider does not enforce `prompt_structured`
+schemas (see [Not yet supported](#not-yet-supported)), so neither do the GPT-6
+presets.
 
 ```rust
 let agent = Agent::from_config(ModelConfig::gpt_6_sol());
@@ -40,9 +42,18 @@ handles these server-sent events:
 | `response.output_item.added` with `item.type == "function_call"` | start of a `Content::ToolCall` (`call_id`, `name`) |
 | `response.function_call_arguments.delta` | argument text, routed by `output_index` / `item_id` |
 | `response.function_call_arguments.done`, `response.output_item.done` | final arguments (source of truth) |
-| `response.completed` | usage; `status: "incomplete"` → `StopReason::Length` |
-| `response.incomplete` | usage, `StopReason::Length` |
+| `response.refusal.delta` / `.done`, a `refusal` content part | refusal text as `Content::Text`, `StopReason::Refusal` |
+| `response.completed` | usage; `status: "incomplete"` → `StopReason::Length` (`Refusal` when `incomplete_details.reason` is `content_filter`) |
+| `response.incomplete` | usage, `StopReason::Length` (`Refusal` for `content_filter`) |
 | `response.failed`, `error` | `ProviderError` |
+
+A refusal or content-filter stop also sets the assistant message's
+`error_message` (on both this provider and Azure), and a refusal is never
+relabelled `ToolUse`. A token count sent as explicit `null` in `usage` reads as
+0 rather than failing the terminal event. A mid-stream error whose `type` /
+`code` says rate limit or capacity (`too_many_requests`, `no_capacity`,
+`rate_limit_exceeded`, …) is classified `RateLimited` and retried, not treated
+as a context overflow.
 
 Parallel function calls each get their own buffer. Argument text that does not
 parse as a JSON object (for example, cut off by `response.incomplete`) is kept
@@ -66,20 +77,19 @@ context-tier selection still uses the full prompt size.
 
 ## Thinking
 
-`ThinkingLevel` becomes `reasoning.effort`. How high it goes, and whether
-`Off` is sent as `none`, is the model's declared capability, read from
-`ModelConfig::compat`: `OpenAiCompat::max_reasoning_effort` (`High` /
-`XHigh` / `Max`) and `OpenAiCompat::supports_effort_none`. This provider reads
-those two fields and ignores the rest of `OpenAiCompat`.
+`ThinkingLevel` becomes `reasoning.effort`. How high it goes is the model's
+declared capability, read from `ModelConfig::compat`:
+`OpenAiCompat::max_reasoning_effort` (`High` / `XHigh` / `Max`). This provider
+reads that one field and ignores the rest of `OpenAiCompat`.
 
-`openai_responses(..)` sets `compat: None` — ceiling `high`, `Off` omitted,
-exactly what this provider always sent. The GPT-6 presets set it for you:
+`ThinkingLevel::Off` omits `reasoning` entirely, on every model. That runs a
+reasoning model at its default effort (`medium` on most OpenAI models), not
+without reasoning; the crate never sends OpenAI's `none` rung, which several
+models (GPT-6 Astra, gpt-5, the o-series) reject with HTTP 400.
 
-| Preset | Ceiling | `Off` sends |
-|--------|---------|-------------|
-| `gpt_6_astra()` | `max` | nothing — `none` is an HTTP 400 on Astra |
-| `gpt_6_sol()`, `gpt_6_luna()` | `max` | `none` |
-
+`openai_responses(..)` sets `compat: None` — ceiling `high`, so `XHigh` and
+`Max` are sent as `high` (logged once per process with `tracing::warn!`). The
+GPT-6 presets declare `max`, so `XHigh` sends `xhigh` and `Max` sends `max`.
 For another model, declare it:
 
 ```rust
@@ -88,17 +98,13 @@ use yoagent::provider::{ModelConfig, OpenAiCompat, ReasoningEffortCeiling};
 let mut config = ModelConfig::openai_responses("gpt-5.6-sol", "GPT-5.6 Sol");
 let mut compat = OpenAiCompat::openai();
 compat.max_reasoning_effort = ReasoningEffortCeiling::Max;
-compat.supports_effort_none = true;
 config.compat = Some(compat);
 ```
 
-Omitting the effort runs a reasoning model at its default (`medium`), not
-without reasoning, which is why `Off` sends `none` where the model has it. See
-the [`ThinkingLevel` table](../reference/configuration.md#thinkinglevel).
+See the [`ThinkingLevel` table](../reference/configuration.md#thinkinglevel).
 
-`temperature` is rejected by GPT-6 while the effort is anything
-but `none`; leave `StreamConfig::temperature` unset unless you run at `Off` on
-a model with `none`.
+`temperature` is rejected by GPT-6 while the effort is anything but `none`,
+and this crate never sends `none`: leave `StreamConfig::temperature` unset.
 
 ## Not yet supported
 

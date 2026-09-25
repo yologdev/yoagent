@@ -1173,8 +1173,9 @@ impl Agent {
     /// `None` when any part of the spend cannot be priced (see
     /// [`SubAgentSpend::is_unpriced`] / [`SessionStats::is_unpriced`]) — an
     /// unpriced sub-agent makes the bill unknown, not silently low — and when
-    /// nothing has been spent yet. With no delegation it is this agent's own
-    /// cost.
+    /// no run has carried a cost yet (nothing spent, nothing priced). A priced
+    /// turn that reported no usage makes it `Some(0.0)`. With no delegation it is
+    /// this agent's own cost.
     pub fn total_cost_usd(&self) -> Option<f64> {
         self.spend.total_cost_usd()
     }

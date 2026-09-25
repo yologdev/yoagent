@@ -3,8 +3,9 @@
 //! Uses the OpenAI Responses API format on Azure's v1 surface:
 //! `POST https://{resource}.openai.azure.com/openai/v1/responses`, no
 //! `api-version` query, and the **deployment name** as `model` in the body.
-//! See [`responses_endpoint`] for the accepted `base_url` shapes, including
-//! the legacy `.../openai/deployments/{deployment}` form.
+//! Accepted `base_url` shapes: the resource endpoint, `.../openai`,
+//! `.../openai/v1`, and the legacy `.../openai/deployments/{deployment}` form
+//! (whose deployment then becomes `model`); see `docs/providers/azure-openai.md`.
 //!
 //! Auth: `api-key` header; for Microsoft Entra ID leave the key empty and set
 //! `Authorization: Bearer ...` via `ModelConfig::headers`.

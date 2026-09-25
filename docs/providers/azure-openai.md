@@ -81,13 +81,18 @@ When the key is empty, the provider sends no `api-key` header.
 - **Streaming**: the Responses API event stream, parsed by the same code as the
   [OpenAI Responses provider](openai-responses.md#streaming-events) (tool calls
   start on `response.output_item.added`; usage splits cached and cache-written
-  tokens out of `input`)
+  tokens out of `input`; refusals and `content_filter` stops become
+  `StopReason::Refusal` with `error_message` set)
+- **Errors**: a mid-stream `too_many_requests` / `no_capacity` error is
+  `RateLimited` and retried, not a context overflow
+- **Structured outputs**: `prompt_structured` schemas are ignored with a warning
 
 ## Thinking
 
 `ThinkingLevel` becomes `reasoning.effort`, mapped exactly as the
 [OpenAI Responses provider](openai-responses.md#thinking) maps it. A `custom`
-config has `compat: None`, so the ceiling is `high` and `Off` omits the effort.
+config has `compat: None`, so the ceiling is `high`. `Off` always omits the
+effort (the deployed model then runs at its default, not without reasoning).
 Declare the deployed model's capability on `compat` — copying it from the
 matching OpenAI preset is simplest:
 
@@ -99,7 +104,7 @@ let mut config = ModelConfig::custom(
     "{deployment}", // a deployment of gpt-6-sol
     "GPT-6 Sol",
 );
-config.compat = ModelConfig::gpt_6_sol().compat; // ceiling `max`, `Off` → `none`
+config.compat = ModelConfig::gpt_6_sol().compat; // ceiling `max`
 ```
 
 Azure's reasoning guide: "max works only with GPT-6 or GPT-5.6 models and the

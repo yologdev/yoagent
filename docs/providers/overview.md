@@ -33,6 +33,7 @@ pub enum ApiProtocol {
 Full configuration for a model, including provider routing:
 
 ```rust
+#[non_exhaustive]  // build with a constructor, then set fields
 pub struct ModelConfig {
     pub id: String,              // e.g. "gpt-5.5"
     pub name: String,            // e.g. "GPT-5.5"
@@ -44,7 +45,9 @@ pub struct ModelConfig {
     pub max_tokens: u32,         // Default max output
     pub cost: Option<CostConfig>, // Pricing per million tokens; None = unknown
     pub headers: HashMap<String, String>,  // Extra headers
-    pub compat: Option<OpenAiCompat>,      // Quirk flags
+    pub compat: Option<OpenAiCompat>,      // OpenAI quirk flags (Chat Completions; effort ceiling also read by Responses/Azure)
+    pub anthropic: Option<AnthropicCompat>, // Anthropic Messages quirk flags (thinking mode, bearer auth, native structured output)
+    pub google: Option<GoogleCompat>,      // Gemini quirk flags (thinkingLevel vs thinkingBudget override)
 }
 ```
 
@@ -53,6 +56,7 @@ First-class model presets are documented in [Model Presets](model-presets.md). C
 ```rust
 let anthropic = ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5");
 let openai = ModelConfig::openai("gpt-5.5", "GPT-5.5");
+let responses = ModelConfig::openai_responses("gpt-5.5", "GPT-5.5");
 let google = ModelConfig::google("gemini-3.8-flash", "Gemini 3.8 Flash");
 let xai = ModelConfig::xai("grok-4.7", "Grok 4.7");
 let groq = ModelConfig::groq("openai/gpt-oss-120b", "GPT-OSS 120B");
