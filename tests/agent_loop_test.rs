@@ -4414,3 +4414,19 @@ async fn double_encoded_arguments_are_answered_not_run() {
     );
     assert!(!text.contains("cut off"), "got: {text}");
 }
+
+/// Complete but malformed JSON is a syntax error, not a truncation: telling
+/// the model to "make the arguments smaller" would have it resend the same
+/// mistake in pieces.
+#[tokio::test]
+async fn malformed_but_complete_arguments_are_not_called_cut_off() {
+    for raw in [r#"{"a":1,}"#, r#"{"a":1}{"b":2}"#] {
+        let args = yoagent::provider::parse_tool_arguments(raw);
+        let (runs, requests, error_text) = run_single_marked_call(args, None).await;
+        assert_eq!(runs, 0, "{raw}: malformed arguments must not run");
+        assert_eq!(requests, 2, "{raw}: the loop continues");
+        let text = error_text.expect("answered with an error result");
+        assert!(text.contains("not valid JSON"), "{raw}: got: {text}");
+        assert!(!text.contains("cut off"), "{raw}: got: {text}");
+    }
+}

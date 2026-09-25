@@ -20,12 +20,15 @@ adheres to [Semantic Versioning](https://semver.org/).
   A **non-empty** argument buffer that does not parse is now kept as
   `{"__partial_json": "<raw text>"}` (`provider::parse_tool_arguments`), and
   `execute_single_tool` — the choke point every execution strategy shares —
-  answers such a call with an error tool result instead of running it: the
-  arguments "were cut off before they were complete (the response likely hit
-  the output token limit)… The tool was not run. Do not resend the same call
-  unchanged — make the arguments smaller". The loop continues so the model can
-  adapt; it is deliberately *not* told to retry, since the same call would be
-  cut off at the same point again. The check runs before middleware, so
+  answers such a call with an error tool result instead of running it. When
+  the text ended early, the arguments "were cut off before they were complete
+  (the response likely hit the output token limit)… The tool was not run. Do
+  not resend the same call unchanged — make the arguments smaller"; it is
+  deliberately *not* told to retry, since the same call would be cut off at the
+  same point again. Complete but malformed JSON (a trailing comma, two objects
+  run together) is answered "not valid JSON… Send the arguments as a single
+  valid JSON object" instead. Either way the loop continues so the model can
+  adapt. The check runs before middleware, so
   `ToolMiddleware` never sees such a call. `provider::unparsed_tool_arguments`
   recognizes the marker.
 

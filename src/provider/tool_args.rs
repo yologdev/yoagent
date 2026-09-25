@@ -62,7 +62,7 @@ pub(crate) fn finalize_tool_arguments(tool_name: &str, raw: &str) -> Value {
         tracing::warn!(
             tool = %tool_name,
             len = raw.len(),
-            "tool-call arguments are not a JSON object (truncated, or not an object); \
+            "tool-call arguments are not a JSON object (truncated, malformed, or not an object); \
              the call will be answered with an error instead of run"
         );
     }

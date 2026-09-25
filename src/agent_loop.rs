@@ -1550,12 +1550,23 @@ fn unparsed_arguments_tool_call(
                 parse_error = %e,
                 "tool call not executed: arguments did not parse as JSON"
             );
-            format!(
-                "The arguments for tool `{name}` were cut off before they were complete \
-                 (the response likely hit the output token limit): {e}. The tool was not run. \
-                 Do not resend the same call unchanged — make the arguments smaller (for \
-                 example, split large content across several calls)."
-            )
+            // Only an early end of input means the text was cut off. Complete
+            // but malformed JSON (a trailing comma, two objects run together)
+            // must not be answered with "make it smaller": the model would
+            // resend the same syntax error in smaller pieces.
+            if e.is_eof() {
+                format!(
+                    "The arguments for tool `{name}` were cut off before they were complete \
+                     (the response likely hit the output token limit): {e}. The tool was not \
+                     run. Do not resend the same call unchanged — make the arguments smaller \
+                     (for example, split large content across several calls)."
+                )
+            } else {
+                format!(
+                    "The arguments for tool `{name}` are not valid JSON: {e}. The tool was not \
+                     run. Send the arguments as a single valid JSON object."
+                )
+            }
         }
         Ok(v) => {
             let kind = match v {
