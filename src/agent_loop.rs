@@ -568,10 +568,16 @@ async fn run_loop(
             // Tool-forcing providers (Anthropic) deliver structured output as
             // a forced tool call — unwrap it into plain text BEFORE tool-call
             // extraction, so the loop never tries to execute the synthetic tool.
-            // A no-op for providers that constrain the reply text natively
-            // (Anthropic with `native_structured_output`, OpenAI-compat,
-            // Gemini): no tool named after the schema was offered.
-            let message = unwrap_structured_tool_call(message, config.output_schema.as_ref());
+            // Skipped on Anthropic's native path (`native_structured_output`):
+            // no synthetic tool was offered there, so a call named after the
+            // schema is a real user tool and must execute. A no-op for the
+            // other natively-constraining providers (OpenAI-compat, Gemini)
+            // unless a user tool shares the schema's name.
+            let message = if structured_output_is_tool_forced(config.model_config.as_ref()) {
+                unwrap_structured_tool_call(message, config.output_schema.as_ref())
+            } else {
+                message
+            };
 
             let agent_msg: AgentMessage = message.clone().into();
             context.messages.push(agent_msg.clone());
@@ -1190,6 +1196,22 @@ struct ToolExecutionResult {
     /// Stats of every sub-agent run these tool calls delegated to, failed
     /// ones included, for the run's `SessionStats::sub_agents`.
     sub_agent_stats: Vec<SessionStats>,
+}
+
+/// Whether a structured-output request may have been enforced by forcing a
+/// synthetic tool call, which the loop must unwrap. False only on Anthropic's
+/// native path (`AnthropicCompat::native_structured_output`), where the API
+/// constrains the reply text and offers no synthetic tool. Without a model
+/// config the provider falls back to its defaults (tool-forcing on Anthropic),
+/// so unwrapping stays on.
+fn structured_output_is_tool_forced(model_config: Option<&ModelConfig>) -> bool {
+    !model_config.is_some_and(|mc| {
+        mc.api == crate::provider::ApiProtocol::AnthropicMessages
+            && mc
+                .anthropic
+                .as_ref()
+                .is_some_and(|c| c.native_structured_output)
+    })
 }
 
 /// Convert a forced structured-output tool call back into a plain-text
