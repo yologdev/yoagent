@@ -144,10 +144,29 @@ a missing cache rate bills at the input rate).
 use yoagent::provider::{ModelConfig, PriceTable};
 
 // At startup, before building any config:
-PriceTable::install_override(PriceTable::from_path("prices.override.json")?);
+let changes = PriceTable::install_override(PriceTable::from_path("prices.override.json")?);
+for c in &changes {
+    tracing::info!("price override: {c}"); // e.g. "anthropic/claude-sonnet-5: input 2 -> 1.8"
+}
 
 let config = ModelConfig::claude_sonnet_5();   // priced from the override
 ```
+
+`install_override` is `#[must_use]`. It returns every model it prices
+differently from the layers below (the built-in data and any fetched
+layer), compared as billed.
+
+Entries replace the lower entry **whole**. The mistakes that makes easy are
+logged at `warn`, for `install_override` and for the `YOAGENT_PRICES` file:
+
+- **Provider no constructor reads.** The entry's provider is not in
+  `PRICED_PROVIDERS`, so no constructor looks it up. Only `with_prices`
+  reads such entries. A gateway name like `openrouter` or `opencode-zen`
+  is a typical case.
+- **Dropped tiers.** The entry has no context tiers, but the entry it
+  replaces had some. Every request then bills at the base rates.
+- **Unset cache rate.** The entry leaves a cache rate unset, so it bills at
+  the input rate, where the replaced entry set one.
 
 Or, with no code change:
 
@@ -156,9 +175,10 @@ YOAGENT_PRICES=/etc/myapp/prices.json ./myapp
 ```
 
 - **Constructors resolve when they run.** A config built before
-  `install_override` keeps the price it was built with. Install overrides
-  first, or re-price an existing config with
-  `config.with_prices(&PriceTable::resolved())`.
+  `install_override` or `install_fetched` keeps the price it was built with.
+  Install overrides first, or call `config.reprice()`, which repeats the
+  constructor's lookup against the current table (see
+  [Re-pricing a config](#re-pricing-a-config)).
 - `YOAGENT_PRICES` is read **once**, the first time any constructor (or
   `PriceTable::resolved` / `install_override`) touches the table. A missing,
   unreadable or invalid file does not panic: it is logged with
@@ -308,9 +328,38 @@ without installing anything. Use it to decide whether to install at all.
 
 ## Re-pricing a config
 
-`ModelConfig::with_prices(&table)` re-resolves one config against a table you
-hold, without touching any global state. A model the table lists gets its
-rates; one it does not list keeps its current cost:
+There are two ways to re-price a config you already built, and they differ
+on purpose.
+
+**`config.reprice()`** repeats the constructor's own lookup against the
+process-wide table **now**. Use it for configs built before an override or a
+fetched layer was installed.
+
+- The result is exactly what the constructor would set today, **including
+  `None`** when the model is no longer listed.
+- A `cost` you assigned yourself is replaced.
+- It acts only on configs built by a first-party constructor that looks
+  prices up: the named presets and `anthropic`, `openai`, `openai_responses`,
+  `google`, `xai`, `groq`, `deepseek`, `mistral`, `zai`, `minimax`, `qwen`,
+  `meta`.
+- Gateways, custom endpoints and configs deserialized from disk are returned
+  unchanged, because no constructor would have priced them.
+
+```rust
+let config = ModelConfig::claude_sonnet_5();  // built before the override
+let _ = PriceTable::install_override(mine);
+let config = config.reprice();                // now priced from the override
+```
+
+**`config.with_prices(&table)`** re-resolves one config against a table you
+hold, without touching any global state.
+
+- A model the table lists gets its rates.
+- A model it does not list **keeps its current cost**: `with_prices` never
+  clears a price.
+- It applies to **any** config, gateways and custom endpoints included. It
+  looks them up under their own `provider`, such as `opencode-zen`: calling
+  it is you saying what you pay there.
 
 ```rust
 let mine = PriceTable::from_json_str(r#"{"schema": 1, "providers": {
@@ -318,8 +367,6 @@ let mine = PriceTable::from_json_str(r#"{"schema": 1, "providers": {
                                       "cache_read": 0.18, "cache_write": 2.25}}}}"#)?;
 let config = ModelConfig::claude_sonnet_5().with_prices(&mine); // your negotiated rate
 ```
-
-It applies to gateways too: calling it is you saying what you pay there.
 
 ## Keeping the data honest
 

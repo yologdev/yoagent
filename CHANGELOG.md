@@ -31,7 +31,21 @@ adheres to [Semantic Versioning](https://semver.org/).
   `PRICE_SCHEMA_VERSION`.
 - **`ModelConfig::with_prices(&table)`** re-resolves a config's cost from a
   table you hold, without global state. Listed models get the table's rates;
-  unlisted ones keep theirs.
+  unlisted ones keep theirs, so it never clears a price. It applies to
+  gateways and custom endpoints too.
+- **`ModelConfig::reprice()`** repeats a first-party constructor's price
+  lookup against the current process-wide table: use it for a config built
+  before an override or fetch. It sets `None` if the model is no longer
+  listed. Gateways, custom endpoints and deserialized configs are left
+  unchanged; a private, unserialized marker records which configs a
+  constructor priced.
+- **`install_override` reports what it changed.** It returns
+  `Vec<PriceChange>` measured against the lower layers, and is
+  `#[must_use]`. It also warns, as does a `YOAGENT_PRICES` file, when an
+  entry:
+  - names a provider no constructor looks up (`PRICED_PROVIDERS`);
+  - drops the replaced entry's context tiers;
+  - leaves a cache rate unset that the replaced entry had set.
 - **Runtime price overrides.** Constructors read a process-wide table: a
   user layer over the built-in data, per `(provider, id)`. Set it with
   `PriceTable::install_override(table)` (replaces the layer;

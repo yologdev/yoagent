@@ -64,12 +64,12 @@
 //! file overrides exactly the models it lists. **Constructors resolve when
 //! they run**, so install overrides before building configs — a config built
 //! earlier keeps the price it was built with (re-price it with
-//! [`ModelConfig::with_prices`] and [`PriceTable::resolved`]).
+//! [`ModelConfig::reprice`]).
 //!
 //! See `docs/concepts/pricing.md` for the format, precedence and trust
 //! caveats.
 //!
-//! [`ModelConfig::with_prices`]: crate::provider::ModelConfig::with_prices
+//! [`ModelConfig::reprice`]: crate::provider::ModelConfig::reprice
 //!
 //! [`ModelConfig::provider`]: crate::provider::ModelConfig::provider
 //! [`ModelConfig::id`]: crate::provider::ModelConfig::id
@@ -99,6 +99,25 @@ pub const PRICE_SCHEMA_VERSION: u32 = 1;
 /// Environment variable naming a price file for the user layer, read once
 /// when the process-wide table is first used.
 pub const PRICES_ENV_VAR: &str = "YOAGENT_PRICES";
+
+/// The `ModelConfig::provider` values whose constructors look prices up:
+/// `anthropic`, `openai` (also `openai_responses`), `google`, `xai`, `groq`,
+/// `deepseek`, `mistral`, `zai`, `minimax`, `qwen`, `meta`. Entries for any
+/// other provider are read only by
+/// [`ModelConfig::with_prices`](crate::provider::ModelConfig::with_prices).
+pub const PRICED_PROVIDERS: &[&str] = &[
+    "anthropic",
+    "openai",
+    "google",
+    "xai",
+    "groq",
+    "deepseek",
+    "mistral",
+    "zai",
+    "minimax",
+    "qwen",
+    "meta",
+];
 
 /// The built-in data, embedded at compile time.
 const BUILTIN_JSON: &str = include_str!("prices.json");
@@ -538,6 +557,59 @@ fn layers() -> &'static RwLock<Layers> {
     })
 }
 
+/// The mistakes an override can make silently, as messages (see
+/// [`PriceTable::install_override`]).
+fn override_warnings(table: &PriceTable, lower: &PriceTable) -> Vec<String> {
+    let mut out = Vec::new();
+    let unlooked: Vec<&str> = table
+        .entries
+        .keys()
+        .map(String::as_str)
+        .filter(|p| !PRICED_PROVIDERS.contains(p))
+        .collect();
+    if !unlooked.is_empty() {
+        out.push(format!(
+            "entries for provider(s) {unlooked:?} are never looked up by a constructor — only \
+             ModelConfig::with_prices reads them (constructors that look prices up: \
+             {PRICED_PROVIDERS:?})"
+        ));
+    }
+    for (provider, model, entry) in table.iter() {
+        let Some(old) = lower.entry(provider, model) else {
+            continue;
+        };
+        let (old, new) = (&old.cost, &entry.cost);
+        if !old.context_tiers.is_empty() && new.context_tiers.is_empty() {
+            out.push(format!(
+                "{provider}/{model} drops the {} context tier(s) of the entry it replaces; \
+                 every request now bills at the base rates",
+                old.context_tiers.len()
+            ));
+        }
+        for (name, was, now) in [
+            (
+                "cache_read",
+                old.cache_read_per_million,
+                new.cache_read_per_million,
+            ),
+            (
+                "cache_write",
+                old.cache_write_per_million,
+                new.cache_write_per_million,
+            ),
+        ] {
+            if was != 0.0 && now == 0.0 {
+                out.push(format!(
+                    "{provider}/{model} leaves {name} unset, so it bills at the input rate \
+                     ({}); the entry it replaces set {was}",
+                    new.input_per_million
+                ));
+            }
+        }
+    }
+    out
+}
+
 /// What happened to [`PRICES_ENV_VAR`] when the layers were initialised.
 type EnvStatus = Option<Result<usize, Arc<PriceError>>>;
 
@@ -564,6 +636,9 @@ fn env_override() -> Option<PriceTable> {
                 entries = table.len(),
                 "yoagent prices: loaded {PRICES_ENV_VAR} override"
             );
+            for warning in override_warnings(&table, builtin_ref()) {
+                tracing::warn!("yoagent prices: {PRICES_ENV_VAR}: {warning}");
+            }
             (Some(Ok(table.len())), Some(table))
         }
         Err(e) => {
@@ -593,25 +668,52 @@ impl PriceTable {
     /// Install `table` as the process-wide **user layer**, replacing any
     /// previous override (including one loaded from `YOAGENT_PRICES`).
     ///
-    /// Its entries take precedence over the fetched layer and the built-in data per
-    /// `(provider, id)`; models it does not list keep their lower-layer price.
-    /// Affects configs built **after** this call — constructors resolve when
-    /// they run.
+    /// Its entries take precedence over the fetched layer and the built-in
+    /// data per `(provider, id)`; models it does not list keep their
+    /// lower-layer price. Affects configs built **after** this call —
+    /// constructors resolve when they run; re-price older ones with
+    /// [`ModelConfig::reprice`](crate::provider::ModelConfig::reprice).
+    ///
+    /// Returns every model it prices differently from the layers below
+    /// (built-in and fetched), as billed. An entry replaces the lower entry
+    /// **whole**, so a few mistakes are logged at `warn` rather than left
+    /// silent:
+    /// - an entry for a provider no constructor looks up ([`PRICED_PROVIDERS`])
+    ///   — only [`ModelConfig::with_prices`](crate::provider::ModelConfig::with_prices)
+    ///   will ever read it;
+    /// - an entry that drops the context tiers the replaced entry had;
+    /// - an entry that leaves a cache rate unset (billing at the input rate)
+    ///   where the replaced entry set one.
     ///
     /// ```
     /// # use yoagent::provider::{ModelConfig, PriceTable};
+    /// # PriceTable::clear_override(); // ignore a developer's YOAGENT_PRICES
     /// let mine = PriceTable::from_json_str(r#"{"schema": 1, "providers": {
     ///     "deepseek": {"deepseek-flash": {"input": 0.3, "output": 1.2, "cache_read": 0.006}}}}"#)?;
-    /// PriceTable::install_override(mine);
+    /// let changes = PriceTable::install_override(mine);
+    /// assert_eq!(changes.len(), 1); // a model the built-in data did not price
     /// let config = ModelConfig::deepseek("deepseek-flash", "DeepSeek Flash");
     /// assert_eq!(config.cost.unwrap().input_per_million, 0.3);
     /// # PriceTable::clear_override();
     /// # Ok::<(), yoagent::provider::PriceError>(())
     /// ```
-    pub fn install_override(table: PriceTable) {
+    #[must_use = "the returned changes are how you see what the override changed"]
+    pub fn install_override(table: PriceTable) -> Vec<PriceChange> {
+        let lower = {
+            let layers = read_layers();
+            match &layers.fetched {
+                Some(fetched) => builtin_ref().layered(fetched),
+                None => builtin_ref().clone(),
+            }
+        };
+        let changes = table.changes_from(&lower);
+        for warning in override_warnings(&table, &lower) {
+            tracing::warn!("yoagent prices: override: {warning}");
+        }
         let mut layers = write_layers();
         layers.user = Some(table);
         layers.rebuild();
+        changes
     }
 
     /// Remove the user layer, including one loaded from `YOAGENT_PRICES`

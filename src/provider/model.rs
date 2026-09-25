@@ -1035,6 +1035,11 @@ pub struct ModelConfig {
         deserialize_with = "deserialize_cost"
     )]
     pub cost: Option<CostConfig>,
+    /// Built by a first-party constructor that looks prices up (see
+    /// [`reprice`](Self::reprice)). Not persisted: a deserialized config was
+    /// not built here, so `reprice` leaves it alone.
+    #[serde(skip)]
+    list_priced: bool,
     /// Additional headers to send with requests.
     ///
     /// May carry credentials (`Authorization`, `x-api-key`). `Debug` prints
@@ -1123,21 +1128,65 @@ impl ModelConfig {
     /// the first-party constructors only — a gateway or custom endpoint does
     /// not bill the vendor's list price.
     fn priced(mut self) -> Self {
+        debug_assert!(
+            super::prices::PRICED_PROVIDERS.contains(&self.provider.as_str()),
+            "{} looks prices up but is not in PRICED_PROVIDERS",
+            self.provider
+        );
         self.cost = super::prices::resolved_cost(&self.provider, &self.id);
+        self.list_priced = true;
         self
+    }
+
+    /// Repeat the constructor's price lookup against the process-wide table
+    /// **now** — for a config built before
+    /// [`PriceTable::install_override`](super::PriceTable::install_override)
+    /// or [`PriceTable::install_fetched`](super::PriceTable::install_fetched).
+    ///
+    /// Only for configs built by a first-party constructor that looks prices
+    /// up ([`anthropic`](Self::anthropic), [`openai`](Self::openai), the
+    /// named presets, …): `cost` becomes exactly what that constructor would
+    /// set today, **including `None`** when the model is no longer listed,
+    /// and a `cost` you assigned yourself is replaced. Any other config —
+    /// gateways, custom endpoints, a config deserialized from disk — is
+    /// returned unchanged, since no constructor would have priced it.
+    ///
+    /// ```
+    /// # use yoagent::provider::{ModelConfig, PriceTable};
+    /// # PriceTable::clear_override(); // ignore a developer's YOAGENT_PRICES
+    /// let config = ModelConfig::claude_sonnet_5(); // built early
+    /// let _ = PriceTable::install_override(PriceTable::from_json_str(
+    ///     r#"{"schema": 1, "providers": {"anthropic": {"claude-sonnet-5": {"input": 1.8, "output": 9.0}}}}"#,
+    /// )?);
+    /// assert_eq!(config.cost.as_ref().unwrap().input_per_million, 2.0);
+    /// let config = config.reprice();
+    /// assert_eq!(config.cost.unwrap().input_per_million, 1.8);
+    /// # PriceTable::clear_override();
+    /// # Ok::<(), yoagent::provider::PriceError>(())
+    /// ```
+    pub fn reprice(self) -> Self {
+        if self.list_priced {
+            self.priced()
+        } else {
+            self
+        }
     }
 
     /// Re-resolve `cost` from `table` for this config's `(provider, id)`.
     ///
     /// When `table` lists the model its rates replace `cost`; when it does
-    /// not, `cost` is left as it is — so a partial table overrides exactly
-    /// what it contains, as [`PriceTable::layered`] does. To make a table the
-    /// whole authority, start from [`PriceTable::builtin`] and layer yours on
-    /// top.
+    /// not, `cost` is left as it is. It **never clears a price**, so a
+    /// partial table overrides exactly what it contains, as
+    /// [`PriceTable::layered`] does. To make a table the whole authority,
+    /// start from [`PriceTable::builtin`] and layer yours on top.
     ///
     /// Unlike the process-wide overrides this touches no global state, and
-    /// it applies to any config, gateways included: calling it is the
-    /// caller saying "these are the prices I pay here".
+    /// it **applies to any config, gateways and custom endpoints included**
+    /// (looked up under their own `provider`, e.g. `opencode-zen`): calling
+    /// it is the caller saying "these are the prices I pay here". To repeat
+    /// a constructor's own lookup against the process-wide table instead —
+    /// which can clear a price, and never touches gateways — use
+    /// [`reprice`](Self::reprice).
     ///
     /// ```
     /// # use yoagent::provider::{ModelConfig, PriceTable};
@@ -1181,6 +1230,7 @@ impl ModelConfig {
             context_window: 128_000,
             max_tokens: 16_000,
             cost: None,
+            list_priced: false,
             headers: HashMap::new(),
             google: None,
             compat: None,
@@ -1200,6 +1250,7 @@ impl ModelConfig {
             context_window: 200_000,
             max_tokens: 16_000,
             cost: None, // set by `priced`
+            list_priced: false,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -1526,6 +1577,7 @@ impl ModelConfig {
             context_window: 128_000,
             max_tokens: 4096,
             cost: None, // set by `priced`
+            list_priced: false,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -1562,6 +1614,7 @@ impl ModelConfig {
             context_window: 128_000,
             max_tokens: 16_000,
             cost: None, // set by `priced`
+            list_priced: false,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -1583,6 +1636,7 @@ impl ModelConfig {
             context_window: 128_000,
             max_tokens: 4096,
             cost: None,
+            list_priced: false,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -1700,6 +1754,7 @@ impl ModelConfig {
             context_window: 128_000,
             max_tokens: 16_000,
             cost: None,
+            list_priced: false,
             headers: HashMap::new(),
             google: None,
             compat,
@@ -1725,6 +1780,7 @@ impl ModelConfig {
             context_window: 128_000,
             max_tokens: 4096,
             cost: None,
+            list_priced: false,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -1747,6 +1803,7 @@ impl ModelConfig {
             context_window: 128_000,
             max_tokens: 4096,
             cost: None,
+            list_priced: false,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -1768,6 +1825,7 @@ impl ModelConfig {
             context_window: 128_000,
             max_tokens: 4096,
             cost: None, // set by `priced`
+            list_priced: false,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -1807,6 +1865,7 @@ impl ModelConfig {
             context_window: 1_048_576,
             max_tokens: 131_072,
             cost: None, // set by `priced`
+            list_priced: false,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -1830,6 +1889,7 @@ impl ModelConfig {
             context_window: 1_000_000,
             max_tokens: 4096,
             cost: None, // set by `priced`
+            list_priced: false,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -1852,6 +1912,7 @@ impl ModelConfig {
             context_window: 128_000,
             max_tokens: 4096,
             cost: None, // set by `priced`
+            list_priced: false,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -1874,6 +1935,7 @@ impl ModelConfig {
             context_window: 131_072,
             max_tokens: 4096,
             cost: None, // set by `priced`
+            list_priced: false,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -1896,6 +1958,7 @@ impl ModelConfig {
             context_window: 128_000,
             max_tokens: 4096,
             cost: None, // set by `priced`
+            list_priced: false,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -1922,6 +1985,7 @@ impl ModelConfig {
             context_window: 1_000_000,
             max_tokens: 384_000,
             cost: None, // set by `priced`
+            list_priced: false,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -1944,6 +2008,7 @@ impl ModelConfig {
             context_window: 128_000,
             max_tokens: 4096,
             cost: None, // set by `priced`
+            list_priced: false,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -1964,6 +2029,7 @@ impl ModelConfig {
             context_window: 1_000_000,
             max_tokens: 8192,
             cost: None, // set by `priced`
+            list_priced: false,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -2757,6 +2823,45 @@ mod tests {
                 mc.id,
                 mc.provider
             );
+        }
+    }
+
+    /// `PRICED_PROVIDERS` is exactly the set of providers whose constructors
+    /// look prices up (the override warning relies on it). `priced()` also
+    /// debug-asserts membership, so a new pricing constructor cannot miss it.
+    #[test]
+    fn priced_providers_match_the_constructors() {
+        use crate::provider::PRICED_PROVIDERS;
+        let looked_up = [
+            ModelConfig::anthropic("m", "M"),
+            ModelConfig::openai("m", "M"),
+            ModelConfig::openai_responses("m", "M"),
+            ModelConfig::google("m", "M"),
+            ModelConfig::xai("m", "M"),
+            ModelConfig::groq("m", "M"),
+            ModelConfig::deepseek("m", "M"),
+            ModelConfig::mistral("m", "M"),
+            ModelConfig::zai("m", "M"),
+            ModelConfig::minimax("m", "M"),
+            ModelConfig::qwen("m", "M"),
+            ModelConfig::meta("m", "M"),
+        ];
+        let mut providers: Vec<&str> = looked_up.iter().map(|c| c.provider.as_str()).collect();
+        providers.sort();
+        providers.dedup();
+        let mut expected = PRICED_PROVIDERS.to_vec();
+        expected.sort();
+        assert_eq!(providers, expected);
+        assert!(looked_up.iter().all(|c| c.list_priced));
+        for gateway in [
+            ModelConfig::opencode_zen("m"),
+            ModelConfig::opencode_go("m"),
+            ModelConfig::local("http://h", "m"),
+            ModelConfig::ollama("http://h", "m"),
+            ModelConfig::mock(),
+        ] {
+            assert!(!PRICED_PROVIDERS.contains(&gateway.provider.as_str()));
+            assert!(!gateway.list_priced);
         }
     }
 

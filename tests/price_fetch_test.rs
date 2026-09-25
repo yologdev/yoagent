@@ -1,10 +1,10 @@
 //! Opt-in live price sources: models.dev mapping, our-format URLs, timeouts,
 //! the cache helper, and the fetched layer's place in the precedence order.
 //!
-//! Some tests install process-wide layers, so they serialize on `LOCK` and
-//! restore what they touched.
+//! Every test serializes on `LOCK` (see there) and restores the layers it
+//! touched.
 
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing_subscriber::layer::SubscriberExt;
 use wiremock::matchers::{method, path};
@@ -19,10 +19,21 @@ use yoagent::provider::{
 /// cost (skipped), and `alibaba` (our `qwen`).
 const MODELS_DEV: &str = include_str!("fixtures/models_dev_slice.json");
 
-static LOCK: Mutex<()> = Mutex::new(());
+/// Every test in this binary holds this lock. Some install process-wide
+/// layers; others assert on `tracing` output, and a callsite first hit on
+/// another thread while a test's scoped subscriber is being set up can miss
+/// the event, so nothing here runs concurrently.
+static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-fn exclusive() -> MutexGuard<'static, ()> {
-    let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+fn exclusive() -> tokio::sync::MutexGuard<'static, ()> {
+    let guard = LOCK.blocking_lock();
+    PriceTable::clear_override();
+    PriceTable::clear_fetched();
+    guard
+}
+
+async fn serial() -> tokio::sync::MutexGuard<'static, ()> {
+    let guard = LOCK.lock().await;
     PriceTable::clear_override();
     PriceTable::clear_fetched();
     guard
@@ -44,6 +55,7 @@ fn ok(body: &str) -> ResponseTemplate {
 
 #[test]
 fn models_dev_fixture_maps_into_our_schema() {
+    let _g = exclusive();
     let t = PriceTable::from_models_dev_json(MODELS_DEV).unwrap();
 
     // Flat, with all four rates.
@@ -102,6 +114,7 @@ fn models_dev_fixture_maps_into_our_schema() {
 
 #[test]
 fn a_changed_models_dev_envelope_is_an_error_not_an_empty_table() {
+    let _g = exclusive();
     for body in ["[]", "{}", r#"{"anthropic": {"data": {}}}"#, "null"] {
         let e = PriceTable::from_models_dev_json(body).unwrap_err();
         assert!(matches!(e, PriceError::ModelsDev(_)), "{body}: {e}");
@@ -110,6 +123,7 @@ fn a_changed_models_dev_envelope_is_an_error_not_an_empty_table() {
 
 #[tokio::test]
 async fn fetches_models_dev_format_from_a_url() {
+    let _g = serial().await;
     let server = serve("/api.json", ok(MODELS_DEV)).await;
     let source = PriceSource::ModelsDevAt(format!("{}/api.json", server.uri()));
     let t = PriceTable::fetch(&source).await.unwrap();
@@ -127,6 +141,7 @@ async fn fetches_models_dev_format_from_a_url() {
 
 #[tokio::test]
 async fn fetches_our_format_from_a_url() {
+    let _g = serial().await;
     let body = r#"{"schema": 1, "providers": {"anthropic": {"claude-sonnet-5": {"input": 1.5, "output": 7.5}}}}"#;
     let server = serve("/prices.json", ok(body)).await;
     let t = PriceTable::fetch(&PriceSource::Url(format!("{}/prices.json", server.uri())))
@@ -143,6 +158,7 @@ async fn fetches_our_format_from_a_url() {
 
 #[tokio::test]
 async fn http_errors_and_timeouts_are_reported() {
+    let _g = serial().await;
     let down = serve("/prices.json", ResponseTemplate::new(503)).await;
     let e = PriceTable::fetch(&PriceSource::Url(format!("{}/prices.json", down.uri())))
         .await
@@ -167,6 +183,7 @@ async fn http_errors_and_timeouts_are_reported() {
 
 #[test]
 fn source_urls() {
+    let _g = exclusive();
     assert_eq!(PriceSource::ModelsDev.url(), "https://models.dev/api.json");
     assert_eq!(
         PriceSource::YoagentMain.url(),
@@ -178,6 +195,7 @@ fn source_urls() {
 /// so it must parse as its format.
 #[test]
 fn the_checked_in_file_is_what_yoagent_main_serves() {
+    let _g = exclusive();
     let text = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/provider/prices.json"),
     )
@@ -192,6 +210,7 @@ const FETCHED: &str = r#"{"schema": 1, "providers": {"anthropic": {"claude-sonne
 
 #[tokio::test]
 async fn a_fresh_cache_is_used_without_a_request() {
+    let _g = serial().await;
     let dir = tempfile::tempdir().unwrap();
     let cache = dir.path().join("prices.json");
     let cached = PriceTable::from_json_str(FETCHED).unwrap();
@@ -212,6 +231,7 @@ async fn a_fresh_cache_is_used_without_a_request() {
 
 #[tokio::test]
 async fn an_expired_cache_is_refetched_and_rewritten() {
+    let _g = serial().await;
     let dir = tempfile::tempdir().unwrap();
     let cache = dir.path().join("nested/dir/prices.json");
     std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
@@ -234,6 +254,7 @@ async fn an_expired_cache_is_refetched_and_rewritten() {
 
 #[tokio::test]
 async fn offline_falls_back_to_the_stale_cache_then_builtin() {
+    let _g = serial().await;
     let dir = tempfile::tempdir().unwrap();
     let cache = dir.path().join("prices.json");
     let down = serve("/prices.json", ResponseTemplate::new(500)).await;
@@ -294,6 +315,7 @@ async fn offline_falls_back_to_the_stale_cache_then_builtin() {
 /// stale fallback only when `max_stale` is unbounded.
 #[tokio::test]
 async fn a_future_mtime_is_treated_as_expired() {
+    let _g = serial().await;
     let dir = tempfile::tempdir().unwrap();
     let cache = dir.path().join("prices.json");
     std::fs::write(
@@ -335,6 +357,7 @@ async fn a_future_mtime_is_treated_as_expired() {
 /// A failed cache write does not lose the fetched table, and is reported.
 #[tokio::test]
 async fn a_failed_cache_write_is_reported() {
+    let _g = serial().await;
     let dir = tempfile::tempdir().unwrap();
     // The cache's parent is a file, so the directory cannot be created.
     let blocker = dir.path().join("not-a-dir");
@@ -358,6 +381,7 @@ async fn a_failed_cache_write_is_reported() {
 
 #[test]
 fn the_models_dev_report_says_what_was_skipped_and_why() {
+    let _g = exclusive();
     let (table, skipped) = PriceTable::from_models_dev_json_report(MODELS_DEV).unwrap();
     assert_eq!(table.len(), 11);
     let reason = |p: &str, m: &str| {
@@ -379,6 +403,7 @@ fn the_models_dev_report_says_what_was_skipped_and_why() {
 /// `qwen`.
 #[test]
 fn models_dev_provider_keys_are_renamed() {
+    let _g = exclusive();
     let doc = r#"{
         "opencode": {"models": {"claude-sonnet-5": {"cost": {"input": 2, "output": 10}}}},
         "alibaba": {"models": {"qwen-flash": {"cost": {"input": 0.05, "output": 0.4}}}}
@@ -402,6 +427,7 @@ fn models_dev_provider_keys_are_renamed() {
 /// named in a warning — it silently keeps its built-in price otherwise.
 #[test]
 fn skipping_a_builtin_model_is_named_in_a_warning() {
+    let _g = exclusive();
     let doc = r#"{"anthropic": {"models": {
         "claude-opus-5": {"cost": {"input": 5, "output": 25, "per_request": 0.01}},
         "claude-sonnet-5": {"cost": {"input": 2, "output": 10}}}}}"#;
@@ -545,7 +571,7 @@ fn precedence_user_over_fetched_over_builtin() {
     assert_eq!(ModelConfig::claude_opus_5().cost, builtin_opus);
 
     // User beats fetched, for what it lists.
-    PriceTable::install_override(
+    let _ = PriceTable::install_override(
         PriceTable::from_json_str(
             r#"{"schema": 1, "providers": {"anthropic": {"claude-sonnet-5": {"input": 1.0, "output": 5.0}}}}"#,
         )
@@ -616,6 +642,7 @@ fn an_agreeing_fetch_logs_no_warning() {
 /// yoagent added (without a schema bump) must not break an older client.
 #[tokio::test]
 async fn remote_and_cached_tables_ignore_unknown_fields() {
+    let _g = serial().await;
     let newer = r#"{"schema": 1, "generated_at": "2027-01-01", "providers": {"anthropic": {
         "claude-sonnet-5": {"input": 1.5, "output": 7.5, "deprecated": false}}}}"#;
     // Positive control: hand-written input rejects exactly this document.
@@ -660,6 +687,7 @@ async fn cache_warnings(source: &PriceSource, cache: &std::path::Path) -> usize 
 /// (only a missing cache is silent).
 #[tokio::test]
 async fn an_unreadable_cache_is_logged() {
+    let _g = serial().await;
     let dir = tempfile::tempdir().unwrap();
     let down = serve("/prices.json", ResponseTemplate::new(500)).await;
     let source = PriceSource::Url(format!("{}/prices.json", down.uri()));

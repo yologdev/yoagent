@@ -55,7 +55,7 @@ fn env_var_file_overrides_what_it_lists_and_is_read_once() {
     ));
 
     // install_override replaces the env-loaded layer.
-    PriceTable::install_override(PriceTable::new());
+    let _ = PriceTable::install_override(PriceTable::new());
     assert_eq!(
         ModelConfig::claude_haiku_4_5().cost,
         PriceTable::builtin().cost("anthropic", "claude-haiku-4-5")
