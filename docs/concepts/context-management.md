@@ -108,7 +108,7 @@ When you set a `ModelConfig` but don't explicitly set a `ContextConfig`, the com
 
 ```rust
 // MiniMax with 1M context → compacts at 800K (no manual config needed)
-let agent = Agent::from_config(ModelConfig::minimax("MiniMax-Text-01", "MiniMax Text 01"));
+let agent = Agent::from_config(ModelConfig::minimax("MiniMax-M3", "MiniMax M3"));
 
 // Anthropic with 200K context → compacts at 160K
 let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"));

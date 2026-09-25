@@ -82,9 +82,9 @@ impl std::fmt::Display for ApiProtocol {
 /// // Generic constructors carry no price (`cost: None`). `get_or_insert_with`
 /// // works here too — `if let Some(c) = config.cost.as_mut()` would silently
 /// // do nothing — but set every rate you pay, since the rest start at zero:
-/// let mut deepseek = ModelConfig::deepseek("deepseek-v4-flash", "DeepSeek V4 Flash");
+/// let mut deepseek = ModelConfig::deepseek("deepseek-flash", "DeepSeek Flash");
 /// assert!(deepseek.cost.is_none());
-/// deepseek.cost = Some(CostConfig::new(0.15, 0.60).with_cache_read(0.015));
+/// deepseek.cost = Some(CostConfig::new(0.15, 0.60).with_cache_read(0.003));
 /// assert_eq!(deepseek.cost.as_ref().unwrap().input_per_million, 0.15);
 ///
 /// // A model you run for free is `Some` with zero rates, and costs $0:
@@ -1012,7 +1012,8 @@ impl ModelConfig {
     ///
     /// Zen serves each model family over a different protocol; the protocol is
     /// selected from the model id:
-    /// - `gpt-*` → OpenAI Responses API (pair with `OpenAiResponsesProvider`)
+    /// - `gpt-*`, `grok-*`, `muse-spark-*` → OpenAI Responses API
+    ///   (pair with `OpenAiResponsesProvider`)
     /// - `claude-*`, `qwen*` → Anthropic Messages API (pair with `AnthropicProvider`)
     /// - everything else (DeepSeek, MiniMax, GLM, Kimi, ...) → Chat Completions
     ///   (pair with `OpenAiCompatProvider`)
@@ -1021,7 +1022,7 @@ impl ModelConfig {
     /// endpoint shape yoagent does not target. A `gemini-*` id falls through to
     /// Chat Completions (with a warning) and will likely fail at request time.
     ///
-    /// The routing mirrors the Zen endpoint tables as of mid-2026; if a model
+    /// The routing mirrors the Zen endpoint table as of September 2026; if a model
     /// errors, verify its protocol against `https://opencode.ai/zen/v1/models`.
     ///
     /// Context window and max output default conservatively (128K / 16K);
@@ -1035,9 +1036,13 @@ impl ModelConfig {
     /// open models.
     ///
     /// Protocol is selected from the model id:
+    /// - `gpt-*`, `grok-*`, `muse-spark-*` → OpenAI Responses API
+    ///   (pair with `OpenAiResponsesProvider`)
     /// - `qwen*`, `minimax-*` → Anthropic Messages API (pair with `AnthropicProvider`)
     /// - everything else (GLM, Kimi, DeepSeek, MiMo, ...) → Chat Completions
     ///   (pair with `OpenAiCompatProvider`)
+    ///
+    /// The routing mirrors the Go endpoint table as of September 2026.
     pub fn opencode_go(model_id: impl Into<String>) -> Self {
         Self::opencode(model_id.into(), OpenCodeGateway::Go)
     }
@@ -1067,7 +1072,11 @@ impl ModelConfig {
                     bearer_auth: true,
                 }),
             )
-        } else if gateway == OpenCodeGateway::Zen && lower.starts_with("gpt-") {
+        } else if lower.starts_with("gpt-")
+            || lower.starts_with("grok-")
+            || lower.starts_with("muse-spark-")
+        {
+            // Both gateways serve these families on `/responses` only.
             (ApiProtocol::OpenAiResponses, true, None, None)
         } else {
             (
@@ -1195,14 +1204,15 @@ impl ModelConfig {
 
     /// Create a new MiniMax model config.
     ///
-    /// Models: `MiniMax-Text-01`, `MiniMax-M1`, etc.
+    /// Models: `MiniMax-M3`, `MiniMax-M2.7`, etc. Served from
+    /// `https://api.minimax.io/v1`.
     pub fn minimax(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             id: id.into(),
             name: name.into(),
             api: ApiProtocol::OpenAiCompletions,
             provider: "minimax".into(),
-            base_url: "https://api.minimaxi.chat/v1".into(),
+            base_url: "https://api.minimax.io/v1".into(),
             reasoning: false,
             context_window: 1_000_000,
             max_tokens: 4096,
@@ -1235,7 +1245,7 @@ impl ModelConfig {
 
     /// Create a new xAI (Grok) model config.
     ///
-    /// Models: `grok-4-1-fast`, `grok-4-1`, etc.
+    /// Models: `grok-4.7`, `grok-4.6`, etc.
     pub fn xai(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -1255,7 +1265,7 @@ impl ModelConfig {
 
     /// Create a new Groq model config.
     ///
-    /// Models: `llama-3.3-70b-versatile`, `mixtral-8x7b-32768`, etc.
+    /// Models: `openai/gpt-oss-120b`, `openai/gpt-oss-20b`, etc.
     pub fn groq(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -1275,10 +1285,11 @@ impl ModelConfig {
 
     /// Create a new DeepSeek model config.
     ///
-    /// Models: `deepseek-v4-flash`, `deepseek-v4-pro`, etc.
+    /// Models: `deepseek-flash` (V4.1 Flash), `deepseek-v4-pro`.
     ///
-    /// Legacy aliases `deepseek-chat` and `deepseek-reasoner` are accepted by
-    /// DeepSeek for now, but are scheduled for deprecation on 2026-07-24.
+    /// The legacy names `deepseek-chat` and `deepseek-reasoner` were
+    /// discontinued on 2026-07-24. `deepseek-v4-flash` is still accepted but
+    /// served by V4.1 Flash; prefer `deepseek-flash`.
     pub fn deepseek(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -1461,6 +1472,15 @@ mod tests {
         assert_eq!(gpt.provider, "opencode-zen");
         assert_eq!(gpt.base_url, "https://opencode.ai/zen/v1");
 
+        // Grok and Muse Spark models are also Responses-only on Zen
+        for id in ["grok-4.7", "grok-build-0.1", "muse-spark-1.3"] {
+            let config = ModelConfig::opencode_zen(id);
+            assert_eq!(config.api, ApiProtocol::OpenAiResponses, "{id}");
+            assert!(config.reasoning, "{id}");
+            assert!(config.compat.is_none(), "{id}");
+            assert!(config.anthropic.is_none(), "{id}");
+        }
+
         // Claude and Qwen models → Anthropic Messages with Bearer auth
         for id in ["claude-sonnet-5", "qwen3.7-max"] {
             let config = ModelConfig::opencode_zen(id);
@@ -1479,6 +1499,20 @@ mod tests {
 
     #[test]
     fn test_opencode_go_protocol_selection() {
+        // GPT, Grok and Muse Spark models → Responses API
+        for id in [
+            "gpt-6-luna",
+            "gpt-5.6-luna",
+            "grok-4.7",
+            "grok-4.6",
+            "muse-spark-1.3-contributor",
+        ] {
+            let config = ModelConfig::opencode_go(id);
+            assert_eq!(config.api, ApiProtocol::OpenAiResponses, "{id}");
+            assert_eq!(config.base_url, "https://opencode.ai/zen/go/v1");
+            assert!(config.compat.is_none(), "{id}");
+        }
+
         // Qwen and MiniMax models → Anthropic Messages with Bearer auth
         for id in ["qwen3.7-max", "minimax-m3"] {
             let config = ModelConfig::opencode_go(id);
@@ -1487,7 +1521,7 @@ mod tests {
             assert!(config.anthropic.expect("anthropic compat set").bearer_auth);
         }
 
-        // Everything else → Chat Completions (Go has no GPT models)
+        // Everything else → Chat Completions
         for id in [
             "glm-5.2",
             "kimi-k2.7-code",
@@ -1649,10 +1683,10 @@ mod tests {
 
     #[test]
     fn test_model_config_minimax() {
-        let config = ModelConfig::minimax("MiniMax-Text-01", "MiniMax Text 01");
+        let config = ModelConfig::minimax("MiniMax-M3", "MiniMax M3");
         assert_eq!(config.api, ApiProtocol::OpenAiCompletions);
         assert_eq!(config.provider, "minimax");
-        assert_eq!(config.base_url, "https://api.minimaxi.chat/v1");
+        assert_eq!(config.base_url, "https://api.minimax.io/v1");
         assert_eq!(config.context_window, 1_000_000);
         assert!(config.compat.is_some());
     }

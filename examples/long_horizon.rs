@@ -247,14 +247,14 @@ fn transcript_is_well_formed(messages: &[AgentMessage]) -> Result<(), String> {
 /// model and demonstrating the anti-pattern this example warns about.
 fn summarizer() -> ModelConfig {
     match std::env::var("SMOKE_MODEL").ok().as_deref() {
-        Some("deepseek") => ModelConfig::deepseek("deepseek-chat", "DeepSeek Chat"),
+        Some("deepseek") => ModelConfig::deepseek("deepseek-flash", "DeepSeek Flash"),
         _ => ModelConfig::claude_haiku_4_5(),
     }
 }
 
 fn model() -> ModelConfig {
     match std::env::var("SMOKE_MODEL").ok().as_deref() {
-        Some("deepseek") => ModelConfig::deepseek("deepseek-chat", "DeepSeek Chat"),
+        Some("deepseek") => ModelConfig::deepseek("deepseek-flash", "DeepSeek Flash"),
         Some("gpt") => ModelConfig::openai("gpt-5.5", "GPT-5.5"),
         _ => ModelConfig::claude_sonnet_5(),
     }

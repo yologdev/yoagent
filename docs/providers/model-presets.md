@@ -25,7 +25,7 @@ Use a preset when the provider is listed here. Use a custom `ModelConfig` when y
 | `ModelConfig::groq(id, name)` | Groq | `OpenAiCompletions` | `https://api.groq.com/openai/v1` | 128K | 4,096 |
 | `ModelConfig::deepseek(id, name)` | DeepSeek | `OpenAiCompletions` | `https://api.deepseek.com` | 1M | 384K |
 | `ModelConfig::mistral(id, name)` | Mistral | `OpenAiCompletions` | `https://api.mistral.ai/v1` | 128K | 4,096 |
-| `ModelConfig::minimax(id, name)` | MiniMax | `OpenAiCompletions` | `https://api.minimaxi.chat/v1` | 1M | 4,096 |
+| `ModelConfig::minimax(id, name)` | MiniMax | `OpenAiCompletions` | `https://api.minimax.io/v1` | 1M | 4,096 |
 | `ModelConfig::meta(id, name)` | Meta (Muse Spark) — US-only preview as of 2026-07 | `OpenAiCompletions` | `https://api.meta.ai/v1` | 1M | 131,072 |
 | `ModelConfig::zai(id, name)` | Z.ai | `OpenAiCompletions` | `https://api.z.ai/api/paas/v4` | 128K | 4,096 |
 | `ModelConfig::qwen(id, name)` | Qwen / DashScope | `OpenAiCompletions` | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` | 128K | 4,096 |
@@ -45,8 +45,8 @@ These constructors all use `OpenAiCompatProvider`:
 use yoagent::provider::ModelConfig;
 
 let agent = Agent::from_config(ModelConfig::deepseek(
-    "deepseek-v4-flash",
-    "DeepSeek V4 Flash",
+    "deepseek-flash",
+    "DeepSeek Flash",
 ));
 ```
 
@@ -110,21 +110,14 @@ let qwen_ollama = ModelConfig::openai_compat(
 
 ## DeepSeek Models
 
-Use the current DeepSeek API model IDs by default:
+Use the current DeepSeek API model IDs:
 
 ```rust
-let flash = ModelConfig::deepseek("deepseek-v4-flash", "DeepSeek V4 Flash");
+let flash = ModelConfig::deepseek("deepseek-flash", "DeepSeek Flash"); // V4.1 Flash
 let pro = ModelConfig::deepseek("deepseek-v4-pro", "DeepSeek V4 Pro");
 ```
 
-Legacy DeepSeek aliases still work because `ModelConfig::deepseek` passes the model ID through unchanged:
-
-```rust
-let chat = ModelConfig::deepseek("deepseek-chat", "DeepSeek Chat");
-let reasoner = ModelConfig::deepseek("deepseek-reasoner", "DeepSeek Reasoner");
-```
-
-DeepSeek documents `deepseek-chat` and `deepseek-reasoner` as compatibility aliases scheduled for deprecation on 2026-07-24. In DeepSeek's current API, `deepseek-chat` maps to the non-thinking mode of `deepseek-v4-flash`, while `deepseek-reasoner` maps to the thinking mode of `deepseek-v4-flash`.
+The legacy names `deepseek-chat` and `deepseek-reasoner` were discontinued on 2026-07-24; requests using them fail. `deepseek-v4-flash` (and `deepseek-v4-flash-vision-exp`) are still accepted, but the V4 Flash model behind them is retired — DeepSeek serves those requests with V4.1 Flash at the Flash price. Prefer `deepseek-flash`.
 
 yoagent also sends DeepSeek's current request shape:
 
@@ -133,17 +126,12 @@ yoagent also sends DeepSeek's current request shape:
 - `reasoning_effort` when `ThinkingLevel` is not `Off`
 - DeepSeek cache hit/miss usage fields when present
 
-For legacy aliases, set `ThinkingLevel` to match the alias behavior:
+Both models default to thinking mode. What used to be `deepseek-chat` is the same model with thinking off:
 
 ```rust
-let chat_agent = Agent::from_config(ModelConfig::deepseek("deepseek-chat", "DeepSeek Chat"))
+let non_thinking = Agent::from_config(ModelConfig::deepseek("deepseek-flash", "DeepSeek Flash"))
     .with_thinking(ThinkingLevel::Off);
-
-let reasoner_agent = Agent::from_config(ModelConfig::deepseek("deepseek-reasoner", "DeepSeek Reasoner"))
-    .with_thinking(ThinkingLevel::High);
 ```
-
-Older DeepSeek reasoning models had stricter feature limits than the current V4 API. In particular, historical `deepseek-reasoner` documentation did not support function calling. If you need tools, prefer current V4 model IDs unless you have tested the legacy alias for your workflow.
 
 ## Compat Flags Without Constructors
 
