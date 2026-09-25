@@ -1,10 +1,13 @@
 //! Azure OpenAI provider.
 //!
-//! Uses the OpenAI Responses API format but with Azure-specific authentication
-//! and URL patterns.
+//! Uses the OpenAI Responses API format on Azure's v1 surface:
+//! `POST https://{resource}.openai.azure.com/openai/v1/responses`, no
+//! `api-version` query, and the **deployment name** as `model` in the body.
+//! See [`responses_endpoint`] for the accepted `base_url` shapes, including
+//! the legacy `.../openai/deployments/{deployment}` form.
 //!
-//! Base URL format: `https://{resource}.openai.azure.com/openai/deployments/{deployment}`
-//! Auth: `api-key` header or Azure AD Bearer token.
+//! Auth: `api-key` header; for Microsoft Entra ID leave the key empty and set
+//! `Authorization: Bearer ...` via `ModelConfig::headers`.
 
 use super::model::OpenAiCompat;
 use super::responses_stream::{Flow, ResponsesStreamState};
@@ -40,20 +43,25 @@ impl StreamProvider for AzureOpenAiProvider {
             .as_ref()
             .ok_or_else(|| ProviderError::Other("ModelConfig required".into()))?;
 
-        // Azure uses the Responses API format
-        let url = format!(
-            "{}/responses?api-version=2025-01-01-preview",
-            model_config.base_url
+        let endpoint = responses_endpoint(&model_config.base_url);
+        let mut body = build_azure_request_body(&config);
+        if let Some(deployment) = &endpoint.deployment {
+            // Legacy deployment-scoped base_url: the v1 surface names the
+            // deployment in the body, not in the path.
+            body["model"] = serde_json::json!(deployment);
+        }
+        debug!(
+            "Azure OpenAI request: model={} url={}",
+            body["model"], endpoint.url
         );
-
-        let body = build_azure_request_body(&config);
-        debug!("Azure OpenAI request: model={} url={}", config.model, url);
 
         let client = reqwest::Client::new();
         let mut request = client
-            .post(&url)
-            .header("content-type", "application/json")
-            .header("api-key", &config.api_key);
+            .post(&endpoint.url)
+            .header("content-type", "application/json");
+        if !config.api_key.is_empty() {
+            request = request.header("api-key", &config.api_key);
+        }
 
         for (k, v) in &model_config.headers {
             request = request.header(k, v);
@@ -108,6 +116,65 @@ impl StreamProvider for AzureOpenAiProvider {
             message: message.clone(),
         });
         Ok(message)
+    }
+}
+
+/// The resolved request target for an Azure `base_url`.
+#[derive(Debug, PartialEq, Eq)]
+struct Endpoint {
+    /// Full Responses URL, e.g. `https://r.openai.azure.com/openai/v1/responses`.
+    url: String,
+    /// Deployment name taken from a legacy `/openai/deployments/{name}`
+    /// base URL; it replaces `model` in the request body.
+    deployment: Option<String>,
+}
+
+/// Map a `base_url` onto Azure's v1 Responses endpoint.
+///
+/// Azure documents the Responses API only at
+/// `https://{resource}.openai.azure.com/openai/v1/responses` (GA, no
+/// `api-version`), with the deployment name as `model`. Its REST specs never
+/// placed `/responses` under `/openai/deployments/{id}`; the preview versions
+/// (from `2025-03-01-preview`) served it at `/openai/responses`. Accepted
+/// shapes:
+///
+/// | `base_url` | Request URL |
+/// |---|---|
+/// | `https://r.openai.azure.com` | `https://r.openai.azure.com/openai/v1/responses` |
+/// | `https://r.openai.azure.com/openai` | same |
+/// | `https://r.openai.azure.com/openai/v1` | same |
+/// | `https://r.openai.azure.com/openai/deployments/d` | same, and `model` = `d` |
+///
+/// Trailing slashes are ignored; `*.services.ai.azure.com` works the same.
+fn responses_endpoint(base_url: &str) -> Endpoint {
+    const DEPLOYMENTS: &str = "/openai/deployments";
+    let base = base_url.trim_end_matches('/');
+    let legacy = base
+        .find(DEPLOYMENTS)
+        .map(|i| (i, &base[i + DEPLOYMENTS.len()..]))
+        .filter(|(_, rest)| rest.is_empty() || rest.starts_with('/'));
+    if let Some((i, rest)) = legacy {
+        let deployment = rest
+            .trim_start_matches('/')
+            .split('/')
+            .next()
+            .filter(|d| !d.is_empty())
+            .map(str::to_string);
+        return Endpoint {
+            url: format!("{}/openai/v1/responses", &base[..i]),
+            deployment,
+        };
+    }
+    let url = if base.ends_with("/openai/v1") {
+        format!("{base}/responses")
+    } else if base.ends_with("/openai") {
+        format!("{base}/v1/responses")
+    } else {
+        format!("{base}/openai/v1/responses")
+    };
+    Endpoint {
+        url,
+        deployment: None,
     }
 }
 
@@ -333,6 +400,54 @@ mod tests {
     }
 
     use crate::provider::ModelConfig;
+
+    #[test]
+    fn every_base_url_shape_resolves_to_the_v1_responses_path() {
+        let v1 = "https://r.openai.azure.com/openai/v1/responses";
+        for base in [
+            "https://r.openai.azure.com",
+            "https://r.openai.azure.com/",
+            "https://r.openai.azure.com/openai",
+            "https://r.openai.azure.com/openai/",
+            "https://r.openai.azure.com/openai/v1",
+            "https://r.openai.azure.com/openai/v1/",
+        ] {
+            assert_eq!(
+                responses_endpoint(base),
+                Endpoint {
+                    url: v1.into(),
+                    deployment: None
+                },
+                "{base}"
+            );
+        }
+        let foundry = responses_endpoint("https://r.services.ai.azure.com/openai/v1/");
+        assert_eq!(
+            foundry.url,
+            "https://r.services.ai.azure.com/openai/v1/responses"
+        );
+    }
+
+    #[test]
+    fn legacy_deployment_base_url_moves_the_deployment_into_model() {
+        for base in [
+            "https://r.openai.azure.com/openai/deployments/my-gpt",
+            "https://r.openai.azure.com/openai/deployments/my-gpt/",
+        ] {
+            assert_eq!(
+                responses_endpoint(base),
+                Endpoint {
+                    url: "https://r.openai.azure.com/openai/v1/responses".into(),
+                    deployment: Some("my-gpt".into()),
+                },
+                "{base}"
+            );
+        }
+        // Near-miss: an empty deployment segment names nothing.
+        let e = responses_endpoint("https://r.openai.azure.com/openai/deployments/");
+        assert_eq!(e.url, "https://r.openai.azure.com/openai/v1/responses");
+        assert_eq!(e.deployment, None);
+    }
 
     #[test]
     fn compat_ceiling_and_none_are_honoured() {
