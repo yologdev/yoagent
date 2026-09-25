@@ -485,31 +485,54 @@ impl Default for OpenAiCompat {
 }
 
 /// One `tracing::warn!` per distinct clamp (requested level, rung sent) per
-/// process.
+/// model id per process.
 ///
-/// One-time rather than per request: the clamp is a property of the config,
-/// so it recurs on every turn of every run, and a per-request warning would
-/// flood an agent's log with the same line. Only three clamps exist (`XHigh`
-/// to `high`, `Max` to `high` or `xhigh`), so each gets its own flag and a
-/// second model with a different ceiling still reports its own clamp.
-fn warn_effort_clamp(level: ThinkingLevel, sent: &'static str) {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    static WARNED: [AtomicBool; 3] = [
-        AtomicBool::new(false),
-        AtomicBool::new(false),
-        AtomicBool::new(false),
-    ];
+/// Once rather than per request: the clamp is a property of the config, so it
+/// recurs on every turn of every run, and a per-request warning would flood an
+/// agent's log with the same line. Keyed by model id as well as clamp kind, so
+/// a second model hitting the same clamp still reports it, and the message
+/// names the model whose config needs the change.
+fn warn_effort_clamp(model: &str, level: ThinkingLevel, sent: &'static str) {
     let Some(slot) = effort_clamp_slot(level, sent) else {
         return;
     };
-    if !WARNED[slot].swap(true, Ordering::Relaxed) {
+    if first_effort_clamp(model, slot) {
         tracing::warn!(
+            model,
             requested = ?level,
             sent,
-            "reasoning effort clamped to the model's declared ceiling \
+            "reasoning effort for model {model} clamped to the model's declared ceiling \
              (OpenAiCompat::max_reasoning_effort); set it on the ModelConfig's \
-             compat if the model accepts a higher rung. Logged once per clamp."
+             compat if the model accepts a higher rung. Logged once per model and clamp."
         );
+    }
+}
+
+/// Records clamp `slot` for `model`; true the first time that pair is seen in
+/// this process. A per-model bitmask of the three clamp kinds: the lookup
+/// borrows the id, so only a model's first clamp allocates, and the path runs
+/// only when a request actually clamps.
+fn first_effort_clamp(model: &str, slot: usize) -> bool {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static WARNED: OnceLock<Mutex<HashMap<String, u8>>> = OnceLock::new();
+    let bit = 1u8 << slot;
+    // A poisoned lock only means another thread panicked mid-update; the map
+    // is still a valid set of flags.
+    let mut warned = WARNED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    match warned.get_mut(model) {
+        Some(mask) if *mask & bit != 0 => false,
+        Some(mask) => {
+            *mask |= bit;
+            true
+        }
+        None => {
+            warned.insert(model.to_string(), bit);
+            true
+        }
     }
 }
 
@@ -534,10 +557,15 @@ impl OpenAiCompat {
     /// crate never sends `none`: several models reject it with HTTP 400 (GPT-6
     /// Astra, gpt-5, the o-series). `XHigh`/`Max` are capped at
     /// [`max_reasoning_effort`](Self::max_reasoning_effort), with a one-time
-    /// `tracing::warn!` per clamp so a downgrade is never completely silent.
+    /// `tracing::warn!` per `model` id and clamp so a downgrade is never
+    /// completely silent.
     /// Not the DeepSeek ladder — `openai_compat.rs` handles that before
     /// reaching here.
-    pub(crate) fn openai_reasoning_effort(&self, level: ThinkingLevel) -> Option<&'static str> {
+    pub(crate) fn openai_reasoning_effort(
+        &self,
+        model: &str,
+        level: ThinkingLevel,
+    ) -> Option<&'static str> {
         use ReasoningEffortCeiling as Ceiling;
         let effort = match level {
             ThinkingLevel::Off => return None,
@@ -552,7 +580,7 @@ impl OpenAiCompat {
                 Ceiling::High => "high",
             },
         };
-        warn_effort_clamp(level, effort);
+        warn_effort_clamp(model, level, effort);
         Some(effort)
     }
 
@@ -805,19 +833,38 @@ impl AnthropicCompat {
 /// `claude-{family}-{major}[-{minor}][-{date}]` (`claude-haiku-4-5`,
 /// `claude-sonnet-4-20250514`, `claude-opus-4.5`) or the older
 /// `claude-{major}[-{minor}]-{family}` (`claude-3-5-sonnet-20241022`).
-/// A date suffix is not a minor version. `None` when no version is found.
+/// A date suffix is not a minor version. A version token may carry a suffix
+/// after its digits — a context-window tag (`claude-opus-4-6[1m]`), a Vertex
+/// date (`claude-sonnet-4-5@20250929`), a Bedrock revision
+/// (`claude-opus-4-6-v1:0`) — so each token is read by its leading digits; a
+/// suffix on the major ends the version there. `None` when no version is
+/// found.
 fn claude_version(id: &str) -> Option<(u32, u32)> {
+    /// The token's leading ASCII digits and whether anything follows them.
+    fn leading_digits(token: &str) -> Option<(&str, bool)> {
+        let end = token
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(token.len());
+        (end > 0).then(|| (&token[..end], end < token.len()))
+    }
     let lower = id.to_ascii_lowercase();
     let rest = lower.strip_prefix("claude-")?;
     let mut tokens = rest
         .split(['-', '.'])
-        .skip_while(|t| t.parse::<u32>().is_err());
-    let major: u32 = tokens.next()?.parse().ok()?;
-    let minor = tokens
-        .next()
-        .filter(|t| t.len() <= 2)
-        .and_then(|t| t.parse().ok())
-        .unwrap_or(0);
+        .skip_while(|t| leading_digits(t).is_none());
+    let (major, major_suffixed) = leading_digits(tokens.next()?)?;
+    let major: u32 = major.parse().ok()?;
+    let minor = if major_suffixed {
+        0
+    } else {
+        tokens
+            .next()
+            .and_then(leading_digits)
+            // An 8-digit date (`-20250514`) is not a minor version.
+            .filter(|(digits, _)| digits.len() <= 2)
+            .and_then(|(digits, _)| digits.parse().ok())
+            .unwrap_or(0)
+    };
     Some((major, minor))
 }
 
@@ -1961,6 +2008,24 @@ mod tests {
     }
 
     #[test]
+    fn effort_clamp_warning_dedupes_per_model_and_kind() {
+        // Unique ids: the set is process-global and shared with other tests.
+        let a = "dedupe-test-model-a";
+        let b = "dedupe-test-model-b";
+        assert!(first_effort_clamp(a, 0), "first clamp for a model warns");
+        assert!(!first_effort_clamp(a, 0), "the same clamp again does not");
+        assert!(first_effort_clamp(a, 2), "another clamp kind still warns");
+        assert!(!first_effort_clamp(a, 2));
+        assert!(
+            first_effort_clamp(b, 0),
+            "another model's same clamp still warns"
+        );
+        assert!(!first_effort_clamp(b, 0));
+        assert!(first_effort_clamp(a, 1));
+        assert!(!first_effort_clamp(a, 0) && !first_effort_clamp(a, 1));
+    }
+
+    #[test]
     fn effort_clamps_are_detected_exactly() {
         use ReasoningEffortCeiling as C;
         let at = |ceiling| OpenAiCompat {
@@ -1979,7 +2044,7 @@ mod tests {
         for ceiling in [C::High, C::XHigh, C::Max] {
             for level in levels {
                 let clamped = at(ceiling)
-                    .openai_reasoning_effort(level)
+                    .openai_reasoning_effort("test-model", level)
                     .and_then(|sent| effort_clamp_slot(level, sent))
                     .is_some();
                 // A clamp is exactly: the level asks for a rung above the
@@ -2356,6 +2421,18 @@ mod tests {
             ("claude-fable-5-1", true, true),
             ("Claude-Opus-5-5", true, true),
             ("claude-nextgen", true, true),
+            // A suffix on the minor token: read its leading digits. These all
+            // used to read as minor 0 (4.0: legacy, tool-forced).
+            ("claude-opus-4-6[1m]", true, true),
+            ("claude-sonnet-4-5@20250929", false, true),
+            ("claude-opus-4-6-v1:0", true, true),
+            ("claude-haiku-4-5-20251001-v1:0", false, true),
+            // A suffix on the major ends the version: no minor follows.
+            ("claude-sonnet-4@20250514", false, false),
+            ("claude-opus-5[1m]", true, true),
+            // Controls: an 8-digit date is still never a minor version.
+            ("claude-opus-4@20250514", false, false),
+            ("claude-sonnet-4-20250514-v1:0", false, false),
         ] {
             let c = AnthropicCompat::for_claude_id(id);
             assert_eq!(c.adaptive_thinking, adaptive, "{id}");

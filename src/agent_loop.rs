@@ -141,6 +141,12 @@ pub const AGENT_STOPPED_PREFIX: &str = "[Agent stopped:";
 /// the model was emitting the same call forever and there is nothing to keep.
 pub const LOOP_ABORT_PREFIX: &str = "[Agent stopped: repeated tool call —";
 
+/// The error tool result given to each tool call in a response that ended as
+/// [`StopReason::Refusal`] — the model declined, or a content filter stopped
+/// the response. The call is never executed.
+const REFUSAL_TOOL_RESULT_TEXT: &str = "Tool call not run: the response was stopped as a refusal \
+     (declined by the model or stopped by the content filter).";
+
 pub async fn agent_loop(
     prompts: Vec<AgentMessage>,
     context: &mut AgentContext,
@@ -616,6 +622,60 @@ async fn run_loop(
                     .ok();
                     return stats;
                 }
+            }
+
+            // A refusal (the model declined, or a content filter cut the
+            // response) is terminal: nothing in it runs, and there is no
+            // further LLM turn — the run ends as Error/Aborted end it, leaving
+            // any queued steering/follow-up messages queued. A tool call in the
+            // refused message may be complete and well-formed (a content filter
+            // can land after it), but executing it would act on a response the
+            // provider withdrew. Every call is still answered with an error
+            // result so the transcript stays one the provider accepts on the
+            // next prompt.
+            if let Message::Assistant {
+                stop_reason: StopReason::Refusal,
+                ref content,
+                ref usage,
+                ..
+            } = message
+            {
+                let mut tool_results: Vec<Message> = Vec::new();
+                for c in content {
+                    if let Content::ToolCall {
+                        id,
+                        name,
+                        arguments,
+                        ..
+                    } = c
+                    {
+                        tracing::warn!(
+                            tool = name.as_str(),
+                            tool_call_id = id.as_str(),
+                            "tool call not executed: the response was a refusal"
+                        );
+                        let (result, _) = unexecuted_tool_call(
+                            id,
+                            name,
+                            arguments,
+                            REFUSAL_TOOL_RESULT_TEXT.to_string(),
+                            tx,
+                        );
+                        let am: AgentMessage = result.clone().into();
+                        context.messages.push(am.clone());
+                        new_messages.push(am);
+                        tool_results.push(result);
+                    }
+                }
+                if let Some(ref after_turn) = config.after_turn {
+                    after_turn(&context.messages, usage);
+                }
+                tx.send(AgentEvent::TurnEnd {
+                    message: agent_msg,
+                    tool_results,
+                })
+                .ok();
+                return stats;
             }
 
             // Extract tool calls

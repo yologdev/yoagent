@@ -409,3 +409,105 @@ async fn content_filter_finish_reason_is_a_refusal() {
         );
     }
 }
+
+/// A model refusal streams as `delta.refusal` (openai-python
+/// `ChoiceDelta.refusal`) and then `finish_reason: "stop"`. It is kept as the
+/// turn's text, streamed as text deltas, reported as `Refusal` — not the
+/// `Stop` the finish reason says, nor `ToolUse` beside a call — and
+/// explained in `error_message` with the Responses path's wording.
+#[tokio::test]
+async fn delta_refusal_is_a_refusal_with_its_text() {
+    const REFUSAL: &str = "I'm sorry, but I can't help with that.";
+    for (with_tool_call, finish) in [(false, "stop"), (true, "tool_calls")] {
+        let server = MockServer::start().await;
+        let mut body = vec![
+            chunk(
+                r#"{"choices":[{"index":0,"delta":{"role":"assistant","content":null,"refusal":"I'm sorry, "}}]}"#,
+            ),
+            chunk(r#"{"choices":[{"index":0,"delta":{"refusal":"but I can't help with that."}}]}"#),
+        ];
+        if with_tool_call {
+            body.push(chunk(
+                r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"search","arguments":"{}"}}]}}]}"#,
+            ));
+        }
+        body.push(chunk(&format!(
+            r#"{{"choices":[{{"index":0,"delta":{{}},"finish_reason":"{finish}"}}]}}"#
+        )));
+        body.push("data: [DONE]\n\n".into());
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_raw(body.concat(), "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let message = OpenAiCompatProvider
+            .stream(stream_config(&server.uri()), tx, CancellationToken::new())
+            .await
+            .unwrap();
+        let mut streamed = String::new();
+        while let Ok(e) = rx.try_recv() {
+            if let yoagent::provider::StreamEvent::TextDelta { delta, .. } = e {
+                streamed.push_str(&delta);
+            }
+        }
+        let Message::Assistant {
+            content,
+            stop_reason,
+            error_message,
+            ..
+        } = &message
+        else {
+            panic!("expected assistant message");
+        };
+        assert_eq!(
+            *stop_reason,
+            StopReason::Refusal,
+            "tool call: {with_tool_call}"
+        );
+        assert!(
+            matches!(&content[0], Content::Text { text } if text == REFUSAL),
+            "{content:?}"
+        );
+        assert_eq!(streamed, REFUSAL);
+        assert_eq!(
+            error_message.as_deref(),
+            Some(format!("Request declined by the model (refusal): {REFUSAL}").as_str())
+        );
+    }
+}
+
+/// Positive control for the refusal test: the same stream with `content`
+/// instead of `refusal` is an ordinary `Stop` with no error message.
+#[tokio::test]
+async fn delta_content_is_not_a_refusal() {
+    let server = MockServer::start().await;
+    let body = [
+        chunk(
+            r#"{"choices":[{"index":0,"delta":{"role":"assistant","content":"Sure, ","refusal":null}}]}"#,
+        ),
+        chunk(r#"{"choices":[{"index":0,"delta":{"content":"here it is."}}]}"#),
+        chunk(r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#),
+        "data: [DONE]\n\n".to_string(),
+    ]
+    .concat();
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
+        .mount(&server)
+        .await;
+    let message = run_stream(stream_config(&server.uri())).await.unwrap();
+    let Message::Assistant {
+        content,
+        stop_reason,
+        error_message,
+        ..
+    } = &message
+    else {
+        panic!("expected assistant message");
+    };
+    assert_eq!(*stop_reason, StopReason::Stop);
+    assert!(matches!(&content[0], Content::Text { text } if text == "Sure, here it is."));
+    assert_eq!(*error_message, None);
+}

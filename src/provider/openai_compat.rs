@@ -63,6 +63,8 @@ impl StreamProvider for OpenAiCompatProvider {
         let mut stop_reason = StopReason::Stop;
         let mut saw_finish_reason = false;
         let mut tool_call_buffers: Vec<ToolCallBuffer> = Vec::new();
+        // The refusal text streamed in `delta.refusal`, once any arrived.
+        let mut refusal: Option<String> = None;
 
         let _ = tx.send(StreamEvent::Start);
 
@@ -121,8 +123,15 @@ impl StreamProvider for OpenAiCompatProvider {
                                     });
                                 }
 
-                                // Handle text content
-                                if let Some(text) = &delta.content {
+                                // Handle text content. A refusal
+                                // (`delta.refusal`, openai-python
+                                // `ChoiceDelta.refusal`) is the model's own
+                                // explanation: kept as the turn's text, and
+                                // recorded for the stop reason below.
+                                if let Some(text) = &delta.refusal {
+                                    refusal.get_or_insert_with(String::new).push_str(text);
+                                }
+                                for text in [&delta.content, &delta.refusal].into_iter().flatten() {
                                     let text_idx = content.iter().position(|c| matches!(c, Content::Text { .. }));
                                     let idx = match text_idx {
                                         Some(i) => i,
@@ -228,14 +237,26 @@ impl StreamProvider for OpenAiCompatProvider {
         // token limit. `finish_reason: "length"` mid-arguments is how a call
         // ends up with unparsed arguments, and Length is the signal a caller
         // needs to see; the loop still answers every tool call either way.
+        // A refusal arrives with `finish_reason: "stop"`; it is the more
+        // specific verdict, and nothing (Stop, ToolUse) overrides it.
+        if refusal.is_some() {
+            warn!("OpenAI: the model declined the request (refusal)");
+            stop_reason = StopReason::Refusal;
+        }
         if !tool_call_buffers.is_empty()
             && !matches!(stop_reason, StopReason::Length | StopReason::Refusal)
         {
             stop_reason = StopReason::ToolUse;
         }
-        let error_message = (stop_reason == StopReason::Refusal).then(|| {
-            "Response stopped by the content filter (finish_reason: content_filter)".to_string()
-        });
+        // Same wording as the Responses API path
+        // (`ResponsesStreamState::error_message`).
+        let error_message = match refusal.as_deref() {
+            Some("") => Some("Request declined by the model (refusal)".to_string()),
+            Some(text) => Some(format!("Request declined by the model (refusal): {text}")),
+            None => (stop_reason == StopReason::Refusal).then(|| {
+                "Response stopped by the content filter (finish_reason: content_filter)".to_string()
+            }),
+        };
 
         let message = Message::Assistant {
             content,
@@ -461,7 +482,7 @@ fn build_request_body(
             (config.thinking_level != ThinkingLevel::Off)
                 .then(|| deepseek_reasoning_effort(config.thinking_level))
         } else {
-            compat.openai_reasoning_effort(config.thinking_level)
+            compat.openai_reasoning_effort(&config.model, config.thinking_level)
         };
         if let Some(effort) = effort {
             body["reasoning_effort"] = serde_json::json!(effort);
@@ -567,6 +588,10 @@ struct OpenAiDelta {
     reasoning_content: Option<String>,
     #[serde(default)]
     reasoning: Option<String>,
+    /// A model refusal, streamed in place of `content` (openai-python
+    /// `ChoiceDelta.refusal`), followed by `finish_reason: "stop"`.
+    #[serde(default)]
+    refusal: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<OpenAiToolCallDelta>>,
 }
@@ -594,8 +619,31 @@ struct OpenAiFunctionDelta {
 /// `#[serde(default)]` covers only a *missing* key; `null` in a `u64` field
 /// fails the whole payload — on Chat Completions the chunk carrying the usage
 /// (often with the `finish_reason`), on Responses the terminal event.
+///
+/// Read as 0, which undercounts: the turn's cost comes out too low. So the
+/// first `null` in the process is logged at `warn` (once, not per chunk — a
+/// server that does this does it on every response).
 pub(crate) fn null_as_zero<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
-    Ok(Option::<u64>::deserialize(d)?.unwrap_or(0))
+    match Option::<u64>::deserialize(d)? {
+        Some(n) => Ok(n),
+        None => {
+            warn_null_usage_count();
+            Ok(0)
+        }
+    }
+}
+
+/// Whether [`null_as_zero`] has read a `null`, so tests can observe the
+/// warning path without a process-global subscriber.
+static NULL_USAGE_SEEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn warn_null_usage_count() {
+    if !NULL_USAGE_SEEN.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        warn!(
+            "a usage token count arrived as null and was read as 0; token counts and cost \
+             for such responses are undercounted. Logged once per process."
+        );
+    }
 }
 
 #[derive(Deserialize)]
@@ -1333,6 +1381,22 @@ mod tests {
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("stop"));
         let usage = usage_from_openai(chunk.usage.as_ref().unwrap());
         assert_eq!((usage.input, usage.output, usage.cache_read), (100, 0, 0));
+        // ...but not silently: the null took the warning path.
+        assert!(NULL_USAGE_SEEN.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    #[test]
+    fn null_as_zero_reads_numbers_unchanged() {
+        #[derive(Deserialize)]
+        struct N {
+            #[serde(deserialize_with = "null_as_zero")]
+            n: u64,
+        }
+        let n: N = serde_json::from_str(r#"{"n":7}"#).unwrap();
+        assert_eq!(n.n, 7);
+        let n: N = serde_json::from_str(r#"{"n":null}"#).unwrap();
+        assert_eq!(n.n, 0);
+        assert!(NULL_USAGE_SEEN.load(std::sync::atomic::Ordering::Relaxed));
     }
 
     #[test]

@@ -18,7 +18,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use reqwest_eventsource::EventSource;
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 pub struct AzureOpenAiProvider;
 
@@ -49,6 +49,13 @@ impl StreamProvider for AzureOpenAiProvider {
         if let Some(deployment) = &endpoint.deployment {
             // Legacy deployment-scoped base_url: the v1 surface names the
             // deployment in the body, not in the path.
+            if *deployment != config.model {
+                info!(
+                    "Azure OpenAI: legacy deployment base_url; sending model={deployment:?} \
+                     in place of the configured model {:?}",
+                    config.model
+                );
+            }
             body["model"] = serde_json::json!(deployment);
         }
         debug!(
@@ -149,9 +156,21 @@ struct Endpoint {
 /// | `https://r.openai.azure.com/openai/deployments/d` | same, and `model` = `d` |
 ///
 /// Trailing slashes are ignored; `*.services.ai.azure.com` works the same.
+/// A query string or fragment is dropped before the path is read — a legacy
+/// URL copied from the portal often carries `?api-version=2024-10-21`, which
+/// would otherwise end up in the deployment name, and the v1 surface takes
+/// no `api-version`.
 fn responses_endpoint(base_url: &str) -> Endpoint {
     const DEPLOYMENTS: &str = "/openai/deployments";
-    let base = base_url.trim_end_matches('/');
+    let path_end = base_url.find(['?', '#']).unwrap_or(base_url.len());
+    if path_end < base_url.len() {
+        info!(
+            "Azure OpenAI: ignoring the query/fragment on base_url ({}); the v1 Responses \
+             endpoint takes no api-version",
+            &base_url[path_end..]
+        );
+    }
+    let base = base_url[..path_end].trim_end_matches('/');
     let legacy = base
         .find(DEPLOYMENTS)
         .map(|i| (i, &base[i + DEPLOYMENTS.len()..]))
@@ -332,7 +351,7 @@ fn build_azure_request_body(config: &StreamConfig) -> serde_json::Value {
         .as_ref()
         .and_then(|m| m.compat.as_ref())
         .unwrap_or(&default_compat);
-    if let Some(effort) = compat.openai_reasoning_effort(config.thinking_level) {
+    if let Some(effort) = compat.openai_reasoning_effort(&config.model, config.thinking_level) {
         body["reasoning"] = serde_json::json!({"effort": effort});
     }
 
@@ -445,6 +464,30 @@ mod tests {
                 "{base}"
             );
         }
+        // A query string or fragment is not part of the deployment name.
+        for base in [
+            "https://r.openai.azure.com/openai/deployments/my-gpt?api-version=2024-10-21",
+            "https://r.openai.azure.com/openai/deployments/my-gpt/?api-version=2024-10-21",
+            "https://r.openai.azure.com/openai/deployments/my-gpt#frag",
+            "https://r.openai.azure.com/openai/deployments/my-gpt?a=b#frag",
+        ] {
+            assert_eq!(
+                responses_endpoint(base),
+                Endpoint {
+                    url: "https://r.openai.azure.com/openai/v1/responses".into(),
+                    deployment: Some("my-gpt".into()),
+                },
+                "{base}"
+            );
+        }
+        // And on the non-legacy shapes it is dropped, not glued into the URL.
+        assert_eq!(
+            responses_endpoint("https://r.openai.azure.com/openai/v1?api-version=preview"),
+            Endpoint {
+                url: "https://r.openai.azure.com/openai/v1/responses".into(),
+                deployment: None,
+            }
+        );
         // Near-miss: an empty deployment segment names nothing.
         let e = responses_endpoint("https://r.openai.azure.com/openai/deployments/");
         assert_eq!(e.url, "https://r.openai.azure.com/openai/v1/responses");

@@ -223,7 +223,10 @@ adheres to [Semantic Versioning](https://semver.org/).
 - **`AnthropicCompat::for_claude_id(id)`** infers compat flags from a Claude
   model id: budget thinking (`legacy()`) before Claude 4.6, adaptive from 4.6,
   and `native_structured_output` from 4.5; an id with no recognizable version
-  is treated as current generation. **`AnthropicCompat::with_bearer_auth(on)`**
+  is treated as current generation. A version token is read by its leading
+  digits, so suffixed ids (`claude-opus-4-6[1m]`,
+  `claude-sonnet-4-5@20250929`, `claude-opus-4-6-v1:0`) keep their minor
+  version; an 8-digit date is never a minor. **`AnthropicCompat::with_bearer_auth(on)`**
   sets `bearer_auth` without a struct literal.
 
 - **`ModelConfig::google: Option<GoogleCompat>`** with
@@ -274,8 +277,8 @@ adheres to [Semantic Versioning](https://semver.org/).
 - **A clamped reasoning effort is logged.** When `XHigh` / `Max` is sent lower
   than requested because of the model's `max_reasoning_effort` (`XHigh` →
   `high`, `Max` → `high` or `xhigh`), the Chat Completions, Responses and
-  Azure providers log one `tracing::warn!` per distinct clamp per process
-  instead of downgrading silently.
+  Azure providers log one `tracing::warn!` per distinct clamp per model id per
+  process, naming the model, instead of downgrading silently.
 
 - **`SessionStats::cost_usd` is now sticky-`None` once a turn cannot be
   priced**, the same rule as `SubAgentSpend::merge`. Previously an unpriced
@@ -491,7 +494,10 @@ adheres to [Semantic Versioning](https://semver.org/).
 
   **Migration:** a legacy `…/openai/deployments/{deployment}` `base_url` still
   works — it is routed to `/openai/v1/responses` and `{deployment}` replaces
-  the configured model id in the body. New configs should use
+  the configured model id in the body (logged at `info`). A query string or
+  fragment on `base_url` (`…/deployments/my-gpt?api-version=2024-10-21`) is
+  dropped before the path is read, so it no longer ends up in the deployment
+  name. New configs should use
   `https://{resource}.openai.azure.com/openai/v1` with the **deployment name**
   as the model id. Any other `base_url` (a proxy path, say) now gets
   `/openai/v1/responses` appended rather than `/responses?api-version=…`;
@@ -539,14 +545,33 @@ adheres to [Semantic Versioning](https://semver.org/).
   `response.incomplete` or an incomplete `response.completed`) is `Refusal`
   too; every other reason stays `Length`. On Chat Completions,
   `finish_reason: "content_filter"` is `Refusal` (it was `Stop`), and an open
-  tool call no longer relabels it `ToolUse`. All three providers set the
-  assistant message's `error_message` to say why.
+  tool call no longer relabels it `ToolUse`; a model refusal streamed in
+  `delta.refusal` (then `finish_reason: "stop"`) was ignored entirely and is
+  now the turn's text, streamed as text deltas, with `StopReason::Refusal`.
+  All three providers set the assistant message's `error_message` to say why
+  (Chat and Responses share the wording "Request declined by the model
+  (refusal): …").
+
+  `Agent::prompt_structured` returns `StructuredPromptError::Provider` with
+  that explanation for a refusal, instead of a `Parse` error over the refusal
+  text (or `NoOutput` when a filter left no text).
+
+- **Tools no longer run after a refusal.** The loop stopped only on `Error` /
+  `Aborted`, so a tool call in a response that ended as `StopReason::Refusal`
+  — complete, say, before a content filter cut in — was executed and the run
+  continued. A refusal is now terminal: every tool call in it is answered with
+  an error tool result ("Tool call not run: the response was stopped as a
+  refusal …", with the usual `ToolExecutionStart`/`End` events) without being
+  executed, and the run ends with `TurnEnd` / `AgentEnd` and no further LLM
+  turn, as after `Error` / `Aborted` — queued steering and follow-up messages
+  stay queued. Applies to every `ToolExecutionStrategy`.
 
 - **A `null` usage count no longer drops the usage.** Some servers send
   explicit `null` token counts; `#[serde(default)]` covers only a missing
   key, so one `null` failed the whole Chat Completions chunk or Responses
   terminal event — losing the usage and the stop reason carried with it. A
-  `null` count now reads as 0.
+  `null` count now reads as 0, and the first one in the process is logged at
+  `warn`, since the turn's tokens and cost are then undercounted.
 
 - **Rate limits are no longer mistaken for context overflow.** Azure OpenAI's
   mid-stream capacity error (`too_many_requests` / `no_capacity`, "…exceeds

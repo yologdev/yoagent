@@ -118,8 +118,12 @@ pub enum StructuredPromptError {
     #[error("model returned no output to parse")]
     NoOutput,
     /// The provider call itself failed (auth, network, rate limits, a
-    /// schema-induced 400, ...). Retrying the parse is pointless; the message
-    /// carries the underlying provider error.
+    /// schema-induced 400, ...), or the response ended as
+    /// [`StopReason::Refusal`] — the model declined, or a content filter
+    /// stopped it. Retrying the parse is pointless; the message carries the
+    /// underlying provider error or the refusal explanation (the assistant
+    /// message's `error_message`, which includes the model's refusal text
+    /// when it gave one).
     #[error("provider error during structured prompt: {message}")]
     Provider { message: String },
     /// The model's output did not deserialize into the requested type.
@@ -802,6 +806,17 @@ impl Agent {
                 message: error_message
                     .clone()
                     .unwrap_or_else(|| "provider error (no detail)".into()),
+            });
+        }
+        // A refusal is not output: its text is the model's explanation, never
+        // the requested JSON, and a content-filtered reply may be cut short.
+        // Reported with the explanation, rather than as a Parse failure over
+        // the refusal text or as NoOutput when the filter left nothing.
+        if *stop_reason == StopReason::Refusal {
+            return Err(StructuredPromptError::Provider {
+                message: error_message
+                    .clone()
+                    .unwrap_or_else(|| "response stopped as a refusal (no detail)".into()),
             });
         }
 

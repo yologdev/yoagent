@@ -249,7 +249,7 @@ fn build_request_body(config: &StreamConfig, model_config: &ModelConfig) -> serd
     // which is what this provider always sent before. `Off` omits it.
     let default_compat = OpenAiCompat::default();
     let compat = model_config.compat.as_ref().unwrap_or(&default_compat);
-    if let Some(effort) = compat.openai_reasoning_effort(config.thinking_level) {
+    if let Some(effort) = compat.openai_reasoning_effort(&config.model, config.thinking_level) {
         body["reasoning"] = serde_json::json!({"effort": effort});
     }
 
