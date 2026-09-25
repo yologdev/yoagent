@@ -112,12 +112,19 @@ fn priced(id: &str) -> ModelConfig {
         // is free, which is the asymmetry the provider comparison turns on.
         "deepseek-v4-flash" => deepseek_priced("deepseek-v4-flash", 0.44, 1.32, 0.014),
         "deepseek-v4-pro" => deepseek_priced("deepseek-v4-pro", 1.32, 3.96, 0.044),
-        other if other.starts_with("deepseek") => ModelConfig::deepseek(other, other),
+        other if other.starts_with("deepseek") => {
+            note_unpriced(other);
+            ModelConfig::deepseek(other, other)
+        }
         other => {
-            eprintln!("note: no priced preset for '{other}' — the cost column will be blank");
+            note_unpriced(other);
             ModelConfig::anthropic(other, other)
         }
     }
+}
+
+fn note_unpriced(model: &str) {
+    eprintln!("note: no priced preset for '{model}' — the cost column will be blank");
 }
 
 /// A DeepSeek config carrying peak-window rates. `cache_write` is 0 because
@@ -623,7 +630,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "\n{:<14} {:>10} {:>10} {:>8} {:>10} {:>9}",
         "method", "before", "after", "span", "req in/out", "cost"
     );
-    let mut total_cost = 0.0;
+    // `None` once any summarization request could not be priced: a partial
+    // sum printed as a dollar figure would understate the spend.
+    let mut total_cost = Some(0.0);
     for (method, before, after, summary) in &compactions {
         let (span, io, cost) = match summary {
             Some(s) => (
@@ -633,7 +642,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ),
             None => ("-".into(), "-".into(), None),
         };
-        total_cost += cost.unwrap_or(0.0);
+        // A row with no summary made no request, so it adds nothing; a
+        // request with no cost is unpriced and poisons the total.
+        if summary.is_some() {
+            total_cost = total_cost.zip(cost).map(|(t, c)| t + c);
+        }
         println!(
             "{:<14} {before:>10} {after:>10} {span:>8} {io:>10} {:>9}",
             format!("{method:?}"),
@@ -641,7 +654,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .unwrap_or_else(|| "-".into()),
         );
     }
-    println!("\nsummarization cost: ${total_cost:.4}");
+    match total_cost {
+        Some(c) => println!("\nsummarization cost: ${c:.4}"),
+        None => println!("\nsummarization cost: unpriced"),
+    }
 
     println!("\n{}", "=".repeat(72));
     println!("SESSION TOKENS & PROMPT CACHE");
