@@ -35,6 +35,12 @@ Google uses a different message format than OpenAI/Anthropic:
 | System prompt | `systemInstruction` field |
 | Tools | `tools[].functionDeclarations[]` |
 
+### Thinking
+
+`ThinkingLevel` becomes `thinkingConfig.thinkingBudget` (both Google AI Studio
+and Vertex AI); budgets per level are in the
+[`ThinkingLevel` table](../reference/configuration.md#thinkinglevel).
+
 ### Streaming
 
 Uses SSE format (`alt=sse`). Each chunk contains `candidates` with `content.parts` and optional `usageMetadata`.

@@ -94,10 +94,16 @@ With `supports_reasoning_effort`, `ThinkingLevel` becomes `reasoning_effort`:
 | `XHigh` | `high` (clamped) | `max` |
 | `Max` | `high` (clamped) | `max` |
 
+The DeepSeek-style column needs both `supports_thinking_control` and
+`supports_reasoning_effort`; `Off` is sent there as `thinking: {"type":
+"disabled"}`, not as an effort value.
+
 `high` is the top rung this crate knows most OpenAI-shaped providers accept,
 and an unknown effort string is rejected rather than rounded, so `XHigh` and
-`Max` clamp there. DeepSeek's ladder is `none`/`low`/`high`/`max`; `XHigh`
-rounds up to `max` the same way DeepSeek itself rounds `medium` up. The OpenAI
+`Max` clamp there. DeepSeek's `reasoning_effort` accepts `low`/`high`/`max`
+([DeepSeek thinking-mode docs](https://api-docs.deepseek.com/guides/thinking_mode)).
+DeepSeek itself maps a requested `xhigh` to `high`; this crate sends `XHigh` as
+`max` instead, so `XHigh` is not a silent synonym for `High`. The OpenAI
 Responses and Azure OpenAI providers clamp `XHigh`/`Max` to `high` too.
 
 The `ThinkingFormat` enum controls how reasoning content is parsed from streams:

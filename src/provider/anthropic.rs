@@ -744,12 +744,14 @@ fn build_request_body(config: &StreamConfig, is_oauth: bool) -> serde_json::Valu
 
 /// Budget tokens for legacy (pre-4.6) extended thinking. The API requires a
 /// minimum of 1024. (`Off` returns 0 but never reaches a thinking-enabled
-/// request — both call sites guard on `!= ThinkingLevel::Off`.)
+/// request — all call sites guard on `!= ThinkingLevel::Off`.)
 ///
-/// `Max` is 30,720 rather than a rounder 32K: the request raises `max_tokens`
-/// to `budget + 1024` when it is too small, and the smallest output ceiling
-/// among budget-thinking models is Opus 4/4.1's 32,000 — so 30,720 + 1,024
-/// still fits where 32,768 + 1,024 would be rejected. Also used by Bedrock.
+/// `Max` is 30,720 rather than a rounder 32K: the first-party request raises
+/// `max_tokens` to `budget + 1024` when it is too small, and the smallest
+/// output ceiling among budget-thinking models is Opus 4/4.1's 32,000 — so
+/// 30,720 + 1,024 still fits where 32,768 + 1,024 would be rejected. Also used
+/// by Bedrock, which does **not** raise `maxTokens`: Bedrock callers must set
+/// `max_tokens` above the budget themselves (for `Max`, above 30,720).
 pub(crate) fn legacy_thinking_budget(level: ThinkingLevel) -> u32 {
     match level {
         ThinkingLevel::Off => 0,

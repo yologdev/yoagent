@@ -322,19 +322,6 @@ async fn parse_google_sse_response(
 }
 
 /// Build the request body for Vertex AI (same format as Google GenAI).
-/// Token budget for Vertex's thinkingConfig per level (same scale as Gemini).
-fn vertex_thinking_budget(level: ThinkingLevel) -> u32 {
-    match level {
-        ThinkingLevel::Off => 0,
-        ThinkingLevel::Minimal | ThinkingLevel::Low => 1024,
-        ThinkingLevel::Medium => 8192,
-        // Clamped: 24,576 is the thinkingBudget ceiling of Gemini 2.5 Flash
-        // and Flash-Lite. 2.5 Pro goes to 32,768, but there is no per-model
-        // table here, and a budget above a model's ceiling is rejected.
-        ThinkingLevel::High | ThinkingLevel::XHigh | ThinkingLevel::Max => 24576,
-    }
-}
-
 fn build_vertex_request_body(config: &StreamConfig) -> serde_json::Value {
     // Same format as Google GenAI
     let mut contents: Vec<serde_json::Value> = Vec::new();
@@ -431,7 +418,7 @@ fn build_vertex_request_body(config: &StreamConfig) -> serde_json::Value {
     // Thinking: same thinkingConfig as the Gemini API.
     if config.thinking_level != ThinkingLevel::Off {
         gen_config["thinkingConfig"] = serde_json::json!({
-            "thinkingBudget": vertex_thinking_budget(config.thinking_level),
+            "thinkingBudget": super::google::gemini_thinking_budget(config.thinking_level),
             "includeThoughts": true,
         });
     }

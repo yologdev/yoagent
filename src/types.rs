@@ -557,10 +557,12 @@ pub enum CacheStrategy {
 ///
 /// A provider-neutral ladder. Each provider maps it onto its own knob, and
 /// where a provider's ladder is shorter than this one the upper levels are
-/// **clamped** to its top rung rather than sent as a value it would reject.
-/// What each level becomes, per provider:
+/// **clamped** to its top rung rather than sent as a value it would reject —
+/// with one exception: Anthropic's adaptive `effort` is passed through
+/// unclamped, so a model with a shorter effort ladder can reject it (see
+/// below). What each level becomes, per provider:
 ///
-/// | Level     | Anthropic (adaptive) | Anthropic legacy / Bedrock budget | OpenAI-compat `reasoning_effort` | DeepSeek `reasoning_effort` | OpenAI Responses / Azure `reasoning.effort` | Gemini / Vertex `thinkingBudget` |
+/// | Level     | Anthropic (adaptive) | Anthropic legacy / Bedrock budget | OpenAI-compat `reasoning_effort`¹ | DeepSeek `reasoning_effort`² | OpenAI Responses / Azure `reasoning.effort` | Gemini / Vertex `thinkingBudget` |
 /// |-----------|----------|--------|----------|--------|----------|--------|
 /// | `Off`     | (no thinking) | (no thinking) | (omitted) | (omitted; `thinking: disabled`) | (omitted) | (omitted) |
 /// | `Minimal` | `low`    | 1,024  | `low`    | `low`  | `low`    | 1,024  |
@@ -570,9 +572,15 @@ pub enum CacheStrategy {
 /// | `XHigh`   | `xhigh`  | 16,384 | `high` *(clamped)* | `max` | `high` *(clamped)* | 24,576 *(clamped)* |
 /// | `Max`     | `max`    | 30,720 | `high` *(clamped)* | `max` | `high` *(clamped)* | 24,576 *(clamped)* |
 ///
-/// "DeepSeek" means any OpenAI-compat provider using DeepSeek-style thinking
-/// control ([`OpenAiCompat::supports_thinking_control`]), whose ladder is
-/// `none`/`low`/`high`/`max`.
+/// ¹ Only when [`OpenAiCompat::supports_reasoning_effort`] is set; otherwise
+/// no `reasoning_effort` is sent.
+///
+/// ² "DeepSeek" means any OpenAI-compat provider with both
+/// [`OpenAiCompat::supports_thinking_control`] and
+/// [`OpenAiCompat::supports_reasoning_effort`] set. DeepSeek's
+/// `reasoning_effort` accepts `low`/`high`/`max`
+/// (<https://api-docs.deepseek.com/guides/thinking_mode>); `Off` is sent as
+/// `thinking: {"type": "disabled"}` rather than as an effort value.
 ///
 /// Anthropic's adaptive `effort` is passed through as-is, so a model with a
 /// shorter ladder rejects what it does not know: `xhigh` arrived with Opus
@@ -583,6 +591,7 @@ pub enum CacheStrategy {
 /// change: `match` on it from outside the crate needs a wildcard arm.
 ///
 /// [`OpenAiCompat::supports_thinking_control`]: crate::provider::OpenAiCompat::supports_thinking_control
+/// [`OpenAiCompat::supports_reasoning_effort`]: crate::provider::OpenAiCompat::supports_reasoning_effort
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 #[non_exhaustive]
@@ -590,18 +599,19 @@ pub enum ThinkingLevel {
     /// No reasoning requested.
     #[default]
     Off,
-    /// The lightest reasoning a provider offers (same as `Low` everywhere today).
+    /// Currently identical to `Low` on every provider.
     Minimal,
     Low,
     Medium,
     High,
-    /// Above `High`, below `Max` — Anthropic's `xhigh`, which Anthropic
-    /// recommends for most coding and agentic work on current models. Clamped
-    /// to the top rung where a provider has nothing between `high` and its
-    /// ceiling (see the table above). Serializes as `"xhigh"`.
+    /// Above `High`, below `Max` — Anthropic's `xhigh`. Where a provider has
+    /// no `xhigh` rung it is sent as that provider's nearest supported rung
+    /// (see the table above). Serializes as `"xhigh"`.
     XHigh,
-    /// The provider's highest reasoning setting — Anthropic's and DeepSeek's
-    /// `max`. Clamped to the top rung elsewhere (see the table above).
+    /// The highest setting this crate sends — Anthropic's and DeepSeek's
+    /// `max`. Elsewhere it is clamped to the highest value this crate knows is
+    /// accepted, which may be below the model's real ceiling (see the table
+    /// above).
     Max,
 }
 

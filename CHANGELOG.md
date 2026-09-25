@@ -17,26 +17,23 @@ adheres to [Semantic Versioning](https://semver.org/).
 
   Each provider now maps the new levels to its own ladder, and where the ladder
   is shorter it **clamps** to its top rung instead of sending a value it would
-  reject. The full table is on `ThinkingLevel`'s doc comment:
+  reject (Anthropic's adaptive effort excepted, see below). The full table is on `ThinkingLevel`'s doc comment:
 
-  | Level | Anthropic effort | Anthropic legacy / Bedrock budget | OpenAI-compat / Responses / Azure | DeepSeek | Gemini / Vertex budget |
+  | Level | Anthropic effort | Anthropic legacy / Bedrock budget | OpenAI-compat¹ / Responses / Azure | DeepSeek² | Gemini / Vertex budget |
   |-------|------|------|------|------|------|
   | `XHigh` | `xhigh` | 16,384 | `high` (clamped) | `max` | 24,576 (clamped) |
   | `Max` | `max` | 30,720 | `high` (clamped) | `max` | 24,576 (clamped) |
 
-  Every existing level sends exactly what it sent before. Serde names are
-  `"xhigh"` and `"max"` (lowercase, like the others), so persisted configs keep
-  loading.
+  ¹ When `supports_reasoning_effort` is set. ² When both
+  `supports_thinking_control` and `supports_reasoning_effort` are set.
+
+  Every existing level sends exactly what it sent before. The new serde names
+  are `"xhigh"` and `"max"` (lowercase, like the others). Persisted configs
+  keep loading because the existing names are unchanged.
 
   Anthropic effort is passed through, not clamped: Opus 4.6 / Sonnet 4.6 have
   no `xhigh` rung (it arrived with Opus 4.7) and will reject it. The crate has
   no per-model effort table.
-
-  This replaces the unreleased `OpenAiCompat::reasoning_effort_max` flag, which
-  never shipped. That flag sent DeepSeek's `High` as `max`, so `High` meant
-  something different on one provider and Anthropic's rungs stayed out of
-  reach. With real variants, `High` is `high` everywhere and `Max` is the
-  top rung wherever one exists.
 
   **Migration:** an exhaustive `match` on `ThinkingLevel` outside this crate no
   longer compiles. Add arms for `XHigh` and `Max`, or a wildcard arm. The

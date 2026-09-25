@@ -465,13 +465,16 @@ fn build_request_body(
 /// `reasoning_effort` for a thinking-enabled request.
 ///
 /// Two ladders. DeepSeek-style providers
-/// ([`OpenAiCompat::supports_thinking_control`]) take `none`/`low`/`high`/`max`:
-/// `High` stays `high`, and both `XHigh` and `Max` go to `max` — DeepSeek
-/// itself rounds an in-between rung *up* (`medium` becomes `high`), and
-/// sending `XHigh` as `high` would make it a silent synonym for `High` while a
-/// higher rung exists. Every other OpenAI-shaped provider tops out at `high`
-/// as far as this crate knows, and rejects an unknown string rather than
-/// rounding it, so `XHigh`/`Max` clamp to `high` there.
+/// ([`OpenAiCompat::supports_thinking_control`]) take `low`/`high`/`max`
+/// (<https://api-docs.deepseek.com/guides/thinking_mode>; `Off` is expressed
+/// as `thinking: disabled`, not as an effort value). `High` stays `high`, and
+/// both `XHigh` and `Max` go to `max`. That is this crate's choice, not
+/// DeepSeek's: DeepSeek's documented mapping sends a requested `xhigh` to
+/// `high` (and `medium` up to `high`), so passing `xhigh` through would make
+/// `XHigh` a silent synonym for `High` while a higher rung exists. Every other
+/// OpenAI-shaped provider tops out at `high` as far as this crate knows, and
+/// rejects an unknown string rather than rounding it, so `XHigh`/`Max` clamp
+/// to `high` there.
 fn reasoning_effort(level: ThinkingLevel, compat: &OpenAiCompat) -> &'static str {
     match level {
         ThinkingLevel::Minimal | ThinkingLevel::Low => "low",
@@ -930,8 +933,9 @@ mod tests {
 
     #[test]
     fn test_deepseek_xhigh_and_max_reach_the_max_rung() {
-        // DeepSeek's ladder is none/low/high/max. Max is its top rung; XHigh
-        // sits between high and max, and DeepSeek rounds in-between rungs up.
+        // DeepSeek's reasoning_effort ladder is low/high/max (api-docs.deepseek.com
+        // /guides/thinking_mode). Max is its top rung; the crate sends XHigh as
+        // max too, so it is not a synonym for High.
         let deepseek = ModelConfig::deepseek("deepseek-v4-pro", "DeepSeek V4 Pro");
         assert_eq!(effort_for(&deepseek, ThinkingLevel::Max), "max");
         assert_eq!(effort_for(&deepseek, ThinkingLevel::XHigh), "max");

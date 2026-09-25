@@ -52,10 +52,11 @@ config.anthropic = Some(AnthropicCompat::legacy());
 ```
 
 Legacy budgets: `Minimal`/`Low` 1,024 (the API minimum), `Medium` 2,048,
-`High` 8,192, `XHigh` 16,384, `Max` 30,720. `max_tokens` is automatically
-raised above the budget when needed (`Max` stops at 30,720 so that
-budget + 1,024 still fits Opus 4/4.1's 32,000-token output ceiling). Bedrock
-uses the same budgets.
+`High` 8,192, `XHigh` 16,384, `Max` 30,720. On this provider `max_tokens` is
+automatically raised to budget + 1,024 when needed (`Max` stops at 30,720 so
+that budget + 1,024 still fits Opus 4/4.1's 32,000-token output ceiling).
+Bedrock uses the same budgets but does **not** raise `max_tokens`: there the
+caller must set `max_tokens` above the budget (for `Max`, above 30,720).
 
 Thinking content is streamed as `Content::Thinking` with a cryptographic `signature` for verification.
 
