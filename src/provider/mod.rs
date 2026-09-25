@@ -7,6 +7,7 @@ pub mod mock;
 pub mod model;
 pub mod openai_compat;
 pub mod openai_responses;
+pub mod prices;
 pub mod registry;
 mod responses_stream;
 pub mod sse;
@@ -25,6 +26,7 @@ pub use model::{
 };
 pub use openai_compat::OpenAiCompatProvider;
 pub use openai_responses::OpenAiResponsesProvider;
+pub use prices::{PriceEntry, PriceError, PriceTable, PRICE_SCHEMA_VERSION};
 pub(crate) use registry::resolve_api_key_or_warn;
 pub use registry::{resolve_api_key, ProviderRegistry};
 pub use tool_args::{parse_tool_arguments, unparsed_tool_arguments, UNPARSED_ARGUMENTS_KEY};

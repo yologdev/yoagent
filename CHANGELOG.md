@@ -4,6 +4,45 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- **Prices are data: `src/provider/prices.json` and `PriceTable`.** Every
+  rate, tier and caveat that was an `f64` literal in a `ModelConfig`
+  constructor now lives in one JSON file (schema 1, keyed by provider then
+  model id, with `source`, `verified` and `note` per entry), embedded with
+  `include_str!`. `PriceTable` parses and validates it (unknown schema
+  version, negative or non-finite rates, tier thresholds not strictly
+  ascending, unknown fields, and a `cache_write_at_input` flag that does not
+  match the rates are all `PriceError`s), and offers `builtin()`,
+  `from_json_str` / `from_path`, `layered(&over)` (per-model replacement),
+  `cost(provider, id)`, `entry`, `iter`, `insert` and `to_json`. Every
+  preset's resulting `CostConfig` is bit-for-bit what 0.19.0 shipped; a new
+  test pins each one. `CostConfig` and `ContextTier` now derive `PartialEq`.
+- **`ModelConfig::with_prices(&table)`** re-resolves a config's cost from a
+  table you hold, without global state. Listed models get the table's rates;
+  unlisted ones keep theirs.
+- **`tests/price_audit.rs` audits every `prices.json` entry**, not a
+  hand-kept preset list, so an entry cannot be added unaudited. Its
+  allowances are now data (`cache_write_at_input`, `absent_upstream`).
+
+### Changed
+
+- **Generic first-party constructors are priced when the model is known.**
+  `anthropic`, `openai`, `openai_responses`, `google`, `xai`, `groq`,
+  `deepseek`, `mistral`, `zai`, `minimax`, `qwen` and `meta` look `(provider,
+  id)` up in the price table: `ModelConfig::anthropic("claude-sonnet-5", ..)`
+  now carries `claude_sonnet_5()`'s rates instead of `None`. An id the table
+  does not list is still `None`. Gateways and custom endpoints (`custom`,
+  `openai_compat`, `local`, `ollama`, `opencode_zen` / `opencode_go`, `mock`)
+  stay `None` — their bill is not the vendor's list price. This replaces
+  0.19's "generic constructors are unpriced" rule.
+- **`ModelConfig::meta` prices per id.** It priced every id at Muse Spark
+  1.1/1.2's standard rates, so `meta("muse-spark-1.2-contributor", ..)`
+  overstated the contributor tier by 12x-75x. `muse-spark-1.1` and
+  `muse-spark-1.2` keep their rates; any other id is now `None` (unknown).
+
 ## 0.19.0
 
 ### Breaking

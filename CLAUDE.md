@@ -162,6 +162,10 @@ All unit tests use `MockProvider` (`provider/mock.rs`) to simulate LLM responses
 
 The loop emits `tracing` spans: `agent_loop` → `llm_stream` per turn (records tokens_in/out/cached + cost_usd from `CostConfig` when configured) → `tool` per execution (records is_error). Futures are instrumented with `.instrument(span)` (never hold an entered guard across `.await`). OTel is app-side via `tracing-opentelemetry` — the library has no OTel dependency by design.
 
+### Pricing (`provider/prices.rs`, `provider/prices.json`)
+
+Prices are data, not literals: `prices.json` (embedded via `include_str!`, schema 1, keyed provider → model id) is parsed into a validated `PriceTable`. First-party constructors (`anthropic`, `openai`, `openai_responses`, `google`, `xai`, `groq`, `deepseek`, `mistral`, `zai`, `minimax`, `qwen`, `meta`) set `cost` via a private `priced()` lookup at construction; the named presets inherit it through `..Self::anthropic(..)` etc. Gateways/custom endpoints never look up (`None`). `ModelConfig::with_prices(&table)` re-resolves explicitly. `tests/preset_prices_test.rs` pins every preset's full `CostConfig`; `tests/price_audit.rs` (`--ignored`) diffs every entry against models.dev. Change a price by editing the JSON entry (and its `verified`/`source`), never by adding a literal.
+
 ## Key Design Conventions
 
 - Context overflow detection is centralized in `OVERFLOW_PHRASES` (`provider/traits.rs`) covering 15+ provider-specific error strings; both HTTP errors and SSE-embedded errors are classified. Rate limits are checked first (HTTP 429; structured SSE `type`/`code`/`status` such as `too_many_requests`, `no_capacity`, `rate_limit_exceeded`) so a capacity error whose text resembles an overflow phrase is retried, not compacted

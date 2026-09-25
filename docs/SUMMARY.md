@@ -23,6 +23,7 @@
 - [GASP: Your Agent Is a Git Repo](concepts/gasp.md)
 - [Lifecycle Callbacks](concepts/callbacks.md)
 - [Telemetry](concepts/telemetry.md)
+- [Model Pricing](concepts/pricing.md)
 
 # Guides
 

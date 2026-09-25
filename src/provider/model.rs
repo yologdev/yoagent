@@ -50,11 +50,14 @@ impl std::fmt::Display for ApiProtocol {
 ///
 /// # These are a snapshot, not an authority
 ///
-/// The built-in presets carry rates verified against the vendor's published
-/// pricing on the date noted at each constructor. Vendors reprice, and a
-/// compiled-in number cannot notice — `claude_sonnet_5` shipped Sonnet 4.6's
-/// rates across 18 releases, v0.9.0 through v0.16.5, overstating every
-/// `cost_usd` for that model by 50%, and nothing detected it.
+/// Built-in rates live in `src/provider/prices.json` (see
+/// [`PriceTable`](crate::provider::PriceTable)), each entry verified against
+/// the vendor's published pricing on the date it records. Vendors reprice,
+/// and a compiled-in number cannot notice — `claude_sonnet_5` shipped Sonnet
+/// 4.6's rates across 18 releases, v0.9.0 through v0.16.5, overstating every
+/// `cost_usd` for that model by 50%, and nothing detected it. You can
+/// re-price a config from your own table without waiting for a release:
+/// [`ModelConfig::with_prices`].
 ///
 /// # Context tiers
 ///
@@ -75,8 +78,8 @@ impl std::fmt::Display for ApiProtocol {
 /// small there and would select the cheap tier. Fix that before tiering a model
 /// Bedrock serves.
 ///
-/// `tests/price_audit.rs` now diffs every preset against models.dev; run it
-/// before a release:
+/// `tests/price_audit.rs` diffs every `prices.json` entry against models.dev;
+/// run it before a release:
 ///
 /// ```text
 /// cargo test --test price_audit -- --ignored --nocapture
@@ -96,10 +99,11 @@ impl std::fmt::Display for ApiProtocol {
 ///     .input_per_million = 1.80; // your negotiated rate
 /// assert_eq!(config.cost.as_ref().unwrap().output_per_million, 10.0);
 ///
-/// // Generic constructors carry no price (`cost: None`). `get_or_insert_with`
-/// // works here too — `if let Some(c) = config.cost.as_mut()` would silently
-/// // do nothing — but set every rate you pay, since the rest start at zero
-/// // (an unset cache rate then bills at the input rate):
+/// // A model the price table does not list has no price (`cost: None`).
+/// // `get_or_insert_with` works here too — `if let Some(c) =
+/// // config.cost.as_mut()` would silently do nothing — but set every rate
+/// // you pay, since the rest start at zero (an unset cache rate then bills
+/// // at the input rate):
 /// let mut deepseek = ModelConfig::deepseek("deepseek-flash", "DeepSeek Flash");
 /// assert!(deepseek.cost.is_none());
 /// // DeepSeek Flash peak rates (off-peak is half); DeepSeek has no
@@ -111,7 +115,7 @@ impl std::fmt::Display for ApiProtocol {
 /// let mut local = ModelConfig::local("http://localhost:1234/v1", "qwen3");
 /// local.cost = Some(CostConfig::new(0.0, 0.0));
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct CostConfig {
     pub input_per_million: f64,
@@ -149,7 +153,7 @@ pub struct CostConfig {
 ///
 /// The threshold is compared against the request's **prompt** tokens —
 /// `input + cache_read + cache_write` — not the total including output.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ContextTier {
     /// Prompt tokens above which the tier rates apply.
@@ -980,14 +984,27 @@ pub struct ModelConfig {
     pub max_tokens: u32,
     /// Per-token rates, or `None` when this crate does not know the price.
     ///
-    /// `None` means **unknown**, not free: the generic constructors
-    /// ([`openai`](Self::openai), [`deepseek`](Self::deepseek),
-    /// [`anthropic`](Self::anthropic), [`custom`](Self::custom), …) take any
-    /// model id, so they cannot carry a price. Only the named presets whose
-    /// rates were checked against the vendor's page (`claude_fable_5_1`,
-    /// `gpt_5_5`, …) return `Some`. Before 0.19 this field was a bare
+    /// Constructors fill it from the price table
+    /// ([`PriceTable`](crate::provider::PriceTable), built from
+    /// `src/provider/prices.json`) **when the config is built**. The named
+    /// presets (`claude_fable_5_1`, `gpt_5_5`, …) are always listed. The
+    /// generic first-party constructors ([`anthropic`](Self::anthropic),
+    /// [`openai`](Self::openai), [`openai_responses`](Self::openai_responses),
+    /// [`google`](Self::google), [`xai`](Self::xai), [`groq`](Self::groq),
+    /// [`deepseek`](Self::deepseek), [`mistral`](Self::mistral),
+    /// [`zai`](Self::zai), [`minimax`](Self::minimax), [`qwen`](Self::qwen),
+    /// [`meta`](Self::meta)) get `Some` for an id the table lists and `None`
+    /// otherwise. Gateways and custom endpoints ([`custom`](Self::custom),
+    /// [`openai_compat`](Self::openai_compat), [`local`](Self::local),
+    /// [`ollama`](Self::ollama), the OpenCode gateways, [`mock`](Self::mock))
+    /// are always `None`: what they bill is not the vendor's list price.
+    ///
+    /// `None` means **unknown**, not free. Before 0.19 this field was a bare
     /// `CostConfig` and unpriced configs held all-zero rates, which read as a
     /// $0 model to anyone who did not know to call `is_configured()`.
+    ///
+    /// Setting this field yourself after construction always wins over any
+    /// table.
     ///
     /// `Some` with every rate zero means **free**: a local model, or a free
     /// tier. The built-in accounting
@@ -1092,6 +1109,45 @@ impl ModelConfig {
         )
     }
 
+    /// Set `cost` from the price table for this config's `(provider, id)`:
+    /// `Some` when the table lists the model, `None` otherwise. Called by
+    /// the first-party constructors only — a gateway or custom endpoint does
+    /// not bill the vendor's list price.
+    fn priced(mut self) -> Self {
+        self.cost = super::prices::resolved_cost(&self.provider, &self.id);
+        self
+    }
+
+    /// Re-resolve `cost` from `table` for this config's `(provider, id)`.
+    ///
+    /// When `table` lists the model its rates replace `cost`; when it does
+    /// not, `cost` is left as it is — so a partial table overrides exactly
+    /// what it contains, as [`PriceTable::layered`] does. To make a table the
+    /// whole authority, start from [`PriceTable::builtin`] and layer yours on
+    /// top.
+    ///
+    /// Unlike the process-wide overrides this touches no global state, and
+    /// it applies to any config, gateways included: calling it is the
+    /// caller saying "these are the prices I pay here".
+    ///
+    /// ```
+    /// # use yoagent::provider::{ModelConfig, PriceTable};
+    /// let mine = PriceTable::from_json_str(r#"{"schema": 1, "providers": {
+    ///     "anthropic": {"claude-sonnet-5": {"input": 1.8, "output": 9.0}}}}"#)?;
+    /// let config = ModelConfig::claude_sonnet_5().with_prices(&mine);
+    /// assert_eq!(config.cost.unwrap().input_per_million, 1.8);
+    /// # Ok::<(), yoagent::provider::PriceError>(())
+    /// ```
+    ///
+    /// [`PriceTable::layered`]: super::PriceTable::layered
+    /// [`PriceTable::builtin`]: super::PriceTable::builtin
+    pub fn with_prices(mut self, table: &super::PriceTable) -> Self {
+        if let Some(cost) = table.cost(&self.provider, &self.id) {
+            self.cost = Some(cost);
+        }
+        self
+    }
+
     /// Create a config for any protocol without a dedicated preset
     /// (Bedrock, Vertex, Azure, or future protocols).
     ///
@@ -1133,28 +1189,25 @@ impl ModelConfig {
             reasoning: true,
             context_window: 200_000,
             max_tokens: 16_000,
-            cost: None,
+            cost: None, // set by `priced`
             headers: HashMap::new(),
             google: None,
             anthropic: None,
             compat: None,
         }
+        .priced()
     }
 
     /// Claude Fable 5 — Anthropic's most capable model.
     /// 1M context; defaults to 64K of the model's 128K max output.
     ///
     /// Rates verified against <https://platform.claude.com/docs/en/about-claude/pricing>
-    /// on 2026-08-19. See [`CostConfig`] — they are a snapshot, not an authority.
+    /// on 2026-08-19. Carried in `prices.json`; see
+    /// [`CostConfig`] — a snapshot, not an authority.
     pub fn claude_fable_5() -> Self {
         Self {
             context_window: 1_000_000,
             max_tokens: 64_000,
-            cost: Some(
-                CostConfig::new(10.0, 50.0)
-                    .with_cache_read(1.0)
-                    .with_cache_write(12.5),
-            ),
             anthropic: Some(AnthropicCompat::default().with_native_structured_output(true)),
             ..Self::anthropic("claude-fable-5", "Claude Fable 5")
         }
@@ -1188,16 +1241,12 @@ impl ModelConfig {
     ///
     /// Rates verified against the raw markup of
     /// <https://platform.claude.com/docs/en/about-claude/pricing> on
-    /// 2026-09-24. See [`CostConfig`] — they are a snapshot, not an authority.
+    /// 2026-09-24. Carried in `prices.json`; see
+    /// [`CostConfig`] — a snapshot, not an authority.
     pub fn claude_fable_5_1() -> Self {
         Self {
             context_window: 1_000_000,
             max_tokens: 64_000,
-            cost: Some(
-                CostConfig::new(10.0, 50.0)
-                    .with_cache_read(0.25)
-                    .with_cache_write(12.5),
-            ),
             anthropic: Some(AnthropicCompat::default().with_native_structured_output(true)),
             ..Self::anthropic("claude-fable-5-1", "Claude Fable 5.1")
         }
@@ -1232,16 +1281,12 @@ impl ModelConfig {
     ///
     /// Rates verified against the raw markup of
     /// <https://platform.claude.com/docs/en/about-claude/pricing> on
-    /// 2026-09-25. See [`CostConfig`] — they are a snapshot, not an authority.
+    /// 2026-09-25. Carried in `prices.json`; see
+    /// [`CostConfig`] — a snapshot, not an authority.
     pub fn claude_opus_5_5() -> Self {
         Self {
             context_window: 1_000_000,
             max_tokens: 64_000,
-            cost: Some(
-                CostConfig::new(4.0, 20.0)
-                    .with_cache_read(0.2)
-                    .with_cache_write(5.0),
-            ),
             anthropic: Some(AnthropicCompat::default().with_native_structured_output(true)),
             ..Self::anthropic("claude-opus-5-5", "Claude Opus 5.5")
         }
@@ -1256,16 +1301,12 @@ impl ModelConfig {
     /// `AnthropicCompat::default()` selects, which Opus 5 accepts unchanged.
     ///
     /// Rates verified against <https://platform.claude.com/docs/en/about-claude/pricing>
-    /// on 2026-08-19. See [`CostConfig`] — they are a snapshot, not an authority.
+    /// on 2026-08-19. Carried in `prices.json`; see
+    /// [`CostConfig`] — a snapshot, not an authority.
     pub fn claude_opus_5() -> Self {
         Self {
             context_window: 1_000_000,
             max_tokens: 64_000,
-            cost: Some(
-                CostConfig::new(5.0, 25.0)
-                    .with_cache_read(0.5)
-                    .with_cache_write(6.25),
-            ),
             anthropic: Some(AnthropicCompat::default().with_native_structured_output(true)),
             ..Self::anthropic("claude-opus-5", "Claude Opus 5")
         }
@@ -1274,16 +1315,12 @@ impl ModelConfig {
     /// Claude Opus 4.8. 1M context; defaults to 64K of the model's 128K max output.
     ///
     /// Rates verified against <https://platform.claude.com/docs/en/about-claude/pricing>
-    /// on 2026-08-19. See [`CostConfig`] — they are a snapshot, not an authority.
+    /// on 2026-08-19. Carried in `prices.json`; see
+    /// [`CostConfig`] — a snapshot, not an authority.
     pub fn claude_opus_4_8() -> Self {
         Self {
             context_window: 1_000_000,
             max_tokens: 64_000,
-            cost: Some(
-                CostConfig::new(5.0, 25.0)
-                    .with_cache_read(0.5)
-                    .with_cache_write(6.25),
-            ),
             anthropic: Some(AnthropicCompat::default().with_native_structured_output(true)),
             ..Self::anthropic("claude-opus-4-8", "Claude Opus 4.8")
         }
@@ -1292,16 +1329,12 @@ impl ModelConfig {
     /// Claude Sonnet 5. 1M context; defaults to 64K of the model's 128K max output.
     ///
     /// Rates verified against <https://platform.claude.com/docs/en/about-claude/pricing>
-    /// on 2026-08-19. See [`CostConfig`] — they are a snapshot, not an authority.
+    /// on 2026-08-19. Carried in `prices.json`; see
+    /// [`CostConfig`] — a snapshot, not an authority.
     pub fn claude_sonnet_5() -> Self {
         Self {
             context_window: 1_000_000,
             max_tokens: 64_000,
-            cost: Some(
-                CostConfig::new(2.0, 10.0)
-                    .with_cache_read(0.2)
-                    .with_cache_write(2.5),
-            ),
             anthropic: Some(AnthropicCompat::default().with_native_structured_output(true)),
             ..Self::anthropic("claude-sonnet-5", "Claude Sonnet 5")
         }
@@ -1313,16 +1346,12 @@ impl ModelConfig {
     /// Haiku 4.5 does not support adaptive thinking.
     ///
     /// Rates verified against <https://platform.claude.com/docs/en/about-claude/pricing>
-    /// on 2026-08-19. See [`CostConfig`] — they are a snapshot, not an authority.
+    /// on 2026-08-19. Carried in `prices.json`; see
+    /// [`CostConfig`] — a snapshot, not an authority.
     pub fn claude_haiku_4_5() -> Self {
         Self {
             context_window: 200_000,
             max_tokens: 32_000,
-            cost: Some(
-                CostConfig::new(1.0, 5.0)
-                    .with_cache_read(0.1)
-                    .with_cache_write(1.25),
-            ),
             // Haiku 4.5 predates adaptive thinking: it accepts only
             // `{"type": "enabled", "budget_tokens": N}` and rejects
             // `{"type": "adaptive"}` with a 400.
@@ -1358,22 +1387,13 @@ impl ModelConfig {
     /// rate, $10 — see [`CostConfig`].) OpenAI's pricing page no longer lists
     /// gpt-5.5, so there is no table cell to settle it.
     ///
-    /// Rates are a snapshot, not an authority; see [`CostConfig`].
+    /// Rates are carried in `prices.json` — a snapshot, not an authority; see
+    /// [`CostConfig`].
     pub fn gpt_5_5() -> Self {
         Self {
             reasoning: true,
             context_window: 1_000_000,
             max_tokens: 64_000,
-            cost: Some(
-                CostConfig::new(5.0, 30.0)
-                    .with_cache_read(0.5)
-                    .with_cache_write(5.0)
-                    .with_context_tier(
-                        ContextTier::new(272_000, 10.0, 45.0)
-                            .with_cache_read(1.0)
-                            .with_cache_write(10.0),
-                    ),
-            ),
             compat: Some(OpenAiCompat {
                 max_reasoning_effort: ReasoningEffortCeiling::XHigh,
                 ..OpenAiCompat::openai()
@@ -1408,18 +1428,7 @@ impl ModelConfig {
     /// cached / $12.50 cache write / $50 output; above 272K prompt tokens the
     /// whole request bills at $20 / $2 / $25 / $75. See [`CostConfig`].
     pub fn gpt_6_astra() -> Self {
-        Self::gpt_6(
-            "gpt-6-astra",
-            "GPT-6 Astra",
-            CostConfig::new(10.0, 50.0)
-                .with_cache_read(1.0)
-                .with_cache_write(12.5)
-                .with_context_tier(
-                    ContextTier::new(272_000, 20.0, 75.0)
-                        .with_cache_read(2.0)
-                        .with_cache_write(25.0),
-                ),
-        )
+        Self::gpt_6("gpt-6-astra", "GPT-6 Astra")
     }
 
     /// GPT-6 Sol (`gpt-6-sol`), built for coding and agentic work.
@@ -1448,18 +1457,7 @@ impl ModelConfig {
     /// cached / $2.50 cache write / $10 output; above 272K prompt tokens the
     /// whole request bills at $4 / $0.40 / $5 / $15. See [`CostConfig`].
     pub fn gpt_6_sol() -> Self {
-        Self::gpt_6(
-            "gpt-6-sol",
-            "GPT-6 Sol",
-            CostConfig::new(2.0, 10.0)
-                .with_cache_read(0.2)
-                .with_cache_write(2.5)
-                .with_context_tier(
-                    ContextTier::new(272_000, 4.0, 15.0)
-                        .with_cache_read(0.4)
-                        .with_cache_write(5.0),
-                ),
-        )
+        Self::gpt_6("gpt-6-sol", "GPT-6 Sol")
     }
 
     /// GPT-6 Luna (`gpt-6-luna`), the efficient GPT-6 model for focused,
@@ -1484,18 +1482,7 @@ impl ModelConfig {
     /// tokens the whole request bills at $0.20 / $0.02 / $0.25 / $0.75. See
     /// [`CostConfig`].
     pub fn gpt_6_luna() -> Self {
-        Self::gpt_6(
-            "gpt-6-luna",
-            "GPT-6 Luna",
-            CostConfig::new(0.1, 0.5)
-                .with_cache_read(0.01)
-                .with_cache_write(0.125)
-                .with_context_tier(
-                    ContextTier::new(272_000, 0.2, 0.75)
-                        .with_cache_read(0.02)
-                        .with_cache_write(0.25),
-                ),
-        )
+        Self::gpt_6("gpt-6-luna", "GPT-6 Luna")
     }
 
     /// Shared shape of the GPT-6 presets. There is no bare `gpt-6` model id.
@@ -1504,12 +1491,11 @@ impl ModelConfig {
     /// provider reads nothing else from it. It starts from
     /// [`OpenAiCompat::openai`] so that switching `api` to Chat Completions
     /// yields correct flags rather than the bare defaults.
-    fn gpt_6(id: &str, name: &str, cost: CostConfig) -> Self {
+    fn gpt_6(id: &str, name: &str) -> Self {
         Self {
             reasoning: true,
             context_window: 1_050_000,
             max_tokens: 64_000,
-            cost: Some(cost),
             compat: Some(OpenAiCompat {
                 max_reasoning_effort: ReasoningEffortCeiling::Max,
                 ..OpenAiCompat::openai()
@@ -1529,12 +1515,13 @@ impl ModelConfig {
             reasoning: false,
             context_window: 128_000,
             max_tokens: 4096,
-            cost: None,
+            cost: None, // set by `priced`
             headers: HashMap::new(),
             google: None,
             anthropic: None,
             compat: Some(OpenAiCompat::openai()),
         }
+        .priced()
     }
 
     /// Create a config for OpenAI's **Responses API** (`POST /v1/responses`).
@@ -1546,7 +1533,8 @@ impl ModelConfig {
     /// [`OpenAiResponsesProvider`](crate::provider::OpenAiResponsesProvider)
     /// and reads the key from `OPENAI_API_KEY`.
     ///
-    /// Unpriced (`cost: None`); set `cost` for the model you use.
+    /// Priced when `prices.json` lists the id (as for [`openai`](Self::openai)),
+    /// else `cost: None`; set `cost` for a model it does not list.
     ///
     /// `compat` is `None`, so reasoning effort tops out at `high`
     /// (`ThinkingLevel::Off` always omits it). For a model with a higher
@@ -1563,12 +1551,13 @@ impl ModelConfig {
             reasoning: true,
             context_window: 128_000,
             max_tokens: 16_000,
-            cost: None,
+            cost: None, // set by `priced`
             headers: HashMap::new(),
             google: None,
             anthropic: None,
             compat: None,
         }
+        .priced()
     }
 
     /// Create a config for a local OpenAI-compatible server (LM Studio, Ollama, etc.).
@@ -1768,12 +1757,13 @@ impl ModelConfig {
             reasoning: false,
             context_window: 128_000,
             max_tokens: 4096,
-            cost: None,
+            cost: None, // set by `priced`
             headers: HashMap::new(),
             google: None,
             anthropic: None,
             compat: Some(OpenAiCompat::zai()),
         }
+        .priced()
     }
 
     /// Create a new Meta Model API config (Muse Spark).
@@ -1789,11 +1779,13 @@ impl ModelConfig {
     /// tune it; `Off` omits the field, which means Meta's default (medium)
     /// applies — not "no reasoning".
     ///
-    /// Rates are Muse Spark 1.1/1.2, verified 2026-08-19. This constructor is
-    /// generic over the model id, so a different tier needs `config.cost`
-    /// overridden: the contributor tier runs 12x lower on input, 21x on output
-    /// and 75x on cache reads, so `ModelConfig::meta("muse-spark-1.2-contributor", ..)`
-    /// overstates cost badly. See [`CostConfig`].
+    /// Priced per model id from `prices.json`: `muse-spark-1.1` and
+    /// `muse-spark-1.2` carry the standard rates (verified 2026-08-19). Any
+    /// other id is `cost: None` — through 0.19 every id got those rates, so
+    /// `ModelConfig::meta("muse-spark-1.2-contributor", ..)` overstated the
+    /// contributor tier (12x lower on input, 21x on output, 75x on cache
+    /// reads) badly; now it is unknown until you set `config.cost`. See
+    /// [`CostConfig`].
     pub fn meta(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -1804,17 +1796,13 @@ impl ModelConfig {
             reasoning: true,
             context_window: 1_048_576,
             max_tokens: 131_072,
-            // No cache-write charge: writes bill at the input rate.
-            cost: Some(
-                CostConfig::new(1.25, 4.25)
-                    .with_cache_read(0.15)
-                    .with_cache_write(1.25),
-            ),
+            cost: None, // set by `priced`
             headers: HashMap::new(),
             google: None,
             anthropic: None,
             compat: Some(OpenAiCompat::meta()),
         }
+        .priced()
     }
 
     /// Create a new MiniMax model config.
@@ -1831,12 +1819,13 @@ impl ModelConfig {
             reasoning: false,
             context_window: 1_000_000,
             max_tokens: 4096,
-            cost: None,
+            cost: None, // set by `priced`
             headers: HashMap::new(),
             google: None,
             anthropic: None,
             compat: Some(OpenAiCompat::minimax()),
         }
+        .priced()
     }
 
     /// Create a new Qwen / DashScope model config.
@@ -1852,12 +1841,13 @@ impl ModelConfig {
             reasoning: true,
             context_window: 128_000,
             max_tokens: 4096,
-            cost: None,
+            cost: None, // set by `priced`
             headers: HashMap::new(),
             google: None,
             anthropic: None,
             compat: Some(OpenAiCompat::qwen()),
         }
+        .priced()
     }
 
     /// Create a new xAI (Grok) model config.
@@ -1873,12 +1863,13 @@ impl ModelConfig {
             reasoning: false,
             context_window: 131_072,
             max_tokens: 4096,
-            cost: None,
+            cost: None, // set by `priced`
             headers: HashMap::new(),
             google: None,
             anthropic: None,
             compat: Some(OpenAiCompat::xai()),
         }
+        .priced()
     }
 
     /// Create a new Groq model config.
@@ -1894,12 +1885,13 @@ impl ModelConfig {
             reasoning: false,
             context_window: 128_000,
             max_tokens: 4096,
-            cost: None,
+            cost: None, // set by `priced`
             headers: HashMap::new(),
             google: None,
             anthropic: None,
             compat: Some(OpenAiCompat::groq()),
         }
+        .priced()
     }
 
     /// Create a new DeepSeek model config.
@@ -1919,12 +1911,13 @@ impl ModelConfig {
             reasoning: true,
             context_window: 1_000_000,
             max_tokens: 384_000,
-            cost: None,
+            cost: None, // set by `priced`
             headers: HashMap::new(),
             google: None,
             anthropic: None,
             compat: Some(OpenAiCompat::deepseek()),
         }
+        .priced()
     }
 
     /// Create a new Mistral model config.
@@ -1940,12 +1933,13 @@ impl ModelConfig {
             reasoning: false,
             context_window: 128_000,
             max_tokens: 4096,
-            cost: None,
+            cost: None, // set by `priced`
             headers: HashMap::new(),
             google: None,
             anthropic: None,
             compat: Some(OpenAiCompat::mistral()),
         }
+        .priced()
     }
 
     /// Create a new Google Generative AI (Gemini) model config.
@@ -1959,12 +1953,13 @@ impl ModelConfig {
             reasoning: false,
             context_window: 1_000_000,
             max_tokens: 8192,
-            cost: None,
+            cost: None, // set by `priced`
             headers: HashMap::new(),
             google: None,
             anthropic: None,
             compat: None,
         }
+        .priced()
     }
 }
 
@@ -2704,24 +2699,34 @@ mod tests {
         assert_eq!(cost.output_per_million, 0.0);
     }
 
-    /// Generic constructors take any model id, so they cannot know a price and
-    /// must say so with `None` rather than all-zero rates that read as free
-    /// (#172). If one of these gains a real price, move it out of this list
-    /// **and** add it to `tests/price_audit.rs`, which is what keeps a
-    /// compiled-in price honest.
+    /// A constructor with no listed price must say so with `None` rather than
+    /// all-zero rates that read as free (#172): generic constructors given an
+    /// id `prices.json` does not list, and gateways/custom endpoints for any
+    /// id — their billing is not the vendor's list price, so they never look
+    /// the table up, even for an id it lists.
     #[test]
-    fn generic_constructors_are_unpriced() {
+    fn unknown_ids_and_gateways_are_unpriced() {
         let unpriced = [
             ModelConfig::custom(ApiProtocol::BedrockConverseStream, "p", "u", "m", "M"),
+            // A custom config named like a first-party provider is still custom.
+            ModelConfig::custom(
+                ApiProtocol::AnthropicMessages,
+                "anthropic",
+                "u",
+                "claude-sonnet-5",
+                "S",
+            ),
             ModelConfig::mock(),
             ModelConfig::anthropic("claude-x", "X"),
             ModelConfig::openai("gpt-x", "X"),
             ModelConfig::openai_responses("gpt-x", "X"),
             ModelConfig::local("http://localhost:1234/v1", "m"),
+            ModelConfig::local("http://localhost:1234/v1", "gpt-5.5"),
             ModelConfig::opencode_zen("claude-sonnet-5"),
             ModelConfig::opencode_zen("gpt-5.5"),
             ModelConfig::opencode_go("glm-5.2"),
             ModelConfig::openai_compat("http://h/v1", "m", "p", OpenAiCompat::default()),
+            ModelConfig::openai_compat("http://h/v1", "gpt-5.5", "openai", OpenAiCompat::openai()),
             ModelConfig::ollama("http://localhost:11434/v1", "m"),
             ModelConfig::zai("glm-5", "GLM-5"),
             ModelConfig::minimax("MiniMax-M1", "M1"),
@@ -2731,6 +2736,9 @@ mod tests {
             ModelConfig::deepseek("deepseek-v4-flash", "DeepSeek"),
             ModelConfig::mistral("mistral-large-latest", "Mistral"),
             ModelConfig::google("gemini-3-pro", "Gemini"),
+            // `meta` looks its id up too: the contributor tier is not listed,
+            // so it is unknown rather than billed at the standard rate.
+            ModelConfig::meta("muse-spark-1.2-contributor", "Contributor"),
         ];
         for mc in unpriced {
             assert!(
@@ -2740,6 +2748,55 @@ mod tests {
                 mc.provider
             );
         }
+    }
+
+    /// The generic first-party constructors price an id the table lists —
+    /// with exactly the named preset's rates.
+    #[test]
+    fn generic_constructors_price_listed_ids() {
+        let pairs = [
+            (
+                ModelConfig::anthropic("claude-sonnet-5", "S"),
+                ModelConfig::claude_sonnet_5(),
+            ),
+            (
+                ModelConfig::anthropic("claude-opus-5-5", "O"),
+                ModelConfig::claude_opus_5_5(),
+            ),
+            (ModelConfig::openai("gpt-5.5", "G"), ModelConfig::gpt_5_5()),
+            (
+                ModelConfig::openai_responses("gpt-5.5", "G"),
+                ModelConfig::gpt_5_5(),
+            ),
+            (
+                ModelConfig::openai("gpt-6-sol", "G"),
+                ModelConfig::gpt_6_sol(),
+            ),
+        ];
+        for (generic, preset) in pairs {
+            assert!(generic.cost.is_some(), "{} unpriced", generic.id);
+            assert_eq!(generic.cost, preset.cost, "{}", generic.id);
+        }
+    }
+
+    /// `with_prices` replaces a listed model's cost and leaves the rest.
+    #[test]
+    fn with_prices_replaces_only_listed_models() {
+        let table = crate::provider::PriceTable::from_json_str(
+            r#"{"schema": 1, "providers": {
+                "anthropic": {"claude-sonnet-5": {"input": 1.8, "output": 9.0}},
+                "local": {"qwen3": {"input": 0, "output": 0}}}}"#,
+        )
+        .unwrap();
+        let sonnet = ModelConfig::claude_sonnet_5().with_prices(&table);
+        assert_eq!(sonnet.cost, Some(CostConfig::new(1.8, 9.0)));
+        let opus = ModelConfig::claude_opus_5().with_prices(&table);
+        assert_eq!(opus.cost, ModelConfig::claude_opus_5().cost);
+        let unknown = ModelConfig::deepseek("deepseek-flash", "D").with_prices(&table);
+        assert!(unknown.cost.is_none());
+        // Explicit, so it applies to a local endpoint too: free, not unknown.
+        let local = ModelConfig::local("http://localhost:1234/v1", "qwen3").with_prices(&table);
+        assert_eq!(local.cost, Some(CostConfig::new(0.0, 0.0)));
     }
 
     #[test]

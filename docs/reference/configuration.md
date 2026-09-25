@@ -202,12 +202,17 @@ cache rate can no longer bill cached tokens as free. A fully zero config still
 costs `$0`. There is no way to say "cache reads are free but input is not";
 set a tiny positive rate if a vendor ever charges that.
 
-`ModelConfig::cost` is an `Option<CostConfig>`. `None` means **pricing
-unknown**, not free: only the named presets whose rates were checked against the
-vendor (`claude_*`, `gpt_5_5`, `gpt_6_astra` / `gpt_6_sol` / `gpt_6_luna`,
-`meta`) return `Some`; generic constructors such as `deepseek(id, name)`,
-`openai(id, name)` or `openai_responses(id, name)` cannot know the model's
-price and return `None`. Supply one when you know it:
+`ModelConfig::cost` is an `Option<CostConfig>`, filled at construction from
+the price table (`src/provider/prices.json`; see [Model Pricing](../concepts/pricing.md)).
+`None` means **pricing unknown**, not free. The named presets (`claude_*`,
+`gpt_5_5`, `gpt_6_astra` / `gpt_6_sol` / `gpt_6_luna`) are always priced; the
+generic first-party constructors (`anthropic`, `openai`, `openai_responses`,
+`google`, `xai`, `groq`, `deepseek`, `mistral`, `zai`, `minimax`, `qwen`,
+`meta`) are priced when the table lists the id — so
+`ModelConfig::openai("gpt-5.5", ..)` carries `gpt_5_5()`'s rates — and `None`
+otherwise; gateways and custom endpoints (`custom`, `openai_compat`, `local`,
+`ollama`, `opencode_zen` / `opencode_go`) are always `None`. Supply a price
+when you know it:
 
 ```rust
 let mut config = ModelConfig::deepseek("deepseek-flash", "DeepSeek Flash");
@@ -226,17 +231,21 @@ let mut config = ModelConfig::local("http://localhost:1234/v1", "qwen3");
 config.cost = Some(CostConfig::new(0.0, 0.0)); // free, not unknown
 ```
 
-To adjust one rate on a named preset, use `get_or_insert_with` rather than
-`if let Some(c) = config.cost.as_mut()`, which silently does nothing on a
-generic constructor:
+To re-price from a table of your own (a negotiated rate, a price change
+yoagent has not released yet), use `config.with_prices(&table)`; see
+[Model Pricing](../concepts/pricing.md).
+
+To adjust one rate on a priced config, use `get_or_insert_with` rather than
+`if let Some(c) = config.cost.as_mut()`, which silently does nothing on an
+unpriced one:
 
 ```rust
 config.cost.get_or_insert_with(CostConfig::default).input_per_million = 1.80;
 ```
 
-On a generic constructor (`cost: None`) that line creates a `CostConfig` whose
+On an unpriced config (`cost: None`) that line creates a `CostConfig` whose
 other rates are zero: output tokens would be billed at a real `$0`, and cache
-tokens at the input rate rather than their own. Price a generic constructor
+tokens at the input rate rather than their own. Price an unpriced config
 with every rate you pay instead:
 
 ```rust
