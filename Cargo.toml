@@ -71,3 +71,7 @@ required-features = ["gasp"]
 [[example]]
 name = "llm_compaction_live"
 required-features = ["gasp"]
+
+[[test]]
+name = "decision_test"
+required-features = ["decision"]
