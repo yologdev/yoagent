@@ -31,8 +31,8 @@ impl QuestionKind {
     }
 
     /// All kinds, in wire order.
-    pub fn all() -> Vec<QuestionKind> {
-        vec![Self::Noul, Self::Choice, Self::Score]
+    pub fn all() -> &'static [QuestionKind] {
+        &[Self::Noul, Self::Choice, Self::Score]
     }
 }
 
@@ -112,8 +112,9 @@ impl Question {
         }
     }
 
-    /// A choice among options, each with a rubric description.
-    pub fn choice_described<I, K, D>(instructions: impl Into<Value>, options: I) -> Self
+    /// A choice among options, each with a rubric description (the
+    /// question's `criteria`). Option order is preserved on the wire.
+    pub fn choice_with_criteria<I, K, D>(instructions: impl Into<Value>, options: I) -> Self
     where
         I: IntoIterator<Item = (K, D)>,
         K: Into<String>,
@@ -166,6 +167,30 @@ impl Question {
         }
     }
 
+    /// A Choice's options with their descriptions (`None` = sent as
+    /// `null`), in order. `None` for other kinds.
+    pub fn choice_criteria(&self) -> Option<Vec<(&str, Option<&Value>)>> {
+        match &self.body {
+            Body::Choice { options } => Some(
+                options
+                    .iter()
+                    .map(|(o, d)| (o.as_str(), d.as_ref()))
+                    .collect(),
+            ),
+            _ => None,
+        }
+    }
+
+    /// A Noul's `(true, false)` criteria, when it has them.
+    pub fn noul_criteria(&self) -> Option<(&Value, &Value)> {
+        match &self.body {
+            Body::Noul {
+                criteria: Some((t, f)),
+            } => Some((t, f)),
+            _ => None,
+        }
+    }
+
     /// A Score's level descriptions, lowest first. `None` for other kinds.
     pub fn levels(&self) -> Option<&[Value]> {
         match &self.body {
@@ -176,7 +201,7 @@ impl Question {
 
     /// Check this question against a backend's limits. `id` names it in the
     /// error.
-    pub fn validate(&self, id: &str, caps: &Capabilities) -> Result<(), DecisionError> {
+    pub(crate) fn validate(&self, id: &str, caps: &Capabilities) -> Result<(), DecisionError> {
         let kind = self.kind();
         if !caps.supports(kind) {
             return Err(DecisionError::Unsupported(format!(
@@ -355,7 +380,7 @@ impl Request {
     /// The token limits are checked on an estimate (4 bytes per token, the
     /// same heuristic as [`context::estimate_tokens`](crate::context::estimate_tokens)),
     /// so a request near a limit may still be rejected by the server with 422.
-    pub fn validate(&self, caps: &Capabilities) -> Result<(), DecisionError> {
+    pub(crate) fn validate(&self, caps: &Capabilities) -> Result<(), DecisionError> {
         if self.model.trim().is_empty() {
             return Err(DecisionError::Invalid("model: must not be empty".into()));
         }

@@ -21,9 +21,9 @@ fn in_unit(x: f64) -> bool {
 #[tokio::test]
 #[ignore = "live: needs TYPESAFE_API_KEY and sends a request to api.typesafe.ai"]
 async fn jev_answers_a_batched_request() {
-    let key = std::env::var(TYPESAFE_API_KEY_ENV).unwrap_or_default();
+    let key = std::env::var("TYPESAFE_API_KEY").unwrap_or_default();
     if key.trim().is_empty() {
-        eprintln!("skipped: {TYPESAFE_API_KEY_ENV} is not set");
+        eprintln!("skipped: TYPESAFE_API_KEY is not set");
         return;
     }
     let jev = DecisionModel::jev();
@@ -56,23 +56,26 @@ async fn jev_answers_a_batched_request() {
     assert!(eval.usage.input_tokens > 0);
 
     let urgent = eval.noul("urgent").expect("noul answer");
-    assert!(in_unit(urgent.p_true) && in_unit(urgent.confidence));
-    assert!(urgent.p_true > 0.5, "clearly urgent: {}", urgent.p_true);
+    assert!(in_unit(urgent.p_true()) && in_unit(urgent.confidence()));
+    assert!(urgent.p_true() > 0.5, "clearly urgent: {}", urgent.p_true());
 
     let team = eval.choice("team").expect("choice answer");
-    assert!(["billing", "technical", "sales"].contains(&team.choice.as_str()));
+    assert!(["billing", "technical", "sales"].contains(&team.choice()));
     assert!(
-        sums_to_one(team.probabilities.values().copied()),
+        sums_to_one(team.probabilities().map(|(_, p)| p)),
         "{team:?}"
     );
-    assert!(in_unit(team.confidence));
+    assert!(in_unit(team.confidence()));
 
     let mood = eval.score("mood").expect("score answer");
-    assert_eq!(mood.probabilities.len(), 3);
-    assert!(sums_to_one(mood.probabilities.iter().copied()), "{mood:?}");
-    assert!(in_unit(mood.confidence));
-    assert!((0.0..=2.0).contains(&mood.score));
-    assert_eq!(mood.legend.len(), 3);
+    assert_eq!(mood.probabilities().len(), 3);
+    assert!(
+        sums_to_one(mood.probabilities().iter().copied()),
+        "{mood:?}"
+    );
+    assert!(in_unit(mood.confidence()));
+    assert!((0.0..=2.0).contains(&mood.score()));
+    assert_eq!(mood.legend().len(), 3);
 
     // Priced when the reported version is in the table; never guessed.
     if eval.model == "jev-1.13.0" {
@@ -81,6 +84,10 @@ async fn jev_answers_a_batched_request() {
     }
     println!(
         "urgent {:.2} | team {} ({:.2}) | mood {:.2} ({:.2})",
-        urgent.p_true, team.choice, team.confidence, mood.score, mood.confidence
+        urgent.p_true(),
+        team.choice(),
+        team.confidence(),
+        mood.score(),
+        mood.confidence()
     );
 }

@@ -49,12 +49,13 @@ async fn main() {
     println!("urgent: {:.2}", eval.p_true("urgent").unwrap_or_default());
     println!(
         "team:   {} (confidence {:.2})",
-        team.choice, team.confidence
+        team.choice(),
+        team.confidence()
     );
     println!(
         "mood:   {:.2} on 0..2 — mostly \"{}\"",
-        mood.score,
-        mood.legend[mood.level()]
+        mood.score(),
+        mood.legend()[mood.level()]
     );
     println!(
         "usage:  {} input tokens, cost {}",
@@ -64,9 +65,17 @@ async fn main() {
             .unwrap_or_else(|| "unpriced".into())
     );
 
-    // 3. Attach it to an agent: advisory skill/tool hints only (never
-    //    blocking). The tool gate is a separate, explicit opt-in.
-    let _agent = Agent::from_config(ModelConfig::claude_sonnet_5())
-        .with_decision_model(jev.clone())
-        .with_tool_gate();
+    // 3. Attach it to an agent: advisory skill/tool hints only, never
+    //    blocking. They need skills or 40+ tools — without either, this adds
+    //    nothing and sends nothing.
+    let _agent =
+        Agent::from_config(ModelConfig::claude_sonnet_5()).with_decision_model(jev.clone());
+
+    // The tool gate is a separate, explicit opt-in because it BLOCKS: calls
+    // that look destructive and not clearly requested are denied, and it
+    // fails closed (a decision-model error or timeout denies the call). It is
+    // defence in depth, not a security boundary. Enable it deliberately:
+    //
+    //     use yoagent::decision::ToolGate;
+    //     let _agent = _agent.with_tool_gate(ToolGate::new(jev));
 }

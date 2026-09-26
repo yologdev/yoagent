@@ -4,7 +4,8 @@
 //! (`https://opencode.ai/zen`), and by self-hosted TypeSafe-style servers
 //! such as JevK5. Responses are parsed leniently: unknown fields are ignored,
 //! and a missing `confidence`, `choice`, `score` or `legend` is computed from
-//! what is present.
+//! what is present. What is present is then validated like every backend's
+//! answers (see [`DecisionBackend`]).
 
 use super::answer::{Answer, ChoiceAnswer, DecisionUsage, Evaluation, NoulAnswer, ScoreAnswer};
 use super::backend::{Capabilities, DecisionBackend};
@@ -14,16 +15,12 @@ use crate::retry::RetryConfig;
 use serde_json::Value;
 use std::time::Duration;
 
-/// TypeSafe's hosted API.
-pub const TYPESAFE_BASE_URL: &str = "https://api.typesafe.ai";
-/// OpenCode Zen's SystemOne endpoint base.
-pub const OPENCODE_ZEN_BASE_URL: &str = "https://opencode.ai/zen";
-/// Environment variable read for the TypeSafe API key.
-pub const TYPESAFE_API_KEY_ENV: &str = "TYPESAFE_API_KEY";
-/// Environment variable that overrides [`TYPESAFE_BASE_URL`].
-pub const TYPESAFE_BASE_URL_ENV: &str = "TYPESAFE_BASE_URL";
-/// Environment variable read for the OpenCode API key.
-pub const OPENCODE_API_KEY_ENV: &str = "OPENCODE_API_KEY";
+pub(crate) const TYPESAFE_BASE_URL: &str = "https://api.typesafe.ai";
+pub(crate) const TYPESAFE_HOST: &str = "api.typesafe.ai";
+pub(crate) const OPENCODE_ZEN_BASE_URL: &str = "https://opencode.ai/zen";
+pub(crate) const TYPESAFE_API_KEY_ENV: &str = "TYPESAFE_API_KEY";
+pub(crate) const TYPESAFE_BASE_URL_ENV: &str = "TYPESAFE_BASE_URL";
+pub(crate) const OPENCODE_API_KEY_ENV: &str = "OPENCODE_API_KEY";
 
 /// Longest error-body excerpt kept in a [`DecisionError`].
 const MAX_ERROR_BODY: usize = 2_000;
@@ -48,9 +45,9 @@ enum Key {
 
 /// An HTTP client for the SystemOne API.
 ///
-/// Cheap to clone (the HTTP client is shared). Keys named by environment
-/// variable are read on every request, so rotating a key needs no rebuild;
-/// the key never appears in `Debug` output or errors.
+/// Cheap to clone. Keys named by environment variable are read on every
+/// request, so rotating a key needs no rebuild; the key never appears in
+/// `Debug` output or errors.
 #[derive(Clone)]
 pub struct SystemOneBackend {
     client: reqwest::Client,
@@ -82,14 +79,17 @@ impl SystemOneBackend {
     /// `/v1`, or be the full `/v1/systemone` URL.
     ///
     /// Capabilities: every question type, 255 options, 10 levels, batching,
-    /// local, no token limits (the server enforces its own).
+    /// no token limits (the server enforces its own). Not marked
+    /// [`local`](Capabilities::local) — use
+    /// [`DecisionModel::local`](super::DecisionModel::local) for a
+    /// self-hosted server, or [`with_capabilities`](Self::with_capabilities).
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
             client: reqwest::Client::new(),
             endpoint: Endpoint::Fixed(base_url.into()),
             key: Key::None,
             retry: RetryConfig::default(),
-            capabilities: Capabilities::new(QuestionKind::all()).with_local(true),
+            capabilities: Capabilities::new(QuestionKind::all()),
         }
     }
 
@@ -150,12 +150,6 @@ impl SystemOneBackend {
         self
     }
 
-    /// Use this HTTP client (proxies, custom TLS, ...).
-    pub fn with_http_client(mut self, client: reqwest::Client) -> Self {
-        self.client = client;
-        self
-    }
-
     fn base(&self) -> String {
         let raw = match &self.endpoint {
             Endpoint::Fixed(url) => url.clone(),
@@ -175,6 +169,18 @@ impl SystemOneBackend {
         format!("{}/v1/systemone", self.base())
     }
 
+    /// Whether requests currently go to TypeSafe's own host (so TypeSafe's
+    /// list prices apply).
+    pub(crate) fn is_typesafe_host(&self) -> bool {
+        let base = self.base();
+        let rest = base
+            .strip_prefix("https://")
+            .or_else(|| base.strip_prefix("http://"))
+            .unwrap_or(&base);
+        let host = rest.split(['/', ':', '?', '#']).next().unwrap_or("");
+        host.eq_ignore_ascii_case(TYPESAFE_HOST)
+    }
+
     fn key(&self) -> Result<Option<String>, DecisionError> {
         match &self.key {
             Key::None => Ok(None),
@@ -184,47 +190,6 @@ impl SystemOneBackend {
                 _ => Err(DecisionError::MissingApiKey(var.clone())),
             },
         }
-    }
-
-    /// `GET /v1/models`: the names this key may send in `model`.
-    pub async fn list_models(&self) -> Result<Vec<ModelInfo>, DecisionError> {
-        let mut req = self.client.get(format!("{}/v1/models", self.base()));
-        if let Some(key) = self.key()? {
-            req = req.bearer_auth(key);
-        }
-        let response = req
-            .send()
-            .await
-            .map_err(|e| DecisionError::Transport(e.to_string()))?;
-        let status = response.status().as_u16();
-        let headers = response.headers().clone();
-        let text = response
-            .text()
-            .await
-            .map_err(|e| DecisionError::Transport(e.to_string()))?;
-        if !(200..300).contains(&status) {
-            return Err(status_error(status, &headers, &text));
-        }
-        let body: Value = serde_json::from_str(&text)
-            .map_err(|e| DecisionError::BadResponse(format!("models list is not JSON: {e}")))?;
-        let models = body
-            .get("models")
-            .and_then(Value::as_array)
-            .ok_or_else(|| {
-                DecisionError::BadResponse("models list has no `models` array".into())
-            })?;
-        Ok(models
-            .iter()
-            .filter_map(|m| {
-                let name = m.get("name")?.as_str()?.to_string();
-                let text = |k: &str| m.get(k).and_then(Value::as_str).map(str::to_string);
-                Some(ModelInfo {
-                    name,
-                    description: text("description"),
-                    release_date: text("release_date"),
-                })
-            })
-            .collect())
     }
 
     async fn send_once(&self, request: &Request, body: &[u8]) -> Result<Evaluation, DecisionError> {
@@ -294,16 +259,6 @@ impl DecisionBackend for SystemOneBackend {
     }
 }
 
-/// One entry of `GET /v1/models`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct ModelInfo {
-    /// The id or alias to send as `model`.
-    pub name: String,
-    pub description: Option<String>,
-    pub release_date: Option<String>,
-}
-
 fn excerpt(text: &str, max: usize) -> String {
     if text.len() <= max {
         return text.to_string();
@@ -329,20 +284,10 @@ fn status_error(status: u16, headers: &reqwest::header::HeaderMap, body: &str) -
     }
 }
 
+/// A number, or NaN when absent or not a number — so validation rejects it
+/// rather than a default slipping through.
 fn number(v: Option<&Value>) -> Option<f64> {
-    v.and_then(Value::as_f64).filter(|x| x.is_finite())
-}
-
-fn probability(v: Option<&Value>, field: &str) -> Result<f64, DecisionError> {
-    let p = number(v)
-        .ok_or_else(|| DecisionError::BadResponse(format!("{field}: missing or not a number")))?;
-    // Tolerate float noise at the edges; reject anything else.
-    if !(-1e-6..=1.0 + 1e-6).contains(&p) {
-        return Err(DecisionError::BadResponse(format!(
-            "{field}: {p} is not a probability"
-        )));
-    }
-    Ok(p.clamp(0.0, 1.0))
+    v.map(|v| v.as_f64().unwrap_or(f64::NAN))
 }
 
 fn level_text(v: &Value) -> String {
@@ -352,7 +297,8 @@ fn level_text(v: &Value) -> String {
     }
 }
 
-/// Parse a SystemOne response against the request that produced it.
+/// Parse a SystemOne response against the request that produced it. Shape
+/// only; values are validated centrally.
 pub(crate) fn parse_evaluation(
     body: &Value,
     request: &Request,
@@ -397,10 +343,12 @@ pub(crate) fn parse_evaluation(
 }
 
 fn parse_answer(id: &str, raw: &Value, question: &Question) -> Result<Answer, DecisionError> {
-    let confidence = number(raw.get("confidence")).map(|c| c.clamp(0.0, 1.0));
+    let confidence = number(raw.get("confidence"));
+    let missing =
+        |field: &str| DecisionError::BadResponse(format!("answers.{id}.{field}: missing"));
     match question.kind() {
         QuestionKind::Noul => {
-            let p = probability(raw.get("noul"), &format!("answers.{id}.noul"))?;
+            let p = number(raw.get("noul")).ok_or_else(|| missing("noul"))?;
             let mut a = NoulAnswer::new(p);
             if let Some(c) = confidence {
                 a = a.with_confidence(c);
@@ -412,36 +360,28 @@ fn parse_answer(id: &str, raw: &Value, question: &Question) -> Result<Answer, De
             let probs = raw
                 .get("probabilities")
                 .and_then(Value::as_object)
-                .ok_or_else(|| {
-                    DecisionError::BadResponse(format!("answers.{id}.probabilities: missing"))
-                })?;
-            let mut pairs = Vec::with_capacity(probs.len());
-            // Request order first, so an argmax tie resolves to the option the
-            // caller listed first rather than alphabetically.
-            for option in &options {
-                if let Some(v) = probs.get(*option) {
-                    let p = probability(Some(v), &format!("answers.{id}.probabilities.{option}"))?;
-                    pairs.push((option.to_string(), p));
-                }
-            }
+                .ok_or_else(|| missing("probabilities"))?;
             if let Some(extra) = probs.keys().find(|k| !options.contains(&k.as_str())) {
                 return Err(DecisionError::BadResponse(format!(
                     "answers.{id}.probabilities: {extra:?} is not one of the options"
                 )));
             }
+            // Option order, so an argmax tie resolves to the option the
+            // caller listed first.
+            let pairs: Vec<(String, f64)> = options
+                .iter()
+                .filter_map(|o| {
+                    probs
+                        .get(*o)
+                        .map(|v| (o.to_string(), number(Some(v)).unwrap_or(f64::NAN)))
+                })
+                .collect();
             if pairs.is_empty() {
-                return Err(DecisionError::BadResponse(format!(
-                    "answers.{id}.probabilities: empty"
-                )));
+                return Err(missing("probabilities"));
             }
             let mut a = ChoiceAnswer::new(pairs);
             if let Some(choice) = raw.get("choice").and_then(Value::as_str) {
-                if !options.contains(&choice) {
-                    return Err(DecisionError::BadResponse(format!(
-                        "answers.{id}.choice: {choice:?} is not one of the options"
-                    )));
-                }
-                a.choice = choice.to_string();
+                a = a.with_choice(choice);
             }
             if let Some(c) = confidence {
                 a = a.with_confidence(c);
@@ -451,7 +391,7 @@ fn parse_answer(id: &str, raw: &Value, question: &Question) -> Result<Answer, De
         QuestionKind::Score => {
             let levels = question.levels().unwrap_or_default();
             let n = levels.len();
-            let mut probs = vec![0.0; n];
+            let mut probs = vec![f64::NAN; n];
             match raw.get("probabilities") {
                 Some(Value::Object(map)) => {
                     for (k, v) in map {
@@ -460,14 +400,12 @@ fn parse_answer(id: &str, raw: &Value, question: &Question) -> Result<Answer, De
                                 "answers.{id}.probabilities: {k:?} is not a level index below {n}"
                             ))
                         })?;
-                        probs[i] =
-                            probability(Some(v), &format!("answers.{id}.probabilities.{k}"))?;
+                        probs[i] = number(Some(v)).unwrap_or(f64::NAN);
                     }
                 }
                 Some(Value::Array(list)) if list.len() == n => {
                     for (i, v) in list.iter().enumerate() {
-                        probs[i] =
-                            probability(Some(v), &format!("answers.{id}.probabilities[{i}]"))?;
+                        probs[i] = number(Some(v)).unwrap_or(f64::NAN);
                     }
                 }
                 _ => {
@@ -476,6 +414,7 @@ fn parse_answer(id: &str, raw: &Value, question: &Question) -> Result<Answer, De
                     )))
                 }
             }
+            // A level the server left out is NaN, which validation rejects.
             let mut legend: Vec<String> = levels.iter().map(level_text).collect();
             if let Some(Value::Object(map)) = raw.get("legend") {
                 for (k, v) in map {
@@ -493,5 +432,20 @@ fn parse_answer(id: &str, raw: &Value, question: &Question) -> Result<Answer, De
             }
             Ok(a.into())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn typesafe_host_detection() {
+        assert!(SystemOneBackend::new("https://api.typesafe.ai").is_typesafe_host());
+        assert!(SystemOneBackend::new("https://API.typesafe.ai/v1/").is_typesafe_host());
+        assert!(!SystemOneBackend::new("https://opencode.ai/zen").is_typesafe_host());
+        assert!(!SystemOneBackend::new("http://127.0.0.1:8000").is_typesafe_host());
+        assert!(!SystemOneBackend::new("https://api.typesafe.ai.evil.example").is_typesafe_host());
+        assert!(!SystemOneBackend::opencode_zen().is_typesafe_host());
     }
 }

@@ -84,7 +84,7 @@ pub struct Agent {
     #[cfg(feature = "decision")]
     decision: Option<crate::decision::Advisory>,
     #[cfg(feature = "decision")]
-    tool_gate: Option<crate::decision::GateSetting>,
+    tool_gate: Option<crate::decision::ToolGate>,
 
     // Custom compaction strategy
     compaction_strategy: Option<Arc<dyn CompactionStrategy>>,
@@ -508,7 +508,7 @@ impl Agent {
     /// runs in the same list and order as [`with_input_filter`](Self::with_input_filter)
     /// filters, with the same [`FilterResult`] semantics.
     pub fn with_async_input_filter(mut self, filter: impl AsyncInputFilter + 'static) -> Self {
-        self.input_filters.push(Arc::new(AsyncFilter(filter)));
+        self.input_filters.push(Arc::new(AsyncFilter::new(filter)));
         self
     }
 
@@ -520,22 +520,26 @@ impl Agent {
     }
 
     /// Attach a decision model, enabling the **advisory** features only —
-    /// they can never block anything:
+    /// they can never block anything. **They need skills or many tools:**
+    /// with no skills and fewer than 40 tools this does nothing and sends
+    /// nothing.
     ///
     /// - a skill hint (with [`with_skills`](Self::with_skills)): at most one
     ///   line naming the skill that fits the request, when confident;
     /// - a tool hint (with 40+ tools): one line naming the few most relevant
     ///   tools. A hint only; no tool is ever removed.
     ///
-    /// At most one decision request per user request (memoized across its
+    /// The hint is appended to the request's latest user turn (never to the
+    /// system prompt, never stored), so the cached prefix is untouched. At
+    /// most one decision request per user request (memoized across its
     /// tool-calling turns), with a 2 s limit; on any failure the agent warns
-    /// and continues exactly as without a model. Nothing is sent when there
-    /// are no skills and fewer than 40 tools. Tune it with
+    /// and continues exactly as without a model. Requests and spend are
+    /// reported in [`SessionStats::decision`]. Tune it with
     /// [`with_decision_advisory`](Self::with_decision_advisory); block
     /// risky tool calls with [`with_tool_gate`](Self::with_tool_gate).
     ///
-    /// Hosted decision models see the user's message and the skill and tool
-    /// descriptions.
+    /// Hosted decision models see the user's request (and, for a short reply,
+    /// the assistant text before it) and the skill and tool descriptions.
     #[cfg(feature = "decision")]
     #[cfg_attr(docsrs, doc(cfg(feature = "decision")))]
     pub fn with_decision_model(self, model: crate::decision::DecisionModel) -> Self {
@@ -551,29 +555,34 @@ impl Agent {
         self
     }
 
-    /// Gate every tool call on the decision model (a blocking feature, so a
-    /// separate opt-in): calls that look destructive and not clearly
-    /// requested are denied with a reason the model sees. Uses the model from
-    /// [`with_decision_model`](Self::with_decision_model) and the
-    /// [`ToolGate`](crate::decision::ToolGate) defaults; runs after every
-    /// other middleware.
+    /// Gate every tool call on a decision model — a blocking feature, so a
+    /// separate opt-in from [`with_decision_model`](Self::with_decision_model):
     ///
-    /// **Fails closed:** a decision-model error or timeout denies the call,
-    /// and without a decision model every call is denied. Defence in depth,
-    /// not a security boundary — injected content can steer the decision.
+    /// ```ignore
+    /// agent.with_tool_gate(ToolGate::new(DecisionModel::jev()))
+    /// ```
+    ///
+    /// Calls that look destructive and not clearly requested are denied with
+    /// a reason the model sees (see [`ToolGate`](crate::decision::ToolGate)
+    /// for the questions and thresholds).
+    ///
+    /// - **Fails closed:** a decision-model error, timeout, or malformed
+    ///   answer denies the call.
+    /// - **Runs last**, after every other middleware, whenever you add them,
+    ///   so it judges the arguments that will actually run. (A `ToolGate`
+    ///   installed by hand with [`with_tool_middleware`](Self::with_tool_middleware)
+    ///   must be added last yourself.)
+    /// - **This agent only:** calls made inside a
+    ///   [`SubAgentTool`](crate::SubAgentTool) are not covered; give it its
+    ///   own gate, where the "user request" is the task text this agent wrote.
+    /// - Requests and spend are reported in [`SessionStats::decision`].
+    ///
+    /// Defence in depth, not a security boundary — injected content can
+    /// steer the decision.
     #[cfg(feature = "decision")]
     #[cfg_attr(docsrs, doc(cfg(feature = "decision")))]
-    pub fn with_tool_gate(mut self) -> Self {
-        self.tool_gate = Some(crate::decision::GateSetting::Default);
-        self
-    }
-
-    /// [`with_tool_gate`](Self::with_tool_gate) with a configured gate (its
-    /// own model, questions, thresholds or timeout).
-    #[cfg(feature = "decision")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "decision")))]
-    pub fn with_tool_gate_config(mut self, gate: crate::decision::ToolGate) -> Self {
-        self.tool_gate = Some(crate::decision::GateSetting::Custom(Box::new(gate)));
+    pub fn with_tool_gate(mut self, gate: crate::decision::ToolGate) -> Self {
+        self.tool_gate = Some(gate);
         self
     }
 

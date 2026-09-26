@@ -1,6 +1,7 @@
 //! Typed answers, confidence, and the [`Evaluation`] that carries them.
 
-use super::question::QuestionKind;
+use super::error::DecisionError;
+use super::question::{Question, QuestionKind};
 use std::collections::BTreeMap;
 
 /// Confidence of a distribution over `n` outcomes:
@@ -9,11 +10,12 @@ use std::collections::BTreeMap;
 /// This is TypeSafe's published formula for Choice answers
 /// (<https://docs.typesafe.ai/confidence>): all mass on one outcome gives
 /// 1.0, a uniform spread gives 0.0. yoagent uses it whenever a backend does
-/// not report a confidence itself — for Choice (over options), for Score
-/// (over levels; TypeSafe's docs derive Score confidence from the same
+/// not report a confidence itself: for Choice (over options), for Score
+/// (over levels — TypeSafe derives Score confidence from the same
 /// distribution without publishing a separate formula), and for Noul (over
-/// the two outcomes yes/no, which reduces to `|2p - 1|`; TypeSafe's Noul
-/// answers carry no confidence of their own).
+/// yes/no, which reduces to `|2p - 1|`; TypeSafe returns no confidence for
+/// Noul, so a Noul answer's confidence is always this computed value unless
+/// a backend such as JevK5 reports its own).
 ///
 /// Fewer than two outcomes: 1.0 for one, 0.0 for none. Non-finite inputs are
 /// ignored.
@@ -35,17 +37,14 @@ pub fn distribution_confidence<I: IntoIterator<Item = f64>>(probabilities: I) ->
 
 /// A yes/no answer.
 #[derive(Debug, Clone, PartialEq)]
-#[non_exhaustive]
 pub struct NoulAnswer {
-    /// Probability that the answer is yes, in `[0, 1]`.
-    pub p_true: f64,
-    /// The backend's confidence when it reports one (JevK5 does), otherwise
-    /// [`distribution_confidence`] over yes/no: `|2 * p_true - 1|`.
-    pub confidence: f64,
+    p_true: f64,
+    confidence: f64,
 }
 
 impl NoulAnswer {
-    /// An answer with this probability of yes; confidence computed.
+    /// An answer with this probability of yes; confidence computed as
+    /// `|2p - 1|` (see [`distribution_confidence`]).
     pub fn new(p_true: f64) -> Self {
         Self {
             p_true,
@@ -58,46 +57,59 @@ impl NoulAnswer {
         self.confidence = confidence;
         self
     }
+
+    /// Probability that the answer is yes, in `[0, 1]`.
+    pub fn p_true(&self) -> f64 {
+        self.p_true
+    }
+
+    /// The backend's confidence, or `|2 * p_true - 1|`.
+    pub fn confidence(&self) -> f64 {
+        self.confidence
+    }
 }
 
 /// One option out of a set.
 #[derive(Debug, Clone, PartialEq)]
-#[non_exhaustive]
 pub struct ChoiceAnswer {
-    /// The highest-probability option.
-    pub choice: String,
-    /// Every option mapped to its probability (sums to about 1).
-    pub probabilities: BTreeMap<String, f64>,
-    /// The backend's confidence, or [`distribution_confidence`] over
-    /// `probabilities`.
-    pub confidence: f64,
+    choice: String,
+    /// In option order.
+    probabilities: Vec<(String, f64)>,
+    confidence: f64,
 }
 
 impl ChoiceAnswer {
-    /// An answer from a distribution; the choice is its argmax (the first
-    /// option in iteration order on a tie) and confidence is computed.
+    /// An answer from a distribution, given in option order. The choice is
+    /// its argmax (the first option on a tie) and confidence is computed.
     pub fn new<I, S>(probabilities: I) -> Self
     where
         I: IntoIterator<Item = (S, f64)>,
         S: Into<String>,
     {
+        let probabilities: Vec<(String, f64)> = probabilities
+            .into_iter()
+            .map(|(o, p)| (o.into(), p))
+            .collect();
         let mut choice = String::new();
         let mut best = f64::NEG_INFINITY;
-        let mut map = BTreeMap::new();
-        for (option, p) in probabilities {
-            let option = option.into();
-            if p > best {
-                best = p;
+        for (option, p) in &probabilities {
+            if *p > best {
+                best = *p;
                 choice = option.clone();
             }
-            map.insert(option, p);
         }
-        let confidence = distribution_confidence(map.values().copied());
+        let confidence = distribution_confidence(probabilities.iter().map(|(_, p)| *p));
         Self {
             choice,
-            probabilities: map,
+            probabilities,
             confidence,
         }
+    }
+
+    /// Replace the argmax with a backend-reported choice.
+    pub fn with_choice(mut self, choice: impl Into<String>) -> Self {
+        self.choice = choice.into();
+        self
     }
 
     /// Replace the computed confidence with a backend-reported one.
@@ -106,41 +118,51 @@ impl ChoiceAnswer {
         self
     }
 
-    /// Probability of `option` (0.0 when absent).
-    pub fn probability(&self, option: &str) -> f64 {
-        self.probabilities.get(option).copied().unwrap_or(0.0)
+    /// The chosen option.
+    pub fn choice(&self) -> &str {
+        &self.choice
     }
 
-    /// Options sorted by probability, highest first (ties by name).
-    pub fn ranked(&self) -> Vec<(&str, f64)> {
-        let mut v: Vec<(&str, f64)> = self
-            .probabilities
+    /// The backend's confidence, or [`distribution_confidence`] over the
+    /// options.
+    pub fn confidence(&self) -> f64 {
+        self.confidence
+    }
+
+    /// Every option with its probability, in option order.
+    pub fn probabilities(&self) -> impl Iterator<Item = (&str, f64)> + '_ {
+        self.probabilities.iter().map(|(o, p)| (o.as_str(), *p))
+    }
+
+    /// Probability of `option` (0.0 when absent).
+    pub fn probability(&self, option: &str) -> f64 {
+        self.probabilities
             .iter()
-            .map(|(k, p)| (k.as_str(), *p))
-            .collect();
-        v.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(b.0)));
+            .find(|(o, _)| o == option)
+            .map(|(_, p)| *p)
+            .unwrap_or(0.0)
+    }
+
+    /// Options sorted by probability, highest first (ties keep option order).
+    pub fn ranked(&self) -> Vec<(&str, f64)> {
+        let mut v: Vec<(&str, f64)> = self.probabilities().collect();
+        v.sort_by(|a, b| b.1.total_cmp(&a.1));
         v
     }
 }
 
 /// A rating on an ordered scale.
 #[derive(Debug, Clone, PartialEq)]
-#[non_exhaustive]
 pub struct ScoreAnswer {
-    /// Probability-weighted level, `sum(i * p_i)`; can land between levels.
-    pub score: f64,
-    /// Level descriptions, lowest first (index = level).
-    pub legend: Vec<String>,
-    /// Probability of each level, by index (sums to about 1).
-    pub probabilities: Vec<f64>,
-    /// The backend's confidence, or [`distribution_confidence`] over the
-    /// levels.
-    pub confidence: f64,
+    score: f64,
+    legend: Vec<String>,
+    probabilities: Vec<f64>,
+    confidence: f64,
 }
 
 impl ScoreAnswer {
-    /// An answer from per-level probabilities; score and confidence
-    /// computed.
+    /// An answer from per-level probabilities, lowest level first; score
+    /// (`sum(i * p_i)`) and confidence computed.
     pub fn new(legend: Vec<String>, probabilities: Vec<f64>) -> Self {
         let score = probabilities
             .iter()
@@ -168,14 +190,36 @@ impl ScoreAnswer {
         self
     }
 
-    /// The most probable level's index.
+    /// Probability-weighted level; can land between levels.
+    pub fn score(&self) -> f64 {
+        self.score
+    }
+
+    /// Level descriptions, lowest first (index = level).
+    pub fn legend(&self) -> &[String] {
+        &self.legend
+    }
+
+    /// Probability of each level, by index.
+    pub fn probabilities(&self) -> &[f64] {
+        &self.probabilities
+    }
+
+    /// The backend's confidence, or [`distribution_confidence`] over the
+    /// levels.
+    pub fn confidence(&self) -> f64 {
+        self.confidence
+    }
+
+    /// The most probable level's index (the lowest on a tie).
     pub fn level(&self) -> usize {
-        self.probabilities
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.total_cmp(b.1).then(b.0.cmp(&a.0)))
-            .map(|(i, _)| i)
-            .unwrap_or(0)
+        let mut best = 0;
+        for (i, p) in self.probabilities.iter().enumerate() {
+            if *p > self.probabilities[best] {
+                best = i;
+            }
+        }
+        best
     }
 }
 
@@ -226,6 +270,76 @@ impl Answer {
             Self::Score(a) => Some(a),
             _ => None,
         }
+    }
+
+    /// Check this answer against the question it answers: its kind, every
+    /// probability and confidence finite and in `[0, 1]`, a Choice's options
+    /// all among the question's, a Score with one probability and one legend
+    /// entry per level. Run by [`DecisionModel`](super::DecisionModel) on
+    /// every backend's answers.
+    pub(crate) fn validate(&self, id: &str, question: &Question) -> Result<(), DecisionError> {
+        let bad = |what: String| Err(DecisionError::BadResponse(format!("answers.{id}: {what}")));
+        if self.kind() != question.kind() {
+            return bad(format!(
+                "a {} answer to a {} question",
+                self.kind(),
+                question.kind()
+            ));
+        }
+        check_unit(id, "confidence", self.confidence())?;
+        match self {
+            Self::Noul(a) => check_unit(id, "noul", a.p_true),
+            Self::Choice(a) => {
+                let options = question.options().unwrap_or_default();
+                if !options.contains(&a.choice.as_str()) {
+                    return bad(format!("choice {:?} is not one of the options", a.choice));
+                }
+                let mut seen = std::collections::HashSet::new();
+                for (option, p) in &a.probabilities {
+                    if !options.contains(&option.as_str()) {
+                        return bad(format!(
+                            "probability for {option:?}, not one of the options"
+                        ));
+                    }
+                    if !seen.insert(option.as_str()) {
+                        return bad(format!("two probabilities for {option:?}"));
+                    }
+                    check_unit(id, &format!("probabilities.{option}"), *p)?;
+                }
+                Ok(())
+            }
+            Self::Score(a) => {
+                let n = question.levels().map_or(0, <[_]>::len);
+                if a.probabilities.len() != n || a.legend.len() != n {
+                    return bad(format!(
+                        "{} probabilities and {} legend entries for {n} levels",
+                        a.probabilities.len(),
+                        a.legend.len()
+                    ));
+                }
+                for (i, p) in a.probabilities.iter().enumerate() {
+                    check_unit(id, &format!("probabilities[{i}]"), *p)?;
+                }
+                let top = n.saturating_sub(1) as f64;
+                if !(a.score.is_finite() && a.score >= -EPS && a.score <= top + EPS) {
+                    return bad(format!("score {} is outside 0..={top}", a.score));
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Tolerance for float noise at the edges of `[0, 1]`.
+const EPS: f64 = 1e-6;
+
+fn check_unit(id: &str, field: &str, x: f64) -> Result<(), DecisionError> {
+    if x.is_finite() && (-EPS..=1.0 + EPS).contains(&x) {
+        Ok(())
+    } else {
+        Err(DecisionError::BadResponse(format!(
+            "answers.{id}.{field}: {x} is not in [0, 1]"
+        )))
     }
 }
 
@@ -288,7 +402,8 @@ pub struct Evaluation {
     pub usage: DecisionUsage,
     /// Cost in USD, when the [`DecisionModel`](super::DecisionModel) knows the
     /// answering model's price. `None` = unpriced (never a guessed `0`); a
-    /// local backend reports `Some(0.0)`.
+    /// model built with [`DecisionModel::local`](super::DecisionModel::local)
+    /// reports `Some(0.0)`.
     pub cost_usd: Option<f64>,
 }
 
@@ -319,9 +434,9 @@ impl Evaluation {
         self.get(id).and_then(Answer::as_noul)
     }
 
-    /// Shorthand for `noul(id).map(|a| a.p_true)`.
+    /// Shorthand for `noul(id).map(|a| a.p_true())`.
     pub fn p_true(&self, id: &str) -> Option<f64> {
-        self.noul(id).map(|a| a.p_true)
+        self.noul(id).map(NoulAnswer::p_true)
     }
 
     /// The Choice answer under `id`.
@@ -346,7 +461,6 @@ mod tests {
         assert!((c - 0.82).abs() < 1e-9, "{c}");
         assert_eq!(distribution_confidence([1.0 / 3.0; 3]), 0.0);
         assert_eq!(distribution_confidence([1.0, 0.0]), 1.0);
-        // Clamped.
         assert_eq!(distribution_confidence([0.2, 0.2, 0.2, 0.2, 0.2]), 0.0);
         assert_eq!(distribution_confidence([0.7]), 1.0);
         assert_eq!(distribution_confidence(Vec::<f64>::new()), 0.0);
@@ -354,9 +468,9 @@ mod tests {
 
     #[test]
     fn noul_confidence_is_distance_from_even() {
-        assert!((NoulAnswer::new(0.95).confidence - 0.9).abs() < 1e-9);
-        assert!((NoulAnswer::new(0.05).confidence - 0.9).abs() < 1e-9);
-        assert_eq!(NoulAnswer::new(0.5).confidence, 0.0);
+        assert!((NoulAnswer::new(0.95).confidence() - 0.9).abs() < 1e-9);
+        assert!((NoulAnswer::new(0.05).confidence() - 0.9).abs() < 1e-9);
+        assert_eq!(NoulAnswer::new(0.5).confidence(), 0.0);
     }
 
     #[test]
@@ -365,16 +479,73 @@ mod tests {
             vec!["Calm".into(), "Frustrated".into(), "Very angry".into()],
             vec![0.0, 0.95, 0.05],
         );
-        assert!((a.score - 1.05).abs() < 1e-9);
+        assert!((a.score() - 1.05).abs() < 1e-9);
         assert_eq!(a.level(), 1);
-        assert!((a.confidence - 0.925).abs() < 1e-9);
+        assert!((a.confidence() - 0.925).abs() < 1e-9);
     }
 
     #[test]
-    fn choice_argmax_and_ranking() {
-        let a = ChoiceAnswer::new([("billing", 0.88), ("technical", 0.12), ("sales", 0.0)]);
-        assert_eq!(a.choice, "billing");
-        assert_eq!(a.ranked()[1], ("technical", 0.12));
+    fn choice_keeps_option_order_and_ranks() {
+        let a = ChoiceAnswer::new([("technical", 0.12), ("billing", 0.88), ("sales", 0.0)]);
+        assert_eq!(a.choice(), "billing");
+        let order: Vec<&str> = a.probabilities().map(|(o, _)| o).collect();
+        assert_eq!(order, ["technical", "billing", "sales"]);
+        assert_eq!(a.ranked()[0], ("billing", 0.88));
         assert_eq!(a.probability("nope"), 0.0);
+    }
+
+    #[test]
+    fn validation_rejects_malformed_answers() {
+        let noul = Question::noul("q?");
+        assert!(Answer::from(NoulAnswer::new(0.5))
+            .validate("q", &noul)
+            .is_ok());
+        for bad in [f64::NAN, -0.2, 1.3, f64::INFINITY] {
+            assert!(
+                Answer::from(NoulAnswer::new(bad))
+                    .validate("q", &noul)
+                    .is_err(),
+                "{bad}"
+            );
+        }
+        assert!(Answer::from(NoulAnswer::new(0.5).with_confidence(f64::NAN))
+            .validate("q", &noul)
+            .is_err());
+
+        let choice = Question::choice("which?", ["a", "b"]);
+        assert!(Answer::from(ChoiceAnswer::new([("a", 0.3), ("b", 0.7)]))
+            .validate("q", &choice)
+            .is_ok());
+        assert!(Answer::from(ChoiceAnswer::new([("a", 0.3), ("c", 0.7)]))
+            .validate("q", &choice)
+            .is_err());
+        assert!(
+            Answer::from(ChoiceAnswer::new([("a", 0.3), ("b", 0.7)]).with_choice("z"))
+                .validate("q", &choice)
+                .is_err()
+        );
+
+        let score = Question::score("how?", ["lo", "hi"]);
+        assert!(Answer::from(ScoreAnswer::new(
+            vec!["lo".into(), "hi".into()],
+            vec![0.5, 0.5]
+        ))
+        .validate("q", &score)
+        .is_ok());
+        assert!(
+            Answer::from(ScoreAnswer::new(vec!["lo".into()], vec![0.5, 0.5]))
+                .validate("q", &score)
+                .is_err()
+        );
+        assert!(Answer::from(ScoreAnswer::new(
+            vec!["lo".into(), "hi".into(), "x".into()],
+            vec![0.2, 0.2, 0.6]
+        ))
+        .validate("q", &score)
+        .is_err());
+        // Wrong kind.
+        assert!(Answer::from(NoulAnswer::new(0.5))
+            .validate("q", &score)
+            .is_err());
     }
 }

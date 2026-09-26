@@ -19,11 +19,8 @@ pub struct Capabilities {
     /// [`DecisionModel`](super::DecisionModel) sends one request per question
     /// and merges the answers (summing usage).
     pub batching: bool,
-    /// Whether answers carry the backend's own confidence. When they do not,
-    /// it is computed ([`distribution_confidence`](super::distribution_confidence)).
-    pub native_confidence: bool,
-    /// Whether the model runs locally (state never leaves the machine, no
-    /// per-token bill).
+    /// Self-hosted: the state does not go to a third party. Informational;
+    /// it does not affect pricing.
     pub local: bool,
     /// Request token limit (state plus every question), when known.
     pub max_request_tokens: Option<usize>,
@@ -33,14 +30,13 @@ pub struct Capabilities {
 
 impl Capabilities {
     /// A backend answering `kinds`, batching, with SystemOne's option/level
-    /// limits (255 / 10), no native confidence, not local, no token limits.
-    pub fn new(kinds: impl IntoIterator<Item = QuestionKind>) -> Self {
+    /// limits (255 / 10), not local, no token limits.
+    pub fn new(kinds: &[QuestionKind]) -> Self {
         Self {
-            question_kinds: kinds.into_iter().collect(),
+            question_kinds: kinds.to_vec(),
             max_choice_options: 255,
             max_score_levels: 10,
             batching: true,
-            native_confidence: false,
             local: false,
             max_request_tokens: None,
             max_state_and_question_tokens: None,
@@ -48,12 +44,10 @@ impl Capabilities {
     }
 
     /// TypeSafe's hosted SystemOne API as documented for Jev 1.13: every
-    /// question type, 255 options, 10 levels, batching, native confidence,
-    /// 64k tokens per request and 32k for the state plus the longest question.
-    pub fn systemone() -> Self {
-        Self::new(QuestionKind::all())
-            .with_native_confidence(true)
-            .with_token_limits(Some(64_000), Some(32_000))
+    /// question type, 255 options, 10 levels, batching, 64k tokens per
+    /// request and 32k for the state plus the longest question.
+    pub(crate) fn systemone() -> Self {
+        Self::new(QuestionKind::all()).with_token_limits(Some(64_000), Some(32_000))
     }
 
     pub fn with_max_choice_options(mut self, n: usize) -> Self {
@@ -68,11 +62,6 @@ impl Capabilities {
 
     pub fn with_batching(mut self, batching: bool) -> Self {
         self.batching = batching;
-        self
-    }
-
-    pub fn with_native_confidence(mut self, native: bool) -> Self {
-        self.native_confidence = native;
         self
     }
 
@@ -106,9 +95,12 @@ impl Capabilities {
 ///
 /// [`DecisionModel`](super::DecisionModel) validates each request against
 /// [`capabilities`](Self::capabilities) before calling
-/// [`evaluate`](Self::evaluate), and checks afterwards that every question got
-/// an answer of its type — a backend need not repeat either check. It leaves
-/// [`Evaluation::cost_usd`] for the model handle to fill in.
+/// [`evaluate`](Self::evaluate), and validates every answer afterwards —
+/// present, of the question's type, probabilities and confidences finite and
+/// in `[0, 1]`, choices among the options, one probability per Score level —
+/// so a backend need not repeat either check. It leaves
+/// [`Evaluation::cost_usd`] for the model handle to fill in. Report your own
+/// failures as [`DecisionError::Backend`].
 #[async_trait::async_trait]
 pub trait DecisionBackend: Send + Sync {
     /// What this backend can answer.

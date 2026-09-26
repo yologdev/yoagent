@@ -7,6 +7,10 @@
 //! small judgments an agent makes constantly: is this request asking for an
 //! action, which skill fits, does this tool call destroy data.
 //!
+//! "Noul" is deliberate: it is the SystemOne wire vocabulary (`"type":
+//! "noul"`), shared by TypeSafe's API and self-hosted servers such as JevK5,
+//! so the types read the same as the requests they produce.
+//!
 //! Behind the `decision` Cargo feature, off by default. Nothing is ever sent
 //! until you construct a [`DecisionModel`] and use it — an API key in the
 //! environment enables nothing on its own.
@@ -16,12 +20,12 @@
 //! use yoagent::decision::DecisionModel;
 //!
 //! let jev = DecisionModel::jev(); // TypeSafe Jev; key from TYPESAFE_API_KEY
-//! let p = jev.noul("Help! My payouts have been failing for 3 days.",
-//!                  "Does this convey urgency?").await?;
+//! let urgent = jev.noul("Help! My payouts have been failing for 3 days.",
+//!                       "Does this convey urgency?").await?;
 //! let team = jev.choice("My card was charged twice.",
 //!                       "Which team should handle this?",
 //!                       ["billing", "technical", "sales"]).await?;
-//! println!("urgent: {p:.2}, team: {} ({:.2})", team.choice, team.confidence);
+//! println!("urgent: {:.2}, team: {} ({:.2})", urgent.p_true(), team.choice(), team.confidence());
 //! # Ok(()) }
 //! ```
 //!
@@ -71,21 +75,17 @@ mod mock;
 mod question;
 mod systemone;
 
-pub use advisory::{Advisor, Advisory};
+pub use advisory::Advisory;
 pub use answer::{
     distribution_confidence, Answer, ChoiceAnswer, DecisionUsage, Evaluation, NoulAnswer,
     ScoreAnswer,
 };
 pub use backend::{Capabilities, DecisionBackend};
 pub use error::DecisionError;
-pub(crate) use gate::GateSetting;
-pub use gate::{ToolGate, DEFAULT_DESTRUCTIVE_QUESTION, DEFAULT_REQUESTED_QUESTION};
+pub use gate::ToolGate;
 pub use mock::MockBackend;
 pub use question::{Question, QuestionKind, Request};
-pub use systemone::{
-    ModelInfo, SystemOneBackend, OPENCODE_API_KEY_ENV, OPENCODE_ZEN_BASE_URL, TYPESAFE_API_KEY_ENV,
-    TYPESAFE_BASE_URL, TYPESAFE_BASE_URL_ENV,
-};
+pub use systemone::SystemOneBackend;
 
 use crate::provider::CostConfig;
 use serde_json::Value;
@@ -93,10 +93,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 /// The `prices.json` provider key for TypeSafe's models.
-pub const TYPESAFE_PRICE_PROVIDER: &str = "typesafe";
+pub(crate) const TYPESAFE_PRICE_PROVIDER: &str = "typesafe";
 
 /// Default overall timeout of one [`DecisionModel`] call, retries included.
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 enum Slot {
@@ -115,9 +115,9 @@ impl Slot {
 
 #[derive(Clone, Debug, PartialEq)]
 enum Pricing {
-    /// Look the answering model up in the resolved price table under this
-    /// provider key.
-    Table(&'static str),
+    /// TypeSafe's list prices from the resolved price table, by the reported
+    /// model id — only while requests go to TypeSafe's own host.
+    TypeSafeList,
     Fixed(CostConfig),
     Unpriced,
 }
@@ -156,13 +156,14 @@ impl DecisionModel {
     /// URL from `TYPESAFE_BASE_URL` (default `https://api.typesafe.ai`), both
     /// read at call time. Priced from the built-in table by the versioned id
     /// the API reports ($0.042 per million input tokens for `jev-1.13.0`;
-    /// output is free).
+    /// output is free) — while the base URL is TypeSafe's host; pointed
+    /// elsewhere it is unpriced.
     pub fn jev() -> Self {
         Self {
             backend: Slot::SystemOne(SystemOneBackend::typesafe()),
             model: "jev-latest".into(),
             timeout: DEFAULT_TIMEOUT,
-            pricing: Pricing::Table(TYPESAFE_PRICE_PROVIDER),
+            pricing: Pricing::TypeSafeList,
         }
     }
 
@@ -187,48 +188,29 @@ impl DecisionModel {
         }
     }
 
-    /// A self-hosted SystemOne-compatible server (JevK5, ...) at `base_url`.
-    /// No key; model id `jev-latest` until [`with_model`](Self::with_model);
-    /// costs reported as $0.
+    /// A self-hosted SystemOne-compatible server (JevK5, ...) at `base_url`:
+    /// no key, [`local`](Capabilities::local) (the state stays with you),
+    /// costs reported as $0. Model id `jev-latest` until
+    /// [`with_model`](Self::with_model).
     pub fn local(base_url: impl Into<String>) -> Self {
+        let backend = SystemOneBackend::new(base_url)
+            .with_capabilities(Capabilities::new(QuestionKind::all()).with_local(true));
         Self {
-            backend: Slot::SystemOne(SystemOneBackend::new(base_url)),
+            backend: Slot::SystemOne(backend),
             model: "jev-latest".into(),
             timeout: DEFAULT_TIMEOUT,
             pricing: Pricing::Fixed(CostConfig::new(0.0, 0.0)),
         }
     }
 
-    /// Any backend, asking for `model`. Unpriced until
-    /// [`with_cost`](Self::with_cost), except that a
-    /// [`local`](Capabilities::local) backend reports $0.
+    /// Any backend — including a [`SystemOneBackend`] you configured —
+    /// asking for `model`. Unpriced until [`with_cost`](Self::with_cost).
     pub fn from_backend(backend: impl DecisionBackend + 'static, model: impl Into<String>) -> Self {
-        let local = backend.capabilities().local;
         Self {
             backend: Slot::Custom(Arc::new(backend)),
             model: model.into(),
             timeout: DEFAULT_TIMEOUT,
-            pricing: if local {
-                Pricing::Fixed(CostConfig::new(0.0, 0.0))
-            } else {
-                Pricing::Unpriced
-            },
-        }
-    }
-
-    /// A configured [`SystemOneBackend`] (custom retry, client, capabilities),
-    /// priced like [`jev`](Self::jev) when it is hosted and $0 when local.
-    pub fn from_systemone(backend: SystemOneBackend, model: impl Into<String>) -> Self {
-        let local = backend.capabilities().local;
-        Self {
-            backend: Slot::SystemOne(backend),
-            model: model.into(),
-            timeout: DEFAULT_TIMEOUT,
-            pricing: if local {
-                Pricing::Fixed(CostConfig::new(0.0, 0.0))
-            } else {
-                Pricing::Table(TYPESAFE_PRICE_PROVIDER)
-            },
+            pricing: Pricing::Unpriced,
         }
     }
 
@@ -246,8 +228,8 @@ impl DecisionModel {
     }
 
     /// Send this API key instead of reading the preset's environment
-    /// variable. Only meaningful for SystemOne backends; ignored (with a
-    /// warning) for a custom backend.
+    /// variable. Only meaningful for the presets; ignored (with a warning)
+    /// for [`from_backend`](Self::from_backend) models.
     pub fn with_api_key(mut self, key: impl Into<String>) -> Self {
         match self.backend {
             Slot::SystemOne(b) => self.backend = Slot::SystemOne(b.with_api_key(key)),
@@ -260,7 +242,7 @@ impl DecisionModel {
         self
     }
 
-    /// Retry policy for rate limits and overload (SystemOne backends only).
+    /// Retry policy for rate limits and overload (presets only).
     pub fn with_retry(mut self, retry: crate::retry::RetryConfig) -> Self {
         match self.backend {
             Slot::SystemOne(b) => self.backend = Slot::SystemOne(b.with_retry(retry)),
@@ -298,13 +280,16 @@ impl DecisionModel {
         self.backend.get().capabilities()
     }
 
-    /// The price of `usage` on the model that reported it: the table entry
-    /// for a versioned id (an alias or an unlisted version is unpriced), the
-    /// fixed rates, or `None`.
-    pub fn cost_usd(&self, model: &str, usage: &DecisionUsage) -> Option<f64> {
+    /// The price of `usage` on the model that reported it.
+    pub(crate) fn cost_usd(&self, model: &str, usage: &DecisionUsage) -> Option<f64> {
         let cost = match &self.pricing {
-            Pricing::Table(provider) => {
-                crate::provider::prices::global::resolved().cost(provider, model)?
+            Pricing::TypeSafeList => {
+                let on_typesafe =
+                    matches!(&self.backend, Slot::SystemOne(b) if b.is_typesafe_host());
+                if !on_typesafe {
+                    return None;
+                }
+                crate::provider::prices::global::resolved().cost(TYPESAFE_PRICE_PROVIDER, model)?
             }
             Pricing::Fixed(c) => c.clone(),
             Pricing::Unpriced => return None,
@@ -322,14 +307,15 @@ impl DecisionModel {
         }
     }
 
-    /// Probability that the answer to a yes/no question is yes.
+    /// Ask one yes/no question.
     pub async fn noul(
         &self,
         state: impl Into<Value>,
         instructions: impl Into<Value>,
-    ) -> Result<f64, DecisionError> {
+    ) -> Result<NoulAnswer, DecisionError> {
         let eval = self.ask(state).noul("q", instructions).send().await?;
-        eval.p_true("q")
+        eval.noul("q")
+            .cloned()
             .ok_or_else(|| DecisionError::BadResponse("no noul answer".into()))
     }
 
@@ -389,10 +375,24 @@ impl DecisionModel {
 
     /// Evaluate a prepared [`Request`] (its `model` is used as is).
     ///
-    /// Validates against the backend's [`Capabilities`], applies the timeout,
-    /// checks every question got an answer of its type, and prices the
-    /// result.
+    /// Validates the request against the backend's [`Capabilities`], applies
+    /// the timeout, validates every answer (see [`DecisionBackend`]), and
+    /// prices the result. Inside an agent run, the attempt and its spend are
+    /// recorded in the run's [`SessionStats::decision`](crate::SessionStats::decision).
     pub async fn evaluate_request(&self, request: Request) -> Result<Evaluation, DecisionError> {
+        let result = self.evaluate_unrecorded(request).await;
+        crate::agent_loop::record_decision(|stats| match &result {
+            Ok(eval) => stats.record_success(
+                eval.usage.input_tokens,
+                eval.usage.output_tokens,
+                eval.cost_usd,
+            ),
+            Err(e) => stats.record_failure(matches!(e, DecisionError::Timeout(_))),
+        });
+        result
+    }
+
+    async fn evaluate_unrecorded(&self, request: Request) -> Result<Evaluation, DecisionError> {
         let backend = self.backend.get();
         let caps = backend.capabilities();
         request.validate(&caps)?;
@@ -446,19 +446,13 @@ impl DecisionModel {
     }
 }
 
-/// Every question must have an answer of its own type.
+/// Every question must have a valid answer of its own type. The one check
+/// every backend's output passes through.
 fn check_complete(request: &Request, eval: &Evaluation) -> Result<(), DecisionError> {
     for (id, q) in &request.questions {
         match eval.get(id) {
             None => return Err(DecisionError::BadResponse(format!("answers.{id}: missing"))),
-            Some(a) if a.kind() != q.kind() => {
-                return Err(DecisionError::BadResponse(format!(
-                    "answers.{id}: a {} answer to a {} question",
-                    a.kind(),
-                    q.kind()
-                )))
-            }
-            Some(_) => {}
+            Some(a) => a.validate(id, q)?,
         }
     }
     Ok(())
@@ -522,34 +516,65 @@ type Hooks = Vec<Arc<dyn crate::TurnHook>>;
 type Middleware = Vec<Arc<dyn crate::ToolMiddleware>>;
 
 /// Add the decision integrations to a run's hooks and middleware: the
-/// advisory [`Advisor`] when a model is set (and could act), and the tool gate
-/// — last in the chain, so it sees the arguments every user middleware
-/// produced. A gate without a model denies every call.
+/// advisory hook when a model is set, and the tool gate — last in the chain,
+/// so it judges the arguments every other middleware produced.
 pub(crate) fn wire(
     advisory: Option<&Advisory>,
-    gate: Option<&GateSetting>,
+    gate: Option<&ToolGate>,
     skills: &crate::skills::SkillSet,
     mut hooks: Hooks,
     mut middleware: Middleware,
 ) -> (Hooks, Middleware) {
     if let Some(a) = advisory {
-        if Advisor::could_act(a, skills) {
-            hooks.push(Arc::new(Advisor::new(a.clone(), skills)));
-        }
+        hooks.push(Arc::new(advisory::Advisor::new(a.clone(), skills)));
     }
-    match (gate, advisory) {
-        (None, _) => {}
-        (Some(GateSetting::Custom(g)), _) => middleware.push(Arc::new(g.as_ref().clone())),
-        (Some(GateSetting::Default), Some(a)) => {
-            middleware.push(Arc::new(ToolGate::new(a.model.clone())))
-        }
-        (Some(GateSetting::Default), None) => {
-            tracing::warn!(
-                "with_tool_gate() is set but no decision model is configured; \
-                 every tool call will be denied"
-            );
-            middleware.push(Arc::new(gate::UnconfiguredGate))
-        }
+    if let Some(g) = gate {
+        middleware.push(Arc::new(g.clone()));
     }
     (hooks, middleware)
+}
+
+#[cfg(test)]
+mod pricing_tests {
+    use super::*;
+
+    #[test]
+    fn jev_prices_by_reported_version_only_on_typesafe() {
+        let usage = DecisionUsage::new(2_000_000, 500);
+        let jev = DecisionModel {
+            backend: Slot::SystemOne(
+                SystemOneBackend::typesafe().with_base_url("https://api.typesafe.ai"),
+            ),
+            ..DecisionModel::jev()
+        };
+        let cost = jev.cost_usd("jev-1.13.0", &usage).unwrap();
+        assert!((cost - 0.084).abs() < 1e-12, "{cost}");
+        assert_eq!(jev.cost_usd("jev-latest", &usage), None, "aliases unpriced");
+        assert_eq!(jev.cost_usd("jev-9.9.9", &usage), None, "unlisted unpriced");
+
+        // The same pricing pointed at another host is unpriced.
+        let proxied = DecisionModel {
+            backend: Slot::SystemOne(
+                SystemOneBackend::typesafe().with_base_url("https://proxy.example"),
+            ),
+            ..DecisionModel::jev()
+        };
+        assert_eq!(proxied.cost_usd("jev-1.13.0", &usage), None);
+
+        assert_eq!(
+            DecisionModel::jev_opencode().cost_usd("jev-1.13.0", &usage),
+            None
+        );
+        assert_eq!(
+            DecisionModel::local("http://localhost:1").cost_usd("x", &usage),
+            Some(0.0)
+        );
+        let mock = DecisionModel::from_backend(MockBackend::neutral(), "m");
+        assert_eq!(mock.cost_usd("m", &usage), None, "from_backend is unpriced");
+        assert_eq!(
+            mock.with_cost(Some(CostConfig::new(1.0, 0.0)))
+                .cost_usd("m", &usage),
+            Some(2.0)
+        );
+    }
 }

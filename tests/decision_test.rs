@@ -20,15 +20,18 @@ fn fast_retry() -> RetryConfig {
     }
 }
 
-/// A hosted-style model pointed at the mock server, priced like `jev()`.
+/// A hosted-style model pointed at the mock server. A custom SystemOne
+/// backend is unpriced, so the list rate is set explicitly (table pricing by
+/// reported version is unit-tested in `decision::pricing_tests`).
 fn hosted(server: &MockServer) -> DecisionModel {
-    DecisionModel::from_systemone(
+    DecisionModel::from_backend(
         SystemOneBackend::typesafe()
             .with_base_url(server.uri())
             .with_api_key(KEY)
             .with_retry(fast_retry()),
         "jev-latest",
     )
+    .with_cost(Some(yoagent::provider::CostConfig::new(0.042, 0.0)))
 }
 
 fn typesafe_response() -> Value {
@@ -93,21 +96,23 @@ async fn typesafe_shape_round_trips_a_batched_request() {
 
     assert_eq!(eval.model, "jev-1.13.0");
     let urgent = eval.noul("urgent").unwrap();
-    assert_eq!(urgent.p_true, 0.95);
-    assert!((urgent.confidence - 0.9).abs() < 1e-9, "computed |2p-1|");
+    assert_eq!(urgent.p_true(), 0.95);
+    assert!((urgent.confidence() - 0.9).abs() < 1e-9, "computed |2p-1|");
     let team = eval.choice("team").unwrap();
-    assert_eq!(team.choice, "billing");
-    assert_eq!(team.confidence, 0.81, "the server's confidence wins");
+    assert_eq!(team.choice(), "billing");
+    assert_eq!(team.confidence(), 0.81, "the server's confidence wins");
+    let order: Vec<&str> = team.probabilities().map(|(o, _)| o).collect();
+    assert_eq!(order, ["billing", "technical", "sales"], "option order");
     let mood = eval.score("mood").unwrap();
-    assert_eq!(mood.score, 1.05);
-    assert_eq!(mood.legend, vec!["Calm", "Frustrated", "Very angry"]);
-    assert_eq!(mood.probabilities, vec![0.0, 0.95, 0.05]);
+    assert_eq!(mood.score(), 1.05);
+    assert_eq!(mood.legend(), ["Calm", "Frustrated", "Very angry"]);
+    assert_eq!(mood.probabilities(), [0.0, 0.95, 0.05]);
     assert_eq!(mood.level(), 1);
     assert_eq!(eval.usage.input_tokens, 1_000_000);
     assert_eq!(eval.usage.output_tokens, 34);
     // Priced by the versioned id the API reported: 1M input tokens at $0.042,
     // output free.
-    let cost = eval.cost_usd.expect("jev-1.13.0 is in the price table");
+    let cost = eval.cost_usd.expect("priced");
     assert!((cost - 0.042).abs() < 1e-12, "{cost}");
     // Typed accessors refuse the wrong type.
     assert!(eval.choice("urgent").is_none());
@@ -170,19 +175,23 @@ async fn jevk5_style_answers_parse_leniently() {
     let eval = batched(&model).send().await.unwrap();
 
     assert_eq!(eval.model, "jevk5-0.3");
-    assert_eq!(eval.noul("urgent").unwrap().confidence, 0.7);
+    assert_eq!(eval.noul("urgent").unwrap().confidence(), 0.7);
     let team = eval.choice("team").unwrap();
-    assert_eq!(team.choice, "billing", "argmax when choice is absent");
+    assert_eq!(team.choice(), "billing", "argmax when choice is absent");
     // (3 * 0.6 - 1) / 2 = 0.4
-    assert!((team.confidence - 0.4).abs() < 1e-9, "{}", team.confidence);
+    assert!(
+        (team.confidence() - 0.4).abs() < 1e-9,
+        "{}",
+        team.confidence()
+    );
     let mood = eval.score("mood").unwrap();
-    assert!((mood.score - 1.6).abs() < 1e-9, "sum(i * p_i)");
+    assert!((mood.score() - 1.6).abs() < 1e-9, "sum(i * p_i)");
     // (3 * 0.7 - 1) / 2 = 0.55
-    assert!((mood.confidence - 0.55).abs() < 1e-9);
-    assert_eq!(mood.legend[2], "Very angry", "legend from the question");
+    assert!((mood.confidence() - 0.55).abs() < 1e-9);
+    assert_eq!(mood.legend()[2], "Very angry", "legend from the question");
     // Usage summed from per-answer counts when there is no top-level usage.
     assert_eq!(eval.usage.input_tokens, 360);
-    // Local: $0, not unpriced.
+    // `DecisionModel::local`: $0, not unpriced.
     assert_eq!(eval.cost_usd, Some(0.0));
     // No key is sent to a local server.
     let received = server.received_requests().await.unwrap();
@@ -207,21 +216,13 @@ async fn one_line_conveniences() {
         .mount(&server)
         .await;
     let jev = hosted(&server);
-    assert_eq!(jev.noul("state", "yes?").await.unwrap(), 0.25);
-    assert_eq!(
-        jev.choice("state", "which?", ["a", "b"])
-            .await
-            .unwrap()
-            .choice,
-        "b"
-    );
-    assert_eq!(
-        jev.score("state", "how?", ["lo", "hi"])
-            .await
-            .unwrap()
-            .score,
-        0.5
-    );
+    // All three helpers return their typed answer.
+    let noul: NoulAnswer = jev.noul("state", "yes?").await.unwrap();
+    assert_eq!(noul.p_true(), 0.25);
+    let choice: ChoiceAnswer = jev.choice("state", "which?", ["a", "b"]).await.unwrap();
+    assert_eq!(choice.choice(), "b");
+    let score: ScoreAnswer = jev.score("state", "how?", ["lo", "hi"]).await.unwrap();
+    assert_eq!(score.score(), 0.5);
 }
 
 #[tokio::test]
@@ -386,17 +387,17 @@ async fn limits_accept_the_boundary() {
         .unwrap();
     let a = eval.choice("c").unwrap();
     assert!(
-        a.confidence.abs() < 1e-9,
+        a.confidence().abs() < 1e-9,
         "uniform over 255 is zero confidence"
     );
     let levels: Vec<String> = (0..10).map(|i| i.to_string()).collect();
     let eval = m.ask("s").score("c", "how?", levels).send().await.unwrap();
-    assert!((eval.score("c").unwrap().score - 4.5).abs() < 1e-9);
+    assert!((eval.score("c").unwrap().score() - 4.5).abs() < 1e-9);
 }
 
 #[tokio::test]
 async fn unsupported_question_type_is_an_error_not_an_emulation() {
-    let mock = MockBackend::neutral().with_capabilities(Capabilities::new([QuestionKind::Noul]));
+    let mock = MockBackend::neutral().with_capabilities(Capabilities::new(&[QuestionKind::Noul]));
     let model = DecisionModel::from_backend(mock.clone(), "m");
     let e = model
         .ask("s")
@@ -458,7 +459,7 @@ async fn retry_after_wins_over_backoff() {
         .await;
     mount_ok(&server, typesafe_response()).await;
     // A 20 s backoff: finishing fast proves the 50 ms retry-after was used.
-    let model = DecisionModel::from_systemone(
+    let model = DecisionModel::from_backend(
         SystemOneBackend::typesafe()
             .with_base_url(server.uri())
             .with_api_key(KEY)
@@ -582,7 +583,7 @@ async fn missing_env_key_fails_before_sending() {
         .expect(0)
         .mount(&server)
         .await;
-    let model = DecisionModel::from_systemone(
+    let model = DecisionModel::from_backend(
         SystemOneBackend::typesafe()
             .with_base_url(server.uri())
             .with_api_key_env("YOAGENT_DECISION_TEST_NEVER_SET"),
@@ -633,8 +634,8 @@ async fn mock_backend_records_requests_and_scripts_answers() {
         .await
         .unwrap();
     assert_eq!(eval.p_true("a"), Some(0.9));
-    assert_eq!(eval.choice("b").unwrap().choice, "y");
-    assert_eq!(eval.cost_usd, Some(0.0), "the mock is a local backend");
+    assert_eq!(eval.choice("b").unwrap().choice(), "y");
+    assert_eq!(eval.cost_usd, None, "from_backend is unpriced");
     let reqs = mock.requests();
     assert_eq!(reqs.len(), 1);
     assert_eq!(reqs[0].model, "mock");
@@ -681,46 +682,33 @@ async fn a_non_batching_backend_gets_one_request_per_question() {
 }
 
 #[tokio::test]
-async fn pricing_follows_the_reported_model() {
+async fn cost_follows_the_model_handle() {
     let server = MockServer::start().await;
-    let mut body = typesafe_response();
-    body["model"] = json!("jev-9.9.9");
-    mount_ok(&server, body).await;
-    // An unlisted version is unpriced, never guessed.
-    let eval = batched(&hosted(&server)).send().await.unwrap();
+    mount_ok(&server, typesafe_response()).await;
+    let backend = || {
+        SystemOneBackend::typesafe()
+            .with_base_url(server.uri())
+            .with_api_key(KEY)
+    };
+    // A custom backend is unpriced, never guessed.
+    let eval = batched(&DecisionModel::from_backend(backend(), "jev-latest"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(eval.cost_usd, None);
-
-    let m = DecisionModel::jev();
-    let usage = DecisionUsage::new(2_000_000, 500);
-    assert!((m.cost_usd("jev-1.13.0", &usage).unwrap() - 0.084).abs() < 1e-12);
-    assert_eq!(
-        m.cost_usd("jev-latest", &usage),
-        None,
-        "aliases are unpriced"
-    );
-    assert_eq!(
-        DecisionModel::jev_opencode().cost_usd("jev-1.13.0", &usage),
-        None
-    );
-    assert_eq!(
-        DecisionModel::local("http://localhost:1").cost_usd("x", &usage),
-        Some(0.0)
-    );
-    let fixed = DecisionModel::jev_opencode_free()
-        .with_cost(Some(yoagent::provider::CostConfig::new(0.0, 0.0)));
-    assert_eq!(fixed.cost_usd("jev-1.13-free", &usage), Some(0.0));
+    // Explicit rates apply to the reported usage (1M input tokens).
+    let eval = batched(
+        &DecisionModel::from_backend(backend(), "jev-latest")
+            .with_cost(Some(yoagent::provider::CostConfig::new(0.042, 0.0))),
+    )
+    .send()
+    .await
+    .unwrap();
+    assert!((eval.cost_usd.unwrap() - 0.042).abs() < 1e-12);
 }
 
 #[test]
-fn presets_are_configured_but_inert() {
-    let jev = DecisionModel::jev();
-    assert_eq!(jev.model(), "jev-latest");
-    assert!(jev.capabilities().native_confidence);
-    assert_eq!(jev.capabilities().max_choice_options, 255);
-    assert_eq!(DecisionModel::jev_opencode().model(), "jev-1.13");
-    assert_eq!(DecisionModel::jev_opencode_free().model(), "jev-1.13-free");
-    assert!(DecisionModel::local("http://x").capabilities().local);
-    assert_eq!(jev.clone().with_model("jev-1.13.0").model(), "jev-1.13.0");
+fn endpoints_normalize_and_debug_hides_keys() {
     assert_eq!(
         SystemOneBackend::opencode_zen().endpoint_url(),
         "https://opencode.ai/zen/v1/systemone"
@@ -736,32 +724,89 @@ fn presets_are_configured_but_inert() {
             "http://localhost:8000/v1/systemone"
         );
     }
-    // Debug output never carries a key.
-    let dbg = format!("{:?}", jev.with_api_key("sk-very-secret"));
+    // Only `DecisionModel::local` marks a server as self-hosted.
+    assert!(!SystemOneBackend::new("http://x").capabilities().local);
+    assert!(DecisionModel::local("http://x").capabilities().local);
+    let dbg = format!("{:?}", DecisionModel::jev().with_api_key("sk-very-secret"));
     assert!(!dbg.contains("sk-very-secret"), "{dbg}");
     assert!(dbg.contains("redacted"), "{dbg}");
 }
 
+// ---------------------------------------------------------------------------
+// Every backend's answers are validated centrally
+// ---------------------------------------------------------------------------
+
+/// A backend that answers whatever its closure says, bypassing any parsing.
+struct Raw(fn(&Request) -> Evaluation);
+
+#[async_trait::async_trait]
+impl DecisionBackend for Raw {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::new(QuestionKind::all())
+    }
+    async fn evaluate(&self, request: &Request) -> Result<Evaluation, DecisionError> {
+        Ok((self.0)(request))
+    }
+}
+
 #[tokio::test]
-async fn list_models_reads_the_catalog() {
-    let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/v1/models"))
-        .and(header("authorization", format!("Bearer {KEY}").as_str()))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "models": [
-                {"name": "jev-latest", "description": "Flagship", "release_date": "2026-09-01"},
-                {"name": "jev-preview"}
-            ]
-        })))
-        .mount(&server)
-        .await;
-    let backend = SystemOneBackend::typesafe()
-        .with_base_url(server.uri())
-        .with_api_key(KEY);
-    let models = backend.list_models().await.unwrap();
-    assert_eq!(models.len(), 2);
-    assert_eq!(models[0].name, "jev-latest");
-    assert_eq!(models[0].description.as_deref(), Some("Flagship"));
-    assert_eq!(models[1].release_date, None);
+async fn malformed_answers_from_any_backend_are_rejected() {
+    let ask = |b: Raw| async move {
+        DecisionModel::from_backend(b, "m")
+            .ask("s")
+            .noul("n", "yes?")
+            .choice("c", "which?", ["a", "b"])
+            .score("sc", "how?", ["lo", "hi"])
+            .send()
+            .await
+    };
+    fn good(_: &Request) -> Evaluation {
+        Evaluation::new("m", DecisionUsage::default())
+            .with_answer("n", NoulAnswer::new(0.4))
+            .with_answer("c", ChoiceAnswer::new([("a", 0.2), ("b", 0.8)]))
+            .with_answer(
+                "sc",
+                ScoreAnswer::new(vec!["lo".into(), "hi".into()], vec![0.5, 0.5]),
+            )
+    }
+    // Positive control.
+    ask(Raw(good)).await.expect("well-formed answers pass");
+
+    type Answers = fn(&Request) -> Evaluation;
+    let cases: [(&str, Answers); 9] = [
+        ("NaN noul", |r| {
+            good(r).with_answer("n", NoulAnswer::new(f64::NAN))
+        }),
+        ("negative noul", |r| {
+            good(r).with_answer("n", NoulAnswer::new(-0.1))
+        }),
+        ("noul above 1", |r| {
+            good(r).with_answer("n", NoulAnswer::new(1.2))
+        }),
+        ("NaN confidence", |r| {
+            good(r).with_answer("n", NoulAnswer::new(0.4).with_confidence(f64::NAN))
+        }),
+        ("wrong kind", |r| {
+            good(r).with_answer("n", ChoiceAnswer::new([("a", 1.0)]))
+        }),
+        ("missing answer", |_| {
+            Evaluation::new("m", DecisionUsage::default()).with_answer("n", NoulAnswer::new(0.4))
+        }),
+        ("unknown option", |r| {
+            good(r).with_answer("c", ChoiceAnswer::new([("a", 0.2), ("z", 0.8)]))
+        }),
+        ("choice not an option", |r| {
+            good(r).with_answer(
+                "c",
+                ChoiceAnswer::new([("a", 0.2), ("b", 0.8)]).with_choice("z"),
+            )
+        }),
+        ("short score", |r| {
+            good(r).with_answer("sc", ScoreAnswer::new(vec!["lo".into()], vec![1.0]))
+        }),
+    ];
+    for (what, answer) in cases {
+        let e = ask(Raw(answer)).await.unwrap_err();
+        assert!(matches!(e, DecisionError::BadResponse(_)), "{what}: {e:?}");
+    }
 }

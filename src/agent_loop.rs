@@ -142,6 +142,36 @@ pub const AGENT_STOPPED_PREFIX: &str = "[Agent stopped:";
 /// the model was emitting the same call forever and there is nothing to keep.
 pub const LOOP_ABORT_PREFIX: &str = "[Agent stopped: repeated tool call —";
 
+/// Prefix of the user-role nudge the loop injects when loop detection steers
+/// a model that keeps repeating one call.
+pub const LOOP_NUDGE_PREFIX: &str = "[You have called ";
+
+tokio::task_local! {
+    /// Decision-model spend of the running loop, recorded by the decision
+    /// integrations (which run inside the loop's task) and folded into its
+    /// `SessionStats`. A nested sub-agent loop opens its own scope.
+    static DECISION_STATS: std::cell::RefCell<DecisionStats>;
+}
+
+/// Record decision-model spend into the enclosing loop's stats. A no-op
+/// outside a loop.
+#[cfg_attr(not(feature = "decision"), allow(dead_code))]
+pub(crate) fn record_decision(f: impl FnOnce(&mut DecisionStats)) {
+    let _ = DECISION_STATS.try_with(|cell| f(&mut cell.borrow_mut()));
+}
+
+/// Run `fut` with a fresh decision-stats scope and return its output plus
+/// what was recorded.
+async fn with_decision_scope<T>(fut: impl std::future::Future<Output = T>) -> (T, DecisionStats) {
+    DECISION_STATS
+        .scope(std::cell::RefCell::new(DecisionStats::default()), async {
+            let out = fut.await;
+            let recorded = DECISION_STATS.with(|cell| cell.take());
+            (out, recorded)
+        })
+        .await
+}
+
 /// The error tool result given to each tool call in a response that ended as
 /// [`StopReason::Refusal`] — the model declined, or a content filter stopped
 /// the response. The call is never executed.
@@ -202,7 +232,19 @@ pub(crate) async fn agent_loop_with_stats(
         let mut warnings: Vec<String> = Vec::new();
         for filter in &config.input_filters {
             let verdict = match filter.as_async() {
-                Some(async_filter) => async_filter.filter(&user_text).await,
+                // A panicking async filter must not take the loop task (and
+                // with it the agent's tools and history) down: contain it and
+                // fail closed, as for middleware.
+                Some(async_filter) => {
+                    use futures::FutureExt;
+                    std::panic::AssertUnwindSafe(async_filter.filter(&user_text))
+                        .catch_unwind()
+                        .await
+                        .unwrap_or_else(|_| {
+                            warn!("async input filter panicked; rejecting the input");
+                            FilterResult::Reject("input filter panicked".into())
+                        })
+                }
                 None => filter.filter(&user_text),
             };
             match verdict {
@@ -270,9 +312,13 @@ pub(crate) async fn agent_loop_with_stats(
 
     let stats = {
         use tracing::Instrument;
-        run_loop(context, &mut new_messages, config, &tx, &cancel)
-            .instrument(tracing::info_span!("agent_loop", model = %config.model))
-            .await
+        let (mut stats, decision) = with_decision_scope(
+            run_loop(context, &mut new_messages, config, &tx, &cancel)
+                .instrument(tracing::info_span!("agent_loop", model = %config.model)),
+        )
+        .await;
+        stats.decision.merge(&decision);
+        stats
     };
 
     tx.send(AgentEvent::AgentEnd {
@@ -321,9 +367,13 @@ pub(crate) async fn agent_loop_continue_with_stats(
 
     let stats = {
         use tracing::Instrument;
-        run_loop(context, &mut new_messages, config, &tx, &cancel)
-            .instrument(tracing::info_span!("agent_loop", model = %config.model))
-            .await
+        let (mut stats, decision) = with_decision_scope(
+            run_loop(context, &mut new_messages, config, &tx, &cancel)
+                .instrument(tracing::info_span!("agent_loop", model = %config.model)),
+        )
+        .await;
+        stats.decision.merge(&decision);
+        stats
     };
 
     tx.send(AgentEvent::AgentEnd {
@@ -735,7 +785,7 @@ async fn run_loop(
                             let nudge = AgentMessage::Llm(Message::User {
                                 content: vec![Content::Text {
                                     text: format!(
-                                        "[You have called {tool_name} {repetitions} times with identical arguments. The result will not change — change approach, or say why the repetition is needed.]"
+                                        "{LOOP_NUDGE_PREFIX}{tool_name} {repetitions} times with identical arguments. The result will not change — change approach, or say why the repetition is needed.]"
                                     ),
                                 }],
                                 timestamp: now_ms(),
@@ -845,6 +895,8 @@ async fn run_loop(
                 // Separate bucket: `usage`/`cost_usd` stay this agent's own.
                 for child in &execution.sub_agent_stats {
                     stats.sub_agents.record_run(child);
+                    // Decision spend has one bucket for the whole tree.
+                    stats.decision.merge(&child.decision);
                 }
 
                 // Cap oversized output on the way in when configured, so

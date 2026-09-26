@@ -1,5 +1,6 @@
 //! The policy-engine hooks: conversation context on `ToolCallRequest`, async
-//! input filters, and per-turn hooks that add a transient system-prompt line.
+//! input filters, and per-turn hooks that add a transient note to the latest
+//! user turn.
 
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -11,10 +12,11 @@ use yoagent::provider::{
 };
 use yoagent::*;
 
-/// Records the system prompt and tool count of every request, then delegates.
+/// Records the system prompt and the latest user turn's text blocks (joined
+/// by `|`) of every request, then delegates.
 struct Recording {
     inner: MockProvider,
-    seen: Arc<Mutex<Vec<(String, usize)>>>,
+    seen: Seen,
 }
 
 #[async_trait::async_trait]
@@ -25,15 +27,33 @@ impl StreamProvider for Recording {
         tx: mpsc::UnboundedSender<StreamEvent>,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<Message, ProviderError> {
+        let last_user = config
+            .messages
+            .iter()
+            .rev()
+            .find_map(|m| match m {
+                Message::User { content, .. } => Some(
+                    content
+                        .iter()
+                        .filter_map(|c| match c {
+                            Content::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("|"),
+                ),
+                _ => None,
+            })
+            .unwrap_or_default();
         self.seen
             .lock()
             .unwrap()
-            .push((config.system_prompt.clone(), config.tools.len()));
+            .push((config.system_prompt.clone(), last_user));
         self.inner.stream(config, tx, cancel).await
     }
 }
 
-type Seen = Arc<Mutex<Vec<(String, usize)>>>;
+type Seen = Arc<Mutex<Vec<(String, String)>>>;
 
 fn recording(inner: MockProvider) -> (Recording, Seen) {
     let seen: Seen = Arc::new(Mutex::new(Vec::new()));
@@ -210,7 +230,7 @@ async fn sync_and_async_filters_share_one_ordered_list() {
 
 #[test]
 fn an_async_filter_called_synchronously_fails_closed() {
-    let f = AsyncFilter(SlowModeration);
+    let f = AsyncFilter::new(SlowModeration);
     assert!(matches!(
         InputFilter::filter(&f, "anything"),
         FilterResult::Reject(_)
@@ -243,7 +263,7 @@ impl TurnHook for Panics {
 }
 
 #[tokio::test]
-async fn turn_hook_adds_a_transient_system_line_every_turn() {
+async fn turn_hook_adds_a_transient_note_to_the_latest_user_turn() {
     let (provider, seen) = recording(tool_then_text());
     let calls = Arc::new(Mutex::new(Vec::new()));
     let agent = Agent::from_provider(provider, ModelConfig::mock())
@@ -255,10 +275,11 @@ async fn turn_hook_adds_a_transient_system_line_every_turn() {
         .with_turn_hook(Line(Some("Hint B."), calls.clone()));
     let (agent, _) = run(agent, "hello").await;
 
-    let seen = seen.lock().unwrap();
+    let seen = seen.lock().unwrap().clone();
     assert_eq!(seen.len(), 2, "two turns");
-    for (prompt, _) in seen.iter() {
-        assert_eq!(prompt, "Base prompt.\n\nHint A.\nHint B.");
+    for (prompt, user) in seen.iter() {
+        assert_eq!(prompt, "Base prompt.", "the system prompt is untouched");
+        assert_eq!(user, "hello|Hint A.\nHint B.");
     }
     // Each hook ran once per turn and saw the user's text.
     let calls = calls.lock().unwrap();
@@ -280,7 +301,10 @@ async fn a_hook_returning_none_leaves_the_request_unchanged() {
         .with_system_prompt("Base prompt.")
         .with_turn_hook(Line(None, calls.clone()));
     run(agent, "hello").await;
-    assert_eq!(seen.lock().unwrap()[0].0, "Base prompt.");
+    assert_eq!(
+        seen.lock().unwrap()[0],
+        ("Base prompt.".to_string(), "hello".to_string())
+    );
     assert_eq!(calls.lock().unwrap().len(), 1, "the hook did run");
 }
 
@@ -316,7 +340,7 @@ async fn raw_loop_callers_wrap_the_provider() {
         before_turn: None,
         after_turn: None,
         on_error: None,
-        input_filters: vec![Arc::new(AsyncFilter(SlowModeration))],
+        input_filters: vec![Arc::new(AsyncFilter::new(SlowModeration))],
         turn_delay: None,
     };
     let mut context = AgentContext {
@@ -333,10 +357,180 @@ async fn raw_loop_callers_wrap_the_provider() {
         tokio_util::sync::CancellationToken::new(),
     )
     .await;
-    assert_eq!(
-        seen.lock().unwrap()[0].0,
-        "Hint.",
-        "empty base: just the line"
-    );
+    assert_eq!(seen.lock().unwrap()[0].1, "hello|Hint.");
     assert!(context.system_prompt.is_empty());
+    // Not stored.
+    let Some(AgentMessage::Llm(Message::User { content, .. })) = context.messages.first() else {
+        panic!("user message first");
+    };
+    assert_eq!(content.len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Async filter panics are contained
+// ---------------------------------------------------------------------------
+
+struct PanicsOnBoom;
+
+#[async_trait::async_trait]
+impl AsyncInputFilter for PanicsOnBoom {
+    async fn filter(&self, text: &str) -> FilterResult {
+        if text.contains("boom") {
+            panic!("filter bug");
+        }
+        FilterResult::Pass
+    }
+}
+
+struct Ran(Arc<Mutex<u32>>);
+
+#[async_trait::async_trait]
+impl AgentTool for Ran {
+    fn name(&self) -> &str {
+        "echo"
+    }
+    fn label(&self) -> &str {
+        "Echo"
+    }
+    fn description(&self) -> &str {
+        "Counts runs"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    async fn execute(
+        &self,
+        _params: serde_json::Value,
+        _ctx: ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        *self.0.lock().unwrap() += 1;
+        Ok(ToolResult {
+            content: vec![Content::Text { text: "ok".into() }],
+            details: serde_json::Value::Null,
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_panicking_async_filter_rejects_and_the_agent_keeps_its_tools() {
+    let count = Arc::new(Mutex::new(0));
+    let agent = Agent::from_provider(tool_then_text(), ModelConfig::mock())
+        .with_tools(vec![Box::new(Ran(count.clone()))])
+        .with_async_input_filter(PanicsOnBoom);
+    let (agent, events) = run(agent, "boom").await;
+    assert!(events.iter().any(
+        |e| matches!(e, AgentEvent::InputRejected { reason } if reason == "input filter panicked")
+    ));
+    assert!(agent.messages().is_empty());
+    // Positive control: the same agent still runs a prompt and its tool.
+    let (agent, _) = run(agent, "go").await;
+    assert_eq!(*count.lock().unwrap(), 1, "tools survived the panic");
+    assert!(!agent.messages().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// What the user asked, read out of a conversation
+// ---------------------------------------------------------------------------
+
+fn assistant(text: &str) -> Message {
+    Message::assistant(
+        vec![Content::Text { text: text.into() }],
+        StopReason::Stop,
+        "mock",
+        "mock",
+        Usage::default(),
+    )
+}
+
+fn user_request(messages: &[Message]) -> Option<String> {
+    TurnContext::new("", messages, &[], "m").user_request()
+}
+
+#[test]
+fn a_short_reply_carries_the_exchange_it_answers() {
+    let messages = vec![
+        Message::user("clean up the workspace"),
+        assistant("I found /tmp/scratch.txt. Should I delete it?"),
+        Message::user("yes, go ahead"),
+    ];
+    assert_eq!(
+        user_request(&messages).unwrap(),
+        "Earlier user request: clean up the workspace\n\n\
+         Assistant: I found /tmp/scratch.txt. Should I delete it?\n\n\
+         Latest user message: yes, go ahead"
+    );
+    // Positive control: a self-contained request stands alone.
+    let long = "please refactor the parser module so that errors carry spans";
+    let messages = vec![
+        Message::user("clean up the workspace"),
+        assistant("Done."),
+        Message::user(long),
+    ];
+    assert_eq!(user_request(&messages).unwrap(), long);
+}
+
+#[test]
+fn loop_injected_messages_are_not_the_user_request() {
+    let prompt = "tidy up the temp directory, then report what you removed";
+    let nudge = format!(
+        "{}rm 3 times with identical arguments.]",
+        yoagent::agent_loop::LOOP_NUDGE_PREFIX
+    );
+    let messages = vec![
+        Message::user(prompt),
+        Message::user(nudge.as_str()),
+        Message::user(format!(
+            "{} max turns]",
+            yoagent::agent_loop::AGENT_STOPPED_PREFIX
+        )),
+    ];
+    assert_eq!(user_request(&messages).unwrap(), prompt);
+    let ctx = TurnContext::new("", &messages, &[], "m");
+    assert_eq!(ctx.latest_user_text().unwrap(), prompt);
+    // Positive control: without the prefixes these would be "the latest".
+    let plain = vec![Message::user(prompt), Message::user("rm 3 times")];
+    assert_eq!(
+        TurnContext::new("", &plain, &[], "m")
+            .latest_user_text()
+            .unwrap(),
+        "rm 3 times"
+    );
+}
+
+#[test]
+fn compacted_history_does_not_yield_summary_text() {
+    use yoagent::context::{compact_messages, ContextConfig, COMPACTION_MARKER, SUMMARY_PREFIX};
+    // Real compaction output: old assistant turns become `[Summary]` user
+    // messages.
+    let mut history: Vec<AgentMessage> = vec![AgentMessage::Llm(Message::user(
+        "migrate the database to the new schema",
+    ))];
+    for i in 0..40 {
+        history.push(AgentMessage::Llm(assistant(&format!(
+            "step {i}: {}",
+            "detail ".repeat(200)
+        ))));
+    }
+    let config = ContextConfig {
+        max_context_tokens: 4_000,
+        ..ContextConfig::default()
+    };
+    let compacted: Vec<Message> = compact_messages(history, &config)
+        .into_iter()
+        .filter_map(|m| m.as_llm().cloned())
+        .collect();
+    let has_injected = compacted.iter().any(|m| match m {
+        Message::User { content, .. } => content.iter().any(|c| {
+            matches!(c, Content::Text { text }
+                if text.starts_with(SUMMARY_PREFIX) || text.starts_with(COMPACTION_MARKER))
+        }),
+        _ => false,
+    });
+    assert!(
+        has_injected,
+        "positive control: compaction injected messages"
+    );
+    let request = user_request(&compacted).unwrap_or_default();
+    assert!(!request.contains("[Summary]"), "{request}");
+    assert!(!request.contains(COMPACTION_MARKER), "{request}");
 }

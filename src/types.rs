@@ -1096,6 +1096,87 @@ pub struct SessionStats {
     /// sub-agents serializes exactly as it did before.
     #[serde(default, skip_serializing_if = "SubAgentSpend::is_empty")]
     pub sub_agents: SubAgentSpend,
+    /// Decision-model requests made during this run — the advisory hints and
+    /// the tool gate (feature `decision`), including those of sub-agents it
+    /// delegated to. Always empty without the feature, and omitted from the
+    /// wire when empty.
+    ///
+    /// Its dollar cost is part of [`total_cost_usd`](Self::total_cost_usd);
+    /// its tokens are not part of [`total_usage`](Self::total_usage), which
+    /// counts LLM tokens only.
+    #[serde(default, skip_serializing_if = "DecisionStats::is_empty")]
+    pub decision: DecisionStats,
+}
+
+/// What decision-model requests cost during a run; see
+/// [`SessionStats::decision`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct DecisionStats {
+    /// Evaluations attempted.
+    #[serde(default)]
+    pub requests: u32,
+    /// Evaluations that produced no usable answer — errors, invalid or
+    /// unusable responses, a missing API key, and timeouts.
+    #[serde(default)]
+    pub failures: u32,
+    /// The subset of `failures` that timed out.
+    #[serde(default)]
+    pub timeouts: u32,
+    /// Tokens of the successful evaluations (`input` and `output` only).
+    #[serde(default)]
+    pub usage: Usage,
+    /// Their dollar cost, with the crate's rule: `None` once any evaluation
+    /// that used tokens could not be priced, and when nothing was priced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+}
+
+impl DecisionStats {
+    /// Whether no evaluation was attempted.
+    pub fn is_empty(&self) -> bool {
+        self.requests == 0 && usage_is_zero(&self.usage) && self.cost_usd.is_none()
+    }
+
+    /// Whether tokens were spent that cannot be priced.
+    pub fn is_unpriced(&self) -> bool {
+        is_unpriced(&self.usage, self.cost_usd)
+    }
+
+    /// Fold another rollup into this one.
+    pub fn merge(&mut self, other: &DecisionStats) {
+        self.cost_usd = combine_cost(&self.usage, self.cost_usd, &other.usage, other.cost_usd);
+        self.usage = add_usage(&self.usage, &other.usage);
+        self.requests = self.requests.saturating_add(other.requests);
+        self.failures = self.failures.saturating_add(other.failures);
+        self.timeouts = self.timeouts.saturating_add(other.timeouts);
+    }
+
+    /// One successful evaluation.
+    #[cfg_attr(not(feature = "decision"), allow(dead_code))]
+    pub(crate) fn record_success(&mut self, input: u64, output: u64, cost_usd: Option<f64>) {
+        self.merge(&DecisionStats {
+            requests: 1,
+            usage: Usage {
+                input,
+                output,
+                ..Default::default()
+            },
+            cost_usd,
+            ..Default::default()
+        });
+    }
+
+    /// One failed evaluation.
+    #[cfg_attr(not(feature = "decision"), allow(dead_code))]
+    pub(crate) fn record_failure(&mut self, timed_out: bool) {
+        self.requests = self.requests.saturating_add(1);
+        self.failures = self.failures.saturating_add(1);
+        if timed_out {
+            self.timeouts = self.timeouts.saturating_add(1);
+        }
+    }
 }
 
 impl SessionStats {
@@ -1111,6 +1192,7 @@ impl SessionStats {
             cost_usd,
             compactions,
             sub_agents: SubAgentSpend::default(),
+            decision: DecisionStats::default(),
         }
     }
 
@@ -1139,12 +1221,22 @@ impl SessionStats {
     /// was priced): a priced turn that reported no usage makes it
     /// `Some(0.0)`, not `None`. Spend of zero tokens needs no price, so a
     /// zero-usage part never poisons the rest.
+    ///
+    /// Decision-model spend ([`decision`](Self::decision)) is included, under
+    /// the same rule.
     pub fn total_cost_usd(&self) -> Option<f64> {
-        combine_cost(
+        let own_and_delegated = combine_cost(
             &self.usage,
             self.cost_usd,
             &self.sub_agents.usage,
             self.sub_agents.cost_usd,
+        );
+        let llm_usage = add_usage(&self.usage, &self.sub_agents.usage);
+        combine_cost(
+            &llm_usage,
+            own_and_delegated,
+            &self.decision.usage,
+            self.decision.cost_usd,
         )
     }
 
@@ -1157,6 +1249,7 @@ impl SessionStats {
         self.turns = self.turns.saturating_add(other.turns);
         self.compactions = self.compactions.saturating_add(other.compactions);
         self.sub_agents.merge(&other.sub_agents);
+        self.decision.merge(&other.decision);
     }
 
     /// The [`SessionStats`] of a sub-agent run, if `result` came from a
@@ -1553,9 +1646,14 @@ pub trait InputFilter: Send + Sync {
 /// [`InputFilter`], with the same [`FilterResult`] semantics.
 ///
 /// It runs in the same place and order as the sync filters (they share one
-/// list), before the prompt reaches the model, so a slow filter delays every
-/// prompt: bound its latency yourself (e.g. `tokio::time::timeout`) and
-/// decide there whether a timeout passes or rejects.
+/// list), before the prompt reaches the model.
+///
+/// **You own the timeout.** The loop awaits the filter as long as it takes,
+/// and a slow filter delays every prompt: bound it yourself (e.g.
+/// `tokio::time::timeout`) and decide there whether a timeout passes or
+/// rejects. A filter that **panics** is contained and treated as a
+/// `Reject` (fail closed): the run ends with an
+/// [`AgentEvent::InputRejected`] and the agent keeps its state.
 #[async_trait::async_trait]
 pub trait AsyncInputFilter: Send + Sync {
     async fn filter(&self, text: &str) -> FilterResult;
@@ -1566,7 +1664,7 @@ pub trait AsyncInputFilter: Send + Sync {
 /// The loop recognises it through [`InputFilter::as_async`] and awaits the
 /// inner filter. Its synchronous [`InputFilter::filter`] cannot await, so it
 /// fails closed: called directly, it rejects.
-pub struct AsyncFilter<F>(pub F);
+pub struct AsyncFilter<F>(F);
 
 impl<F: AsyncInputFilter> AsyncFilter<F> {
     pub fn new(filter: F) -> Self {
@@ -1587,24 +1685,107 @@ impl<F: AsyncInputFilter> InputFilter for AsyncFilter<F> {
     }
 }
 
-/// The text of the most recent user message: its text blocks, joined by
-/// newlines. `None` when there is no user message with text.
-pub(crate) fn latest_user_text_of<'a>(
-    messages: impl DoubleEndedIterator<Item = &'a Message>,
-) -> Option<String> {
-    messages.rev().find_map(|m| match m {
+// ---------------------------------------------------------------------------
+// Reading the user's request out of a conversation
+// ---------------------------------------------------------------------------
+
+/// Whether a user-role text was written by the loop or by compaction rather
+/// than by the user: compaction summaries and markers, execution-limit and
+/// loop-abort notes, and the loop-detection nudge. The one list, built from
+/// the constants where each message is written, so it cannot drift.
+pub(crate) fn is_loop_injected(text: &str) -> bool {
+    [
+        crate::context::SUMMARY_PREFIX,
+        crate::context::COMPACTION_MARKER,
+        crate::llm_compaction::SUMMARY_MARKER,
+        crate::agent_loop::AGENT_STOPPED_PREFIX,
+        crate::agent_loop::LOOP_ABORT_PREFIX,
+        crate::agent_loop::LOOP_NUDGE_PREFIX,
+    ]
+    .iter()
+    .any(|prefix| text.starts_with(prefix))
+}
+
+fn text_blocks(content: &[Content]) -> Option<String> {
+    let text: Vec<&str> = content
+        .iter()
+        .filter_map(|c| match c {
+            Content::Text { text } if !text.trim().is_empty() => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    (!text.is_empty()).then(|| text.join("\n"))
+}
+
+/// The text of a message the user wrote: `None` for other roles, for user
+/// messages without text, and for loop-injected ones.
+fn real_user_text(m: &Message) -> Option<String> {
+    match m {
         Message::User { content, .. } => {
-            let text: Vec<&str> = content
-                .iter()
-                .filter_map(|c| match c {
-                    Content::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect();
-            (!text.is_empty()).then(|| text.join("\n"))
+            let first = content.iter().find_map(|c| match c {
+                Content::Text { text } => Some(text.as_str()),
+                _ => None,
+            })?;
+            if is_loop_injected(first) {
+                return None;
+            }
+            text_blocks(content)
         }
         _ => None,
-    })
+    }
+}
+
+/// Below this many characters a user message is read as a reply ("yes, go
+/// ahead") that needs the preceding exchange to mean anything.
+const SHORT_REPLY_CHARS: usize = 40;
+
+/// The most recent message the user actually wrote.
+pub(crate) fn latest_user_text_of(messages: &[&Message]) -> Option<String> {
+    messages.iter().rev().find_map(|m| real_user_text(m))
+}
+
+/// What the user is asking for, as a decision policy should judge it.
+///
+/// The latest message the user wrote (loop-injected messages skipped). When
+/// that message is a short reply, or answers an assistant question, the
+/// assistant text before it and the user's previous request are included
+/// too, labelled, so a confirmation such as "yes, go ahead" carries what it
+/// confirms.
+pub(crate) fn user_request_of(messages: &[&Message]) -> Option<String> {
+    let at = messages.iter().rposition(|m| real_user_text(m).is_some())?;
+    let latest = real_user_text(messages[at])?;
+
+    let mut asked: Option<String> = None;
+    let mut earlier: Option<String> = None;
+    for m in messages[..at].iter().rev() {
+        if let Some(text) = real_user_text(m) {
+            earlier = Some(text);
+            break;
+        }
+        if asked.is_none() {
+            if let Message::Assistant { content, .. } = m {
+                asked = text_blocks(content);
+            }
+        }
+    }
+
+    let is_reply = latest.chars().count() < SHORT_REPLY_CHARS
+        || asked.as_deref().is_some_and(|a| {
+            let tail: String = a.chars().rev().take(300).collect();
+            tail.contains('?')
+        });
+    if !is_reply || (asked.is_none() && earlier.is_none()) {
+        return Some(latest);
+    }
+    let mut parts = Vec::new();
+    if let Some(e) = earlier {
+        parts.push(format!("Earlier user request: {e}"));
+    }
+    if let Some(a) = asked {
+        parts.push(format!("Assistant: {a}"));
+    }
+    parts.push(format!("Latest user message: {latest}"));
+    Some(parts.join("\n\n"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1646,20 +1827,35 @@ pub struct ToolCallRequest<'a> {
     /// Arguments as the model provided them (possibly rewritten by earlier
     /// middleware in the chain).
     pub args: &'a serde_json::Value,
-    /// The conversation so far, as the model saw it plus the assistant
-    /// message carrying this call. For policies that depend on what the user
-    /// asked — see [`latest_user_text`](Self::latest_user_text).
+    /// The loop's conversation context at the time of the call: history
+    /// *before* `transform_context` / `convert_to_llm`, so it may differ from
+    /// what the model saw, ending with the assistant message carrying this
+    /// call. For policies that depend on what the user asked — see
+    /// [`user_request`](Self::user_request).
     pub messages: &'a [AgentMessage],
 }
 
 impl ToolCallRequest<'_> {
-    /// The text of the most recent user message in [`messages`](Self::messages).
-    ///
-    /// That is the last `Message::User`, which may be a steering or follow-up
-    /// message, or a note the loop injected — not necessarily the prompt that
-    /// started the run.
+    fn llm_messages(&self) -> Vec<&Message> {
+        self.messages
+            .iter()
+            .filter_map(AgentMessage::as_llm)
+            .collect()
+    }
+
+    /// The text of the most recent message the user wrote. Loop-injected
+    /// user-role messages (compaction summaries, limit notes, the
+    /// loop-detection nudge) are skipped.
     pub fn latest_user_text(&self) -> Option<String> {
-        latest_user_text_of(self.messages.iter().filter_map(AgentMessage::as_llm))
+        latest_user_text_of(&self.llm_messages())
+    }
+
+    /// What the user is asking for: [`latest_user_text`](Self::latest_user_text),
+    /// plus — when that is a short reply or answers an assistant question —
+    /// the assistant text before it and the user's previous request, so "yes,
+    /// go ahead" carries what it confirms.
+    pub fn user_request(&self) -> Option<String> {
+        user_request_of(&self.llm_messages())
     }
 }
 
@@ -1695,13 +1891,15 @@ pub trait ToolMiddleware: Send + Sync {
 /// Borrowed view of the request about to be sent for one turn, passed to
 /// [`TurnHook::before_turn`].
 ///
-/// Marked `#[non_exhaustive]`: fields may be added in minor releases.
+/// Marked `#[non_exhaustive]`: fields may be added in minor releases. Build
+/// one with [`TurnContext::new`] to test a hook.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct TurnContext<'a> {
-    /// The system prompt as configured (without other hooks' lines).
+    /// The system prompt of the request.
     pub system_prompt: &'a str,
-    /// The messages being sent, after `transform_context`/`convert_to_llm`.
+    /// The messages being sent, after `transform_context`/`convert_to_llm`
+    /// and before any hook's note.
     pub messages: &'a [Message],
     /// The tools offered this turn.
     pub tools: &'a [crate::provider::ToolDefinition],
@@ -1709,37 +1907,56 @@ pub struct TurnContext<'a> {
     pub model: &'a str,
 }
 
-impl TurnContext<'_> {
-    /// The text of the most recent user message being sent.
+impl<'a> TurnContext<'a> {
+    pub fn new(
+        system_prompt: &'a str,
+        messages: &'a [Message],
+        tools: &'a [crate::provider::ToolDefinition],
+        model: &'a str,
+    ) -> Self {
+        Self {
+            system_prompt,
+            messages,
+            tools,
+            model,
+        }
+    }
+
+    /// The text of the most recent message the user wrote (loop-injected
+    /// messages skipped).
     pub fn latest_user_text(&self) -> Option<String> {
-        latest_user_text_of(self.messages.iter())
+        latest_user_text_of(&self.messages.iter().collect::<Vec<_>>())
+    }
+
+    /// What the user is asking for; see [`ToolCallRequest::user_request`].
+    pub fn user_request(&self) -> Option<String> {
+        user_request_of(&self.messages.iter().collect::<Vec<_>>())
     }
 }
 
 /// An async hook run before every LLM request, able to add one transient
-/// line to that request's system prompt.
+/// note to that request's **latest user turn**.
 ///
-/// The line is for **this request only**: it is never stored in history, and
-/// a hook that returns `None` leaves the request byte-for-byte unchanged.
-/// Lines from several hooks are appended in installation order, after a
-/// blank line.
+/// The note is for **this request only**: it is appended as a text block to
+/// the last user message being sent, never stored in history, and a hook
+/// that returns `None` leaves the request byte-for-byte unchanged. Notes from
+/// several hooks are joined in installation order.
+///
+/// **Prompt caching.** The system prompt and every earlier message stay
+/// byte-identical, so the provider's cached prefix survives. The note sits
+/// at the tail; on the next user prompt the previous turn is sent without
+/// its note, so at most that last exchange is re-read. Keep the note stable
+/// within one request (derive it from the user's request, not from every
+/// tool result) so its tool-calling turns cache too.
 ///
 /// Install via [`Agent::with_turn_hook`](crate::Agent::with_turn_hook), or
 /// for a raw loop wrap the provider in
 /// [`TurnHookProvider`](crate::provider::TurnHookProvider). The hook runs
 /// once per provider call, so a retried request runs it again; memoize if it
-/// is expensive.
-///
-/// **Prompt caching.** The system prompt precedes the conversation, so a
-/// line that changes invalidates the provider's prompt cache from there on
-/// for that request. A line that stays the same across turns caches
-/// normally: keep it stable (e.g. derive it from the latest user message,
-/// not from every tool result).
-///
-/// A panicking hook is contained and contributes nothing.
+/// is expensive. A panicking hook is contained and contributes nothing.
 #[async_trait::async_trait]
 pub trait TurnHook: Send + Sync {
-    /// Return a line to append to this request's system prompt, or `None`.
+    /// Return a note to append to this request's latest user turn, or `None`.
     async fn before_turn(&self, turn: &TurnContext<'_>) -> Option<String>;
 }
 
@@ -1890,6 +2107,16 @@ mod wire_tag_freeze {
                     },
                     cost_usd: Some(0.2),
                     runs: 2,
+                },
+                decision: DecisionStats {
+                    requests: 3,
+                    failures: 1,
+                    timeouts: 1,
+                    usage: Usage {
+                        input: 900,
+                        ..Default::default()
+                    },
+                    cost_usd: Some(0.0000378),
                 },
             },
         ),

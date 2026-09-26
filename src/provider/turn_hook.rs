@@ -1,12 +1,12 @@
 //! [`TurnHookProvider`]: runs [`TurnHook`]s before each request.
 
 use super::traits::{ProviderError, StreamConfig, StreamEvent, StreamProvider};
-use crate::types::{Message, TurnContext, TurnHook};
+use crate::types::{Content, Message, TurnContext, TurnHook};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
 /// Wraps a provider so every request first runs the given [`TurnHook`]s and
-/// appends the lines they return to that request's system prompt.
+/// appends the notes they return to that request's latest user turn.
 ///
 /// This is how turn hooks reach the loop without a new
 /// [`AgentLoopConfig`](crate::agent_loop::AgentLoopConfig) field:
@@ -18,8 +18,9 @@ use tokio::sync::mpsc;
 /// let config = AgentLoopConfig { provider, /* ... */ };
 /// ```
 ///
-/// With no hooks, or hooks that all return `None`, the request reaches the
-/// inner provider unchanged.
+/// The system prompt and every earlier message are never touched. With no
+/// hooks, hooks that all return `None`, or a request with no user message,
+/// the request reaches the inner provider unchanged.
 pub struct TurnHookProvider {
     inner: Arc<dyn StreamProvider>,
     hooks: Vec<Arc<dyn TurnHook>>,
@@ -30,27 +31,27 @@ impl TurnHookProvider {
         Self { inner, hooks }
     }
 
-    /// Run the hooks against `config` and return the lines they added.
-    async fn lines(&self, config: &StreamConfig) -> Vec<String> {
-        let turn = TurnContext {
-            system_prompt: &config.system_prompt,
-            messages: &config.messages,
-            tools: &config.tools,
-            model: &config.model,
-        };
-        let mut lines = Vec::new();
+    /// Run the hooks against `config` and return the notes they added.
+    async fn notes(&self, config: &StreamConfig) -> Vec<String> {
+        let turn = TurnContext::new(
+            &config.system_prompt,
+            &config.messages,
+            &config.tools,
+            &config.model,
+        );
+        let mut notes = Vec::new();
         for hook in &self.hooks {
             use futures::FutureExt;
             match std::panic::AssertUnwindSafe(hook.before_turn(&turn))
                 .catch_unwind()
                 .await
             {
-                Ok(Some(line)) if !line.trim().is_empty() => lines.push(line),
+                Ok(Some(note)) if !note.trim().is_empty() => notes.push(note),
                 Ok(_) => {}
                 Err(_) => tracing::warn!("turn hook panicked; adding nothing for this turn"),
             }
         }
-        lines
+        notes
     }
 }
 
@@ -62,14 +63,18 @@ impl StreamProvider for TurnHookProvider {
         tx: mpsc::UnboundedSender<StreamEvent>,
         cancel: tokio_util::sync::CancellationToken,
     ) -> Result<Message, ProviderError> {
-        let lines = self.lines(&config).await;
-        if !lines.is_empty() {
-            let extra = lines.join("\n");
-            config.system_prompt = if config.system_prompt.is_empty() {
-                extra
-            } else {
-                format!("{}\n\n{extra}", config.system_prompt)
-            };
+        let notes = self.notes(&config).await;
+        if !notes.is_empty() {
+            let latest_user = config.messages.iter_mut().rev().find_map(|m| match m {
+                Message::User { content, .. } => Some(content),
+                _ => None,
+            });
+            match latest_user {
+                Some(content) => content.push(Content::Text {
+                    text: notes.join("\n"),
+                }),
+                None => tracing::debug!("turn hook note dropped: the request has no user turn"),
+            }
         }
         self.inner.stream(config, tx, cancel).await
     }

@@ -46,8 +46,13 @@ pub enum DecisionError {
     /// variable, never a value.
     #[error("decision model API key missing: set {0}")]
     MissingApiKey(String),
-    /// The server's answer could not be understood (not JSON, a missing
-    /// answer, a probability out of range, ...).
+    /// A custom backend's own failure, in its words.
+    #[error("decision backend error: {0}")]
+    Backend(String),
+    /// The answer could not be used: not JSON, a missing answer or one of
+    /// the wrong type, a probability or confidence that is not finite or not
+    /// in `[0, 1]`, a choice that is not one of the options. Checked for
+    /// every backend.
     #[error("decision model returned an unusable response: {0}")]
     BadResponse(String),
 }

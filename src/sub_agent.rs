@@ -73,7 +73,7 @@ pub struct SubAgentTool {
     #[cfg(feature = "decision")]
     decision: Option<crate::decision::Advisory>,
     #[cfg(feature = "decision")]
-    tool_gate: Option<crate::decision::GateSetting>,
+    tool_gate: Option<crate::decision::ToolGate>,
 }
 
 impl SubAgentTool {
@@ -264,21 +264,14 @@ impl SubAgentTool {
         self
     }
 
-    /// Gate the sub-agent's tool calls on its decision model. Mirrors
+    /// Gate the sub-agent's own tool calls. Mirrors
     /// [`Agent::with_tool_gate`](crate::Agent::with_tool_gate), fail-closed
-    /// included.
+    /// included. A parent's gate does not cover these calls; and here the
+    /// gate's `user_request` is the task text the parent model wrote.
     #[cfg(feature = "decision")]
     #[cfg_attr(docsrs, doc(cfg(feature = "decision")))]
-    pub fn with_tool_gate(mut self) -> Self {
-        self.tool_gate = Some(crate::decision::GateSetting::Default);
-        self
-    }
-
-    /// Mirrors [`Agent::with_tool_gate_config`](crate::Agent::with_tool_gate_config).
-    #[cfg(feature = "decision")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "decision")))]
-    pub fn with_tool_gate_config(mut self, gate: crate::decision::ToolGate) -> Self {
-        self.tool_gate = Some(crate::decision::GateSetting::Custom(Box::new(gate)));
+    pub fn with_tool_gate(mut self, gate: crate::decision::ToolGate) -> Self {
+        self.tool_gate = Some(gate);
         self
     }
 

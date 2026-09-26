@@ -15,6 +15,9 @@ struct Inner {
 }
 
 /// A scripted [`DecisionBackend`] that records every request it receives.
+/// Reports itself [`local`](Capabilities::local) (nothing leaves the process);
+/// a model built on it with [`DecisionModel::from_backend`](super::DecisionModel::from_backend)
+/// is unpriced unless you set [`with_cost`](super::DecisionModel::with_cost).
 ///
 /// Answers come from, in order: the queue of scripted results
 /// ([`push`](Self::push) / [`push_error`](Self::push_error)), then the
