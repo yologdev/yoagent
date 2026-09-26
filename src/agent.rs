@@ -77,6 +77,15 @@ pub struct Agent {
     // Per-turn hooks (transient system-prompt lines)
     turn_hooks: Vec<Arc<dyn TurnHook>>,
 
+    // Decision model integration (feature `decision`): the skills it may
+    // hint at, the advisory settings, and whether the tool gate is on.
+    #[cfg(feature = "decision")]
+    skills: crate::skills::SkillSet,
+    #[cfg(feature = "decision")]
+    decision: Option<crate::decision::Advisory>,
+    #[cfg(feature = "decision")]
+    tool_gate: Option<crate::decision::GateSetting>,
+
     // Custom compaction strategy
     compaction_strategy: Option<Arc<dyn CompactionStrategy>>,
 
@@ -311,6 +320,12 @@ impl Agent {
             input_filters: Vec::new(),
             tool_middleware: Vec::new(),
             turn_hooks: Vec::new(),
+            #[cfg(feature = "decision")]
+            skills: crate::skills::SkillSet::empty(),
+            #[cfg(feature = "decision")]
+            decision: None,
+            #[cfg(feature = "decision")]
+            tool_gate: None,
             compaction_strategy: None,
             cancel: None,
             is_streaming: false,
@@ -440,6 +455,8 @@ impl Agent {
     /// when it decides a skill is relevant.
     pub fn with_skills(mut self, skills: crate::skills::SkillSet) -> Self {
         let prompt_fragment = skills.format_for_prompt();
+        #[cfg(feature = "decision")]
+        self.skills.merge(skills);
         if !prompt_fragment.is_empty() {
             if self.system_prompt.is_empty() {
                 self.system_prompt = prompt_fragment;
@@ -499,6 +516,64 @@ impl Agent {
     /// one line to that request's system prompt (never stored in history).
     pub fn with_turn_hook(mut self, hook: impl TurnHook + 'static) -> Self {
         self.turn_hooks.push(Arc::new(hook));
+        self
+    }
+
+    /// Attach a decision model, enabling the **advisory** features only —
+    /// they can never block anything:
+    ///
+    /// - a skill hint (with [`with_skills`](Self::with_skills)): at most one
+    ///   line naming the skill that fits the request, when confident;
+    /// - a tool hint (with 40+ tools): one line naming the few most relevant
+    ///   tools. A hint only; no tool is ever removed.
+    ///
+    /// At most one decision request per user request (memoized across its
+    /// tool-calling turns), with a 2 s limit; on any failure the agent warns
+    /// and continues exactly as without a model. Nothing is sent when there
+    /// are no skills and fewer than 40 tools. Tune it with
+    /// [`with_decision_advisory`](Self::with_decision_advisory); block
+    /// risky tool calls with [`with_tool_gate`](Self::with_tool_gate).
+    ///
+    /// Hosted decision models see the user's message and the skill and tool
+    /// descriptions.
+    #[cfg(feature = "decision")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "decision")))]
+    pub fn with_decision_model(self, model: crate::decision::DecisionModel) -> Self {
+        self.with_decision_advisory(crate::decision::Advisory::new(model))
+    }
+
+    /// [`with_decision_model`](Self::with_decision_model) with explicit
+    /// advisory settings (thresholds, timeout, which hints run).
+    #[cfg(feature = "decision")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "decision")))]
+    pub fn with_decision_advisory(mut self, advisory: crate::decision::Advisory) -> Self {
+        self.decision = Some(advisory);
+        self
+    }
+
+    /// Gate every tool call on the decision model (a blocking feature, so a
+    /// separate opt-in): calls that look destructive and not clearly
+    /// requested are denied with a reason the model sees. Uses the model from
+    /// [`with_decision_model`](Self::with_decision_model) and the
+    /// [`ToolGate`](crate::decision::ToolGate) defaults; runs after every
+    /// other middleware.
+    ///
+    /// **Fails closed:** a decision-model error or timeout denies the call,
+    /// and without a decision model every call is denied. Defence in depth,
+    /// not a security boundary — injected content can steer the decision.
+    #[cfg(feature = "decision")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "decision")))]
+    pub fn with_tool_gate(mut self) -> Self {
+        self.tool_gate = Some(crate::decision::GateSetting::Default);
+        self
+    }
+
+    /// [`with_tool_gate`](Self::with_tool_gate) with a configured gate (its
+    /// own model, questions, thresholds or timeout).
+    #[cfg(feature = "decision")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "decision")))]
+    pub fn with_tool_gate_config(mut self, gate: crate::decision::ToolGate) -> Self {
+        self.tool_gate = Some(crate::decision::GateSetting::Custom(Box::new(gate)));
         self
     }
 
@@ -1260,12 +1335,24 @@ impl Agent {
         let follow_up_queue = self.follow_up_queue.clone();
         let follow_up_mode = self.follow_up_mode;
 
-        let provider: Arc<dyn StreamProvider> = if self.turn_hooks.is_empty() {
+        // The decision integration appends its advisor hook and tool gate
+        // last, so the gate sees arguments after every user middleware.
+        #[cfg(feature = "decision")]
+        let (turn_hooks, tool_middleware) = crate::decision::wire(
+            self.decision.as_ref(),
+            self.tool_gate.as_ref(),
+            &self.skills,
+            self.turn_hooks.clone(),
+            self.tool_middleware.clone(),
+        );
+        #[cfg(not(feature = "decision"))]
+        let (turn_hooks, tool_middleware) = (self.turn_hooks.clone(), self.tool_middleware.clone());
+        let provider: Arc<dyn StreamProvider> = if turn_hooks.is_empty() {
             self.provider.clone()
         } else {
             Arc::new(crate::provider::TurnHookProvider::new(
                 self.provider.clone(),
-                self.turn_hooks.clone(),
+                turn_hooks,
             ))
         };
 
@@ -1325,7 +1412,7 @@ impl Agent {
             after_turn: self.after_turn.clone(),
             on_error: self.on_error.clone(),
             input_filters: self.input_filters.clone(),
-            tool_middleware: self.tool_middleware.clone(),
+            tool_middleware,
             output_schema: None,
             turn_delay: None,
         }

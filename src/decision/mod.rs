@@ -62,19 +62,24 @@
 //! See the book chapter *Decision models* for the agent integrations
 //! (`Agent::with_decision_model`, `Agent::with_tool_gate`).
 
+mod advisory;
 mod answer;
 mod backend;
 mod error;
+mod gate;
 mod mock;
 mod question;
 mod systemone;
 
+pub use advisory::{Advisor, Advisory};
 pub use answer::{
     distribution_confidence, Answer, ChoiceAnswer, DecisionUsage, Evaluation, NoulAnswer,
     ScoreAnswer,
 };
 pub use backend::{Capabilities, DecisionBackend};
 pub use error::DecisionError;
+pub(crate) use gate::GateSetting;
+pub use gate::{ToolGate, DEFAULT_DESTRUCTIVE_QUESTION, DEFAULT_REQUESTED_QUESTION};
 pub use mock::MockBackend;
 pub use question::{Question, QuestionKind, Request};
 pub use systemone::{
@@ -511,4 +516,40 @@ impl Ask<'_> {
     pub async fn send(self) -> Result<Evaluation, DecisionError> {
         self.model.evaluate(self.state, self.questions).await
     }
+}
+
+type Hooks = Vec<Arc<dyn crate::TurnHook>>;
+type Middleware = Vec<Arc<dyn crate::ToolMiddleware>>;
+
+/// Add the decision integrations to a run's hooks and middleware: the
+/// advisory [`Advisor`] when a model is set (and could act), and the tool gate
+/// — last in the chain, so it sees the arguments every user middleware
+/// produced. A gate without a model denies every call.
+pub(crate) fn wire(
+    advisory: Option<&Advisory>,
+    gate: Option<&GateSetting>,
+    skills: &crate::skills::SkillSet,
+    mut hooks: Hooks,
+    mut middleware: Middleware,
+) -> (Hooks, Middleware) {
+    if let Some(a) = advisory {
+        if Advisor::could_act(a, skills) {
+            hooks.push(Arc::new(Advisor::new(a.clone(), skills)));
+        }
+    }
+    match (gate, advisory) {
+        (None, _) => {}
+        (Some(GateSetting::Custom(g)), _) => middleware.push(Arc::new(g.as_ref().clone())),
+        (Some(GateSetting::Default), Some(a)) => {
+            middleware.push(Arc::new(ToolGate::new(a.model.clone())))
+        }
+        (Some(GateSetting::Default), None) => {
+            tracing::warn!(
+                "with_tool_gate() is set but no decision model is configured; \
+                 every tool call will be denied"
+            );
+            middleware.push(Arc::new(gate::UnconfiguredGate))
+        }
+    }
+    (hooks, middleware)
 }
