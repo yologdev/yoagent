@@ -81,15 +81,21 @@ impl AsyncInputFilter for Moderation {
 let agent = agent.with_async_input_filter(Moderation);
 ```
 
-For a raw loop, push `Arc::new(AsyncFilter(Moderation))` onto
+**You own the timeout**: the loop awaits the filter as long as it takes.
+A filter that panics is contained and treated as a `Reject` (fail closed):
+the run ends with `AgentEvent::InputRejected` and the agent keeps its tools
+and history.
+
+For a raw loop, push `Arc::new(AsyncFilter::new(Moderation))` onto
 `AgentLoopConfig::input_filters`; the loop awaits it through
 `InputFilter::as_async`.
 
 ## Turn Hooks
 
-A `TurnHook` is awaited before **every LLM request** and may return one line
-to append to that request's system prompt. The line is transient — never
-stored in history — and a hook returning `None` leaves the request unchanged.
+A `TurnHook` is awaited before **every LLM request** and may return one note
+to append to that request's **latest user turn**. The note is transient —
+never stored in history, never in the system prompt — and a hook returning
+`None` leaves the request unchanged.
 
 ```rust
 use yoagent::{TurnContext, TurnHook};
@@ -99,7 +105,7 @@ struct Reminder;
 #[async_trait::async_trait]
 impl TurnHook for Reminder {
     async fn before_turn(&self, turn: &TurnContext<'_>) -> Option<String> {
-        let request = turn.latest_user_text()?;
+        let request = turn.user_request()?;
         request.contains("deploy").then(|| "Deploys need a changelog entry.".to_string())
     }
 }
@@ -107,10 +113,15 @@ impl TurnHook for Reminder {
 let agent = agent.with_turn_hook(Reminder);
 ```
 
-The system prompt precedes the conversation, so a line that changes between
-turns invalidates the provider's prompt cache from there on; keep it stable
-(derive it from the user's request, and memoize). Hooks run once per provider
-call — a retried request runs them again. A panicking hook is contained.
+The system prompt and every earlier message stay byte-identical, so the
+provider's cached prefix survives; only the tail changes, and on the next
+user prompt the previous turn is sent without its note, so at most that last
+exchange is re-read. Keep a note stable within one request (derive it from
+the user's request, and memoize) so its tool-calling turns cache too. Hooks
+run once per provider call — a retried request runs them again. A panicking
+hook is contained. `TurnContext::new(..)` builds a context to unit-test a
+hook; `latest_user_text()` and `user_request()` skip the user-role messages
+the loop injects itself (compaction summaries, limit notes, the loop nudge).
 
 Turn hooks reach the loop by wrapping the provider: `Agent` does this per run,
 and a raw loop wraps its own with

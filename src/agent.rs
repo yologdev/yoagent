@@ -74,7 +74,7 @@ pub struct Agent {
     // Tool middleware (permissions/policy hooks)
     tool_middleware: Vec<Arc<dyn ToolMiddleware>>,
 
-    // Per-turn hooks (transient system-prompt lines)
+    // Per-turn hooks (transient notes on the latest user turn)
     turn_hooks: Vec<Arc<dyn TurnHook>>,
 
     // Decision model integration (feature `decision`): the skills it may
@@ -513,7 +513,8 @@ impl Agent {
     }
 
     /// Add a [`TurnHook`]: awaited before every LLM request, it may append
-    /// one line to that request's system prompt (never stored in history).
+    /// one note to that request's latest user turn (never to the system
+    /// prompt, never stored in history).
     pub fn with_turn_hook(mut self, hook: impl TurnHook + 'static) -> Self {
         self.turn_hooks.push(Arc::new(hook));
         self

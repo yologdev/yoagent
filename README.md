@@ -177,7 +177,7 @@ Built something on yoagent? [Open a PR](CONTRIBUTING.md) and add it here — we'
 - **Steering** — interrupt mid-run; **follow-ups** — queue work after completion; both queues are inspectable and editable
 - **`ToolMiddleware`** — async `Allow` / `Modify(args)` / `Deny(reason)` hooks gating every call. A denial becomes an error tool result the model sees, so the loop keeps going
 - **`InputFilter`** — rewrite or reject user input before it reaches the model (PII redaction, prompt-injection guards); `AsyncInputFilter` for filters that await
-- **`TurnHook`** — an async hook before every LLM request that may add one transient system-prompt line; middleware can read the conversation (`ToolCallRequest::messages`)
+- **`TurnHook`** — an async hook before every LLM request that may add one transient note to the latest user turn (the cached prefix is untouched); middleware can read the conversation (`ToolCallRequest::messages`, `user_request()`)
 - Execution limits (max turns, max tokens, wall-clock timeout), `abort()`, and lifecycle callbacks (`before_turn`, `after_turn`, `on_error`)
 - Automatic retry with exponential backoff and ±20% jitter, for rate-limit and network errors only
 
@@ -295,13 +295,13 @@ it injects the `shared_state` tool and a state summary into the sub-agent's syst
 A decision model answers typed questions — yes/no (**Noul**), one-of-N (**Choice**), a rating (**Score**) — with calibrated probabilities instead of prose. The first backend is TypeSafe's Jev; integrations depend on a `DecisionBackend` trait, not on a vendor. Off by default, no extra dependencies, and nothing is sent until you pick a model:
 
 ```rust,ignore
-let jev = DecisionModel::jev();                                    // key from TYPESAFE_API_KEY
-let p = jev.noul(message, "Does this convey urgency?").await?;     // f64
+let jev = DecisionModel::jev();                                      // key from TYPESAFE_API_KEY
+let urgent = jev.noul(message, "Does this convey urgency?").await?;  // urgent.p_true()
 
 let agent = Agent::from_config(ModelConfig::claude_sonnet_5())
     .with_skills(skills)
-    .with_decision_model(jev.clone())   // advisory only: skill / tool hints, never blocks
-    .with_tool_gate();                  // opt-in: deny destructive, unrequested calls; fails closed
+    .with_decision_model(jev.clone())          // advisory only: skill / tool hints; needs skills or 40+ tools
+    .with_tool_gate(ToolGate::new(jev));       // opt-in: deny destructive, unrequested calls; fails closed
 ```
 
 Hosted models see what you send; `DecisionModel::local(url)` keeps it on your machine. The tool gate is defence in depth, not a security boundary — injected content can steer a decision model. See [Decision Models](https://yologdev.github.io/yoagent/concepts/decision-models.html).

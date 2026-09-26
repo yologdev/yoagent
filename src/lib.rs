@@ -53,7 +53,7 @@
 //!   reject user input before it reaches the model (PII redaction,
 //!   prompt-injection guards).
 //! - **Turn hooks** ([`TurnHook`]) — an async hook before every LLM request
-//!   that may add one transient system-prompt line.
+//!   that may add one transient note to the request's latest user turn.
 //! - **Decision models** (feature `decision`) — typed questions (yes/no,
 //!   choice, score) answered with calibrated probabilities, e.g. TypeSafe's
 //!   Jev; advisory skill/tool hints and an opt-in, fail-closed tool gate.
