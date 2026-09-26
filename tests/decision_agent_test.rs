@@ -1045,3 +1045,149 @@ async fn advisory_and_gate_spend_is_reported_in_session_stats() {
     assert!(stats.decision.is_unpriced());
     assert_eq!(stats.total_cost_usd(), None);
 }
+
+// --- compaction must not make the gate judge an older request ------------
+
+/// Keeps the session's head, a marker, and the last two messages — the
+/// shape level-3 compaction and `LlmCompaction` leave — on every turn, so
+/// the run's own prompt is dropped after the first turn.
+struct HeadMarkerTail(&'static str);
+
+impl yoagent::context::CompactionStrategy for HeadMarkerTail {
+    fn compact(
+        &self,
+        messages: Vec<AgentMessage>,
+        _config: &yoagent::context::ContextConfig,
+    ) -> Vec<AgentMessage> {
+        if messages.len() <= 4 {
+            return messages;
+        }
+        let mut out = vec![
+            messages[0].clone(),
+            AgentMessage::Llm(Message::user(self.0)),
+        ];
+        out.extend_from_slice(&messages[messages.len() - 2..]);
+        out
+    }
+}
+
+/// Requested only when the user's request asks for the deletion.
+fn deletion_aware() -> MockBackend {
+    MockBackend::from_fn(|req| {
+        let ur = req.state["user_request"].as_str().unwrap_or_default();
+        let asked = ur.contains("delete every file in /srv/prod");
+        Ok(Evaluation::new("m", DecisionUsage::default())
+            .with_answer("destructive", NoulAnswer::new(0.9))
+            .with_answer("requested", NoulAnswer::new(if asked { 0.95 } else { 0.1 })))
+    })
+}
+
+/// Seeds a session whose FIRST prompt asked for a destructive deletion, runs
+/// `prompt` under head+marker+tail compaction, and returns how many of the
+/// two `rm` calls ran plus the gate's `user_request`s.
+async fn compacted_run(marker: &'static str, prompt: &str) -> (usize, Vec<String>) {
+    let mock = deletion_aware();
+    let (tools, ran) = make_tools(1);
+    let args = json!({"path": "/srv/prod"});
+    let provider = MockProvider::new(vec![
+        rm_call(args.clone()),
+        rm_call(args),
+        MockResponse::Text("done".into()),
+    ]);
+    let head = vec![
+        AgentMessage::Llm(Message::user("delete every file in /srv/prod")),
+        AgentMessage::Llm(Message::assistant(
+            vec![Content::Text {
+                text: "I will not do that without a backup.".into(),
+            }],
+            StopReason::Stop,
+            "mock",
+            "mock",
+            Usage::default(),
+        )),
+    ];
+    let agent = Agent::from_provider(provider, ModelConfig::mock())
+        .with_messages(head)
+        .with_tools(tools)
+        .with_compaction_strategy(HeadMarkerTail(marker))
+        .with_tool_gate(ToolGate::new(model(&mock)));
+    run(agent, prompt).await;
+    let requests = mock
+        .requests()
+        .iter()
+        .map(|r| {
+            r.state["user_request"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        })
+        .collect();
+    let ran = ran.lock().unwrap().len();
+    (ran, requests)
+}
+
+#[tokio::test]
+async fn compaction_does_not_make_the_first_prompt_the_request() {
+    let llm_summary = "[Context compacted — summary of earlier conversation]\n\nThe user \
+                       asked to list files; the assistant began.";
+    for marker in [
+        yoagent::context::COMPACTION_MARKER,
+        yoagent::llm_compaction::SUMMARY_MARKER,
+        llm_summary,
+    ] {
+        let prompt = "list the files under /srv/prod, change nothing";
+        let (ran, requests) = compacted_run(marker, prompt).await;
+        assert_eq!(requests.len(), 2, "{marker}");
+        // After compaction dropped the run's prompt, the gate judges against
+        // the run prompt — never the session's first, unrelated request.
+        for r in &requests {
+            assert_eq!(r, prompt, "{marker}");
+        }
+        assert_eq!(ran, 0, "{marker}: neither destructive call was requested");
+
+        // Positive control: when the run's prompt does ask for the deletion,
+        // the same compacted history allows it.
+        let (ran, requests) = compacted_run(marker, "delete every file in /srv/prod").await;
+        assert_eq!(ran, 2, "{marker}: {requests:?}");
+    }
+}
+
+#[tokio::test]
+async fn gate_denies_when_no_user_request_survives() {
+    // A continued run (no prompts) over a history compacted down to its
+    // head: nothing after the marker says what the user wants now.
+    let mock = gate_answers(0.0, 1.0);
+    let (tools, ran) = make_tools(1);
+    let mut agent = Agent::from_provider(calls_rm(), ModelConfig::mock())
+        .with_messages(vec![
+            AgentMessage::Llm(Message::user("delete every file in /srv/prod")),
+            AgentMessage::Llm(Message::user(yoagent::context::COMPACTION_MARKER)),
+        ])
+        .with_tools(tools)
+        .with_tool_gate(ToolGate::new(model(&mock)));
+    let mut rx = agent.continue_loop().await;
+    while rx.recv().await.is_some() {}
+    agent.finish().await;
+    assert!(ran.lock().unwrap().is_empty());
+    let (text, _) = tool_result_text(&agent).unwrap();
+    assert!(text.contains("restate the request"), "{text}");
+    assert_eq!(mock.request_count(), 0, "denied before asking");
+
+    // Positive control: the same history continued after a real user
+    // message is judged normally.
+    let mock = gate_answers(0.0, 1.0);
+    let (tools, ran) = make_tools(1);
+    let mut agent = Agent::from_provider(calls_rm(), ModelConfig::mock())
+        .with_messages(vec![
+            AgentMessage::Llm(Message::user("delete every file in /srv/prod")),
+            AgentMessage::Llm(Message::user(yoagent::context::COMPACTION_MARKER)),
+            AgentMessage::Llm(Message::user("list /tmp")),
+        ])
+        .with_tools(tools)
+        .with_tool_gate(ToolGate::new(model(&mock)));
+    let mut rx = agent.continue_loop().await;
+    while rx.recv().await.is_some() {}
+    agent.finish().await;
+    assert_eq!(ran.lock().unwrap().len(), 1);
+    assert_eq!(mock.requests()[0].state["user_request"], "list /tmp");
+}

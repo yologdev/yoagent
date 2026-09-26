@@ -42,8 +42,12 @@ const DEFAULT_REQUESTED_QUESTION: &str = "Is `tool_call` something the user aske
 ///
 /// The state is `{"user_request": .., "tool_call": {"tool": .., "arguments": ..}}`.
 /// `user_request` is [`ToolCallRequest::user_request`]: the user's latest
-/// message, with the preceding exchange when it is a short reply, so a
-/// confirmation ("yes, go ahead") carries what it confirms. Small argument
+/// message after the most recent compaction boundary — with, when it is a
+/// short reply to an assistant question, that question and the earlier
+/// request, so a confirmation ("yes, go ahead") carries what it confirms —
+/// else the run's own prompts. When none of these exists (compaction left
+/// no user message and the run has no prompt), the call is denied and the
+/// reason asks for the request to be restated. Small argument
 /// values are sent in full; a string over 2,000 characters is shortened to
 /// its head and tail around an explicit `[truncated N chars]` marker, and a
 /// call whose arguments are still over 12,000 characters is denied.
@@ -65,6 +69,12 @@ const DEFAULT_REQUESTED_QUESTION: &str = "Is `tool_call` something the user aske
 /// the call's arguments can carry text written to steer the decision model,
 /// which does not treat its state as hostile. Keep real sandboxing and
 /// permissions underneath.
+///
+/// **This widens in the fail-open direction.** Including the assistant's
+/// question and the earlier request in `user_request` makes more calls
+/// count as requested — and the assistant's text can itself be steered by
+/// injected content (a tool result that makes the model *ask* "Shall I
+/// delete everything?" turns a user's "yes" into apparent consent).
 #[derive(Debug, Clone)]
 pub struct ToolGate {
     model: DecisionModel,
@@ -169,8 +179,20 @@ impl ToolGate {
                  The gate fails closed; split the work into smaller calls or ask the user."
             ));
         }
+        let Some(user_request) = call.user_request() else {
+            tracing::warn!(
+                tool = call.tool_name,
+                "tool gate denied a call: no user request to judge against"
+            );
+            return ToolDecision::Deny(
+                "Tool gate: the conversation no longer shows what the user asked for (history \
+                 was compacted and this run has no prompt), so this call was not run. The gate \
+                 fails closed; ask the user to restate the request."
+                    .into(),
+            );
+        };
         let state = json!({
-            "user_request": truncate_middle(&call.user_request().unwrap_or_default(), MAX_REQUEST_CHARS),
+            "user_request": truncate_middle(&user_request, MAX_REQUEST_CHARS),
             "tool_call": { "tool": call.tool_name, "arguments": arguments },
         });
 

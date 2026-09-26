@@ -33,12 +33,14 @@ impl TurnHookProvider {
 
     /// Run the hooks against `config` and return the notes they added.
     async fn notes(&self, config: &StreamConfig) -> Vec<String> {
+        let prompts = crate::agent_loop::run_prompts();
         let turn = TurnContext::new(
             &config.system_prompt,
             &config.messages,
             &config.tools,
             &config.model,
-        );
+        )
+        .with_run_prompts(&prompts);
         let mut notes = Vec::new();
         for hook in &self.hooks {
             use futures::FutureExt;

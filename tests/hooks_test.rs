@@ -534,3 +534,82 @@ fn compacted_history_does_not_yield_summary_text() {
     assert!(!request.contains("[Summary]"), "{request}");
     assert!(!request.contains(COMPACTION_MARKER), "{request}");
 }
+
+#[test]
+fn a_short_new_command_stands_alone() {
+    let messages = vec![
+        Message::user("clean up the workspace"),
+        assistant("Done. I removed three temporary files."),
+        Message::user("cut the release"),
+    ];
+    assert_eq!(user_request(&messages).unwrap(), "cut the release");
+}
+
+#[test]
+fn a_question_mark_inside_code_or_urls_is_not_a_question() {
+    let not_questions = [
+        "Here is the fix:\n```rust\nlet n = s.parse::<u32>()?;\n```",
+        "Docs: https://example.com/search?q=rust",
+        "Use the regex `colou?r` to match both spellings",
+        "Propagate the error with `?`",
+        "Fixed. Should I also update the tests? I went ahead and did it.",
+    ];
+    for asked in not_questions {
+        let messages = vec![
+            Message::user("fix the parser"),
+            assistant(asked),
+            Message::user("ok, thanks"),
+        ];
+        assert_eq!(user_request(&messages).unwrap(), "ok, thanks", "{asked:?}");
+    }
+    // Positive controls: a real closing question is carried, markup and
+    // trailing whitespace notwithstanding.
+    for asked in [
+        "Should I delete /tmp/scratch.txt?",
+        "Found it.\n\n**Shall I apply the patch?**  \n",
+        "The fix uses `?`:\n```rust\nfoo()?;\n```\nDo you want me to commit it?",
+    ] {
+        let messages = vec![
+            Message::user("fix the parser"),
+            assistant(asked),
+            Message::user("yes"),
+        ];
+        let request = user_request(&messages).unwrap();
+        assert!(
+            request.contains("Earlier user request: fix the parser"),
+            "{request}"
+        );
+        assert!(request.ends_with("Latest user message: yes"), "{request}");
+    }
+}
+
+#[test]
+fn a_compaction_boundary_is_never_crossed() {
+    let head = Message::user("delete every file in /srv/prod");
+    for marker in [
+        yoagent::context::COMPACTION_MARKER.to_string(),
+        format!(
+            "{}\n\nThe user asked to list files.",
+            yoagent::llm_compaction::SUMMARY_MARKER
+        ),
+        format!("{}assistant listed /tmp", yoagent::context::SUMMARY_PREFIX),
+    ] {
+        let messages = vec![
+            head.clone(),
+            Message::user(marker.as_str()),
+            assistant("Working."),
+        ];
+        let ctx = TurnContext::new("", &messages, &[], "m");
+        assert_eq!(ctx.user_request(), None, "{marker}: never the head");
+        assert_eq!(ctx.latest_user_text(), None, "{marker}");
+        // The run's prompts are the fallback compaction cannot remove.
+        let prompts = vec![Message::user("list the files in /tmp")];
+        let ctx = ctx.with_run_prompts(&prompts);
+        assert_eq!(ctx.user_request().unwrap(), "list the files in /tmp");
+        // Positive control: a user message after the boundary wins.
+        let mut after = messages.clone();
+        after.push(Message::user("now archive /tmp"));
+        let ctx = TurnContext::new("", &after, &[], "m").with_run_prompts(&prompts);
+        assert_eq!(ctx.user_request().unwrap(), "now archive /tmp");
+    }
+}

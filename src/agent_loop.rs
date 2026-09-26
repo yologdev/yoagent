@@ -146,27 +146,73 @@ pub const LOOP_ABORT_PREFIX: &str = "[Agent stopped: repeated tool call —";
 /// a model that keeps repeating one call.
 pub const LOOP_NUDGE_PREFIX: &str = "[You have called ";
 
+/// Per-run state the loop shares with the hooks that run inside its task.
+#[derive(Default)]
+struct LoopScope {
+    /// Decision-model spend, recorded by the decision integrations and
+    /// folded into the run's `SessionStats`.
+    decision: DecisionStats,
+    /// The user messages this run was given — its prompts, steering and
+    /// follow-ups — kept apart from the context so compaction cannot remove
+    /// them. Exposed as `ToolCallRequest::run_prompts` /
+    /// `TurnContext::run_prompts`.
+    prompts: Vec<Message>,
+}
+
 tokio::task_local! {
-    /// Decision-model spend of the running loop, recorded by the decision
-    /// integrations (which run inside the loop's task) and folded into its
-    /// `SessionStats`. A nested sub-agent loop opens its own scope.
-    static DECISION_STATS: std::cell::RefCell<DecisionStats>;
+    /// The running loop's [`LoopScope`]. Hooks run inside the loop's task; a
+    /// nested sub-agent loop opens its own scope.
+    static LOOP_SCOPE: std::cell::RefCell<LoopScope>;
 }
 
 /// Record decision-model spend into the enclosing loop's stats. A no-op
 /// outside a loop.
 #[cfg_attr(not(feature = "decision"), allow(dead_code))]
 pub(crate) fn record_decision(f: impl FnOnce(&mut DecisionStats)) {
-    let _ = DECISION_STATS.try_with(|cell| f(&mut cell.borrow_mut()));
+    let _ = LOOP_SCOPE.try_with(|cell| f(&mut cell.borrow_mut().decision));
 }
 
-/// Run `fut` with a fresh decision-stats scope and return its output plus
-/// what was recorded.
-async fn with_decision_scope<T>(fut: impl std::future::Future<Output = T>) -> (T, DecisionStats) {
-    DECISION_STATS
-        .scope(std::cell::RefCell::new(DecisionStats::default()), async {
+/// The user messages the enclosing loop's run was given so far (empty
+/// outside a loop).
+pub(crate) fn run_prompts() -> Vec<Message> {
+    LOOP_SCOPE
+        .try_with(|cell| cell.borrow().prompts.clone())
+        .unwrap_or_default()
+}
+
+/// The user-role LLM messages among `messages`.
+fn user_messages(messages: &[AgentMessage]) -> Vec<Message> {
+    messages
+        .iter()
+        .filter_map(|m| match m {
+            AgentMessage::Llm(msg @ Message::User { .. }) => Some(msg.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Note messages handed to the run (steering, follow-ups) as run prompts.
+fn note_run_prompts(messages: &[AgentMessage]) {
+    let users = user_messages(messages);
+    if !users.is_empty() {
+        let _ = LOOP_SCOPE.try_with(|cell| cell.borrow_mut().prompts.extend(users));
+    }
+}
+
+/// Run `fut` in a fresh [`LoopScope`] seeded with the run's prompts, and
+/// return its output plus the decision spend recorded.
+async fn with_loop_scope<T>(
+    prompts: Vec<Message>,
+    fut: impl std::future::Future<Output = T>,
+) -> (T, DecisionStats) {
+    let scope = LoopScope {
+        prompts,
+        ..Default::default()
+    };
+    LOOP_SCOPE
+        .scope(std::cell::RefCell::new(scope), async {
             let out = fut.await;
-            let recorded = DECISION_STATS.with(|cell| cell.take());
+            let recorded = LOOP_SCOPE.with(|cell| std::mem::take(&mut cell.borrow_mut().decision));
             (out, recorded)
         })
         .await
@@ -312,7 +358,9 @@ pub(crate) async fn agent_loop_with_stats(
 
     let stats = {
         use tracing::Instrument;
-        let (mut stats, decision) = with_decision_scope(
+        let prompts = user_messages(&new_messages);
+        let (mut stats, decision) = with_loop_scope(
+            prompts,
             run_loop(context, &mut new_messages, config, &tx, &cancel)
                 .instrument(tracing::info_span!("agent_loop", model = %config.model)),
         )
@@ -367,7 +415,8 @@ pub(crate) async fn agent_loop_continue_with_stats(
 
     let stats = {
         use tracing::Instrument;
-        let (mut stats, decision) = with_decision_scope(
+        let (mut stats, decision) = with_loop_scope(
+            Vec::new(),
             run_loop(context, &mut new_messages, config, &tx, &cancel)
                 .instrument(tracing::info_span!("agent_loop", model = %config.model)),
         )
@@ -438,6 +487,7 @@ async fn run_loop(
 
             // Inject pending messages
             if !pending.is_empty() {
+                note_run_prompts(&pending);
                 for msg in pending.drain(..) {
                     tx.send(AgentEvent::MessageStart {
                         message: msg.clone(),
@@ -1575,12 +1625,18 @@ async fn execute_single_tool(
     // later hooks; the first Deny short-circuits into an error tool result
     // (the LLM sees the reason and can adapt — the loop continues).
     let mut effective_args = args.clone();
+    let prompts = if gate.middleware.is_empty() {
+        Vec::new()
+    } else {
+        run_prompts()
+    };
     for mw in gate.middleware {
         let call = ToolCallRequest {
             tool_call_id: id,
             tool_name: name,
             args: &effective_args,
             messages: gate.history,
+            run_prompts: &prompts,
         };
         // A panicking middleware must not kill the loop task (which would
         // strip the agent of its tools) — contain it and fail closed.

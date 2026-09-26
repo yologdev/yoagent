@@ -1735,57 +1735,139 @@ fn real_user_text(m: &Message) -> Option<String> {
     }
 }
 
-/// Below this many characters a user message is read as a reply ("yes, go
-/// ahead") that needs the preceding exchange to mean anything.
+/// Whether a message marks where compaction removed or rewrote history:
+/// the drop marker, an `LlmCompaction` summary, or a level-2 `[Summary]`.
+/// Nothing before one can be trusted to belong to the current request.
+fn is_compaction_boundary(m: &Message) -> bool {
+    let Message::User { content, .. } = m else {
+        return false;
+    };
+    content.iter().any(|c| {
+        matches!(c, Content::Text { text } if
+            text.starts_with(crate::context::COMPACTION_MARKER)
+                || text.starts_with(crate::llm_compaction::SUMMARY_MARKER)
+                || text.starts_with(crate::context::SUMMARY_PREFIX))
+    })
+}
+
+/// Below this many characters a user message may be a reply ("yes, go
+/// ahead") that needs the question it answers.
 const SHORT_REPLY_CHARS: usize = 40;
 
-/// The most recent message the user actually wrote.
+/// Whether assistant text ends by asking a question: its final sentence
+/// ends in `?` once fenced code blocks and inline code are removed and
+/// trailing whitespace and closing markup are trimmed. A `?` inside code
+/// (Rust's `?`, a regex, a URL query) does not count.
+pub(crate) fn ends_with_question(text: &str) -> bool {
+    let mut prose = String::new();
+    let mut in_fence = false;
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        // Drop inline code spans: every other backtick-delimited segment.
+        for (i, part) in line.split('`').enumerate() {
+            if i % 2 == 0 {
+                prose.push_str(part);
+            }
+        }
+        prose.push('\n');
+    }
+    let trimmed = prose
+        .trim_end_matches(|c: char| c.is_whitespace() || matches!(c, '*' | '_' | ')' | '"' | '\''));
+    trimmed.ends_with('?')
+}
+
+/// The most recent message the user wrote, not looking back past a
+/// compaction boundary.
 pub(crate) fn latest_user_text_of(messages: &[&Message]) -> Option<String> {
-    messages.iter().rev().find_map(|m| real_user_text(m))
+    let start = messages
+        .iter()
+        .rposition(|m| is_compaction_boundary(m))
+        .map_or(0, |b| b + 1);
+    messages[start..]
+        .iter()
+        .rev()
+        .find_map(|m| real_user_text(m))
 }
 
 /// What the user is asking for, as a decision policy should judge it.
 ///
-/// The latest message the user wrote (loop-injected messages skipped). When
-/// that message is a short reply, or answers an assistant question, the
-/// assistant text before it and the user's previous request are included
-/// too, labelled, so a confirmation such as "yes, go ahead" carries what it
-/// confirms.
-pub(crate) fn user_request_of(messages: &[&Message]) -> Option<String> {
-    let at = messages.iter().rposition(|m| real_user_text(m).is_some())?;
-    let latest = real_user_text(messages[at])?;
+/// 1. The latest message the user wrote **after the most recent compaction
+///    boundary** — nothing before a boundary is trusted, because
+///    compaction keeps the session's head, which may hold an unrelated,
+///    older request. Loop-injected messages are skipped.
+///    - When that message is short (under 40 characters) **and** the
+///      assistant text before it ends with a question, the assistant text
+///      and the user's earlier request (both after the boundary) are
+///      included, labelled, so "yes, go ahead" carries what it confirms.
+/// 2. Otherwise the run's own prompts (`run_prompts`: the messages this run
+///    was given, which compaction cannot remove).
+/// 3. Otherwise `None`.
+pub(crate) fn user_request_of(messages: &[&Message], run_prompts: &[Message]) -> Option<String> {
+    let start = messages
+        .iter()
+        .rposition(|m| is_compaction_boundary(m))
+        .map_or(0, |b| b + 1);
+    let window = &messages[start..];
 
-    let mut asked: Option<String> = None;
-    let mut earlier: Option<String> = None;
-    for m in messages[..at].iter().rev() {
-        if let Some(text) = real_user_text(m) {
-            earlier = Some(text);
+    let Some(at) = window.iter().rposition(|m| real_user_text(m).is_some()) else {
+        return run_prompts_text(run_prompts);
+    };
+    let latest = real_user_text(window[at])?;
+    if latest.chars().count() >= SHORT_REPLY_CHARS {
+        return Some(latest);
+    }
+
+    // The assistant text the reply answers: the nearest assistant message
+    // with text, not looking past the user's previous message.
+    let mut asked: Option<(usize, String)> = None;
+    for (i, m) in window[..at].iter().enumerate().rev() {
+        if real_user_text(m).is_some() {
             break;
         }
-        if asked.is_none() {
-            if let Message::Assistant { content, .. } = m {
-                asked = text_blocks(content);
+        if let Message::Assistant { content, .. } = m {
+            if let Some(text) = text_blocks(content) {
+                asked = Some((i, text));
+                break;
             }
         }
     }
-
-    let is_reply = latest.chars().count() < SHORT_REPLY_CHARS
-        || asked.as_deref().is_some_and(|a| {
-            let tail: String = a.chars().rev().take(300).collect();
-            tail.contains('?')
-        });
-    if !is_reply || (asked.is_none() && earlier.is_none()) {
+    let Some((asked_at, asked)) = asked.filter(|(_, a)| ends_with_question(a)) else {
         return Some(latest);
-    }
+    };
+    let earlier = window[..asked_at]
+        .iter()
+        .rev()
+        .find_map(|m| real_user_text(m));
+
     let mut parts = Vec::new();
     if let Some(e) = earlier {
         parts.push(format!("Earlier user request: {e}"));
     }
-    if let Some(a) = asked {
-        parts.push(format!("Assistant: {a}"));
-    }
+    parts.push(format!("Assistant: {asked}"));
     parts.push(format!("Latest user message: {latest}"));
     Some(parts.join("\n\n"))
+}
+
+/// The run's prompts as one request: the only one's text, or each labelled.
+fn run_prompts_text(run_prompts: &[Message]) -> Option<String> {
+    let texts: Vec<String> = run_prompts.iter().filter_map(real_user_text).collect();
+    match texts.len() {
+        0 => None,
+        1 => texts.into_iter().next(),
+        _ => Some(
+            texts
+                .iter()
+                .map(|t| format!("User: {t}"))
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        ),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1833,6 +1915,11 @@ pub struct ToolCallRequest<'a> {
     /// call. For policies that depend on what the user asked — see
     /// [`user_request`](Self::user_request).
     pub messages: &'a [AgentMessage],
+    /// The user messages this run was given — its prompts, steering and
+    /// follow-ups — which compaction cannot remove from here. Used by
+    /// [`user_request`](Self::user_request) when the conversation no longer
+    /// shows what the user asked.
+    pub run_prompts: &'a [Message],
 }
 
 impl ToolCallRequest<'_> {
@@ -1843,19 +1930,23 @@ impl ToolCallRequest<'_> {
             .collect()
     }
 
-    /// The text of the most recent message the user wrote. Loop-injected
-    /// user-role messages (compaction summaries, limit notes, the
-    /// loop-detection nudge) are skipped.
+    /// The text of the most recent message the user wrote, not looking back
+    /// past a compaction boundary. Loop-injected user-role messages
+    /// (compaction summaries, limit notes, the loop-detection nudge) are
+    /// skipped.
     pub fn latest_user_text(&self) -> Option<String> {
         latest_user_text_of(&self.llm_messages())
     }
 
-    /// What the user is asking for: [`latest_user_text`](Self::latest_user_text),
-    /// plus — when that is a short reply or answers an assistant question —
-    /// the assistant text before it and the user's previous request, so "yes,
-    /// go ahead" carries what it confirms.
+    /// What the user is asking for: the latest user message after the most
+    /// recent compaction boundary — with, when it is a short reply to an
+    /// assistant question, that question and the earlier request — else the
+    /// run's own prompts ([`run_prompts`](Self::run_prompts)), else `None`.
+    ///
+    /// Including the assistant's question widens what counts as requested,
+    /// and that text can itself be steered by injected content.
     pub fn user_request(&self) -> Option<String> {
-        user_request_of(&self.llm_messages())
+        user_request_of(&self.llm_messages(), self.run_prompts)
     }
 }
 
@@ -1905,6 +1996,10 @@ pub struct TurnContext<'a> {
     pub tools: &'a [crate::provider::ToolDefinition],
     /// The model id.
     pub model: &'a str,
+    /// The user messages this run was given (prompts, steering,
+    /// follow-ups), which compaction cannot remove; see
+    /// [`ToolCallRequest::run_prompts`].
+    pub run_prompts: &'a [Message],
 }
 
 impl<'a> TurnContext<'a> {
@@ -1919,18 +2014,25 @@ impl<'a> TurnContext<'a> {
             messages,
             tools,
             model,
+            run_prompts: &[],
         }
     }
 
+    /// Set the run's prompts (the loop does this for you).
+    pub fn with_run_prompts(mut self, run_prompts: &'a [Message]) -> Self {
+        self.run_prompts = run_prompts;
+        self
+    }
+
     /// The text of the most recent message the user wrote (loop-injected
-    /// messages skipped).
+    /// messages skipped, not looking back past a compaction boundary).
     pub fn latest_user_text(&self) -> Option<String> {
         latest_user_text_of(&self.messages.iter().collect::<Vec<_>>())
     }
 
     /// What the user is asking for; see [`ToolCallRequest::user_request`].
     pub fn user_request(&self) -> Option<String> {
-        user_request_of(&self.messages.iter().collect::<Vec<_>>())
+        user_request_of(&self.messages.iter().collect::<Vec<_>>(), self.run_prompts)
     }
 }
 
