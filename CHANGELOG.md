@@ -4,7 +4,7 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.20.0
 
 This release is 0.20.0: two constructor behaviours change (see Breaking).
 
