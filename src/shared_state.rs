@@ -253,7 +253,7 @@ impl FileBackend {
     /// regular files it finds there, so pointing this at a directory holding
     /// anything else will lose those files.
     ///
-    /// Capped at [`DEFAULT_MAX_BYTES`], matching [`MemoryBackend`]. Without a
+    /// Capped at the same 10 MiB default as [`MemoryBackend`]. Without a
     /// cap an agent that stashes truncated tool output would grow the directory
     /// without bound; with one, the oldest entries are evicted and a stale key
     /// simply fails to read, which a model handles as an ordinary tool error.

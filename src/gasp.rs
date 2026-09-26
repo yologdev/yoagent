@@ -135,7 +135,7 @@ impl GaspRecorder {
     /// This is the extension path for applications that record more than the
     /// run/model/tool tier — goals, tasks, verdicts, evals — into the *same*
     /// ledger: open the [`GitEventStore`] yourself, build a
-    /// [`YoAgentState`](yoagent_state::YoAgentState) on a clone of it for your
+    /// [`YoAgentState`] on a clone of it for your
     /// own `record_*` calls, and hand the recorder this handle. One store, one
     /// writer process, no cross-process coordination.
     ///
