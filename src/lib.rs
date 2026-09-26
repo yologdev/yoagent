@@ -94,6 +94,10 @@ pub mod openapi;
 #[cfg_attr(docsrs, doc(cfg(feature = "gasp")))]
 pub mod gasp;
 
+#[cfg(feature = "decision")]
+#[cfg_attr(docsrs, doc(cfg(feature = "decision")))]
+pub mod decision;
+
 pub use agent::{Agent, AgentBuildError, StructuredPromptError};
 pub use agent_loop::{agent_loop, agent_loop_continue};
 pub use context::{CompactionStrategy, DefaultCompaction};
