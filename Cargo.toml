@@ -75,3 +75,7 @@ required-features = ["gasp"]
 [[test]]
 name = "decision_test"
 required-features = ["decision"]
+
+[[test]]
+name = "decision_agent_test"
+required-features = ["decision"]
