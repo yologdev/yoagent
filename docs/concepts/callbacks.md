@@ -59,6 +59,63 @@ let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude
     .on_error(|err| eprintln!("Error: {}", err));
 ```
 
+## Async Input Filters
+
+`InputFilter` is synchronous. A filter that awaits — a moderation API, a
+classifier — implements `AsyncInputFilter` instead; it runs in the same
+ordered list, with the same `Pass` / `Warn` / `Reject` semantics:
+
+```rust
+use yoagent::{AsyncInputFilter, FilterResult};
+
+struct Moderation;
+
+#[async_trait::async_trait]
+impl AsyncInputFilter for Moderation {
+    async fn filter(&self, text: &str) -> FilterResult {
+        // call your moderation endpoint; bound its latency yourself
+        FilterResult::Pass
+    }
+}
+
+let agent = agent.with_async_input_filter(Moderation);
+```
+
+For a raw loop, push `Arc::new(AsyncFilter(Moderation))` onto
+`AgentLoopConfig::input_filters`; the loop awaits it through
+`InputFilter::as_async`.
+
+## Turn Hooks
+
+A `TurnHook` is awaited before **every LLM request** and may return one line
+to append to that request's system prompt. The line is transient — never
+stored in history — and a hook returning `None` leaves the request unchanged.
+
+```rust
+use yoagent::{TurnContext, TurnHook};
+
+struct Reminder;
+
+#[async_trait::async_trait]
+impl TurnHook for Reminder {
+    async fn before_turn(&self, turn: &TurnContext<'_>) -> Option<String> {
+        let request = turn.latest_user_text()?;
+        request.contains("deploy").then(|| "Deploys need a changelog entry.".to_string())
+    }
+}
+
+let agent = agent.with_turn_hook(Reminder);
+```
+
+The system prompt precedes the conversation, so a line that changes between
+turns invalidates the provider's prompt cache from there on; keep it stable
+(derive it from the user's request, and memoize). Hooks run once per provider
+call — a retried request runs them again. A panicking hook is contained.
+
+Turn hooks reach the loop by wrapping the provider: `Agent` does this per run,
+and a raw loop wraps its own with
+`TurnHookProvider::new(provider, vec![Arc::new(hook)])`.
+
 ## Using with `AgentLoopConfig`
 
 For direct loop usage without the `Agent` wrapper:

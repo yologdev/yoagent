@@ -536,3 +536,9 @@ serialize inside your middleware (e.g. a `tokio::sync::Mutex`) or switch to
 
 Sub-agents gate their own tool calls the same way via
 `SubAgentTool::with_tool_middleware`.
+
+Middleware can also see the conversation: `call.messages` is the history so
+far (including the assistant message carrying the call), and
+`call.latest_user_text()` returns the most recent user message — enough for
+policies such as "was this destructive call actually requested?". The
+[decision-model tool gate](decision-models.md#blocking-with_tool_gate) is one.

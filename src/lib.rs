@@ -49,8 +49,15 @@
 //! - **Permissions** ([`ToolMiddleware`]) — async approve/deny/modify hooks
 //!   gating every tool call; the mechanism behind approval prompts and
 //!   policy engines (yoagent ships no policy — you install it).
-//! - **Input filtering** ([`InputFilter`]) — rewrite or reject user input
-//!   before it reaches the model (PII redaction, prompt-injection guards).
+//! - **Input filtering** ([`InputFilter`], [`AsyncInputFilter`]) — rewrite or
+//!   reject user input before it reaches the model (PII redaction,
+//!   prompt-injection guards).
+//! - **Turn hooks** ([`TurnHook`]) — an async hook before every LLM request
+//!   that may add one transient system-prompt line.
+//! - **Decision models** (feature `decision`) — typed questions (yes/no,
+//!   choice, score) answered with calibrated probabilities, e.g. TypeSafe's
+//!   Jev; advisory skill/tool hints and an opt-in, fail-closed tool gate.
+//!   Off by default; nothing is sent until you pick a model.
 //! - **Sub-agents** ([`SubAgentTool`]) — delegation with per-sub-agent models
 //!   and [`SharedState`] for passing artifacts by reference.
 //! - **GASP** (feature `gasp`) — record runs into a

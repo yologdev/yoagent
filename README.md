@@ -176,7 +176,8 @@ Built something on yoagent? [Open a PR](CONTRIBUTING.md) and add it here — we'
 - Parallel tool execution by default; `Sequential` and `Batched { size }` strategies available
 - **Steering** — interrupt mid-run; **follow-ups** — queue work after completion; both queues are inspectable and editable
 - **`ToolMiddleware`** — async `Allow` / `Modify(args)` / `Deny(reason)` hooks gating every call. A denial becomes an error tool result the model sees, so the loop keeps going
-- **`InputFilter`** — rewrite or reject user input before it reaches the model (PII redaction, prompt-injection guards)
+- **`InputFilter`** — rewrite or reject user input before it reaches the model (PII redaction, prompt-injection guards); `AsyncInputFilter` for filters that await
+- **`TurnHook`** — an async hook before every LLM request that may add one transient system-prompt line; middleware can read the conversation (`ToolCallRequest::messages`)
 - Execution limits (max turns, max tokens, wall-clock timeout), `abort()`, and lifecycle callbacks (`before_turn`, `after_turn`, `on_error`)
 - Automatic retry with exponential backoff and ±20% jitter, for rate-limit and network errors only
 
@@ -289,6 +290,25 @@ it injects the `shared_state` tool and a state summary into the sub-agent's syst
 </details>
 
 <details>
+<summary><b>Decision models</b> — typed judgments in ~100 ms (feature <code>decision</code>)</summary>
+
+A decision model answers typed questions — yes/no (**Noul**), one-of-N (**Choice**), a rating (**Score**) — with calibrated probabilities instead of prose. The first backend is TypeSafe's Jev; integrations depend on a `DecisionBackend` trait, not on a vendor. Off by default, no extra dependencies, and nothing is sent until you pick a model:
+
+```rust,ignore
+let jev = DecisionModel::jev();                                    // key from TYPESAFE_API_KEY
+let p = jev.noul(message, "Does this convey urgency?").await?;     // f64
+
+let agent = Agent::from_config(ModelConfig::claude_sonnet_5())
+    .with_skills(skills)
+    .with_decision_model(jev.clone())   // advisory only: skill / tool hints, never blocks
+    .with_tool_gate();                  // opt-in: deny destructive, unrequested calls; fails closed
+```
+
+Hosted models see what you send; `DecisionModel::local(url)` keeps it on your machine. The tool gate is defence in depth, not a security boundary — injected content can steer a decision model. See [Decision Models](https://yologdev.github.io/yoagent/concepts/decision-models.html).
+
+</details>
+
+<details>
 <summary><b>Production concerns</b></summary>
 
 - **Cost tracking** — `CostConfig` carries separate input/output/cache-read/cache-write rates plus optional context tiers; `session_cost_usd()` gives a running total, `AgentEvent::AgentEnd` carries a `SessionStats` rollup, and `ModelConfig::cost` is an `Option` — `None` means pricing unknown, never $0. Rates live in a data file (`src/provider/prices.json`) that first-party constructors look up by provider and model id; override them at runtime with `prices::global::install_override` or `YOAGENT_PRICES`, per config with `with_prices` / `reprice`, or opt into a live source (`PriceTable::fetch` from models.dev or the checked file on `main`)
@@ -305,7 +325,7 @@ it injects the `shared_state` tool and a state summary into the sub-agent's syst
 
 ## Examples
 
-Ten runnable examples in [`examples/`](examples/). Five need no API key at all.
+Eleven runnable examples in [`examples/`](examples/). Five need no API key at all.
 
 | Example | What it shows | Key needed |
 |---|---|---|
@@ -319,6 +339,7 @@ Ten runnable examples in [`examples/`](examples/). Five need no API key at all.
 | [`persistence`](examples/persistence.rs) | Save and restore a session | **no** |
 | [`telemetry`](examples/telemetry.rs) | `tracing` spans with token and cost fields | **no** |
 | [`gasp_emit`](examples/gasp_emit.rs) | Recording a run into a GASP repo | **no** |
+| [`decision`](examples/decision.rs) | Decision-model questions in one line, and attaching a model to an agent (feature `decision`) | yes |
 
 ¹ `--provider ollama` or `--api-url` needs no key; hosted providers read their conventional env var.
 
@@ -370,6 +391,7 @@ testable too.
 | [`mcp/`](src/mcp/) | MCP client, stdio + HTTP transports, tool adapter |
 | [`openapi/`](src/openapi/) | OpenAPI 3.0 → tools (feature `openapi`) |
 | [`gasp`](src/gasp.rs) | Run recording into a GASP repo (feature `gasp`) |
+| [`decision/`](src/decision/) | Decision models, advisory hints and the tool gate (feature `decision`) |
 
 ---
 

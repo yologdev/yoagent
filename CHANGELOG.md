@@ -4,6 +4,65 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- **Decision models, behind the new `decision` feature (off by default, no
+  new dependencies).** `yoagent::decision` asks typed questions — Noul
+  (yes/no), Choice (one of up to 255 options), Score (2–10 ordered levels) —
+  about a text or JSON state and returns typed answers with probabilities
+  and a confidence. Nothing is sent until you construct a `DecisionModel`;
+  an API key in the environment enables nothing.
+  - `DecisionModel` presets: `jev()` (TypeSafe, `TYPESAFE_API_KEY`,
+    `TYPESAFE_BASE_URL`), `jev_opencode()` / `jev_opencode_free()`
+    (OpenCode Zen, `OPENCODE_API_KEY`), `local(url)` (self-hosted
+    SystemOne servers such as JevK5, no key). Keys are read at call time.
+    One-line `noul` / `choice` / `score`, and `ask(state)...send()` for many
+    questions in one request.
+  - `DecisionBackend` trait with `Capabilities`; `SystemOneBackend` (HTTP,
+    lenient parsing, 429/529 retried with `RetryConfig` backoff, server
+    `retry-after` honoured, `list_models()`) and `MockBackend` (scripted,
+    records requests). Requests are validated against the backend's limits
+    before sending; an unsupported question type is an error, never
+    emulated.
+  - `DecisionError` (`Clone`, `#[non_exhaustive]`): `Http`, `RateLimited`,
+    `Timeout`, `Invalid`, `Unsupported`, `Transport`, `MissingApiKey`,
+    `BadResponse`.
+  - Confidence is the backend's when reported, otherwise TypeSafe's
+    `(n * p_max - 1) / (n - 1)` (`distribution_confidence`).
+  - Pricing: `prices.json` lists `typesafe/jev-1.13.0` ($0.042 per million
+    input tokens, output free). Evaluations are priced by the model id the
+    API reports; aliases and unlisted versions are unpriced, gateways
+    unpriced, local backends $0. The price audit records the entry as absent
+    from models.dev (with a test that counts it). With the feature on,
+    `typesafe` override entries are no longer reported as inert.
+- **`Agent::with_decision_model(model)`** — advisory features only, which
+  never block: a skill hint (with skills) and, with 40+ tools, a tool hint,
+  each at most one line in that turn's system prompt. One decision request
+  per user message (memoized across its tool-calling turns), 2 s limit; any
+  failure warns and adds nothing; nothing is sent without skills and with
+  fewer than 40 tools. `with_decision_advisory(Advisory)` tunes thresholds.
+- **`Agent::with_tool_gate()`** — an explicit, blocking opt-in: a
+  `ToolMiddleware` that denies calls a decision model judges destructive and
+  not requested by the user. Runs after every other middleware and **fails
+  closed** (error, timeout, or no decision model deny the call).
+  `with_tool_gate_config(ToolGate)` overrides questions, thresholds, timeout
+  and adds checks. Defence in depth, not a security boundary.
+  `SubAgentTool` mirrors `with_decision_model` / `with_tool_gate`.
+- **Hooks for policy engines** (no feature needed; nothing existing changes
+  shape):
+  - `ToolCallRequest::messages` and `latest_user_text()` — middleware can see
+    the conversation.
+  - `AsyncInputFilter` and `Agent::with_async_input_filter` — input filters
+    that await, in the same ordered list as sync filters. `InputFilter`
+    gains a provided `as_async()` (default `None`); the `AsyncFilter`
+    adapter puts an async filter in `AgentLoopConfig::input_filters`.
+  - `TurnHook` and `Agent::with_turn_hook` — an async hook before every LLM
+    request that may append one transient line to that request's system
+    prompt. Raw loops wrap their provider in `provider::TurnHookProvider`;
+    `AgentLoopConfig` gains no field.
+
 ## 0.20.0
 
 This release is 0.20.0: two constructor behaviours change (see Breaking).
