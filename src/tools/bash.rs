@@ -11,7 +11,7 @@
 //!
 //! Real isolation belongs outside this tool: run the agent in a container or
 //! VM, or gate every call through
-//! [`ToolMiddleware`](crate::types::ToolMiddleware), which sees the arguments
+//! [`ToolMiddleware`], which sees the arguments
 //! before execution and can deny them. For credentials specifically, see
 //! [`BashTool::env_allowlist`].
 //!

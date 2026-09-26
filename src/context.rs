@@ -223,7 +223,7 @@ pub struct ContextConfig {
     /// had room for it — which is why tools that tolerate it badly are exempted
     /// via `tool_output_max_lines_overrides` rather than by turning this off.
     /// The full output is always visible in the
-    /// [`AgentEvent`](crate::types::AgentEvent) stream either way.
+    /// [`AgentEvent`] stream either way.
     ///
     /// On by default. Only honoured by the agent loop when a `ContextConfig`
     /// is set.

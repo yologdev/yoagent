@@ -65,7 +65,7 @@ impl std::fmt::Display for ApiProtocol {
 /// # Context tiers
 ///
 /// Some vendors charge more above a prompt-size threshold. Set
-/// [`context_tier`](Self::context_tier) and `cost_usd` selects by the request's
+/// [`context_tiers`](Self::context_tiers) and `cost_usd` selects by the request's
 /// prompt tokens (`input + cache_read + cache_write`).
 ///
 /// The OpenAI presets set one at 272K: `gpt_5_5`, `gpt_6_astra`,
