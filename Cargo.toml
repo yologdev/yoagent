@@ -79,3 +79,11 @@ required-features = ["decision"]
 [[test]]
 name = "decision_agent_test"
 required-features = ["decision"]
+
+[[test]]
+name = "decision_live"
+required-features = ["decision"]
+
+[[example]]
+name = "decision"
+required-features = ["decision"]
