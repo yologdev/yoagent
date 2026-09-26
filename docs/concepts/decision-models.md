@@ -244,13 +244,25 @@ result ("Tool gate: this call looks destructive or irreversible (p=0.91) and
 not clearly what the user asked for (p=0.22). Ask the user to confirm before
 retrying."), and the loop continues.
 
-**What `user_request` is.** The latest message the user actually wrote —
-loop-injected user-role messages (compaction summaries and markers, limit
-notes, the loop-detection nudge) are skipped. When that message is a short
-reply or answers an assistant question, the assistant text before it and the
-user's previous request are included, labelled, so a confirmation such as
-"yes, go ahead" carries what it confirms: a call denied once can be allowed
-after the user confirms it.
+**What `user_request` is.** In order of preference:
+
+1. The latest message the user actually wrote **after the most recent
+   compaction boundary** (the drop marker, an `LlmCompaction` summary, or a
+   `[Summary]` turn). Compaction keeps the session's head, which may hold an
+   older, unrelated request, so nothing before a boundary is trusted.
+   Loop-injected user-role messages (limit notes, the loop-detection nudge)
+   are skipped.
+   - Only when that message is **short** (under 40 characters) **and** the
+     assistant text before it **ends with a question** — fenced code and
+     inline code ignored, so Rust's `?`, a regex or a URL query do not count —
+     are that assistant text and the user's earlier request included,
+     labelled. A confirmation such as "yes, go ahead" then carries what it
+     confirms: a call denied once can be allowed after the user confirms it.
+2. Otherwise the run's own prompts (`ToolCallRequest::run_prompts`: the
+   messages this run was given, steering and follow-ups included), which
+   compaction cannot remove.
+3. Otherwise there is no request to judge against, and the call is denied
+   with a reason asking the user to restate it.
 
 **Arguments.** Short values (paths, names, flags) are always sent whole. A
 string over 2,000 characters keeps its head and its tail around an explicit
@@ -292,6 +304,12 @@ or a check id of `destructive` / `requested` panics at setup.
 > text written to steer it. Decision models treat their state as data, not as
 > hostile input, and TypeSafe lists adversarial content among Jev's known
 > weaknesses. Keep real sandboxing and permissions underneath.
+>
+> **The confirmation path widens in the fail-open direction.** Including the
+> assistant's question and the earlier request makes more calls count as
+> requested — and that assistant text can itself be steered by injected
+> content: a tool result that gets the model to *ask* "Shall I delete
+> everything?" turns the user's "yes" into apparent consent.
 
 ### Spend
 
@@ -308,8 +326,8 @@ tokens are not added to `total_usage()`, which counts LLM tokens.
 The integrations use three general hooks, available without the feature to
 any policy engine:
 
-- `ToolCallRequest::messages`, `latest_user_text()` and `user_request()` —
-  middleware can see the conversation, not just the call.
+- `ToolCallRequest::messages`, `run_prompts`, `latest_user_text()` and
+  `user_request()` — middleware can see the conversation, not just the call.
 - `AsyncInputFilter` (`Agent::with_async_input_filter`) — input filters that
   await. You own the timeout; a panic is contained and rejects.
 - `TurnHook` (`Agent::with_turn_hook`) — an async hook before every LLM
@@ -321,9 +339,9 @@ See [Lifecycle Callbacks](callbacks.md).
 ## Privacy
 
 A hosted decision model sees everything you send it. With the agent
-integrations that is: the user's request — the latest user message and, when
-it is a short reply, **the assistant text before it and the user's previous
-request** — skill names and descriptions and tool names and descriptions
+integrations that is: the user's request — the latest user message (or the
+run's prompts) and, when it is a short reply to an assistant question, **the
+assistant text before it and the user's previous request** — skill names and descriptions and tool names and descriptions
 (advisory), and each tool call's name and arguments (the gate). If that
 content must not leave your machine, use `DecisionModel::local(url)` against a
 self-hosted server.

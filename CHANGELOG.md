@@ -60,10 +60,18 @@ adheres to [Semantic Versioning](https://semver.org/).
   included; part of `total_cost_usd()`. Omitted from the wire when empty.
 - **Hooks for policy engines** (no feature needed; nothing existing changes
   shape):
-  - `ToolCallRequest::messages`, `latest_user_text()` and `user_request()` —
-    middleware can see the conversation; loop-injected user-role messages
-    are skipped. The markers are exported: `context::SUMMARY_PREFIX`,
-    `context::COMPACTION_MARKER`, `agent_loop::LOOP_NUDGE_PREFIX`.
+  - `ToolCallRequest::messages`, `ToolCallRequest::run_prompts` (the user
+    messages this run was given, which compaction cannot remove),
+    `latest_user_text()` and `user_request()` — middleware can see the
+    conversation. `user_request()` never looks back past a compaction
+    boundary; it falls back to the run's prompts, then `None`. It includes
+    the preceding assistant text and earlier request only for a short reply
+    to an assistant question. Loop-injected user-role messages are skipped
+    using the exported markers `context::SUMMARY_PREFIX`,
+    `context::COMPACTION_MARKER`, `llm_compaction::SUMMARY_MARKER`,
+    `agent_loop::AGENT_STOPPED_PREFIX`, `agent_loop::LOOP_ABORT_PREFIX` and
+    `agent_loop::LOOP_NUDGE_PREFIX` (the first two and the last are newly
+    public).
   - `AsyncInputFilter` and `Agent::with_async_input_filter` — input filters
     that await, in the same ordered list as sync filters; a panic is
     contained and rejects. `InputFilter` gains a provided `as_async()`
@@ -72,7 +80,9 @@ adheres to [Semantic Versioning](https://semver.org/).
   - `TurnHook` and `Agent::with_turn_hook` — an async hook before every LLM
     request that may append one transient note to the request's latest user
     turn. Raw loops wrap their provider in `provider::TurnHookProvider`;
-    `TurnContext::new` for tests; `AgentLoopConfig` gains no field.
+    `TurnContext::new` / `with_run_prompts` for tests; `TurnContext` carries
+    `run_prompts` and the same `user_request()`; `AgentLoopConfig` gains no
+    field.
 
 ## 0.20.0
 
