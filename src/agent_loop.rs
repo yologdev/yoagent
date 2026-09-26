@@ -106,6 +106,7 @@ pub struct AgentLoopConfig {
     /// Input filters applied to user messages before the LLM call.
     /// Filters run in order; first `Reject` wins and discards any accumulated
     /// warnings. `Warn` messages accumulate and are appended to the user message.
+    /// An [`AsyncFilter`] in the list is awaited (see [`InputFilter::as_async`]).
     pub input_filters: Vec<Arc<dyn InputFilter>>,
 
     /// Optional delay between turns. Useful for rate-limit-sensitive scenarios
@@ -200,7 +201,11 @@ pub(crate) async fn agent_loop_with_stats(
 
         let mut warnings: Vec<String> = Vec::new();
         for filter in &config.input_filters {
-            match filter.filter(&user_text) {
+            let verdict = match filter.as_async() {
+                Some(async_filter) => async_filter.filter(&user_text).await,
+                None => filter.filter(&user_text),
+            };
+            match verdict {
                 FilterResult::Pass => {}
                 FilterResult::Warn(w) => warnings.push(w),
                 FilterResult::Reject(reason) => {
@@ -828,7 +833,10 @@ async fn run_loop(
                     cancel,
                     config.get_steering_messages.as_ref(),
                     &config.tool_execution,
-                    &config.tool_middleware,
+                    Gate {
+                        middleware: &config.tool_middleware,
+                        history: &context.messages,
+                    },
                 )
                 .await;
 
@@ -1342,6 +1350,14 @@ fn unwrap_structured_tool_call(
     }
 }
 
+/// What gates a tool call: the middleware chain, and the conversation it may
+/// consult ([`ToolCallRequest::messages`]).
+#[derive(Clone, Copy)]
+struct Gate<'a> {
+    middleware: &'a [Arc<dyn ToolMiddleware>],
+    history: &'a [AgentMessage],
+}
+
 async fn execute_tool_calls(
     tools: &[Box<dyn AgentTool>],
     tool_calls: &[(String, String, serde_json::Value)],
@@ -1349,14 +1365,14 @@ async fn execute_tool_calls(
     cancel: &tokio_util::sync::CancellationToken,
     get_steering: Option<&GetMessagesFn>,
     strategy: &ToolExecutionStrategy,
-    middleware: &[Arc<dyn ToolMiddleware>],
+    gate: Gate<'_>,
 ) -> ToolExecutionResult {
     match strategy {
         ToolExecutionStrategy::Sequential => {
-            execute_sequential(tools, tool_calls, tx, cancel, get_steering, middleware).await
+            execute_sequential(tools, tool_calls, tx, cancel, get_steering, gate).await
         }
         ToolExecutionStrategy::Parallel => {
-            execute_batch(tools, tool_calls, tx, cancel, get_steering, middleware).await
+            execute_batch(tools, tool_calls, tx, cancel, get_steering, gate).await
         }
         ToolExecutionStrategy::Batched { size } => {
             let mut results: Vec<Message> = Vec::new();
@@ -1364,7 +1380,7 @@ async fn execute_tool_calls(
             let mut sub_agent_stats: Vec<SessionStats> = Vec::new();
 
             for (batch_idx, batch) in tool_calls.chunks(*size).enumerate() {
-                let batch_result = execute_batch(tools, batch, tx, cancel, None, middleware).await;
+                let batch_result = execute_batch(tools, batch, tx, cancel, None, gate).await;
                 results.extend(batch_result.tool_results);
                 sub_agent_stats.extend(batch_result.sub_agent_stats);
 
@@ -1401,7 +1417,7 @@ async fn execute_sequential(
     tx: &mpsc::UnboundedSender<AgentEvent>,
     cancel: &tokio_util::sync::CancellationToken,
     get_steering: Option<&GetMessagesFn>,
-    middleware: &[Arc<dyn ToolMiddleware>],
+    gate: Gate<'_>,
 ) -> ToolExecutionResult {
     let mut results: Vec<Message> = Vec::new();
     let mut steering_messages: Option<Vec<AgentMessage>> = None;
@@ -1409,7 +1425,7 @@ async fn execute_sequential(
 
     for (index, (id, name, args)) in tool_calls.iter().enumerate() {
         let (result_msg, delegated) =
-            execute_single_tool(tools, id, name, args, tx, cancel, middleware).await;
+            execute_single_tool(tools, id, name, args, tx, cancel, gate).await;
         results.push(result_msg);
         sub_agent_stats.extend(delegated);
 
@@ -1440,13 +1456,13 @@ async fn execute_batch(
     tx: &mpsc::UnboundedSender<AgentEvent>,
     cancel: &tokio_util::sync::CancellationToken,
     get_steering: Option<&GetMessagesFn>,
-    middleware: &[Arc<dyn ToolMiddleware>],
+    gate: Gate<'_>,
 ) -> ToolExecutionResult {
     use futures::future::join_all;
 
     let futures: Vec<_> = tool_calls
         .iter()
-        .map(|(id, name, args)| execute_single_tool(tools, id, name, args, tx, cancel, middleware))
+        .map(|(id, name, args)| execute_single_tool(tools, id, name, args, tx, cancel, gate))
         .collect();
 
     let batch_results = join_all(futures).await;
@@ -1490,7 +1506,7 @@ async fn execute_single_tool(
     args: &serde_json::Value,
     tx: &mpsc::UnboundedSender<AgentEvent>,
     cancel: &tokio_util::sync::CancellationToken,
-    middleware: &[Arc<dyn ToolMiddleware>],
+    gate: Gate<'_>,
 ) -> (Message, Vec<SessionStats>) {
     // A call whose streamed arguments did not resolve to a JSON object (cut
     // off at the output token limit, in practice, or double-encoded as a
@@ -1507,11 +1523,12 @@ async fn execute_single_tool(
     // later hooks; the first Deny short-circuits into an error tool result
     // (the LLM sees the reason and can adapt — the loop continues).
     let mut effective_args = args.clone();
-    for mw in middleware {
+    for mw in gate.middleware {
         let call = ToolCallRequest {
             tool_call_id: id,
             tool_name: name,
             args: &effective_args,
+            messages: gate.history,
         };
         // A panicking middleware must not kill the loop task (which would
         // strip the agent of its tools) — contain it and fail closed.

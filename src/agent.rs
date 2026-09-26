@@ -74,6 +74,9 @@ pub struct Agent {
     // Tool middleware (permissions/policy hooks)
     tool_middleware: Vec<Arc<dyn ToolMiddleware>>,
 
+    // Per-turn hooks (transient system-prompt lines)
+    turn_hooks: Vec<Arc<dyn TurnHook>>,
+
     // Custom compaction strategy
     compaction_strategy: Option<Arc<dyn CompactionStrategy>>,
 
@@ -307,6 +310,7 @@ impl Agent {
             on_error: None,
             input_filters: Vec::new(),
             tool_middleware: Vec::new(),
+            turn_hooks: Vec::new(),
             compaction_strategy: None,
             cancel: None,
             is_streaming: false,
@@ -480,6 +484,21 @@ impl Agent {
     /// Add an input filter. Filters run in order on user messages before the LLM call.
     pub fn with_input_filter(mut self, filter: impl InputFilter + 'static) -> Self {
         self.input_filters.push(Arc::new(filter));
+        self
+    }
+
+    /// Add an input filter that awaits (a moderation API, a classifier). It
+    /// runs in the same list and order as [`with_input_filter`](Self::with_input_filter)
+    /// filters, with the same [`FilterResult`] semantics.
+    pub fn with_async_input_filter(mut self, filter: impl AsyncInputFilter + 'static) -> Self {
+        self.input_filters.push(Arc::new(AsyncFilter(filter)));
+        self
+    }
+
+    /// Add a [`TurnHook`]: awaited before every LLM request, it may append
+    /// one line to that request's system prompt (never stored in history).
+    pub fn with_turn_hook(mut self, hook: impl TurnHook + 'static) -> Self {
+        self.turn_hooks.push(Arc::new(hook));
         self
     }
 
@@ -1241,8 +1260,17 @@ impl Agent {
         let follow_up_queue = self.follow_up_queue.clone();
         let follow_up_mode = self.follow_up_mode;
 
+        let provider: Arc<dyn StreamProvider> = if self.turn_hooks.is_empty() {
+            self.provider.clone()
+        } else {
+            Arc::new(crate::provider::TurnHookProvider::new(
+                self.provider.clone(),
+                self.turn_hooks.clone(),
+            ))
+        };
+
         AgentLoopConfig {
-            provider: self.provider.clone(),
+            provider,
             model: self.model.clone(),
             api_key: self.resolved_api_key(),
             thinking_level: self.thinking_level,

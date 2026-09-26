@@ -1530,10 +1530,81 @@ pub enum FilterResult {
 /// Synchronous filter applied to user input before the LLM call.
 ///
 /// Implement this for injection detection, content moderation, PII redaction, etc.
-/// Filters run in the hot path and must be fast — use `before_turn` callbacks
-/// for async moderation (external API calls).
+/// Filters run in the hot path and must be fast. For a filter that awaits
+/// something (a moderation API, a classifier), implement
+/// [`AsyncInputFilter`] instead and register it with
+/// [`Agent::with_async_input_filter`](crate::Agent::with_async_input_filter)
+/// (or push an [`AsyncFilter`] onto
+/// [`AgentLoopConfig::input_filters`](crate::agent_loop::AgentLoopConfig)).
 pub trait InputFilter: Send + Sync {
     fn filter(&self, text: &str) -> FilterResult;
+
+    /// The async filter behind this one, if any. The loop awaits it instead
+    /// of calling [`filter`](Self::filter).
+    ///
+    /// Provided (returns `None`), so existing filters are unaffected; only
+    /// [`AsyncFilter`] overrides it.
+    fn as_async(&self) -> Option<&dyn AsyncInputFilter> {
+        None
+    }
+}
+
+/// An input filter that may await — the async counterpart of
+/// [`InputFilter`], with the same [`FilterResult`] semantics.
+///
+/// It runs in the same place and order as the sync filters (they share one
+/// list), before the prompt reaches the model, so a slow filter delays every
+/// prompt: bound its latency yourself (e.g. `tokio::time::timeout`) and
+/// decide there whether a timeout passes or rejects.
+#[async_trait::async_trait]
+pub trait AsyncInputFilter: Send + Sync {
+    async fn filter(&self, text: &str) -> FilterResult;
+}
+
+/// Adapts an [`AsyncInputFilter`] into the [`InputFilter`] list.
+///
+/// The loop recognises it through [`InputFilter::as_async`] and awaits the
+/// inner filter. Its synchronous [`InputFilter::filter`] cannot await, so it
+/// fails closed: called directly, it rejects.
+pub struct AsyncFilter<F>(pub F);
+
+impl<F: AsyncInputFilter> AsyncFilter<F> {
+    pub fn new(filter: F) -> Self {
+        Self(filter)
+    }
+}
+
+impl<F: AsyncInputFilter> InputFilter for AsyncFilter<F> {
+    fn filter(&self, _text: &str) -> FilterResult {
+        FilterResult::Reject(
+            "an async input filter was called synchronously; await it via InputFilter::as_async"
+                .into(),
+        )
+    }
+
+    fn as_async(&self) -> Option<&dyn AsyncInputFilter> {
+        Some(&self.0)
+    }
+}
+
+/// The text of the most recent user message: its text blocks, joined by
+/// newlines. `None` when there is no user message with text.
+pub(crate) fn latest_user_text_of<'a>(
+    messages: impl DoubleEndedIterator<Item = &'a Message>,
+) -> Option<String> {
+    messages.rev().find_map(|m| match m {
+        Message::User { content, .. } => {
+            let text: Vec<&str> = content
+                .iter()
+                .filter_map(|c| match c {
+                    Content::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            (!text.is_empty()).then(|| text.join("\n"))
+        }
+        _ => None,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1575,6 +1646,21 @@ pub struct ToolCallRequest<'a> {
     /// Arguments as the model provided them (possibly rewritten by earlier
     /// middleware in the chain).
     pub args: &'a serde_json::Value,
+    /// The conversation so far, as the model saw it plus the assistant
+    /// message carrying this call. For policies that depend on what the user
+    /// asked — see [`latest_user_text`](Self::latest_user_text).
+    pub messages: &'a [AgentMessage],
+}
+
+impl ToolCallRequest<'_> {
+    /// The text of the most recent user message in [`messages`](Self::messages).
+    ///
+    /// That is the last `Message::User`, which may be a steering or follow-up
+    /// message, or a note the loop injected — not necessarily the prompt that
+    /// started the run.
+    pub fn latest_user_text(&self) -> Option<String> {
+        latest_user_text_of(self.messages.iter().filter_map(AgentMessage::as_llm))
+    }
 }
 
 /// Async hook that gates every tool call — the mechanism behind permission
@@ -1600,6 +1686,61 @@ pub struct ToolCallRequest<'a> {
 #[async_trait::async_trait]
 pub trait ToolMiddleware: Send + Sync {
     async fn before_tool(&self, call: &ToolCallRequest<'_>) -> ToolDecision;
+}
+
+// ---------------------------------------------------------------------------
+// Turn hooks
+// ---------------------------------------------------------------------------
+
+/// Borrowed view of the request about to be sent for one turn, passed to
+/// [`TurnHook::before_turn`].
+///
+/// Marked `#[non_exhaustive]`: fields may be added in minor releases.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct TurnContext<'a> {
+    /// The system prompt as configured (without other hooks' lines).
+    pub system_prompt: &'a str,
+    /// The messages being sent, after `transform_context`/`convert_to_llm`.
+    pub messages: &'a [Message],
+    /// The tools offered this turn.
+    pub tools: &'a [crate::provider::ToolDefinition],
+    /// The model id.
+    pub model: &'a str,
+}
+
+impl TurnContext<'_> {
+    /// The text of the most recent user message being sent.
+    pub fn latest_user_text(&self) -> Option<String> {
+        latest_user_text_of(self.messages.iter())
+    }
+}
+
+/// An async hook run before every LLM request, able to add one transient
+/// line to that request's system prompt.
+///
+/// The line is for **this request only**: it is never stored in history, and
+/// a hook that returns `None` leaves the request byte-for-byte unchanged.
+/// Lines from several hooks are appended in installation order, after a
+/// blank line.
+///
+/// Install via [`Agent::with_turn_hook`](crate::Agent::with_turn_hook), or
+/// for a raw loop wrap the provider in
+/// [`TurnHookProvider`](crate::provider::TurnHookProvider). The hook runs
+/// once per provider call, so a retried request runs it again; memoize if it
+/// is expensive.
+///
+/// **Prompt caching.** The system prompt precedes the conversation, so a
+/// line that changes invalidates the provider's prompt cache from there on
+/// for that request. A line that stays the same across turns caches
+/// normally: keep it stable (e.g. derive it from the latest user message,
+/// not from every tool result).
+///
+/// A panicking hook is contained and contributes nothing.
+#[async_trait::async_trait]
+pub trait TurnHook: Send + Sync {
+    /// Return a line to append to this request's system prompt, or `None`.
+    async fn before_turn(&self, turn: &TurnContext<'_>) -> Option<String>;
 }
 
 // ---------------------------------------------------------------------------
