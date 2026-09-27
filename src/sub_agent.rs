@@ -277,10 +277,11 @@ impl SubAgentTool {
     /// [`Agent::with_input_guard`](crate::Agent::with_input_guard) — fails
     /// closed — except that the "input" is the task text the parent model
     /// wrote, not the human's words. A rejected task fails the tool call
-    /// with the guard's reason.
+    /// with the guard's reason. Panics when the guard has no checks.
     #[cfg(feature = "decision")]
     #[cfg_attr(docsrs, doc(cfg(feature = "decision")))]
     pub fn with_input_guard(self, guard: crate::decision::InputGuard) -> Self {
+        guard.assert_has_checks();
         self.with_async_input_filter(guard)
     }
 

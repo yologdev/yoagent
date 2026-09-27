@@ -613,9 +613,15 @@ impl Agent {
     ///   and spend are reported in [`SessionStats::decision`].
     ///
     /// Defence in depth, not a security boundary.
+    ///
+    /// # Panics
+    ///
+    /// When the guard has no checks (`without_default_checks()` and none
+    /// added): a blocking guard that checks nothing is a setup mistake.
     #[cfg(feature = "decision")]
     #[cfg_attr(docsrs, doc(cfg(feature = "decision")))]
     pub fn with_input_guard(self, guard: crate::decision::InputGuard) -> Self {
+        guard.assert_has_checks();
         self.with_async_input_filter(guard)
     }
 
