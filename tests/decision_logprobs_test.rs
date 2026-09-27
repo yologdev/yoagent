@@ -446,9 +446,9 @@ async fn questions_fan_out_concurrently_and_merge_in_order() {
         3,
         "one per question"
     );
-    // Sequential would take ~1200 ms, concurrent ~800 ms.
+    // Sequential cannot finish before 1200 ms; concurrent takes ~800 ms.
     assert!(
-        elapsed >= Duration::from_millis(800) && elapsed < Duration::from_millis(1_100),
+        elapsed >= Duration::from_millis(800) && elapsed < Duration::from_millis(1_200),
         "concurrent: {elapsed:?}"
     );
     let ids: Vec<&str> = eval.answers().map(|(id, _)| id).collect();
@@ -669,8 +669,8 @@ async fn a_timeout_keeps_the_answered_questions_spend() {
 
 #[tokio::test]
 async fn at_most_eight_questions_are_in_flight() {
-    // Every response takes 400 ms, so how many requests arrive in the first
-    // 200 ms is how many were in flight at once.
+    // Every response takes 1 s, so how many requests arrive in the first
+    // 500 ms is how many were in flight at once.
     let arrivals: Arc<Mutex<Vec<Instant>>> = Arc::default();
     let seen = arrivals.clone();
     let server = MockServer::start().await;
@@ -680,7 +680,7 @@ async fn at_most_eight_questions_are_in_flight() {
             seen.lock().unwrap().push(Instant::now());
             ResponseTemplate::new(200)
                 .set_body_json(completion(&[("A", 0.9), ("B", 0.1)], (1, 1)))
-                .set_delay(Duration::from_millis(400))
+                .set_delay(Duration::from_millis(1_000))
         })
         .mount(&server)
         .await;
@@ -696,7 +696,7 @@ async fn at_most_eight_questions_are_in_flight() {
     assert_eq!(arrivals.len(), 12);
     let early = arrivals
         .iter()
-        .filter(|t| t.duration_since(start) < Duration::from_millis(200))
+        .filter(|t| t.duration_since(start) < Duration::from_millis(500))
         .count();
     assert_eq!(early, 8, "the cap (8) at once, the rest after a slot frees");
     assert_eq!(model(&server).capabilities().max_concurrent_requests, 8);
