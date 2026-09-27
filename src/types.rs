@@ -1858,6 +1858,65 @@ pub(crate) fn latest_user_text_of(messages: &[&Message]) -> Option<String> {
 ///    which compaction cannot remove).
 /// 3. Otherwise `None`.
 pub(crate) fn user_request_of(messages: &[&Message], run_prompts: &[Message]) -> Option<String> {
+    user_request_parts_of(messages, run_prompts).map(|p| p.to_prose())
+}
+
+/// The pieces [`ToolCallRequest::user_request`] joins into prose, for
+/// policies that want them separately; see
+/// [`ToolCallRequest::user_request_parts`].
+///
+/// Marked `#[non_exhaustive]`: fields may be added in minor releases. Read
+/// it; [`ToolCallRequest`] and [`TurnContext`] build it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct UserRequestParts {
+    /// The latest message the user wrote after the most recent compaction
+    /// boundary — or, when [`from_run_prompts`](Self::from_run_prompts) is
+    /// set, the text of the run's own prompts (several are joined as
+    /// `User: ...` paragraphs). `Some` whenever the parts exist.
+    pub latest: Option<String>,
+    /// The assistant text `latest` replies to — only when `latest` is short
+    /// (under 40 characters) and that text ends with a question.
+    pub assistant_question: Option<String>,
+    /// The user's message before that assistant question (after the same
+    /// compaction boundary), when there is one. Only ever set together with
+    /// [`assistant_question`](Self::assistant_question).
+    pub earlier_request: Option<String>,
+    /// Whether the conversation showed no usable user message, so
+    /// [`latest`](Self::latest) is the run's own prompts.
+    pub from_run_prompts: bool,
+}
+
+impl UserRequestParts {
+    /// The prose form [`ToolCallRequest::user_request`] returns.
+    fn to_prose(&self) -> String {
+        let latest = self.latest.clone().unwrap_or_default();
+        let Some(asked) = &self.assistant_question else {
+            return latest;
+        };
+        let mut parts = Vec::new();
+        if let Some(e) = &self.earlier_request {
+            parts.push(format!("Earlier user request: {e}"));
+        }
+        parts.push(format!("Assistant: {asked}"));
+        parts.push(format!("Latest user message: {latest}"));
+        parts.join("\n\n")
+    }
+}
+
+/// [`user_request_of`], in parts.
+pub(crate) fn user_request_parts_of(
+    messages: &[&Message],
+    run_prompts: &[Message],
+) -> Option<UserRequestParts> {
+    let from_prompts = || {
+        run_prompts_text(run_prompts).map(|text| UserRequestParts {
+            latest: Some(text),
+            assistant_question: None,
+            earlier_request: None,
+            from_run_prompts: true,
+        })
+    };
     let start = messages
         .iter()
         .rposition(|m| is_compaction_boundary(m))
@@ -1865,13 +1924,20 @@ pub(crate) fn user_request_of(messages: &[&Message], run_prompts: &[Message]) ->
     let window = &messages[start..];
 
     let Some(at) = window.iter().rposition(|m| is_real_user(m)) else {
-        return run_prompts_text(run_prompts);
+        return from_prompts();
     };
     let Some(latest) = real_user_text(window[at]) else {
-        return run_prompts_text(run_prompts);
+        return from_prompts();
     };
-    if latest.chars().count() >= SHORT_REPLY_CHARS {
-        return Some(latest);
+    let short = latest.chars().count() < SHORT_REPLY_CHARS;
+    let mut parts = UserRequestParts {
+        latest: Some(latest),
+        assistant_question: None,
+        earlier_request: None,
+        from_run_prompts: false,
+    };
+    if !short {
+        return Some(parts);
     }
 
     // The assistant text the reply answers: the nearest assistant message
@@ -1889,21 +1955,15 @@ pub(crate) fn user_request_of(messages: &[&Message], run_prompts: &[Message]) ->
         }
     }
     let Some((asked_at, asked)) = asked.filter(|(_, a)| ends_with_question(a)) else {
-        return Some(latest);
+        return Some(parts);
     };
-    let earlier = window[..asked_at]
+    parts.earlier_request = window[..asked_at]
         .iter()
         .rev()
         .find(|m| is_real_user(m))
         .and_then(|m| real_user_text(m));
-
-    let mut parts = Vec::new();
-    if let Some(e) = earlier {
-        parts.push(format!("Earlier user request: {e}"));
-    }
-    parts.push(format!("Assistant: {asked}"));
-    parts.push(format!("Latest user message: {latest}"));
-    Some(parts.join("\n\n"))
+    parts.assistant_question = Some(asked);
+    Some(parts)
 }
 
 /// The run's prompts as one request: the only one's text, or each labelled.
@@ -1950,7 +2010,10 @@ pub enum ToolDecision {
 ///
 /// Marked `#[non_exhaustive]`: fields may be added in minor releases (turn
 /// number, history access, ...) without breaking middleware implementations.
-/// Constructed by the loop; middleware only reads it.
+/// Constructed by the loop; middleware only reads it. To unit-test a
+/// middleware, build one with [`ToolCallRequest::new`] plus
+/// [`with_messages`](Self::with_messages) /
+/// [`with_run_prompts`](Self::with_run_prompts).
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct ToolCallRequest<'a> {
@@ -1974,7 +2037,42 @@ pub struct ToolCallRequest<'a> {
     pub run_prompts: &'a [Message],
 }
 
-impl ToolCallRequest<'_> {
+impl<'a> ToolCallRequest<'a> {
+    /// A request for one call with no conversation (see
+    /// [`with_messages`](Self::with_messages) and
+    /// [`with_run_prompts`](Self::with_run_prompts)) — for testing a
+    /// [`ToolMiddleware`] outside the loop; the loop builds the real one.
+    ///
+    /// ```
+    /// use yoagent::{Message, ToolCallRequest};
+    /// let args = serde_json::json!({"path": "/tmp/x"});
+    /// let prompts = [Message::user("delete /tmp/x")];
+    /// let call = ToolCallRequest::new("call-1", "rm", &args).with_run_prompts(&prompts);
+    /// assert_eq!(call.user_request().as_deref(), Some("delete /tmp/x"));
+    /// ```
+    pub fn new(tool_call_id: &'a str, tool_name: &'a str, args: &'a serde_json::Value) -> Self {
+        Self {
+            tool_call_id,
+            tool_name,
+            args,
+            messages: &[],
+            run_prompts: &[],
+        }
+    }
+
+    /// Set the conversation the call is made in (see
+    /// [`messages`](Self::messages)).
+    pub fn with_messages(mut self, messages: &'a [AgentMessage]) -> Self {
+        self.messages = messages;
+        self
+    }
+
+    /// Set the run's prompts (see [`run_prompts`](Self::run_prompts)).
+    pub fn with_run_prompts(mut self, run_prompts: &'a [Message]) -> Self {
+        self.run_prompts = run_prompts;
+        self
+    }
+
     fn llm_messages(&self) -> Vec<&Message> {
         self.messages
             .iter()
@@ -1997,8 +2095,18 @@ impl ToolCallRequest<'_> {
     ///
     /// Including the assistant's question widens what counts as requested,
     /// and that text can itself be steered by injected content.
+    ///
+    /// The prose (its `Earlier user request:` / `Assistant:` / `Latest user
+    /// message:` labels and separators) is **not a stable format**; parse
+    /// [`user_request_parts`](Self::user_request_parts) instead.
     pub fn user_request(&self) -> Option<String> {
         user_request_of(&self.llm_messages(), self.run_prompts)
+    }
+
+    /// [`user_request`](Self::user_request) as structured parts: the same
+    /// selection, before it is joined into prose.
+    pub fn user_request_parts(&self) -> Option<UserRequestParts> {
+        user_request_parts_of(&self.llm_messages(), self.run_prompts)
     }
 }
 
@@ -2084,9 +2192,16 @@ impl<'a> TurnContext<'a> {
         latest_user_text_of(&self.messages.iter().collect::<Vec<_>>())
     }
 
-    /// What the user is asking for; see [`ToolCallRequest::user_request`].
+    /// What the user is asking for; see [`ToolCallRequest::user_request`]
+    /// (the prose is not a stable format).
     pub fn user_request(&self) -> Option<String> {
         user_request_of(&self.messages.iter().collect::<Vec<_>>(), self.run_prompts)
+    }
+
+    /// [`user_request`](Self::user_request) as structured parts; see
+    /// [`ToolCallRequest::user_request_parts`].
+    pub fn user_request_parts(&self) -> Option<UserRequestParts> {
+        user_request_parts_of(&self.messages.iter().collect::<Vec<_>>(), self.run_prompts)
     }
 }
 
