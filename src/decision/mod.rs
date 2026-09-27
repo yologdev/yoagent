@@ -60,7 +60,7 @@
 //!
 //! // Hosted Jev, falling back to a local llama-server.
 //! let model = DecisionModel::jev()
-//!     .or(DecisionModel::logprobs("http://localhost:8080", "qwen3-8b"));
+//!     .or(DecisionModel::logprobs("http://localhost:8080", "llama-3.1-8b-instruct"));
 //! let q = "Does this ask to delete data?";
 //! let report = calibrate(&model, vec![
 //!     CalibrationExample::noul("rm -rf build/", q, true),

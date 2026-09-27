@@ -87,11 +87,19 @@ async fn main() {
 
     // 4. Any OpenAI-compatible server that returns logprobs is a decision
     //    model too — llama.cpp's llama-server, vLLM, SGLang, LM Studio. Its
-    //    probabilities are only approximately calibrated. And `or` chains a
-    //    fallback: hosted Jev first, the local server when Jev fails.
+    //    probabilities are only approximately calibrated, and thinking must
+    //    be off (the answer is the first token). And `or` chains a fallback:
+    //    hosted Jev first, the local server when Jev fails.
     //
-    //     let local = DecisionModel::logprobs("http://localhost:8080", "qwen3-8b");
+    //     let local = DecisionModel::logprobs("http://localhost:8080", "llama-3.1-8b-instruct");
     //     let model = DecisionModel::jev().or(local);
+    //
+    //     // A reasoning model needs thinking turned off (llama.cpp, vLLM, SGLang):
+    //     use yoagent::decision::LogprobBackend;
+    //     let qwen = DecisionModel::from_logprob_backend(
+    //         LogprobBackend::new("http://localhost:8080").with_thinking_disabled(),
+    //         "qwen3-8b",
+    //     );
     //
     // 5. Measure a model (and choose thresholds, or a logprob temperature)
     //    on labelled examples of your own:
@@ -104,4 +112,6 @@ async fn main() {
     //     ])
     //     .await;
     //     println!("{report}"); // accuracy, Brier, ECE, thresholds, temperature
+    //     // Apply a suggested temperature on the logprob backend:
+    //     //     LogprobBackend::new(url).with_temperature(t)
 }

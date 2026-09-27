@@ -547,8 +547,8 @@ falls back to the run's prompts, and returns `None` when nothing says what the
 user wants — enough for policies such as "was this destructive call actually
 requested?". The [decision-model tool gate](decision-models.md#blocking-with_tool_gate)
 is one. `call.user_request_parts()` gives the same selection as structured
-`UserRequestParts` (`latest`, `assistant_question`, `earlier_request`,
-`from_run_prompts`); the prose of `user_request()` is not a stable format.
+`UserRequestParts` (`latest`, `reply`, `source`, `run_prompts`); the prose of
+`user_request()` is not a stable format.
 
 To unit-test a middleware without running an agent, build the request
 yourself:

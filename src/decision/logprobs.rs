@@ -512,9 +512,7 @@ pub(crate) fn label_distribution(
     }
     // An absent label's probability is below every reported one and within
     // what the reported tokens leave over.
-    let absent = smallest
-        .min(1.0 - reported_total)
-        .clamp(ABSENT_FLOOR, 1.0);
+    let absent = smallest.min(1.0 - reported_total).clamp(ABSENT_FLOOR, 1.0);
     let logits: Vec<f64> = mass
         .iter()
         .map(|&m| if m > 0.0 { m } else { absent }.ln() / temperature)

@@ -142,8 +142,9 @@ and a raw loop wraps its own with
 `TurnHookProvider::new(provider, vec![Arc::new(hook)])`.
 
 `TurnContext::user_request_parts()` returns the same selection as
-`user_request()` as a structured `UserRequestParts` (`latest`,
-`assistant_question`, `earlier_request`, `from_run_prompts`). Prefer it to
+`user_request()` as a structured `UserRequestParts` (`latest`, `reply:
+Option<ReplyContext { question, earlier_request }>`, `source:
+UserRequestSource`, `run_prompts`). Prefer it to
 parsing the prose of `user_request()`, whose labels and layout are not a
 stable format.
 

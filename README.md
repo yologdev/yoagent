@@ -297,7 +297,7 @@ A decision model answers typed questions — yes/no (**Noul**), one-of-N (**Choi
 ```rust,ignore
 let jev = DecisionModel::jev();                                      // key from TYPESAFE_API_KEY
 let urgent = jev.noul(message, "Does this convey urgency?").await?;  // urgent.p_true()
-let jev = jev.or(DecisionModel::logprobs("http://localhost:8080", "qwen3-8b")); // fallback: any logprob LLM
+let jev = jev.or(DecisionModel::logprobs("http://localhost:8080", "llama-3.1-8b-instruct")); // fallback: any logprob LLM, thinking off
 
 let agent = Agent::from_config(ModelConfig::claude_sonnet_5())
     .with_skills(skills)
