@@ -1870,36 +1870,65 @@ pub(crate) fn user_request_of(messages: &[&Message], run_prompts: &[Message]) ->
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct UserRequestParts {
-    /// The latest message the user wrote after the most recent compaction
-    /// boundary — or, when [`from_run_prompts`](Self::from_run_prompts) is
-    /// set, the text of the run's own prompts (several are joined as
-    /// `User: ...` paragraphs). `Some` whenever the parts exist.
-    pub latest: Option<String>,
-    /// The assistant text `latest` replies to — only when `latest` is short
-    /// (under 40 characters) and that text ends with a question.
-    pub assistant_question: Option<String>,
-    /// The user's message before that assistant question (after the same
-    /// compaction boundary), when there is one. Only ever set together with
-    /// [`assistant_question`](Self::assistant_question).
+    /// The request's text: the latest message the user wrote after the most
+    /// recent compaction boundary — or, from [`UserRequestSource::RunPrompts`],
+    /// the last of the run's prompts (all of them are in
+    /// [`run_prompts`](Self::run_prompts)).
+    pub latest: String,
+    /// When `latest` is a short reply (under 40 characters) to an assistant
+    /// message ending with a question: that question and the request before
+    /// it.
+    pub reply: Option<ReplyContext>,
+    /// Where `latest` came from.
+    pub source: UserRequestSource,
+    /// From [`UserRequestSource::RunPrompts`]: the text of each of the run's
+    /// prompts, in order. Empty for [`UserRequestSource::Conversation`].
+    pub run_prompts: Vec<String>,
+}
+
+/// What a short reply answers; see [`UserRequestParts::reply`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ReplyContext {
+    /// The assistant text the reply answers (it ends with a question).
+    pub question: String,
+    /// The user's message before that question (after the same compaction
+    /// boundary), when there is one.
     pub earlier_request: Option<String>,
-    /// Whether the conversation showed no usable user message, so
-    /// [`latest`](Self::latest) is the run's own prompts.
-    pub from_run_prompts: bool,
+}
+
+/// Where [`UserRequestParts::latest`] came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum UserRequestSource {
+    /// A message the user wrote, found in the conversation.
+    Conversation,
+    /// The run's own prompts: the conversation showed no usable user message
+    /// (compacted away, or image-only).
+    RunPrompts,
 }
 
 impl UserRequestParts {
-    /// The prose form [`ToolCallRequest::user_request`] returns.
+    /// The prose form [`ToolCallRequest::user_request`] returns. Not a
+    /// stable format.
     fn to_prose(&self) -> String {
-        let latest = self.latest.clone().unwrap_or_default();
-        let Some(asked) = &self.assistant_question else {
-            return latest;
+        if self.source == UserRequestSource::RunPrompts && self.run_prompts.len() > 1 {
+            return self
+                .run_prompts
+                .iter()
+                .map(|t| format!("User: {t}"))
+                .collect::<Vec<_>>()
+                .join("\n\n");
+        }
+        let Some(reply) = &self.reply else {
+            return self.latest.clone();
         };
         let mut parts = Vec::new();
-        if let Some(e) = &self.earlier_request {
+        if let Some(e) = &reply.earlier_request {
             parts.push(format!("Earlier user request: {e}"));
         }
-        parts.push(format!("Assistant: {asked}"));
-        parts.push(format!("Latest user message: {latest}"));
+        parts.push(format!("Assistant: {}", reply.question));
+        parts.push(format!("Latest user message: {}", self.latest));
         parts.join("\n\n")
     }
 }
@@ -1910,11 +1939,12 @@ pub(crate) fn user_request_parts_of(
     run_prompts: &[Message],
 ) -> Option<UserRequestParts> {
     let from_prompts = || {
-        run_prompts_text(run_prompts).map(|text| UserRequestParts {
-            latest: Some(text),
-            assistant_question: None,
-            earlier_request: None,
-            from_run_prompts: true,
+        let texts: Vec<String> = run_prompts.iter().filter_map(real_user_text).collect();
+        texts.last().cloned().map(|latest| UserRequestParts {
+            latest,
+            reply: None,
+            source: UserRequestSource::RunPrompts,
+            run_prompts: texts,
         })
     };
     let start = messages
@@ -1931,10 +1961,10 @@ pub(crate) fn user_request_parts_of(
     };
     let short = latest.chars().count() < SHORT_REPLY_CHARS;
     let mut parts = UserRequestParts {
-        latest: Some(latest),
-        assistant_question: None,
-        earlier_request: None,
-        from_run_prompts: false,
+        latest,
+        reply: None,
+        source: UserRequestSource::Conversation,
+        run_prompts: Vec::new(),
     };
     if !short {
         return Some(parts);
@@ -1954,32 +1984,19 @@ pub(crate) fn user_request_parts_of(
             }
         }
     }
-    let Some((asked_at, asked)) = asked.filter(|(_, a)| ends_with_question(a)) else {
+    let Some((asked_at, question)) = asked.filter(|(_, a)| ends_with_question(a)) else {
         return Some(parts);
     };
-    parts.earlier_request = window[..asked_at]
+    let earlier_request = window[..asked_at]
         .iter()
         .rev()
         .find(|m| is_real_user(m))
         .and_then(|m| real_user_text(m));
-    parts.assistant_question = Some(asked);
+    parts.reply = Some(ReplyContext {
+        question,
+        earlier_request,
+    });
     Some(parts)
-}
-
-/// The run's prompts as one request: the only one's text, or each labelled.
-fn run_prompts_text(run_prompts: &[Message]) -> Option<String> {
-    let texts: Vec<String> = run_prompts.iter().filter_map(real_user_text).collect();
-    match texts.len() {
-        0 => None,
-        1 => texts.into_iter().next(),
-        _ => Some(
-            texts
-                .iter()
-                .map(|t| format!("User: {t}"))
-                .collect::<Vec<_>>()
-                .join("\n\n"),
-        ),
-    }
 }
 
 // ---------------------------------------------------------------------------

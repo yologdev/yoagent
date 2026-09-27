@@ -716,22 +716,20 @@ fn user_request_parts_match_the_prose() {
     ];
     let turn = TurnContext::new("", &messages, &[], "m");
     let parts = turn.user_request_parts().unwrap();
-    assert_eq!(parts.latest.as_deref(), Some("yes, go ahead"));
+    assert_eq!(parts.latest, "yes, go ahead");
+    assert_eq!(parts.source, UserRequestSource::Conversation);
+    assert!(parts.run_prompts.is_empty());
+    let reply = parts.reply.clone().unwrap();
     assert_eq!(
-        parts.assistant_question.as_deref(),
-        Some("I found /tmp/scratch.txt. Should I delete it?")
+        reply.question,
+        "I found /tmp/scratch.txt. Should I delete it?"
     );
     assert_eq!(
-        parts.earlier_request.as_deref(),
+        reply.earlier_request.as_deref(),
         Some("clean up the workspace")
     );
-    assert!(!parts.from_run_prompts);
     let prose = turn.user_request().unwrap();
-    for part in [
-        parts.latest.unwrap(),
-        parts.assistant_question.unwrap(),
-        parts.earlier_request.unwrap(),
-    ] {
+    for part in [parts.latest, reply.question, reply.earlier_request.unwrap()] {
         assert!(prose.contains(&part), "{prose}");
     }
 
@@ -742,15 +740,22 @@ fn user_request_parts_match_the_prose() {
     let parts = TurnContext::new("", &messages, &[], "m")
         .user_request_parts()
         .unwrap();
-    assert!(parts.assistant_question.is_none() && parts.earlier_request.is_none());
+    assert!(parts.reply.is_none());
 
-    // Compacted away: the run's prompts, flagged.
+    // Compacted away: the run's prompts, each kept separately.
     let messages = vec![Message::user(COMPACTION_MARKER_TEXT)];
-    let prompts = vec![Message::user("tidy /srv")];
+    let prompts = vec![
+        Message::user("look around /srv"),
+        Message::user("tidy /srv"),
+    ];
     let turn = TurnContext::new("", &messages, &[], "m").with_run_prompts(&prompts);
     let parts = turn.user_request_parts().unwrap();
-    assert!(parts.from_run_prompts);
-    assert_eq!(parts.latest.as_deref(), Some("tidy /srv"));
+    assert_eq!(parts.source, UserRequestSource::RunPrompts);
+    assert_eq!(parts.latest, "tidy /srv");
+    assert_eq!(parts.run_prompts, ["look around /srv", "tidy /srv"]);
+    assert!(parts.reply.is_none());
+    let one = [Message::user("tidy /srv")];
+    let turn = TurnContext::new("", &messages, &[], "m").with_run_prompts(&one);
     assert_eq!(turn.user_request().as_deref(), Some("tidy /srv"));
 
     // Nothing at all.
@@ -776,17 +781,20 @@ fn a_tool_call_request_can_be_built_outside_the_loop() {
     ];
     let call = ToolCallRequest::new("call-1", "rm", &args).with_messages(&history);
     assert_eq!(call.latest_user_text().as_deref(), Some("yes"));
-    let parts = call.user_request_parts().unwrap();
-    assert_eq!(parts.assistant_question.as_deref(), Some("Delete /tmp/x?"));
+    let reply = call.user_request_parts().unwrap().reply.unwrap();
+    assert_eq!(reply.question, "Delete /tmp/x?");
     assert_eq!(
-        parts.earlier_request.as_deref(),
+        reply.earlier_request.as_deref(),
         Some("clean up the workspace")
     );
 
     let prompts = vec![Message::user("remove /tmp/x")];
     let call = ToolCallRequest::new("call-1", "rm", &args).with_run_prompts(&prompts);
     assert_eq!(call.user_request().as_deref(), Some("remove /tmp/x"));
-    assert!(call.user_request_parts().unwrap().from_run_prompts);
+    assert_eq!(
+        call.user_request_parts().unwrap().source,
+        UserRequestSource::RunPrompts
+    );
 }
 
 // ---------------------------------------------------------------------------
