@@ -9,7 +9,7 @@
 
 ```toml
 [dependencies]
-yoagent = "0.15"
+yoagent = "0.21"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -35,10 +35,12 @@ All providers and built-in tools are included by default. Optional features:
 | Feature | Dependencies | Description |
 |---------|-------------|-------------|
 | `openapi` | `openapiv3`, `serde_yaml_ng` | Auto-generate tools from OpenAPI 3.0 specs |
+| `gasp` | `yoagent-state` | Record runs into a [GASP](../concepts/gasp.md) agent repo |
+| `decision` | none | [Decision models](../concepts/decision-models.md): typed yes/no, choice and score questions; advisory hints, the tool gate and the input guard. Nothing is sent until you pick a model |
 
 Enable in `Cargo.toml`:
 
 ```toml
 [dependencies]
-yoagent = { version = "0.15", features = ["openapi"] }
+yoagent = { version = "0.21", features = ["openapi", "decision"] }
 ```
