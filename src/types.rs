@@ -1028,8 +1028,9 @@ impl AgentEvent {
 pub struct SessionStats {
     /// Provider usage summed over every LLM turn in this run.
     ///
-    /// `total_tokens` is **not** summed and stays 0. Derive a total from the
-    /// four components instead.
+    /// `total_tokens` is **not** summed and stays 0: providers disagree on what
+    /// it counts, and some never set it. Derive a total from the four
+    /// components instead.
     #[serde(default)]
     pub usage: Usage,
     /// LLM turns taken. Tool executions are not turns; an errored turn counts,
