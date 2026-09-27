@@ -13,6 +13,7 @@ cargo test --all-features            # Run all tests — what CI runs
 cargo clippy --all-targets --all-features   # Lint — what CI runs (-Dwarnings)
 cargo fmt                            # Auto-format code
 cargo fmt -- --check                 # Check formatting (CI uses this)
+RUSTDOCFLAGS="-Dwarnings" cargo doc --no-deps --all-features   # Doc links — what CI runs
 
 cargo test <test_name>               # Run a single test by name
 cargo test --test agent_test         # Run a specific test file
