@@ -72,8 +72,9 @@ impl Advisory {
         self
     }
 
-    /// Minimum probability that the request needs a skill at all (0.3, the
-    /// gate TypeSafe's skill-suggestion cookbook uses). Panics outside
+    /// Minimum probability that the request needs a skill at all (0.3 —
+    /// adapted from TypeSafe's skill-suggestion cookbook, where 0.3 applies
+    /// to the mean of three gate questions; here to one). Panics outside
     /// `[0, 1]`.
     pub fn with_skill_need_threshold(mut self, p: f64) -> Self {
         assert_threshold("skill need threshold", p);
@@ -81,7 +82,8 @@ impl Advisory {
         self
     }
 
-    /// Minimum confidence of the skill Choice (0.5). Panics outside `[0, 1]`.
+    /// Minimum confidence of the skill Choice (0.5, yoagent's own default).
+    /// Panics outside `[0, 1]`.
     pub fn with_skill_confidence_threshold(mut self, p: f64) -> Self {
         assert_threshold("skill confidence threshold", p);
         self.skill_confidence_threshold = p;

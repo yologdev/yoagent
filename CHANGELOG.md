@@ -18,71 +18,108 @@ adheres to [Semantic Versioning](https://semver.org/).
     `TYPESAFE_BASE_URL`), `jev_opencode()` / `jev_opencode_free()`
     (OpenCode Zen, `OPENCODE_API_KEY`), `local(url)` (self-hosted
     SystemOne servers such as JevK5, no key); `from_backend` for anything
-    else. Keys are read at call time. One-line `noul` / `choice` / `score`
-    returning `NoulAnswer` / `ChoiceAnswer` / `ScoreAnswer`, and
-    `ask(state)...send()` for many questions in one request.
-  - `DecisionBackend` trait with `Capabilities`; `SystemOneBackend` (HTTP,
-    lenient parsing, 429/529 retried with `RetryConfig` backoff, server
-    `retry-after` honoured) and `MockBackend` (scripted, records requests).
-    Requests are validated against the backend's limits before sending; an
-    unsupported question type is an error, never emulated. Every backend's
-    answers are validated (kind, finite probabilities in `[0, 1]`, choices
-    among the options, one probability per Score level).
-  - `DecisionError` (`Clone`, `#[non_exhaustive]`): `Http`, `RateLimited`,
-    `Timeout`, `Invalid`, `Unsupported`, `Transport`, `MissingApiKey`,
-    `Backend`, `BadResponse`.
+    else. Keys are read at call time. Builders `with_model`,
+    `with_timeout`, `with_api_key`, `with_retry`, `with_cost`; getters
+    `model`, `timeout`, `capabilities`. One-line `noul` / `choice` /
+    `score` returning `NoulAnswer` / `ChoiceAnswer` / `ScoreAnswer`,
+    `ask(state)` returning an `Ask` batch builder (`noul`, `choice`,
+    `score`, `question`, `send`), and `evaluate` / `evaluate_request`.
+  - Requests and answers: `Question` (`noul`, `noul_with_criteria`,
+    `choice`, `choice_with_criteria`, `score`; accessors `kind`,
+    `instructions`, `options`, `choice_criteria`, `noul_criteria`,
+    `levels`), `QuestionKind` (`all`, `as_str`), `Request` (`new`,
+    `question`, `get`), `Answer` (`kind`, `confidence`, `as_noul`,
+    `as_choice`, `as_score`), `NoulAnswer`, `ChoiceAnswer` (probabilities
+    in option order), `ScoreAnswer`, `DecisionUsage`, and `Evaluation`
+    (`new`, `with_answer`, `with_cost_usd`; `model`, `usage`, `cost_usd`,
+    `answers` in request order, `get`, `noul`, `p_true`, `choice`,
+    `score`), plus `distribution_confidence`.
+  - `DecisionBackend` trait with `Capabilities` (`new`,
+    `with_max_choice_options`, `with_max_score_levels`, `with_batching`,
+    `with_local`, `with_token_limits`, `supports`); `SystemOneBackend`
+    (`new`, `typesafe`, `opencode_zen`, `with_api_key`, `with_api_key_env`,
+    `with_base_url`, `with_retry`, `with_capabilities`, `endpoint_url`;
+    lenient parsing, 429/529 and transport errors retried with
+    `RetryConfig` backoff, server `retry-after` honoured) and `MockBackend`
+    (`new`, `neutral`, `from_fn`, `push`, `push_error`,
+    `with_capabilities`, `requests`, `request_count`). Requests are
+    validated against the backend's limits before sending; an unsupported
+    question type is an error, never emulated. Every backend's answers are
+    validated (kind; finite probabilities and confidences in `[0, 1]`; a
+    probability for every Choice option and every Score level, summing to
+    1 within 0.02; choices among the options); answers nobody asked for
+    are dropped.
+  - `DecisionError` (`Clone`, `#[non_exhaustive]`, matched with
+    `matches!`): `Http`, `RateLimited`, `Timeout`, `Invalid`,
+    `Unsupported`, `Transport { message, source }`, `MissingApiKey`,
+    `Backend { message, source }`, `BadResponse`; constructors `http`,
+    `rate_limited`, `transport`, `transport_with_source`, `backend`,
+    `backend_with_source`; `is_retryable`, `retry_after`.
   - Confidence is the backend's when reported, otherwise TypeSafe's
     `(n * p_max - 1) / (n - 1)` (`distribution_confidence`).
   - Pricing: `prices.json` lists `typesafe/jev-1.13.0` ($0.042 per million
     input tokens, output free). `jev()` evaluations are priced by the model
     id the API reports, only on TypeSafe's host; aliases, unlisted versions,
-    gateways and `from_backend` are unpriced, `local()` is $0. The price
-    audit records the entry as absent from models.dev (with a test that
-    counts it). With the feature on, `typesafe` override entries are no
-    longer reported as inert.
+    gateways and `from_backend` are unpriced, `local()` is $0; a response
+    that reports no usage is unpriced. An unpriced handle keeps a cost the
+    backend reports itself. The price audit records the entry as absent
+    from models.dev (with a test that counts it). With the feature on,
+    `typesafe` override entries are no longer reported as inert.
 - **`Agent::with_decision_model(model)`** — advisory features only, which
   never block, and which need skills or 40+ tools (otherwise nothing is
   sent): a skill hint and a tool hint, each at most one note appended to the
-  request's latest user turn — never the system prompt, never stored. One
-  decision request per user message (memoized across its tool-calling
+  request's latest user message — never the system prompt, never stored.
+  One decision request per user message (memoized across its tool-calling
   turns), 2 s limit; any failure warns and adds nothing.
-  `with_decision_advisory(Advisory)` tunes thresholds.
+  `with_decision_advisory(Advisory)` tunes it: `Advisory::new` and
+  `with_skill_hint`, `with_skill_need_threshold`,
+  `with_skill_confidence_threshold`, `with_tool_hint`,
+  `with_tool_hint_min_tools`, `with_max_tool_hints`,
+  `with_tool_hint_min_probability`, `with_timeout`.
 - **`Agent::with_tool_gate(ToolGate::new(model))`** — an explicit, blocking
   opt-in: a `ToolMiddleware` that denies calls a decision model judges
   destructive and not requested by the user, judged against the user's
   request with the preceding exchange for short confirmations. Runs after
   every other middleware and **fails closed** (errors, timeouts, malformed
-  answers, arguments too large to read). Covers only its own agent;
-  `SubAgentTool::with_tool_gate` gates a sub-agent. Defence in depth, not a
-  security boundary. `SubAgentTool` also mirrors `with_decision_model`.
-- **`SessionStats::decision`** (`DecisionStats`: requests, failures,
-  timeouts, usage, cost) — decision-model spend of a run, sub-agents
-  included; part of `total_cost_usd()`. Omitted from the wire when empty.
-- **Hooks for policy engines** (no feature needed; nothing existing changes
-  shape):
+  answers, arguments too large to read, no user request). `ToolGate`
+  builders: `with_destructive_threshold`, `with_requested_threshold`,
+  `with_destructive_question`, `with_requested_question`, `with_check`,
+  `with_timeout`. Covers only its own agent. Defence in depth, not a
+  security boundary. `SubAgentTool` mirrors `with_decision_model`,
+  `with_decision_advisory` and `with_tool_gate`.
+- **`SessionStats::decision`** (`DecisionStats`: `requests`, `failures`,
+  `timeouts`, `usage`, `cost_usd`, `unpriced`; methods `is_empty`,
+  `is_unpriced`, `merge`) — decision-model spend of a run, including async
+  input filters and sub-agents; part of `total_cost_usd()`. Omitted from the
+  wire when empty.
+- **Hooks for policy engines** (no feature needed). `ToolCallRequest` and
+  `SessionStats` gain fields, but both are `#[non_exhaustive]`, so this is
+  not breaking; `AgentLoopConfig` gains no field.
   - `ToolCallRequest::messages`, `ToolCallRequest::run_prompts` (the user
     messages this run was given, which compaction cannot remove),
     `latest_user_text()` and `user_request()` — middleware can see the
     conversation. `user_request()` never looks back past a compaction
-    boundary; it falls back to the run's prompts, then `None`. It includes
-    the preceding assistant text and earlier request only for a short reply
-    to an assistant question. Loop-injected user-role messages are skipped
-    using the exported markers `context::SUMMARY_PREFIX`,
-    `context::COMPACTION_MARKER`, `llm_compaction::SUMMARY_MARKER`,
-    `agent_loop::AGENT_STOPPED_PREFIX`, `agent_loop::LOOP_ABORT_PREFIX` and
-    `agent_loop::LOOP_NUDGE_PREFIX` (the first two and the last are newly
-    public).
-  - `AsyncInputFilter` and `Agent::with_async_input_filter` — input filters
-    that await, in the same ordered list as sync filters; a panic is
-    contained and rejects. `InputFilter` gains a provided `as_async()`
-    (default `None`); `AsyncFilter::new` puts an async filter in
-    `AgentLoopConfig::input_filters`.
+    boundary or past the latest user message (even an image-only one); it
+    falls back to the run's prompts, then `None`. It includes the preceding
+    assistant text and earlier request only for a short reply to an
+    assistant question.
+  - `is_loop_injected(text)` (crate root) — whether a user-role text was
+    written by the loop or by compaction. It recognises
+    `llm_compaction::SUMMARY_MARKER`, `agent_loop::AGENT_STOPPED_PREFIX`,
+    `agent_loop::LOOP_ABORT_PREFIX` (all already public), and the
+    crate-private level-2 summary prefix, level-3 compaction marker and
+    loop-detection nudge.
+  - `AsyncInputFilter` (`filter`) and `Agent::with_async_input_filter` —
+    input filters that await, in the same ordered list as sync filters; a
+    panic is contained and rejects. `InputFilter` gains a provided
+    `as_async()` (default `None`); `AsyncFilter::new` puts an async filter
+    in `AgentLoopConfig::input_filters`.
   - `TurnHook` and `Agent::with_turn_hook` — an async hook before every LLM
     request that may append one transient note to the request's latest user
-    turn. Raw loops wrap their provider in `provider::TurnHookProvider`;
-    `TurnContext::new` / `with_run_prompts` for tests; `TurnContext` carries
-    `run_prompts` and the same `user_request()`; `AgentLoopConfig` gains no
-    field.
+    message. Raw loops wrap their provider with `provider::TurnHookProvider::new`.
+    `TurnContext` carries `run_prompts`; `TurnContext::new` /
+    `with_run_prompts` for tests; `TurnContext::latest_user_text` and
+    `user_request` as on `ToolCallRequest`.
 
 ## 0.20.0
 

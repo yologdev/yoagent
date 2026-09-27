@@ -2098,12 +2098,14 @@ impl<'a> TurnContext<'a> {
 /// that returns `None` leaves the request byte-for-byte unchanged. Notes from
 /// several hooks are joined in installation order.
 ///
-/// **Prompt caching.** The system prompt and every earlier message stay
-/// byte-identical, so the provider's cached prefix survives. The note sits
-/// at the tail; on the next user prompt the previous turn is sent without
-/// its note, so at most that last exchange is re-read. Keep the note stable
-/// within one request (derive it from the user's request, not from every
-/// tool result) so its tool-calling turns cache too.
+/// **Prompt caching.** The note is on the latest user message; everything
+/// before that message is unchanged, so the provider's cached prefix up to
+/// it survives. (During tool turns, assistant and tool-result messages
+/// follow the note.) On the next user prompt the previous user message is
+/// sent without its note, so that last exchange is re-processed — a cache
+/// miss from there. Keep the note stable within one request (derive it from
+/// the user's request, not from every tool result) so its tool-calling
+/// turns cache too.
 ///
 /// Install via [`Agent::with_turn_hook`](crate::Agent::with_turn_hook), or
 /// for a raw loop wrap the provider in

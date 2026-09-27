@@ -539,8 +539,9 @@ impl Agent {
     /// [`with_decision_advisory`](Self::with_decision_advisory); block
     /// risky tool calls with [`with_tool_gate`](Self::with_tool_gate).
     ///
-    /// Hosted decision models see the user's request (and, for a short reply,
-    /// the assistant text before it) and the skill and tool descriptions.
+    /// Hosted decision models see the user's request (and, for a short reply
+    /// to an assistant question, that assistant text and the user's earlier
+    /// request) and the skill and tool descriptions.
     #[cfg(feature = "decision")]
     #[cfg_attr(docsrs, doc(cfg(feature = "decision")))]
     pub fn with_decision_model(self, model: crate::decision::DecisionModel) -> Self {

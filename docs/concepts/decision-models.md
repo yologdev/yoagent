@@ -61,6 +61,10 @@ let jev = DecisionModel::local("http://localhost:8000");         // self-hosted 
 Everything else has a default and a builder: `with_model("jev-1.13.0")` (pin
 a version), `with_timeout(..)` (default 30 s, retries included),
 `with_api_key(..)`, `with_retry(RetryConfig)`, `with_cost(Some(CostConfig))`.
+`with_api_key` and `with_retry` apply to the presets; on a `from_backend`
+model the backend owns its keys and retries, so they are ignored with a
+warning. Inside an agent, the advisory's (2 s) and the gate's (5 s) own
+timeouts replace the model's `with_timeout` for their requests.
 
 ## Asking
 
@@ -88,9 +92,10 @@ let eval = jev
 eval.p_true("urgent");           // Option<f64>
 eval.choice("team");             // Option<&ChoiceAnswer>; probabilities() in option order
 eval.score("mood");              // Option<&ScoreAnswer>
-eval.model;                      // "jev-1.13.0" — the version that answered
-eval.usage;                      // input/output tokens
-eval.cost_usd;                   // Option<f64>: None = unpriced, never a guessed 0
+eval.model();                    // "jev-1.13.0" — the version that answered
+eval.usage();                    // input/output tokens
+eval.cost_usd();                 // Option<f64>: None = unpriced, never a guessed 0
+eval.answers();                  // (id, &Answer) in request order
 ```
 
 State and instructions may be JSON: `jev.ask(json!({"resume": ..}))`, and
@@ -118,17 +123,26 @@ estimate). A question type the backend does not support is an error
 
 **Answers are validated too, for every backend:** each question must have an
 answer of its own kind; every probability and confidence must be finite and in
-`[0, 1]`; a Choice's `choice` and probability keys must be among its options;
-a Score needs exactly one probability and one legend entry per level.
-Anything else is `BadResponse`.
+`[0, 1]`; a Choice needs a probability for **every** option (TypeSafe sends
+exact zeros, e.g. `"sales": 0.0`), its `choice` must be one of them, and a
+Choice's or Score's probabilities must sum to 1 within 0.02 (room for servers
+that round); a Score needs exactly one probability and one legend entry per
+level, and a score within `0..=levels-1`. Anything else is `BadResponse`.
+Answers nobody asked for are dropped, and the rest are kept in request order.
+In a SystemOne response, `null` for an optional or derivable field
+(`confidence`, `choice`, `score`, `legend`) means "compute it"; `null` for a
+required one (`noul`, a probability) is rejected.
 
-`DecisionError` (`Clone`, `#[non_exhaustive]`): `Http { status, body }`,
-`RateLimited { status, retry_after }`, `Timeout`, `Invalid` (client-side, or
-the server's 422 with the field it names), `Unsupported`, `Transport`,
-`MissingApiKey` (names the variable, never a value), `Backend` (a custom
-backend's own failure), `BadResponse`. 429 and 529 are retried with the
-crate's `RetryConfig` backoff, and a server `retry-after` wins over the
-backoff (capped at `max_delay_ms`).
+`DecisionError` (`Clone`, `#[non_exhaustive]`, no `PartialEq` — match with
+`matches!`): `Http { status, body }`, `RateLimited { status, retry_after }`,
+`Timeout`, `Invalid` (client-side, or the server's 422 with the field it
+names), `Unsupported`, `Transport { message, source }`, `MissingApiKey`
+(names the variable, never a value), `Backend { message, source }` (a custom
+backend's own failure; build it with `DecisionError::backend(..)` or
+`backend_with_source(..)`), `BadResponse` (including a success whose body
+could not be read — not retried, since it was already processed). 429, 529
+and transport errors are retried with the crate's `RetryConfig` backoff, and a
+server `retry-after` wins over the backoff (capped at `max_delay_ms`).
 
 ### Backends
 
@@ -149,7 +163,14 @@ pub trait DecisionBackend: Send + Sync {
   `neutral`) that records every request. Use it in tests.
 - Your own — wrap it with `DecisionModel::from_backend(backend, "model-id")`.
   `Question` exposes `kind()`, `instructions()`, `noul_criteria()`,
-  `choice_criteria()` and `levels()` for translating requests.
+  `choice_criteria()` and `levels()` for translating requests. Build results
+  with `Evaluation::new(model, usage).with_answer(..)`.
+
+**Cost.** A handle with its own pricing (a preset, or `with_cost`) computes
+the cost from the usage the backend reports, replacing any cost the backend
+set; an unpriced handle (`from_backend` without `with_cost`) keeps the cost
+the backend set with `Evaluation::with_cost_usd`. A response that reports no
+usage at all is unpriced (`None`), never $0.
 
 `Capabilities::local` means *self-hosted: the state does not go to a third
 party*. Only `DecisionModel::local(url)` sets it for the SystemOne backend. A
@@ -167,7 +188,13 @@ let agent = Agent::from_config(ModelConfig::claude_sonnet_5())
 ```
 
 **This needs skills or many tools.** With no skills and fewer than 40 tools it
-does nothing and sends nothing (a one-time `debug!` says so).
+does nothing and sends nothing (a one-time `debug!` says so). It also adds
+nothing when the backend cannot answer Choice (and, for the skill hint, Noul)
+questions; when there are as many skills as the backend's Choice limit (255
+for SystemOne, one option being reserved for "none" — a one-time `warn!`
+says so); when there are more tools than that limit; and when there is no
+user request to judge (see below). If a skill is literally named `none`, the
+"none" option is called `no_skill` instead.
 
 It enables **advisory features only**. They add at most one note to the
 request; they can never block, remove a tool, or change what runs.
@@ -175,9 +202,12 @@ request; they can never block, remove a tool, or change what runs.
 - **Skill hint** (when the agent has skills): one Choice over the skills plus
   a "none" option, and a Noul — *"Would a careful expert handling `request`
   consult a specific documented procedure or set of commands, rather than
-  answering from general understanding?"* (the gate question from TypeSafe's
-  skill-suggestion cookbook). When the Noul is at least **0.3**, the choice is
-  not "none", and its confidence is at least **0.5**, the model sees:
+  answering from general understanding?"* — adapted from one of the three
+  gate questions in TypeSafe's skill-suggestion cookbook, where **0.3** is the
+  threshold on the *mean* of the three; here it applies to this one question.
+  The **0.5** minimum confidence on the Choice is yoagent's own choice. When
+  the Noul is at least 0.3, the choice is not "none", and its confidence is at
+  least 0.5, the model sees:
 
   > Relevant to the current request: pdf-fill. Ignore this if it does not fit what the user actually asked for.
 
@@ -189,13 +219,15 @@ request; they can never block, remove a tool, or change what runs.
   Every tool is still offered to the model — this is a hint, not a filter.
 
 **Where the note goes.** It is appended as a text block to the outgoing
-request's **latest user turn** — never to the system prompt, and never stored
-in history. The system prompt and every earlier message stay byte-identical,
-so the provider's cached prefix survives. On the next user prompt the
-previous turn is sent without its note, so at most that last exchange is
-re-read from cache.
+request's **latest user message** — never to the system prompt, and never
+stored in history. Everything before that message is unchanged, so the
+provider's cached prefix up to it survives. (During tool turns the assistant
+and tool-result messages follow the note.) On the next user prompt the
+previous user message is sent without its note, so that last exchange is
+**re-processed** — a cache miss from that message on, not a cache hit.
 
-Both questions go out in **one decision request**, whose state is the user's
+Up to three questions — the skill Choice, the "needs a skill" Noul, and the
+tool Choice — go out in **one decision request**, whose state is the user's
 request (below). The result is memoized on it, so the tool-calling turns of
 one request send nothing more and see the same note; a new user message asks
 again. The request has a **2 s** limit; on any error or timeout the agent logs
@@ -244,12 +276,18 @@ result ("Tool gate: this call looks destructive or irreversible (p=0.91) and
 not clearly what the user asked for (p=0.22). Ask the user to confirm before
 retrying."), and the loop continues.
 
-**Checked against live Jev (`jev-1.13.0`, 2026-09-27).** `rm -rf` or
+The destructive question carries criteria: *true* — "The call removes or
+replaces existing data, or changes something outside the conversation that
+cannot easily be undone"; *false* — "The call only reads, lists or searches,
+or creates something new without replacing anything".
+
+**Checked by hand against live Jev (`jev-1.13.0`, 2026-09-27)** — a manual
+check, not a committed test. `rm -rf` or
 `git push --force` that the user did not ask for scored destructive 0.93–0.99
 with requested 0.02–0.07, and was denied. The same kind of call when asked for
 (requested 0.99), and a read (destructive 0.02), were allowed. Jev also scores
-*creating a new file* as destructive (0.82), so a new-file write the user did
-not ask for is denied. That is the conservative side; if it gets in your way,
+*creating a new file* as destructive (0.82) despite the "creates something new"
+criterion, so a new-file write the user did not ask for is denied. That is the conservative side; if it gets in your way,
 raise the threshold with `ToolGate::with_destructive_threshold`. Thresholds are
 per model: re-check them if you pin a different Jev version or use another
 backend.
@@ -261,16 +299,19 @@ backend.
    `[Summary]` turn). Compaction keeps the session's head, which may hold an
    older, unrelated request, so nothing before a boundary is trusted.
    Loop-injected user-role messages (limit notes, the loop-detection nudge)
-   are skipped.
+   are skipped (`yoagent::is_loop_injected` is the predicate). The search
+   stops at that message **even when it has no text** (an image-only
+   prompt): an earlier request is never promoted in its place — step 2
+   applies instead.
    - Only when that message is **short** (under 40 characters) **and** the
      assistant text before it **ends with a question** — fenced code and
      inline code ignored, so Rust's `?`, a regex or a URL query do not count —
      are that assistant text and the user's earlier request included,
      labelled. A confirmation such as "yes, go ahead" then carries what it
      confirms: a call denied once can be allowed after the user confirms it.
-2. Otherwise the run's own prompts (`ToolCallRequest::run_prompts`: the
-   messages this run was given, steering and follow-ups included), which
-   compaction cannot remove.
+2. Otherwise the text of the run's own prompts (`ToolCallRequest::run_prompts`:
+   the messages this run was given, steering and follow-ups included), which
+   compaction cannot remove; several are labelled `User:`.
 3. Otherwise there is no request to judge against, and the call is denied
    with a reason asking the user to restate it.
 
@@ -280,9 +321,14 @@ string over 2,000 characters keeps its head and its tail around an explicit
 is visible. If the arguments are still over 12,000 characters, the call is
 denied without asking.
 
-**It fails closed.** A decision-model error, a timeout (**5 s**), a missing
-or malformed answer, or a non-finite probability denies the call, and the
-reason says so.
+**What denies.** A call is denied — with a reason the model sees — when:
+
+- it looks destructive and is not clearly requested (the thresholds above);
+- a custom check (`with_check`) reaches its threshold;
+- its arguments are over the size cap after shortening;
+- there is no user request to judge against;
+- the decision model errors, times out (**5 s**), or answers with a missing,
+  malformed, non-finite or out-of-range value (**fails closed**).
 
 **Scope.**
 
@@ -326,10 +372,18 @@ or a check id of `destructive` / `requested` panics at setup.
 Every decision request made during a run — advisory and gate, sub-agents
 included — is counted in `SessionStats::decision` (`requests`, `failures`,
 `timeouts`, `usage`, `cost_usd`), reported on `AgentEvent::AgentEnd`. Its cost
-is part of `SessionStats::total_cost_usd()` and `Agent::total_cost_usd()`,
+is part of `SessionStats::total_cost_usd()` and `Agent::total_cost_usd()`
+(sub-agents' decision spend is in this bucket, not in `sub_agents`),
 with the crate's rule: unpriced decision spend (e.g. `from_backend` without
 `with_cost`) makes the total unknown (`None`), never silently low. Decision
 tokens are not added to `total_usage()`, which counts LLM tokens.
+
+Decision spend in an `AsyncInputFilter` counts too, including when the
+filter rejects the prompt. A request that timed out, or a non-batching
+request that failed partway, may still have been billed: the questions a
+non-batching backend already answered are recorded, but a timed-out
+request's usage is unknown and is not counted. `DecisionStats::unpriced`
+counts successful evaluations whose cost is unknown.
 
 ## The hooks underneath
 
@@ -337,7 +391,8 @@ The integrations use three general hooks, available without the feature to
 any policy engine:
 
 - `ToolCallRequest::messages`, `run_prompts`, `latest_user_text()` and
-  `user_request()` — middleware can see the conversation, not just the call.
+  `user_request()` — middleware can see the conversation, not just the call;
+  `yoagent::is_loop_injected` tells the loop's own user-role messages apart.
 - `AsyncInputFilter` (`Agent::with_async_input_filter`) — input filters that
   await. You own the timeout; a panic is contained and rejects.
 - `TurnHook` (`Agent::with_turn_hook`) — an async hook before every LLM

@@ -113,11 +113,13 @@ impl TurnHook for Reminder {
 let agent = agent.with_turn_hook(Reminder);
 ```
 
-The system prompt and every earlier message stay byte-identical, so the
-provider's cached prefix survives; only the tail changes, and on the next
-user prompt the previous turn is sent without its note, so at most that last
-exchange is re-read. Keep a note stable within one request (derive it from
-the user's request, and memoize) so its tool-calling turns cache too. Hooks
+The note is on the latest user message; everything before that message is
+unchanged, so the provider's cached prefix up to it survives (during tool
+turns, assistant and tool-result messages follow the note). On the next user
+prompt the previous user message is sent without its note, so that last
+exchange is **re-processed** — a cache miss from there, not a cache hit.
+Keep a note stable within one request (derive it from the user's request,
+and memoize) so its tool-calling turns cache too. Hooks
 run once per provider call — a retried request runs them again. A panicking
 hook is contained. `TurnContext::new(..)` builds a context to unit-test a
 hook; `latest_user_text()` and `user_request()` skip the user-role messages

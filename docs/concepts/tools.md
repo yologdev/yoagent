@@ -537,8 +537,13 @@ serialize inside your middleware (e.g. a `tokio::sync::Mutex`) or switch to
 Sub-agents gate their own tool calls the same way via
 `SubAgentTool::with_tool_middleware`.
 
-Middleware can also see the conversation: `call.messages` is the history so
-far (including the assistant message carrying the call), and
-`call.latest_user_text()` returns the most recent user message — enough for
-policies such as "was this destructive call actually requested?". The
-[decision-model tool gate](decision-models.md#blocking-with_tool_gate) is one.
+Middleware can also see the conversation: `call.messages` is the loop's
+history (before `transform_context`, including the assistant message carrying
+the call), and `call.run_prompts` holds the user messages this run was given,
+which compaction cannot remove. For "what did the user ask?", use
+`call.user_request()`: it skips loop-injected messages
+(`yoagent::is_loop_injected`), never looks back past a compaction boundary,
+falls back to the run's prompts, and returns `None` when nothing says what the
+user wants — enough for policies such as "was this destructive call actually
+requested?". The [decision-model tool gate](decision-models.md#blocking-with_tool_gate)
+is one.
