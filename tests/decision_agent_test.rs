@@ -14,6 +14,10 @@ use yoagent::provider::{
 use yoagent::skills::SkillSet;
 use yoagent::*;
 
+/// The level-3 compaction marker (crate-private; `is_loop_injected` knows it).
+const COMPACTION_MARKER_TEXT: &str =
+    "[Context compacted: earlier messages removed to fit the context window]";
+
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
@@ -294,7 +298,7 @@ impl DecisionBackend for Slow {
     }
     async fn evaluate(&self, _request: &Request) -> Result<Evaluation, DecisionError> {
         tokio::time::sleep(Duration::from_secs(30)).await;
-        Err(DecisionError::Transport("unreachable".into()))
+        Err(DecisionError::transport("unreachable"))
     }
 }
 
@@ -860,7 +864,7 @@ async fn a_loop_nudge_does_not_become_the_user_request() {
     let nudged = agent.messages().iter().any(|m| {
         serde_json::to_string(m)
             .unwrap()
-            .contains(yoagent::agent_loop::LOOP_NUDGE_PREFIX)
+            .contains("[You have called ")
     });
     assert!(nudged, "loop detection nudged");
     let reqs = mock.requests();
@@ -1131,7 +1135,7 @@ async fn compaction_does_not_make_the_first_prompt_the_request() {
     let llm_summary = "[Context compacted — summary of earlier conversation]\n\nThe user \
                        asked to list files; the assistant began.";
     for marker in [
-        yoagent::context::COMPACTION_MARKER,
+        COMPACTION_MARKER_TEXT,
         yoagent::llm_compaction::SUMMARY_MARKER,
         llm_summary,
     ] {
@@ -1161,7 +1165,7 @@ async fn gate_denies_when_no_user_request_survives() {
     let mut agent = Agent::from_provider(calls_rm(), ModelConfig::mock())
         .with_messages(vec![
             AgentMessage::Llm(Message::user("delete every file in /srv/prod")),
-            AgentMessage::Llm(Message::user(yoagent::context::COMPACTION_MARKER)),
+            AgentMessage::Llm(Message::user(COMPACTION_MARKER_TEXT)),
         ])
         .with_tools(tools)
         .with_tool_gate(ToolGate::new(model(&mock)));
@@ -1180,7 +1184,7 @@ async fn gate_denies_when_no_user_request_survives() {
     let mut agent = Agent::from_provider(calls_rm(), ModelConfig::mock())
         .with_messages(vec![
             AgentMessage::Llm(Message::user("delete every file in /srv/prod")),
-            AgentMessage::Llm(Message::user(yoagent::context::COMPACTION_MARKER)),
+            AgentMessage::Llm(Message::user(COMPACTION_MARKER_TEXT)),
             AgentMessage::Llm(Message::user("list /tmp")),
         ])
         .with_tools(tools)
@@ -1190,4 +1194,399 @@ async fn gate_denies_when_no_user_request_survives() {
     agent.finish().await;
     assert_eq!(ran.lock().unwrap().len(), 1);
     assert_eq!(mock.requests()[0].state["user_request"], "list /tmp");
+}
+
+// ---------------------------------------------------------------------------
+// Round 4: consent, merging, filters, spend
+// ---------------------------------------------------------------------------
+
+fn image_only() -> AgentMessage {
+    AgentMessage::Llm(Message::User {
+        content: vec![Content::Image {
+            data: "iVBORw0KGgo=".into(),
+            mime_type: "image/png".into(),
+        }],
+        timestamp: 0,
+    })
+}
+
+/// Requested only when the request names the deletion of /tmp/scratch.txt.
+fn names_the_deletion() -> MockBackend {
+    MockBackend::from_fn(|req| {
+        let ur = req.state["user_request"].as_str().unwrap_or_default();
+        Ok(Evaluation::new("m", DecisionUsage::default())
+            .with_answer("destructive", NoulAnswer::new(0.9))
+            .with_answer(
+                "requested",
+                NoulAnswer::new(if ur.contains("delete /tmp/scratch.txt") {
+                    0.95
+                } else {
+                    0.1
+                }),
+            ))
+    })
+}
+
+async fn run_after_earlier_request(prompt: AgentMessage) -> (Agent, Ran, MockBackend) {
+    let mock = names_the_deletion();
+    let (tools, ran) = make_tools(1);
+    let mut agent = Agent::from_provider(calls_rm(), ModelConfig::mock())
+        .with_messages(vec![
+            AgentMessage::Llm(Message::user("delete /tmp/scratch.txt")),
+            AgentMessage::Llm(Message::assistant(
+                vec![Content::Text {
+                    text: "Done.".into(),
+                }],
+                StopReason::Stop,
+                "mock",
+                "mock",
+                Usage::default(),
+            )),
+        ])
+        .with_tools(tools)
+        .with_tool_gate(ToolGate::new(model(&mock)));
+    let mut rx = agent.prompt_messages(vec![prompt]).await;
+    while rx.recv().await.is_some() {}
+    agent.finish().await;
+    (agent, ran, mock)
+}
+
+#[tokio::test]
+async fn an_image_only_prompt_never_borrows_an_earlier_runs_consent() {
+    let (agent, ran, mock) = run_after_earlier_request(image_only()).await;
+    assert!(ran.lock().unwrap().is_empty(), "denied");
+    let (text, _) = tool_result_text(&agent).unwrap();
+    assert!(text.contains("restate the request"), "{text}");
+    assert_eq!(mock.request_count(), 0, "nothing to judge against");
+
+    // Positive control: the same history with a text prompt that asks for
+    // the deletion is allowed.
+    let (_, ran, _) =
+        run_after_earlier_request(AgentMessage::Llm(Message::user("delete /tmp/scratch.txt")))
+            .await;
+    assert_eq!(ran.lock().unwrap().len(), 1);
+}
+
+/// Answers one question per request (no batching), and smuggles an extra
+/// `destructive` answer into the `requested` response.
+struct Smuggler {
+    destructive: f64,
+    smuggle: bool,
+}
+
+#[async_trait::async_trait]
+impl DecisionBackend for Smuggler {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::new(QuestionKind::all()).with_batching(false)
+    }
+    async fn evaluate(&self, request: &Request) -> Result<Evaluation, DecisionError> {
+        let (id, _) = &request.questions[0];
+        let eval = Evaluation::new("m", DecisionUsage::new(10, 0));
+        Ok(match id.as_str() {
+            "destructive" => eval.with_answer("destructive", NoulAnswer::new(self.destructive)),
+            _ if self.smuggle => eval
+                .with_answer("requested", NoulAnswer::new(0.1))
+                .with_answer("destructive", NoulAnswer::new(-3.0)),
+            _ => eval.with_answer("requested", NoulAnswer::new(0.1)),
+        })
+    }
+}
+
+#[tokio::test]
+async fn extra_answers_cannot_overwrite_validated_ones() {
+    let run_with = |backend: Smuggler| async move {
+        let (tools, ran) = make_tools(1);
+        let agent = Agent::from_provider(calls_rm(), ModelConfig::mock())
+            .with_tools(tools)
+            .with_tool_gate(ToolGate::new(DecisionModel::from_backend(backend, "m")));
+        run(agent, "summarize the README").await;
+        let n = ran.lock().unwrap().len();
+        n
+    };
+    assert_eq!(
+        run_with(Smuggler {
+            destructive: 0.9,
+            smuggle: true
+        })
+        .await,
+        0,
+        "the smuggled -3.0 must not replace the validated 0.9"
+    );
+    // Positive control: an honestly harmless call through the same
+    // non-batching path is allowed.
+    assert_eq!(
+        run_with(Smuggler {
+            destructive: 0.0,
+            smuggle: false
+        })
+        .await,
+        1
+    );
+}
+
+/// An async input filter that consults a decision model.
+struct ModeratedBy(DecisionModel);
+
+#[async_trait::async_trait]
+impl AsyncInputFilter for ModeratedBy {
+    async fn filter(&self, text: &str) -> FilterResult {
+        match self.0.noul(text, "Is this abusive?").await {
+            Ok(a) if a.p_true() >= 0.5 => FilterResult::Reject("abusive".into()),
+            Ok(_) => FilterResult::Pass,
+            Err(_) => FilterResult::Reject("moderation unavailable".into()),
+        }
+    }
+}
+
+#[tokio::test]
+async fn decision_spend_in_async_input_filters_is_counted() {
+    for (p, rejected) in [(0.1, false), (0.9, true)] {
+        let mock = MockBackend::from_fn(move |_| {
+            Ok(Evaluation::new("m", DecisionUsage::new(2_000, 0))
+                .with_answer("q", NoulAnswer::new(p)))
+        });
+        let priced = model(&mock).with_cost(Some(CostConfig::new(1.0, 0.0)));
+        let agent = Agent::from_provider(MockProvider::text("ok"), ModelConfig::mock())
+            .with_async_input_filter(ModeratedBy(priced));
+        let (agent, stats) = run_stats(agent, "hello").await;
+        assert_eq!(agent.messages().is_empty(), rejected);
+        assert_eq!(stats.decision.requests, 1, "rejected={rejected}");
+        let cost = stats.decision.cost_usd.expect("priced");
+        assert!((cost - 0.002).abs() < 1e-12, "{cost}");
+        assert_eq!(agent.total_cost_usd(), Some(cost));
+    }
+    // Positive control: a filter that asks nothing records nothing.
+    let agent = Agent::from_provider(MockProvider::text("ok"), ModelConfig::mock());
+    let (_, stats) = run_stats(agent, "hello").await;
+    assert!(stats.decision.is_empty());
+}
+
+#[tokio::test]
+async fn a_partial_failure_records_the_usage_already_billed() {
+    // Non-batching: `destructive` answers (10 tokens), then `requested` fails.
+    let calls = Arc::new(Mutex::new(0u32));
+    let backend_calls = calls.clone();
+    let mock = MockBackend::from_fn(move |req| {
+        *backend_calls.lock().unwrap() += 1;
+        let (id, _) = &req.questions[0];
+        if id == "destructive" {
+            Ok(Evaluation::new("m", DecisionUsage::new(10, 0))
+                .with_answer("destructive", NoulAnswer::new(0.0)))
+        } else {
+            Err(DecisionError::backend("second question failed"))
+        }
+    })
+    .with_capabilities(Capabilities::new(QuestionKind::all()).with_batching(false));
+    let (tools, ran) = make_tools(1);
+    let agent = Agent::from_provider(calls_rm(), ModelConfig::mock())
+        .with_tools(tools)
+        .with_tool_gate(ToolGate::new(
+            model(&mock).with_cost(Some(CostConfig::new(1.0, 0.0))),
+        ));
+    let (_, stats) = run_stats(agent, "delete /tmp/scratch.txt").await;
+    assert!(ran.lock().unwrap().is_empty(), "fails closed");
+    assert_eq!(*calls.lock().unwrap(), 2);
+    let d = &stats.decision;
+    assert_eq!((d.requests, d.failures), (1, 1), "{d:?}");
+    assert_eq!(d.usage.input, 10, "the answered half was billed");
+    assert!((d.cost_usd.unwrap() - 0.00001).abs() < 1e-15);
+}
+
+#[tokio::test]
+async fn missing_usage_is_unpriced_not_free() {
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    for (with_usage, priced) in [(false, false), (true, true)] {
+        let server = MockServer::start().await;
+        let mut body = json!({
+            "model": "jev-test",
+            "answers": {
+                "destructive": {"type": "noul", "noul": 0.0},
+                "requested": {"type": "noul", "noul": 1.0}
+            }
+        });
+        if with_usage {
+            body["usage"] = json!({"input_tokens": 1_000, "output_tokens": 5});
+        }
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+        let backend = SystemOneBackend::new(server.uri());
+        let gate = ToolGate::new(
+            DecisionModel::from_backend(backend, "jev-test")
+                .with_cost(Some(CostConfig::new(1.0, 0.0))),
+        );
+        let (tools, _) = make_tools(1);
+        let agent = Agent::from_provider(calls_rm(), ModelConfig::mock())
+            .with_tools(tools)
+            .with_tool_gate(gate);
+        let (agent, stats) = run_stats(agent, "delete /tmp/scratch.txt").await;
+        assert_eq!(stats.decision.requests, 1);
+        assert_eq!(stats.decision.is_unpriced(), !priced, "usage={with_usage}");
+        assert_eq!(stats.decision.cost_usd.is_some(), priced);
+        assert_eq!(agent.total_cost_usd().is_some(), priced);
+    }
+}
+
+// --- mutation-found gaps -------------------------------------------------
+
+#[tokio::test]
+async fn nested_sub_agent_decision_spend_reaches_the_parent_once() {
+    let mock = gate_answers(0.0, 1.0);
+    let priced = model(&mock).with_cost(Some(CostConfig::new(1.0, 0.0)));
+    let ran: Ran = Arc::new(Mutex::new(Vec::new()));
+    let sub = SubAgentTool::from_provider("helper", Arc::new(calls_rm()), ModelConfig::mock())
+        .with_tools(vec![Arc::new(Named {
+            name: "rm".into(),
+            ran: ran.clone(),
+        })])
+        .with_tool_gate(ToolGate::new(priced));
+    let parent_provider = MockProvider::new(vec![
+        MockResponse::ToolCalls(vec![MockToolCall {
+            provider_metadata: None,
+            name: "helper".into(),
+            arguments: json!({"task": "tidy up"}),
+        }]),
+        MockResponse::Text("done".into()),
+    ]);
+    let agent = Agent::from_provider(parent_provider, ModelConfig::mock()).with_sub_agent(sub);
+    let (agent, stats) = run_stats(agent, "tidy up").await;
+    assert_eq!(ran.lock().unwrap().len(), 1, "the child's gate allowed");
+    // One gate request (50 input tokens at $1/M), in the decision bucket.
+    assert_eq!(stats.decision.requests, 1, "{:?}", stats.decision);
+    let cost = stats.decision.cost_usd.unwrap();
+    assert!((cost - 0.00005).abs() < 1e-15, "{cost}");
+    // ...and not also in the sub-agent bucket, which is LLM spend only.
+    assert_eq!(stats.sub_agents.runs, 1);
+    assert_eq!(stats.sub_agents.cost_usd, None);
+    assert_eq!(stats.total_cost_usd(), Some(cost));
+    assert_eq!(agent.total_cost_usd(), Some(cost));
+}
+
+#[tokio::test]
+async fn steering_lands_in_the_run_prompts() {
+    let mock = deletion_aware();
+    let (tools, ran) = make_tools(1);
+    let args = json!({"path": "/srv/prod"});
+    let provider = MockProvider::new(vec![
+        rm_call(args.clone()),
+        rm_call(args),
+        MockResponse::Text("done".into()),
+    ]);
+    let head = vec![
+        AgentMessage::Llm(Message::user("what is in /srv?")),
+        AgentMessage::Llm(Message::assistant(
+            vec![Content::Text {
+                text: "Several directories.".into(),
+            }],
+            StopReason::Stop,
+            "mock",
+            "mock",
+            Usage::default(),
+        )),
+    ];
+    let agent = Agent::from_provider(provider, ModelConfig::mock())
+        .with_messages(head)
+        .with_tools(tools)
+        .with_compaction_strategy(HeadMarkerTail(COMPACTION_MARKER_TEXT))
+        .with_tool_gate(ToolGate::new(model(&mock)));
+    // Only the steering message asks for the deletion.
+    agent.steer(AgentMessage::Llm(Message::user(
+        "delete every file in /srv/prod",
+    )));
+    run(agent, "look around /srv/prod").await;
+    let reqs = mock.requests();
+    assert_eq!(reqs.len(), 2);
+    // Second call: compaction dropped both prompts; the run prompts hold
+    // them, labelled.
+    let second = reqs[1].state["user_request"].as_str().unwrap();
+    assert_eq!(
+        second,
+        "User: look around /srv/prod\n\nUser: delete every file in /srv/prod"
+    );
+    assert_eq!(
+        ran.lock().unwrap().len(),
+        2,
+        "requested by the steering message"
+    );
+}
+
+#[tokio::test]
+async fn gate_threshold_edges() {
+    for (requested, allowed) in [(0.69, false), (0.7, true)] {
+        let mock = gate_answers(0.5, requested);
+        let (agent, ran) = gated(&mock);
+        run(agent, "delete /tmp/scratch.txt").await;
+        assert_eq!(
+            ran.lock().unwrap().len() == 1,
+            allowed,
+            "requested={requested}"
+        );
+    }
+    // Just below the destructive threshold is not destructive.
+    let mock = gate_answers(0.4999, 0.0);
+    let (agent, ran) = gated(&mock);
+    run(agent, "look").await;
+    assert_eq!(ran.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_check_below_its_threshold_allows() {
+    let mock = MockBackend::from_fn(|req| {
+        let mut eval = Evaluation::new("m", DecisionUsage::default());
+        for (id, _) in &req.questions {
+            let p = match id.as_str() {
+                "secrets" => 0.49,
+                "requested" => 1.0,
+                _ => 0.0,
+            };
+            eval = eval.with_answer(id.clone(), NoulAnswer::new(p));
+        }
+        Ok(eval)
+    });
+    let (tools, ran) = make_tools(1);
+    let agent = Agent::from_provider(calls_rm(), ModelConfig::mock())
+        .with_tools(tools)
+        .with_tool_gate(ToolGate::new(model(&mock)).with_check(
+            "secrets",
+            "Does `tool_call` read or send credentials?",
+            0.5,
+        ));
+    run(agent, "clean up").await;
+    assert_eq!(ran.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn the_advisory_caches_a_failure_for_the_request() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mock = MockBackend::new().push_error(DecisionError::http(500, "down"));
+    let (tools, _) = make_tools(1);
+    let agent = Agent::from_provider(calls_rm(), ModelConfig::mock())
+        .with_skills(skills(tmp.path()))
+        .with_tools(tools)
+        .with_decision_model(model(&mock));
+    run(agent, "fill in the PDF").await;
+    assert_eq!(mock.request_count(), 1, "two turns, one attempt");
+}
+
+#[tokio::test]
+async fn advisory_filters_uncertain_answers() {
+    // Uniform answers: the skill Choice has zero confidence and every tool
+    // is below the minimum probability.
+    let tmp = tempfile::tempdir().unwrap();
+    let mock = MockBackend::neutral();
+    let (provider, seen) = recording(MockProvider::text("ok"));
+    let (tools, _) = make_tools(45);
+    let agent = Agent::from_provider(provider, ModelConfig::mock())
+        .with_skills(skills(tmp.path()))
+        .with_tools(tools)
+        .with_decision_model(model(&mock));
+    run(agent, "fill in the PDF").await;
+    assert_eq!(mock.request_count(), 1, "asked");
+    assert_eq!(
+        sent(&seen)[0].last_user_text(),
+        "fill in the PDF",
+        "no note"
+    );
 }

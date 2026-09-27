@@ -392,6 +392,25 @@ impl DecisionModel {
         result
     }
 
+    /// The cost of `eval` under this handle's pricing: an unpriced handle
+    /// keeps whatever the backend reported; a priced one computes it from the
+    /// reported usage, and is unpriced when the backend reported none.
+    fn price(&self, eval: &Evaluation) -> Option<f64> {
+        if self.pricing == Pricing::Unpriced {
+            return eval.cost_usd;
+        }
+        if !eval.usage_reported {
+            if !WARNED_NO_USAGE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                tracing::warn!(
+                    model = %eval.model,
+                    "decision backend reported no usage; its evaluations are unpriced"
+                );
+            }
+            return None;
+        }
+        self.cost_usd(&eval.model, &eval.usage)
+    }
+
     async fn evaluate_unrecorded(&self, request: Request) -> Result<Evaluation, DecisionError> {
         let backend = self.backend.get();
         let caps = backend.capabilities();
@@ -406,8 +425,8 @@ impl DecisionModel {
         );
         let work = async {
             if caps.batching || request.questions.len() == 1 {
-                let eval = backend.evaluate(&request).await?;
-                check_complete(&request, &eval)?;
+                let mut eval = backend.evaluate(&request).await?;
+                check_complete(&request, &mut eval)?;
                 Ok(eval)
             } else {
                 let mut merged: Option<Evaluation> = None;
@@ -417,13 +436,38 @@ impl DecisionModel {
                         state: request.state.clone(),
                         questions: vec![(id.clone(), q.clone())],
                     };
-                    let eval = backend.evaluate(&single).await?;
-                    check_complete(&single, &eval)?;
+                    let step = match backend.evaluate(&single).await {
+                        Ok(mut eval) => check_complete(&single, &mut eval).map(|()| eval),
+                        Err(e) => Err(e),
+                    };
+                    let eval = match step {
+                        Ok(eval) => eval,
+                        Err(e) => {
+                            // The questions already answered were billed.
+                            if let Some(done) = &merged {
+                                let cost = self.price(done);
+                                crate::agent_loop::record_decision(|stats| {
+                                    stats.record_billed(
+                                        done.usage.input_tokens,
+                                        done.usage.output_tokens,
+                                        cost,
+                                    )
+                                });
+                            }
+                            return Err(e);
+                        }
+                    };
                     merged = Some(match merged {
                         None => eval,
                         Some(mut m) => {
                             m.usage.input_tokens += eval.usage.input_tokens;
                             m.usage.output_tokens += eval.usage.output_tokens;
+                            m.usage_reported &= eval.usage_reported;
+                            m.cost_usd = match (m.cost_usd, eval.cost_usd) {
+                                (Some(a), Some(b)) => Some(a + b),
+                                _ => None,
+                            };
+                            // `check_complete` left only the asked-for answer.
                             m.answers.extend(eval.answers);
                             m
                         }
@@ -437,7 +481,7 @@ impl DecisionModel {
             tokio::time::timeout(self.timeout, work.instrument(span.clone())).await
         };
         let mut eval = result.map_err(|_| DecisionError::Timeout(self.timeout))??;
-        eval.cost_usd = self.cost_usd(&eval.model, &eval.usage);
+        eval.cost_usd = self.price(&eval);
         span.record("tokens_in", eval.usage.input_tokens);
         if let Some(c) = eval.cost_usd {
             span.record("cost_usd", c);
@@ -446,15 +490,25 @@ impl DecisionModel {
     }
 }
 
-/// Every question must have a valid answer of its own type. The one check
-/// every backend's output passes through.
-fn check_complete(request: &Request, eval: &Evaluation) -> Result<(), DecisionError> {
+/// Warned once per process that a backend reported no usage.
+static WARNED_NO_USAGE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Every question must have a valid answer of its own type, and nothing
+/// else survives: answers nobody asked for are dropped (so a backend cannot
+/// smuggle one in to overwrite a validated answer when results are merged),
+/// and the rest are put in request order. The one check every backend's
+/// output passes through.
+fn check_complete(request: &Request, eval: &mut Evaluation) -> Result<(), DecisionError> {
+    let mut ordered = Vec::with_capacity(request.questions.len());
     for (id, q) in &request.questions {
-        match eval.get(id) {
-            None => return Err(DecisionError::BadResponse(format!("answers.{id}: missing"))),
-            Some(a) => a.validate(id, q)?,
-        }
+        let Some(at) = eval.answers.iter().position(|(k, _)| k == id) else {
+            return Err(DecisionError::BadResponse(format!("answers.{id}: missing")));
+        };
+        let (key, answer) = eval.answers.swap_remove(at);
+        answer.validate(id, q)?;
+        ordered.push((key, answer));
     }
+    eval.answers = ordered;
     Ok(())
 }
 

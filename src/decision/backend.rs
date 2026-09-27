@@ -50,26 +50,32 @@ impl Capabilities {
         Self::new(QuestionKind::all()).with_token_limits(Some(64_000), Some(32_000))
     }
 
+    /// Most options one Choice may have.
     pub fn with_max_choice_options(mut self, n: usize) -> Self {
         self.max_choice_options = n;
         self
     }
 
+    /// Most levels one Score may have.
     pub fn with_max_score_levels(mut self, n: usize) -> Self {
         self.max_score_levels = n;
         self
     }
 
+    /// Whether one request may carry many questions.
     pub fn with_batching(mut self, batching: bool) -> Self {
         self.batching = batching;
         self
     }
 
+    /// Whether the backend is self-hosted (the state stays with you).
     pub fn with_local(mut self, local: bool) -> Self {
         self.local = local;
         self
     }
 
+    /// The request token limit and the limit on the state plus the longest
+    /// question (`None` = unknown; not checked client-side).
     pub fn with_token_limits(
         mut self,
         request: Option<usize>,
@@ -98,9 +104,18 @@ impl Capabilities {
 /// [`evaluate`](Self::evaluate), and validates every answer afterwards —
 /// present, of the question's type, probabilities and confidences finite and
 /// in `[0, 1]`, choices among the options, one probability per Score level —
-/// so a backend need not repeat either check. It leaves
-/// [`Evaluation::cost_usd`] for the model handle to fill in. Report your own
-/// failures as [`DecisionError::Backend`].
+/// so a backend need not repeat either check. Answers nobody asked for are
+/// dropped.
+///
+/// **Cost.** A handle with its own pricing (a preset, or
+/// [`with_cost`](super::DecisionModel::with_cost)) computes the cost from
+/// the usage you report, replacing any you set; an unpriced handle
+/// (`from_backend` without `with_cost`) keeps the cost you set with
+/// [`Evaluation::with_cost_usd`]. Report usage whenever you know it: a
+/// priced handle treats an evaluation without reported usage as unpriced.
+///
+/// Report your own failures with
+/// [`DecisionError::backend`] / [`backend_with_source`](DecisionError::backend_with_source).
 #[async_trait::async_trait]
 pub trait DecisionBackend: Send + Sync {
     /// What this backend can answer.

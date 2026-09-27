@@ -775,14 +775,14 @@ fn level2_summarize_old_turns(messages: &[AgentMessage], keep_recent: usize) -> 
 
 /// Prefix of the user-role message that replaces a summarized old turn
 /// (level-2 compaction).
-pub const SUMMARY_PREFIX: &str = "[Summary] ";
+pub(crate) const SUMMARY_PREFIX: &str = "[Summary] ";
 
 /// Marker left in place of dropped history.
 ///
 /// The text is constant on purpose. It sits near the front of the message list,
 /// so embedding a message count here would change the bytes of the cached
 /// prefix on every compaction pass — the count goes to the debug log instead.
-pub const COMPACTION_MARKER: &str =
+pub(crate) const COMPACTION_MARKER: &str =
     "[Context compacted: earlier messages removed to fit the context window]";
 
 fn compaction_marker(timestamp: u64) -> AgentMessage {

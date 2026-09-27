@@ -1128,9 +1128,14 @@ pub struct DecisionStats {
     #[serde(default)]
     pub usage: Usage,
     /// Their dollar cost, with the crate's rule: `None` once any evaluation
-    /// that used tokens could not be priced, and when nothing was priced.
+    /// could not be priced, and when nothing was priced.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
+    /// Successful evaluations whose cost is unknown — an unpriced model, or a
+    /// response that reported no usage. Any makes [`cost_usd`](Self::cost_usd)
+    /// `None` for good.
+    #[serde(default)]
+    pub unpriced: u32,
 }
 
 impl DecisionStats {
@@ -1139,21 +1144,27 @@ impl DecisionStats {
         self.requests == 0 && usage_is_zero(&self.usage) && self.cost_usd.is_none()
     }
 
-    /// Whether tokens were spent that cannot be priced.
+    /// Whether some decision spend cannot be priced: an evaluation on an
+    /// unpriced model, one that reported no usage, or tokens without a cost.
     pub fn is_unpriced(&self) -> bool {
-        is_unpriced(&self.usage, self.cost_usd)
+        self.unpriced > 0 || is_unpriced(&self.usage, self.cost_usd)
     }
 
     /// Fold another rollup into this one.
     pub fn merge(&mut self, other: &DecisionStats) {
-        self.cost_usd = combine_cost(&self.usage, self.cost_usd, &other.usage, other.cost_usd);
+        self.cost_usd = if self.unpriced > 0 || other.unpriced > 0 {
+            None
+        } else {
+            combine_cost(&self.usage, self.cost_usd, &other.usage, other.cost_usd)
+        };
         self.usage = add_usage(&self.usage, &other.usage);
         self.requests = self.requests.saturating_add(other.requests);
         self.failures = self.failures.saturating_add(other.failures);
         self.timeouts = self.timeouts.saturating_add(other.timeouts);
+        self.unpriced = self.unpriced.saturating_add(other.unpriced);
     }
 
-    /// One successful evaluation.
+    /// One successful evaluation; `cost_usd: None` counts it as unpriced.
     #[cfg_attr(not(feature = "decision"), allow(dead_code))]
     pub(crate) fn record_success(&mut self, input: u64, output: u64, cost_usd: Option<f64>) {
         self.merge(&DecisionStats {
@@ -1164,6 +1175,24 @@ impl DecisionStats {
                 ..Default::default()
             },
             cost_usd,
+            unpriced: u32::from(cost_usd.is_none()),
+            ..Default::default()
+        });
+    }
+
+    /// Spend already billed by a request that then failed (a non-batching
+    /// backend that answered some questions before one failed). Not a
+    /// request of its own; the failure is recorded separately.
+    #[cfg_attr(not(feature = "decision"), allow(dead_code))]
+    pub(crate) fn record_billed(&mut self, input: u64, output: u64, cost_usd: Option<f64>) {
+        self.merge(&DecisionStats {
+            usage: Usage {
+                input,
+                output,
+                ..Default::default()
+            },
+            cost_usd,
+            unpriced: u32::from(cost_usd.is_none()),
             ..Default::default()
         });
     }
@@ -1231,6 +1260,9 @@ impl SessionStats {
             &self.sub_agents.usage,
             self.sub_agents.cost_usd,
         );
+        if self.decision.is_unpriced() {
+            return None;
+        }
         let llm_usage = add_usage(&self.usage, &self.sub_agents.usage);
         combine_cost(
             &llm_usage,
@@ -1656,6 +1688,7 @@ pub trait InputFilter: Send + Sync {
 /// [`AgentEvent::InputRejected`] and the agent keeps its state.
 #[async_trait::async_trait]
 pub trait AsyncInputFilter: Send + Sync {
+    /// Judge the prompt's text (every user text block, joined by newlines).
     async fn filter(&self, text: &str) -> FilterResult;
 }
 
@@ -1667,6 +1700,7 @@ pub trait AsyncInputFilter: Send + Sync {
 pub struct AsyncFilter<F>(F);
 
 impl<F: AsyncInputFilter> AsyncFilter<F> {
+    /// Wrap `filter` for an [`InputFilter`] list.
     pub fn new(filter: F) -> Self {
         Self(filter)
     }
@@ -1691,9 +1725,13 @@ impl<F: AsyncInputFilter> InputFilter for AsyncFilter<F> {
 
 /// Whether a user-role text was written by the loop or by compaction rather
 /// than by the user: compaction summaries and markers, execution-limit and
-/// loop-abort notes, and the loop-detection nudge. The one list, built from
-/// the constants where each message is written, so it cannot drift.
-pub(crate) fn is_loop_injected(text: &str) -> bool {
+/// loop-abort notes, and the loop-detection nudge.
+///
+/// Use it to skip those messages when reading "what the user said" out of
+/// [`ToolCallRequest::messages`] or [`TurnContext::messages`]. The one list,
+/// built from the constants where each message is written, so it cannot
+/// drift; [`ToolCallRequest::user_request`] uses it.
+pub fn is_loop_injected(text: &str) -> bool {
     [
         crate::context::SUMMARY_PREFIX,
         crate::context::COMPACTION_MARKER,
@@ -1721,17 +1759,23 @@ fn text_blocks(content: &[Content]) -> Option<String> {
 /// messages without text, and for loop-injected ones.
 fn real_user_text(m: &Message) -> Option<String> {
     match m {
-        Message::User { content, .. } => {
-            let first = content.iter().find_map(|c| match c {
+        Message::User { content, .. } if is_real_user(m) => text_blocks(content),
+        _ => None,
+    }
+}
+
+/// Whether `m` is a message the user wrote — not loop-injected — with or
+/// without text (an image-only prompt counts).
+fn is_real_user(m: &Message) -> bool {
+    match m {
+        Message::User { content, .. } => !content
+            .iter()
+            .find_map(|c| match c {
                 Content::Text { text } => Some(text.as_str()),
                 _ => None,
-            })?;
-            if is_loop_injected(first) {
-                return None;
-            }
-            text_blocks(content)
-        }
-        _ => None,
+            })
+            .is_some_and(is_loop_injected),
+        _ => false,
     }
 }
 
@@ -1783,7 +1827,8 @@ pub(crate) fn ends_with_question(text: &str) -> bool {
 }
 
 /// The most recent message the user wrote, not looking back past a
-/// compaction boundary.
+/// compaction boundary — and not past that message either: if it has no
+/// text (an image-only prompt), the answer is `None`.
 pub(crate) fn latest_user_text_of(messages: &[&Message]) -> Option<String> {
     let start = messages
         .iter()
@@ -1792,7 +1837,8 @@ pub(crate) fn latest_user_text_of(messages: &[&Message]) -> Option<String> {
     messages[start..]
         .iter()
         .rev()
-        .find_map(|m| real_user_text(m))
+        .find(|m| is_real_user(m))
+        .and_then(|m| real_user_text(m))
 }
 
 /// What the user is asking for, as a decision policy should judge it.
@@ -1800,13 +1846,16 @@ pub(crate) fn latest_user_text_of(messages: &[&Message]) -> Option<String> {
 /// 1. The latest message the user wrote **after the most recent compaction
 ///    boundary** — nothing before a boundary is trusted, because
 ///    compaction keeps the session's head, which may hold an unrelated,
-///    older request. Loop-injected messages are skipped.
+///    older request. Loop-injected messages are skipped. The search stops at
+///    that message even when it has no text (an image-only prompt): an
+///    earlier message is never promoted in its place.
 ///    - When that message is short (under 40 characters) **and** the
 ///      assistant text before it ends with a question, the assistant text
 ///      and the user's earlier request (both after the boundary) are
 ///      included, labelled, so "yes, go ahead" carries what it confirms.
-/// 2. Otherwise the run's own prompts (`run_prompts`: the messages this run
-///    was given, which compaction cannot remove).
+/// 2. When there is no such message, or it has no text: the text of the
+///    run's own prompts (`run_prompts`: the messages this run was given,
+///    which compaction cannot remove).
 /// 3. Otherwise `None`.
 pub(crate) fn user_request_of(messages: &[&Message], run_prompts: &[Message]) -> Option<String> {
     let start = messages
@@ -1815,10 +1864,12 @@ pub(crate) fn user_request_of(messages: &[&Message], run_prompts: &[Message]) ->
         .map_or(0, |b| b + 1);
     let window = &messages[start..];
 
-    let Some(at) = window.iter().rposition(|m| real_user_text(m).is_some()) else {
+    let Some(at) = window.iter().rposition(|m| is_real_user(m)) else {
         return run_prompts_text(run_prompts);
     };
-    let latest = real_user_text(window[at])?;
+    let Some(latest) = real_user_text(window[at]) else {
+        return run_prompts_text(run_prompts);
+    };
     if latest.chars().count() >= SHORT_REPLY_CHARS {
         return Some(latest);
     }
@@ -1827,7 +1878,7 @@ pub(crate) fn user_request_of(messages: &[&Message], run_prompts: &[Message]) ->
     // with text, not looking past the user's previous message.
     let mut asked: Option<(usize, String)> = None;
     for (i, m) in window[..at].iter().enumerate().rev() {
-        if real_user_text(m).is_some() {
+        if is_real_user(m) {
             break;
         }
         if let Message::Assistant { content, .. } = m {
@@ -1843,7 +1894,8 @@ pub(crate) fn user_request_of(messages: &[&Message], run_prompts: &[Message]) ->
     let earlier = window[..asked_at]
         .iter()
         .rev()
-        .find_map(|m| real_user_text(m));
+        .find(|m| is_real_user(m))
+        .and_then(|m| real_user_text(m));
 
     let mut parts = Vec::new();
     if let Some(e) = earlier {
@@ -2003,6 +2055,8 @@ pub struct TurnContext<'a> {
 }
 
 impl<'a> TurnContext<'a> {
+    /// A context with no run prompts (see [`with_run_prompts`](Self::with_run_prompts)),
+    /// for testing a [`TurnHook`]; the loop builds the real one.
     pub fn new(
         system_prompt: &'a str,
         messages: &'a [Message],
@@ -2219,6 +2273,7 @@ mod wire_tag_freeze {
                         ..Default::default()
                     },
                     cost_usd: Some(0.0000378),
+                    unpriced: 0,
                 },
             },
         ),

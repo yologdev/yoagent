@@ -144,7 +144,7 @@ pub const LOOP_ABORT_PREFIX: &str = "[Agent stopped: repeated tool call —";
 
 /// Prefix of the user-role nudge the loop injects when loop detection steers
 /// a model that keeps repeating one call.
-pub const LOOP_NUDGE_PREFIX: &str = "[You have called ";
+pub(crate) const LOOP_NUDGE_PREFIX: &str = "[You have called ";
 
 /// Per-run state the loop shares with the hooks that run inside its task.
 #[derive(Default)]
@@ -249,7 +249,76 @@ pub(crate) async fn agent_loop_with_stats(
 ) -> (Vec<AgentMessage>, SessionStats) {
     tx.send(AgentEvent::AgentStart).ok();
 
-    // Apply input filters before adding prompts to context
+    // One scope for the whole run, input filters included, so decision
+    // spend in an async filter is counted — also when it rejects.
+    let (outcome, decision) = with_loop_scope(Vec::new(), async {
+        let prompts = apply_input_filters(prompts, config).await?;
+        note_run_prompts(&prompts);
+
+        let mut new_messages: Vec<AgentMessage> = prompts.clone();
+
+        // Add prompts to context
+        for prompt in &prompts {
+            context.messages.push(prompt.clone());
+        }
+
+        tx.send(AgentEvent::TurnStart).ok();
+
+        // Emit events for each prompt message
+        for prompt in &prompts {
+            tx.send(AgentEvent::MessageStart {
+                message: prompt.clone(),
+            })
+            .ok();
+            tx.send(AgentEvent::MessageEnd {
+                message: prompt.clone(),
+            })
+            .ok();
+        }
+
+        let stats = {
+            use tracing::Instrument;
+            run_loop(context, &mut new_messages, config, &tx, &cancel)
+                .instrument(tracing::info_span!("agent_loop", model = %config.model))
+                .await
+        };
+        Ok::<_, String>((new_messages, stats))
+    })
+    .await;
+
+    let (new_messages, mut stats) = match outcome {
+        Ok(done) => done,
+        Err(reason) => {
+            tx.send(AgentEvent::InputRejected { reason }).ok();
+            let stats = SessionStats {
+                decision,
+                ..Default::default()
+            };
+            tx.send(AgentEvent::AgentEnd {
+                messages: vec![],
+                stats: stats.clone(),
+            })
+            .ok();
+            return (vec![], stats);
+        }
+    };
+    stats.decision.merge(&decision);
+
+    tx.send(AgentEvent::AgentEnd {
+        messages: new_messages.clone(),
+        stats: stats.clone(),
+    })
+    .ok();
+    (new_messages, stats)
+}
+
+/// Run the input filters over the prompts: `Err(reason)` on the first
+/// reject, otherwise the prompts with any warnings appended to the last
+/// user message.
+async fn apply_input_filters(
+    prompts: Vec<AgentMessage>,
+    config: &AgentLoopConfig,
+) -> Result<Vec<AgentMessage>, String> {
     let prompts = if !config.input_filters.is_empty() {
         let user_text: String = prompts
             .iter()
@@ -296,18 +365,7 @@ pub(crate) async fn agent_loop_with_stats(
             match verdict {
                 FilterResult::Pass => {}
                 FilterResult::Warn(w) => warnings.push(w),
-                FilterResult::Reject(reason) => {
-                    tx.send(AgentEvent::InputRejected {
-                        reason: reason.clone(),
-                    })
-                    .ok();
-                    tx.send(AgentEvent::AgentEnd {
-                        messages: vec![],
-                        stats: SessionStats::default(),
-                    })
-                    .ok();
-                    return (vec![], SessionStats::default());
-                }
+                FilterResult::Reject(reason) => return Err(reason),
             }
         }
 
@@ -334,47 +392,7 @@ pub(crate) async fn agent_loop_with_stats(
     } else {
         prompts
     };
-
-    let mut new_messages: Vec<AgentMessage> = prompts.clone();
-
-    // Add prompts to context
-    for prompt in &prompts {
-        context.messages.push(prompt.clone());
-    }
-
-    tx.send(AgentEvent::TurnStart).ok();
-
-    // Emit events for each prompt message
-    for prompt in &prompts {
-        tx.send(AgentEvent::MessageStart {
-            message: prompt.clone(),
-        })
-        .ok();
-        tx.send(AgentEvent::MessageEnd {
-            message: prompt.clone(),
-        })
-        .ok();
-    }
-
-    let stats = {
-        use tracing::Instrument;
-        let prompts = user_messages(&new_messages);
-        let (mut stats, decision) = with_loop_scope(
-            prompts,
-            run_loop(context, &mut new_messages, config, &tx, &cancel)
-                .instrument(tracing::info_span!("agent_loop", model = %config.model)),
-        )
-        .await;
-        stats.decision.merge(&decision);
-        stats
-    };
-
-    tx.send(AgentEvent::AgentEnd {
-        messages: new_messages.clone(),
-        stats: stats.clone(),
-    })
-    .ok();
-    (new_messages, stats)
+    Ok(prompts)
 }
 
 /// Continue an agent loop from existing context (for retries).

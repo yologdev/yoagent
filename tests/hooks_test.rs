@@ -12,6 +12,10 @@ use yoagent::provider::{
 };
 use yoagent::*;
 
+/// The level-3 compaction marker (crate-private; `is_loop_injected` knows it).
+const COMPACTION_MARKER_TEXT: &str =
+    "[Context compacted: earlier messages removed to fit the context window]";
+
 /// Records the system prompt and the latest user turn's text blocks (joined
 /// by `|`) of every request, then delegates.
 struct Recording {
@@ -474,7 +478,7 @@ fn loop_injected_messages_are_not_the_user_request() {
     let prompt = "tidy up the temp directory, then report what you removed";
     let nudge = format!(
         "{}rm 3 times with identical arguments.]",
-        yoagent::agent_loop::LOOP_NUDGE_PREFIX
+        "[You have called "
     );
     let messages = vec![
         Message::user(prompt),
@@ -499,7 +503,7 @@ fn loop_injected_messages_are_not_the_user_request() {
 
 #[test]
 fn compacted_history_does_not_yield_summary_text() {
-    use yoagent::context::{compact_messages, ContextConfig, COMPACTION_MARKER, SUMMARY_PREFIX};
+    use yoagent::context::{compact_messages, ContextConfig};
     // Real compaction output: old assistant turns become `[Summary]` user
     // messages.
     let mut history: Vec<AgentMessage> = vec![AgentMessage::Llm(Message::user(
@@ -520,10 +524,9 @@ fn compacted_history_does_not_yield_summary_text() {
         .filter_map(|m| m.as_llm().cloned())
         .collect();
     let has_injected = compacted.iter().any(|m| match m {
-        Message::User { content, .. } => content.iter().any(|c| {
-            matches!(c, Content::Text { text }
-                if text.starts_with(SUMMARY_PREFIX) || text.starts_with(COMPACTION_MARKER))
-        }),
+        Message::User { content, .. } => content
+            .iter()
+            .any(|c| matches!(c, Content::Text { text } if is_loop_injected(text))),
         _ => false,
     });
     assert!(
@@ -532,7 +535,19 @@ fn compacted_history_does_not_yield_summary_text() {
     );
     let request = user_request(&compacted).unwrap_or_default();
     assert!(!request.contains("[Summary]"), "{request}");
-    assert!(!request.contains(COMPACTION_MARKER), "{request}");
+    assert!(!request.contains("[Context compacted"), "{request}");
+    // The public predicate knows every marker the loop writes.
+    for marker in [
+        "[Summary] earlier turn",
+        "[Context compacted: earlier messages removed to fit the context window]",
+        yoagent::llm_compaction::SUMMARY_MARKER,
+        yoagent::agent_loop::AGENT_STOPPED_PREFIX,
+        yoagent::agent_loop::LOOP_ABORT_PREFIX,
+        "[You have called rm 3 times with identical arguments.]",
+    ] {
+        assert!(is_loop_injected(marker), "{marker}");
+    }
+    assert!(!is_loop_injected("please [Summary] this"), "prefix only");
 }
 
 #[test]
@@ -587,12 +602,12 @@ fn a_question_mark_inside_code_or_urls_is_not_a_question() {
 fn a_compaction_boundary_is_never_crossed() {
     let head = Message::user("delete every file in /srv/prod");
     for marker in [
-        yoagent::context::COMPACTION_MARKER.to_string(),
+        COMPACTION_MARKER_TEXT.to_string(),
         format!(
             "{}\n\nThe user asked to list files.",
             yoagent::llm_compaction::SUMMARY_MARKER
         ),
-        format!("{}assistant listed /tmp", yoagent::context::SUMMARY_PREFIX),
+        "[Summary] assistant listed /tmp".to_string(),
     ] {
         let messages = vec![
             head.clone(),
@@ -612,4 +627,77 @@ fn a_compaction_boundary_is_never_crossed() {
         let ctx = TurnContext::new("", &after, &[], "m").with_run_prompts(&prompts);
         assert_eq!(ctx.user_request().unwrap(), "now archive /tmp");
     }
+}
+
+fn image_only() -> Message {
+    Message::User {
+        content: vec![Content::Image {
+            data: "iVBORw0KGgo=".into(),
+            mime_type: "image/png".into(),
+        }],
+        timestamp: 0,
+    }
+}
+
+#[test]
+fn an_image_only_latest_message_stops_the_search() {
+    let messages = vec![
+        Message::user("delete /tmp/scratch.txt"),
+        assistant("Done."),
+        image_only(),
+    ];
+    let ctx = TurnContext::new("", &messages, &[], "m");
+    assert_eq!(ctx.user_request(), None, "never the earlier run's request");
+    assert_eq!(ctx.latest_user_text(), None);
+    // This run's text prompts are the fallback.
+    let prompts = vec![Message::user("describe this screenshot")];
+    let ctx = ctx.with_run_prompts(&prompts);
+    assert_eq!(ctx.user_request().unwrap(), "describe this screenshot");
+    // An image-only run prompt gives nothing to fall back on.
+    let only_image = vec![image_only()];
+    assert_eq!(
+        TurnContext::new("", &messages, &[], "m")
+            .with_run_prompts(&only_image)
+            .user_request(),
+        None
+    );
+    // Positive control: an image with text uses the text.
+    let mut with_text = messages.clone();
+    with_text.push(Message::User {
+        content: vec![
+            Content::Image {
+                data: "iVBORw0KGgo=".into(),
+                mime_type: "image/png".into(),
+            },
+            Content::Text {
+                text: "what is this?".into(),
+            },
+        ],
+        timestamp: 0,
+    });
+    assert_eq!(
+        TurnContext::new("", &with_text, &[], "m")
+            .user_request()
+            .unwrap(),
+        "what is this?"
+    );
+}
+
+#[test]
+fn several_run_prompts_are_labelled() {
+    let messages = vec![Message::user(
+        "[Context compacted: earlier messages removed to fit the context window]",
+    )];
+    let prompts = vec![
+        Message::user("look around /srv"),
+        image_only(),
+        Message::user("then tidy it up"),
+    ];
+    assert_eq!(
+        TurnContext::new("", &messages, &[], "m")
+            .with_run_prompts(&prompts)
+            .user_request()
+            .unwrap(),
+        "User: look around /srv\n\nUser: then tidy it up"
+    );
 }

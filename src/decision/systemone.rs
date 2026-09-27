@@ -204,14 +204,23 @@ impl SystemOneBackend {
         let response = req
             .send()
             .await
-            .map_err(|e| DecisionError::Transport(e.to_string()))?;
+            .map_err(|e| DecisionError::transport_with_source(e.to_string(), e))?;
         let status = response.status().as_u16();
         let headers = response.headers().clone();
-        let text = response
-            .text()
-            .await
-            .map_err(|e| DecisionError::Transport(e.to_string()))?;
-        if !(200..300).contains(&status) {
+        let ok = (200..300).contains(&status);
+        let text = match response.text().await {
+            Ok(text) => text,
+            // A success whose body cannot be read has been processed (and
+            // billed): retrying would pay twice, so it is not a transport
+            // error.
+            Err(e) if ok => {
+                return Err(DecisionError::BadResponse(format!(
+                    "could not read the response body: {e}"
+                )))
+            }
+            Err(e) => return Err(DecisionError::transport_with_source(e.to_string(), e)),
+        };
+        if !ok {
             return Err(status_error(status, &headers, &text));
         }
         let value: Value = serde_json::from_str(&text).map_err(|e| {
@@ -284,10 +293,13 @@ fn status_error(status: u16, headers: &reqwest::header::HeaderMap, body: &str) -
     }
 }
 
-/// A number, or NaN when absent or not a number — so validation rejects it
-/// rather than a default slipping through.
+/// A number; `None` when absent or `null`; NaN when present but not a
+/// number — so validation rejects it rather than a default slipping through.
+/// For a required field `None` is itself an error; for an optional or
+/// derivable one (`confidence`, `score`) it means "compute it".
 fn number(v: Option<&Value>) -> Option<f64> {
-    v.map(|v| v.as_f64().unwrap_or(f64::NAN))
+    v.filter(|v| !v.is_null())
+        .map(|v| v.as_f64().unwrap_or(f64::NAN))
 }
 
 fn level_text(v: &Value) -> String {
@@ -315,6 +327,7 @@ pub(crate) fn parse_evaluation(
         .to_string();
 
     let mut per_answer_input = 0u64;
+    let mut per_answer_reported = false;
     let mut eval = Evaluation::new(model, DecisionUsage::default());
     for (id, question) in &request.questions {
         let raw = answers
@@ -328,17 +341,23 @@ pub(crate) fn parse_evaluation(
                 )));
             }
         }
-        per_answer_input += raw.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
+        if let Some(n) = raw.get("input_tokens").and_then(Value::as_u64) {
+            per_answer_input += n;
+            per_answer_reported = true;
+        }
         let answer = parse_answer(id, raw, question)?;
         eval = eval.with_answer(id.clone(), answer);
     }
 
-    let usage = body.get("usage");
+    let usage = body.get("usage").filter(|u| u.is_object());
     let tokens = |k: &str| usage.and_then(|u| u.get(k)).and_then(Value::as_u64);
     eval.usage = DecisionUsage::new(
         tokens("input_tokens").unwrap_or(per_answer_input),
         tokens("output_tokens").unwrap_or(0),
     );
+    // No usage at all — neither a `usage` object nor per-answer counts —
+    // means the evaluation cannot be priced (never a priced $0).
+    eval.usage_reported = tokens("input_tokens").is_some() || per_answer_reported;
     Ok(eval)
 }
 

@@ -2,7 +2,6 @@
 
 use super::error::DecisionError;
 use super::question::{Question, QuestionKind};
-use std::collections::BTreeMap;
 
 /// Confidence of a distribution over `n` outcomes:
 /// `(n * p_max - 1) / (n - 1)`, clamped to `[0, 1]`.
@@ -227,8 +226,11 @@ impl ScoreAnswer {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Answer {
+    /// The answer to a yes/no question.
     Noul(NoulAnswer),
+    /// The answer to a choice among options.
     Choice(ChoiceAnswer),
+    /// The answer to a rating on ordered levels.
     Score(ScoreAnswer),
 }
 
@@ -251,6 +253,7 @@ impl Answer {
         }
     }
 
+    /// The Noul answer, if this is one.
     pub fn as_noul(&self) -> Option<&NoulAnswer> {
         match self {
             Self::Noul(a) => Some(a),
@@ -258,6 +261,7 @@ impl Answer {
         }
     }
 
+    /// The Choice answer, if this is one.
     pub fn as_choice(&self) -> Option<&ChoiceAnswer> {
         match self {
             Self::Choice(a) => Some(a),
@@ -265,6 +269,7 @@ impl Answer {
         }
     }
 
+    /// The Score answer, if this is one.
     pub fn as_score(&self) -> Option<&ScoreAnswer> {
         match self {
             Self::Score(a) => Some(a),
@@ -306,7 +311,12 @@ impl Answer {
                     }
                     check_unit(id, &format!("probabilities.{option}"), *p)?;
                 }
-                Ok(())
+                // Every option needs a probability: a partial distribution
+                // would inflate the computed confidence (n too small).
+                if let Some(missing) = options.iter().find(|o| !seen.contains(**o)) {
+                    return bad(format!("no probability for option {missing:?}"));
+                }
+                check_sum(id, a.probabilities.iter().map(|(_, p)| *p))
             }
             Self::Score(a) => {
                 let n = question.levels().map_or(0, <[_]>::len);
@@ -320,6 +330,7 @@ impl Answer {
                 for (i, p) in a.probabilities.iter().enumerate() {
                     check_unit(id, &format!("probabilities[{i}]"), *p)?;
                 }
+                check_sum(id, a.probabilities.iter().copied())?;
                 let top = n.saturating_sub(1) as f64;
                 if !(a.score.is_finite() && a.score >= -EPS && a.score <= top + EPS) {
                     return bad(format!("score {} is outside 0..={top}", a.score));
@@ -332,6 +343,21 @@ impl Answer {
 
 /// Tolerance for float noise at the edges of `[0, 1]`.
 const EPS: f64 = 1e-6;
+
+/// How far a distribution may sum from 1: generous enough for servers that
+/// round probabilities to a few decimals, tight enough to reject a broken one.
+pub(crate) const SUM_TOLERANCE: f64 = 0.02;
+
+fn check_sum(id: &str, probabilities: impl Iterator<Item = f64>) -> Result<(), DecisionError> {
+    let sum: f64 = probabilities.sum();
+    if (sum - 1.0).abs() <= SUM_TOLERANCE {
+        Ok(())
+    } else {
+        Err(DecisionError::BadResponse(format!(
+            "answers.{id}.probabilities: sum to {sum}, not 1"
+        )))
+    }
+}
 
 fn check_unit(id: &str, field: &str, x: f64) -> Result<(), DecisionError> {
     if x.is_finite() && (-EPS..=1.0 + EPS).contains(&x) {
@@ -361,15 +387,18 @@ impl From<ScoreAnswer> for Answer {
     }
 }
 
-/// Token usage of one evaluation.
+/// Token usage of one evaluation, as the backend reported it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct DecisionUsage {
+    /// Tokens read: the state and every question (what TypeSafe bills).
     pub input_tokens: u64,
+    /// Tokens produced (free on TypeSafe).
     pub output_tokens: u64,
 }
 
 impl DecisionUsage {
+    /// Usage with these counts.
     pub fn new(input_tokens: u64, output_tokens: u64) -> Self {
         Self {
             input_tokens,
@@ -388,23 +417,20 @@ impl DecisionUsage {
     }
 }
 
-/// The result of one request: an answer per question id.
+/// The result of one request: an answer per question id, in request order.
+///
+/// Built by backends with [`new`](Self::new) and [`with_answer`](Self::with_answer);
+/// read through the getters. [`DecisionModel`](super::DecisionModel) keeps
+/// only the answers that were asked for, in the order they were asked.
 #[derive(Debug, Clone, PartialEq)]
-#[non_exhaustive]
 pub struct Evaluation {
-    /// The model that answered, as the backend reports it — a versioned id
-    /// such as `jev-1.13.0` even when you sent an alias. Log it: thresholds
-    /// are tuned per model version.
-    pub model: String,
-    /// Answers by question id.
-    pub answers: BTreeMap<String, Answer>,
-    /// Tokens this request used.
-    pub usage: DecisionUsage,
-    /// Cost in USD, when the [`DecisionModel`](super::DecisionModel) knows the
-    /// answering model's price. `None` = unpriced (never a guessed `0`); a
-    /// model built with [`DecisionModel::local`](super::DecisionModel::local)
-    /// reports `Some(0.0)`.
-    pub cost_usd: Option<f64>,
+    pub(crate) model: String,
+    pub(crate) answers: Vec<(String, Answer)>,
+    pub(crate) usage: DecisionUsage,
+    /// Whether the backend reported usage at all. When it did not, the
+    /// evaluation cannot be priced.
+    pub(crate) usage_reported: bool,
+    pub(crate) cost_usd: Option<f64>,
 }
 
 impl Evaluation {
@@ -412,21 +438,60 @@ impl Evaluation {
     pub fn new(model: impl Into<String>, usage: DecisionUsage) -> Self {
         Self {
             model: model.into(),
-            answers: BTreeMap::new(),
+            answers: Vec::new(),
             usage,
+            usage_reported: true,
             cost_usd: None,
         }
     }
 
-    /// Add an answer under `id`.
+    /// Add an answer under `id` (replacing an earlier one with that id).
     pub fn with_answer(mut self, id: impl Into<String>, answer: impl Into<Answer>) -> Self {
-        self.answers.insert(id.into(), answer.into());
+        let id = id.into();
+        let answer = answer.into();
+        match self.answers.iter_mut().find(|(k, _)| *k == id) {
+            Some(slot) => slot.1 = answer,
+            None => self.answers.push((id, answer)),
+        }
         self
+    }
+
+    /// A cost the backend computed itself. Kept only when the
+    /// [`DecisionModel`](super::DecisionModel) is unpriced; a handle with
+    /// its own pricing replaces it.
+    pub fn with_cost_usd(mut self, cost_usd: Option<f64>) -> Self {
+        self.cost_usd = cost_usd;
+        self
+    }
+
+    /// The model that answered, as the backend reports it — a versioned id
+    /// such as `jev-1.13.0` even when you sent an alias. Log it: thresholds
+    /// are tuned per model version.
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// Tokens this request used.
+    pub fn usage(&self) -> DecisionUsage {
+        self.usage
+    }
+
+    /// Cost in USD. `None` = unpriced (never a guessed `0`): an unpriced
+    /// model, or a response that reported no usage. A model built with
+    /// [`DecisionModel::local`](super::DecisionModel::local) reports
+    /// `Some(0.0)`.
+    pub fn cost_usd(&self) -> Option<f64> {
+        self.cost_usd
+    }
+
+    /// Every answer with its id, in request order.
+    pub fn answers(&self) -> impl Iterator<Item = (&str, &Answer)> + '_ {
+        self.answers.iter().map(|(k, a)| (k.as_str(), a))
     }
 
     /// The answer under `id`, of any type.
     pub fn get(&self, id: &str) -> Option<&Answer> {
-        self.answers.get(id)
+        self.answers.iter().find(|(k, _)| k == id).map(|(_, a)| a)
     }
 
     /// The Noul answer under `id` (`None` if absent or another type).
@@ -456,7 +521,9 @@ mod tests {
 
     #[test]
     fn confidence_matches_typesafe_formula() {
-        // Their doc example: 0.88/0.12/0.0 -> (3*0.88-1)/2 = 0.82.
+        // TypeSafe's doc example distribution 0.88/0.12/0.0. The formula
+        // gives (3*0.88-1)/2 = 0.82; their example response shows 0.81, a
+        // server-side rounding of the same figure.
         let c = distribution_confidence([0.88, 0.12, 0.0]);
         assert!((c - 0.82).abs() < 1e-9, "{c}");
         assert_eq!(distribution_confidence([1.0 / 3.0; 3]), 0.0);

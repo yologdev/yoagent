@@ -141,6 +141,7 @@ pub(crate) struct Advisor {
     memo: Mutex<Option<(u64, Option<String>)>>,
     said_idle: AtomicBool,
     said_missing_key: AtomicBool,
+    said_too_many_skills: AtomicBool,
 }
 
 impl Advisor {
@@ -166,6 +167,7 @@ impl Advisor {
             memo: Mutex::new(None),
             said_idle: AtomicBool::new(false),
             said_missing_key: AtomicBool::new(false),
+            said_too_many_skills: AtomicBool::new(false),
         }
     }
 
@@ -180,11 +182,23 @@ impl Advisor {
     async fn advise(&self, turn: &TurnContext<'_>) -> Option<String> {
         let caps = self.model.capabilities();
         let choice_ok = caps.supports(QuestionKind::Choice);
+        let too_many_skills = self.skills.len() >= caps.max_choice_options;
+        if self.advisory.skill_hint
+            && too_many_skills
+            && !self.said_too_many_skills.swap(true, Ordering::Relaxed)
+        {
+            tracing::warn!(
+                skills = self.skills.len(),
+                limit = caps.max_choice_options,
+                "decision advisory skill hint off: more skills than the backend's Choice \
+                 option limit (one option is reserved for \"none\")"
+            );
+        }
         let want_skill = self.advisory.skill_hint
             && !self.skills.is_empty()
             && choice_ok
             && caps.supports(QuestionKind::Noul)
-            && self.skills.len() < caps.max_choice_options;
+            && !too_many_skills;
         let want_tools = self.advisory.tool_hint
             && choice_ok
             && turn.tools.len() >= self.advisory.tool_hint_min_tools.max(2)

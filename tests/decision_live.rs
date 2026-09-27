@@ -46,14 +46,16 @@ async fn jev_answers_a_batched_request() {
 
     println!(
         "model {} | usage {:?} | cost {:?}",
-        eval.model, eval.usage, eval.cost_usd
+        eval.model(),
+        eval.usage(),
+        eval.cost_usd()
     );
     assert!(
-        eval.model.starts_with("jev-"),
+        eval.model().starts_with("jev-"),
         "reported model: {}",
-        eval.model
+        eval.model()
     );
-    assert!(eval.usage.input_tokens > 0);
+    assert!(eval.usage().input_tokens > 0);
 
     let urgent = eval.noul("urgent").expect("noul answer");
     assert!(in_unit(urgent.p_true()) && in_unit(urgent.confidence()));
@@ -78,8 +80,8 @@ async fn jev_answers_a_batched_request() {
     assert_eq!(mood.legend().len(), 3);
 
     // Priced when the reported version is in the table; never guessed.
-    if eval.model == "jev-1.13.0" {
-        let cost = eval.cost_usd.expect("jev-1.13.0 is priced");
+    if eval.model() == "jev-1.13.0" {
+        let cost = eval.cost_usd().expect("jev-1.13.0 is priced");
         assert!(cost > 0.0 && cost < 0.01, "{cost}");
     }
     println!(

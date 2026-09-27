@@ -94,7 +94,7 @@ async fn typesafe_shape_round_trips_a_batched_request() {
 
     let eval = batched(&hosted(&server)).send().await.unwrap();
 
-    assert_eq!(eval.model, "jev-1.13.0");
+    assert_eq!(eval.model(), "jev-1.13.0");
     let urgent = eval.noul("urgent").unwrap();
     assert_eq!(urgent.p_true(), 0.95);
     assert!((urgent.confidence() - 0.9).abs() < 1e-9, "computed |2p-1|");
@@ -108,11 +108,11 @@ async fn typesafe_shape_round_trips_a_batched_request() {
     assert_eq!(mood.legend(), ["Calm", "Frustrated", "Very angry"]);
     assert_eq!(mood.probabilities(), [0.0, 0.95, 0.05]);
     assert_eq!(mood.level(), 1);
-    assert_eq!(eval.usage.input_tokens, 1_000_000);
-    assert_eq!(eval.usage.output_tokens, 34);
+    assert_eq!(eval.usage().input_tokens, 1_000_000);
+    assert_eq!(eval.usage().output_tokens, 34);
     // Priced by the versioned id the API reported: 1M input tokens at $0.042,
     // output free.
-    let cost = eval.cost_usd.expect("priced");
+    let cost = eval.cost_usd().expect("priced");
     assert!((cost - 0.042).abs() < 1e-12, "{cost}");
     // Typed accessors refuse the wrong type.
     assert!(eval.choice("urgent").is_none());
@@ -174,7 +174,7 @@ async fn jevk5_style_answers_parse_leniently() {
     let model = DecisionModel::local(server.uri());
     let eval = batched(&model).send().await.unwrap();
 
-    assert_eq!(eval.model, "jevk5-0.3");
+    assert_eq!(eval.model(), "jevk5-0.3");
     assert_eq!(eval.noul("urgent").unwrap().confidence(), 0.7);
     let team = eval.choice("team").unwrap();
     assert_eq!(team.choice(), "billing", "argmax when choice is absent");
@@ -190,9 +190,9 @@ async fn jevk5_style_answers_parse_leniently() {
     assert!((mood.confidence() - 0.55).abs() < 1e-9);
     assert_eq!(mood.legend()[2], "Very angry", "legend from the question");
     // Usage summed from per-answer counts when there is no top-level usage.
-    assert_eq!(eval.usage.input_tokens, 360);
+    assert_eq!(eval.usage().input_tokens, 360);
     // `DecisionModel::local`: $0, not unpriced.
-    assert_eq!(eval.cost_usd, Some(0.0));
+    assert_eq!(eval.cost_usd(), Some(0.0));
     // No key is sent to a local server.
     let received = server.received_requests().await.unwrap();
     assert!(received[0].headers.get("authorization").is_none());
@@ -431,7 +431,7 @@ async fn retries_429_then_succeeds() {
         .await;
     mount_ok(&server, typesafe_response()).await;
     let eval = batched(&hosted(&server)).send().await.unwrap();
-    assert_eq!(eval.model, "jev-1.13.0");
+    assert_eq!(eval.model(), "jev-1.13.0");
     assert_eq!(server.received_requests().await.unwrap().len(), 3);
 }
 
@@ -590,9 +590,9 @@ async fn missing_env_key_fails_before_sending() {
         "jev-latest",
     );
     let e = model.noul("s", "q?").await.unwrap_err();
-    assert_eq!(
-        e,
-        DecisionError::MissingApiKey("YOAGENT_DECISION_TEST_NEVER_SET".into())
+    assert!(
+        matches!(&e, DecisionError::MissingApiKey(v) if v == "YOAGENT_DECISION_TEST_NEVER_SET"),
+        "{e:?}"
     );
 }
 
@@ -610,7 +610,10 @@ async fn timeout_bounds_the_whole_call() {
     let model = hosted(&server).with_timeout(Duration::from_millis(100));
     let start = Instant::now();
     let e = batched(&model).send().await.unwrap_err();
-    assert_eq!(e, DecisionError::Timeout(Duration::from_millis(100)));
+    assert!(
+        matches!(e, DecisionError::Timeout(d) if d == Duration::from_millis(100)),
+        "{e:?}"
+    );
     assert!(start.elapsed() < Duration::from_secs(2));
 }
 
@@ -635,7 +638,7 @@ async fn mock_backend_records_requests_and_scripts_answers() {
         .unwrap();
     assert_eq!(eval.p_true("a"), Some(0.9));
     assert_eq!(eval.choice("b").unwrap().choice(), "y");
-    assert_eq!(eval.cost_usd, None, "from_backend is unpriced");
+    assert_eq!(eval.cost_usd(), None, "from_backend is unpriced");
     let reqs = mock.requests();
     assert_eq!(reqs.len(), 1);
     assert_eq!(reqs[0].model, "mock");
@@ -677,8 +680,8 @@ async fn a_non_batching_backend_gets_one_request_per_question() {
         .unwrap();
     assert_eq!(mock.request_count(), 3);
     assert!(mock.requests().iter().all(|r| r.questions.len() == 1));
-    assert_eq!(eval.answers.len(), 3);
-    assert_eq!(eval.usage, DecisionUsage::new(30, 3));
+    assert_eq!(eval.answers().count(), 3);
+    assert_eq!(eval.usage(), DecisionUsage::new(30, 3));
 }
 
 #[tokio::test]
@@ -695,7 +698,7 @@ async fn cost_follows_the_model_handle() {
         .send()
         .await
         .unwrap();
-    assert_eq!(eval.cost_usd, None);
+    assert_eq!(eval.cost_usd(), None);
     // Explicit rates apply to the reported usage (1M input tokens).
     let eval = batched(
         &DecisionModel::from_backend(backend(), "jev-latest")
@@ -704,7 +707,7 @@ async fn cost_follows_the_model_handle() {
     .send()
     .await
     .unwrap();
-    assert!((eval.cost_usd.unwrap() - 0.042).abs() < 1e-12);
+    assert!((eval.cost_usd().unwrap() - 0.042).abs() < 1e-12);
 }
 
 #[test]
@@ -773,7 +776,7 @@ async fn malformed_answers_from_any_backend_are_rejected() {
     ask(Raw(good)).await.expect("well-formed answers pass");
 
     type Answers = fn(&Request) -> Evaluation;
-    let cases: [(&str, Answers); 9] = [
+    let cases: [(&str, Answers); 14] = [
         ("NaN noul", |r| {
             good(r).with_answer("n", NoulAnswer::new(f64::NAN))
         }),
@@ -804,9 +807,219 @@ async fn malformed_answers_from_any_backend_are_rejected() {
         ("short score", |r| {
             good(r).with_answer("sc", ScoreAnswer::new(vec!["lo".into()], vec![1.0]))
         }),
+        ("score out of range", |r| {
+            good(r).with_answer(
+                "sc",
+                ScoreAnswer::new(vec!["lo".into(), "hi".into()], vec![0.5, 0.5]).with_score(3.0),
+            )
+        }),
+        ("choice p = 1.4", |r| {
+            good(r).with_answer("c", ChoiceAnswer::new([("a", 1.4), ("b", -0.4)]))
+        }),
+        ("choice p = NaN", |r| {
+            good(r).with_answer("c", ChoiceAnswer::new([("a", f64::NAN), ("b", 0.8)]))
+        }),
+        ("choice missing an option", |r| {
+            good(r).with_answer("c", ChoiceAnswer::new([("b", 1.0)]))
+        }),
+        ("score sums to 1.6", |r| {
+            good(r).with_answer(
+                "sc",
+                ScoreAnswer::new(vec!["lo".into(), "hi".into()], vec![0.8, 0.8]),
+            )
+        }),
     ];
     for (what, answer) in cases {
         let e = ask(Raw(answer)).await.unwrap_err();
         assert!(matches!(e, DecisionError::BadResponse(_)), "{what}: {e:?}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// Round 4: distributions, nulls, ordering, cost rule
+// ---------------------------------------------------------------------------
+
+fn twelve() -> Vec<String> {
+    (0..12).map(|i| format!("o{i}")).collect()
+}
+
+async fn choice_response(probabilities: Value) -> Result<Evaluation, DecisionError> {
+    let server = MockServer::start().await;
+    mount_ok(
+        &server,
+        json!({"model": "m", "answers": {"c": {"type": "choice", "probabilities": probabilities}},
+               "usage": {"input_tokens": 1, "output_tokens": 0}}),
+    )
+    .await;
+    hosted(&server)
+        .ask("s")
+        .choice("c", "which?", twelve())
+        .send()
+        .await
+}
+
+#[tokio::test]
+async fn a_choice_must_cover_every_option_and_sum_to_one() {
+    // One of twelve options returned: its confidence would be computed over
+    // n = 1 and read as certainty.
+    let e = choice_response(json!({"o3": 1.0})).await.unwrap_err();
+    assert!(
+        matches!(&e, DecisionError::BadResponse(t) if t.contains("no probability for option")),
+        "{e:?}"
+    );
+    // All twelve, summing to 1.8.
+    let mut probs = serde_json::Map::new();
+    for (i, o) in twelve().iter().enumerate() {
+        probs.insert(o.clone(), json!(if i == 0 { 0.8 } else { 1.0 / 11.0 }));
+    }
+    let e = choice_response(Value::Object(probs)).await.unwrap_err();
+    assert!(
+        matches!(&e, DecisionError::BadResponse(t) if t.contains("sum to")),
+        "{e:?}"
+    );
+    // Positive control: all twelve, summing to 1 (including exact zeros).
+    let mut probs = serde_json::Map::new();
+    for (i, o) in twelve().iter().enumerate() {
+        probs.insert(
+            o.clone(),
+            json!(if i == 0 {
+                0.9
+            } else if i == 1 {
+                0.1
+            } else {
+                0.0
+            }),
+        );
+    }
+    let eval = choice_response(Value::Object(probs)).await.unwrap();
+    let c = eval.choice("c").unwrap();
+    assert_eq!(c.choice(), "o0");
+    // (12 * 0.9 - 1) / 11
+    assert!((c.confidence() - 9.8 / 11.0).abs() < 1e-9);
+}
+
+#[tokio::test]
+async fn score_probabilities_as_an_array_parse() {
+    let server = MockServer::start().await;
+    mount_ok(
+        &server,
+        json!({"model": "jevk5", "answers": {"sc": {"type": "score", "probabilities": [0.1, 0.2, 0.7]}}}),
+    )
+    .await;
+    let eval = DecisionModel::local(server.uri())
+        .ask("s")
+        .score("sc", "how?", ["lo", "mid", "hi"])
+        .send()
+        .await
+        .unwrap();
+    let a = eval.score("sc").unwrap();
+    assert_eq!(a.probabilities(), [0.1, 0.2, 0.7]);
+    assert!((a.score() - 1.6).abs() < 1e-9);
+}
+
+#[tokio::test]
+async fn null_optional_fields_are_computed_and_null_required_fields_reject() {
+    let server = MockServer::start().await;
+    mount_ok(
+        &server,
+        json!({"model": "m", "answers": {
+            "urgent": {"type": "noul", "noul": 0.8, "confidence": null},
+            "team": {"type": "choice", "choice": null, "probabilities": {"billing": 0.6, "technical": 0.4, "sales": 0.0}, "confidence": null},
+            "mood": {"type": "score", "score": null, "probabilities": {"0": 0.2, "1": 0.8, "2": 0.0}, "confidence": null}
+        }, "usage": {"input_tokens": 1, "output_tokens": 0}}),
+    )
+    .await;
+    let eval = batched(&hosted(&server)).send().await.unwrap();
+    assert!((eval.noul("urgent").unwrap().confidence() - 0.6).abs() < 1e-9);
+    assert_eq!(eval.choice("team").unwrap().choice(), "billing");
+    assert!((eval.score("mood").unwrap().score() - 0.8).abs() < 1e-9);
+
+    let server = MockServer::start().await;
+    mount_ok(
+        &server,
+        json!({"model": "m", "answers": {
+            "urgent": {"type": "noul", "noul": null},
+            "team": {"type": "choice", "probabilities": {"billing": 1.0, "technical": 0.0, "sales": 0.0}},
+            "mood": {"type": "score", "probabilities": {"0": 1.0, "1": 0.0, "2": 0.0}}
+        }}),
+    )
+    .await;
+    let e = batched(&hosted(&server)).send().await.unwrap_err();
+    assert!(
+        matches!(&e, DecisionError::BadResponse(t) if t.contains("answers.urgent.noul")),
+        "{e:?}"
+    );
+}
+
+/// Answers each question alone and appends an answer nobody asked for.
+struct Extra;
+
+#[async_trait::async_trait]
+impl DecisionBackend for Extra {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::new(QuestionKind::all()).with_batching(false)
+    }
+    async fn evaluate(&self, request: &Request) -> Result<Evaluation, DecisionError> {
+        let (id, _) = &request.questions[0];
+        let eval = Evaluation::new("m", DecisionUsage::new(1, 0))
+            .with_answer("zzz-unasked", NoulAnswer::new(0.5))
+            .with_answer(
+                id.clone(),
+                NoulAnswer::new(if id == "b" { 0.2 } else { 0.9 }),
+            );
+        // Every other response smuggles a different answer for `b`.
+        Ok(if id == "b" {
+            eval
+        } else {
+            eval.with_answer("b", NoulAnswer::new(0.99))
+        })
+    }
+}
+
+#[tokio::test]
+async fn only_asked_answers_survive_in_request_order() {
+    let eval = DecisionModel::from_backend(Extra, "m")
+        .ask("s")
+        .noul("c", "c?")
+        .noul("b", "b?")
+        .noul("a", "a?")
+        .send()
+        .await
+        .unwrap();
+    let ids: Vec<&str> = eval.answers().map(|(id, _)| id).collect();
+    assert_eq!(ids, ["c", "b", "a"]);
+    // `b` keeps the answer to its own question, not the extra 0.99 that
+    // the `c` and `a` responses carried.
+    assert_eq!(eval.p_true("b"), Some(0.2));
+    assert_eq!(eval.usage(), DecisionUsage::new(3, 0));
+}
+
+/// Reports its own cost.
+struct SelfPriced;
+
+#[async_trait::async_trait]
+impl DecisionBackend for SelfPriced {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::new(QuestionKind::all())
+    }
+    async fn evaluate(&self, _request: &Request) -> Result<Evaluation, DecisionError> {
+        Ok(Evaluation::new("m", DecisionUsage::new(1_000_000, 0))
+            .with_answer("q", NoulAnswer::new(0.5))
+            .with_cost_usd(Some(0.5)))
+    }
+}
+
+#[tokio::test]
+async fn backend_cost_is_kept_only_by_an_unpriced_handle() {
+    let unpriced = DecisionModel::from_backend(SelfPriced, "m");
+    let eval = unpriced.ask("s").noul("q", "q?").send().await.unwrap();
+    assert_eq!(eval.cost_usd(), Some(0.5), "the backend's figure is kept");
+    let priced = DecisionModel::from_backend(SelfPriced, "m")
+        .with_cost(Some(yoagent::provider::CostConfig::new(0.042, 0.0)));
+    let eval = priced.ask("s").noul("q", "q?").send().await.unwrap();
+    let cost = eval.cost_usd().unwrap();
+    assert!(
+        (cost - 0.042).abs() < 1e-12,
+        "the handle's pricing wins: {cost}"
+    );
 }

@@ -228,10 +228,11 @@ impl ToolGate {
             }
         };
 
-        // Every comparison below denies on a missing or non-finite answer.
+        // Every comparison below denies on a missing, non-finite or
+        // out-of-range answer.
         // `evaluate` already rejects both; this keeps the gate closed even if
         // that check ever regresses.
-        let p = |id: &str| eval.p_true(id).filter(|p| p.is_finite());
+        let p = |id: &str| eval.p_true(id).filter(|p| (0.0..=1.0).contains(p));
         for (id, q, deny_at) in &self.checks {
             let denied = match p(id) {
                 Some(v) => at_or_above(v, *deny_at),

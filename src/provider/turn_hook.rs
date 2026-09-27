@@ -27,6 +27,7 @@ pub struct TurnHookProvider {
 }
 
 impl TurnHookProvider {
+    /// Wrap `inner` so `hooks` run, in order, before each of its requests.
     pub fn new(inner: Arc<dyn StreamProvider>, hooks: Vec<Arc<dyn TurnHook>>) -> Self {
         Self { inner, hooks }
     }

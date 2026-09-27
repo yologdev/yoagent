@@ -45,7 +45,7 @@ async fn main() {
 
     let team = eval.choice("team").expect("asked");
     let mood = eval.score("mood").expect("asked");
-    println!("answered by {}", eval.model);
+    println!("answered by {}", eval.model());
     println!("urgent: {:.2}", eval.p_true("urgent").unwrap_or_default());
     println!(
         "team:   {} (confidence {:.2})",
@@ -59,8 +59,8 @@ async fn main() {
     );
     println!(
         "usage:  {} input tokens, cost {}",
-        eval.usage.input_tokens,
-        eval.cost_usd
+        eval.usage().input_tokens,
+        eval.cost_usd()
             .map(|c| format!("${c:.8}"))
             .unwrap_or_else(|| "unpriced".into())
     );
