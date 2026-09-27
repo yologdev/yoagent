@@ -76,6 +76,25 @@ pub enum DecisionError {
     /// options. Checked for every backend.
     #[error("decision model returned an unusable response: {0}")]
     BadResponse(String),
+    /// Every model of a fallback chain
+    /// ([`DecisionModel::or`](super::DecisionModel::or)) failed or was
+    /// skipped for its limits. Lists each one's model id and error, in the
+    /// order they were tried. (When the chain's overall time ran out, the
+    /// error is [`Timeout`](Self::Timeout) instead.)
+    #[error("every decision model in the fallback chain failed: {}", fmt_attempts(.attempts))]
+    #[non_exhaustive]
+    AllFailed {
+        /// `(model, error)` per member, in order.
+        attempts: Vec<(String, DecisionError)>,
+    },
+}
+
+fn fmt_attempts(attempts: &[(String, DecisionError)]) -> String {
+    attempts
+        .iter()
+        .map(|(model, e)| format!("[{model}] {e}"))
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 impl DecisionError {

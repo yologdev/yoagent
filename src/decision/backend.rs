@@ -50,6 +50,14 @@ impl Capabilities {
         Self::new(QuestionKind::all()).with_token_limits(Some(64_000), Some(32_000))
     }
 
+    /// No limits at all: what every request must satisfy whatever the
+    /// backend (the structural checks).
+    pub(crate) fn unlimited() -> Self {
+        Self::new(QuestionKind::all())
+            .with_max_choice_options(usize::MAX)
+            .with_max_score_levels(usize::MAX)
+    }
+
     /// Most options one Choice may have.
     pub fn with_max_choice_options(mut self, n: usize) -> Self {
         self.max_choice_options = n;

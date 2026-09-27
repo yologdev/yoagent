@@ -69,8 +69,11 @@
 mod advisory;
 mod answer;
 mod backend;
+mod calibrate;
 mod error;
 mod gate;
+mod guard;
+mod logprobs;
 mod mock;
 mod question;
 mod systemone;
@@ -81,8 +84,14 @@ pub use answer::{
     ScoreAnswer,
 };
 pub use backend::{Capabilities, DecisionBackend};
+pub use calibrate::{
+    calibrate, calibrate_with, CalibrationExample, CalibrationOptions, CalibrationReport, Expected,
+    ReliabilityBin, ThresholdPoint,
+};
 pub use error::DecisionError;
 pub use gate::ToolGate;
+pub use guard::InputGuard;
+pub use logprobs::LogprobBackend;
 pub use mock::MockBackend;
 pub use question::{Question, QuestionKind, Request};
 pub use systemone::SystemOneBackend;
@@ -101,6 +110,7 @@ pub(crate) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Clone)]
 enum Slot {
     SystemOne(SystemOneBackend),
+    Logprobs(LogprobBackend),
     Custom(Arc<dyn DecisionBackend>),
 }
 
@@ -108,6 +118,7 @@ impl Slot {
     fn get(&self) -> &dyn DecisionBackend {
         match self {
             Slot::SystemOne(b) => b,
+            Slot::Logprobs(b) => b,
             Slot::Custom(b) => b.as_ref(),
         }
     }
@@ -127,14 +138,20 @@ enum Pricing {
 ///
 /// Cheap to clone (the backend is shared). Choose one with a preset —
 /// [`jev`](Self::jev), [`jev_opencode`](Self::jev_opencode),
-/// [`jev_opencode_free`](Self::jev_opencode_free), [`local`](Self::local) —
-/// or [`from_backend`](Self::from_backend); everything else has defaults.
+/// [`jev_opencode_free`](Self::jev_opencode_free), [`local`](Self::local),
+/// [`logprobs`](Self::logprobs) — or [`from_backend`](Self::from_backend);
+/// everything else has defaults. Chain fallbacks with [`or`](Self::or).
 #[derive(Clone)]
 pub struct DecisionModel {
     backend: Slot,
     model: String,
+    /// One call's overall budget — the whole fallback chain's.
     timeout: Duration,
     pricing: Pricing,
+    /// This member's own limit per attempt, inside the overall budget.
+    attempt_timeout: Option<Duration>,
+    /// Tried in order after this model fails (flat: members have none).
+    fallbacks: Vec<DecisionModel>,
 }
 
 impl std::fmt::Debug for DecisionModel {
@@ -143,10 +160,17 @@ impl std::fmt::Debug for DecisionModel {
         d.field("model", &self.model)
             .field("timeout", &self.timeout)
             .field("pricing", &self.pricing);
+        if let Some(t) = self.attempt_timeout {
+            d.field("attempt_timeout", &t);
+        }
         match &self.backend {
             Slot::SystemOne(b) => d.field("backend", b),
+            Slot::Logprobs(b) => d.field("backend", b),
             Slot::Custom(_) => d.field("backend", &"custom"),
         };
+        if !self.fallbacks.is_empty() {
+            d.field("fallbacks", &self.fallbacks);
+        }
         d.finish()
     }
 }
@@ -164,6 +188,8 @@ impl DecisionModel {
             model: "jev-latest".into(),
             timeout: DEFAULT_TIMEOUT,
             pricing: Pricing::TypeSafeList,
+            attempt_timeout: None,
+            fallbacks: Vec::new(),
         }
     }
 
@@ -175,6 +201,8 @@ impl DecisionModel {
             model: "jev-1.13".into(),
             timeout: DEFAULT_TIMEOUT,
             pricing: Pricing::Unpriced,
+            attempt_timeout: None,
+            fallbacks: Vec::new(),
         }
     }
 
@@ -200,17 +228,73 @@ impl DecisionModel {
             model: "jev-latest".into(),
             timeout: DEFAULT_TIMEOUT,
             pricing: Pricing::Fixed(CostConfig::new(0.0, 0.0)),
+            attempt_timeout: None,
+            fallbacks: Vec::new(),
         }
     }
 
     /// Any backend — including a [`SystemOneBackend`] you configured —
     /// asking for `model`. Unpriced until [`with_cost`](Self::with_cost).
     pub fn from_backend(backend: impl DecisionBackend + 'static, model: impl Into<String>) -> Self {
+        Self::from_arc(Arc::new(backend), model)
+    }
+
+    /// [`from_backend`](Self::from_backend) for a backend you already hold
+    /// behind an `Arc` (shared with other handles, or chosen at runtime as
+    /// `Arc<dyn DecisionBackend>`). Unpriced until
+    /// [`with_cost`](Self::with_cost).
+    pub fn from_arc(backend: Arc<dyn DecisionBackend>, model: impl Into<String>) -> Self {
         Self {
-            backend: Slot::Custom(Arc::new(backend)),
+            backend: Slot::Custom(backend),
             model: model.into(),
             timeout: DEFAULT_TIMEOUT,
             pricing: Pricing::Unpriced,
+            attempt_timeout: None,
+            fallbacks: Vec::new(),
+        }
+    }
+
+    /// Any OpenAI-compatible `/chat/completions` server that returns
+    /// logprobs — llama.cpp's `llama-server`, vLLM, SGLang, LM Studio, or a
+    /// hosted API — asking for `model`. Every question becomes a one-token
+    /// completion whose label probabilities are read from `top_logprobs`
+    /// (see [`LogprobBackend`]).
+    ///
+    /// ```no_run
+    /// # async fn demo() -> Result<(), yoagent::decision::DecisionError> {
+    /// use yoagent::decision::DecisionModel;
+    /// // llama-server on this machine: local, $0, no key.
+    /// let qwen = DecisionModel::logprobs("http://localhost:8080", "qwen3-8b");
+    /// let urgent = qwen.noul("Help! Payouts failing for 3 days.", "Is this urgent?").await?;
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// - **No key** unless [`with_api_key`](Self::with_api_key); no
+    ///   environment variable is read.
+    /// - **Local and $0** when the host is loopback (`localhost`,
+    ///   `127.0.0.0/8`, `::1`); any other host is not local and **unpriced**
+    ///   until [`with_cost`](Self::with_cost). Usage is the sum of each
+    ///   completion's `prompt_tokens` / `completion_tokens`.
+    /// - **Calibration is approximate** compared with a trained decision
+    ///   model: measure it with [`calibrate`](crate::decision::calibrate()) and
+    ///   correct it with [`with_temperature`](Self::with_temperature).
+    /// - Choice is limited to 20 options (OpenAI's `top_logprobs` cap);
+    ///   [`with_max_choice_options`](Self::with_max_choice_options) raises it
+    ///   to 26 for servers that allow more.
+    pub fn logprobs(base_url: impl Into<String>, model: impl Into<String>) -> Self {
+        let backend = LogprobBackend::new(base_url);
+        let pricing = if backend.is_local() {
+            Pricing::Fixed(CostConfig::new(0.0, 0.0))
+        } else {
+            Pricing::Unpriced
+        };
+        Self {
+            backend: Slot::Logprobs(backend),
+            model: model.into(),
+            timeout: DEFAULT_TIMEOUT,
+            pricing,
+            attempt_timeout: None,
+            fallbacks: Vec::new(),
         }
     }
 
@@ -222,17 +306,127 @@ impl DecisionModel {
     }
 
     /// Overall time limit for one call, retries included (default 30 s).
+    /// With fallbacks ([`or`](Self::or)) it is **one budget for the whole
+    /// chain**: a fallback gets only what is left.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
     }
 
+    /// Limit each attempt of this model to `timeout`, inside the overall
+    /// [`with_timeout`](Self::with_timeout) budget — so in a fallback chain
+    /// a slow primary (or one retrying a rate limit) leaves time for the
+    /// fallback. When an attempt hits its own limit the chain moves on; when
+    /// the overall budget runs out the call fails with
+    /// [`DecisionError::Timeout`]. Default: none (an attempt may use the rest
+    /// of the budget).
+    ///
+    /// ```
+    /// # use std::time::Duration;
+    /// use yoagent::decision::DecisionModel;
+    /// let model = DecisionModel::jev()
+    ///     .with_attempt_timeout(Duration::from_secs(2))
+    ///     .or(DecisionModel::local("http://localhost:8000"));
+    /// ```
+    pub fn with_attempt_timeout(mut self, timeout: Duration) -> Self {
+        self.attempt_timeout = Some(timeout);
+        self
+    }
+
+    /// Fall back to `fallback` when this model fails. Chainable —
+    /// `a.or(b).or(c)` tries `a`, then `b`, then `c` — and `fallback`'s own
+    /// fallbacks are appended after it.
+    ///
+    /// ```
+    /// use yoagent::decision::DecisionModel;
+    /// // Hosted Jev; the local server when TypeSafe is down, rate limited,
+    /// // or TYPESAFE_API_KEY is unset.
+    /// let model = DecisionModel::jev().or(DecisionModel::local("http://localhost:8000"));
+    /// ```
+    ///
+    /// - **Falls back on every error except [`DecisionError::Invalid`]** from
+    ///   a backend (a 422, or a request that does not serialize): the request
+    ///   itself is wrong, and every backend would reject it. Unsupported
+    ///   question kinds, rate limits, outages, missing keys, unusable
+    ///   answers and an attempt's own timeout all fall back.
+    /// - **Each member is validated against its own capabilities** before it
+    ///   is tried. A request structurally invalid everywhere (no questions, a
+    ///   one-option Choice, ...) fails with `Invalid` at once; one that only
+    ///   exceeds a member's limits (too many options or levels, a question
+    ///   kind it lacks, its token limits) skips that member without sending
+    ///   anything.
+    /// - **One overall timeout** — this handle's
+    ///   [`with_timeout`](Self::with_timeout) — covers the whole chain; the
+    ///   members' own `with_timeout` is ignored, their
+    ///   [`with_attempt_timeout`](Self::with_attempt_timeout) is not. The tool
+    ///   gate's and the advisory's time limits replace it the same way, so
+    ///   the gate stays fail-closed within its budget.
+    /// - **When every member fails**, the error is
+    ///   [`DecisionError::AllFailed`], listing each member's error in order —
+    ///   or [`DecisionError::Timeout`] when the overall budget ran out.
+    /// - [`Evaluation::model`] names the member that answered; each member
+    ///   prices its own answers. Every attempt sent is recorded in
+    ///   [`SessionStats::decision`](crate::SessionStats::decision) (a primary
+    ///   failure and a fallback success are two requests, one failure);
+    ///   skipped members are not.
+    /// - [`model`](Self::model), [`capabilities`](Self::capabilities) and
+    ///   the builders (`with_api_key`, `with_retry`, `with_cost`, ...) are the
+    ///   **primary's**: configure each member before chaining it.
+    pub fn or(mut self, fallback: DecisionModel) -> Self {
+        let mut fallback = fallback;
+        let rest = std::mem::take(&mut fallback.fallbacks);
+        self.fallbacks.push(fallback);
+        self.fallbacks.extend(rest);
+        self
+    }
+
+    /// The model ids of the fallbacks, in the order they are tried.
+    pub fn fallback_models(&self) -> impl Iterator<Item = &str> + '_ {
+        self.fallbacks.iter().map(|f| f.model.as_str())
+    }
+
+    /// Temperature-scale a [`logprobs`](Self::logprobs) model's label
+    /// probabilities (see [`LogprobBackend::with_temperature`]); ignored,
+    /// with a warning, for other backends. Panics unless `t` is finite and
+    /// positive.
+    pub fn with_temperature(mut self, t: f64) -> Self {
+        match self.backend {
+            Slot::Logprobs(b) => self.backend = Slot::Logprobs(b.with_temperature(t)),
+            other => {
+                tracing::warn!(
+                    "DecisionModel::with_temperature ignored: only logprobs models scale answers"
+                );
+                self.backend = other;
+            }
+        }
+        self
+    }
+
+    /// Raise a [`logprobs`](Self::logprobs) model's Choice option limit (see
+    /// [`LogprobBackend::with_max_choice_options`]); ignored, with a
+    /// warning, for other backends. Panics outside `2..=26`.
+    pub fn with_max_choice_options(mut self, n: usize) -> Self {
+        match self.backend {
+            Slot::Logprobs(b) => self.backend = Slot::Logprobs(b.with_max_choice_options(n)),
+            other => {
+                tracing::warn!(
+                    "DecisionModel::with_max_choice_options ignored: only logprobs models \
+                     take it (configure other backends' capabilities directly)"
+                );
+                self.backend = other;
+            }
+        }
+        self
+    }
+
     /// Send this API key instead of reading the preset's environment
-    /// variable. Only meaningful for the presets; ignored (with a warning)
-    /// for [`from_backend`](Self::from_backend) models.
+    /// variable (for [`logprobs`](Self::logprobs): send one at all). Only
+    /// meaningful for the presets; ignored (with a warning) for
+    /// [`from_backend`](Self::from_backend) models.
     pub fn with_api_key(mut self, key: impl Into<String>) -> Self {
         match self.backend {
             Slot::SystemOne(b) => self.backend = Slot::SystemOne(b.with_api_key(key)),
+            Slot::Logprobs(b) => self.backend = Slot::Logprobs(b.with_api_key(key)),
             Slot::Custom(_) => {
                 tracing::warn!(
                     "DecisionModel::with_api_key ignored: custom backends own their keys"
@@ -246,6 +440,7 @@ impl DecisionModel {
     pub fn with_retry(mut self, retry: crate::retry::RetryConfig) -> Self {
         match self.backend {
             Slot::SystemOne(b) => self.backend = Slot::SystemOne(b.with_retry(retry)),
+            Slot::Logprobs(b) => self.backend = Slot::Logprobs(b.with_retry(retry)),
             Slot::Custom(_) => {
                 tracing::warn!(
                     "DecisionModel::with_retry ignored: custom backends own their retries"
@@ -265,7 +460,8 @@ impl DecisionModel {
         self
     }
 
-    /// The model id or alias requests ask for.
+    /// The model id or alias requests ask for — the primary's, when there
+    /// are fallbacks ([`or`](Self::or)).
     pub fn model(&self) -> &str {
         &self.model
     }
@@ -275,7 +471,8 @@ impl DecisionModel {
         self.timeout
     }
 
-    /// What the backend can answer.
+    /// What the backend can answer — the primary's, when there are
+    /// fallbacks ([`or`](Self::or)).
     pub fn capabilities(&self) -> Capabilities {
         self.backend.get().capabilities()
     }
@@ -379,16 +576,78 @@ impl DecisionModel {
     /// the timeout, validates every answer (see [`DecisionBackend`]), and
     /// prices the result. Inside an agent run, the attempt and its spend are
     /// recorded in the run's [`SessionStats::decision`](crate::SessionStats::decision).
+    ///
+    /// With fallbacks ([`or`](Self::or)), each member in turn — see `or` for
+    /// the rules.
     pub async fn evaluate_request(&self, request: Request) -> Result<Evaluation, DecisionError> {
-        let result = self.evaluate_unrecorded(request).await;
-        crate::agent_loop::record_decision(|stats| match &result {
-            Ok(eval) => stats.record_success(
-                eval.usage.input_tokens,
-                eval.usage.output_tokens,
-                eval.cost_usd,
-            ),
-            Err(e) => stats.record_failure(matches!(e, DecisionError::Timeout(_))),
-        });
+        if !self.fallbacks.is_empty() {
+            return self.evaluate_chain(request).await;
+        }
+        let result = self
+            .evaluate_unrecorded(request, self.attempt_limit(self.timeout))
+            .await;
+        record_attempt(&result);
+        result
+    }
+
+    /// The time one attempt may take when `remaining` is left.
+    fn attempt_limit(&self, remaining: Duration) -> Duration {
+        self.attempt_timeout.map_or(remaining, |t| t.min(remaining))
+    }
+
+    /// Try the primary, then each fallback, within one overall budget.
+    async fn evaluate_chain(&self, request: Request) -> Result<Evaluation, DecisionError> {
+        // Invalid for every backend: fail now, like a single model would.
+        if let Err(e) = request.validate(&Capabilities::unlimited()) {
+            let result = Err(e);
+            record_attempt(&result);
+            return result;
+        }
+        let deadline = tokio::time::Instant::now() + self.timeout;
+        let mut attempts: Vec<(String, DecisionError)> = Vec::new();
+        let mut sent = false;
+        let members = std::iter::once(self).chain(self.fallbacks.iter());
+        for (i, member) in members.enumerate() {
+            let mut req = request.clone();
+            if i > 0 {
+                req.model = member.model.clone();
+            }
+            if let Err(e) = req.validate(&member.backend.get().capabilities()) {
+                tracing::debug!(model = %req.model, "decision fallback: skipped a model: {e}");
+                attempts.push((req.model, e));
+                continue;
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                let result = Err(DecisionError::Timeout(self.timeout));
+                if !sent {
+                    record_attempt(&result);
+                }
+                return result;
+            }
+            let limit = member.attempt_limit(remaining);
+            let model = req.model.clone();
+            let result = member.evaluate_unrecorded(req, limit).await;
+            sent = true;
+            record_attempt(&result);
+            match result {
+                Ok(eval) => return Ok(eval),
+                // The request itself is wrong; every backend would say so.
+                Err(e @ DecisionError::Invalid(_)) => return Err(e),
+                // The overall budget ran out (the attempt had all of it).
+                Err(DecisionError::Timeout(_)) if limit >= remaining => {
+                    return Err(DecisionError::Timeout(self.timeout))
+                }
+                Err(e) => {
+                    tracing::warn!(model = %model, "decision model failed; trying its fallback: {e}");
+                    attempts.push((model, e));
+                }
+            }
+        }
+        let result = Err(DecisionError::AllFailed { attempts });
+        if !sent {
+            record_attempt(&result);
+        }
         result
     }
 
@@ -415,7 +674,12 @@ impl DecisionModel {
         self.cost_usd(&eval.model, &eval.usage)
     }
 
-    async fn evaluate_unrecorded(&self, request: Request) -> Result<Evaluation, DecisionError> {
+    /// One attempt on this model's own backend, within `limit`.
+    async fn evaluate_unrecorded(
+        &self,
+        request: Request,
+        limit: Duration,
+    ) -> Result<Evaluation, DecisionError> {
         let backend = self.backend.get();
         let caps = backend.capabilities();
         request.validate(&caps)?;
@@ -488,11 +752,11 @@ impl DecisionModel {
         };
         let result = {
             use tracing::Instrument;
-            tokio::time::timeout(self.timeout, work.instrument(span.clone())).await
+            tokio::time::timeout(limit, work.instrument(span.clone())).await
         };
         let result = match result {
             Ok(inner) => inner,
-            Err(_) => Err(DecisionError::Timeout(self.timeout)),
+            Err(_) => Err(DecisionError::Timeout(limit)),
         };
         if result.is_err() {
             // A failed or timed-out non-batching request: record what the
@@ -513,6 +777,18 @@ impl DecisionModel {
         }
         Ok(eval)
     }
+}
+
+/// Record one attempt's outcome in the enclosing run's decision stats.
+fn record_attempt(result: &Result<Evaluation, DecisionError>) {
+    crate::agent_loop::record_decision(|stats| match result {
+        Ok(eval) => stats.record_success(
+            eval.usage.input_tokens,
+            eval.usage.output_tokens,
+            eval.cost_usd,
+        ),
+        Err(e) => stats.record_failure(matches!(e, DecisionError::Timeout(_))),
+    });
 }
 
 /// Whether every rate is zero (a model priced as free).

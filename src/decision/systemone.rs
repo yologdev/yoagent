@@ -23,7 +23,7 @@ pub(crate) const TYPESAFE_BASE_URL_ENV: &str = "TYPESAFE_BASE_URL";
 pub(crate) const OPENCODE_API_KEY_ENV: &str = "OPENCODE_API_KEY";
 
 /// Longest error-body excerpt kept in a [`DecisionError`].
-const MAX_ERROR_BODY: usize = 2_000;
+pub(crate) const MAX_ERROR_BODY: usize = 2_000;
 
 #[derive(Clone)]
 enum Endpoint {
@@ -193,44 +193,56 @@ impl SystemOneBackend {
     }
 
     async fn send_once(&self, request: &Request, body: &[u8]) -> Result<Evaluation, DecisionError> {
-        let mut req = self
-            .client
-            .post(self.endpoint_url())
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(body.to_vec());
-        if let Some(key) = self.key()? {
-            req = req.bearer_auth(key);
-        }
-        let response = req
-            .send()
-            .await
-            .map_err(|e| DecisionError::transport_with_source(e.to_string(), e))?;
-        let status = response.status().as_u16();
-        let headers = response.headers().clone();
-        let ok = (200..300).contains(&status);
-        let text = match response.text().await {
-            Ok(text) => text,
-            // A success whose body cannot be read has been processed (and
-            // billed): retrying would pay twice, so it is not a transport
-            // error.
-            Err(e) if ok => {
-                return Err(DecisionError::BadResponse(format!(
-                    "could not read the response body: {e}"
-                )))
-            }
-            Err(e) => return Err(DecisionError::transport_with_source(e.to_string(), e)),
-        };
-        if !ok {
-            return Err(status_error(status, &headers, &text));
-        }
-        let value: Value = serde_json::from_str(&text).map_err(|e| {
-            DecisionError::BadResponse(format!(
-                "response is not JSON ({e}): {}",
-                excerpt(&text, 200)
-            ))
-        })?;
+        let key = self.key()?;
+        let value = post_json(&self.client, &self.endpoint_url(), key.as_deref(), body).await?;
         parse_evaluation(&value, request)
     }
+}
+
+/// POST a JSON `body` (bearer `key` when set) and read a JSON response,
+/// mapping failures to [`DecisionError`]s the retry policy understands.
+/// Shared by the HTTP backends.
+pub(crate) async fn post_json(
+    client: &reqwest::Client,
+    url: &str,
+    key: Option<&str>,
+    body: &[u8],
+) -> Result<Value, DecisionError> {
+    let mut req = client
+        .post(url)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(body.to_vec());
+    if let Some(key) = key {
+        req = req.bearer_auth(key);
+    }
+    let response = req
+        .send()
+        .await
+        .map_err(|e| DecisionError::transport_with_source(e.to_string(), e))?;
+    let status = response.status().as_u16();
+    let headers = response.headers().clone();
+    let ok = (200..300).contains(&status);
+    let text = match response.text().await {
+        Ok(text) => text,
+        // A success whose body cannot be read has been processed (and
+        // billed): retrying would pay twice, so it is not a transport
+        // error.
+        Err(e) if ok => {
+            return Err(DecisionError::BadResponse(format!(
+                "could not read the response body: {e}"
+            )))
+        }
+        Err(e) => return Err(DecisionError::transport_with_source(e.to_string(), e)),
+    };
+    if !ok {
+        return Err(status_error(status, &headers, &text));
+    }
+    serde_json::from_str(&text).map_err(|e| {
+        DecisionError::BadResponse(format!(
+            "response is not JSON ({e}): {}",
+            excerpt(&text, 200)
+        ))
+    })
 }
 
 #[async_trait::async_trait]
@@ -244,31 +256,46 @@ impl DecisionBackend for SystemOneBackend {
         self.key()?;
         let body = serde_json::to_vec(request)
             .map_err(|e| DecisionError::Invalid(format!("request does not serialize: {e}")))?;
-        let mut attempt = 0usize;
-        loop {
-            match self.send_once(request, &body).await {
-                Err(e) if e.is_retryable() && attempt < self.retry.max_retries => {
-                    attempt += 1;
-                    let delay = e
-                        .retry_after()
-                        .map(|d| d.min(Duration::from_millis(self.retry.max_delay_ms)))
-                        .unwrap_or_else(|| self.retry.delay_for_attempt(attempt));
-                    tracing::warn!(
-                        "decision model error (attempt {}/{}), retrying in {:.1}s: {}",
-                        attempt,
-                        self.retry.max_retries,
-                        delay.as_secs_f64(),
-                        e
-                    );
-                    tokio::time::sleep(delay).await;
-                }
-                other => return other,
+        with_retries(&self.retry, || self.send_once(request, &body)).await
+    }
+}
+
+/// Run `send` until it succeeds, fails with a non-retryable error, or the
+/// retries are spent: rate limits, overload and transport failures are
+/// retried with `retry`'s backoff, a server `retry-after` winning (clamped
+/// to the cap). Shared by the HTTP backends.
+pub(crate) async fn with_retries<T, F, Fut>(
+    retry: &RetryConfig,
+    mut send: F,
+) -> Result<T, DecisionError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, DecisionError>>,
+{
+    let mut attempt = 0usize;
+    loop {
+        match send().await {
+            Err(e) if e.is_retryable() && attempt < retry.max_retries => {
+                attempt += 1;
+                let delay = e
+                    .retry_after()
+                    .map(|d| d.min(Duration::from_millis(retry.max_delay_ms)))
+                    .unwrap_or_else(|| retry.delay_for_attempt(attempt));
+                tracing::warn!(
+                    "decision model error (attempt {}/{}), retrying in {:.1}s: {}",
+                    attempt,
+                    retry.max_retries,
+                    delay.as_secs_f64(),
+                    e
+                );
+                tokio::time::sleep(delay).await;
             }
+            other => return other,
         }
     }
 }
 
-fn excerpt(text: &str, max: usize) -> String {
+pub(crate) fn excerpt(text: &str, max: usize) -> String {
     if text.len() <= max {
         return text.to_string();
     }
@@ -279,7 +306,11 @@ fn excerpt(text: &str, max: usize) -> String {
     format!("{}…", &text[..end])
 }
 
-fn status_error(status: u16, headers: &reqwest::header::HeaderMap, body: &str) -> DecisionError {
+pub(crate) fn status_error(
+    status: u16,
+    headers: &reqwest::header::HeaderMap,
+    body: &str,
+) -> DecisionError {
     match status {
         429 | 529 => DecisionError::rate_limited(
             status,
