@@ -946,4 +946,32 @@ mod pricing_tests {
             Some(2.0)
         );
     }
+
+    #[test]
+    fn logprobs_are_free_only_on_loopback() {
+        let usage = DecisionUsage::new(2_000_000, 500);
+        for local in [
+            "http://localhost:8080",
+            "http://127.0.0.1:1/v1",
+            "http://[::1]:9",
+        ] {
+            let m = DecisionModel::logprobs(local, "m");
+            assert!(m.capabilities().local, "{local}");
+            assert_eq!(m.cost_usd("m", &usage), Some(0.0), "{local}");
+        }
+        for remote in [
+            "https://api.openai.com/v1",
+            "http://10.1.2.3:8000",
+            "http://gpu-box:8080",
+        ] {
+            let m = DecisionModel::logprobs(remote, "m");
+            assert!(!m.capabilities().local, "{remote}");
+            assert_eq!(m.cost_usd("m", &usage), None, "{remote}: unpriced");
+            assert_eq!(
+                m.with_cost(Some(CostConfig::new(1.0, 0.0)))
+                    .cost_usd("m", &usage),
+                Some(2.0)
+            );
+        }
+    }
 }

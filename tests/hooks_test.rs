@@ -701,3 +701,181 @@ fn several_run_prompts_are_labelled() {
         "User: look around /srv\n\nUser: then tidy it up"
     );
 }
+
+// ---------------------------------------------------------------------------
+// User request parts, and ToolCallRequest outside the loop
+// ---------------------------------------------------------------------------
+
+#[test]
+fn user_request_parts_match_the_prose() {
+    // A short reply to a question: every part set.
+    let messages = vec![
+        Message::user("clean up the workspace"),
+        assistant("I found /tmp/scratch.txt. Should I delete it?"),
+        Message::user("yes, go ahead"),
+    ];
+    let turn = TurnContext::new("", &messages, &[], "m");
+    let parts = turn.user_request_parts().unwrap();
+    assert_eq!(parts.latest.as_deref(), Some("yes, go ahead"));
+    assert_eq!(
+        parts.assistant_question.as_deref(),
+        Some("I found /tmp/scratch.txt. Should I delete it?")
+    );
+    assert_eq!(
+        parts.earlier_request.as_deref(),
+        Some("clean up the workspace")
+    );
+    assert!(!parts.from_run_prompts);
+    let prose = turn.user_request().unwrap();
+    for part in [
+        parts.latest.unwrap(),
+        parts.assistant_question.unwrap(),
+        parts.earlier_request.unwrap(),
+    ] {
+        assert!(prose.contains(&part), "{prose}");
+    }
+
+    // A self-contained request: only `latest`.
+    let messages = vec![Message::user(
+        "please refactor the parser module so errors carry spans",
+    )];
+    let parts = TurnContext::new("", &messages, &[], "m")
+        .user_request_parts()
+        .unwrap();
+    assert!(parts.assistant_question.is_none() && parts.earlier_request.is_none());
+
+    // Compacted away: the run's prompts, flagged.
+    let messages = vec![Message::user(COMPACTION_MARKER_TEXT)];
+    let prompts = vec![Message::user("tidy /srv")];
+    let turn = TurnContext::new("", &messages, &[], "m").with_run_prompts(&prompts);
+    let parts = turn.user_request_parts().unwrap();
+    assert!(parts.from_run_prompts);
+    assert_eq!(parts.latest.as_deref(), Some("tidy /srv"));
+    assert_eq!(turn.user_request().as_deref(), Some("tidy /srv"));
+
+    // Nothing at all.
+    assert!(TurnContext::new("", &messages, &[], "m")
+        .user_request_parts()
+        .is_none());
+}
+
+#[test]
+fn a_tool_call_request_can_be_built_outside_the_loop() {
+    let args = serde_json::json!({"path": "/tmp/x"});
+    let bare = ToolCallRequest::new("call-1", "rm", &args);
+    assert_eq!(bare.tool_call_id, "call-1");
+    assert_eq!(bare.tool_name, "rm");
+    assert_eq!(bare.args, &args);
+    assert!(bare.messages.is_empty() && bare.run_prompts.is_empty());
+    assert!(bare.user_request().is_none());
+
+    let history = vec![
+        AgentMessage::Llm(Message::user("clean up the workspace")),
+        AgentMessage::Llm(assistant("Delete /tmp/x?")),
+        AgentMessage::Llm(Message::user("yes")),
+    ];
+    let call = ToolCallRequest::new("call-1", "rm", &args).with_messages(&history);
+    assert_eq!(call.latest_user_text().as_deref(), Some("yes"));
+    let parts = call.user_request_parts().unwrap();
+    assert_eq!(parts.assistant_question.as_deref(), Some("Delete /tmp/x?"));
+    assert_eq!(
+        parts.earlier_request.as_deref(),
+        Some("clean up the workspace")
+    );
+
+    let prompts = vec![Message::user("remove /tmp/x")];
+    let call = ToolCallRequest::new("call-1", "rm", &args).with_run_prompts(&prompts);
+    assert_eq!(call.user_request().as_deref(), Some("remove /tmp/x"));
+    assert!(call.user_request_parts().unwrap().from_run_prompts);
+}
+
+// ---------------------------------------------------------------------------
+// SubAgentTool mirrors: turn hooks and async input filters
+// ---------------------------------------------------------------------------
+
+fn sub_agent(provider: Recording) -> SubAgentTool {
+    SubAgentTool::from_provider("helper", Arc::new(provider), ModelConfig::mock())
+}
+
+fn tool_text(result: &ToolResult) -> String {
+    match &result.content[0] {
+        Content::Text { text } => text.clone(),
+        _ => panic!("text"),
+    }
+}
+
+#[tokio::test]
+async fn a_sub_agent_turn_hook_notes_its_own_requests() {
+    let (provider, seen) = recording(MockProvider::text("done"));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let tool = sub_agent(provider).with_turn_hook(Line(Some("Sub hint."), calls.clone()));
+    let result = tool
+        .execute(
+            serde_json::json!({"task": "summarize"}),
+            ToolContext::new("tc-1", "helper"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(tool_text(&result), "done");
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].1, "summarize|Sub hint.");
+    assert_eq!(
+        calls.lock().unwrap().as_slice(),
+        [Some("summarize".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn a_sub_agent_async_filter_can_reject_or_warn() {
+    // Rejected: the sub-agent never calls its model, and the tool call fails
+    // with the reason.
+    let (provider, seen) = recording(MockProvider::text("should not run"));
+    let tool = sub_agent(provider).with_async_input_filter(SlowModeration);
+    let err = tool
+        .execute(
+            serde_json::json!({"task": "do the forbidden thing"}),
+            ToolContext::new("tc-1", "helper"),
+        )
+        .await
+        .unwrap_err();
+    let text = err.to_string();
+    assert!(text.contains("rejected its task"), "{text}");
+    assert!(text.contains("moderation said no"), "{text}");
+    assert!(seen.lock().unwrap().is_empty(), "no LLM request");
+
+    // The same with event forwarding on (the other code path).
+    let (provider, _) = recording(MockProvider::text("should not run"));
+    let tool = sub_agent(provider).with_async_input_filter(SlowModeration);
+    let ctx = ToolContext::new("tc-1", "helper").with_on_progress(Arc::new(|_| {}));
+    let err = tool
+        .execute(serde_json::json!({"task": "forbidden"}), ctx)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("moderation said no"));
+
+    // Warned: runs, with the warning appended to the task.
+    let (provider, seen) = recording(MockProvider::text("ok"));
+    let tool = sub_agent(provider).with_async_input_filter(SlowModeration);
+    tool.execute(
+        serde_json::json!({"task": "an iffy task"}),
+        ToolContext::new("tc-1", "helper"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        seen.lock().unwrap()[0].1,
+        "an iffy task|[Warning: flagged by moderation]"
+    );
+
+    // Positive control: a clean task runs untouched.
+    let (provider, seen) = recording(MockProvider::text("ok"));
+    let tool = sub_agent(provider).with_async_input_filter(SlowModeration);
+    tool.execute(
+        serde_json::json!({"task": "a clean task"}),
+        ToolContext::new("tc-1", "helper"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(seen.lock().unwrap()[0].1, "a clean task");
+}

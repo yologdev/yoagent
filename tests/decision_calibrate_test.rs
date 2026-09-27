@@ -1,0 +1,258 @@
+//! `decision::calibrate` against scripted models: calibrated and
+//! overconfident answers, thresholds, errors and skips, bounded concurrency.
+
+use serde_json::json;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+use yoagent::decision::*;
+
+const Q: &str = "Is this a yes?";
+
+/// A model answering each Noul with the `p` in its state (and failing when
+/// the state says so).
+fn echo() -> DecisionModel {
+    DecisionModel::from_backend(
+        MockBackend::from_fn(|req| {
+            if req.state["fail"] == true {
+                return Err(DecisionError::http(503, "down"));
+            }
+            let mut eval = Evaluation::new("echo", DecisionUsage::new(1, 0));
+            for (id, q) in &req.questions {
+                eval = match q.kind() {
+                    QuestionKind::Noul => eval.with_answer(
+                        id.clone(),
+                        NoulAnswer::new(req.state["p"].as_f64().unwrap()),
+                    ),
+                    QuestionKind::Choice => {
+                        let probs: Vec<f64> =
+                            serde_json::from_value(req.state["probs"].clone()).unwrap();
+                        let options = q.options().unwrap();
+                        eval.with_answer(
+                            id.clone(),
+                            ChoiceAnswer::new(options.into_iter().zip(probs)),
+                        )
+                    }
+                    _ => {
+                        let probs: Vec<f64> =
+                            serde_json::from_value(req.state["probs"].clone()).unwrap();
+                        let legend = (0..probs.len()).map(|i| i.to_string()).collect();
+                        eval.with_answer(id.clone(), ScoreAnswer::new(legend, probs))
+                    }
+                };
+            }
+            Ok(eval)
+        }),
+        "echo",
+    )
+}
+
+/// `n` Noul examples answered `p`, of which `yes` are truly yes.
+fn group(p: f64, n: usize, yes: usize) -> Vec<CalibrationExample> {
+    (0..n)
+        .map(|i| CalibrationExample::noul(json!({"p": p, "i": i}), Q, i < yes))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_calibrated_model_has_near_zero_ece() {
+    let mut examples = Vec::new();
+    for (p, yes) in [(0.1, 1), (0.3, 3), (0.7, 7), (0.9, 9)] {
+        examples.extend(group(p, 10, yes));
+    }
+    let report = calibrate(&echo(), examples).await;
+    assert_eq!(report.count, 40);
+    assert!(report.ece < 1e-9, "{report}");
+    assert!((report.accuracy - 0.8).abs() < 1e-9, "{report}");
+    // Mean (p - y)^2: 0.09 for the 0.1/0.9 groups, 0.21 for 0.3/0.7.
+    assert!((report.brier - 0.15).abs() < 1e-9, "{report}");
+    let t = report.suggested_temperature.unwrap();
+    assert!((t - 1.0).abs() < 0.06, "calibrated: T = {t}");
+    assert_eq!(report.bins.len(), 10);
+    assert_eq!(report.bins.iter().map(|b| b.count).sum::<usize>(), 40);
+    assert!(report.errors.is_empty() && report.skipped.is_empty());
+}
+
+#[tokio::test]
+async fn an_overconfident_model_has_high_ece_and_a_temperature_above_one() {
+    let mut examples = group(0.99, 10, 7); // says yes at 0.99, right 70%
+    examples.extend(group(0.01, 10, 3)); // says no at 0.99, right 70%
+    let report = calibrate(&echo(), examples).await;
+    assert!((report.accuracy - 0.7).abs() < 1e-9);
+    assert!((report.ece - 0.29).abs() < 1e-9, "{report}");
+    let t = report.suggested_temperature.unwrap();
+    assert!(t > 1.5, "overconfident: T = {t}");
+    // Everything lands in the top bin.
+    assert_eq!(report.bins[9].count, 20);
+    assert!((report.bins[9].accuracy - 0.7).abs() < 1e-9);
+}
+
+#[tokio::test]
+async fn an_underconfident_model_gets_a_temperature_below_one() {
+    let mut examples = group(0.6, 10, 10); // right every time at 0.6
+    examples.extend(group(0.4, 10, 0));
+    let report = calibrate(&echo(), examples).await;
+    assert!(report.suggested_temperature.unwrap() < 1.0);
+}
+
+#[tokio::test]
+async fn noul_thresholds_on_a_separable_set() {
+    let mut examples = Vec::new();
+    for p in [0.6, 0.8, 0.9] {
+        examples.push(CalibrationExample::noul(json!({"p": p}), Q, true));
+    }
+    for p in [0.1, 0.2, 0.4] {
+        examples.push(CalibrationExample::noul(json!({"p": p}), Q, false));
+    }
+    let report = calibrate_with(
+        &echo(),
+        examples,
+        CalibrationOptions::new().with_target_precision(1.0),
+    )
+    .await;
+    let best = report.best_f1.unwrap();
+    assert_eq!(best.threshold, 0.6);
+    assert_eq!((best.precision, best.recall, best.f1), (1.0, 1.0, 1.0));
+    assert_eq!(report.precision_threshold.unwrap().threshold, 0.6);
+}
+
+#[tokio::test]
+async fn target_precision_trades_recall() {
+    let mut examples = Vec::new();
+    for p in [0.6, 0.8, 0.9] {
+        examples.push(CalibrationExample::noul(json!({"p": p}), Q, true));
+    }
+    for p in [0.1, 0.7] {
+        examples.push(CalibrationExample::noul(json!({"p": p}), Q, false));
+    }
+    let report = calibrate_with(
+        &echo(),
+        examples,
+        CalibrationOptions::new().with_target_precision(0.9),
+    )
+    .await;
+    // Best F1 at 0.6 (precision 0.75, recall 1); precision 0.9 needs 0.8.
+    assert_eq!(report.best_f1.unwrap().threshold, 0.6);
+    let strict = report.precision_threshold.unwrap();
+    assert_eq!(strict.threshold, 0.8);
+    assert_eq!(strict.precision, 1.0);
+    assert!((strict.recall - 2.0 / 3.0).abs() < 1e-9);
+
+    // Unreachable target: none.
+    let report = calibrate_with(
+        &echo(),
+        vec![
+            CalibrationExample::noul(json!({"p": 0.9}), Q, false),
+            CalibrationExample::noul(json!({"p": 0.5}), Q, true),
+        ],
+        CalibrationOptions::new().with_target_precision(0.9),
+    )
+    .await;
+    assert!(report.precision_threshold.is_none());
+}
+
+#[tokio::test]
+async fn choice_and_score_examples_are_scored() {
+    let examples = vec![
+        CalibrationExample::choice(json!({"probs": [0.8, 0.2]}), "which?", ["a", "b"], "a"),
+        CalibrationExample::choice(json!({"probs": [0.8, 0.2]}), "which?", ["a", "b"], "b"),
+        CalibrationExample::score(json!({"probs": [0.1, 0.9]}), "how?", ["lo", "hi"], 1),
+        CalibrationExample::score(json!({"probs": [0.1, 0.9]}), "how?", ["lo", "hi"], 1),
+    ];
+    let report = calibrate(&echo(), examples).await;
+    assert_eq!(report.count, 4);
+    assert!((report.accuracy - 0.75).abs() < 1e-9);
+    // Multi-class Brier: 0.08, 1.28, 0.02, 0.02.
+    assert!((report.brier - 1.4 / 4.0).abs() < 1e-9, "{report}");
+    assert!(report.best_f1.is_none(), "Noul only");
+}
+
+#[tokio::test]
+async fn errors_and_misfit_examples_are_counted_not_fatal() {
+    let examples = vec![
+        CalibrationExample::noul(json!({"p": 0.9}), Q, true),
+        CalibrationExample::noul(json!({"fail": true}), Q, true),
+        // The expected option is not an option.
+        CalibrationExample::choice(json!({"probs": [0.5, 0.5]}), "which?", ["a", "b"], "c"),
+        // Level out of range.
+        CalibrationExample::score(json!({"probs": [0.5, 0.5]}), "how?", ["lo", "hi"], 2),
+        // A Noul expectation on a Choice question.
+        CalibrationExample::new(
+            json!({"p": 0.5}),
+            Question::choice("which?", ["a", "b"]),
+            Expected::Noul(true),
+        ),
+        CalibrationExample::noul(json!({"p": 0.2}), Q, false),
+    ];
+    let report = calibrate(&echo(), examples).await;
+    assert_eq!(report.count, 2);
+    assert_eq!(report.errors.len(), 1);
+    assert_eq!(report.errors[0].0, 1);
+    assert!(matches!(
+        report.errors[0].1,
+        DecisionError::Http { status: 503, .. }
+    ));
+    assert_eq!(report.skipped, [2, 3, 4]);
+    assert_eq!(report.accuracy, 1.0);
+    let text = report.to_string();
+    assert!(text.contains("1 errors, 3 skipped"), "{text}");
+}
+
+#[tokio::test]
+async fn nothing_evaluated_is_nan_not_zero() {
+    let report = calibrate(&echo(), Vec::new()).await;
+    assert_eq!(report.count, 0);
+    assert!(report.accuracy.is_nan() && report.ece.is_nan() && report.brier.is_nan());
+    assert!(report.suggested_temperature.is_none());
+}
+
+/// Counts how many evaluations run at once.
+struct Counting {
+    now: Arc<AtomicUsize>,
+    max: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl DecisionBackend for Counting {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::new(QuestionKind::all())
+    }
+    async fn evaluate(&self, request: &Request) -> Result<Evaluation, DecisionError> {
+        let n = self.now.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max.fetch_max(n, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        self.now.fetch_sub(1, Ordering::SeqCst);
+        Ok(Evaluation::new("c", DecisionUsage::default())
+            .with_answer(request.questions[0].0.clone(), NoulAnswer::new(0.5)))
+    }
+}
+
+#[tokio::test]
+async fn concurrency_is_bounded() {
+    let max = Arc::new(AtomicUsize::new(0));
+    let model = DecisionModel::from_backend(
+        Counting {
+            now: Arc::default(),
+            max: max.clone(),
+        },
+        "c",
+    );
+    let report = calibrate_with(
+        &model,
+        group(0.5, 12, 6),
+        CalibrationOptions::new().with_concurrency(3),
+    )
+    .await;
+    assert_eq!(report.count, 12);
+    let seen = max.load(Ordering::SeqCst);
+    assert!(
+        (2..=3).contains(&seen),
+        "at most 3 at once, and concurrent: {seen}"
+    );
+}
+
+#[test]
+#[should_panic(expected = "target precision")]
+fn target_precision_must_be_a_probability() {
+    let _ = CalibrationOptions::new().with_target_precision(1.5);
+}
