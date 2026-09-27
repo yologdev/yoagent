@@ -47,7 +47,8 @@ adheres to [Semantic Versioning](https://semver.org/).
     question type is an error, never emulated. Every backend's answers are
     validated (kind; finite probabilities and confidences in `[0, 1]`; a
     probability for every Choice option and every Score level, summing to
-    1 within 0.02; choices among the options); answers nobody asked for
+    1 within `max(0.02, n × 0.005)` for `n` options or levels, for servers
+    that round; choices among the options); answers nobody asked for
     are dropped.
   - `DecisionError` (`Clone`, `#[non_exhaustive]`, matched with
     `matches!`): `Http`, `RateLimited`, `Timeout`, `Invalid`,
@@ -61,7 +62,9 @@ adheres to [Semantic Versioning](https://semver.org/).
     input tokens, output free). `jev()` evaluations are priced by the model
     id the API reports, only on TypeSafe's host; aliases, unlisted versions,
     gateways and `from_backend` are unpriced, `local()` is $0; a response
-    that reports no usage is unpriced. An unpriced handle keeps a cost the
+    that reports no usage is unpriced unless the handle is free. A
+    non-batching request that fails or times out partway records the usage
+    already billed. An unpriced handle keeps a cost the
     backend reports itself. The price audit records the entry as absent
     from models.dev (with a test that counts it). With the feature on,
     `typesafe` override entries are no longer reported as inert.

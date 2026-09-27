@@ -914,6 +914,8 @@ async fn score_probabilities_as_an_array_parse() {
         .unwrap();
     let a = eval.score("sc").unwrap();
     assert_eq!(a.probabilities(), [0.1, 0.2, 0.7]);
+    // `local()` is free: no usage reported, still $0 (not unpriced).
+    assert_eq!(eval.cost_usd(), Some(0.0));
     assert!((a.score() - 1.6).abs() < 1e-9);
 }
 
@@ -1021,5 +1023,59 @@ async fn backend_cost_is_kept_only_by_an_unpriced_handle() {
     assert!(
         (cost - 0.042).abs() < 1e-12,
         "the handle's pricing wins: {cost}"
+    );
+}
+
+async fn choice_of(n: usize, probabilities: Vec<f64>) -> Result<Evaluation, DecisionError> {
+    let options: Vec<String> = (0..n).map(|i| format!("o{i}")).collect();
+    let probs: serde_json::Map<String, Value> = options
+        .iter()
+        .zip(&probabilities)
+        .map(|(o, p)| (o.clone(), json!(p)))
+        .collect();
+    let server = MockServer::start().await;
+    mount_ok(
+        &server,
+        json!({"model": "m", "answers": {"c": {"type": "choice", "probabilities": probs}},
+               "usage": {"input_tokens": 1, "output_tokens": 0}}),
+    )
+    .await;
+    hosted(&server)
+        .ask("s")
+        .choice("c", "which?", options)
+        .send()
+        .await
+}
+
+#[tokio::test]
+async fn rounded_distributions_over_many_options_are_accepted() {
+    // 41 options rounded to 2 decimals: 0.45 plus forty 0.01s (really
+    // ~0.01375 each) sum to 0.85, within 41 * 0.005.
+    let mut p = vec![0.45];
+    p.extend(std::iter::repeat_n(0.01, 40));
+    let eval = choice_of(41, p)
+        .await
+        .expect("rounding slack for 41 options");
+    assert_eq!(eval.choice("c").unwrap().choice(), "o0");
+
+    // 255 options with a long tail rounded to 0.00: the visible mass is 0.9.
+    let mut p = vec![0.5, 0.1, 0.1, 0.1, 0.1];
+    p.extend(std::iter::repeat_n(0.0, 250));
+    choice_of(255, p)
+        .await
+        .expect("rounding slack for 255 options");
+
+    // Still rejected: 12 options summing to 1.8, and 255 near-1 values.
+    let mut p = vec![0.8];
+    p.extend(std::iter::repeat_n(1.0 / 11.0, 11));
+    let e = choice_of(12, p).await.unwrap_err();
+    assert!(
+        matches!(&e, DecisionError::BadResponse(t) if t.contains("sum to")),
+        "{e:?}"
+    );
+    let e = choice_of(255, vec![0.99; 255]).await.unwrap_err();
+    assert!(
+        matches!(&e, DecisionError::BadResponse(t) if t.contains("sum to")),
+        "{e:?}"
     );
 }

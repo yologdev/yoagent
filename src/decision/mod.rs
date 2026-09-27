@@ -396,8 +396,12 @@ impl DecisionModel {
     /// keeps whatever the backend reported; a priced one computes it from the
     /// reported usage, and is unpriced when the backend reported none.
     fn price(&self, eval: &Evaluation) -> Option<f64> {
-        if self.pricing == Pricing::Unpriced {
-            return eval.cost_usd;
+        match &self.pricing {
+            Pricing::Unpriced => return eval.cost_usd,
+            // Free (e.g. `local()`): $0 whatever the usage — missing usage
+            // cannot make a free model's cost unknown.
+            Pricing::Fixed(c) if is_free(c) => return Some(0.0),
+            _ => {}
         }
         if !eval.usage_reported {
             if !WARNED_NO_USAGE.swap(true, std::sync::atomic::Ordering::Relaxed) {
@@ -423,6 +427,10 @@ impl DecisionModel {
             tokens_in = tracing::field::Empty,
             cost_usd = tracing::field::Empty,
         );
+        // What a non-batching request has already been billed for, kept
+        // outside the future so a timeout (which drops the future) or a later
+        // failure still records it.
+        let billed: std::sync::Mutex<Option<Evaluation>> = std::sync::Mutex::new(None);
         let work = async {
             if caps.batching || request.questions.len() == 1 {
                 let mut eval = backend.evaluate(&request).await?;
@@ -436,27 +444,29 @@ impl DecisionModel {
                         state: request.state.clone(),
                         questions: vec![(id.clone(), q.clone())],
                     };
-                    let step = match backend.evaluate(&single).await {
-                        Ok(mut eval) => check_complete(&single, &mut eval).map(|()| eval),
-                        Err(e) => Err(e),
-                    };
-                    let eval = match step {
-                        Ok(eval) => eval,
-                        Err(e) => {
-                            // The questions already answered were billed.
-                            if let Some(done) = &merged {
-                                let cost = self.price(done);
-                                crate::agent_loop::record_decision(|stats| {
-                                    stats.record_billed(
-                                        done.usage.input_tokens,
-                                        done.usage.output_tokens,
-                                        cost,
-                                    )
-                                });
+                    let mut eval = backend.evaluate(&single).await?;
+                    // Billed even if its answer is then rejected.
+                    {
+                        let mut total = billed.lock().unwrap_or_else(|e| e.into_inner());
+                        let step = Evaluation {
+                            answers: Vec::new(),
+                            ..eval.clone()
+                        };
+                        *total = Some(match total.take() {
+                            None => step,
+                            Some(mut t) => {
+                                t.usage.input_tokens += step.usage.input_tokens;
+                                t.usage.output_tokens += step.usage.output_tokens;
+                                t.usage_reported &= step.usage_reported;
+                                t.cost_usd = match (t.cost_usd, step.cost_usd) {
+                                    (Some(a), Some(b)) => Some(a + b),
+                                    _ => None,
+                                };
+                                t
                             }
-                            return Err(e);
-                        }
-                    };
+                        });
+                    }
+                    check_complete(&single, &mut eval)?;
                     merged = Some(match merged {
                         None => eval,
                         Some(mut m) => {
@@ -480,7 +490,22 @@ impl DecisionModel {
             use tracing::Instrument;
             tokio::time::timeout(self.timeout, work.instrument(span.clone())).await
         };
-        let mut eval = result.map_err(|_| DecisionError::Timeout(self.timeout))??;
+        let result = match result {
+            Ok(inner) => inner,
+            Err(_) => Err(DecisionError::Timeout(self.timeout)),
+        };
+        if result.is_err() {
+            // A failed or timed-out non-batching request: record what the
+            // questions answered so far were billed.
+            let done = billed.lock().unwrap_or_else(|e| e.into_inner()).take();
+            if let Some(done) = done {
+                let cost = self.price(&done);
+                crate::agent_loop::record_decision(|stats| {
+                    stats.record_billed(done.usage.input_tokens, done.usage.output_tokens, cost)
+                });
+            }
+        }
+        let mut eval = result?;
         eval.cost_usd = self.price(&eval);
         span.record("tokens_in", eval.usage.input_tokens);
         if let Some(c) = eval.cost_usd {
@@ -488,6 +513,20 @@ impl DecisionModel {
         }
         Ok(eval)
     }
+}
+
+/// Whether every rate is zero (a model priced as free).
+fn is_free(c: &CostConfig) -> bool {
+    c.input_per_million == 0.0
+        && c.output_per_million == 0.0
+        && c.cache_read_per_million == 0.0
+        && c.cache_write_per_million == 0.0
+        && c.context_tiers.iter().all(|t| {
+            t.input_per_million == 0.0
+                && t.output_per_million == 0.0
+                && t.cache_read_per_million == 0.0
+                && t.cache_write_per_million == 0.0
+        })
 }
 
 /// Warned once per process that a backend reported no usage.

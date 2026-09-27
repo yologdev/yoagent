@@ -344,13 +344,22 @@ impl Answer {
 /// Tolerance for float noise at the edges of `[0, 1]`.
 const EPS: f64 = 1e-6;
 
-/// How far a distribution may sum from 1: generous enough for servers that
-/// round probabilities to a few decimals, tight enough to reject a broken one.
-pub(crate) const SUM_TOLERANCE: f64 = 0.02;
+/// How far a distribution of `n` outcomes may sum from 1. TypeSafe appears
+/// to round probabilities to 2 decimals, which moves each by up to 0.005, so
+/// the slack grows with `n`: `max(0.02, n * 0.005)` — 0.06 for 12 options,
+/// 0.2 for 40, 1.275 for 255. Still tight enough to reject a distribution
+/// that is badly off (every probability near 1).
+pub(crate) fn sum_tolerance(n: usize) -> f64 {
+    (n as f64 * 0.005 + 1e-9).max(0.02)
+}
 
 fn check_sum(id: &str, probabilities: impl Iterator<Item = f64>) -> Result<(), DecisionError> {
-    let sum: f64 = probabilities.sum();
-    if (sum - 1.0).abs() <= SUM_TOLERANCE {
+    let (mut n, mut sum) = (0usize, 0.0f64);
+    for p in probabilities {
+        n += 1;
+        sum += p;
+    }
+    if (sum - 1.0).abs() <= sum_tolerance(n) {
         Ok(())
     } else {
         Err(DecisionError::BadResponse(format!(

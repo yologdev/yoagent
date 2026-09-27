@@ -125,8 +125,8 @@ estimate). A question type the backend does not support is an error
 answer of its own kind; every probability and confidence must be finite and in
 `[0, 1]`; a Choice needs a probability for **every** option (TypeSafe sends
 exact zeros, e.g. `"sales": 0.0`), its `choice` must be one of them, and a
-Choice's or Score's probabilities must sum to 1 within 0.02 (room for servers
-that round); a Score needs exactly one probability and one legend entry per
+Choice's or Score's probabilities must sum to 1 within `max(0.02, n × 0.005)`
+for `n` options or levels (TypeSafe appears to round to 2 decimals); a Score needs exactly one probability and one legend entry per
 level, and a score within `0..=levels-1`. Anything else is `BadResponse`.
 Answers nobody asked for are dropped, and the rest are kept in request order.
 In a SystemOne response, `null` for an optional or derivable field
@@ -170,7 +170,8 @@ pub trait DecisionBackend: Send + Sync {
 the cost from the usage the backend reports, replacing any cost the backend
 set; an unpriced handle (`from_backend` without `with_cost`) keeps the cost
 the backend set with `Evaluation::with_cost_usd`. A response that reports no
-usage at all is unpriced (`None`), never $0.
+usage at all is unpriced (`None`), never $0 — except on a free handle
+(`local()`, or `with_cost` with all-zero rates), which is always $0.
 
 `Capabilities::local` means *self-hosted: the state does not go to a third
 party*. Only `DecisionModel::local(url)` sets it for the SystemOne backend. A
@@ -379,10 +380,10 @@ with the crate's rule: unpriced decision spend (e.g. `from_backend` without
 tokens are not added to `total_usage()`, which counts LLM tokens.
 
 Decision spend in an `AsyncInputFilter` counts too, including when the
-filter rejects the prompt. A request that timed out, or a non-batching
-request that failed partway, may still have been billed: the questions a
-non-batching backend already answered are recorded, but a timed-out
-request's usage is unknown and is not counted. `DecisionStats::unpriced`
+filter rejects the prompt. When a non-batching request fails or times out
+partway, the questions already answered were billed, and that usage is
+recorded. A batched request that times out may still have been billed by
+the server, but its usage never arrives, so it is not counted. `DecisionStats::unpriced`
 counts successful evaluations whose cost is unknown.
 
 ## The hooks underneath

@@ -1396,6 +1396,7 @@ async fn a_partial_failure_records_the_usage_already_billed() {
 async fn missing_usage_is_unpriced_not_free() {
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
+    // Priced handle without usage -> unpriced; with usage -> priced.
     for (with_usage, priced) in [(false, false), (true, true)] {
         let server = MockServer::start().await;
         let mut body = json!({
@@ -1589,4 +1590,72 @@ async fn advisory_filters_uncertain_answers() {
         "fill in the PDF",
         "no note"
     );
+}
+
+#[tokio::test]
+async fn a_free_handle_stays_free_without_usage() {
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "model": "jevk5",
+            "answers": {
+                "destructive": {"type": "noul", "noul": 0.0},
+                "requested": {"type": "noul", "noul": 1.0}
+            }
+        })))
+        .mount(&server)
+        .await;
+    let (tools, ran) = make_tools(1);
+    let agent = Agent::from_provider(calls_rm(), ModelConfig::mock())
+        .with_tools(tools)
+        .with_tool_gate(ToolGate::new(DecisionModel::local(server.uri())));
+    let (agent, stats) = run_stats(agent, "delete /tmp/scratch.txt").await;
+    assert_eq!(ran.lock().unwrap().len(), 1);
+    assert_eq!(stats.decision.requests, 1);
+    assert_eq!(stats.decision.unpriced, 0);
+    assert_eq!(stats.decision.cost_usd, Some(0.0));
+    // The run's bill is not hidden by a free decision model.
+    assert_eq!(stats.total_cost_usd(), Some(0.0));
+    assert_eq!(agent.total_cost_usd(), Some(0.0));
+}
+
+/// Non-batching: answers `destructive` at once (10 tokens), then hangs.
+struct HangsOnSecond;
+
+#[async_trait::async_trait]
+impl DecisionBackend for HangsOnSecond {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::new(QuestionKind::all()).with_batching(false)
+    }
+    async fn evaluate(&self, request: &Request) -> Result<Evaluation, DecisionError> {
+        let (id, _) = &request.questions[0];
+        if id == "destructive" {
+            return Ok(Evaluation::new("m", DecisionUsage::new(10, 0))
+                .with_answer("destructive", NoulAnswer::new(0.0)));
+        }
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        Err(DecisionError::backend("unreachable"))
+    }
+}
+
+#[tokio::test]
+async fn a_timed_out_partial_request_records_what_was_billed() {
+    let (tools, ran) = make_tools(1);
+    let gate = ToolGate::new(
+        DecisionModel::from_backend(HangsOnSecond, "m").with_cost(Some(CostConfig::new(1.0, 0.0))),
+    )
+    .with_timeout(Duration::from_millis(100));
+    let agent = Agent::from_provider(calls_rm(), ModelConfig::mock())
+        .with_tools(tools)
+        .with_tool_gate(gate);
+    let start = Instant::now();
+    let (_, stats) = run_stats(agent, "delete /tmp/scratch.txt").await;
+    assert!(start.elapsed() < Duration::from_secs(5));
+    assert!(ran.lock().unwrap().is_empty(), "fails closed");
+    let d = &stats.decision;
+    assert_eq!((d.requests, d.failures, d.timeouts), (1, 1, 1), "{d:?}");
+    assert_eq!(d.usage.input, 10, "the answered half was billed");
+    assert!((d.cost_usd.unwrap() - 0.00001).abs() < 1e-15);
 }
