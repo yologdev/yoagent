@@ -77,5 +77,31 @@ async fn main() {
     // defence in depth, not a security boundary. Enable it deliberately:
     //
     //     use yoagent::decision::ToolGate;
-    //     let _agent = _agent.with_tool_gate(ToolGate::new(jev));
+    //     let _agent = _agent.with_tool_gate(ToolGate::new(jev.clone()));
+    //
+    // The input guard also BLOCKS: it screens each prompt (prompt injection,
+    // clearly harmful requests) and rejects hits; it fails closed too.
+    //
+    //     use yoagent::decision::InputGuard;
+    //     let _agent = _agent.with_input_guard(InputGuard::new(jev.clone()));
+
+    // 4. Any OpenAI-compatible server that returns logprobs is a decision
+    //    model too — llama.cpp's llama-server, vLLM, SGLang, LM Studio. Its
+    //    probabilities are only approximately calibrated. And `or` chains a
+    //    fallback: hosted Jev first, the local server when Jev fails.
+    //
+    //     let local = DecisionModel::logprobs("http://localhost:8080", "qwen3-8b");
+    //     let model = DecisionModel::jev().or(local);
+    //
+    // 5. Measure a model (and choose thresholds, or a logprob temperature)
+    //    on labelled examples of your own:
+    //
+    //     use yoagent::decision::{calibrate, CalibrationExample};
+    //     let q = "Does this convey urgency?";
+    //     let report = calibrate(&model, vec![
+    //         CalibrationExample::noul("Help! Payouts failing for 3 days.", q, true),
+    //         CalibrationExample::noul("Just saying thanks for the update.", q, false),
+    //     ])
+    //     .await;
+    //     println!("{report}"); // accuracy, Brier, ECE, thresholds, temperature
 }

@@ -56,7 +56,9 @@
 //!   that may add one transient note to the request's latest user turn.
 //! - **Decision models** (feature `decision`) — typed questions (yes/no,
 //!   choice, score) answered with calibrated probabilities, e.g. TypeSafe's
-//!   Jev; advisory skill/tool hints and an opt-in, fail-closed tool gate.
+//!   Jev, or any OpenAI-compatible LLM that returns logprobs; fallbacks and
+//!   calibration; advisory skill/tool hints, and an opt-in, fail-closed tool
+//!   gate and input guard.
 //!   Off by default; nothing is sent until you pick a model.
 //! - **Sub-agents** ([`SubAgentTool`]) — delegation with per-sub-agent models
 //!   and [`SharedState`] for passing artifacts by reference.

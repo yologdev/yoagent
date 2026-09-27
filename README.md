@@ -297,14 +297,16 @@ A decision model answers typed questions — yes/no (**Noul**), one-of-N (**Choi
 ```rust,ignore
 let jev = DecisionModel::jev();                                      // key from TYPESAFE_API_KEY
 let urgent = jev.noul(message, "Does this convey urgency?").await?;  // urgent.p_true()
+let jev = jev.or(DecisionModel::logprobs("http://localhost:8080", "qwen3-8b")); // fallback: any logprob LLM
 
 let agent = Agent::from_config(ModelConfig::claude_sonnet_5())
     .with_skills(skills)
     .with_decision_model(jev.clone())          // advisory only: skill / tool hints; needs skills or 40+ tools
-    .with_tool_gate(ToolGate::new(jev));       // opt-in: deny destructive, unrequested calls; fails closed
+    .with_tool_gate(ToolGate::new(jev.clone())) // opt-in: deny destructive, unrequested calls; fails closed
+    .with_input_guard(InputGuard::new(jev));   // opt-in: reject injection / harmful prompts; fails closed
 ```
 
-Hosted models see what you send; `DecisionModel::local(url)` keeps it on your machine. The tool gate is defence in depth, not a security boundary — injected content can steer a decision model. See [Decision Models](https://yologdev.github.io/yoagent/concepts/decision-models.html).
+`DecisionModel::logprobs(url, model)` turns any OpenAI-compatible server that returns logprobs (llama.cpp, vLLM, SGLang, LM Studio) into a decision model — approximately calibrated; measure it on your own examples with `decision::calibrate`. Hosted models see what you send; `DecisionModel::local(url)` or a loopback `logprobs` server keeps it on your machine. The tool gate and input guard are defence in depth, not a security boundary — injected content can steer a decision model. See [Decision Models](https://yologdev.github.io/yoagent/concepts/decision-models.html).
 
 </details>
 
@@ -391,7 +393,7 @@ testable too.
 | [`mcp/`](src/mcp/) | MCP client, stdio + HTTP transports, tool adapter |
 | [`openapi/`](src/openapi/) | OpenAPI 3.0 → tools (feature `openapi`) |
 | [`gasp`](src/gasp.rs) | Run recording into a GASP repo (feature `gasp`) |
-| [`decision/`](src/decision/) | Decision models, advisory hints and the tool gate (feature `decision`) |
+| [`decision/`](src/decision/) | Decision models (SystemOne and logprob backends, fallbacks, calibration), advisory hints, the tool gate and the input guard (feature `decision`) |
 
 ---
 

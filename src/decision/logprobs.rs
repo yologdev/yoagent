@@ -66,8 +66,22 @@ pub(crate) const MAX_CONCURRENT_QUESTIONS: usize = 8;
 ///   `retry-after`; 422 is [`DecisionError::Invalid`]; any other non-success
 ///   status is [`DecisionError::Http`].
 ///
-/// See the [module docs](self) for how answers are read, and why their
-/// calibration is approximate.
+/// **How answers are read.** Each question is one completion of one token
+/// at temperature 0; the prompt presents the state, the question and a label
+/// per answer — `A` = yes / `B` = no for a Noul, `A`, `B`, ... for a
+/// Choice's options in order, `0`–`9` for a Score's levels. Every token in
+/// the first position's `top_logprobs` is trimmed and upper-cased (`" A"`
+/// and `"a"` both count as `A`), probabilities of tokens mapping to one
+/// label are summed, the temperature is applied to their log-probabilities,
+/// and a softmax over the labels present gives the distribution; a label
+/// outside the top K gets 0. No label in the top K is
+/// [`DecisionError::BadResponse`].
+///
+/// **Calibration is approximate.** A general LLM's next-token probability
+/// for a label is not a calibrated probability the way a trained decision
+/// model's is; it is often overconfident. Measure it with
+/// [`calibrate`](super::calibrate()) and correct it with
+/// [`with_temperature`](Self::with_temperature).
 #[derive(Clone)]
 pub struct LogprobBackend {
     client: reqwest::Client,

@@ -47,8 +47,28 @@
 //!
 //! Integrations depend on the [`DecisionBackend`] trait, never on a vendor:
 //! [`SystemOneBackend`] speaks the SystemOne HTTP API (TypeSafe, OpenCode Zen,
-//! self-hosted JevK5), [`MockBackend`] scripts answers for tests, and any
-//! other backend plugs in through [`DecisionModel::from_backend`].
+//! self-hosted JevK5), [`LogprobBackend`] turns any OpenAI-compatible server
+//! that returns logprobs into a decision model
+//! ([`DecisionModel::logprobs`]), [`MockBackend`] scripts answers for tests,
+//! and any other backend plugs in through [`DecisionModel::from_backend`].
+//! Chain fallbacks with [`DecisionModel::or`]; measure a model on your own
+//! labelled examples with [`calibrate()`].
+//!
+//! ```no_run
+//! # async fn demo() {
+//! use yoagent::decision::{calibrate, CalibrationExample, DecisionModel};
+//!
+//! // Hosted Jev, falling back to a local llama-server.
+//! let model = DecisionModel::jev()
+//!     .or(DecisionModel::logprobs("http://localhost:8080", "qwen3-8b"));
+//! let q = "Does this ask to delete data?";
+//! let report = calibrate(&model, vec![
+//!     CalibrationExample::noul("rm -rf build/", q, true),
+//!     CalibrationExample::noul("list src/", q, false),
+//! ]).await;
+//! println!("{report}");
+//! # }
+//! ```
 //!
 //! # Limits you should know
 //!
@@ -64,7 +84,8 @@
 //!   dates, and large states full of irrelevant detail.
 //!
 //! See the book chapter *Decision models* for the agent integrations
-//! (`Agent::with_decision_model`, `Agent::with_tool_gate`).
+//! (`Agent::with_decision_model`, `Agent::with_tool_gate`,
+//! `Agent::with_input_guard`).
 
 mod advisory;
 mod answer;
