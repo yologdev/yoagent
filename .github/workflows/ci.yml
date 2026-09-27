@@ -33,6 +33,9 @@ jobs:
       - name: Format
         run: cargo fmt -- --check
 
+      - name: Documentation
+        run: RUSTDOCFLAGS="-Dwarnings" cargo doc --no-deps --all-features
+
       - name: Clippy
         run: cargo clippy --all-targets --all-features
 
