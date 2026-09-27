@@ -68,7 +68,7 @@ cargo run --example cli -- --api-url http://localhost:1234/v1 --model my-model  
 
 ```toml
 [dependencies]
-yoagent = "0.15"
+yoagent = "0.21"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -145,7 +145,7 @@ What that focus bought:
   event log in a git repo — restore is clone + replay. Conformance-checked in CI.
 - **The whole loop is testable offline.** `MockProvider` scripts multi-turn tool-calling
   conversations and honours cancellation, so abort and steering paths are testable with no
-  network. 456 of our 463 tests need no key.
+  network. 1,037 of our tests run with no network and no key.
 
 ---
 
@@ -368,10 +368,10 @@ let agent = Agent::from_provider(provider, ModelConfig::mock());
 It emits real `StreamEvent`s and honours the `CancellationToken`, so abort and steering paths are
 testable too.
 
-- **463 tests**, of which **456 run with no network and no API keys** — `cargo test --all-features`
-- Provider SSE streams tested at the HTTP level with `wiremock` across 8 suites
+- **1,037 tests run with no network and no API keys** — `cargo test --all-features`; 16 more are opt-in live checks and benchmarks
+- HTTP-level tests with `wiremock` across 17 suites: provider SSE streams, MCP over HTTP, OpenAPI, decision backends and price fetching
 - `clippy --all-targets --all-features` with `-Dwarnings`, `cargo fmt --check`
-- Linux + macOS test matrix, a Windows compile check, a pinned **MSRV 1.86** job, and a GASP conformance job
+- Linux + macOS test matrix, a Windows compile check, a pinned **MSRV 1.86** job, per-feature builds (default, `openapi`, `gasp`, `decision`), and a GASP conformance job
 
 ---
 
