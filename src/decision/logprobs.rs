@@ -90,7 +90,8 @@ const KINDS: &[QuestionKind] = &[
 ///    probability, 1 − total reported probability)` — an upper bound on its
 ///    real probability — so absence alone never yields exactly 0 or 1;
 /// 4. the temperature is applied to the log-probabilities and a softmax
-///    gives the distribution.
+///    gives the distribution; an absent label keeps a floor of 1e-9 after
+///    scaling, so even a very small temperature cannot make it 0.
 ///
 /// **Calibration is approximate.** A general LLM's next-token probability
 /// for a label is not a calibrated probability the way a trained decision
@@ -233,12 +234,17 @@ impl LogprobBackend {
     /// fields the backend relies on (`model`, `messages`, `max_tokens`,
     /// `temperature`, `logprobs`, `top_logprobs`) cannot be overridden.
     ///
+    /// The merge is deep: nested objects are merged key by key (so
+    /// `with_thinking_disabled()` followed by
+    /// `with_extra_body(json!({"chat_template_kwargs": {"x": 1}}))` keeps
+    /// `enable_thinking: false`); any other value replaces the earlier one.
+    ///
     /// Panics unless `fields` is a JSON object.
     pub fn with_extra_body(mut self, fields: Value) -> Self {
         let Value::Object(map) = fields else {
             panic!("with_extra_body takes a JSON object");
         };
-        self.extra_body.extend(map);
+        deep_merge(&mut self.extra_body, map);
         self
     }
 
@@ -362,6 +368,19 @@ impl DecisionBackend for LogprobBackend {
         eval.usage = DecisionUsage::new(input, output);
         eval.usage_reported = reported;
         Ok(eval)
+    }
+}
+
+/// Merge `from` into `into`: objects key by key, recursively; anything else
+/// replaces.
+fn deep_merge(into: &mut Map<String, Value>, from: Map<String, Value>) {
+    for (key, value) in from {
+        match (into.get_mut(&key), value) {
+            (Some(Value::Object(existing)), Value::Object(new)) => deep_merge(existing, new),
+            (_, value) => {
+                into.insert(key, value);
+            }
+        }
     }
 }
 
@@ -520,7 +539,21 @@ pub(crate) fn label_distribution(
     let max = logits.iter().copied().fold(f64::NEG_INFINITY, f64::max);
     let weights: Vec<f64> = logits.iter().map(|l| (l - max).exp()).collect();
     let total: f64 = weights.iter().sum();
-    Ok(weights.into_iter().map(|w| w / total).collect())
+    let mut probs: Vec<f64> = weights.into_iter().map(|w| w / total).collect();
+    // A small temperature can underflow an absent label's share to 0: keep
+    // the floor after scaling, so absence alone never yields 0 or 1.
+    let mut floored = false;
+    for (p, m) in probs.iter_mut().zip(&mass) {
+        if *m <= 0.0 && *p < ABSENT_FLOOR {
+            *p = ABSENT_FLOOR;
+            floored = true;
+        }
+    }
+    if floored {
+        let total: f64 = probs.iter().sum();
+        probs.iter_mut().for_each(|p| *p /= total);
+    }
+    Ok(probs)
 }
 
 #[cfg(test)]
@@ -590,6 +623,32 @@ mod tests {
             ("B", 0.01f64.ln()),
         ]);
         assert!(label_distribution(&words, &ab(), 1.0, 0.05).is_ok());
+    }
+
+    #[test]
+    fn a_tiny_temperature_keeps_absent_labels_off_zero() {
+        // B absent; at t = 0.01 its bounded 0.1 share would underflow.
+        let p = dist(&[("A", 0.6), ("The", 0.3)], 0.01).unwrap();
+        assert!(p[1] > 0.0 && p[0] < 1.0, "{p:?}");
+        assert!((p.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+        // Positive control: at t = 1 no floor is needed.
+        let p = dist(&[("A", 0.6), ("The", 0.3)], 1.0).unwrap();
+        assert!((p[1] - 0.1 / 0.7).abs() < 1e-9, "{p:?}");
+    }
+
+    #[test]
+    fn extra_body_merges_deeply() {
+        let b = LogprobBackend::new("http://localhost:1")
+            .with_thinking_disabled()
+            .with_extra_body(json!({"chat_template_kwargs": {"custom": 1}, "top_k": 5}))
+            .with_extra_body(json!({"top_k": 7}));
+        assert_eq!(
+            Value::Object(b.extra_body.clone()),
+            json!({"chat_template_kwargs": {"enable_thinking": false, "custom": 1}, "top_k": 7})
+        );
+        // A non-object value replaces.
+        let b = b.with_extra_body(json!({"chat_template_kwargs": null}));
+        assert_eq!(b.extra_body["chat_template_kwargs"], Value::Null);
     }
 
     #[test]

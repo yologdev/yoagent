@@ -619,9 +619,11 @@ fn threshold_points(nouls: &[(f64, bool)]) -> Vec<ThresholdPoint> {
 }
 
 /// Mean negative log-likelihood of the true outcomes after rescaling every
-/// distribution to temperature `t`: `p^(1/t)` renormalised, where a zero
-/// stays zero (as in the logprob backend); only the true outcome's rescaled
-/// probability is floored, so a confident miss is finite.
+/// distribution to temperature `t`: `p^(1/t)` renormalised. A zero
+/// probability (which some backends report; the logprob backend floors
+/// absent labels instead) stays zero, since no temperature can make it
+/// non-zero; only the true outcome's rescaled probability is floored, so a
+/// confident miss is finite.
 fn nll(scored: &[Scored], t: f64) -> f64 {
     let total: f64 = scored
         .iter()

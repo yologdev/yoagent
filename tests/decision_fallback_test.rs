@@ -374,3 +374,59 @@ async fn from_arc_shares_one_backend() {
     let models: Vec<String> = mock.requests().into_iter().map(|r| r.model).collect();
     assert_eq!(models, ["a", "b"]);
 }
+
+/// Counts evaluations in flight and records the peak.
+struct InFlight {
+    caps: Capabilities,
+    now: Arc<std::sync::atomic::AtomicUsize>,
+    peak: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl DecisionBackend for InFlight {
+    fn capabilities(&self) -> Capabilities {
+        self.caps.clone()
+    }
+    async fn evaluate(&self, request: &Request) -> Result<Evaluation, DecisionError> {
+        use std::sync::atomic::Ordering;
+        let n = self.now.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(n, Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        self.now.fetch_sub(1, Ordering::SeqCst);
+        let mut eval = Evaluation::new("m", DecisionUsage::default());
+        for (id, _) in &request.questions {
+            eval = eval.with_answer(id.clone(), NoulAnswer::new(0.5));
+        }
+        Ok(eval)
+    }
+}
+
+async fn peak_for(caps: Capabilities) -> usize {
+    let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let backend = InFlight {
+        caps,
+        now: Arc::default(),
+        peak: peak.clone(),
+    };
+    let model = DecisionModel::from_backend(backend, "m");
+    let mut ask = model.ask("s");
+    for i in 0..12 {
+        ask = ask.noul(format!("q{i}"), "q?");
+    }
+    let eval = ask.send().await.unwrap();
+    assert_eq!(eval.answers().count(), 12);
+    peak.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[tokio::test]
+async fn a_split_request_respects_the_concurrency_cap() {
+    let split = || Capabilities::new(QuestionKind::all()).with_batching(false);
+    // The default: one at a time.
+    assert_eq!(split().max_concurrent_requests, 1);
+    assert_eq!(peak_for(split()).await, 1);
+    // The logprob backend's cap.
+    let peak = peak_for(split().with_max_concurrent_requests(8)).await;
+    assert!(peak > 1 && peak <= 8, "{peak}");
+    let peak = peak_for(split().with_max_concurrent_requests(3)).await;
+    assert!(peak > 1 && peak <= 3, "{peak}");
+}

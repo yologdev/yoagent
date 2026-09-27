@@ -230,7 +230,7 @@ then fails closed. Use a non-thinking model, start llama-server with
 `--reasoning off`, or send `chat_template_kwargs: {"enable_thinking": false}`
 with `LogprobBackend::with_thinking_disabled()` (llama.cpp, vLLM and SGLang
 accept it). It is not sent by default because OpenAI's API rejects unknown
-fields. `with_extra_body(json!({..}))` sends other server-specific fields;
+fields. `with_extra_body(json!({..}))` sends other server-specific fields (merged deeply, so it keeps `enable_thinking`);
 the fields the backend relies on cannot be overridden.
 
 ```rust

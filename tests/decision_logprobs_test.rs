@@ -3,6 +3,7 @@
 //! temperature scaling, the Choice limit, fan-out, usage, pricing, retries.
 
 use serde_json::{json, Value};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request as WireRequest, ResponseTemplate};
@@ -412,17 +413,19 @@ async fn questions_fan_out_concurrently_and_merge_in_order() {
     Mock::given(method("POST"))
         .and(path(CHAT))
         .respond_with(|req: &WireRequest| {
+            // Delays 800 / 400 / 0 ms: the answers complete in the REVERSE
+            // of request order.
             let prompt = prompt_of(req);
-            let top: &[(&str, f64)] = if prompt.contains("urgent?") {
-                &[("A", 0.8), ("B", 0.2)]
+            let (top, delay): (&[(&str, f64)], u64) = if prompt.contains("urgent?") {
+                (&[("A", 0.8), ("B", 0.2)], 800)
             } else if prompt.contains("which team?") {
-                &[("B", 0.9), ("A", 0.1)]
+                (&[("B", 0.9), ("A", 0.1)], 400)
             } else {
-                &[("2", 0.7), ("0", 0.3)]
+                (&[("2", 0.7), ("0", 0.3)], 0)
             };
             ResponseTemplate::new(200)
                 .set_body_json(completion(top, (100, 1)))
-                .set_delay(Duration::from_millis(300))
+                .set_delay(Duration::from_millis(delay))
         })
         .mount(&server)
         .await;
@@ -443,8 +446,9 @@ async fn questions_fan_out_concurrently_and_merge_in_order() {
         3,
         "one per question"
     );
+    // Sequential would take ~1200 ms, concurrent ~800 ms.
     assert!(
-        elapsed < Duration::from_millis(850),
+        elapsed >= Duration::from_millis(800) && elapsed < Duration::from_millis(1_100),
         "concurrent: {elapsed:?}"
     );
     let ids: Vec<&str> = eval.answers().map(|(id, _)| id).collect();
@@ -661,4 +665,85 @@ async fn a_timeout_keeps_the_answered_questions_spend() {
         stats.decision.usage.input, 200,
         "the two answered questions"
     );
+}
+
+#[tokio::test]
+async fn at_most_eight_questions_are_in_flight() {
+    // Every response takes 400 ms, so how many requests arrive in the first
+    // 200 ms is how many were in flight at once.
+    let arrivals: Arc<Mutex<Vec<Instant>>> = Arc::default();
+    let seen = arrivals.clone();
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(CHAT))
+        .respond_with(move |_req: &WireRequest| {
+            seen.lock().unwrap().push(Instant::now());
+            ResponseTemplate::new(200)
+                .set_body_json(completion(&[("A", 0.9), ("B", 0.1)], (1, 1)))
+                .set_delay(Duration::from_millis(400))
+        })
+        .mount(&server)
+        .await;
+    let m = model(&server);
+    let mut ask = m.ask("s");
+    for i in 0..12 {
+        ask = ask.noul(format!("q{i}"), format!("question {i}?"));
+    }
+    let start = Instant::now();
+    let eval = ask.send().await.unwrap();
+    assert_eq!(eval.answers().count(), 12);
+    let arrivals = arrivals.lock().unwrap().clone();
+    assert_eq!(arrivals.len(), 12);
+    let early = arrivals
+        .iter()
+        .filter(|t| t.duration_since(start) < Duration::from_millis(200))
+        .count();
+    assert_eq!(early, 8, "the cap (8) at once, the rest after a slot frees");
+    assert_eq!(model(&server).capabilities().max_concurrent_requests, 8);
+}
+
+#[tokio::test]
+async fn a_response_without_usage_is_unpriced_unless_free() {
+    let server = MockServer::start().await;
+    let mut body = completion(&[("A", 0.9), ("B", 0.1)], (0, 0));
+    body.as_object_mut().unwrap().remove("usage");
+    mount(&server, body).await;
+
+    // Loopback is a free handle: $0 even without usage.
+    let eval = model(&server)
+        .ask("s")
+        .noul("q", "q?")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(eval.cost_usd(), Some(0.0));
+    assert_eq!(eval.usage().input_tokens, 0);
+
+    // Priced: no usage means unpriced, never a guessed $0 ...
+    let priced = model(&server).with_cost(Some(yoagent::provider::CostConfig::new(1.0, 0.0)));
+    let eval = priced.ask("s").noul("q", "q?").send().await.unwrap();
+    assert_eq!(eval.cost_usd(), None);
+
+    // ... and the run's stats count it as unpriced.
+    let guard = InputGuard::new(priced)
+        .without_default_checks()
+        .with_check("x", "x?", 0.9);
+    let mut agent = yoagent::Agent::from_provider(
+        yoagent::provider::MockProvider::text("hi"),
+        yoagent::provider::ModelConfig::mock(),
+    )
+    .with_input_guard(guard);
+    let mut rx = agent.prompt("hello").await;
+    let mut stats = None;
+    while let Some(e) = rx.recv().await {
+        if let yoagent::AgentEvent::AgentEnd { stats: s, .. } = e {
+            stats = Some(s);
+        }
+    }
+    agent.finish().await;
+    let stats = stats.unwrap();
+    assert_eq!(stats.decision.requests, 1);
+    assert_eq!(stats.decision.unpriced, 1);
+    assert_eq!(stats.decision.cost_usd, None);
+    assert!(stats.decision.is_unpriced());
 }

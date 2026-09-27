@@ -500,3 +500,41 @@ async fn the_gate_can_be_unit_tested_through_tool_call_request_new() {
     assert!(matches!(decision, ToolDecision::Deny(_)));
     assert_eq!(mock.request_count(), 0);
 }
+
+#[test]
+fn check_order_does_not_matter_for_added_checks() {
+    let a = InputGuard::new(model(&MockBackend::neutral()))
+        .with_check("pii", "PII?", 0.5)
+        .without_default_checks();
+    let b = InputGuard::new(model(&MockBackend::neutral()))
+        .without_default_checks()
+        .with_check("pii", "PII?", 0.5);
+    assert_eq!(a.check_ids(), ["pii"]);
+    assert_eq!(a.check_ids(), b.check_ids());
+}
+
+#[tokio::test]
+async fn a_chain_whose_members_are_all_skipped_fails_and_is_recorded() {
+    // Neither member answers Nouls: both are skipped unsent.
+    let choice_only =
+        || MockBackend::neutral().with_capabilities(Capabilities::new(&[QuestionKind::Choice]));
+    let (a, b) = (choice_only(), choice_only());
+    let chain =
+        DecisionModel::from_backend(a.clone(), "a").or(DecisionModel::from_backend(b.clone(), "b"));
+
+    // Directly: AllFailed, nothing sent.
+    let e = chain.noul("s", "q?").await.unwrap_err();
+    let DecisionError::AllFailed { attempts, .. } = &e else {
+        panic!("expected AllFailed, got {e:?}");
+    };
+    assert!(attempts.iter().all(|x| !x.was_sent()));
+    assert!(matches!(attempts[0].error(), DecisionError::Unsupported(_)));
+
+    // In a run: the guard fails closed and the stats record one failure.
+    let out = run(InputGuard::new(chain), "hello").await;
+    let reason = out.rejected.expect("fails closed");
+    assert!(reason.contains("every decision model"), "{reason}");
+    assert_eq!(out.stats.decision.requests, 1);
+    assert_eq!(out.stats.decision.failures, 1);
+    assert_eq!(a.request_count() + b.request_count(), 0);
+}

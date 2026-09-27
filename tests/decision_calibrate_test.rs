@@ -325,3 +325,49 @@ async fn a_chain_that_mixes_models_is_visible() {
     assert!(!report.mixed_models());
     assert_eq!(report.models, [("echo".to_string(), 3)]);
 }
+
+#[tokio::test]
+async fn best_f1_ties_go_to_the_lowest_threshold() {
+    // Yes at 0.9 and 0.2, no at 0.3 and 0.5: thresholds 0.2 (P 0.5, R 1)
+    // and 0.9 (P 1, R 0.5) both reach F1 = 2/3.
+    let examples = vec![
+        CalibrationExample::noul(json!({"p": 0.9}), Q, true),
+        CalibrationExample::noul(json!({"p": 0.2}), Q, true),
+        CalibrationExample::noul(json!({"p": 0.3}), Q, false),
+        CalibrationExample::noul(json!({"p": 0.5}), Q, false),
+    ];
+    let best = calibrate(&echo(), examples).await.best_f1.unwrap();
+    assert_eq!(best.threshold, 0.2);
+    assert!((best.f1 - 2.0 / 3.0).abs() < 1e-12);
+}
+
+/// Fails every example, later ones sooner — so failures complete in reverse.
+struct FailsInReverse;
+
+#[async_trait::async_trait]
+impl DecisionBackend for FailsInReverse {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::new(QuestionKind::all())
+    }
+    async fn evaluate(&self, request: &Request) -> Result<Evaluation, DecisionError> {
+        let i = request.state["i"].as_u64().unwrap();
+        tokio::time::sleep(Duration::from_millis((5 - i) * 30)).await;
+        Err(DecisionError::http(500, format!("example {i}")))
+    }
+}
+
+#[tokio::test]
+async fn calibration_errors_are_sorted_by_index() {
+    let examples: Vec<CalibrationExample> = (0..5)
+        .map(|i| CalibrationExample::noul(json!({"i": i}), Q, true))
+        .collect();
+    let report = calibrate_with(
+        &DecisionModel::from_backend(FailsInReverse, "m"),
+        examples,
+        CalibrationOptions::new().with_concurrency(5),
+    )
+    .await;
+    let order: Vec<usize> = report.errors.iter().map(|e| e.index()).collect();
+    assert_eq!(order, [0, 1, 2, 3, 4]);
+    assert_eq!(report.count, 0);
+}
