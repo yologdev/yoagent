@@ -123,6 +123,99 @@ adheres to [Semantic Versioning](https://semver.org/).
     `TurnContext` carries `run_prompts`; `TurnContext::new` /
     `with_run_prompts` for tests; `TurnContext::latest_user_text` and
     `user_request` as on `ToolCallRequest`.
+- **Decision models: any LLM with logprobs** (feature `decision`).
+  `DecisionModel::logprobs(base_url, model)`,
+  `DecisionModel::from_logprob_backend(LogprobBackend, model)` and
+  `LogprobBackend` (`new`, `with_api_key`, `with_retry`, `with_temperature`,
+  `with_max_choice_options`, `with_top_logprobs`, `with_min_label_mass`,
+  `with_thinking_disabled`, `with_extra_body`, `temperature`, `is_local`,
+  `endpoint_url`) turn any OpenAI-compatible `/chat/completions` server that
+  returns logprobs (llama.cpp `llama-server`, vLLM, SGLang, LM Studio, hosted
+  APIs) into a decision backend: one one-token completion per question
+  (`max_tokens: 1`, `temperature: 0`, `logprobs: true`,
+  `top_logprobs: max(configured K, label count)`, K = 20), labels `A`/`B`
+  (Noul), `A`.. (Choice, the options in order) and `0`–`9` (Score), read
+  from the first token's `top_logprobs`: tokens trimmed and case-folded,
+  duplicates summed; no label in the top K, or labels covering less than
+  half of the first-token probability (a thinking model's `<think>`, an
+  answer in words), is `BadResponse`; an absent label is bounded by the
+  smallest reported probability instead of 0. Thinking must be off
+  (`with_thinking_disabled` sends `chat_template_kwargs.enable_thinking =
+  false`, not by default). Calibration is approximate; the backend's
+  `with_temperature` rescales it. Choice up to 20 options by default (up to
+  26 when raised), Score up to 10 levels; Noul/Choice/Score only (a future
+  kind is `Unsupported`). One request per question: the backend reports
+  `batching: false` with 8 concurrent requests, so the questions of a
+  request run concurrently and the spend of completed ones is recorded even
+  when another fails or the call times out. No key unless set and no
+  environment variable read; local and $0 only on a loopback host, otherwise
+  unpriced until `with_cost`. `DecisionModel::with_api_key` and
+  `with_retry` also apply to logprob models.
+- **`Capabilities::max_concurrent_requests`** (`with_max_concurrent_requests`,
+  default 1) — for a non-batching backend, how many single-question
+  requests `DecisionModel` runs at once. The split path now stops starting
+  new questions after the first failure but awaits those in flight.
+- **Decision-model fallbacks.** `DecisionModel::or(fallback)` (chainable,
+  flattened in order; each member asks with its own model id) tries the next
+  model on any error a member returns, `Invalid` (e.g. a 422) included; each
+  member is validated against its own capabilities (a request invalid for
+  every member fails at once; one over a member's limits skips it unsent).
+  One overall budget (`with_timeout` of the chain, judged by the clock, not
+  the error kind) covers the chain; the gate's (5 s), input guard's (3 s)
+  and advisory's (2 s) limits replace it, as they do a single model's; and
+  `with_attempt_timeout` caps a member's attempt within it. Every attempt
+  sent is recorded in `SessionStats::decision`. `model()` /
+  `capabilities()` report the primary's; `fallback_models()` lists the
+  rest. New error variant `DecisionError::AllFailed { attempts }` with
+  `FallbackAttempt` (`model`, `error`, `was_sent`); it is retryable when any
+  member's error was (the enum is `#[non_exhaustive]`, so this is additive).
+  A request that cannot be built (a malformed base URL) is now `Invalid`,
+  not a retried `Transport` error, for the SystemOne and logprob backends.
+- **`DecisionModel::from_arc(Arc<dyn DecisionBackend>, model)`** — wrap a
+  shared or runtime-chosen backend.
+- **Calibration.** `decision::calibrate(model, examples)` and
+  `calibrate_with(model, examples, CalibrationOptions)` measure a model on
+  labelled `CalibrationExample`s (`noul`, `choice`, `score`, `new` with an
+  `Expected` of `Noul`/`Choice`/`Score`; getters `state`, `question`,
+  `expected`), evaluated with bounded concurrency
+  (`CalibrationOptions::new`, `with_concurrency` — default 4 —,
+  `with_target_precision`; getters `concurrency`, `target_precision`).
+  `CalibrationReport`: `count`, `accuracy` / `brier` / `ece` (`Option`,
+  `None` when nothing was evaluated; ECE over 10 bins with the
+  `ReliabilityBin`s), Noul `best_f1` and `precision_threshold` as
+  `ThresholdPoint`s, a `suggested_temperature` (grid search minimising NLL;
+  approximate for logprob models), `models` per answering model with
+  `mixed_models()`, and the `errors` (`CalibrationError`: `index`, `error`)
+  and `skipped` examples — counted, never fatal. Its `Display` is for
+  people, not a stable format.
+- **`Agent::with_input_guard(InputGuard::new(model))`** — an explicit,
+  blocking opt-in built on `AsyncInputFilter`: one batched request of
+  Nouls per prompt (default checks `injection` and `harmful`, each
+  rejecting at `p >= 0.8`; they may change in minor releases — pin them
+  with `without_default_checks` + `with_check`); a hit rejects the input
+  with a reason naming the check. The whole input is sent; input over
+  32,000 characters (`with_max_input_chars`) is not sent. **Fails closed**
+  (error, timeout — 3 s by default —, missing answer, or input over the
+  limit rejects); `with_fail_open()` opts out. Builders `with_check` (a
+  built-in id replaces that check), `without_default_checks` (independent
+  of call order), `with_threshold` (panics on an unknown id or a value
+  outside `[0, 1]`), `with_timeout`, `with_max_input_chars`; `check_ids()`.
+  `with_input_guard` panics on a guard with no checks. Input with no text
+  (image-only) passes unscreened; steering and follow-up messages are not
+  screened (input filters see prompts only). `SubAgentTool::with_input_guard`
+  screens a sub-agent's task.
+- **Hook builders** (no feature needed). `ToolCallRequest::new(tool_call_id,
+  tool_name, args)` with `with_messages` and `with_run_prompts`, to
+  unit-test middleware — `ToolGate` included — outside the crate.
+  `ToolCallRequest::user_request_parts()` and
+  `TurnContext::user_request_parts()` return `UserRequestParts` (`latest`,
+  `reply: Option<ReplyContext { question, earlier_request }>`,
+  `source: UserRequestSource` — `Conversation` / `RunPrompts` —, and
+  `run_prompts`; all `#[non_exhaustive]`), the same selection as
+  `user_request()`, whose prose is now documented as not a stable format.
+- **`SubAgentTool::with_turn_hook` and `SubAgentTool::with_async_input_filter`**,
+  mirroring `Agent`. A sub-agent task rejected by an input filter fails the
+  tool call with the reason instead of running.
 
 ## 0.20.0
 

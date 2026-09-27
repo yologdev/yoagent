@@ -76,13 +76,71 @@ pub enum DecisionError {
     /// options. Checked for every backend.
     #[error("decision model returned an unusable response: {0}")]
     BadResponse(String),
+    /// Every model of a fallback chain
+    /// ([`DecisionModel::or`](super::DecisionModel::or)) failed or was
+    /// skipped for its limits. Lists each member, in the order they were
+    /// tried. (When the chain's overall time ran out, the error is
+    /// [`Timeout`](Self::Timeout) instead.)
+    #[error("every decision model in the fallback chain failed: {}", fmt_attempts(.attempts))]
+    #[non_exhaustive]
+    AllFailed {
+        /// One per member, in order.
+        attempts: Vec<FallbackAttempt>,
+    },
+}
+
+/// One member's outcome in [`DecisionError::AllFailed`].
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct FallbackAttempt {
+    model: String,
+    error: DecisionError,
+    sent: bool,
+}
+
+impl FallbackAttempt {
+    pub(crate) fn new(model: String, error: DecisionError, sent: bool) -> Self {
+        Self { model, error, sent }
+    }
+
+    /// The model id this member asked for.
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// Why it failed — or, when it was not sent, why it was skipped.
+    pub fn error(&self) -> &DecisionError {
+        &self.error
+    }
+
+    /// Whether a request was sent. `false` when the member was skipped
+    /// because the request exceeded its capabilities.
+    pub fn was_sent(&self) -> bool {
+        self.sent
+    }
+}
+
+fn fmt_attempts(attempts: &[FallbackAttempt]) -> String {
+    attempts
+        .iter()
+        .map(|a| {
+            let skipped = if a.sent { "" } else { " (skipped)" };
+            format!("[{}{skipped}] {}", a.model, a.error)
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 impl DecisionError {
     /// Whether retrying the same request may succeed: rate limits, overload,
-    /// and transport failures.
+    /// and transport failures — and [`AllFailed`](Self::AllFailed) when any
+    /// member's error was one of those.
     pub fn is_retryable(&self) -> bool {
-        matches!(self, Self::RateLimited { .. } | Self::Transport { .. })
+        match self {
+            Self::RateLimited { .. } | Self::Transport { .. } => true,
+            Self::AllFailed { attempts } => attempts.iter().any(|a| a.error.is_retryable()),
+            _ => false,
+        }
     }
 
     /// The server-specified retry delay, if any.

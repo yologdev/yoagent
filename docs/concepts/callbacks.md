@@ -90,6 +90,17 @@ For a raw loop, push `Arc::new(AsyncFilter::new(Moderation))` onto
 `AgentLoopConfig::input_filters`; the loop awaits it through
 `InputFilter::as_async`.
 
+A sub-agent takes one too: `SubAgentTool::with_async_input_filter(Moderation)`
+screens the task the parent model hands it. A `Warn` is appended to the task;
+a `Reject` means the sub-agent never runs and the tool call fails with the
+reason, which the parent's model sees.
+
+Input filters see a run's **prompts** only: messages queued with
+`Agent::steer` / `Agent::follow_up` enter the loop without passing through
+them. With the `decision` feature, `Agent::with_input_guard` is a ready-made
+async filter backed by a decision model (see
+[Decision Models](decision-models.md#blocking-with_input_guard)).
+
 ## Turn Hooks
 
 A `TurnHook` is awaited before **every LLM request** and may return one note
@@ -126,8 +137,16 @@ hook; `latest_user_text()` and `user_request()` skip the user-role messages
 the loop injects itself (compaction summaries, limit notes, the loop nudge).
 
 Turn hooks reach the loop by wrapping the provider: `Agent` does this per run,
+`SubAgentTool::with_turn_hook(hook)` does it for a sub-agent's own requests,
 and a raw loop wraps its own with
 `TurnHookProvider::new(provider, vec![Arc::new(hook)])`.
+
+`TurnContext::user_request_parts()` returns the same selection as
+`user_request()` as a structured `UserRequestParts` (`latest`, `reply:
+Option<ReplyContext { question, earlier_request }>`, `source:
+UserRequestSource`, `run_prompts`). Prefer it to
+parsing the prose of `user_request()`, whose labels and layout are not a
+stable format.
 
 ## Using with `AgentLoopConfig`
 

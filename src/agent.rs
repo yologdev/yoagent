@@ -588,6 +588,43 @@ impl Agent {
         self
     }
 
+    /// Screen every prompt with a decision model before it reaches the LLM
+    /// — a blocking feature, so an explicit opt-in:
+    ///
+    /// ```ignore
+    /// agent.with_input_guard(InputGuard::new(DecisionModel::jev()))
+    /// ```
+    ///
+    /// One batched request of yes/no checks per prompt (by default: an
+    /// attempt to override the agent's instructions, and a request for
+    /// clearly harmful help; see [`InputGuard`](crate::decision::InputGuard)).
+    /// A hit rejects the input: the run ends with
+    /// [`AgentEvent::InputRejected`] naming the check.
+    ///
+    /// - **Fails closed:** a decision-model error or timeout (3 s) rejects
+    ///   the input; `InputGuard::with_fail_open` opts out.
+    /// - Installed as an async input filter, in order with the others
+    ///   ([`with_input_filter`](Self::with_input_filter),
+    ///   [`with_async_input_filter`](Self::with_async_input_filter)).
+    /// - Input with no text (an image-only prompt) passes unscreened;
+    ///   steering and follow-up messages are not screened (input filters see
+    ///   a run's prompts only).
+    /// - The input text is sent to the decision model's backend. Requests
+    ///   and spend are reported in [`SessionStats::decision`].
+    ///
+    /// Defence in depth, not a security boundary.
+    ///
+    /// # Panics
+    ///
+    /// When the guard has no checks (`without_default_checks()` and none
+    /// added): a blocking guard that checks nothing is a setup mistake.
+    #[cfg(feature = "decision")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "decision")))]
+    pub fn with_input_guard(self, guard: crate::decision::InputGuard) -> Self {
+        guard.assert_has_checks();
+        self.with_async_input_filter(guard)
+    }
+
     /// Add a tool middleware — an async approve/deny/modify hook that gates
     /// every tool call (see [`ToolMiddleware`]). Middleware run in
     /// installation order; each may rewrite the arguments seen by later ones,

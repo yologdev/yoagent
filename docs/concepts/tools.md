@@ -546,4 +546,17 @@ which compaction cannot remove. For "what did the user ask?", use
 falls back to the run's prompts, and returns `None` when nothing says what the
 user wants — enough for policies such as "was this destructive call actually
 requested?". The [decision-model tool gate](decision-models.md#blocking-with_tool_gate)
-is one.
+is one. `call.user_request_parts()` gives the same selection as structured
+`UserRequestParts` (`latest`, `reply`, `source`, `run_prompts`); the prose of
+`user_request()` is not a stable format.
+
+To unit-test a middleware without running an agent, build the request
+yourself:
+
+```rust
+let args = serde_json::json!({"path": "/tmp/x"});
+let prompts = [Message::user("delete /tmp/x")];
+let call = ToolCallRequest::new("call-1", "rm", &args)
+    .with_run_prompts(&prompts); // or .with_messages(&history)
+assert!(matches!(MyPolicy.before_tool(&call).await, ToolDecision::Allow));
+```

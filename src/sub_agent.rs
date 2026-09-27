@@ -68,6 +68,8 @@ pub struct SubAgentTool {
     turn_delay: Option<std::time::Duration>,
     model_config: Option<ModelConfig>,
     tool_middleware: Vec<Arc<dyn ToolMiddleware>>,
+    turn_hooks: Vec<Arc<dyn TurnHook>>,
+    input_filters: Vec<Arc<dyn InputFilter>>,
     #[cfg(feature = "decision")]
     skills: crate::skills::SkillSet,
     #[cfg(feature = "decision")]
@@ -113,6 +115,8 @@ impl SubAgentTool {
             turn_delay: None,
             model_config: None,
             tool_middleware: Vec::new(),
+            turn_hooks: Vec::new(),
+            input_filters: Vec::new(),
             #[cfg(feature = "decision")]
             skills: crate::skills::SkillSet::empty(),
             #[cfg(feature = "decision")]
@@ -245,6 +249,40 @@ impl SubAgentTool {
     pub fn with_tool_middleware(mut self, middleware: impl ToolMiddleware + 'static) -> Self {
         self.tool_middleware.push(Arc::new(middleware));
         self
+    }
+
+    /// Add a [`TurnHook`] for the sub-agent's own LLM requests. Mirrors
+    /// [`Agent::with_turn_hook`](crate::Agent::with_turn_hook): awaited
+    /// before every request, it may append one note to that request's
+    /// latest user turn. Hooks run in installation order, before the
+    /// decision advisory's.
+    pub fn with_turn_hook(mut self, hook: impl TurnHook + 'static) -> Self {
+        self.turn_hooks.push(Arc::new(hook));
+        self
+    }
+
+    /// Add an async input filter for the task the parent model hands this
+    /// sub-agent. Mirrors
+    /// [`Agent::with_async_input_filter`](crate::Agent::with_async_input_filter).
+    /// When a filter rejects the task, the sub-agent does not run and the
+    /// tool call fails with the reason (the parent's model sees it); a
+    /// `Warn` is appended to the task.
+    pub fn with_async_input_filter(mut self, filter: impl AsyncInputFilter + 'static) -> Self {
+        self.input_filters.push(Arc::new(AsyncFilter::new(filter)));
+        self
+    }
+
+    /// Screen the task the parent model hands this sub-agent with a
+    /// decision model. Mirrors
+    /// [`Agent::with_input_guard`](crate::Agent::with_input_guard) — fails
+    /// closed — except that the "input" is the task text the parent model
+    /// wrote, not the human's words. A rejected task fails the tool call
+    /// with the guard's reason. Panics when the guard has no checks.
+    #[cfg(feature = "decision")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "decision")))]
+    pub fn with_input_guard(self, guard: crate::decision::InputGuard) -> Self {
+        guard.assert_has_checks();
+        self.with_async_input_filter(guard)
     }
 
     /// Attach a decision model for the sub-agent's own turns: advisory skill
@@ -492,21 +530,16 @@ impl AgentTool for SubAgentTool {
                 self.decision.as_ref(),
                 self.tool_gate.as_ref(),
                 &self.skills,
-                Vec::new(),
+                self.turn_hooks.clone(),
                 self.tool_middleware.clone(),
             );
-            let provider: Arc<dyn StreamProvider> = if hooks.is_empty() {
-                self.provider.clone()
-            } else {
-                Arc::new(crate::provider::TurnHookProvider::new(
-                    self.provider.clone(),
-                    hooks,
-                ))
-            };
-            (provider, middleware)
+            (with_turn_hooks(&self.provider, hooks), middleware)
         };
         #[cfg(not(feature = "decision"))]
-        let (provider, tool_middleware) = (self.provider.clone(), self.tool_middleware.clone());
+        let (provider, tool_middleware) = (
+            with_turn_hooks(&self.provider, self.turn_hooks.clone()),
+            self.tool_middleware.clone(),
+        );
 
         // Config with Arc'd provider
         let config = AgentLoopConfig {
@@ -546,20 +579,28 @@ impl AgentTool for SubAgentTool {
             before_turn: None,
             after_turn: None,
             on_error: None,
-            input_filters: vec![],
+            input_filters: self.input_filters.clone(),
             tool_middleware,
             output_schema: None,
             turn_delay: self.turn_delay,
         };
 
         // Channel for sub-agent events
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut unforwarded = Some(rx);
+        // Why an input filter rejected the task, if one did.
+        let rejected: Arc<std::sync::Mutex<Option<String>>> = Arc::default();
 
         // Forward sub-agent events to parent via on_update and on_progress callbacks
         let forward_handle = if on_update.is_some() || on_progress.is_some() {
             let tool_name = self.tool_name.clone();
+            let rejected = rejected.clone();
+            let mut rx = unforwarded.take().expect("receiver not taken yet");
             Some(tokio::spawn(async move {
                 while let Some(event) = rx.recv().await {
+                    if let AgentEvent::InputRejected { reason } = &event {
+                        *rejected.lock().unwrap_or_else(|e| e.into_inner()) = Some(reason.clone());
+                    }
                     // Forward progress messages via on_progress
                     if let AgentEvent::ProgressMessage { text, .. } = &event {
                         if let Some(ref cb) = on_progress {
@@ -601,6 +642,12 @@ impl AgentTool for SubAgentTool {
         // Wait for event forwarding to complete
         if let Some(handle) = forward_handle {
             let _ = handle.await;
+        } else if let Some(mut rx) = unforwarded {
+            while let Ok(event) = rx.try_recv() {
+                if let AgentEvent::InputRejected { reason } = event {
+                    *rejected.lock().unwrap_or_else(|e| e.into_inner()) = Some(reason);
+                }
+            }
         }
 
         // Report before deciding success or failure: a failed delegation
@@ -608,6 +655,15 @@ impl AgentTool for SubAgentTool {
         // `run_stats` covers this run's own turns and, recursively, whatever
         // its own sub-agents reported to it.
         ctx.report_delegated_run(run_stats.clone());
+
+        // An input filter rejected the task: nothing ran.
+        let rejection = rejected.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(reason) = rejection {
+            return Err(ToolError::Failed(format!(
+                "Sub-agent '{}' rejected its task: {}",
+                self.tool_name, reason
+            )));
+        }
 
         // Check if the last message was an error
         if let Some(error_msg) = extract_error(&new_messages) {
@@ -632,6 +688,21 @@ impl AgentTool for SubAgentTool {
             content: vec![Content::Text { text: result_text }],
             details,
         })
+    }
+}
+
+/// `provider` behind the turn hooks, or as is when there are none.
+fn with_turn_hooks(
+    provider: &Arc<dyn StreamProvider>,
+    hooks: Vec<Arc<dyn TurnHook>>,
+) -> Arc<dyn StreamProvider> {
+    if hooks.is_empty() {
+        provider.clone()
+    } else {
+        Arc::new(crate::provider::TurnHookProvider::new(
+            provider.clone(),
+            hooks,
+        ))
     }
 }
 

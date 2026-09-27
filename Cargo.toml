@@ -88,6 +88,22 @@ required-features = ["decision"]
 name = "decision_live"
 required-features = ["decision"]
 
+[[test]]
+name = "decision_logprobs_test"
+required-features = ["decision"]
+
+[[test]]
+name = "decision_fallback_test"
+required-features = ["decision"]
+
+[[test]]
+name = "decision_calibrate_test"
+required-features = ["decision"]
+
+[[test]]
+name = "decision_guard_test"
+required-features = ["decision"]
+
 [[example]]
 name = "decision"
 required-features = ["decision"]

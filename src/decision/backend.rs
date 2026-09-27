@@ -19,6 +19,10 @@ pub struct Capabilities {
     /// [`DecisionModel`](super::DecisionModel) sends one request per question
     /// and merges the answers (summing usage).
     pub batching: bool,
+    /// When not batching: how many single-question requests
+    /// [`DecisionModel`](super::DecisionModel) may have in flight at once
+    /// (default 1, one after another).
+    pub max_concurrent_requests: usize,
     /// Self-hosted: the state does not go to a third party. Informational;
     /// it does not affect pricing.
     pub local: bool,
@@ -37,6 +41,7 @@ impl Capabilities {
             max_choice_options: 255,
             max_score_levels: 10,
             batching: true,
+            max_concurrent_requests: 1,
             local: false,
             max_request_tokens: None,
             max_state_and_question_tokens: None,
@@ -48,6 +53,14 @@ impl Capabilities {
     /// request and 32k for the state plus the longest question.
     pub(crate) fn systemone() -> Self {
         Self::new(QuestionKind::all()).with_token_limits(Some(64_000), Some(32_000))
+    }
+
+    /// No limits at all: what every request must satisfy whatever the
+    /// backend (the structural checks).
+    pub(crate) fn unlimited() -> Self {
+        Self::new(QuestionKind::all())
+            .with_max_choice_options(usize::MAX)
+            .with_max_score_levels(usize::MAX)
     }
 
     /// Most options one Choice may have.
@@ -65,6 +78,13 @@ impl Capabilities {
     /// Whether one request may carry many questions.
     pub fn with_batching(mut self, batching: bool) -> Self {
         self.batching = batching;
+        self
+    }
+
+    /// When not batching, how many single-question requests may run at once
+    /// (at least 1).
+    pub fn with_max_concurrent_requests(mut self, n: usize) -> Self {
+        self.max_concurrent_requests = n.max(1);
         self
     }
 
