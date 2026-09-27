@@ -244,6 +244,16 @@ result ("Tool gate: this call looks destructive or irreversible (p=0.91) and
 not clearly what the user asked for (p=0.22). Ask the user to confirm before
 retrying."), and the loop continues.
 
+**Checked against live Jev (`jev-1.13.0`, 2026-09-27).** `rm -rf` or
+`git push --force` that the user did not ask for scored destructive 0.93–0.99
+with requested 0.02–0.07, and was denied. The same kind of call when asked for
+(requested 0.99), and a read (destructive 0.02), were allowed. Jev also scores
+*creating a new file* as destructive (0.82), so a new-file write the user did
+not ask for is denied. That is the conservative side; if it gets in your way,
+raise the threshold with `ToolGate::with_destructive_threshold`. Thresholds are
+per model: re-check them if you pin a different Jev version or use another
+backend.
+
 **What `user_request` is.** In order of preference:
 
 1. The latest message the user actually wrote **after the most recent
