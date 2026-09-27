@@ -97,6 +97,11 @@ All return `Self` for chaining (unless noted as `Result`).
 | `with_tool_execution(strategy: ToolExecutionStrategy) -> Self` | Set tool execution strategy (`Parallel`, `Sequential`, `Batched`) |
 | `with_retry_config(config: RetryConfig) -> Self` | Set retry configuration |
 | `with_input_filter(filter: impl InputFilter) -> Self` | Add an input filter (runs on user messages before LLM call) |
+| `with_async_input_filter(filter: impl AsyncInputFilter) -> Self` | Add an input filter that awaits (same list and semantics) |
+| `with_turn_hook(hook: impl TurnHook) -> Self` | Add an async per-request hook that may append one transient note to the latest user turn |
+| `with_decision_model(model: DecisionModel) -> Self` | *(feature `decision`)* Advisory skill/tool hints from a decision model; never blocks; needs skills or 40+ tools |
+| `with_decision_advisory(advisory: Advisory) -> Self` | *(feature `decision`)* The same, with explicit thresholds and timeout |
+| `with_tool_gate(gate: ToolGate) -> Self` | *(feature `decision`)* Deny destructive, unrequested tool calls; runs last; fails closed |
 
 **Callbacks**
 

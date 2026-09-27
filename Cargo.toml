@@ -54,6 +54,9 @@ yoagent-state = { version = "0.5", optional = true }
 [features]
 openapi = ["dep:openapiv3", "dep:serde_yaml_ng", "reqwest/query"]
 gasp = ["dep:yoagent-state"]
+# Decision models (typed questions -> calibrated answers), e.g. TypeSafe Jev.
+# Off by default; adds no dependencies. Nothing is sent until you pick a model.
+decision = []
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
@@ -68,3 +71,23 @@ required-features = ["gasp"]
 [[example]]
 name = "llm_compaction_live"
 required-features = ["gasp"]
+
+[[test]]
+name = "decision_test"
+required-features = ["decision"]
+
+[[test]]
+name = "decision_agent_test"
+required-features = ["decision"]
+
+[[test]]
+name = "decision_env_test"
+required-features = ["decision"]
+
+[[test]]
+name = "decision_live"
+required-features = ["decision"]
+
+[[example]]
+name = "decision"
+required-features = ["decision"]

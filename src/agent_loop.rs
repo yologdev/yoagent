@@ -106,6 +106,7 @@ pub struct AgentLoopConfig {
     /// Input filters applied to user messages before the LLM call.
     /// Filters run in order; first `Reject` wins and discards any accumulated
     /// warnings. `Warn` messages accumulate and are appended to the user message.
+    /// An [`AsyncFilter`] in the list is awaited (see [`InputFilter::as_async`]).
     pub input_filters: Vec<Arc<dyn InputFilter>>,
 
     /// Optional delay between turns. Useful for rate-limit-sensitive scenarios
@@ -141,6 +142,82 @@ pub const AGENT_STOPPED_PREFIX: &str = "[Agent stopped:";
 /// the model was emitting the same call forever and there is nothing to keep.
 pub const LOOP_ABORT_PREFIX: &str = "[Agent stopped: repeated tool call —";
 
+/// Prefix of the user-role nudge the loop injects when loop detection steers
+/// a model that keeps repeating one call.
+pub(crate) const LOOP_NUDGE_PREFIX: &str = "[You have called ";
+
+/// Per-run state the loop shares with the hooks that run inside its task.
+#[derive(Default)]
+struct LoopScope {
+    /// Decision-model spend, recorded by the decision integrations and
+    /// folded into the run's `SessionStats`.
+    decision: DecisionStats,
+    /// The user messages this run was given — its prompts, steering and
+    /// follow-ups — kept apart from the context so compaction cannot remove
+    /// them. Exposed as `ToolCallRequest::run_prompts` /
+    /// `TurnContext::run_prompts`.
+    prompts: Vec<Message>,
+}
+
+tokio::task_local! {
+    /// The running loop's [`LoopScope`]. Hooks run inside the loop's task; a
+    /// nested sub-agent loop opens its own scope.
+    static LOOP_SCOPE: std::cell::RefCell<LoopScope>;
+}
+
+/// Record decision-model spend into the enclosing loop's stats. A no-op
+/// outside a loop.
+#[cfg_attr(not(feature = "decision"), allow(dead_code))]
+pub(crate) fn record_decision(f: impl FnOnce(&mut DecisionStats)) {
+    let _ = LOOP_SCOPE.try_with(|cell| f(&mut cell.borrow_mut().decision));
+}
+
+/// The user messages the enclosing loop's run was given so far (empty
+/// outside a loop).
+pub(crate) fn run_prompts() -> Vec<Message> {
+    LOOP_SCOPE
+        .try_with(|cell| cell.borrow().prompts.clone())
+        .unwrap_or_default()
+}
+
+/// The user-role LLM messages among `messages`.
+fn user_messages(messages: &[AgentMessage]) -> Vec<Message> {
+    messages
+        .iter()
+        .filter_map(|m| match m {
+            AgentMessage::Llm(msg @ Message::User { .. }) => Some(msg.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Note messages handed to the run (steering, follow-ups) as run prompts.
+fn note_run_prompts(messages: &[AgentMessage]) {
+    let users = user_messages(messages);
+    if !users.is_empty() {
+        let _ = LOOP_SCOPE.try_with(|cell| cell.borrow_mut().prompts.extend(users));
+    }
+}
+
+/// Run `fut` in a fresh [`LoopScope`] seeded with the run's prompts, and
+/// return its output plus the decision spend recorded.
+async fn with_loop_scope<T>(
+    prompts: Vec<Message>,
+    fut: impl std::future::Future<Output = T>,
+) -> (T, DecisionStats) {
+    let scope = LoopScope {
+        prompts,
+        ..Default::default()
+    };
+    LOOP_SCOPE
+        .scope(std::cell::RefCell::new(scope), async {
+            let out = fut.await;
+            let recorded = LOOP_SCOPE.with(|cell| std::mem::take(&mut cell.borrow_mut().decision));
+            (out, recorded)
+        })
+        .await
+}
+
 /// The error tool result given to each tool call in a response that ended as
 /// [`StopReason::Refusal`] — the model declined, or a content filter stopped
 /// the response. The call is never executed.
@@ -172,7 +249,76 @@ pub(crate) async fn agent_loop_with_stats(
 ) -> (Vec<AgentMessage>, SessionStats) {
     tx.send(AgentEvent::AgentStart).ok();
 
-    // Apply input filters before adding prompts to context
+    // One scope for the whole run, input filters included, so decision
+    // spend in an async filter is counted — also when it rejects.
+    let (outcome, decision) = with_loop_scope(Vec::new(), async {
+        let prompts = apply_input_filters(prompts, config).await?;
+        note_run_prompts(&prompts);
+
+        let mut new_messages: Vec<AgentMessage> = prompts.clone();
+
+        // Add prompts to context
+        for prompt in &prompts {
+            context.messages.push(prompt.clone());
+        }
+
+        tx.send(AgentEvent::TurnStart).ok();
+
+        // Emit events for each prompt message
+        for prompt in &prompts {
+            tx.send(AgentEvent::MessageStart {
+                message: prompt.clone(),
+            })
+            .ok();
+            tx.send(AgentEvent::MessageEnd {
+                message: prompt.clone(),
+            })
+            .ok();
+        }
+
+        let stats = {
+            use tracing::Instrument;
+            run_loop(context, &mut new_messages, config, &tx, &cancel)
+                .instrument(tracing::info_span!("agent_loop", model = %config.model))
+                .await
+        };
+        Ok::<_, String>((new_messages, stats))
+    })
+    .await;
+
+    let (new_messages, mut stats) = match outcome {
+        Ok(done) => done,
+        Err(reason) => {
+            tx.send(AgentEvent::InputRejected { reason }).ok();
+            let stats = SessionStats {
+                decision,
+                ..Default::default()
+            };
+            tx.send(AgentEvent::AgentEnd {
+                messages: vec![],
+                stats: stats.clone(),
+            })
+            .ok();
+            return (vec![], stats);
+        }
+    };
+    stats.decision.merge(&decision);
+
+    tx.send(AgentEvent::AgentEnd {
+        messages: new_messages.clone(),
+        stats: stats.clone(),
+    })
+    .ok();
+    (new_messages, stats)
+}
+
+/// Run the input filters over the prompts: `Err(reason)` on the first
+/// reject, otherwise the prompts with any warnings appended to the last
+/// user message.
+async fn apply_input_filters(
+    prompts: Vec<AgentMessage>,
+    config: &AgentLoopConfig,
+) -> Result<Vec<AgentMessage>, String> {
     let prompts = if !config.input_filters.is_empty() {
         let user_text: String = prompts
             .iter()
@@ -200,21 +346,26 @@ pub(crate) async fn agent_loop_with_stats(
 
         let mut warnings: Vec<String> = Vec::new();
         for filter in &config.input_filters {
-            match filter.filter(&user_text) {
+            let verdict = match filter.as_async() {
+                // A panicking async filter must not take the loop task (and
+                // with it the agent's tools and history) down: contain it and
+                // fail closed, as for middleware.
+                Some(async_filter) => {
+                    use futures::FutureExt;
+                    std::panic::AssertUnwindSafe(async_filter.filter(&user_text))
+                        .catch_unwind()
+                        .await
+                        .unwrap_or_else(|_| {
+                            warn!("async input filter panicked; rejecting the input");
+                            FilterResult::Reject("input filter panicked".into())
+                        })
+                }
+                None => filter.filter(&user_text),
+            };
+            match verdict {
                 FilterResult::Pass => {}
                 FilterResult::Warn(w) => warnings.push(w),
-                FilterResult::Reject(reason) => {
-                    tx.send(AgentEvent::InputRejected {
-                        reason: reason.clone(),
-                    })
-                    .ok();
-                    tx.send(AgentEvent::AgentEnd {
-                        messages: vec![],
-                        stats: SessionStats::default(),
-                    })
-                    .ok();
-                    return (vec![], SessionStats::default());
-                }
+                FilterResult::Reject(reason) => return Err(reason),
             }
         }
 
@@ -241,41 +392,7 @@ pub(crate) async fn agent_loop_with_stats(
     } else {
         prompts
     };
-
-    let mut new_messages: Vec<AgentMessage> = prompts.clone();
-
-    // Add prompts to context
-    for prompt in &prompts {
-        context.messages.push(prompt.clone());
-    }
-
-    tx.send(AgentEvent::TurnStart).ok();
-
-    // Emit events for each prompt message
-    for prompt in &prompts {
-        tx.send(AgentEvent::MessageStart {
-            message: prompt.clone(),
-        })
-        .ok();
-        tx.send(AgentEvent::MessageEnd {
-            message: prompt.clone(),
-        })
-        .ok();
-    }
-
-    let stats = {
-        use tracing::Instrument;
-        run_loop(context, &mut new_messages, config, &tx, &cancel)
-            .instrument(tracing::info_span!("agent_loop", model = %config.model))
-            .await
-    };
-
-    tx.send(AgentEvent::AgentEnd {
-        messages: new_messages.clone(),
-        stats: stats.clone(),
-    })
-    .ok();
-    (new_messages, stats)
+    Ok(prompts)
 }
 
 /// Continue an agent loop from existing context (for retries).
@@ -316,9 +433,14 @@ pub(crate) async fn agent_loop_continue_with_stats(
 
     let stats = {
         use tracing::Instrument;
-        run_loop(context, &mut new_messages, config, &tx, &cancel)
-            .instrument(tracing::info_span!("agent_loop", model = %config.model))
-            .await
+        let (mut stats, decision) = with_loop_scope(
+            Vec::new(),
+            run_loop(context, &mut new_messages, config, &tx, &cancel)
+                .instrument(tracing::info_span!("agent_loop", model = %config.model)),
+        )
+        .await;
+        stats.decision.merge(&decision);
+        stats
     };
 
     tx.send(AgentEvent::AgentEnd {
@@ -383,6 +505,7 @@ async fn run_loop(
 
             // Inject pending messages
             if !pending.is_empty() {
+                note_run_prompts(&pending);
                 for msg in pending.drain(..) {
                     tx.send(AgentEvent::MessageStart {
                         message: msg.clone(),
@@ -730,7 +853,7 @@ async fn run_loop(
                             let nudge = AgentMessage::Llm(Message::User {
                                 content: vec![Content::Text {
                                     text: format!(
-                                        "[You have called {tool_name} {repetitions} times with identical arguments. The result will not change — change approach, or say why the repetition is needed.]"
+                                        "{LOOP_NUDGE_PREFIX}{tool_name} {repetitions} times with identical arguments. The result will not change — change approach, or say why the repetition is needed.]"
                                     ),
                                 }],
                                 timestamp: now_ms(),
@@ -828,7 +951,10 @@ async fn run_loop(
                     cancel,
                     config.get_steering_messages.as_ref(),
                     &config.tool_execution,
-                    &config.tool_middleware,
+                    Gate {
+                        middleware: &config.tool_middleware,
+                        history: &context.messages,
+                    },
                 )
                 .await;
 
@@ -837,6 +963,8 @@ async fn run_loop(
                 // Separate bucket: `usage`/`cost_usd` stay this agent's own.
                 for child in &execution.sub_agent_stats {
                     stats.sub_agents.record_run(child);
+                    // Decision spend has one bucket for the whole tree.
+                    stats.decision.merge(&child.decision);
                 }
 
                 // Cap oversized output on the way in when configured, so
@@ -1342,6 +1470,14 @@ fn unwrap_structured_tool_call(
     }
 }
 
+/// What gates a tool call: the middleware chain, and the conversation it may
+/// consult ([`ToolCallRequest::messages`]).
+#[derive(Clone, Copy)]
+struct Gate<'a> {
+    middleware: &'a [Arc<dyn ToolMiddleware>],
+    history: &'a [AgentMessage],
+}
+
 async fn execute_tool_calls(
     tools: &[Box<dyn AgentTool>],
     tool_calls: &[(String, String, serde_json::Value)],
@@ -1349,14 +1485,14 @@ async fn execute_tool_calls(
     cancel: &tokio_util::sync::CancellationToken,
     get_steering: Option<&GetMessagesFn>,
     strategy: &ToolExecutionStrategy,
-    middleware: &[Arc<dyn ToolMiddleware>],
+    gate: Gate<'_>,
 ) -> ToolExecutionResult {
     match strategy {
         ToolExecutionStrategy::Sequential => {
-            execute_sequential(tools, tool_calls, tx, cancel, get_steering, middleware).await
+            execute_sequential(tools, tool_calls, tx, cancel, get_steering, gate).await
         }
         ToolExecutionStrategy::Parallel => {
-            execute_batch(tools, tool_calls, tx, cancel, get_steering, middleware).await
+            execute_batch(tools, tool_calls, tx, cancel, get_steering, gate).await
         }
         ToolExecutionStrategy::Batched { size } => {
             let mut results: Vec<Message> = Vec::new();
@@ -1364,7 +1500,7 @@ async fn execute_tool_calls(
             let mut sub_agent_stats: Vec<SessionStats> = Vec::new();
 
             for (batch_idx, batch) in tool_calls.chunks(*size).enumerate() {
-                let batch_result = execute_batch(tools, batch, tx, cancel, None, middleware).await;
+                let batch_result = execute_batch(tools, batch, tx, cancel, None, gate).await;
                 results.extend(batch_result.tool_results);
                 sub_agent_stats.extend(batch_result.sub_agent_stats);
 
@@ -1401,7 +1537,7 @@ async fn execute_sequential(
     tx: &mpsc::UnboundedSender<AgentEvent>,
     cancel: &tokio_util::sync::CancellationToken,
     get_steering: Option<&GetMessagesFn>,
-    middleware: &[Arc<dyn ToolMiddleware>],
+    gate: Gate<'_>,
 ) -> ToolExecutionResult {
     let mut results: Vec<Message> = Vec::new();
     let mut steering_messages: Option<Vec<AgentMessage>> = None;
@@ -1409,7 +1545,7 @@ async fn execute_sequential(
 
     for (index, (id, name, args)) in tool_calls.iter().enumerate() {
         let (result_msg, delegated) =
-            execute_single_tool(tools, id, name, args, tx, cancel, middleware).await;
+            execute_single_tool(tools, id, name, args, tx, cancel, gate).await;
         results.push(result_msg);
         sub_agent_stats.extend(delegated);
 
@@ -1440,13 +1576,13 @@ async fn execute_batch(
     tx: &mpsc::UnboundedSender<AgentEvent>,
     cancel: &tokio_util::sync::CancellationToken,
     get_steering: Option<&GetMessagesFn>,
-    middleware: &[Arc<dyn ToolMiddleware>],
+    gate: Gate<'_>,
 ) -> ToolExecutionResult {
     use futures::future::join_all;
 
     let futures: Vec<_> = tool_calls
         .iter()
-        .map(|(id, name, args)| execute_single_tool(tools, id, name, args, tx, cancel, middleware))
+        .map(|(id, name, args)| execute_single_tool(tools, id, name, args, tx, cancel, gate))
         .collect();
 
     let batch_results = join_all(futures).await;
@@ -1490,7 +1626,7 @@ async fn execute_single_tool(
     args: &serde_json::Value,
     tx: &mpsc::UnboundedSender<AgentEvent>,
     cancel: &tokio_util::sync::CancellationToken,
-    middleware: &[Arc<dyn ToolMiddleware>],
+    gate: Gate<'_>,
 ) -> (Message, Vec<SessionStats>) {
     // A call whose streamed arguments did not resolve to a JSON object (cut
     // off at the output token limit, in practice, or double-encoded as a
@@ -1507,11 +1643,18 @@ async fn execute_single_tool(
     // later hooks; the first Deny short-circuits into an error tool result
     // (the LLM sees the reason and can adapt — the loop continues).
     let mut effective_args = args.clone();
-    for mw in middleware {
+    let prompts = if gate.middleware.is_empty() {
+        Vec::new()
+    } else {
+        run_prompts()
+    };
+    for mw in gate.middleware {
         let call = ToolCallRequest {
             tool_call_id: id,
             tool_name: name,
             args: &effective_args,
+            messages: gate.history,
+            run_prompts: &prompts,
         };
         // A panicking middleware must not kill the loop task (which would
         // strip the agent of its tools) — contain it and fail closed.

@@ -59,6 +59,76 @@ let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude
     .on_error(|err| eprintln!("Error: {}", err));
 ```
 
+## Async Input Filters
+
+`InputFilter` is synchronous. A filter that awaits — a moderation API, a
+classifier — implements `AsyncInputFilter` instead; it runs in the same
+ordered list, with the same `Pass` / `Warn` / `Reject` semantics:
+
+```rust
+use yoagent::{AsyncInputFilter, FilterResult};
+
+struct Moderation;
+
+#[async_trait::async_trait]
+impl AsyncInputFilter for Moderation {
+    async fn filter(&self, text: &str) -> FilterResult {
+        // call your moderation endpoint; bound its latency yourself
+        FilterResult::Pass
+    }
+}
+
+let agent = agent.with_async_input_filter(Moderation);
+```
+
+**You own the timeout**: the loop awaits the filter as long as it takes.
+A filter that panics is contained and treated as a `Reject` (fail closed):
+the run ends with `AgentEvent::InputRejected` and the agent keeps its tools
+and history.
+
+For a raw loop, push `Arc::new(AsyncFilter::new(Moderation))` onto
+`AgentLoopConfig::input_filters`; the loop awaits it through
+`InputFilter::as_async`.
+
+## Turn Hooks
+
+A `TurnHook` is awaited before **every LLM request** and may return one note
+to append to that request's **latest user turn**. The note is transient —
+never stored in history, never in the system prompt — and a hook returning
+`None` leaves the request unchanged.
+
+```rust
+use yoagent::{TurnContext, TurnHook};
+
+struct Reminder;
+
+#[async_trait::async_trait]
+impl TurnHook for Reminder {
+    async fn before_turn(&self, turn: &TurnContext<'_>) -> Option<String> {
+        let request = turn.user_request()?;
+        request.contains("deploy").then(|| "Deploys need a changelog entry.".to_string())
+    }
+}
+
+let agent = agent.with_turn_hook(Reminder);
+```
+
+The note is on the latest user message; everything before that message is
+unchanged, so the provider's cached prefix up to it survives (during tool
+turns, assistant and tool-result messages follow the note). On the next user
+prompt the previous user message is sent without its note, so that last
+exchange is **re-processed** — a cache miss from there, not a cache hit.
+Keep a note stable within one request (derive it from the user's request,
+and memoize) so its tool-calling turns cache too. Hooks
+run once per provider call — a retried request runs them again. A panicking
+hook is contained. `TurnContext::new(..)` builds a context to unit-test a
+hook; `latest_user_text()` and `user_request()` skip the user-role messages
+the loop injects itself (compaction summaries, limit notes, the loop nudge).
+
+Turn hooks reach the loop by wrapping the provider: `Agent` does this per run,
+and a raw loop wraps its own with
+`TurnHookProvider::new(provider, vec![Arc::new(hook)])`.
+
 ## Using with `AgentLoopConfig`
 
 For direct loop usage without the `Agent` wrapper:

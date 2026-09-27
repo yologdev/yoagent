@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "comment": "yoagent's built-in model prices, USD per million tokens, keyed by ModelConfig::provider then ModelConfig::id. A cache rate of 0 (or omitted) bills at the band's input rate. Rates are a snapshot checked against each 'source' on its 'verified' date, not an authority; tests/price_audit.rs diffs every entry against models.dev. See docs/concepts/pricing.md.",
+  "comment": "yoagent's built-in model prices, USD per million tokens, keyed by ModelConfig::provider then ModelConfig::id (decision models: by their price provider key, e.g. 'typesafe', then the model id the API reports). A cache rate of 0 (or omitted) bills at the band's input rate. Rates are a snapshot checked against each 'source' on its 'verified' date, not an authority; tests/price_audit.rs diffs every entry against models.dev. See docs/concepts/pricing.md.",
   "providers": {
     "anthropic": {
       "claude-fable-5": {
@@ -156,6 +156,16 @@
         ],
         "source": "https://developers.openai.com/api/docs/pricing",
         "verified": "2026-09-25"
+      }
+    },
+    "typesafe": {
+      "jev-1.13.0": {
+        "input": 0.042,
+        "output": 0.0,
+        "note": "A decision model (feature `decision`), not a ModelConfig: DecisionModel::jev() prices each evaluation by the versioned id the API reports. Billed per input token; output tokens are free ($42 per billion input tokens).",
+        "source": "https://docs.typesafe.ai/models",
+        "verified": "2026-09-26",
+        "absent_upstream": "models.dev lists no TypeSafe provider and no Jev model; checked 2026-09-26"
       }
     }
   }

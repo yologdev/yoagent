@@ -108,8 +108,9 @@ pub struct OverrideReport {
     /// previous override); those never affected billing.
     pub reverted: Vec<PriceChange>,
     /// `provider/model` of entries whose provider is not in
-    /// [`PRICED_PROVIDERS`]: no constructor reads
-    /// them; only [`ModelConfig::with_prices`](crate::provider::ModelConfig::with_prices) does.
+    /// [`PRICED_PROVIDERS`] (nor, with the `decision` feature, `typesafe`,
+    /// which decision models read): no constructor reads them; only
+    /// [`ModelConfig::with_prices`](crate::provider::ModelConfig::with_prices) does.
     pub inert: Vec<String>,
     /// Everything that was also logged at `warn`: inert entries, dropped
     /// tiers, cache rates left unset where the replaced entry set one, and
@@ -280,10 +281,17 @@ fn override_warnings(table: &PriceTable, lower: &PriceTable) -> Vec<String> {
     out
 }
 
+/// Whether anything in this build reads a provider's entries: a pricing
+/// constructor ([`PRICED_PROVIDERS`]) or, with the `decision` feature, a
+/// decision model (`typesafe`).
+fn is_read(provider: &str) -> bool {
+    PRICED_PROVIDERS.contains(&provider) || (cfg!(feature = "decision") && provider == "typesafe")
+}
+
 fn inert_entries(table: &PriceTable) -> Vec<String> {
     table
         .iter()
-        .filter(|(p, _, _)| !PRICED_PROVIDERS.contains(p))
+        .filter(|(p, _, _)| !is_read(p))
         .map(|(p, m, _)| format!("{p}/{m}"))
         .collect()
 }
@@ -330,7 +338,7 @@ pub fn install_override(table: PriceTable) -> OverrideReport {
         let listed = user.entry(&change.provider, &change.model).is_some();
         if !listed {
             reverted.push(change);
-        } else if PRICED_PROVIDERS.contains(&change.provider.as_str()) {
+        } else if is_read(&change.provider) {
             changes.push(change);
         }
     }

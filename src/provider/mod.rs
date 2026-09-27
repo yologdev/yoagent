@@ -13,6 +13,7 @@ mod responses_stream;
 pub mod sse;
 pub mod tool_args;
 pub mod traits;
+pub mod turn_hook;
 
 pub use anthropic::AnthropicProvider;
 pub use azure_openai::AzureOpenAiProvider;
@@ -35,3 +36,4 @@ pub(crate) use registry::resolve_api_key_or_warn;
 pub use registry::{resolve_api_key, ProviderRegistry};
 pub use tool_args::{parse_tool_arguments, unparsed_tool_arguments, UNPARSED_ARGUMENTS_KEY};
 pub use traits::*;
+pub use turn_hook::TurnHookProvider;

@@ -68,6 +68,12 @@ pub struct SubAgentTool {
     turn_delay: Option<std::time::Duration>,
     model_config: Option<ModelConfig>,
     tool_middleware: Vec<Arc<dyn ToolMiddleware>>,
+    #[cfg(feature = "decision")]
+    skills: crate::skills::SkillSet,
+    #[cfg(feature = "decision")]
+    decision: Option<crate::decision::Advisory>,
+    #[cfg(feature = "decision")]
+    tool_gate: Option<crate::decision::ToolGate>,
 }
 
 impl SubAgentTool {
@@ -107,6 +113,12 @@ impl SubAgentTool {
             turn_delay: None,
             model_config: None,
             tool_middleware: Vec::new(),
+            #[cfg(feature = "decision")]
+            skills: crate::skills::SkillSet::empty(),
+            #[cfg(feature = "decision")]
+            decision: None,
+            #[cfg(feature = "decision")]
+            tool_gate: None,
         }
     }
 
@@ -201,6 +213,10 @@ impl SubAgentTool {
     /// decides a skill is relevant (make sure the sub-agent has such a tool).
     pub fn with_skills(mut self, skills: crate::skills::SkillSet) -> Self {
         self.skills_prompt = skills.format_for_prompt();
+        #[cfg(feature = "decision")]
+        {
+            self.skills = skills;
+        }
         self
     }
 
@@ -228,6 +244,34 @@ impl SubAgentTool {
     /// [`Agent::with_tool_middleware`](crate::Agent::with_tool_middleware).
     pub fn with_tool_middleware(mut self, middleware: impl ToolMiddleware + 'static) -> Self {
         self.tool_middleware.push(Arc::new(middleware));
+        self
+    }
+
+    /// Attach a decision model for the sub-agent's own turns: advisory skill
+    /// and tool hints only. Mirrors
+    /// [`Agent::with_decision_model`](crate::Agent::with_decision_model).
+    #[cfg(feature = "decision")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "decision")))]
+    pub fn with_decision_model(self, model: crate::decision::DecisionModel) -> Self {
+        self.with_decision_advisory(crate::decision::Advisory::new(model))
+    }
+
+    /// Mirrors [`Agent::with_decision_advisory`](crate::Agent::with_decision_advisory).
+    #[cfg(feature = "decision")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "decision")))]
+    pub fn with_decision_advisory(mut self, advisory: crate::decision::Advisory) -> Self {
+        self.decision = Some(advisory);
+        self
+    }
+
+    /// Gate the sub-agent's own tool calls. Mirrors
+    /// [`Agent::with_tool_gate`](crate::Agent::with_tool_gate), fail-closed
+    /// included. A parent's gate does not cover these calls; and here the
+    /// gate's `user_request` is the task text the parent model wrote.
+    #[cfg(feature = "decision")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "decision")))]
+    pub fn with_tool_gate(mut self, gate: crate::decision::ToolGate) -> Self {
+        self.tool_gate = Some(gate);
         self
     }
 
@@ -442,9 +486,31 @@ impl AgentTool for SubAgentTool {
             tools,
         };
 
+        #[cfg(feature = "decision")]
+        let (provider, tool_middleware) = {
+            let (hooks, middleware) = crate::decision::wire(
+                self.decision.as_ref(),
+                self.tool_gate.as_ref(),
+                &self.skills,
+                Vec::new(),
+                self.tool_middleware.clone(),
+            );
+            let provider: Arc<dyn StreamProvider> = if hooks.is_empty() {
+                self.provider.clone()
+            } else {
+                Arc::new(crate::provider::TurnHookProvider::new(
+                    self.provider.clone(),
+                    hooks,
+                ))
+            };
+            (provider, middleware)
+        };
+        #[cfg(not(feature = "decision"))]
+        let (provider, tool_middleware) = (self.provider.clone(), self.tool_middleware.clone());
+
         // Config with Arc'd provider
         let config = AgentLoopConfig {
-            provider: self.provider.clone(),
+            provider,
             model: self.model.clone(),
             api_key: if self.api_key.is_empty() {
                 crate::provider::resolve_api_key_or_warn(
@@ -481,7 +547,7 @@ impl AgentTool for SubAgentTool {
             after_turn: None,
             on_error: None,
             input_filters: vec![],
-            tool_middleware: self.tool_middleware.clone(),
+            tool_middleware,
             output_schema: None,
             turn_delay: self.turn_delay,
         };

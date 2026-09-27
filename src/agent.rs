@@ -74,6 +74,18 @@ pub struct Agent {
     // Tool middleware (permissions/policy hooks)
     tool_middleware: Vec<Arc<dyn ToolMiddleware>>,
 
+    // Per-turn hooks (transient notes on the latest user turn)
+    turn_hooks: Vec<Arc<dyn TurnHook>>,
+
+    // Decision model integration (feature `decision`): the skills it may
+    // hint at, the advisory settings, and whether the tool gate is on.
+    #[cfg(feature = "decision")]
+    skills: crate::skills::SkillSet,
+    #[cfg(feature = "decision")]
+    decision: Option<crate::decision::Advisory>,
+    #[cfg(feature = "decision")]
+    tool_gate: Option<crate::decision::ToolGate>,
+
     // Custom compaction strategy
     compaction_strategy: Option<Arc<dyn CompactionStrategy>>,
 
@@ -307,6 +319,13 @@ impl Agent {
             on_error: None,
             input_filters: Vec::new(),
             tool_middleware: Vec::new(),
+            turn_hooks: Vec::new(),
+            #[cfg(feature = "decision")]
+            skills: crate::skills::SkillSet::empty(),
+            #[cfg(feature = "decision")]
+            decision: None,
+            #[cfg(feature = "decision")]
+            tool_gate: None,
             compaction_strategy: None,
             cancel: None,
             is_streaming: false,
@@ -436,6 +455,8 @@ impl Agent {
     /// when it decides a skill is relevant.
     pub fn with_skills(mut self, skills: crate::skills::SkillSet) -> Self {
         let prompt_fragment = skills.format_for_prompt();
+        #[cfg(feature = "decision")]
+        self.skills.merge(skills);
         if !prompt_fragment.is_empty() {
             if self.system_prompt.is_empty() {
                 self.system_prompt = prompt_fragment;
@@ -480,6 +501,90 @@ impl Agent {
     /// Add an input filter. Filters run in order on user messages before the LLM call.
     pub fn with_input_filter(mut self, filter: impl InputFilter + 'static) -> Self {
         self.input_filters.push(Arc::new(filter));
+        self
+    }
+
+    /// Add an input filter that awaits (a moderation API, a classifier). It
+    /// runs in the same list and order as [`with_input_filter`](Self::with_input_filter)
+    /// filters, with the same [`FilterResult`] semantics.
+    pub fn with_async_input_filter(mut self, filter: impl AsyncInputFilter + 'static) -> Self {
+        self.input_filters.push(Arc::new(AsyncFilter::new(filter)));
+        self
+    }
+
+    /// Add a [`TurnHook`]: awaited before every LLM request, it may append
+    /// one note to that request's latest user turn (never to the system
+    /// prompt, never stored in history).
+    pub fn with_turn_hook(mut self, hook: impl TurnHook + 'static) -> Self {
+        self.turn_hooks.push(Arc::new(hook));
+        self
+    }
+
+    /// Attach a decision model, enabling the **advisory** features only —
+    /// they can never block anything. **They need skills or many tools:**
+    /// with no skills and fewer than 40 tools this does nothing and sends
+    /// nothing.
+    ///
+    /// - a skill hint (with [`with_skills`](Self::with_skills)): at most one
+    ///   line naming the skill that fits the request, when confident;
+    /// - a tool hint (with 40+ tools): one line naming the few most relevant
+    ///   tools. A hint only; no tool is ever removed.
+    ///
+    /// The hint is appended to the request's latest user turn (never to the
+    /// system prompt, never stored), so the cached prefix is untouched. At
+    /// most one decision request per user request (memoized across its
+    /// tool-calling turns), with a 2 s limit; on any failure the agent warns
+    /// and continues exactly as without a model. Requests and spend are
+    /// reported in [`SessionStats::decision`]. Tune it with
+    /// [`with_decision_advisory`](Self::with_decision_advisory); block
+    /// risky tool calls with [`with_tool_gate`](Self::with_tool_gate).
+    ///
+    /// Hosted decision models see the user's request (and, for a short reply
+    /// to an assistant question, that assistant text and the user's earlier
+    /// request) and the skill and tool descriptions.
+    #[cfg(feature = "decision")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "decision")))]
+    pub fn with_decision_model(self, model: crate::decision::DecisionModel) -> Self {
+        self.with_decision_advisory(crate::decision::Advisory::new(model))
+    }
+
+    /// [`with_decision_model`](Self::with_decision_model) with explicit
+    /// advisory settings (thresholds, timeout, which hints run).
+    #[cfg(feature = "decision")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "decision")))]
+    pub fn with_decision_advisory(mut self, advisory: crate::decision::Advisory) -> Self {
+        self.decision = Some(advisory);
+        self
+    }
+
+    /// Gate every tool call on a decision model — a blocking feature, so a
+    /// separate opt-in from [`with_decision_model`](Self::with_decision_model):
+    ///
+    /// ```ignore
+    /// agent.with_tool_gate(ToolGate::new(DecisionModel::jev()))
+    /// ```
+    ///
+    /// Calls that look destructive and not clearly requested are denied with
+    /// a reason the model sees (see [`ToolGate`](crate::decision::ToolGate)
+    /// for the questions and thresholds).
+    ///
+    /// - **Fails closed:** a decision-model error, timeout, or malformed
+    ///   answer denies the call.
+    /// - **Runs last**, after every other middleware, whenever you add them,
+    ///   so it judges the arguments that will actually run. (A `ToolGate`
+    ///   installed by hand with [`with_tool_middleware`](Self::with_tool_middleware)
+    ///   must be added last yourself.)
+    /// - **This agent only:** calls made inside a
+    ///   [`SubAgentTool`](crate::SubAgentTool) are not covered; give it its
+    ///   own gate, where the "user request" is the task text this agent wrote.
+    /// - Requests and spend are reported in [`SessionStats::decision`].
+    ///
+    /// Defence in depth, not a security boundary — injected content can
+    /// steer the decision.
+    #[cfg(feature = "decision")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "decision")))]
+    pub fn with_tool_gate(mut self, gate: crate::decision::ToolGate) -> Self {
+        self.tool_gate = Some(gate);
         self
     }
 
@@ -1241,8 +1346,29 @@ impl Agent {
         let follow_up_queue = self.follow_up_queue.clone();
         let follow_up_mode = self.follow_up_mode;
 
+        // The decision integration appends its advisor hook and tool gate
+        // last, so the gate sees arguments after every user middleware.
+        #[cfg(feature = "decision")]
+        let (turn_hooks, tool_middleware) = crate::decision::wire(
+            self.decision.as_ref(),
+            self.tool_gate.as_ref(),
+            &self.skills,
+            self.turn_hooks.clone(),
+            self.tool_middleware.clone(),
+        );
+        #[cfg(not(feature = "decision"))]
+        let (turn_hooks, tool_middleware) = (self.turn_hooks.clone(), self.tool_middleware.clone());
+        let provider: Arc<dyn StreamProvider> = if turn_hooks.is_empty() {
+            self.provider.clone()
+        } else {
+            Arc::new(crate::provider::TurnHookProvider::new(
+                self.provider.clone(),
+                turn_hooks,
+            ))
+        };
+
         AgentLoopConfig {
-            provider: self.provider.clone(),
+            provider,
             model: self.model.clone(),
             api_key: self.resolved_api_key(),
             thinking_level: self.thinking_level,
@@ -1297,7 +1423,7 @@ impl Agent {
             after_turn: self.after_turn.clone(),
             on_error: self.on_error.clone(),
             input_filters: self.input_filters.clone(),
-            tool_middleware: self.tool_middleware.clone(),
+            tool_middleware,
             output_schema: None,
             turn_delay: None,
         }

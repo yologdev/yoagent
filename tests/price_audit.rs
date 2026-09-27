@@ -1010,3 +1010,54 @@ fn cache_write_at_input_allowance_is_asserted_both_ways() {
     assert!(stale_allowance(&with, "cache_read").is_none());
     assert!(stale_allowance(&without, "cache_write").is_none());
 }
+
+/// models.dev lists no TypeSafe provider, so the decision-model price
+/// (`typesafe/jev-1.13.0`, read by `DecisionModel::jev()` under the
+/// `decision` feature) is covered by an explicit, dated `absent_upstream`
+/// note: its fields are counted as accounted for and the note is printed —
+/// not skipped. Should models.dev add the provider, the same entry is
+/// compared field by field like any other.
+#[test]
+fn typesafe_decision_price_is_audited_as_explicitly_absent() {
+    let db: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
+    let typesafe = || -> Vec<Preset> {
+        presets()
+            .into_iter()
+            .filter(|p| p.provider == "typesafe")
+            .collect()
+    };
+    let all = typesafe();
+    assert_eq!(all.len(), 1, "one TypeSafe entry expected");
+    assert_eq!(all[0].model, "jev-1.13.0");
+    assert_eq!(all[0].cost.input_per_million, 0.042);
+    assert_eq!(all[0].cost.output_per_million, 0.0);
+    assert!(
+        all[0]
+            .absent_upstream
+            .as_deref()
+            .is_some_and(|why| why.contains("2026-")),
+        "the absence must be recorded with a date"
+    );
+
+    let o = audit(&db, &all);
+    assert!(
+        o.unexpectedly_missing.is_empty(),
+        "{:?}",
+        o.unexpectedly_missing
+    );
+    assert!(o.drift.is_empty(), "{:?}", o.drift);
+    assert_eq!(o.compared, 0);
+    assert_eq!(o.absent, fields(&all));
+    assert!(
+        o.notes
+            .iter()
+            .any(|n| n.starts_with("jev-1.13.0 absent upstream")),
+        "{:?}",
+        o.notes
+    );
+
+    // Positive control: without the note, the same entry fails the audit.
+    let mut bare = typesafe();
+    bare[0].absent_upstream = None;
+    assert_eq!(audit(&db, &bare).unexpectedly_missing.len(), 1);
+}
