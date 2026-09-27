@@ -82,20 +82,22 @@ async fn a_healthy_primary_answers_alone() {
 }
 
 #[tokio::test]
-async fn invalid_does_not_fall_back() {
-    // A server-side rejection (422).
+async fn a_members_invalid_falls_through_but_a_request_invalid_everywhere_does_not() {
+    // A server-side rejection (422) is that server's limit: the next member
+    // is tried.
     let primary = failing(DecisionError::Invalid(
         "server rejected the request (422)".into(),
     ));
     let fallback = answers("fallback-1", 0.8);
     let model = DecisionModel::from_backend(primary, "primary")
         .or(DecisionModel::from_backend(fallback.clone(), "fallback"));
-    let e = model.ask("s").noul("q", "q?").send().await.unwrap_err();
-    assert!(matches!(e, DecisionError::Invalid(_)), "{e:?}");
-    assert_eq!(fallback.request_count(), 0, "never tried");
+    let eval = model.ask("s").noul("q", "q?").send().await.unwrap();
+    assert_eq!(eval.model(), "fallback-1");
+    assert_eq!(fallback.request_count(), 1);
 
     // A request invalid everywhere (a one-option choice): nobody is asked.
     let primary = answers("primary-1", 0.5);
+    let fallback = answers("fallback-1", 0.8);
     let model = DecisionModel::from_backend(primary.clone(), "primary")
         .or(DecisionModel::from_backend(fallback.clone(), "fallback"));
     let e = model.choice("s", "which?", ["only"]).await.unwrap_err();
@@ -144,16 +146,62 @@ async fn when_every_member_fails_all_errors_are_listed() {
     let DecisionError::AllFailed { attempts, .. } = &e else {
         panic!("expected AllFailed, got {e:?}");
     };
-    let models: Vec<&str> = attempts.iter().map(|(m, _)| m.as_str()).collect();
+    let models: Vec<&str> = attempts.iter().map(|a| a.model()).collect();
     assert_eq!(models, ["a", "b", "c"]);
+    assert!(attempts.iter().all(|a| a.was_sent()));
     assert!(matches!(
-        attempts[0].1,
+        attempts[0].error(),
         DecisionError::Http { status: 503, .. }
     ));
-    assert!(matches!(attempts[1].1, DecisionError::Transport { .. }));
+    assert!(matches!(
+        attempts[1].error(),
+        DecisionError::Transport { .. }
+    ));
     let text = e.to_string();
     assert!(text.contains("[a]") && text.contains("[c]"), "{text}");
+    // Retryable because some members' errors were.
+    assert!(e.is_retryable());
+
+    // None retryable, one skipped unsent.
+    let small = MockBackend::neutral()
+        .with_capabilities(Capabilities::new(QuestionKind::all()).with_max_choice_options(2));
+    let model = DecisionModel::from_backend(small, "small").or(DecisionModel::from_backend(
+        failing(DecisionError::http(401, "no")),
+        "b",
+    ));
+    let e = model
+        .choice("s", "which?", ["x", "y", "z"])
+        .await
+        .unwrap_err();
+    let DecisionError::AllFailed { attempts, .. } = &e else {
+        panic!("expected AllFailed, got {e:?}");
+    };
+    assert!(!attempts[0].was_sent() && attempts[1].was_sent());
+    assert!(e.to_string().contains("[small (skipped)]"), "{e}");
     assert!(!e.is_retryable());
+}
+
+/// A backend that reports its own timeout at once.
+struct OwnTimeout;
+
+#[async_trait::async_trait]
+impl DecisionBackend for OwnTimeout {
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::new(QuestionKind::all())
+    }
+    async fn evaluate(&self, _request: &Request) -> Result<Evaluation, DecisionError> {
+        Err(DecisionError::Timeout(Duration::from_secs(1)))
+    }
+}
+
+#[tokio::test]
+async fn a_backends_own_timeout_does_not_end_the_chain() {
+    let fallback = answers("fallback-1", 0.8);
+    let model = DecisionModel::from_backend(OwnTimeout, "a")
+        .or(DecisionModel::from_backend(fallback.clone(), "b"));
+    let eval = model.ask("s").noul("q", "q?").send().await.unwrap();
+    assert_eq!(eval.model(), "fallback-1");
+    assert_eq!(fallback.request_count(), 1);
 }
 
 #[tokio::test]

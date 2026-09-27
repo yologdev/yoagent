@@ -215,10 +215,15 @@ pub(crate) async fn post_json(
     if let Some(key) = key {
         req = req.bearer_auth(key);
     }
-    let response = req
-        .send()
-        .await
-        .map_err(|e| DecisionError::transport_with_source(e.to_string(), e))?;
+    let response = req.send().await.map_err(|e| {
+        // A request that could not even be built (a malformed URL) will
+        // never succeed: not a transport failure to retry.
+        if e.is_builder() {
+            DecisionError::Invalid(format!("the request could not be built: {e}"))
+        } else {
+            DecisionError::transport_with_source(e.to_string(), e)
+        }
+    })?;
     let status = response.status().as_u16();
     let headers = response.headers().clone();
     let ok = (200..300).contains(&status);

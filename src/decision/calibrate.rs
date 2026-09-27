@@ -9,8 +9,8 @@ use std::fmt;
 
 /// Reliability bins in a [`CalibrationReport`].
 const BINS: usize = 10;
-/// Probabilities are clamped to at least this when computing a
-/// log-likelihood, so one confident miss is costly but finite.
+/// The true outcome's rescaled probability is floored at this when
+/// computing a log-likelihood, so one confident miss is costly but finite.
 const NLL_FLOOR: f64 = 1e-6;
 /// Temperatures searched: `1.05^k` for `k` in `-33..=33`, i.e. about 0.2
 /// to 5.0 (1.0 included).
@@ -130,15 +130,12 @@ impl CalibrationExample {
     }
 }
 
-/// How [`calibrate_with`] runs.
+/// How [`calibrate_with`] runs. Build with [`new`](Self::new) and the
+/// `with_*` setters.
 #[derive(Debug, Clone, PartialEq)]
-#[non_exhaustive]
 pub struct CalibrationOptions {
-    /// Examples evaluated at once (default 4).
-    pub concurrency: usize,
-    /// For Noul examples, also report the lowest threshold whose precision
-    /// reaches this (default none).
-    pub target_precision: Option<f64>,
+    concurrency: usize,
+    target_precision: Option<f64>,
 }
 
 impl Default for CalibrationOptions {
@@ -169,6 +166,36 @@ impl CalibrationOptions {
         assert_threshold("target precision", p);
         self.target_precision = Some(p);
         self
+    }
+
+    /// Examples evaluated at once (default 4).
+    pub fn concurrency(&self) -> usize {
+        self.concurrency
+    }
+
+    /// The precision the Noul threshold search aims for, if any.
+    pub fn target_precision(&self) -> Option<f64> {
+        self.target_precision
+    }
+}
+
+/// An example that failed to evaluate, in [`CalibrationReport::errors`].
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct CalibrationError {
+    index: usize,
+    error: DecisionError,
+}
+
+impl CalibrationError {
+    /// The example's position in the input.
+    pub fn index(&self) -> usize {
+        self.index
+    }
+
+    /// Why it failed.
+    pub fn error(&self) -> &DecisionError {
+        &self.error
     }
 }
 
@@ -207,10 +234,13 @@ pub struct ReliabilityBin {
 
 /// What [`calibrate`] measured.
 ///
-/// Every figure is over the examples that were evaluated (`count`); it is
-/// `NaN` when there are none. "Confidence" here is the probability of the
-/// answer given (the argmax), so a Noul answered `p_true = 0.3` is a "no"
-/// with confidence 0.7.
+/// Every figure is over the examples that were evaluated (`count`);
+/// `accuracy`, `brier` and `ece` are `None` when there are none.
+/// "Confidence" here is the probability of the answer given (the argmax),
+/// so a Noul answered `p_true = 0.3` is a "no" with confidence 0.7.
+///
+/// Its `Display` is a summary for people, not a stable format; read the
+/// fields.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct CalibrationReport {
@@ -218,16 +248,16 @@ pub struct CalibrationReport {
     pub count: usize,
     /// Fraction whose most probable answer was the expected one (a Noul is
     /// "yes" at `p_true >= 0.5`).
-    pub accuracy: f64,
+    pub accuracy: Option<f64>,
     /// Mean Brier score (lower is better): `(p_true - y)^2` for a Noul
     /// (0 to 1), the sum of squared errors over every option or level for a
     /// Choice or Score (0 to 2). Calibrate one question type at a time for
     /// comparable figures.
-    pub brier: f64,
+    pub brier: Option<f64>,
     /// Expected calibration error over 10 equal-width confidence bins: the
     /// count-weighted mean of `|accuracy - mean confidence|` (0 = perfectly
     /// calibrated).
-    pub ece: f64,
+    pub ece: Option<f64>,
     /// The 10 bins behind `ece`, lowest first — a reliability diagram.
     pub bins: Vec<ReliabilityBin>,
     /// Noul examples only: the threshold on `p_true` maximising F1 (the
@@ -243,29 +273,53 @@ pub struct CalibrationReport {
     /// overconfident; below 1: underconfident. Relative to the answers
     /// measured: for a [`logprobs`](DecisionModel::logprobs) model already
     /// at temperature `t0`, use `t0 * suggested` with
-    /// [`with_temperature`](DecisionModel::with_temperature). Other backends
-    /// have no such knob; read it as a diagnostic.
+    /// [`LogprobBackend::with_temperature`](super::LogprobBackend::with_temperature)
+    /// — approximately: the search rescales the answers as they were
+    /// reported, after the backend's own normalisation. Other backends have
+    /// no such knob; read it as a diagnostic.
     pub suggested_temperature: Option<f64>,
-    /// Examples that failed to evaluate, by index, with the error. Counted,
-    /// never fatal.
-    pub errors: Vec<(usize, DecisionError)>,
+    /// How many evaluated examples each model answered (by
+    /// [`Evaluation::model`](super::Evaluation::model)), most first. More
+    /// than one entry means the figures mix models — a fallback chain
+    /// answered some examples with a fallback; see
+    /// [`mixed_models`](Self::mixed_models).
+    pub models: Vec<(String, usize)>,
+    /// Examples that failed to evaluate. Counted, never fatal.
+    pub errors: Vec<CalibrationError>,
     /// Examples not evaluated because `expected` does not fit the question,
     /// by index.
     pub skipped: Vec<usize>,
 }
 
+impl CalibrationReport {
+    /// Whether more than one model answered — the figures then describe a
+    /// mix, not one model.
+    pub fn mixed_models(&self) -> bool {
+        self.models.len() > 1
+    }
+}
+
 impl fmt::Display for CalibrationReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let num = |x: Option<f64>| x.map_or_else(|| "n/a".to_string(), |x| format!("{x:.3}"));
         write!(
             f,
-            "{} evaluated ({} errors, {} skipped): accuracy {:.3}, Brier {:.3}, ECE {:.3}",
+            "{} evaluated ({} errors, {} skipped): accuracy {}, Brier {}, ECE {}",
             self.count,
             self.errors.len(),
             self.skipped.len(),
-            self.accuracy,
-            self.brier,
-            self.ece
+            num(self.accuracy),
+            num(self.brier),
+            num(self.ece)
         )?;
+        if self.mixed_models() {
+            let list: Vec<String> = self
+                .models
+                .iter()
+                .map(|(m, n)| format!("{m} ×{n}"))
+                .collect();
+            write!(f, "\nmixed models: {}", list.join(", "))?;
+        }
         if let Some(t) = self.suggested_temperature {
             write!(f, "\nsuggested temperature {t:.2}")?;
         }
@@ -306,7 +360,9 @@ pub async fn calibrate(
 ///
 /// ```no_run
 /// # async fn demo() {
-/// use yoagent::decision::{calibrate_with, CalibrationExample, CalibrationOptions, DecisionModel};
+/// use yoagent::decision::{
+///     calibrate_with, CalibrationExample, CalibrationOptions, DecisionModel, LogprobBackend,
+/// };
 ///
 /// let q = "Does this message ask to delete or overwrite data?";
 /// let examples = vec![
@@ -315,7 +371,7 @@ pub async fn calibrate(
 ///     CalibrationExample::noul("truncate the users table", q, true),
 ///     CalibrationExample::noul("what does this function return?", q, false),
 /// ];
-/// let model = DecisionModel::logprobs("http://localhost:8080", "qwen3-8b");
+/// let model = DecisionModel::logprobs("http://localhost:8080", "llama-3.1-8b-instruct");
 /// let report = calibrate_with(
 ///     &model,
 ///     examples,
@@ -324,7 +380,9 @@ pub async fn calibrate(
 /// .await;
 /// println!("{report}");
 /// if let Some(t) = report.suggested_temperature {
-///     let model = model.with_temperature(t); // logprob models only
+///     // Logprob models only: rebuild the backend at that temperature.
+///     let backend = LogprobBackend::new("http://localhost:8080").with_temperature(t);
+///     let model = DecisionModel::from_logprob_backend(backend, "llama-3.1-8b-instruct");
 /// #   let _ = model;
 /// }
 /// # }
@@ -362,22 +420,23 @@ pub async fn calibrate_with(
 
     let mut scored_all = Vec::new();
     let mut errors = Vec::new();
-    for (i, outcome) in outcomes {
+    for (index, outcome) in outcomes {
         match outcome {
             Ok(s) => scored_all.push(s),
-            Err(e) => errors.push((i, e)),
+            Err(error) => errors.push(CalibrationError { index, error }),
         }
     }
-    errors.sort_by_key(|(i, _)| *i);
+    errors.sort_by_key(|e| e.index);
     report(&scored_all, &options, errors, skipped)
 }
 
-/// One evaluated example: the distribution, the true outcome's index, and
-/// for a Noul `(p_true, expected)`.
+/// One evaluated example: the distribution, the true outcome's index, for
+/// a Noul `(p_true, expected)`, and the model that answered.
 struct Scored {
     probs: Vec<f64>,
     truth: usize,
     noul: Option<(f64, bool)>,
+    model: String,
 }
 
 fn scored(
@@ -386,7 +445,17 @@ fn scored(
     truth: usize,
 ) -> Result<Scored, DecisionError> {
     let missing = || DecisionError::BadResponse("answers.q: missing".into());
+    let model = eval.model().to_string();
     match example.question.kind() {
+        QuestionKind::Noul => {
+            let p = eval.p_true("q").ok_or_else(missing)?;
+            Ok(Scored {
+                probs: vec![p, 1.0 - p],
+                truth,
+                noul: Some((p, truth == 0)),
+                model,
+            })
+        }
         QuestionKind::Choice => {
             let answer = eval.choice("q").ok_or_else(missing)?;
             let options = example.question.options().unwrap_or_default();
@@ -394,6 +463,7 @@ fn scored(
                 probs: options.iter().map(|o| answer.probability(o)).collect(),
                 truth,
                 noul: None,
+                model,
             })
         }
         QuestionKind::Score => Ok(Scored {
@@ -404,15 +474,8 @@ fn scored(
                 .to_vec(),
             truth,
             noul: None,
+            model,
         }),
-        _ => {
-            let p = eval.p_true("q").ok_or_else(missing)?;
-            Ok(Scored {
-                probs: vec![p, 1.0 - p],
-                truth,
-                noul: Some((p, truth == 0)),
-            })
-        }
     }
 }
 
@@ -430,7 +493,7 @@ fn argmax(probs: &[f64]) -> usize {
 fn report(
     scored: &[Scored],
     options: &CalibrationOptions,
-    errors: Vec<(usize, DecisionError)>,
+    errors: Vec<CalibrationError>,
     skipped: Vec<usize>,
 ) -> CalibrationReport {
     let n = scored.len();
@@ -458,9 +521,9 @@ fn report(
     }
     let nf = n as f64;
     let (accuracy, brier) = if n == 0 {
-        (f64::NAN, f64::NAN)
+        (None, None)
     } else {
-        (correct as f64 / nf, brier / nf)
+        (Some(correct as f64 / nf), Some(brier / nf))
     };
     let bins: Vec<ReliabilityBin> = bins
         .iter()
@@ -476,13 +539,20 @@ fn report(
             }
         })
         .collect();
-    let ece = if n == 0 {
-        f64::NAN
-    } else {
+    let ece = (n > 0).then(|| {
         bins.iter()
             .map(|b| b.count as f64 / nf * (b.accuracy - b.mean_confidence).abs())
             .sum()
-    };
+    });
+
+    let mut models: Vec<(String, usize)> = Vec::new();
+    for s in scored {
+        match models.iter_mut().find(|(m, _)| *m == s.model) {
+            Some(entry) => entry.1 += 1,
+            None => models.push((s.model.clone(), 1)),
+        }
+    }
+    models.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
     let nouls: Vec<(f64, bool)> = scored.iter().filter_map(|s| s.noul).collect();
     let points = threshold_points(&nouls);
@@ -506,6 +576,7 @@ fn report(
         best_f1,
         precision_threshold,
         suggested_temperature: suggest_temperature(scored),
+        models,
         errors,
         skipped,
     }
@@ -548,19 +619,29 @@ fn threshold_points(nouls: &[(f64, bool)]) -> Vec<ThresholdPoint> {
 }
 
 /// Mean negative log-likelihood of the true outcomes after rescaling every
-/// distribution to temperature `t`.
+/// distribution to temperature `t`: `p^(1/t)` renormalised, where a zero
+/// stays zero (as in the logprob backend); only the true outcome's rescaled
+/// probability is floored, so a confident miss is finite.
 fn nll(scored: &[Scored], t: f64) -> f64 {
     let total: f64 = scored
         .iter()
         .map(|s| {
-            let logits: Vec<f64> = s
+            let logits: Vec<Option<f64>> = s
                 .probs
                 .iter()
-                .map(|p| p.clamp(NLL_FLOOR, 1.0).ln() / t)
+                .map(|p| (*p > 0.0).then(|| p.min(1.0).ln() / t))
                 .collect();
-            let max = logits.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-            let log_sum = logits.iter().map(|l| (l - max).exp()).sum::<f64>().ln() + max;
-            log_sum - logits[s.truth]
+            let max = logits
+                .iter()
+                .flatten()
+                .copied()
+                .fold(f64::NEG_INFINITY, f64::max);
+            if !max.is_finite() {
+                return -NLL_FLOOR.ln();
+            }
+            let sum: f64 = logits.iter().flatten().map(|l| (l - max).exp()).sum();
+            let q = logits[s.truth].map_or(0.0, |l| (l - max).exp() / sum);
+            -q.max(NLL_FLOOR).ln()
         })
         .sum();
     total / scored.len() as f64

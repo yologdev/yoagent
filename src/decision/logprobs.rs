@@ -1,29 +1,6 @@
 //! [`LogprobBackend`]: decisions from any OpenAI-compatible
-//! `/chat/completions` server that returns logprobs.
-//!
-//! Each question becomes one completion of **one token** at temperature 0:
-//! the prompt presents the state, the question and a label per answer, and
-//! the answer is read from the first token's `top_logprobs` — never from the
-//! generated text.
-//!
-//! | Question | Labels |
-//! |----------|--------|
-//! | Noul     | `A` = yes, `B` = no |
-//! | Choice   | `A`, `B`, `C`, ... — the options in order (at most 26) |
-//! | Score    | `0` ... `9` — the levels, lowest first |
-//!
-//! Reading the answer: every top-K token is trimmed of whitespace and
-//! upper-cased (so `" A"` and `"a"` both count as `A`), the probability of
-//! tokens that map to the same label is summed, the optional temperature is
-//! applied to the resulting log-probabilities, and a softmax over the labels
-//! that appeared gives the distribution; a label outside the top K gets
-//! probability 0. No label in the top K is [`DecisionError::BadResponse`].
-//!
-//! **Calibration is approximate.** A general LLM's next-token probability
-//! for a label is not a calibrated probability the way a trained decision
-//! model's is; it is often overconfident. Measure it on your own data with
-//! [`calibrate`](super::calibrate()) and apply the suggested
-//! [`with_temperature`](LogprobBackend::with_temperature).
+//! `/chat/completions` server that returns logprobs. See the type's docs for
+//! how answers are read and why their calibration is approximate.
 
 use super::answer::{Answer, ChoiceAnswer, DecisionUsage, Evaluation, NoulAnswer, ScoreAnswer};
 use super::backend::{Capabilities, DecisionBackend};
@@ -31,14 +8,27 @@ use super::error::DecisionError;
 use super::question::{Question, QuestionKind, Request};
 use super::systemone::{post_json, with_retries};
 use crate::retry::RetryConfig;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 /// Most `top_logprobs` OpenAI accepts; the default K and Choice limit.
 const DEFAULT_TOP_LOGPROBS: usize = 20;
 /// Letters available as Choice labels.
 const MAX_LETTER_LABELS: usize = 26;
 /// Questions of one request evaluated at once (one HTTP request each).
-pub(crate) const MAX_CONCURRENT_QUESTIONS: usize = 8;
+const MAX_CONCURRENT_QUESTIONS: usize = 8;
+/// Default minimum share of the first-token probability the labels must
+/// cover.
+const DEFAULT_MIN_LABEL_MASS: f64 = 0.5;
+/// The smallest probability an absent label is given, so absence alone
+/// never yields exactly 0 or 1.
+const ABSENT_FLOOR: f64 = 1e-9;
+/// The question kinds this backend answers — listed, never `all()`, so a
+/// future kind is `Unsupported` rather than answered as something else.
+const KINDS: &[QuestionKind] = &[
+    QuestionKind::Noul,
+    QuestionKind::Choice,
+    QuestionKind::Score,
+];
 
 /// A decision backend over an OpenAI-compatible `/chat/completions` endpoint
 /// that returns logprobs — llama.cpp's `llama-server`, vLLM, SGLang,
@@ -46,36 +36,61 @@ pub(crate) const MAX_CONCURRENT_QUESTIONS: usize = 8;
 ///
 /// Usually built for you by
 /// [`DecisionModel::logprobs`](super::DecisionModel::logprobs); build one
-/// directly to change its limits, then wrap it with
-/// [`DecisionModel::from_backend`](super::DecisionModel::from_backend)
-/// (which is unpriced until `with_cost`).
+/// directly to change its settings and wrap it with
+/// [`DecisionModel::from_logprob_backend`](super::DecisionModel::from_logprob_backend),
+/// which keeps the same conveniences (`with_api_key`, `with_retry`, $0 on a
+/// loopback host). Wrapping it with
+/// [`from_backend`](super::DecisionModel::from_backend) works too, but loses
+/// them: that model is unpriced and owns its key and retries.
 ///
-/// - **Every question type**; Choice up to 20 options by default (OpenAI caps
-///   `top_logprobs` at 20; raise it to 26 with
+/// - **Question types:** Noul, Choice and Score. Choice up to 20 options by
+///   default (OpenAI caps `top_logprobs` at 20; raise it to 26 with
 ///   [`with_max_choice_options`](Self::with_max_choice_options) for servers
 ///   that allow more), Score up to 10 levels.
-/// - **Batching:** a request with several questions fans out one HTTP request
-///   per question, at most 8 at a time, and returns one [`Evaluation`] with
-///   the usage summed.
+/// - **One HTTP request per question.** It reports `batching: false` with 8
+///   concurrent requests, so a [`DecisionModel`](super::DecisionModel) sends
+///   a request's questions concurrently and records the usage of those that
+///   completed even when another fails or the call times out.
 /// - **Local** ([`Capabilities::local`]) only when the base URL's host is
 ///   loopback (`localhost`, `127.0.0.0/8`, `::1`).
 /// - **Key:** none unless [`with_api_key`](Self::with_api_key); no
 ///   environment variable is ever read.
 /// - Rate limits (429/529) and transport failures are retried like
 ///   [`SystemOneBackend`](super::SystemOneBackend)'s, honouring
-///   `retry-after`; 422 is [`DecisionError::Invalid`]; any other non-success
-///   status is [`DecisionError::Http`].
+///   `retry-after`; 422 and a malformed URL are [`DecisionError::Invalid`];
+///   any other non-success status is [`DecisionError::Http`].
+///
+/// **Thinking must be off.** The answer must be the very first token. A
+/// reasoning model that starts with `<think>` (Qwen3 does by default), or
+/// one that answers in words, puts little probability on the labels — and
+/// is rejected (below) rather than read as an answer. Use a non-thinking
+/// model, start llama-server with `--reasoning off`, or send
+/// `chat_template_kwargs: {"enable_thinking": false}` with
+/// [`with_thinking_disabled`](Self::with_thinking_disabled) (llama.cpp,
+/// vLLM and SGLang accept it; OpenAI's API rejects unknown fields, so it is
+/// not sent by default).
 ///
 /// **How answers are read.** Each question is one completion of one token
-/// at temperature 0; the prompt presents the state, the question and a label
-/// per answer — `A` = yes / `B` = no for a Noul, `A`, `B`, ... for a
-/// Choice's options in order, `0`–`9` for a Score's levels. Every token in
-/// the first position's `top_logprobs` is trimmed and upper-cased (`" A"`
-/// and `"a"` both count as `A`), probabilities of tokens mapping to one
-/// label are summed, the temperature is applied to their log-probabilities,
-/// and a softmax over the labels present gives the distribution; a label
-/// outside the top K gets 0. No label in the top K is
-/// [`DecisionError::BadResponse`].
+/// at temperature 0 (`max_tokens: 1`, `logprobs: true`,
+/// `top_logprobs: max(configured K, the question's label count)`). The
+/// prompt presents the state, the question and a label per answer — `A` =
+/// yes / `B` = no for a Noul, `A`, `B`, ... for a Choice's options in order,
+/// `0`–`9` for a Score's levels. Then, from the first position's
+/// `top_logprobs`:
+///
+/// 1. every token is trimmed and upper-cased (`" A"` and `"a"` both count
+///    as `A`), and the probabilities of tokens mapping to one label are
+///    summed;
+/// 2. no label at all, or labels covering less than the minimum share of
+///    the probability (default 0.5,
+///    [`with_min_label_mass`](Self::with_min_label_mass)), is
+///    [`DecisionError::BadResponse`] — the model was not answering with a
+///    label;
+/// 3. a label outside the top K is given `min(smallest reported
+///    probability, 1 − total reported probability)` — an upper bound on its
+///    real probability — so absence alone never yields exactly 0 or 1;
+/// 4. the temperature is applied to the log-probabilities and a softmax
+///    gives the distribution.
 ///
 /// **Calibration is approximate.** A general LLM's next-token probability
 /// for a label is not a calibrated probability the way a trained decision
@@ -90,6 +105,8 @@ pub struct LogprobBackend {
     retry: RetryConfig,
     temperature: f64,
     top_logprobs: usize,
+    min_label_mass: f64,
+    extra_body: Map<String, Value>,
     capabilities: Capabilities,
 }
 
@@ -101,6 +118,8 @@ impl std::fmt::Debug for LogprobBackend {
             .field("retry", &self.retry)
             .field("temperature", &self.temperature)
             .field("top_logprobs", &self.top_logprobs)
+            .field("min_label_mass", &self.min_label_mass)
+            .field("extra_body", &self.extra_body)
             .field("capabilities", &self.capabilities)
             .finish_non_exhaustive()
     }
@@ -121,10 +140,13 @@ impl LogprobBackend {
             retry: RetryConfig::default(),
             temperature: 1.0,
             top_logprobs: DEFAULT_TOP_LOGPROBS,
-            capabilities: Capabilities::new(QuestionKind::all())
+            min_label_mass: DEFAULT_MIN_LABEL_MASS,
+            extra_body: Map::new(),
+            capabilities: Capabilities::new(KINDS)
                 .with_max_choice_options(DEFAULT_TOP_LOGPROBS)
                 .with_max_score_levels(10)
-                .with_batching(true)
+                .with_batching(false)
+                .with_max_concurrent_requests(MAX_CONCURRENT_QUESTIONS)
                 .with_local(local),
         }
     }
@@ -159,8 +181,9 @@ impl LogprobBackend {
     }
 
     /// Most options one Choice may have (default 20). Requests ask for at
-    /// least this many `top_logprobs`, so raise it only for servers that
-    /// allow more than 20 (llama.cpp, vLLM with `--max-logprobs`).
+    /// least as many `top_logprobs` as the question has labels, so raise it
+    /// only for servers that allow more than 20 (llama.cpp, vLLM with
+    /// `--max-logprobs`).
     ///
     /// Panics outside `2..=26` (options are labelled with letters).
     pub fn with_max_choice_options(mut self, n: usize) -> Self {
@@ -172,13 +195,50 @@ impl LogprobBackend {
         self
     }
 
-    /// Ask for this many `top_logprobs` (default 20; never fewer than the
-    /// question's labels). Lower it for a server with a smaller cap.
+    /// Ask for this many `top_logprobs` (default 20). Requests ask for
+    /// `max(k, the question's label count)`. Lower it for a server with a
+    /// smaller cap.
     ///
     /// Panics on 0.
     pub fn with_top_logprobs(mut self, k: usize) -> Self {
         assert!(k > 0, "top_logprobs must be at least 1");
         self.top_logprobs = k;
+        self
+    }
+
+    /// The share of the first token's probability the labels must cover
+    /// for an answer to be read (default 0.5). Below it the response is
+    /// [`DecisionError::BadResponse`]: the model was thinking, or answering
+    /// in words, not choosing a label.
+    ///
+    /// Panics outside `(0, 1]`.
+    pub fn with_min_label_mass(mut self, share: f64) -> Self {
+        assert!(
+            share > 0.0 && share <= 1.0,
+            "minimum label mass must be in (0, 1], got {share}"
+        );
+        self.min_label_mass = share;
+        self
+    }
+
+    /// Send `chat_template_kwargs: {"enable_thinking": false}`, which turns
+    /// thinking off for templates that support it (Qwen3 and others) on
+    /// llama.cpp, vLLM and SGLang. OpenAI's API rejects the field.
+    pub fn with_thinking_disabled(self) -> Self {
+        self.with_extra_body(json!({"chat_template_kwargs": {"enable_thinking": false}}))
+    }
+
+    /// Merge these fields into every request body — server-specific
+    /// settings such as `chat_template_kwargs` or `reasoning_effort`. The
+    /// fields the backend relies on (`model`, `messages`, `max_tokens`,
+    /// `temperature`, `logprobs`, `top_logprobs`) cannot be overridden.
+    ///
+    /// Panics unless `fields` is a JSON object.
+    pub fn with_extra_body(mut self, fields: Value) -> Self {
+        let Value::Object(map) = fields else {
+            panic!("with_extra_body takes a JSON object");
+        };
+        self.extra_body.extend(map);
         self
     }
 
@@ -214,14 +274,20 @@ impl LogprobBackend {
         question: &Question,
     ) -> Result<(Answer, String, DecisionUsage, bool), DecisionError> {
         let labels = labels_for(question);
-        let body = json!({
-            "model": request.model,
-            "messages": [{"role": "user", "content": prompt(&request.state, question, &labels)}],
-            "max_tokens": 1,
-            "temperature": 0,
-            "logprobs": true,
-            "top_logprobs": self.top_logprobs.max(labels.len()),
-        });
+        let mut body = self.extra_body.clone();
+        for (k, v) in [
+            ("model", json!(request.model)),
+            (
+                "messages",
+                json!([{"role": "user", "content": prompt(&request.state, question, &labels)}]),
+            ),
+            ("max_tokens", json!(1)),
+            ("temperature", json!(0)),
+            ("logprobs", json!(true)),
+            ("top_logprobs", json!(self.top_logprobs.max(labels.len()))),
+        ] {
+            body.insert(k.to_string(), v);
+        }
         let body = serde_json::to_vec(&body)
             .map_err(|e| DecisionError::Invalid(format!("request does not serialize: {e}")))?;
         let url = self.endpoint_url();
@@ -230,9 +296,10 @@ impl LogprobBackend {
         })
         .await?;
 
-        let probs = label_distribution(&value, &labels, self.temperature)
+        let probs = label_distribution(&value, &labels, self.temperature, self.min_label_mass)
             .map_err(|e| DecisionError::BadResponse(format!("answers.{id}: {e}")))?;
         let answer: Answer = match question.kind() {
+            QuestionKind::Noul => NoulAnswer::new(probs[0]).into(),
             QuestionKind::Choice => {
                 let options = question.options().unwrap_or_default();
                 ChoiceAnswer::new(options.into_iter().zip(probs)).into()
@@ -246,7 +313,6 @@ impl LogprobBackend {
                     .collect();
                 ScoreAnswer::new(legend, probs).into()
             }
-            _ => NoulAnswer::new(probs[0]).into(),
         };
 
         let model = value
@@ -272,37 +338,25 @@ impl DecisionBackend for LogprobBackend {
         self.capabilities.clone()
     }
 
+    /// Answers each question with its own completion, one after another.
+    /// (A [`DecisionModel`](super::DecisionModel) splits a request into
+    /// single questions and sends them concurrently itself.)
     async fn evaluate(&self, request: &Request) -> Result<Evaluation, DecisionError> {
-        use futures::{StreamExt, TryStreamExt};
-        type Asked = (String, (Answer, String, DecisionUsage, bool));
-        type Pending<'a> = std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<Asked, DecisionError>> + Send + 'a>,
-        >;
-        // Built in a loop, not a closure: a closure over borrowed questions
-        // trips the `Send` check of `async_trait`'s boxed future.
-        let mut pending: Vec<Pending<'_>> = Vec::with_capacity(request.questions.len());
-        for (id, q) in &request.questions {
-            pending.push(Box::pin(async move {
-                self.ask_one(request, id, q).await.map(|r| (id.clone(), r))
-            }));
-        }
-        // In order, at most MAX_CONCURRENT_QUESTIONS in flight; the first
-        // error stops the rest.
-        let results: Vec<Asked> = futures::stream::iter(pending)
-            .buffered(MAX_CONCURRENT_QUESTIONS)
-            .try_collect()
-            .await?;
-
         let mut eval: Option<Evaluation> = None;
-        let mut input = 0u64;
-        let mut output = 0u64;
-        let mut reported = true;
-        for (id, (answer, model, usage, usage_reported)) in results {
+        let (mut input, mut output, mut reported) = (0u64, 0u64, true);
+        for (id, q) in &request.questions {
+            if !KINDS.contains(&q.kind()) {
+                return Err(DecisionError::Unsupported(format!(
+                    "questions.{id}: {} questions are not supported by the logprob backend",
+                    q.kind()
+                )));
+            }
+            let (answer, model, usage, usage_reported) = self.ask_one(request, id, q).await?;
             input += usage.input_tokens;
             output += usage.output_tokens;
             reported &= usage_reported;
             let e = eval.take().unwrap_or_else(|| Evaluation::new(model, usage));
-            eval = Some(e.with_answer(id, answer));
+            eval = Some(e.with_answer(id.clone(), answer));
         }
         let mut eval = eval.ok_or_else(|| DecisionError::Invalid("questions: empty".into()))?;
         eval.usage = DecisionUsage::new(input, output);
@@ -339,11 +393,11 @@ fn labels_for(question: &Question) -> Vec<String> {
             .collect()
     };
     match question.kind() {
+        QuestionKind::Noul => letters(2),
         QuestionKind::Choice => letters(question.options().map_or(0, |o| o.len())),
         QuestionKind::Score => (0..question.levels().map_or(0, <[_]>::len))
             .map(|i| i.to_string())
             .collect(),
-        _ => letters(2),
     }
 }
 
@@ -359,6 +413,17 @@ fn render(v: &Value) -> String {
 fn prompt(state: &Value, question: &Question, labels: &[String]) -> String {
     let mut lines: Vec<String> = Vec::new();
     match question.kind() {
+        QuestionKind::Noul => {
+            let (yes, no) = match question.noul_criteria() {
+                Some((t, f)) => (
+                    format!("Yes — {}", render(t)),
+                    format!("No — {}", render(f)),
+                ),
+                None => ("Yes".to_string(), "No".to_string()),
+            };
+            lines.push(format!("{}: {yes}", labels[0]));
+            lines.push(format!("{}: {no}", labels[1]));
+        }
         QuestionKind::Choice => {
             for (label, (option, desc)) in labels
                 .iter()
@@ -376,17 +441,6 @@ fn prompt(state: &Value, question: &Question, labels: &[String]) -> String {
             for (label, level) in labels.iter().zip(question.levels().unwrap_or_default()) {
                 lines.push(format!("{label}: {}", render(level)));
             }
-        }
-        _ => {
-            let (yes, no) = match question.noul_criteria() {
-                Some((t, f)) => (
-                    format!("Yes — {}", render(t)),
-                    format!("No — {}", render(f)),
-                ),
-                None => ("Yes".to_string(), "No".to_string()),
-            };
-            lines.push(format!("{}: {yes}", labels[0]));
-            lines.push(format!("{}: {no}", labels[1]));
         }
     }
     let scale = if question.kind() == QuestionKind::Score {
@@ -408,19 +462,20 @@ fn prompt(state: &Value, question: &Question, labels: &[String]) -> String {
 }
 
 /// The distribution over `labels` read from the first generated token's
-/// `top_logprobs`: tokens trimmed and upper-cased, duplicates summed,
-/// `temperature` applied to the log-probabilities, softmax over the labels
-/// present (absent labels get 0).
+/// `top_logprobs` (see [`LogprobBackend`] for the rules).
 pub(crate) fn label_distribution(
     body: &Value,
     labels: &[String],
     temperature: f64,
+    min_label_mass: f64,
 ) -> Result<Vec<f64>, String> {
     let top = body
         .pointer("/choices/0/logprobs/content/0/top_logprobs")
         .and_then(Value::as_array)
         .ok_or("the response has no choices[0].logprobs.content[0].top_logprobs")?;
     let mut mass = vec![0.0f64; labels.len()];
+    let mut reported_total = 0.0f64;
+    let mut smallest = f64::INFINITY;
     for entry in top {
         let Some(token) = entry.get("token").and_then(Value::as_str) else {
             continue;
@@ -431,31 +486,41 @@ pub(crate) fn label_distribution(
         if logprob.is_nan() {
             continue;
         }
+        let p = logprob.exp();
+        reported_total += p;
+        if p > 0.0 {
+            smallest = smallest.min(p);
+        }
         let token = token.trim().to_ascii_uppercase();
         if let Some(i) = labels.iter().position(|l| *l == token) {
-            mass[i] += logprob.exp();
+            mass[i] += p;
         }
     }
-    let logits: Vec<Option<f64>> = mass
-        .iter()
-        .map(|&m| (m > 0.0 && m.is_finite()).then(|| m.ln() / temperature))
-        .collect();
-    let max = logits
-        .iter()
-        .flatten()
-        .copied()
-        .fold(f64::NEG_INFINITY, f64::max);
-    if !max.is_finite() {
+    let label_mass: f64 = mass.iter().sum();
+    if label_mass <= 0.0 {
         return Err(format!(
             "none of the labels {} is among the top {} tokens",
             labels.join(", "),
             top.len()
         ));
     }
-    let weights: Vec<f64> = logits
+    if label_mass < min_label_mass {
+        return Err(format!(
+            "labels cover only {label_mass:.3} of the first-token probability (minimum \
+             {min_label_mass}); the model is not answering with a label — is thinking on?"
+        ));
+    }
+    // An absent label's probability is below every reported one and within
+    // what the reported tokens leave over.
+    let absent = smallest
+        .min(1.0 - reported_total)
+        .clamp(ABSENT_FLOOR, 1.0);
+    let logits: Vec<f64> = mass
         .iter()
-        .map(|l| l.map_or(0.0, |l| (l - max).exp()))
+        .map(|&m| if m > 0.0 { m } else { absent }.ln() / temperature)
         .collect();
+    let max = logits.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let weights: Vec<f64> = logits.iter().map(|l| (l - max).exp()).collect();
     let total: f64 = weights.iter().sum();
     Ok(weights.into_iter().map(|w| w / total).collect())
 }
@@ -476,36 +541,64 @@ mod tests {
         vec!["A".into(), "B".into()]
     }
 
+    fn dist(tokens: &[(&str, f64)], t: f64) -> Result<Vec<f64>, String> {
+        let probs: Vec<(&str, f64)> = tokens.iter().map(|(k, p)| (*k, p.ln())).collect();
+        label_distribution(&top(&probs), &ab(), t, DEFAULT_MIN_LABEL_MASS)
+    }
+
     #[test]
     fn labels_are_normalised_and_summed() {
         // " A" and "a" are both A; B once.
-        let body = top(&[(" A", 0.5f64.ln()), ("a", 0.2f64.ln()), ("B", 0.3f64.ln())]);
-        let p = label_distribution(&body, &ab(), 1.0).unwrap();
+        let p = dist(&[(" A", 0.5), ("a", 0.2), ("B", 0.3)], 1.0).unwrap();
         assert!((p[0] - 0.7).abs() < 1e-9, "{p:?}");
         assert!((p[1] - 0.3).abs() < 1e-9, "{p:?}");
     }
 
     #[test]
-    fn a_missing_label_is_renormalised_to_zero() {
-        let body = top(&[("A", 0.6f64.ln()), ("The", 0.3f64.ln())]);
-        let p = label_distribution(&body, &ab(), 1.0).unwrap();
-        assert_eq!(p, vec![1.0, 0.0]);
+    fn a_missing_label_is_bounded_not_zero() {
+        // B is absent: it gets min(smallest reported 0.3, 1 - 0.9) = 0.1.
+        let p = dist(&[("A", 0.6), ("The", 0.3)], 1.0).unwrap();
+        assert!((p[0] - 0.6 / 0.7).abs() < 1e-9, "{p:?}");
+        assert!((p[1] - 0.1 / 0.7).abs() < 1e-9, "{p:?}");
+        // Even when the reported tokens cover everything, never exactly 1.
+        let p = dist(&[("A", 1.0)], 1.0).unwrap();
+        assert!(p[0] < 1.0 && p[1] > 0.0, "{p:?}");
     }
 
     #[test]
     fn no_label_is_an_error() {
-        let body = top(&[("The", -0.1), ("Yes", -2.0)]);
-        let e = label_distribution(&body, &ab(), 1.0).unwrap_err();
+        let e = dist(&[("The", 0.9), ("Yes", 0.1)], 1.0).unwrap_err();
         assert!(e.contains("none of the labels"), "{e}");
-        assert!(label_distribution(&json!({"choices": []}), &ab(), 1.0).is_err());
+        let e = label_distribution(&json!({"choices": []}), &ab(), 1.0, 0.5).unwrap_err();
+        assert!(e.contains("top_logprobs"), "{e}");
+    }
+
+    #[test]
+    fn too_little_label_mass_is_an_error() {
+        // A thinking model: `<think>` takes nearly everything.
+        let body = top(&[("<think>", -0.0001), ("A", -12.0), ("B", -14.0)]);
+        let e = label_distribution(&body, &ab(), 1.0, 0.5).unwrap_err();
+        assert!(e.contains("labels cover only"), "{e}");
+        // A model answering in words.
+        let e = dist(&[("No", 0.9), ("A", 0.05), ("B", 0.01)], 1.0).unwrap_err();
+        assert!(e.contains("labels cover only"), "{e}");
+        // Positive control: the same shape with the labels dominant.
+        let p = dist(&[("B", 0.9), ("No", 0.05), ("A", 0.05)], 1.0).unwrap();
+        assert!((p[1] - 0.9 / 0.95).abs() < 1e-9, "{p:?}");
+        // A lower floor accepts the word answer's labels.
+        let words = top(&[
+            ("No", 0.9f64.ln()),
+            ("A", 0.05f64.ln()),
+            ("B", 0.01f64.ln()),
+        ]);
+        assert!(label_distribution(&words, &ab(), 1.0, 0.05).is_ok());
     }
 
     #[test]
     fn temperature_softens_and_sharpens() {
-        let body = top(&[("A", 0.8f64.ln()), ("B", 0.2f64.ln())]);
-        let p1 = label_distribution(&body, &ab(), 1.0).unwrap()[0];
-        let p2 = label_distribution(&body, &ab(), 2.0).unwrap()[0];
-        let p05 = label_distribution(&body, &ab(), 0.5).unwrap()[0];
+        let p1 = dist(&[("A", 0.8), ("B", 0.2)], 1.0).unwrap()[0];
+        let p2 = dist(&[("A", 0.8), ("B", 0.2)], 2.0).unwrap()[0];
+        let p05 = dist(&[("A", 0.8), ("B", 0.2)], 0.5).unwrap()[0];
         assert!((p1 - 0.8).abs() < 1e-9);
         // 0.8^(1/2) / (0.8^(1/2) + 0.2^(1/2)) = 2/3
         assert!((p2 - 2.0 / 3.0).abs() < 1e-9, "{p2}");
@@ -570,5 +663,13 @@ mod tests {
             labels_for(&Question::score("q", ["lo", "mid", "hi"])),
             ["0", "1", "2"]
         );
+    }
+
+    #[test]
+    fn only_the_three_kinds_are_listed() {
+        let caps = LogprobBackend::new("http://localhost:1").capabilities();
+        assert_eq!(caps.question_kinds, KINDS);
+        assert!(!caps.batching);
+        assert_eq!(caps.max_concurrent_requests, 8);
     }
 }

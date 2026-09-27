@@ -62,10 +62,10 @@ async fn a_calibrated_model_has_near_zero_ece() {
     }
     let report = calibrate(&echo(), examples).await;
     assert_eq!(report.count, 40);
-    assert!(report.ece < 1e-9, "{report}");
-    assert!((report.accuracy - 0.8).abs() < 1e-9, "{report}");
+    assert!(report.ece.unwrap() < 1e-9, "{report}");
+    assert!((report.accuracy.unwrap() - 0.8).abs() < 1e-9, "{report}");
     // Mean (p - y)^2: 0.09 for the 0.1/0.9 groups, 0.21 for 0.3/0.7.
-    assert!((report.brier - 0.15).abs() < 1e-9, "{report}");
+    assert!((report.brier.unwrap() - 0.15).abs() < 1e-9, "{report}");
     let t = report.suggested_temperature.unwrap();
     assert!((t - 1.0).abs() < 0.06, "calibrated: T = {t}");
     assert_eq!(report.bins.len(), 10);
@@ -78,8 +78,8 @@ async fn an_overconfident_model_has_high_ece_and_a_temperature_above_one() {
     let mut examples = group(0.99, 10, 7); // says yes at 0.99, right 70%
     examples.extend(group(0.01, 10, 3)); // says no at 0.99, right 70%
     let report = calibrate(&echo(), examples).await;
-    assert!((report.accuracy - 0.7).abs() < 1e-9);
-    assert!((report.ece - 0.29).abs() < 1e-9, "{report}");
+    assert!((report.accuracy.unwrap() - 0.7).abs() < 1e-9);
+    assert!((report.ece.unwrap() - 0.29).abs() < 1e-9, "{report}");
     let t = report.suggested_temperature.unwrap();
     assert!(t > 1.5, "overconfident: T = {t}");
     // Everything lands in the top bin.
@@ -161,9 +161,9 @@ async fn choice_and_score_examples_are_scored() {
     ];
     let report = calibrate(&echo(), examples).await;
     assert_eq!(report.count, 4);
-    assert!((report.accuracy - 0.75).abs() < 1e-9);
+    assert!((report.accuracy.unwrap() - 0.75).abs() < 1e-9);
     // Multi-class Brier: 0.08, 1.28, 0.02, 0.02.
-    assert!((report.brier - 1.4 / 4.0).abs() < 1e-9, "{report}");
+    assert!((report.brier.unwrap() - 1.4 / 4.0).abs() < 1e-9, "{report}");
     assert!(report.best_f1.is_none(), "Noul only");
 }
 
@@ -187,22 +187,22 @@ async fn errors_and_misfit_examples_are_counted_not_fatal() {
     let report = calibrate(&echo(), examples).await;
     assert_eq!(report.count, 2);
     assert_eq!(report.errors.len(), 1);
-    assert_eq!(report.errors[0].0, 1);
+    assert_eq!(report.errors[0].index(), 1);
     assert!(matches!(
-        report.errors[0].1,
+        report.errors[0].error(),
         DecisionError::Http { status: 503, .. }
     ));
     assert_eq!(report.skipped, [2, 3, 4]);
-    assert_eq!(report.accuracy, 1.0);
+    assert_eq!(report.accuracy.unwrap(), 1.0);
     let text = report.to_string();
     assert!(text.contains("1 errors, 3 skipped"), "{text}");
 }
 
 #[tokio::test]
-async fn nothing_evaluated_is_nan_not_zero() {
+async fn nothing_evaluated_is_none_not_zero() {
     let report = calibrate(&echo(), Vec::new()).await;
     assert_eq!(report.count, 0);
-    assert!(report.accuracy.is_nan() && report.ece.is_nan() && report.brier.is_nan());
+    assert!(report.accuracy.is_none() && report.ece.is_none() && report.brier.is_none());
     assert!(report.suggested_temperature.is_none());
 }
 
@@ -255,4 +255,73 @@ async fn concurrency_is_bounded() {
 #[should_panic(expected = "target precision")]
 fn target_precision_must_be_a_probability() {
     let _ = CalibrationOptions::new().with_target_precision(1.5);
+}
+
+#[test]
+fn options_have_getters() {
+    let o = CalibrationOptions::new();
+    assert_eq!((o.concurrency(), o.target_precision()), (4, None));
+    let o = o.with_concurrency(2).with_target_precision(0.9);
+    assert_eq!((o.concurrency(), o.target_precision()), (2, Some(0.9)));
+}
+
+#[tokio::test]
+async fn a_zero_probability_miss_does_not_push_the_temperature_up() {
+    // Calibrated on the two options it uses ...
+    let choice = |truth: &str| {
+        CalibrationExample::choice(
+            json!({"probs": [0.8, 0.2, 0.0]}),
+            "which?",
+            ["a", "b", "c"],
+            truth,
+        )
+    };
+    let mut examples: Vec<CalibrationExample> = Vec::new();
+    for i in 0..20 {
+        examples.push(choice(if i < 16 { "a" } else { "b" }));
+    }
+    let base = calibrate(&echo(), examples.clone()).await;
+    let t0 = base.suggested_temperature.unwrap();
+    assert!((t0 - 1.0).abs() < 0.06, "{t0}");
+    // ... plus one miss on an option it gave exactly 0: rescaling cannot
+    // make a zero non-zero, so the miss does not argue for a hotter T.
+    examples.push(choice("c"));
+    let t = calibrate(&echo(), examples)
+        .await
+        .suggested_temperature
+        .unwrap();
+    assert!((t - 1.0).abs() < 0.06, "{t}");
+}
+
+#[tokio::test]
+async fn a_chain_that_mixes_models_is_visible() {
+    let primary = DecisionModel::from_backend(
+        MockBackend::from_fn(|req| {
+            if req.state["p"].as_f64() == Some(0.9) {
+                return Err(DecisionError::http(503, "down"));
+            }
+            Ok(
+                Evaluation::new("primary-1", DecisionUsage::default()).with_answer(
+                    req.questions[0].0.clone(),
+                    NoulAnswer::new(req.state["p"].as_f64().unwrap()),
+                ),
+            )
+        }),
+        "primary",
+    );
+    let chain = primary.or(echo());
+    let mut examples = group(0.1, 3, 0);
+    examples.extend(group(0.9, 2, 2));
+    let report = calibrate(&chain, examples).await;
+    assert!(report.mixed_models());
+    assert_eq!(
+        report.models,
+        [("primary-1".to_string(), 3), ("echo".to_string(), 2)]
+    );
+    assert!(report.to_string().contains("mixed models"), "{report}");
+
+    // Positive control: one model, not mixed.
+    let report = calibrate(&echo(), group(0.1, 3, 0)).await;
+    assert!(!report.mixed_models());
+    assert_eq!(report.models, [("echo".to_string(), 3)]);
 }

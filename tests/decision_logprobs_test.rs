@@ -62,7 +62,19 @@ fn prompt_of(req: &WireRequest) -> String {
 }
 
 fn model(server: &MockServer) -> DecisionModel {
-    DecisionModel::logprobs(server.uri(), "qwen3-8b").with_retry(fast_retry())
+    DecisionModel::logprobs(server.uri(), "llama-3.1-8b-instruct").with_retry(fast_retry())
+}
+
+/// A model over a backend configured by `f`.
+fn model_with(
+    server: &MockServer,
+    f: impl FnOnce(LogprobBackend) -> LogprobBackend,
+) -> DecisionModel {
+    DecisionModel::from_logprob_backend(
+        f(LogprobBackend::new(server.uri())),
+        "llama-3.1-8b-instruct",
+    )
+    .with_retry(fast_retry())
 }
 
 fn close(a: f64, b: f64) -> bool {
@@ -93,7 +105,7 @@ async fn request_shape_is_a_one_token_logprob_completion() {
         "no key unless set"
     );
     let body = body_of(&reqs[0]);
-    assert_eq!(body["model"], "qwen3-8b");
+    assert_eq!(body["model"], "llama-3.1-8b-instruct");
     assert_eq!(body["max_tokens"], 1);
     assert_eq!(body["temperature"], 0);
     assert_eq!(body["logprobs"], true);
@@ -212,21 +224,94 @@ async fn score_digits_map_to_levels() {
 }
 
 #[tokio::test]
-async fn a_missing_label_is_renormalised_away() {
+async fn a_missing_label_is_bounded_not_zero() {
     let server = MockServer::start().await;
-    // C never appears in the top K.
+    // C never appears in the top K: it gets min(smallest reported 0.1,
+    // 1 - reported 0.9) = 0.1, not 0.
     mount(
         &server,
-        completion(&[("A", 0.3), ("B", 0.1), ("I", 0.6)], (10, 1)),
+        completion(&[("A", 0.6), ("B", 0.2), ("I", 0.1)], (10, 1)),
     )
     .await;
     let a = model(&server)
         .choice("s", "which?", ["x", "y", "z"])
         .await
         .unwrap();
-    assert!(close(a.probability("x"), 0.75));
-    assert!(close(a.probability("y"), 0.25));
-    assert_eq!(a.probability("z"), 0.0);
+    assert!(close(a.probability("x"), 0.6 / 0.9));
+    assert!(close(a.probability("y"), 0.2 / 0.9));
+    assert!(close(a.probability("z"), 0.1 / 0.9));
+}
+
+#[tokio::test]
+async fn too_little_label_mass_is_a_bad_response() {
+    // A thinking model: `<think>` takes nearly all the first token.
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        completion(
+            &[
+                ("<think>", (-0.0001f64).exp()),
+                ("A", (-12.0f64).exp()),
+                ("B", (-14.0f64).exp()),
+            ],
+            (10, 1),
+        ),
+    )
+    .await;
+    let e = model(&server).noul("s", "q?").await.unwrap_err();
+    assert!(matches!(e, DecisionError::BadResponse(_)), "{e:?}");
+    assert!(e.to_string().contains("labels cover only"), "{e}");
+
+    // A model answering in words.
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        completion(&[("No", 0.9), ("A", 0.05), ("B", 0.01)], (10, 1)),
+    )
+    .await;
+    let e = model(&server).noul("s", "q?").await.unwrap_err();
+    assert!(e.to_string().contains("labels cover only"), "{e}");
+    // ... accepted only when the floor is lowered on purpose.
+    let a = model_with(&server, |b| b.with_min_label_mass(0.05))
+        .noul("s", "q?")
+        .await
+        .unwrap();
+    assert!(a.p_true() > 0.8);
+
+    // Positive control: the labels dominate.
+    let server = MockServer::start().await;
+    mount(
+        &server,
+        completion(&[("B", 0.85), ("No", 0.1), ("A", 0.05)], (10, 1)),
+    )
+    .await;
+    let a = model(&server).noul("s", "q?").await.unwrap();
+    assert!(close(a.p_true(), 0.05 / 0.9), "{}", a.p_true());
+}
+
+#[tokio::test]
+async fn thinking_can_be_disabled_and_extra_fields_cannot_override_the_core() {
+    let server = MockServer::start().await;
+    mount(&server, completion(&[("A", 0.9), ("B", 0.1)], (10, 1))).await;
+    model_with(&server, |b| {
+        b.with_thinking_disabled()
+            .with_extra_body(json!({"max_tokens": 500, "reasoning_effort": "none"}))
+    })
+    .noul("s", "q?")
+    .await
+    .unwrap();
+    // Positive control: without it, nothing extra is sent.
+    model(&server).noul("s", "q?").await.unwrap();
+    let reqs = server.received_requests().await.unwrap();
+    let with = body_of(&reqs[0]);
+    assert_eq!(
+        with["chat_template_kwargs"],
+        json!({"enable_thinking": false})
+    );
+    assert_eq!(with["reasoning_effort"], "none");
+    assert_eq!(with["max_tokens"], 1, "the core field wins");
+    let without = body_of(&reqs[1]);
+    assert!(without.get("chat_template_kwargs").is_none());
 }
 
 #[tokio::test]
@@ -247,11 +332,11 @@ async fn no_label_in_the_top_k_is_a_bad_response() {
     let e = model(&server).noul("s", "q?").await.unwrap_err();
     assert!(matches!(e, DecisionError::BadResponse(_)), "{e:?}");
 
-    // Positive control: the same server shape with a label parses.
+    // Positive control: the same server shape with the labels parses.
     let server = MockServer::start().await;
     mount(
         &server,
-        completion(&[("Yes", 0.7), ("A", 0.2), ("B", 0.1)], (10, 1)),
+        completion(&[("A", 0.6), ("B", 0.3), ("Yes", 0.1)], (10, 1)),
     )
     .await;
     let a = model(&server).noul("s", "q?").await.unwrap();
@@ -263,13 +348,11 @@ async fn temperature_scaling_moves_confidence() {
     let server = MockServer::start().await;
     mount(&server, completion(&[("A", 0.9), ("B", 0.1)], (10, 1))).await;
     let base = model(&server).noul("s", "q?").await.unwrap();
-    let soft = model(&server)
-        .with_temperature(2.0)
+    let soft = model_with(&server, |b| b.with_temperature(2.0))
         .noul("s", "q?")
         .await
         .unwrap();
-    let sharp = model(&server)
-        .with_temperature(0.5)
+    let sharp = model_with(&server, |b| b.with_temperature(0.5))
         .noul("s", "q?")
         .await
         .unwrap();
@@ -284,7 +367,7 @@ async fn temperature_scaling_moves_confidence() {
 #[test]
 #[should_panic(expected = "finite and positive")]
 fn temperature_must_be_positive() {
-    let _ = DecisionModel::logprobs("http://localhost:1", "m").with_temperature(0.0);
+    let _ = LogprobBackend::new("http://localhost:1").with_temperature(0.0);
 }
 
 #[tokio::test]
@@ -308,8 +391,7 @@ async fn the_choice_option_limit_follows_the_capabilities() {
     // Raised to 26: sent, asking for enough top_logprobs to see every label.
     let server = MockServer::start().await;
     mount(&server, completion(&[("U", 0.9), ("A", 0.1)], (1, 1))).await;
-    let a = model(&server)
-        .with_max_choice_options(26)
+    let a = model_with(&server, |b| b.with_max_choice_options(26))
         .choice("s", "which?", options)
         .await
         .unwrap();
@@ -456,4 +538,127 @@ async fn rate_limits_are_retried_and_errors_mapped() {
             "{status}: not retried"
         );
     }
+}
+
+#[tokio::test]
+async fn from_logprob_backend_keeps_the_conveniences() {
+    let server = MockServer::start().await;
+    mount(&server, completion(&[("A", 0.9), ("B", 0.1)], (1_000, 1))).await;
+    let m = model_with(&server, |b| b.with_temperature(1.5)).with_api_key("sk-local");
+    assert!(m.capabilities().local);
+    let eval = m.ask("s").noul("q", "q?").send().await.unwrap();
+    assert_eq!(eval.cost_usd(), Some(0.0), "loopback stays $0");
+    let reqs = server.received_requests().await.unwrap();
+    assert_eq!(
+        reqs[0].headers.get("authorization").unwrap(),
+        "Bearer sk-local"
+    );
+}
+
+#[tokio::test]
+async fn a_malformed_base_url_is_invalid_not_retried() {
+    let m = DecisionModel::logprobs("not a url", "m").with_retry(RetryConfig {
+        max_retries: 3,
+        initial_delay_ms: 2_000,
+        backoff_multiplier: 1.0,
+        max_delay_ms: 2_000,
+    });
+    let start = Instant::now();
+    let e = m.noul("s", "q?").await.unwrap_err();
+    assert!(matches!(e, DecisionError::Invalid(_)), "{e:?}");
+    assert!(start.elapsed() < Duration::from_secs(1), "not retried");
+    // The same for the SystemOne backend.
+    let e = DecisionModel::from_backend(SystemOneBackend::new("not a url"), "m")
+        .noul("s", "q?")
+        .await
+        .unwrap_err();
+    assert!(matches!(e, DecisionError::Invalid(_)), "{e:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Spend of split requests: completed questions are recorded when another
+// fails or the call times out.
+// ---------------------------------------------------------------------------
+
+/// The injection check answers at once; the harmful check fails (or hangs
+/// for `slow`); a third check answers at once. Each success reports 100
+/// prompt tokens.
+async fn split_server(harmful: ResponseTemplate) -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(CHAT))
+        .respond_with(move |req: &WireRequest| {
+            if prompt_of(req).contains("clearly harmful") {
+                harmful.clone()
+            } else {
+                ResponseTemplate::new(200)
+                    .set_body_json(completion(&[("B", 0.95), ("A", 0.05)], (100, 1)))
+            }
+        })
+        .mount(&server)
+        .await;
+    server
+}
+
+async fn guarded_stats(
+    server: &MockServer,
+    timeout: Duration,
+) -> (Option<String>, yoagent::SessionStats) {
+    use yoagent::provider::{MockProvider, ModelConfig};
+    let guard = InputGuard::new(model(server))
+        .with_check("third", "Is `input` about weather?", 0.9)
+        .with_timeout(timeout);
+    let mut agent = yoagent::Agent::from_provider(MockProvider::text("hi"), ModelConfig::mock())
+        .with_input_guard(guard);
+    let mut rx = agent.prompt("hello there").await;
+    let (mut rejected, mut stats) = (None, None);
+    while let Some(e) = rx.recv().await {
+        match e {
+            yoagent::AgentEvent::InputRejected { reason } => rejected = Some(reason),
+            yoagent::AgentEvent::AgentEnd { stats: s, .. } => stats = Some(s),
+            _ => {}
+        }
+    }
+    agent.finish().await;
+    (rejected, stats.unwrap())
+}
+
+#[tokio::test]
+async fn a_failed_question_keeps_the_others_spend() {
+    let server = split_server(ResponseTemplate::new(500).set_body_string("boom")).await;
+    let (rejected, stats) = guarded_stats(&server, Duration::from_secs(5)).await;
+    assert!(rejected.unwrap().contains("could not be screened"));
+    assert_eq!(server.received_requests().await.unwrap().len(), 3);
+    assert_eq!(stats.decision.requests, 1);
+    assert_eq!(stats.decision.failures, 1);
+    assert_eq!(
+        stats.decision.usage.input, 200,
+        "the two answered questions"
+    );
+    assert_eq!(stats.decision.cost_usd, Some(0.0), "loopback: $0");
+
+    // Positive control: all three answer.
+    let server = split_server(
+        ResponseTemplate::new(200).set_body_json(completion(&[("B", 0.95), ("A", 0.05)], (100, 1))),
+    )
+    .await;
+    let (rejected, stats) = guarded_stats(&server, Duration::from_secs(5)).await;
+    assert!(rejected.is_none());
+    assert_eq!(stats.decision.failures, 0);
+    assert_eq!(stats.decision.usage.input, 300);
+}
+
+#[tokio::test]
+async fn a_timeout_keeps_the_answered_questions_spend() {
+    let slow = ResponseTemplate::new(200)
+        .set_body_json(completion(&[("B", 0.95), ("A", 0.05)], (100, 1)))
+        .set_delay(Duration::from_secs(5));
+    let server = split_server(slow).await;
+    let (rejected, stats) = guarded_stats(&server, Duration::from_millis(500)).await;
+    assert!(rejected.unwrap().contains("timed out"));
+    assert_eq!(stats.decision.timeouts, 1);
+    assert_eq!(
+        stats.decision.usage.input, 200,
+        "the two answered questions"
+    );
 }
