@@ -368,7 +368,9 @@ fn signing_region(host: &str, env: Env<'_>) -> Result<String, ProviderError> {
 
 /// The DNS suffixes that follow `bedrock-runtime[-fips].<region>` in AWS's
 /// endpoint rules (botocore `bedrock-runtime` endpoint-rule-set and
-/// `partitions.json`: each partition's `dnsSuffix` and `dualStackDnsSuffix`),
+/// `partitions.json`: the `dnsSuffix` and `dualStackDnsSuffix` of the aws,
+/// aws-us-gov, aws-cn and aws-eusc partitions; the isolated ISO partitions are
+/// not listed, so their hosts fall back to `AWS_REGION`),
 /// plus the VPC endpoint forms.
 const AWS_DNS_SUFFIXES: [&str; 8] = [
     "amazonaws.com",

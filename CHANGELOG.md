@@ -58,7 +58,11 @@ adheres to [Semantic Versioning](https://semver.org/).
   whose provider was not exactly `"bedrock"` (say
   `ModelConfig::custom(ApiProtocol::BedrockConverseStream, "aws-bedrock", ..)`)
   picked up the generic `YOAGENT_API_KEY` / `API_KEY`; those are no longer
-  sent to AWS.
+  sent to AWS. A custom `StreamProvider` registered for
+  `BedrockConverseStream` now also receives an empty key, where it used to
+  get `AWS_BEARER_TOKEN_BEDROCK` or the composed IAM credentials when the
+  provider string was `"bedrock"`; it should read its credentials itself, or
+  be given an explicit key.
 
 - **Behaviour change: `MIN_HEADROOM_RATIO` is 0.30 (was 0.15).** It is the
   lowest ratio of the context budget the headroom policy may compact to. For
