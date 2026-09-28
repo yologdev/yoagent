@@ -44,37 +44,77 @@ Two AWS mechanisms are supported:
 1. An `authorization` header in `ModelConfig.headers` (any case). It is sent
    as given and nothing else is added — for pre-computed auth or a signing
    proxy.
-2. The API key (`with_api_key`, or what `Agent::from_config` resolved from the
-   environment when the agent was built):
-   - a value **without `:`** is a Bedrock API key (bearer);
+2. An explicit API key (`with_api_key`):
    - `access_key_id:secret_access_key` or
      `access_key_id:secret_access_key:session_token` is IAM credentials
-     (SigV4). A value with `:` but an empty key id or secret is an error, as
-     is a bare access key id (`AKIA…`/`ASIA…`).
-3. With no API key, the environment at request time:
-   `AWS_BEARER_TOKEN_BEDROCK`, then `AWS_ACCESS_KEY_ID` +
-   `AWS_SECRET_ACCESS_KEY` (+ `AWS_SESSION_TOKEN`).
+     (SigV4). An empty key id or secret is an error, and so is a temporary
+     access key id (`ASIA…`) without its session token.
+   - a value **without `:`** is a Bedrock API key (bearer) — unless it
+     evidently is not one: a value with whitespace or control characters, one
+     starting with `AKIA`/`ASIA`, one with characters outside base64
+     (`A–Z a–z 0–9 + / = - _`), or a bare 40-character secret key is
+     refused, so IAM credentials joined with anything but `:` are never sent
+     as a bearer token. A key that does not start with `bedrock-api-key-`
+     (short-term keys) or `ABSK` (long-term keys, as observed — AWS does not
+     document the prefix) is sent, with a one-time warning.
+3. With no API key, the environment, read each time a request is built:
+   `AWS_BEARER_TOKEN_BEDROCK` (same checks), then `AWS_ACCESS_KEY_ID` +
+   `AWS_SECRET_ACCESS_KEY` (+ `AWS_SESSION_TOKEN`, required for `ASIA…`
+   keys). One of the pair without the other, or a variable that is not valid
+   Unicode, is an error naming the variable.
 
-`Agent::from_config` resolves the key the same way
-(`provider::resolve_api_key("bedrock")`): `AWS_BEARER_TOKEN_BEDROCK` first,
-then the IAM variables composed as `access:secret[:token]`. An explicit
-`with_api_key` always wins over the environment. With no credentials at all
-the provider returns `ProviderError::Auth` without sending anything.
+For a `BedrockConverseStream` config, `Agent`, `SubAgentTool` and
+`LlmCompaction` never resolve a key themselves — whatever the config's
+provider string (`"bedrock"`, `"aws-bedrock"`, …), so a generic `API_KEY` or
+`YOAGENT_API_KEY` is never sent to AWS. They pass an empty key, and step 3
+applies on every request: changing the variables (for example exporting
+refreshed STS credentials) takes effect on the next request.
+`provider::resolve_api_key("bedrock")` is still available for your own code
+(`AWS_BEARER_TOKEN_BEDROCK` first, then `access:secret[:token]` from the IAM
+variables). An explicit `with_api_key` always wins over the environment.
 
-Other headers in `ModelConfig.headers` are sent but not signed. Credentials
-are not refreshed: temporary credentials from the environment are read when
-the agent is built (`from_config`) or on each request (empty API key). There
-is no support for profiles, `~/.aws/credentials`, SSO or instance roles —
-export the variables (for example with `aws configure export-credentials
---format env`) or pass them explicitly.
+Every authentication failure — no credentials, a malformed value, a value
+that cannot go in an HTTP header (a newline, non-ASCII), no region — is
+`ProviderError::Auth` before anything is sent, and no error message contains
+a credential. Credential headers are marked sensitive, so they are redacted
+from `Debug` output.
+
+Other headers in `ModelConfig.headers` are sent but not signed. With SigV4, a
+header the signer sets itself (`host`, `content-type`, `x-amz-date`,
+`x-amz-security-token`, `x-amz-content-sha256`) is refused: it would be sent
+twice and fail the signature. Credentials are never refreshed by yoagent, and
+there is no support for profiles, `~/.aws/credentials`, SSO or instance roles
+— export the variables (for example with `aws configure export-credentials
+--format env`) or pass them explicitly. A `403` saying the signature expired
+or is not yet current means the system clock is off by more than five
+minutes; the error says so.
+
+### Signing proxies
+
+Before this version yoagent never signed: without an `authorization` header
+it sent `Authorization: Bearer access:secret`, and a local signing proxy
+(such as `aws-sigv4-proxy`) re-signed the request. **This is a behaviour
+change:** with IAM credentials yoagent now signs itself, and with a proxy
+`base_url` (for example `http://localhost:8080`) there is no region in the
+host, so the request fails with `ProviderError::Auth` unless `AWS_REGION` is
+set. Either:
+
+- set `AWS_REGION` (yoagent signs for the proxy's host, and the proxy
+  re-signs for AWS as before), or
+- put a placeholder `authorization` header in `ModelConfig.headers`, so
+  yoagent sends no credentials at all and leaves signing to the proxy.
 
 ### Region (SigV4)
 
 The signing region is, in order:
 
 1. the region in the endpoint host — `bedrock-runtime.<region>.amazonaws.com`,
-   `bedrock-runtime-fips.<region>.amazonaws.com`, `….amazonaws.com.cn`, or a
-   VPC endpoint `vpce-….bedrock-runtime.<region>.vpce.amazonaws.com`;
+   `bedrock-runtime-fips.<region>.amazonaws.com`, the dual-stack
+   `bedrock-runtime.<region>.api.aws`, the China (`amazonaws.com.cn`,
+   `api.amazonwebservices.com.cn`) and European Sovereign Cloud
+   (`amazonaws.eu`, `api.amazonwebservices.eu`) forms, or a VPC endpoint
+   `vpce-….bedrock-runtime.<region>.vpce.amazonaws.com` (the suffixes are the
+   partition DNS suffixes in AWS's endpoint rules for Bedrock Runtime);
 2. `AWS_REGION`;
 3. `AWS_DEFAULT_REGION`.
 
@@ -83,6 +123,9 @@ rejected. A custom endpoint (proxy, private DNS) needs `AWS_REGION`; without a
 region, SigV4 fails with `ProviderError::Auth` before sending. The signing
 name is `bedrock` (Bedrock Runtime's signing name, not the `bedrock-runtime`
 endpoint prefix). Bearer tokens need no region.
+
+A trailing `/` on `base_url` is dropped, and the signed path is normalized
+the way AWS normalizes it (empty and `.` segments removed).
 
 The model id is percent-encoded in the request path as the AWS SDKs send it
 (`anthropic.claude-sonnet-5-v1:0` → `anthropic.claude-sonnet-5-v1%3A0`, and the

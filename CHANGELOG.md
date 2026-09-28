@@ -24,16 +24,39 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 - **Amazon Bedrock API keys** ([#174](https://github.com/yologdev/yoagent/issues/174)).
   An `api_key` without `:` is a Bedrock API key and is sent as
-  `Authorization: Bearer <key>`; `AWS_BEARER_TOKEN_BEDROCK`, AWS's variable
-  for it, is read by `resolve_api_key("bedrock")` (and so by
-  `Agent::from_config`) before the IAM variables. With an empty `api_key` the
-  provider reads the environment at request time: `AWS_BEARER_TOKEN_BEDROCK`,
-  then `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (+ `AWS_SESSION_TOKEN`).
-  The SigV4 region comes from the endpoint host
-  (`bedrock-runtime.<region>.amazonaws.com`, FIPS, China and VPC endpoint
-  hosts), else `AWS_REGION`, else `AWS_DEFAULT_REGION`.
+  `Authorization: Bearer <key>` — unless it evidently is not one
+  (whitespace or control characters, an `AKIA`/`ASIA` start, non-base64
+  characters, or the length of a bare secret key), which is refused so IAM
+  credentials joined with something other than `:` never go out as a bearer
+  token. `AWS_BEARER_TOKEN_BEDROCK`, AWS's variable for it, is read before
+  the IAM variables, both by the provider (with an empty `api_key`, on every
+  request: `AWS_BEARER_TOKEN_BEDROCK`, then `AWS_ACCESS_KEY_ID` +
+  `AWS_SECRET_ACCESS_KEY` (+ `AWS_SESSION_TOKEN`)) and by
+  `resolve_api_key("bedrock")`. The SigV4 region comes from the endpoint
+  host (`bedrock-runtime[-fips].<region>` with any AWS partition suffix,
+  dual-stack `api.aws` and VPC endpoints included), else `AWS_REGION`, else
+  `AWS_DEFAULT_REGION`.
 
 ### Changed
+
+- **Behaviour change: Amazon Bedrock requests with IAM credentials are signed
+  by yoagent** ([#174](https://github.com/yologdev/yoagent/issues/174)). If
+  you route Bedrock through a local signing proxy (`aws-sigv4-proxy` and the
+  like) with IAM credentials in the environment, yoagent used to send them as
+  `Bearer access:secret` for the proxy to re-sign; it now signs itself, and a
+  proxy `base_url` has no region in its host, so the request fails with
+  `ProviderError::Auth` unless `AWS_REGION` is set. Set `AWS_REGION`, or put a
+  placeholder `authorization` header in `ModelConfig.headers` so yoagent
+  sends no credentials and leaves signing to the proxy.
+
+- **Behaviour change: `Agent`, `SubAgentTool` and `LlmCompaction` resolve a
+  Bedrock key by protocol, not by provider string.** For any
+  `BedrockConverseStream` config they pass an empty key and the provider
+  reads `AWS_BEARER_TOKEN_BEDROCK` / `AWS_*` on each request. Before, a config
+  whose provider was not exactly `"bedrock"` (say
+  `ModelConfig::custom(ApiProtocol::BedrockConverseStream, "aws-bedrock", ..)`)
+  picked up the generic `YOAGENT_API_KEY` / `API_KEY`; those are no longer
+  sent to AWS.
 
 - **Behaviour change: `MIN_HEADROOM_RATIO` is 0.30 (was 0.15).** It is the
   lowest ratio of the context budget the headroom policy may compact to. For
@@ -132,11 +155,21 @@ adheres to [Semantic Versioning](https://semver.org/).
   `x-amz-security-token` for a session token); only the access key id and a
   signature are sent. An `authorization` header in `ModelConfig.headers`
   still wins and is sent alone (now matched in any case, and no longer
-  requires `api_key` to contain `:`). No credentials, a malformed
-  `access:secret` value, or SigV4 with no region is a `ProviderError::Auth`
-  before anything is sent. The model id is now percent-encoded in the request
-  path as the AWS SDKs send it (`:` → `%3A`, `/` → `%2F`); ids without those
-  characters are sent as before.
+  requires `api_key` to contain `:`). Every authentication failure is a
+  `ProviderError::Auth` before anything is sent, naming what is wrong but
+  never a credential: no credentials, one half of the IAM pair in the
+  environment, a variable that is not valid Unicode, a malformed
+  `access:secret` value, a temporary (`ASIA…`) key without its session token,
+  a value that cannot be an HTTP header (a newline, non-ASCII — previously a
+  retried `Network("builder error")`), a `ModelConfig.headers` entry that
+  SigV4 sets itself, a clock before 1970, or SigV4 with no region.
+  Credential headers are marked sensitive (redacted from `Debug`). A request
+  reqwest cannot build is now `ProviderError::Other` (not retried) instead of
+  a retryable `Network` error. A trailing `/` on `base_url` is dropped (it
+  produced `//model/…`). A `403` for an expired or not-yet-valid signature
+  says to check the system clock. The model id is now percent-encoded in the
+  request path as the AWS SDKs send it (`:` → `%3A`, `/` → `%2F`); ids
+  without those characters are sent as before.
 
   The signer is hand-written (private `provider::sigv4`, on the RustCrypto
   `sha2` and `hmac` crates — two new dependencies) and pinned to AWS's
