@@ -144,7 +144,7 @@ mod tests {
 /// | `meta` | `META_API_KEY`, then `MODEL_API_KEY` |
 /// | `opencode-zen` / `opencode-go` | `OPENCODE_API_KEY` |
 /// | `azure` | `AZURE_OPENAI_API_KEY` |
-/// | `bedrock` | `AWS_BEARER_TOKEN_BEDROCK` (a Bedrock API key, sent as a bearer token), then `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (+ `AWS_SESSION_TOKEN`), composed as `access:secret[:token]` and used to SigV4-sign |
+/// | `bedrock` | `AWS_BEARER_TOKEN_BEDROCK` (a Bedrock API key, sent as a bearer token), then `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (+ `AWS_SESSION_TOKEN`), composed as `access:secret[:token]` and used to SigV4-sign. `Agent`, `SubAgentTool` and `LlmCompaction` do not call this for a `BedrockConverseStream` config, whatever its provider string: they leave the key empty and the Bedrock provider reads these variables per request |
 /// | `vertex` | none — pass a short-lived OAuth token via `with_api_key` |
 /// | `local` / `ollama` | no key needed (empty) |
 /// | anything else | `YOAGENT_API_KEY`, then `API_KEY` |
@@ -203,7 +203,30 @@ pub fn resolve_api_key(provider: &str) -> Option<String> {
 /// for a provider that needs a key, then falls back to an empty string so
 /// the provider returns a clear authentication error instead of the failure
 /// being invisible until the first request.
-pub(crate) fn resolve_api_key_or_warn(provider: &str) -> String {
+///
+/// Resolution follows the config's **protocol** before its provider string:
+/// a `BedrockConverseStream` config always gets an empty key, whatever its
+/// provider is called (`ModelConfig::custom(.., "aws-bedrock", ..)` must not
+/// pick up `API_KEY`), and the Bedrock provider reads
+/// `AWS_BEARER_TOKEN_BEDROCK` / `AWS_*` itself when the request is built — so
+/// it can say exactly which variable is missing or malformed. The warning
+/// is still logged here when the environment has no Bedrock credentials.
+/// Without a config the provider is taken to be `anthropic`.
+pub(crate) fn resolve_api_key_or_warn(config: Option<&ModelConfig>) -> String {
+    if let Some(config) = config {
+        if config.api == ApiProtocol::BedrockConverseStream {
+            if resolve_api_key("bedrock").is_none() {
+                tracing::warn!(
+                    "no API key found for provider '{}' (Amazon Bedrock): {}; requests \
+                     will fail with an authentication error",
+                    config.provider,
+                    api_key_env_hint("bedrock")
+                );
+            }
+            return String::new();
+        }
+    }
+    let provider = config.map(|c| c.provider.as_str()).unwrap_or("anthropic");
     match resolve_api_key(provider) {
         Some(key) => key,
         None => {

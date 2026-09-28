@@ -34,6 +34,8 @@ const ENV_VARS: &[&str] = &[
     "AWS_SESSION_TOKEN",
     "AWS_REGION",
     "AWS_DEFAULT_REGION",
+    "API_KEY",
+    "YOAGENT_API_KEY",
 ];
 
 const ACCESS: &str = "AKIDEXAMPLE";
@@ -579,4 +581,171 @@ async fn malformed_iam_key_is_an_error_and_nothing_is_sent() {
         other => panic!("{other:?}"),
     }
     server.verify().await;
+}
+
+// ---------------------------------------------------------------------------
+// Review round (#174)
+// ---------------------------------------------------------------------------
+
+/// A server that must receive nothing.
+async fn silent_server() -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+    server
+}
+
+async fn run_agent(config: ModelConfig) -> agent::Agent {
+    let mut agent = agent::Agent::from_config(config).with_retry_config(RetryConfig::none());
+    let mut rx = agent.prompt("hi").await;
+    while rx.recv().await.is_some() {}
+    agent.finish().await;
+    agent
+}
+
+fn custom(base_url: &str, provider: &str) -> ModelConfig {
+    ModelConfig::custom(
+        ApiProtocol::BedrockConverseStream,
+        provider,
+        base_url,
+        "anthropic.claude-sonnet-5-v1:0",
+        "Test",
+    )
+}
+
+/// Key resolution follows the protocol, not the provider string: a Bedrock
+/// config named "aws-bedrock" must not send the generic `API_KEY` to AWS as
+/// a bearer token, and must use the AWS credentials in the environment.
+#[tokio::test]
+async fn bedrock_protocol_ignores_generic_api_key_env_vars() {
+    let _guard = ENV_LOCK.lock().await;
+    clear_env();
+    std::env::set_var("API_KEY", "unrelated-generic-key");
+    std::env::set_var("YOAGENT_API_KEY", "unrelated-yoagent-key");
+    std::env::set_var("AWS_ACCESS_KEY_ID", ACCESS);
+    std::env::set_var("AWS_SECRET_ACCESS_KEY", SECRET);
+    std::env::set_var("AWS_REGION", "us-east-1");
+    let server = server().await;
+    run_agent(custom(&server.uri(), "aws-bedrock")).await;
+    let req = only_request(&server).await;
+    let auth = verify_sigv4(&req, SECRET);
+    assert_eq!(auth.access, ACCESS);
+    assert_never_sent(&req, "unrelated-generic-key");
+    assert_never_sent(&req, "unrelated-yoagent-key");
+    assert_never_sent(&req, SECRET);
+
+    // With no AWS credentials, the generic key is still not used: nothing
+    // is sent.
+    std::env::remove_var("AWS_ACCESS_KEY_ID");
+    std::env::remove_var("AWS_SECRET_ACCESS_KEY");
+    let silent = silent_server().await;
+    let agent = run_agent(custom(&silent.uri(), "aws-bedrock")).await;
+    silent.verify().await;
+    let last = agent.messages().last().cloned();
+    let text = format!("{last:?}");
+    assert!(text.contains("no Amazon Bedrock credentials"), "{text}");
+    clear_env();
+}
+
+/// A trailing slash on `base_url` must not produce `//model/…`, which AWS
+/// normalizes before checking the signature.
+#[tokio::test]
+async fn trailing_slash_on_base_url_is_trimmed() {
+    let _guard = ENV_LOCK.lock().await;
+    clear_env();
+    std::env::set_var("AWS_REGION", "us-east-1");
+    let server = server().await;
+    let key = format!("{ACCESS}:{SECRET}");
+    let base = format!("{}//", server.uri());
+    let _ = send(stream_config(&base, "anthropic.claude-test", &key, &[])).await;
+    let req = only_request(&server).await;
+    assert_eq!(
+        req.url.path(),
+        "/model/anthropic.claude-test/converse-stream"
+    );
+    verify_sigv4(&req, SECRET);
+    clear_env();
+}
+
+/// IAM credentials joined with a space are refused, not sent as a bearer.
+#[tokio::test]
+async fn malformed_keys_send_nothing() {
+    let _guard = ENV_LOCK.lock().await;
+    clear_env();
+    for key in [
+        format!("{ACCESS} {SECRET}"),
+        format!("AKIAIOSFODNN7EXAMPLE;{SECRET}"),
+        SECRET.to_string(),
+        format!("ASIAIOSFODNN7EXAMPLE:{SECRET}"),
+        format!("{ACCESS}:{SECRET}:tok\nen"),
+    ] {
+        std::env::set_var("AWS_REGION", "us-east-1");
+        let server = silent_server().await;
+        let err = send(stream_config(
+            &server.uri(),
+            "anthropic.claude-test",
+            &key,
+            &[],
+        ))
+        .await
+        .unwrap_err();
+        match &err {
+            ProviderError::Auth(m) => assert!(!m.contains(SECRET), "{m}"),
+            other => panic!("{key:?}: {other:?}"),
+        }
+        server.verify().await;
+    }
+    clear_env();
+}
+
+/// A user header that SigV4 sets itself would be sent twice: refused before
+/// sending.
+#[tokio::test]
+async fn colliding_user_header_on_the_sigv4_path_sends_nothing() {
+    let _guard = ENV_LOCK.lock().await;
+    clear_env();
+    std::env::set_var("AWS_REGION", "us-east-1");
+    let server = silent_server().await;
+    let key = format!("{ACCESS}:{SECRET}");
+    let err = send(stream_config(
+        &server.uri(),
+        "anthropic.claude-test",
+        &key,
+        &[("Content-Type", "application/json")],
+    ))
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(&err, ProviderError::Auth(m) if m.contains("`Content-Type`")),
+        "{err:?}"
+    );
+    server.verify().await;
+    clear_env();
+}
+
+/// AWS's clock-skew rejection gets a hint to check the system clock.
+#[tokio::test]
+async fn signature_expired_suggests_checking_the_clock() {
+    let _guard = ENV_LOCK.lock().await;
+    clear_env();
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(403).set_body_raw(
+            r#"{"message":"Signature expired: 20260928T000000Z is now earlier than 20260928T000600Z (20260928T001100Z - 5 min.)"}"#,
+            "application/json",
+        ))
+        .mount(&server)
+        .await;
+    let err = send(stream_config(
+        &server.uri(),
+        "anthropic.claude-test",
+        "bedrock-api-key-QUJD",
+        &[],
+    ))
+    .await
+    .unwrap_err();
+    assert!(format!("{err}").contains("check the system clock"), "{err}");
 }

@@ -1264,12 +1264,7 @@ impl Agent {
         if !self.api_key.is_empty() {
             return self.api_key.clone();
         }
-        let provider = self
-            .model_config
-            .as_ref()
-            .map(|m| m.provider.as_str())
-            .unwrap_or("anthropic");
-        crate::provider::resolve_api_key_or_warn(provider)
+        crate::provider::resolve_api_key_or_warn(self.model_config.as_ref())
     }
 
     /// Total dollar cost of the assistant turns currently in history, using

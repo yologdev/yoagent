@@ -579,7 +579,7 @@ impl LlmCompaction {
         let provider = registry
             .resolve(&config.api)
             .ok_or(crate::AgentBuildError::NoProviderForProtocol(config.api))?;
-        let api_key = crate::provider::resolve_api_key_or_warn(&config.provider);
+        let api_key = crate::provider::resolve_api_key_or_warn(Some(&config));
         Ok(Self::build(provider, config, api_key))
     }
 
@@ -591,7 +591,7 @@ impl LlmCompaction {
     /// stay defined together, matching
     /// [`Agent::from_provider`](crate::Agent::from_provider).
     pub fn from_provider(provider: Arc<dyn StreamProvider>, config: ModelConfig) -> Self {
-        let api_key = crate::provider::resolve_api_key_or_warn(&config.provider);
+        let api_key = crate::provider::resolve_api_key_or_warn(Some(&config));
         Self::build(provider, config, api_key)
     }
 

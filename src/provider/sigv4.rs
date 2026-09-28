@@ -7,8 +7,9 @@
 //! the wire* (already percent-encoded where the request needs it); the
 //! canonical URI encodes each segment of it once more, which is SigV4's rule
 //! for every service except S3 (so a `%3A` on the wire is `%253A` in the
-//! canonical request). Dot segments are not normalized: callers never produce
-//! them.
+//! canonical request). The path is normalized first, as AWS does for every
+//! service but S3: empty segments (`//`) and `.` are dropped and `..` removes
+//! the segment before it; a trailing `/` is kept.
 //!
 //! Checked against the published `aws-sig-v4-test-suite` vectors (see the
 //! tests below).
@@ -154,17 +155,33 @@ pub(crate) fn sign(
     }
 }
 
-/// The canonical URI: each `/`-separated segment of the path as sent,
+/// The canonical URI: the path as sent, normalized (empty and `.` segments
+/// dropped, `..` resolved, a trailing `/` kept), with each segment
 /// URI-encoded once more (everything but the unreserved characters
 /// `A-Z a-z 0-9 - _ . ~` becomes `%XY`, uppercase hex).
 pub(crate) fn canonical_uri(path: &str) -> String {
-    if path.is_empty() {
-        return "/".into();
+    let mut segments: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            s => segments.push(s),
+        }
     }
-    path.split('/')
-        .map(uri_encode)
-        .collect::<Vec<_>>()
-        .join("/")
+    let mut uri = String::from("/");
+    uri.push_str(
+        &segments
+            .iter()
+            .map(|s| uri_encode(s))
+            .collect::<Vec<_>>()
+            .join("/"),
+    );
+    if !segments.is_empty() && path.ends_with('/') {
+        uri.push('/');
+    }
+    uri
 }
 
 /// Percent-encode every byte outside SigV4's unreserved set (RFC 3986
@@ -212,12 +229,16 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// The current time as `YYYYMMDD'T'HHMMSS'Z'`.
-pub(crate) fn amz_date_now() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    amz_date(secs)
+pub(crate) fn amz_date_now() -> Result<String, String> {
+    amz_date_at(SystemTime::now())
+}
+
+/// `time` as `YYYYMMDD'T'HHMMSS'Z'`; a clock before the Unix epoch is an
+/// error (signing with 1970 would only earn an opaque 403).
+pub(crate) fn amz_date_at(time: SystemTime) -> Result<String, String> {
+    time.duration_since(UNIX_EPOCH)
+        .map(|d| amz_date(d.as_secs()))
+        .map_err(|_| "the system clock is before 1970; SigV4 needs the current time".to_string())
 }
 
 /// Format seconds since the Unix epoch as `YYYYMMDD'T'HHMMSS'Z'` (UTC).
@@ -274,9 +295,9 @@ mod tests {
         }
     }
 
-    struct Vector {
+    struct Vector<'a> {
         method: &'static str,
-        path: &'static str,
+        path: &'a str,
         headers: &'static [(&'static str, &'static str)],
         body: &'static [u8],
         token: Option<&'static str>,
@@ -286,7 +307,7 @@ mod tests {
         authorization: &'static str,
     }
 
-    fn check(v: &Vector) {
+    fn check(v: &Vector<'_>) {
         let c = creds(v.token);
         let signed = sign(
             v.method,
@@ -445,6 +466,59 @@ mod tests {
         });
     }
 
+    /// `get-slashes-normalized`: `//example//` normalizes to `/example/`.
+    #[test]
+    fn get_slashes_normalized() {
+        check(&Vector {
+            method: "GET",
+            path: "//example//",
+            headers: &[("Host", "example.amazonaws.com")],
+            body: b"",
+            token: None,
+            sign_body: false,
+            canonical_request: "GET\n/example/\n\nhost:example.amazonaws.com\nx-amz-date:20150830T123600Z\n\nhost;x-amz-date\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            string_to_sign: "AWS4-HMAC-SHA256\n20150830T123600Z\n20150830/us-east-1/service/aws4_request\ncb96b4ac96d501f7c5c15bc6d67b3035061cfced4af6585ad927f7e6c985c015",
+            authorization: "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/service/aws4_request, SignedHeaders=host;x-amz-date, Signature=9a624bd73a37c9a373b5312afbebe7a714a789de108f0bdfe846570885f57e84",
+        });
+    }
+
+    /// `get-slash-pointless-dot-normalized`: `/./example` is `/example`.
+    #[test]
+    fn get_slash_pointless_dot_normalized() {
+        check(&Vector {
+            method: "GET",
+            path: "/./example",
+            headers: &[("Host", "example.amazonaws.com")],
+            body: b"",
+            token: None,
+            sign_body: false,
+            canonical_request: "GET\n/example\n\nhost:example.amazonaws.com\nx-amz-date:20150830T123600Z\n\nhost;x-amz-date\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            string_to_sign: "AWS4-HMAC-SHA256\n20150830T123600Z\n20150830/us-east-1/service/aws4_request\n214d50c111a8edc4819da6a636336472c916b5240f51e9a51b5c3305180cf702",
+            authorization: "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/service/aws4_request, SignedHeaders=host;x-amz-date, Signature=ef75d96142cf21edca26f06005da7988e4f8dc83a165a80865db7089db637ec5",
+        });
+    }
+
+    /// `get-slash-normalized` (`//`), `get-slash-dot-slash-normalized`
+    /// (`/./`), `get-relative-normalized` (`/example/..`) and
+    /// `get-relative-relative-normalized` (`/example1/example2/../..`) all
+    /// normalize to `/` and share `get-vanilla`'s expected output.
+    #[test]
+    fn paths_that_normalize_to_root() {
+        for path in ["//", "/./", "/example/..", "/example1/example2/../.."] {
+            check(&Vector {
+                method: "GET",
+                path,
+                headers: &[("Host", "example.amazonaws.com")],
+                body: b"",
+                token: None,
+                sign_body: false,
+                canonical_request: "GET\n/\n\nhost:example.amazonaws.com\nx-amz-date:20150830T123600Z\n\nhost;x-amz-date\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                string_to_sign: "AWS4-HMAC-SHA256\n20150830T123600Z\n20150830/us-east-1/service/aws4_request\nbb579772317eb040ac9ed261061d46c1f17a8133879d6129b6e1c25292927e63",
+                authorization: "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/service/aws4_request, SignedHeaders=host;x-amz-date, Signature=5fa00fa31553b73ebf1942676e86291e8372ff2a2260956d9b8aae1d763fbf31",
+            });
+        }
+    }
+
     #[test]
     fn empty_payload_hash_is_the_sha256_of_nothing() {
         assert_eq!(hex(&Sha256::digest(b"")), EMPTY_HASH);
@@ -487,6 +561,9 @@ mod tests {
         assert_eq!(amz_date(4_107_542_400), "21000301T000000Z");
         assert_eq!(amz_date(1_704_067_199), "20231231T235959Z");
         assert_eq!(amz_date(1_709_164_800), "20240229T000000Z");
-        assert_eq!(amz_date_now().len(), 16);
+        assert_eq!(amz_date_now().unwrap().len(), 16);
+        let before_epoch = UNIX_EPOCH - std::time::Duration::from_secs(1);
+        assert!(amz_date_at(before_epoch).is_err());
+        assert_eq!(amz_date_at(UNIX_EPOCH).unwrap(), "19700101T000000Z");
     }
 }
