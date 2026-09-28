@@ -29,6 +29,13 @@ The `api_key` field uses a colon-separated format:
 
 Alternatively, provide pre-computed auth headers via `ModelConfig.headers` or use an IAM proxy that handles SigV4 signing.
 
+> **Caution:** yoagent does not SigV4-sign requests. When `ModelConfig.headers`
+> has no `authorization` entry, the provider sends `Authorization: Bearer
+> {api_key}` — the whole `access:secret` string — which Bedrock rejects and
+> which puts the secret key in a header. Until this is fixed (tracked in
+> [#174](https://github.com/yologdev/yoagent/issues/174)), supply your own
+> `authorization` header or route through a signing proxy.
+
 ## API Details
 
 - **Endpoint**: `{base_url}/model/{model}/converse-stream`
@@ -61,10 +68,62 @@ so thinking is not usable with them on this provider yet.
 
 ## Stream Events
 
-Bedrock's ConverseStream returns these event types:
+ConverseStream answers with binary `application/vnd.amazon.eventstream`
+frames. Each frame carries a length prelude and a trailing checksum (both
+CRC-32 verified), binary headers and a JSON payload. The event type is the
+`:event-type` header; the payload is the event itself, with no wrapper key.
+The provider buffers bytes across network chunks and decodes only complete
+frames.
 
-- `contentBlockStart` — New content block (text or tool use)
-- `contentBlockDelta` — Text or tool use input delta
-- `contentBlockStop` — Block complete
-- `messageStop` — Stop reason (`end_turn`, `max_tokens`, `tool_use`)
-- `metadata` — Token usage
+| Event | Payload | What yoagent does |
+|-------|---------|-------------------|
+| `messageStart` | `{role}` | — |
+| `contentBlockStart` | `{contentBlockIndex, start: {toolUse: {toolUseId, name}}}` | Opens a tool call (`ToolCallStart`) |
+| `contentBlockDelta` | `{contentBlockIndex, delta: {text} \| {toolUse: {input}} \| {reasoningContent: {text} \| {signature} \| {redactedContent}}}` | Text, thinking and tool-input deltas, accumulated per block index |
+| `contentBlockStop` | `{contentBlockIndex}` | Parses the tool call's accumulated input (`ToolCallEnd`) |
+| `messageStop` | `{stopReason}` | Sets the stop reason (below) |
+| `metadata` | `{usage: {inputTokens, outputTokens, totalTokens, cacheReadInputTokens?, cacheWriteInputTokens?}, metrics}` | Usage, including cache reads and writes |
+
+Stop reasons: `end_turn` / `stop_sequence` → `Stop`, `tool_use` → `ToolUse`,
+`max_tokens` → `Length`, `guardrail_intervened` / `content_filtered` →
+`Refusal`, `model_context_window_exceeded` → `Error` (detected as a context
+overflow), `malformed_model_output` / `malformed_tool_use` → `Error`.
+
+Tool input that does not parse (cut off at the token limit) and tool blocks
+that never receive `contentBlockStop` are not run: the loop answers them with an
+error tool result. Server-side tool blocks and image, citation and tool-result
+content are not surfaced; each is dropped with a warning (once per block), as
+is any union member or event type added after this was written.
+
+Reasoning is kept for replay: a signed reasoning block is sent back as
+`reasoningText {text, signature}`, and encrypted reasoning (`redactedContent`)
+is kept in `Content::Thinking::redacted` and sent back as `redactedContent`.
+Reasoning without a signature is sent back as `reasoningText {text}` with no
+signature key (the signature is optional in `ReasoningTextBlock`, and Bedrock's
+non-Claude reasoning models such as gpt-oss never sign). The exception is a
+Claude model: Claude verifies signatures, so unsigned reasoning (which can only
+come from another provider after a model switch) is not replayed to it. A
+signature is never sent as `""`. Signature deltas are appended.
+
+If the stream ends after `messageStop` without a `metadata` event, the turn
+reports zero tokens (as the other providers do when usage never arrives) and a
+warning with `usage_missing = true` is logged inside the `llm_stream` span.
+
+Errors are never an empty successful turn:
+
+- An exception frame (`:message-type: exception`) is classified by the HTTP
+  status AWS documents for it: `throttlingException` is a retryable rate
+  limit, a `validationException` whose message reports an over-long input is
+  a context overflow, and the rest (`modelStreamErrorException`,
+  `internalServerException`, `serviceUnavailableException`, …) are API
+  errors.
+- A checksum mismatch or malformed frame is an error.
+- A dropped connection, a body that ends inside a frame, or a stream that ends
+  without `messageStop` is a retryable network error — unless `messageStop` and
+  `metadata` have both arrived, in which case the response is complete and is
+  kept (with a warning) rather than retried and billed again.
+- A `200` whose `content-type` is not `application/vnd.amazon.eventstream` is
+  an error carrying an excerpt of the body.
+
+This is tested with mock frames built to AWS's documented format, not against a
+live Bedrock endpoint.

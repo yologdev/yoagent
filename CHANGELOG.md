@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- **`Content::Thinking` gains `redacted: Option<String>`** and a
+  `Content::thinking_redacted(data)` constructor, for reasoning a provider
+  returns encrypted instead of as text (Amazon Bedrock's `redactedContent`,
+  base64). The variant is `#[non_exhaustive]`, so this is not a breaking
+  change; the field is omitted from JSON when `None`, so session files and
+  the event wire format are unchanged. It is replayed only to the provider
+  that produced it; the Anthropic provider skips such blocks.
+
 ### Changed
 
 - **Behaviour change: `MIN_HEADROOM_RATIO` is 0.30 (was 0.15).** It is the
@@ -23,6 +33,59 @@ adheres to [Semantic Versioning](https://semver.org/).
   applies when `compact_target_ratio` is set below 0.30, so such a config now
   compacts to 0.30. To compact harder, set `compact_headroom_turns: None`:
   compaction then uses `compact_target_ratio` unfloored.
+
+### Fixed
+
+- **Amazon Bedrock streaming works** ([#174](https://github.com/yologdev/yoagent/issues/174)).
+  `BedrockProvider` parsed the ConverseStream body as newline-delimited JSON
+  and silently skipped every line that did not parse. Real responses are
+  binary `application/vnd.amazon.eventstream` frames, so nothing parsed and
+  every turn came back as an empty *successful* assistant message
+  (`StopReason::Stop`, zero usage). The payload structs did not match AWS's
+  shapes either; streamed `toolUse.input` was never collected, so every
+  Bedrock tool call ran with `{}`; text split across network chunks was
+  decoded per chunk, corrupting multi-byte characters; a dropped connection
+  returned the partial content as a success; and all text and reasoning went
+  into the first block of each kind.
+
+  The response is now decoded as event stream frames: bytes are buffered
+  across network chunks, both CRC-32 checksums are verified (in-house, no new
+  dependency; checked against the AWS SDK eventstream test vectors), and
+  events are dispatched on the `:event-type` / `:message-type` headers with
+  payload shapes taken from the AWS Bedrock Runtime API reference. Text,
+  reasoning (with its signature, so it replays) and tool input accumulate per
+  `contentBlockIndex`; tool input is parsed at `contentBlockStop` with the
+  same rule as the other providers, so truncated or unparseable arguments —
+  and a tool block that never closed — are answered with an error tool result
+  instead of running on `{}`. Every documented `stopReason` is mapped
+  (`max_tokens` → `Length`, `guardrail_intervened` and `content_filtered` →
+  `Refusal`, `model_context_window_exceeded` → a context-overflow `Error`),
+  and usage includes cache reads and writes. In-stream exceptions classify
+  like their HTTP status (`throttlingException` → retryable rate limit, an
+  over-long-input `validationException` → context overflow). A checksum
+  mismatch, a truncated frame, a dropped connection, or a stream without
+  `messageStop` (including an empty body) is now an error — except once both
+  `messageStop` and `metadata` have arrived, when a later drop keeps the
+  finished response instead of retrying (and re-billing) it. A `200` with a
+  non-eventstream content type reports its body.
+
+  Reasoning replays as Bedrock requires: a signed block as `reasoningText`
+  with its signature, a redacted block as `redactedContent` (previously both
+  failed — a redacted block was replayed as empty text with an empty
+  signature, which Bedrock rejects). Reasoning without a signature is replayed
+  without a signature key (it is optional, and non-Claude reasoning models
+  such as gpt-oss never sign); to a Claude model, which verifies signatures,
+  it is not replayed. A signature is never sent as `""`. Content this provider
+  does not surface (images, citations, tool results, server-side tool use,
+  and union members or event types added later) is dropped with a warning
+  rather than silently. A response that ends without a `metadata` event
+  reports zero usage, as the other providers do, and logs a warning with
+  `usage_missing = true`.
+
+  Tested against mock frames built to AWS's documented format, not against a
+  live Bedrock endpoint. Request signing is unchanged: yoagent still does not
+  SigV4-sign, so supply an `authorization` header or a signing proxy (see the
+  Bedrock provider page).
 
 ## 0.21.0
 

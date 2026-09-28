@@ -283,8 +283,13 @@ cache rate left at `0.0` bills at that tier's input rate.
 
 One caveat if you add a tier: prompt size is derived as
 `input + cache_read + cache_write`, which holds only where the provider
-subtracts cached tokens out of `input`. `bedrock.rs` populates neither cache
-field, so a heavily-cached prompt reads small there.
+subtracts cached tokens out of `input`. Bedrock does: `bedrock.rs` fills
+`input` from `inputTokens` and the cache fields from `cacheReadInputTokens` /
+`cacheWriteInputTokens`, and AWS's
+[prompt caching guide](https://docs.aws.amazon.com/bedrock/latest/userguide/prompt-caching.html)
+states that "the inputTokens field represents only the non-cached input tokens"
+and "total input tokens = inputTokens + cacheReadInputTokens +
+cacheWriteInputTokens".
 
 ## ModelConfig Presets
 

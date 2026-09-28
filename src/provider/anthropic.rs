@@ -210,7 +210,7 @@ impl StreamProvider for AnthropicProvider {
                                             }
                                             AnthropicContentBlock::Thinking { .. } => {
                                                 while content.len() <= idx {
-                                                    content.push(Content::Thinking { thinking: String::new(), signature: None });
+                                                    content.push(Content::Thinking { thinking: String::new(), signature: None, redacted: None });
                                                 }
                                             }
                                             AnthropicContentBlock::ToolUse { id, name, .. } => {
@@ -791,6 +791,22 @@ fn content_to_anthropic(content: &[Content]) -> Vec<serde_json::Value> {
     content
         .iter()
         .filter(|c| !matches!(c, Content::Text { text } if text.is_empty()))
+        // Redacted reasoning from another provider (Bedrock's
+        // `redactedContent`) is opaque to this API; replaying it as a
+        // `thinking` block would send empty text with a bogus signature.
+        .filter(|c| {
+            let redacted = matches!(
+                c,
+                Content::Thinking {
+                    redacted: Some(_),
+                    ..
+                }
+            );
+            if redacted {
+                warn!("skipping a redacted thinking block from another provider");
+            }
+            !redacted
+        })
         .map(|c| match c {
             Content::Text { text } => serde_json::json!({"type": "text", "text": text}),
             Content::Image { data, mime_type } => serde_json::json!({
@@ -800,6 +816,7 @@ fn content_to_anthropic(content: &[Content]) -> Vec<serde_json::Value> {
             Content::Thinking {
                 thinking,
                 signature,
+                ..
             } => serde_json::json!({
                 "type": "thinking",
                 "thinking": thinking,
@@ -927,6 +944,20 @@ mod tests {
     use super::*;
     use crate::provider::traits::ToolDefinition;
     use crate::provider::ModelConfig;
+
+    /// Bedrock's redacted reasoning is opaque here: it is skipped rather
+    /// than sent as a `thinking` block with an empty text and signature.
+    #[test]
+    fn redacted_thinking_from_another_provider_is_not_replayed() {
+        let blocks = content_to_anthropic(&[
+            Content::thinking_redacted("AAEC"),
+            Content::thinking_signed("t", "s"),
+        ]);
+        assert_eq!(
+            blocks,
+            vec![serde_json::json!({"type": "thinking", "thinking": "t", "signature": "s"})]
+        );
+    }
 
     fn make_config(cache: CacheConfig) -> StreamConfig {
         StreamConfig {

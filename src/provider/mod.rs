@@ -1,6 +1,7 @@
 pub mod anthropic;
 pub mod azure_openai;
 pub mod bedrock;
+mod eventstream;
 pub mod google;
 pub mod google_vertex;
 pub mod mock;
