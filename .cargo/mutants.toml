@@ -1,0 +1,71 @@
+# cargo-mutants configuration (issue #163). Run by `.github/workflows/mutants.yml`
+# weekly; the recorded baseline and the triage of survivors live in
+# `docs/evals/mutation-baseline.md`.
+#
+# Run locally with `cargo mutants` (this file is picked up automatically); add
+# `--list` to see what would be mutated. A full run is ~14 h on one machine, so
+# sample with `--shard 0/10 --sharding round-robin`. `-f <file>` does NOT narrow
+# the run while `examine_globs` is set here (27.1.0 examines all of them); to
+# run one module, copy this file, edit the globs and pass `--config <copy>`.
+# Do not export CARGO_TARGET_DIR while it runs: cargo-mutants builds each `-j`
+# job in its own copy of the tree, and they must not share one target dir.
+
+# Only the modules where a silent failure costs most. Scope is deliberate —
+# the whole crate is ~5x the mutants and most of it is wire-format code that
+# mock-provider tests already pin byte-for-byte.
+examine_globs = [
+    # Compaction, truncation, the context tracker, execution limits.
+    "src/context.rs",
+    # The loop itself: tool dispatch, steering, stop conditions, stats.
+    "src/agent_loop.rs",
+    # The LlmCompaction state machine.
+    "src/llm_compaction.rs",
+    # Pricing arithmetic (`CostConfig::cost_usd`, context tiers) and the
+    # construction-time lookup (`priced`, `reprice`, `with_prices`).
+    "src/provider/model.rs",
+    # Since 0.20 prices are data: validation, layering and change reports.
+    "src/provider/prices.rs",
+    # The process-wide layer resolution every constructor reads through.
+    "src/provider/prices/global.rs",
+    # Not `prices/fetch.rs`: it is opt-in (never fetched implicitly), and a
+    # mis-mapped fetch is caught by `tests/price_audit.rs` against models.dev.
+]
+
+# Build and test the way CI does. Nothing listed above is feature-gated, but the
+# `decision` and `gasp` tests drive the loop (decision spend in `LoopScope`,
+# the event stream the GASP recorder consumes) and so can kill loop mutants.
+all_features = true
+
+# `profile.mutants` in Cargo.toml: the test profile at opt-level 1 without debug
+# info. `tests/context_cache_test.rs` replays 2400-turn sessions and dominates
+# an unoptimised run; measured locally this cut the per-mutant test time from
+# ~109 s to ~57 s for ~8 s more incremental build.
+profile = "mutants"
+
+# Unit + integration tests only, for both the build and the test phase: doctests
+# and examples are skipped. Recompiling every doctest cost ~3 minutes per
+# mutant, more than everything else together, and the doctests here are usage
+# examples rather than assertions about these modules; examples have no tests.
+additional_cargo_args = ["--tests"]
+
+# Mutants must not become "unviable" just because a mutation leaves a variable
+# unused under a deny-warnings RUSTFLAGS.
+cap_lints = true
+
+# Auto-set timeout = multiplier x the unmutated test time. A mutant that turns
+# a loop bound into an infinite loop must time out, not hang the shard.
+timeout_multiplier = 3.0
+minimum_test_timeout = 60
+
+# Known-acceptable survivors. Each entry must say why the mutant cannot matter.
+# Keep this list short: anything that is really a missing assertion belongs in
+# the baseline's "real gaps" list instead.
+exclude_re = [
+    # These two `Debug` impls exist to REDACT secrets (header values, the
+    # compaction API key). Replacing the body with an empty `Ok(())` prints
+    # nothing at all — still redacted — so the only thing lost is the model id
+    # in a log line. The inverse risk (printing a secret) is not a mutant
+    # cargo-mutants can generate.
+    '<impl std::fmt::Debug for ModelConfig>::fmt -> std::fmt::Result with Ok\(Default::default\(\)\)',
+    '<impl std::fmt::Debug for LlmCompaction>::fmt -> std::fmt::Result with Ok\(Default::default\(\)\)',
+]

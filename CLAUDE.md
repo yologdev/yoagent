@@ -171,6 +171,8 @@ details (`SessionStats::from_sub_agent_result`). Every cost rollup —
 
 All unit tests use `MockProvider` (`provider/mock.rs`) to simulate LLM responses without network. Test files are in `tests/` — `agent_test.rs`, `agent_loop_test.rs`, `tools_test.rs`. Follow the existing pattern of constructing a `MockProvider` with predetermined responses.
 
+**Mutation testing** (`cargo-mutants`, #163) runs weekly, not per-PR, via `.github/workflows/mutants.yml` (8 round-robin shards, pinned version in the workflow's `CARGO_MUTANTS_VERSION`; survivors are a report on the run summary, never a red X; a failing unmutated baseline is). Scope, features, the `mutants` profile (`Cargo.toml`: opt-level 1, no debuginfo) and the documented acceptable exclusions live in `.cargo/mutants.toml`. `docs/evals/mutation-baseline.md` holds the baseline and the triaged survivors — check a missed mutant against it before treating it as news, and add newly-accepted equivalents there (or to `exclude_re` with a comment saying why). Locally: never export `CARGO_TARGET_DIR` for it; each `-j` job does its own cold build (~2–3 GB, 12+ min) in `$TMPDIR`; `-f` does not narrow a run when the config sets `examine_globs` (copy the config and change the globs, or use `--shard k/n --sharding round-robin` for a sample).
+
 ### Telemetry
 
 The loop emits `tracing` spans: `agent_loop` → `llm_stream` per turn (records tokens_in/out/cached + cost_usd from `CostConfig` when configured) → `tool` per execution (records is_error). Futures are instrumented with `.instrument(span)` (never hold an entered guard across `.await`). OTel is app-side via `tracing-opentelemetry` — the library has no OTel dependency by design.

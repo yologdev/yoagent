@@ -107,3 +107,12 @@ required-features = ["decision"]
 [[example]]
 name = "decision"
 required-features = ["decision"]
+
+# Used only by cargo-mutants (`.cargo/mutants.toml`, the weekly mutation-testing
+# workflow): a mutant is rebuilt and the suite rerun hundreds of times, and
+# opt-level 1 roughly halves the test time (the 2400-turn replays in
+# `tests/context_cache_test.rs`). Profiles are ignored in dependents' builds.
+[profile.mutants]
+inherits = "test"
+debug = false
+opt-level = 1
