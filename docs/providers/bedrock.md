@@ -79,7 +79,7 @@ frames.
 |-------|---------|-------------------|
 | `messageStart` | `{role}` | — |
 | `contentBlockStart` | `{contentBlockIndex, start: {toolUse: {toolUseId, name}}}` | Opens a tool call (`ToolCallStart`) |
-| `contentBlockDelta` | `{contentBlockIndex, delta: {text} \| {toolUse: {input}} \| {reasoningContent: {text} \| {signature}}}` | Text, thinking and tool-input deltas, accumulated per block index |
+| `contentBlockDelta` | `{contentBlockIndex, delta: {text} \| {toolUse: {input}} \| {reasoningContent: {text} \| {signature} \| {redactedContent}}}` | Text, thinking and tool-input deltas, accumulated per block index |
 | `contentBlockStop` | `{contentBlockIndex}` | Parses the tool call's accumulated input (`ToolCallEnd`) |
 | `messageStop` | `{stopReason}` | Sets the stop reason (below) |
 | `metadata` | `{usage: {inputTokens, outputTokens, totalTokens, cacheReadInputTokens?, cacheWriteInputTokens?}, metrics}` | Usage, including cache reads and writes |
@@ -91,8 +91,19 @@ overflow), `malformed_model_output` / `malformed_tool_use` → `Error`.
 
 Tool input that does not parse (cut off at the token limit) and tool blocks
 that never receive `contentBlockStop` are not run: the loop answers them with an
-error tool result. Server-side tool blocks and image, citation and redacted
-reasoning content are not surfaced.
+error tool result. Server-side tool blocks and image, citation and tool-result
+content are not surfaced; each is dropped with a warning (once per block), as
+is any union member or event type added after this was written.
+
+Reasoning is kept for replay: a signed reasoning block is sent back as
+`reasoningText {text, signature}`, and encrypted reasoning (`redactedContent`)
+is kept in `Content::Thinking::redacted` and sent back as `redactedContent`.
+Reasoning without a signature (for example from another provider after a model
+switch) is skipped on replay, with a warning. Signature deltas are appended.
+
+If the stream ends after `messageStop` without a `metadata` event, the turn
+reports zero tokens (as the other providers do when usage never arrives) and a
+warning with `usage_missing = true` is logged inside the `llm_stream` span.
 
 Errors are never an empty successful turn:
 
@@ -104,7 +115,11 @@ Errors are never an empty successful turn:
   errors.
 - A checksum mismatch or malformed frame is an error.
 - A dropped connection, a body that ends inside a frame, or a stream that ends
-  without `messageStop` is a retryable network error.
+  without `messageStop` is a retryable network error — unless `messageStop` and
+  `metadata` have both arrived, in which case the response is complete and is
+  kept (with a warning) rather than retried and billed again.
+- A `200` whose `content-type` is not `application/vnd.amazon.eventstream` is
+  an error carrying an excerpt of the body.
 
 This is tested with mock frames built to AWS's documented format, not against a
 live Bedrock endpoint.

@@ -6,6 +6,16 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- **`Content::Thinking` gains `redacted: Option<String>`** and a
+  `Content::thinking_redacted(data)` constructor, for reasoning a provider
+  returns encrypted instead of as text (Amazon Bedrock's `redactedContent`,
+  base64). The variant is `#[non_exhaustive]`, so this is not a breaking
+  change; the field is omitted from JSON when `None`, so session files and
+  the event wire format are unchanged. It is replayed only to the provider
+  that produced it; the Anthropic provider skips such blocks.
+
 ### Changed
 
 - **Behaviour change: `MIN_HEADROOM_RATIO` is 0.30 (was 0.15).** It is the
@@ -54,7 +64,22 @@ adheres to [Semantic Versioning](https://semver.org/).
   like their HTTP status (`throttlingException` → retryable rate limit, an
   over-long-input `validationException` → context overflow). A checksum
   mismatch, a truncated frame, a dropped connection, or a stream without
-  `messageStop` (including an empty body) is now an error.
+  `messageStop` (including an empty body) is now an error — except once both
+  `messageStop` and `metadata` have arrived, when a later drop keeps the
+  finished response instead of retrying (and re-billing) it. A `200` with a
+  non-eventstream content type reports its body.
+
+  Reasoning replays as Bedrock requires: a signed block as `reasoningText`
+  with its signature, a redacted block as `redactedContent` (previously both
+  failed — a redacted block was replayed as empty text with an empty
+  signature, which Bedrock rejects). Reasoning without a signature, such as
+  from another provider after a model switch, is skipped on replay with a
+  warning instead of being sent with `signature: ""`. Content this provider
+  does not surface (images, citations, tool results, server-side tool use,
+  and union members or event types added later) is dropped with a warning
+  rather than silently. A response that ends without a `metadata` event
+  reports zero usage, as the other providers do, and logs a warning with
+  `usage_missing = true`.
 
   Tested against mock frames built to AWS's documented format, not against a
   live Bedrock endpoint. Request signing is unchanged: yoagent still does not

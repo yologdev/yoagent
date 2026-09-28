@@ -73,7 +73,11 @@ Each message contains `Vec<Content>`:
 pub enum Content {
     Text { text: String },
     Image { data: String, mime_type: String },
-    Thinking { thinking: String, signature: Option<String> },
+    Thinking {
+        thinking: String,
+        signature: Option<String>,
+        redacted: Option<String>, // provider-encrypted reasoning (Bedrock `redactedContent`)
+    },
     ToolCall {
         id: String,
         name: String,
@@ -85,7 +89,7 @@ pub enum Content {
 
 An assistant message can contain multiple content blocks — e.g., thinking + text + tool calls.
 
-`Content` is `#[non_exhaustive]` (match with a wildcard arm), and the `ToolCall` and `Thinking` variants are separately `#[non_exhaustive]` — construct them via `Content::tool_call()` / `tool_call_with_metadata()` / `thinking()` / `thinking_signed()`. `Message::Assistant` is likewise `#[non_exhaustive]`; custom providers construct it via `Message::assistant()`.
+`Content` is `#[non_exhaustive]` (match with a wildcard arm), and the `ToolCall` and `Thinking` variants are separately `#[non_exhaustive]` — construct them via `Content::tool_call()` / `tool_call_with_metadata()` / `thinking()` / `thinking_signed()` / `thinking_redacted()`. `Message::Assistant` is likewise `#[non_exhaustive]`; custom providers construct it via `Message::assistant()`.
 
 ## StopReason
 
