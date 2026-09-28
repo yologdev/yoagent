@@ -19,7 +19,7 @@
 //!
 //! `compact_headroom_turns` defaults to `Some(30)`: "leave room for 30 more
 //! turns". `effective_target_ratio` computes `budget - turns * growth`, floored
-//! at `MIN_HEADROOM_RATIO` (0.15). For any session growing faster than
+//! at `MIN_HEADROOM_RATIO` (0.15 when this was written; 0.30 since 0.22). For any session growing faster than
 //! `budget/30` per turn that demand exceeds the budget outright and pins the
 //! ratio to the floor.
 //!

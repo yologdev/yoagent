@@ -250,7 +250,16 @@ impl Default for ContextConfig {
 ///
 /// A session whose growth per turn approaches the whole budget would otherwise
 /// ask compaction to discard essentially everything.
-pub const MIN_HEADROOM_RATIO: f32 = 0.15;
+///
+/// 0.30 since 0.22 (0.15 before). Measured offline with
+/// `examples/compaction_sweep` (see `docs/evals/compaction-defaults.md`): at
+/// the default 96K budget, tool-heavy sessions compacted to the 0.15 floor lost
+/// the opening task prompt in 91% of compactions and the latest request in
+/// 41%; at 0.30, 0% and 2%, for about 7% more input tokens and no measurable
+/// change in compaction count or prefix-cache hit rate. It does not prevent
+/// collapse at small budgets (around 26K), where the newest turn alone can
+/// exceed any target.
+pub const MIN_HEADROOM_RATIO: f32 = 0.30;
 
 fn default_headroom_turns() -> Option<usize> {
     Some(30)
@@ -1366,6 +1375,27 @@ mod tests {
             config.effective_target_ratio(1_000_000.0),
             MIN_HEADROOM_RATIO
         );
+    }
+
+    #[test]
+    fn test_floor_overrides_a_lower_target_ratio_only_under_headroom() {
+        let config = ContextConfig {
+            max_context_tokens: 100_000,
+            system_prompt_tokens: 0,
+            compact_target_ratio: 0.2,
+            compact_headroom_turns: Some(30),
+            ..Default::default()
+        };
+        // Under the headroom policy a ratio below the floor is raised to it.
+        assert_eq!(config.effective_target_ratio(5_000.0), MIN_HEADROOM_RATIO);
+        assert_ne!(config.effective_target_ratio(5_000.0), 0.2);
+        // Without the policy the configured ratio is used as-is, so the floor
+        // never stops a caller who asks to compact harder.
+        let unfloored = ContextConfig {
+            compact_headroom_turns: None,
+            ..config
+        };
+        assert_eq!(unfloored.effective_target_ratio(5_000.0), 0.2);
     }
 
     #[test]
