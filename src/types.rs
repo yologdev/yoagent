@@ -35,6 +35,13 @@ pub enum Content {
         thinking: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         signature: Option<String>,
+        /// Reasoning the provider returned encrypted instead of as text
+        /// (Amazon Bedrock's `redactedContent`, base64). `thinking` is empty
+        /// for such a block. It is replayed unmodified to the provider that
+        /// produced it; other providers skip it, since it is meaningless to
+        /// them.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        redacted: Option<String>,
     },
     #[serde(rename = "toolCall")]
     #[non_exhaustive]
@@ -79,6 +86,17 @@ impl Content {
         Self::Thinking {
             thinking: text.into(),
             signature: None,
+            redacted: None,
+        }
+    }
+
+    /// Construct a redacted (provider-encrypted) thinking block: no text,
+    /// the opaque base64 `data` kept for replay.
+    pub fn thinking_redacted(data: impl Into<String>) -> Self {
+        Self::Thinking {
+            thinking: String::new(),
+            signature: None,
+            redacted: Some(data.into()),
         }
     }
 
@@ -87,6 +105,7 @@ impl Content {
         Self::Thinking {
             thinking: text.into(),
             signature: Some(signature.into()),
+            redacted: None,
         }
     }
 

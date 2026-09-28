@@ -110,7 +110,7 @@ impl StreamProvider for OpenAiCompatProvider {
                                     let idx = match thinking_idx {
                                         Some(i) => i,
                                         None => {
-                                            content.push(Content::Thinking { thinking: String::new(), signature: None });
+                                            content.push(Content::Thinking { thinking: String::new(), signature: None, redacted: None });
                                             content.len() - 1
                                         }
                                     };

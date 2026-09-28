@@ -511,6 +511,7 @@ impl ResponsesStreamState {
                 self.content.push(Content::Thinking {
                     thinking: String::new(),
                     signature: None,
+                    redacted: None,
                 });
                 let idx = self.content.len() - 1;
                 self.thinking_slots.insert(key, (idx, part));

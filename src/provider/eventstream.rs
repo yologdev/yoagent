@@ -557,9 +557,65 @@ mod tests {
             d.next_frame(),
             Err(FrameError::MessageChecksum { .. })
         ));
-        // Poisoned: the error sticks.
-        assert!(d.next_frame().is_err());
-        assert!(d.finish().is_err());
+        // Poisoned: the error sticks even after good bytes arrive, and
+        // `finish` reports it rather than the buffered bytes as truncation.
+        d.push(&encode_frame(&[], b"fine"));
+        assert!(matches!(
+            d.next_frame(),
+            Err(FrameError::MessageChecksum { .. })
+        ));
+        assert!(matches!(
+            d.finish(),
+            Err(FrameError::MessageChecksum { .. })
+        ));
+    }
+
+    /// A frame with valid CRCs whose prelude claims `total` and
+    /// `headers_len`, followed by `body` (headers + payload bytes).
+    fn raw_frame(total: u32, headers_len: u32, body: &[u8]) -> Vec<u8> {
+        let mut f = Vec::new();
+        f.extend_from_slice(&total.to_be_bytes());
+        f.extend_from_slice(&headers_len.to_be_bytes());
+        let c = crc32(&f);
+        f.extend_from_slice(&c.to_be_bytes());
+        f.extend_from_slice(body);
+        let c = crc32(&f);
+        f.extend_from_slice(&c.to_be_bytes());
+        f
+    }
+
+    #[test]
+    fn headers_length_past_the_frame_is_malformed_not_a_panic() {
+        // 20-byte frame: room for 4 bytes of headers + payload, claims 10.
+        let f = raw_frame(20, 10, b"abcd");
+        assert_eq!(f.len(), 20);
+        let mut d = FrameDecoder::new();
+        d.push(&f);
+        assert!(matches!(d.next_frame(), Err(FrameError::Malformed(_))));
+    }
+
+    #[test]
+    fn headers_length_over_the_maximum_is_malformed() {
+        // Fits the frame, exceeds the 128 KiB headers cap; the prelude alone
+        // is enough to reject it.
+        let headers_len = (MAX_HEADERS_LEN + 1) as u32;
+        let mut prelude = Vec::new();
+        prelude.extend_from_slice(&(headers_len + 16).to_be_bytes());
+        prelude.extend_from_slice(&headers_len.to_be_bytes());
+        let c = crc32(&prelude);
+        prelude.extend_from_slice(&c.to_be_bytes());
+        let mut d = FrameDecoder::new();
+        d.push(&prelude);
+        assert!(matches!(d.next_frame(), Err(FrameError::Malformed(_))));
+    }
+
+    #[test]
+    fn zero_length_header_name_is_malformed() {
+        let h = [0u8, 7, 0, 1, b'x'];
+        let f = raw_frame((16 + h.len()) as u32, h.len() as u32, &h);
+        let mut d = FrameDecoder::new();
+        d.push(&f);
+        assert!(matches!(d.next_frame(), Err(FrameError::Malformed(_))));
     }
 
     /// Three frames back to back, fed in every chunk size from 1 byte up —
