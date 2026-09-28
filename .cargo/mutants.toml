@@ -27,6 +27,8 @@ examine_globs = [
     "src/provider/prices.rs",
     # The process-wide layer resolution every constructor reads through.
     "src/provider/prices/global.rs",
+    # SigV4 signing for Bedrock: a wrong byte is a rejected request or a leak.
+    "src/provider/sigv4.rs",
     # Not `prices/fetch.rs`: it is opt-in (never fetched implicitly), and a
     # mis-mapped fetch is caught by `tests/price_audit.rs` against models.dev.
 ]

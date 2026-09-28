@@ -11,6 +11,7 @@ pub mod openai_responses;
 pub mod prices;
 pub mod registry;
 mod responses_stream;
+mod sigv4;
 pub mod sse;
 pub mod tool_args;
 pub mod traits;

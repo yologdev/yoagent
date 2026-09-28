@@ -162,7 +162,7 @@ fn model_config(base_url: &str) -> ModelConfig {
 }
 
 fn stream_config(base_url: &str) -> StreamConfig {
-    let mut config = StreamConfig::new(MODEL, "access:secret");
+    let mut config = StreamConfig::new(MODEL, "test-bedrock-api-key");
     config.messages = vec![Message::user("hi")];
     config.model_config = Some(model_config(base_url));
     config
@@ -386,7 +386,7 @@ async fn run_agent(first: Vec<u8>, rest: Vec<u8>) -> (Vec<Value>, Vec<AgentMessa
         .await;
     let calls = Arc::new(Mutex::new(Vec::new()));
     let mut agent = Agent::from_provider(BedrockProvider, model_config(&server.uri()))
-        .with_api_key("access:secret")
+        .with_api_key("test-bedrock-api-key")
         .with_tools(vec![Box::new(Recorder(calls.clone()))]);
     let mut rx = agent.prompt("read it").await;
     while rx.recv().await.is_some() {}

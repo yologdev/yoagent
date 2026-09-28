@@ -46,6 +46,11 @@ reqwest-eventsource = { package = "kameleoon-reqwest-eventsource", version = "0.
 futures = "0.3"
 rand = "0.10.0"
 base64 = "0.22"
+# SigV4 request signing for Amazon Bedrock (`provider::sigv4`). RustCrypto,
+# pure Rust. Used directly rather than through the TLS stack's primitives
+# (aws-lc-rs today), which are a transitive detail of reqwest's backend choice.
+sha2 = { version = "0.11", default-features = false }
+hmac = "0.13"
 openapiv3 = { version = "2", optional = true }
 serde_yaml_ng = { version = "0.10", optional = true }
 # 0.4.2 floor: 0.4.1 declared MSRV 1.85 but required 1.88 (let-chain)

@@ -546,12 +546,7 @@ impl AgentTool for SubAgentTool {
             provider,
             model: self.model.clone(),
             api_key: if self.api_key.is_empty() {
-                crate::provider::resolve_api_key_or_warn(
-                    self.model_config
-                        .as_ref()
-                        .map(|m| m.provider.as_str())
-                        .unwrap_or("anthropic"),
-                )
+                crate::provider::resolve_api_key_or_warn(self.model_config.as_ref())
             } else {
                 self.api_key.clone()
             },

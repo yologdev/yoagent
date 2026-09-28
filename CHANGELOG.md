@@ -16,13 +16,53 @@ adheres to [Semantic Versioning](https://semver.org/).
   `redacted_protocol` records which API produced the payload, and it is
   replayed only to that API: neither API documents the other's encrypted
   reasoning as valid, so each provider skips the other's (and a block with no
-  recorded protocol) with a warning. The variant is `#[non_exhaustive]`, so
+  recorded protocol), logged at debug. An unknown `redactedProtocol` (written
+  by a newer yoagent) loads as none recorded rather than failing the
+  message. The variant is `#[non_exhaustive]`, so
   this is not a breaking change; both fields are omitted from JSON when
   `None` (`redactedProtocol` when present, `redacted_protocol` also
   accepted), so session files and the event wire format are unchanged for
   content without redacted reasoning.
 
+- **Amazon Bedrock API keys** ([#174](https://github.com/yologdev/yoagent/issues/174)).
+  An `api_key` without `:` is a Bedrock API key and is sent as
+  `Authorization: Bearer <key>` — unless it evidently is not one
+  (whitespace or control characters, an `AKIA`/`ASIA` start, non-base64
+  characters, or the length of a bare secret key), which is refused so IAM
+  credentials joined with something other than `:` never go out as a bearer
+  token. `AWS_BEARER_TOKEN_BEDROCK`, AWS's variable for it, is read before
+  the IAM variables, both by the provider (with an empty `api_key`, on every
+  request: `AWS_BEARER_TOKEN_BEDROCK`, then `AWS_ACCESS_KEY_ID` +
+  `AWS_SECRET_ACCESS_KEY` (+ `AWS_SESSION_TOKEN`)) and by
+  `resolve_api_key("bedrock")`. The SigV4 region comes from the endpoint
+  host (`bedrock-runtime[-fips].<region>` with any AWS partition suffix,
+  dual-stack `api.aws` and VPC endpoints included), else `AWS_REGION`, else
+  `AWS_DEFAULT_REGION`.
+
 ### Changed
+
+- **Behaviour change: Amazon Bedrock requests with IAM credentials are signed
+  by yoagent** ([#174](https://github.com/yologdev/yoagent/issues/174)). If
+  you route Bedrock through a local signing proxy (`aws-sigv4-proxy` and the
+  like) with IAM credentials in the environment, yoagent used to send them as
+  `Bearer access:secret` for the proxy to re-sign; it now signs itself, and a
+  proxy `base_url` has no region in its host, so the request fails with
+  `ProviderError::Auth` unless `AWS_REGION` is set. Set `AWS_REGION`, or put a
+  placeholder `authorization` header in `ModelConfig.headers` so yoagent
+  sends no credentials and leaves signing to the proxy.
+
+- **Behaviour change: `Agent`, `SubAgentTool` and `LlmCompaction` resolve a
+  Bedrock key by protocol, not by provider string.** For any
+  `BedrockConverseStream` config they pass an empty key and the provider
+  reads `AWS_BEARER_TOKEN_BEDROCK` / `AWS_*` on each request. Before, a config
+  whose provider was not exactly `"bedrock"` (say
+  `ModelConfig::custom(ApiProtocol::BedrockConverseStream, "aws-bedrock", ..)`)
+  picked up the generic `YOAGENT_API_KEY` / `API_KEY`; those are no longer
+  sent to AWS. A custom `StreamProvider` registered for
+  `BedrockConverseStream` now also receives an empty key, where it used to
+  get `AWS_BEARER_TOKEN_BEDROCK` or the composed IAM credentials when the
+  provider string was `"bedrock"`; it should read its credentials itself, or
+  be given an explicit key.
 
 - **Behaviour change: `MIN_HEADROOM_RATIO` is 0.30 (was 0.15).** It is the
   lowest ratio of the context budget the headroom policy may compact to. For
@@ -107,9 +147,40 @@ adheres to [Semantic Versioning](https://semver.org/).
   `usage_missing = true`.
 
   Tested against mock frames built to AWS's documented format, not against a
-  live Bedrock endpoint. Request signing is unchanged: yoagent still does not
-  SigV4-sign, so supply an `authorization` header or a signing proxy (see the
-  Bedrock provider page).
+  live Bedrock endpoint. Requests are now also authenticated properly (next
+  entry).
+
+- **Amazon Bedrock no longer sends the secret access key in a bearer header**
+  ([#174](https://github.com/yologdev/yoagent/issues/174)). Without an
+  `authorization` header in `ModelConfig.headers`, `BedrockProvider` sent
+  `Authorization: Bearer {api_key}` — with `api_key` in the documented
+  `access_key_id:secret_access_key[:session_token]` form, the secret key went
+  out in a header, and Bedrock rejected the request. IAM credentials are now
+  used to SigV4-sign the request (signing name `bedrock`; `x-amz-date`,
+  `x-amz-content-sha256` over the exact body bytes sent, and
+  `x-amz-security-token` for a session token); only the access key id and a
+  signature are sent. An `authorization` header in `ModelConfig.headers`
+  still wins and is sent alone (now matched in any case, and no longer
+  requires `api_key` to contain `:`). Every authentication failure is a
+  `ProviderError::Auth` before anything is sent, naming what is wrong but
+  never a credential: no credentials, one half of the IAM pair in the
+  environment, a variable that is not valid Unicode, a malformed
+  `access:secret` value, a temporary (`ASIA…`) key without its session token,
+  a value that cannot be an HTTP header (a newline, non-ASCII — previously a
+  retried `Network("builder error")`), a `ModelConfig.headers` entry that
+  SigV4 sets itself, a clock before 1970, or SigV4 with no region.
+  Credential headers are marked sensitive (redacted from `Debug`). A request
+  reqwest cannot build is now `ProviderError::Other` (not retried) instead of
+  a retryable `Network` error. A trailing `/` on `base_url` is dropped (it
+  produced `//model/…`). A `403` for an expired or not-yet-valid signature
+  says to check the system clock. The model id is now percent-encoded in the
+  request path as the AWS SDKs send it (`:` → `%3A`, `/` → `%2F`); ids
+  without those characters are sent as before.
+
+  The signer is hand-written (private `provider::sigv4`, on the RustCrypto
+  `sha2` and `hmac` crates — two new dependencies) and pinned to AWS's
+  `aws-sig-v4-test-suite` vectors; a mock-server test recomputes each
+  signature from the request received. Not tested against a live endpoint.
 
 ## 0.21.0
 
