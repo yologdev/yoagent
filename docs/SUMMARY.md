@@ -52,6 +52,7 @@
 # Evaluations
 
 - [LlmCompaction: live evaluation](evals/llm-compaction-live.md)
+- [Compaction defaults: offline sweep](evals/compaction-defaults.md)
 
 # Architecture
 

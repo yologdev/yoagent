@@ -32,6 +32,12 @@
 //! What this measures: for a realistic range of growth rates, how many
 //! compactions a session takes and how much history it holds, under each
 //! candidate policy.
+//!
+//! One limit: history here is pairs of *user* messages, which levels 1 and 2
+//! never touch, so every compaction is a level-3 cut. `compaction_sweep`
+//! repeats the measurement over transcripts with real tool calls and results,
+//! where level 2 usually decides the post-compaction size instead — see
+//! `docs/evals/compaction-defaults.md`.
 
 use yoagent::context::{compact_messages, total_tokens, ContextConfig, MIN_HEADROOM_RATIO};
 use yoagent::types::{AgentMessage, Content, Message};
