@@ -10,8 +10,8 @@
 //! `https://bedrock-runtime.us-east-1.amazonaws.com`.
 //!
 //! **Response stream.** ConverseStream answers with binary
-//! `application/vnd.amazon.eventstream` frames (see
-//! [`eventstream`](super::eventstream)), not JSON lines. The event type is
+//! `application/vnd.amazon.eventstream` frames (decoded by the crate-private
+//! `provider::eventstream` module), not JSON lines. The event type is
 //! the `:event-type` header of each frame, and the JSON payload is the event
 //! structure itself — `{"contentBlockIndex":0,"delta":{"text":"Hi"}}` for a
 //! `contentBlockDelta`, with no wrapper key. The shapes below follow the AWS
