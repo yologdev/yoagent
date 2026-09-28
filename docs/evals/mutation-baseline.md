@@ -120,6 +120,28 @@ Only the two redacting `Debug` impls are excluded in the config. The survivors
 above are matched by line and column, which drifts with every edit, so they are
 recorded here instead of being written into `exclude_re`.
 
+## First CI run — 2026-09-28
+
+The first `workflow_dispatch` run on `main` (run 36416164104, cargo-mutants
+27.1.0) replaces the runtime estimate with measurements. Each mutant took
+about 200–210 s to build and 26 s to test, and each shard tested its 117
+mutants in 2.2–3.3 h, inside the 320 min cap.
+
+**Four of the eight shards completed:**
+
+| shard | caught | missed | timeout | unviable |
+|---|---:|---:|---:|---:|
+| 1 | 79 | 20 | 1 | 17 |
+| 2 | 74 | 23 | 1 | 19 |
+| 4 | 80 | 21 | 2 | 14 |
+| 5 | 78 | 23 | 2 | 14 |
+
+**The other four (0, 3, 6, 7) were lost.** Each one received "The runner has
+received a shutdown signal" 69–109 min in, with no error from cargo-mutants.
+Disk exhaustion is the likely cause: two all-features build trees on about
+14 GB free. The workflow now frees the unused preinstalled toolchains before
+building, and logs disk and memory before and after the run.
+
 ## Reading a scheduled run
 
 The workflow summary lists every missed mutant. For each one:
