@@ -72,9 +72,10 @@ adheres to [Semantic Versioning](https://semver.org/).
   Reasoning replays as Bedrock requires: a signed block as `reasoningText`
   with its signature, a redacted block as `redactedContent` (previously both
   failed — a redacted block was replayed as empty text with an empty
-  signature, which Bedrock rejects). Reasoning without a signature, such as
-  from another provider after a model switch, is skipped on replay with a
-  warning instead of being sent with `signature: ""`. Content this provider
+  signature, which Bedrock rejects). Reasoning without a signature is replayed
+  without a signature key (it is optional, and non-Claude reasoning models
+  such as gpt-oss never sign); to a Claude model, which verifies signatures,
+  it is not replayed. A signature is never sent as `""`. Content this provider
   does not surface (images, citations, tool results, server-side tool use,
   and union members or event types added later) is dropped with a warning
   rather than silently. A response that ends without a `metadata` event

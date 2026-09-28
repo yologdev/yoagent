@@ -645,7 +645,8 @@ impl ConverseStreamState {
                 })?;
             block.redacted.extend_from_slice(&bytes);
         }
-        let redacted = (!block.redacted.is_empty()).then(|| {
+        // Re-encoded only when this delta carried redacted data.
+        let redacted = reasoning.redacted_content.is_some().then(|| {
             use base64::Engine as _;
             base64::engine::general_purpose::STANDARD.encode(&block.redacted)
         });
@@ -841,15 +842,20 @@ fn bedrock_thinking_budget(level: ThinkingLevel) -> u32 {
 
 fn build_bedrock_body(config: &StreamConfig) -> serde_json::Value {
     let mut messages: Vec<serde_json::Value> = Vec::new();
+    // Claude verifies replayed reasoning against its signature, so unsigned
+    // reasoning (from another provider, after a model switch) cannot go back
+    // to it. Bedrock's other reasoning models do not sign at all, and their
+    // reasoning is replayed without one.
+    let signed_reasoning_only = config.model.to_ascii_lowercase().contains("claude");
 
     for msg in &config.messages {
         match msg {
             Message::User { content, .. } => {
-                let blocks = content_to_bedrock(content);
+                let blocks = content_to_bedrock(content, signed_reasoning_only);
                 messages.push(serde_json::json!({"role": "user", "content": blocks}));
             }
             Message::Assistant { content, .. } => {
-                let blocks = content_to_bedrock(content);
+                let blocks = content_to_bedrock(content, signed_reasoning_only);
                 messages.push(serde_json::json!({"role": "assistant", "content": blocks}));
             }
             Message::ToolResult {
@@ -943,7 +949,7 @@ fn build_bedrock_body(config: &StreamConfig) -> serde_json::Value {
     body
 }
 
-fn content_to_bedrock(content: &[Content]) -> Vec<serde_json::Value> {
+fn content_to_bedrock(content: &[Content], signed_reasoning_only: bool) -> Vec<serde_json::Value> {
     content
         .iter()
         .filter(|c| !matches!(c, Content::Text { text } if text.is_empty()))
@@ -983,13 +989,24 @@ fn content_to_bedrock(content: &[Content]) -> Vec<serde_json::Value> {
                     "reasoningText": {"text": thinking, "signature": signature}
                 }
             })),
-            // Unsigned reasoning (from a provider that does not sign, or an
-            // empty block) cannot be verified by the model that would receive
-            // it, and an empty signature is rejected outright. Skip it.
-            Content::Thinking { .. } => {
-                warn!("Bedrock: skipping an unsigned reasoning block on replay");
-                None
+            // Unsigned reasoning. `signature` is optional in
+            // ReasoningTextBlock ("Required: No"), and Bedrock's non-Claude
+            // reasoning models never sign, so it is sent without one — never
+            // as `signature: ""`. Claude would reject it, so for a Claude
+            // model it is skipped; that only happens after a switch from
+            // another provider, so it logs at debug, not once per turn.
+            Content::Thinking { thinking, .. } if !thinking.is_empty() => {
+                if signed_reasoning_only {
+                    debug!("Bedrock: not replaying unsigned reasoning to a Claude model");
+                    None
+                } else {
+                    Some(serde_json::json!({
+                        "reasoningContent": {"reasoningText": {"text": thinking}}
+                    }))
+                }
             }
+            // Nothing to replay: no text, no signature, no redacted data.
+            Content::Thinking { .. } => None,
         })
         .collect()
 }
@@ -1295,7 +1312,7 @@ mod tests {
             },
             Content::Text { text: "".into() },
         ];
-        let blocks = content_to_bedrock(&content);
+        let blocks = content_to_bedrock(&content, false);
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0]["text"], "hello");
     }
@@ -1313,7 +1330,7 @@ mod tests {
                 arguments: serde_json::json!({"command": "ls"}),
             },
         ];
-        let blocks = content_to_bedrock(&content);
+        let blocks = content_to_bedrock(&content, false);
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0]["text"], "hello");
         assert_eq!(blocks[1]["toolUse"]["name"], "bash");
@@ -1447,22 +1464,82 @@ mod tests {
     }
 
     #[test]
-    fn unsigned_reasoning_is_skipped_on_replay_and_redacted_is_sent_as_is() {
-        let blocks = content_to_bedrock(&[
-            Content::thinking("from another provider"),
+    fn reasoning_replay_rules() {
+        let content = [
+            Content::thinking("unsigned reasoning"),
             Content::thinking(""),
             Content::thinking_redacted("AAEC"),
             Content::thinking_signed("real", "sig"),
             Content::Text { text: "t".into() },
-        ]);
+        ];
+        let redacted = serde_json::json!({"reasoningContent": {"redactedContent": "AAEC"}});
+        let signed = serde_json::json!(
+            {"reasoningContent": {"reasoningText": {"text": "real", "signature": "sig"}}}
+        );
+        let text = serde_json::json!({"text": "t"});
+
+        // A model that does not sign gets unsigned reasoning back, with no
+        // signature key at all (never `""`); an empty block is dropped.
         assert_eq!(
-            blocks,
+            content_to_bedrock(&content, false),
             vec![
-                serde_json::json!({"reasoningContent": {"redactedContent": "AAEC"}}),
-                serde_json::json!({"reasoningContent": {"reasoningText": {"text": "real", "signature": "sig"}}}),
-                serde_json::json!({"text": "t"}),
+                serde_json::json!(
+                    {"reasoningContent": {"reasoningText": {"text": "unsigned reasoning"}}}
+                ),
+                redacted.clone(),
+                signed.clone(),
+                text.clone(),
             ]
         );
+        // Claude verifies signatures: unsigned reasoning is not replayed.
+        assert_eq!(
+            content_to_bedrock(&content, true),
+            vec![redacted, signed, text]
+        );
+    }
+
+    #[test]
+    fn claude_model_ids_replay_signed_reasoning_only() {
+        let unsigned = || Message::Assistant {
+            content: vec![
+                Content::thinking("mine"),
+                Content::Text { text: "a".into() },
+            ],
+            stop_reason: StopReason::Stop,
+            model: String::new(),
+            provider: String::new(),
+            usage: Usage::default(),
+            timestamp: 0,
+            error_message: None,
+        };
+        let body_for = |model: &str| {
+            build_bedrock_body(&StreamConfig {
+                model: model.into(),
+                system_prompt: String::new(),
+                messages: vec![unsigned()],
+                tools: vec![],
+                thinking_level: ThinkingLevel::Off,
+                api_key: "key:secret".into(),
+                max_tokens: Some(1024),
+                temperature: None,
+                model_config: None,
+                cache_config: CacheConfig::default(),
+                output_schema: None,
+            })
+        };
+        let reasoning_blocks = |body: serde_json::Value| {
+            body["messages"][0]["content"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|b| b.get("reasoningContent").is_some())
+                .count()
+        };
+        assert_eq!(
+            reasoning_blocks(body_for("us.anthropic.claude-sonnet-5-v1:0")),
+            0
+        );
+        assert_eq!(reasoning_blocks(body_for("openai.gpt-oss-120b-1:0")), 1);
     }
 
     #[tokio::test]

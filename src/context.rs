@@ -48,7 +48,13 @@ fn content_tokens(content: &[Content]) -> usize {
                 let raw_bytes = data.len() * 3 / 4;
                 (raw_bytes / 750).clamp(85, 16_000)
             }
-            Content::Thinking { thinking, .. } => estimate_tokens(thinking),
+            Content::Thinking {
+                thinking, redacted, ..
+            } => {
+                // Redacted reasoning is replayed and billed as input too:
+                // base64 len * 3/4 = raw bytes, ~4 bytes per token.
+                estimate_tokens(thinking) + redacted.as_ref().map_or(0, |r| r.len() * 3 / 4 / 4)
+            }
             Content::ToolCall {
                 name, arguments, ..
             } => estimate_tokens(name) + estimate_tokens(&arguments.to_string()) + 8,

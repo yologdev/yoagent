@@ -98,8 +98,12 @@ is any union member or event type added after this was written.
 Reasoning is kept for replay: a signed reasoning block is sent back as
 `reasoningText {text, signature}`, and encrypted reasoning (`redactedContent`)
 is kept in `Content::Thinking::redacted` and sent back as `redactedContent`.
-Reasoning without a signature (for example from another provider after a model
-switch) is skipped on replay, with a warning. Signature deltas are appended.
+Reasoning without a signature is sent back as `reasoningText {text}` with no
+signature key (the signature is optional in `ReasoningTextBlock`, and Bedrock's
+non-Claude reasoning models such as gpt-oss never sign). The exception is a
+Claude model: Claude verifies signatures, so unsigned reasoning (which can only
+come from another provider after a model switch) is not replayed to it. A
+signature is never sent as `""`. Signature deltas are appended.
 
 If the stream ends after `messageStop` without a `metadata` event, the turn
 reports zero tokens (as the other providers do when usage never arrives) and a
