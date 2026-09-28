@@ -144,7 +144,7 @@ mod tests {
 /// | `meta` | `META_API_KEY`, then `MODEL_API_KEY` |
 /// | `opencode-zen` / `opencode-go` | `OPENCODE_API_KEY` |
 /// | `azure` | `AZURE_OPENAI_API_KEY` |
-/// | `bedrock` | `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (+ `AWS_SESSION_TOKEN`), composed as `access:secret[:token]` |
+/// | `bedrock` | `AWS_BEARER_TOKEN_BEDROCK` (a Bedrock API key, sent as a bearer token), then `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (+ `AWS_SESSION_TOKEN`), composed as `access:secret[:token]` and used to SigV4-sign |
 /// | `vertex` | none — pass a short-lived OAuth token via `with_api_key` |
 /// | `local` / `ollama` | no key needed (empty) |
 /// | anything else | `YOAGENT_API_KEY`, then `API_KEY` |
@@ -176,11 +176,21 @@ pub fn resolve_api_key(provider: &str) -> Option<String> {
         "opencode-zen" | "opencode-go" => first(&["OPENCODE_API_KEY"]),
         "azure" => first(&["AZURE_OPENAI_API_KEY"]),
         "bedrock" => {
-            let access = var("AWS_ACCESS_KEY_ID").ok()?;
-            let secret = var("AWS_SECRET_ACCESS_KEY").ok()?;
-            Some(match var("AWS_SESSION_TOKEN") {
-                Ok(token) => format!("{}:{}:{}", access, secret, token),
-                Err(_) => format!("{}:{}", access, secret),
+            // Empty values count as unset (a blanked-out export).
+            let set = |n: &str| var(n).ok().filter(|v| !v.trim().is_empty());
+            // A Bedrock API key wins, as in the AWS SDKs.
+            if let Some(token) = set(crate::provider::bedrock::BEARER_TOKEN_ENV) {
+                tracing::debug!(
+                    "resolved API key for provider 'bedrock' from ${}",
+                    crate::provider::bedrock::BEARER_TOKEN_ENV
+                );
+                return Some(token);
+            }
+            let access = set("AWS_ACCESS_KEY_ID")?;
+            let secret = set("AWS_SECRET_ACCESS_KEY")?;
+            Some(match set("AWS_SESSION_TOKEN") {
+                Some(token) => format!("{}:{}:{}", access, secret, token),
+                None => format!("{}:{}", access, secret),
             })
         }
         "vertex" => None,
@@ -228,8 +238,9 @@ fn api_key_env_hint(provider: &str) -> &'static str {
         "opencode-zen" | "opencode-go" => "set OPENCODE_API_KEY or call .with_api_key(...)",
         "azure" => "set AZURE_OPENAI_API_KEY or call .with_api_key(...)",
         "bedrock" => {
-            "set AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY (+ AWS_SESSION_TOKEN) \
-             or call .with_api_key(\"access:secret[:token]\")"
+            "set AWS_BEARER_TOKEN_BEDROCK, or AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY \
+             (+ AWS_SESSION_TOKEN), or call .with_api_key(...) with a Bedrock API key \
+             or \"access:secret[:token]\""
         }
         "vertex" => "pass a short-lived OAuth token via .with_api_key(...)",
         _ => "set YOAGENT_API_KEY (or API_KEY) or call .with_api_key(...)",

@@ -1,11 +1,27 @@
 //! Amazon Bedrock ConverseStream provider.
 //!
-//! **Authentication.** Requests are *not* SigV4-signed: this crate has no
-//! SigV4 implementation. Headers in `ModelConfig.headers` are sent as given
-//! (pre-computed auth headers, or an IAM proxy that signs for you); without an
-//! `authorization` header the provider sends `Authorization: Bearer {api_key}`.
-//! The `api_key` must currently be formatted as
-//! `{access_key_id}:{secret_access_key}` (with optional `:{session_token}`).
+//! **Authentication**, first match wins:
+//!
+//! 1. An `authorization` entry in `ModelConfig.headers` (any case) is sent as
+//!    given and nothing else is added — for pre-computed auth or a signing
+//!    proxy.
+//! 2. `api_key` (from `with_api_key`, or resolved from the environment by
+//!    `Agent::from_config`): a value without `:` is a Bedrock API key, sent as
+//!    `Authorization: Bearer <key>`; `access_key_id:secret_access_key` (with
+//!    optional `:session_token`) is IAM credentials, and the request is
+//!    SigV4-signed.
+//! 3. With an empty `api_key`, the environment at request time:
+//!    `AWS_BEARER_TOKEN_BEDROCK` (bearer), then `AWS_ACCESS_KEY_ID` +
+//!    `AWS_SECRET_ACCESS_KEY` (+ `AWS_SESSION_TOKEN`) (SigV4).
+//!
+//! No credentials is an [`ProviderError::Auth`] before anything is sent. The
+//! secret access key is never sent: SigV4 sends only the access key id and an
+//! HMAC signature. The SigV4 signing region is the one in the endpoint host
+//! (`bedrock-runtime.<region>.amazonaws.com`, also `-fips`, `.amazonaws.com.cn`
+//! and VPC endpoint hosts), else `AWS_REGION`, else `AWS_DEFAULT_REGION`; the
+//! signing name is `bedrock`. The model id is percent-encoded in the path
+//! (`:` becomes `%3A`, `/` in an ARN `%2F`), as the AWS SDKs send it.
+//!
 //! The `base_url` in ModelConfig should be the Bedrock endpoint, e.g.
 //! `https://bedrock-runtime.us-east-1.amazonaws.com`.
 //!
@@ -20,6 +36,7 @@
 //! live endpoint.
 
 use super::eventstream::{Frame, FrameDecoder, FrameError};
+use super::sigv4::{self, Credentials};
 use super::tool_args::finalize_tool_arguments;
 use super::traits::*;
 use crate::provider::UNPARSED_ARGUMENTS_KEY;
@@ -27,7 +44,7 @@ use crate::types::*;
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use serde::Deserialize;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
@@ -55,42 +72,56 @@ impl StreamProvider for BedrockProvider {
             .as_ref()
             .ok_or_else(|| ProviderError::Other("ModelConfig required".into()))?;
 
-        let base_url = &model_config.base_url;
-        let url = format!("{}/model/{}/converse-stream", base_url, config.model);
+        let auth = resolve_auth(&config.api_key, &model_config.headers, &|name| {
+            std::env::var(name).ok()
+        })?;
 
-        let body = build_bedrock_body(&config);
+        let url = format!(
+            "{}/model/{}/converse-stream",
+            model_config.base_url,
+            sigv4::uri_encode(&config.model)
+        );
+        let parsed_url = reqwest::Url::parse(&url)
+            .map_err(|e| ProviderError::Other(format!("invalid Bedrock URL `{url}`: {e}")))?;
+
+        // Serialize once: these exact bytes are hashed for SigV4 and sent.
+        let body = serde_json::to_vec(&build_bedrock_body(&config))
+            .map_err(|e| ProviderError::Other(format!("failed to encode request: {e}")))?;
         debug!("Bedrock request: model={} url={}", config.model, url);
-
-        // Parse AWS credentials from api_key
-        let parts: Vec<&str> = config.api_key.splitn(3, ':').collect();
-        if parts.len() < 2 {
-            return Err(ProviderError::Auth(
-                "Bedrock api_key must be 'access_key:secret_key[:session_token]'".into(),
-            ));
-        }
 
         let client = reqwest::Client::new();
         let mut request = client
-            .post(&url)
+            .post(parsed_url.clone())
             .header("content-type", "application/json")
             .header("accept", "application/vnd.amazon.eventstream");
 
-        // Add AWS auth headers. In a real implementation, this would use SigV4.
-        // For now, we support a simplified auth model where the caller provides
-        // pre-computed auth headers via model_config.headers, or uses an IAM proxy.
         for (k, v) in &model_config.headers {
             request = request.header(k, v);
         }
 
-        // If no auth headers provided, try basic Bearer auth as fallback
-        // (works with some Bedrock proxy configurations)
-        if !model_config.headers.contains_key("authorization") {
-            request = request.header("authorization", format!("Bearer {}", config.api_key));
+        match auth {
+            Auth::Explicit => {}
+            Auth::Bearer(token) => {
+                request = request.header("authorization", format!("Bearer {token}"));
+            }
+            Auth::SigV4(credentials) => {
+                for (name, value) in sigv4_headers(
+                    &parsed_url,
+                    &body,
+                    &credentials,
+                    &sigv4::amz_date_now(),
+                    &|name| std::env::var(name).ok(),
+                )? {
+                    request = request.header(name, value);
+                }
+            }
         }
+
+        let request = request.body(body);
 
         let response = tokio::select! {
             _ = cancel.cancelled() => return Err(ProviderError::Cancelled),
-            r = request.json(&body).send() => r.map_err(|e| ProviderError::Network(e.to_string()))?,
+            r = request.send() => r.map_err(|e| ProviderError::Network(e.to_string()))?,
         };
 
         if !response.status().is_success() {
@@ -134,6 +165,199 @@ impl StreamProvider for BedrockProvider {
         });
         Ok(message)
     }
+}
+
+/// The environment variable AWS documents for a Bedrock API key.
+pub(crate) const BEARER_TOKEN_ENV: &str = "AWS_BEARER_TOKEN_BEDROCK";
+
+/// The SigV4 signing name of Bedrock Runtime (`signingName` in the service
+/// model; the endpoint prefix `bedrock-runtime` is not the signing name).
+const SIGNING_NAME: &str = "bedrock";
+
+/// How a request is authenticated. `Debug` never prints a secret.
+enum Auth {
+    /// `ModelConfig.headers` carries `authorization`; add nothing.
+    Explicit,
+    /// A Bedrock API key.
+    Bearer(String),
+    /// IAM credentials: sign with SigV4.
+    SigV4(Credentials),
+}
+
+impl std::fmt::Debug for Auth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Auth::Explicit => f.write_str("Explicit"),
+            Auth::Bearer(_) => f.write_str("Bearer(<redacted>)"),
+            Auth::SigV4(c) => f.debug_tuple("SigV4").field(c).finish(),
+        }
+    }
+}
+
+const NO_CREDENTIALS: &str = "no Amazon Bedrock credentials: set AWS_BEARER_TOKEN_BEDROCK \
+     (a Bedrock API key) or AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY (+ AWS_SESSION_TOKEN), \
+     call .with_api_key(...) with an API key or \"access_key_id:secret_access_key[:session_token]\", \
+     or put an `authorization` header in ModelConfig.headers";
+
+/// Decide how to authenticate (see the module docs for the order). `env`
+/// reads an environment variable; it is consulted only when `api_key` is
+/// empty.
+fn resolve_auth(
+    api_key: &str,
+    headers: &HashMap<String, String>,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Auth, ProviderError> {
+    if headers
+        .keys()
+        .any(|k| k.eq_ignore_ascii_case("authorization"))
+    {
+        return Ok(Auth::Explicit);
+    }
+    let api_key = api_key.trim();
+    if !api_key.is_empty() {
+        return parse_api_key(api_key);
+    }
+    let env = |name: &str| {
+        env(name)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    if let Some(token) = env(BEARER_TOKEN_ENV) {
+        return Ok(Auth::Bearer(token));
+    }
+    match (env("AWS_ACCESS_KEY_ID"), env("AWS_SECRET_ACCESS_KEY")) {
+        (Some(access_key_id), Some(secret_access_key)) => Ok(Auth::SigV4(Credentials {
+            access_key_id,
+            secret_access_key,
+            session_token: env("AWS_SESSION_TOKEN"),
+        })),
+        _ => Err(ProviderError::Auth(NO_CREDENTIALS.into())),
+    }
+}
+
+/// Interpret an explicit `api_key`: `access:secret[:token]` is IAM
+/// credentials, anything without `:` a Bedrock API key (AWS issues those as
+/// base64 strings — `bedrock-api-key-…` for short-term keys — which contain
+/// no `:`).
+fn parse_api_key(api_key: &str) -> Result<Auth, ProviderError> {
+    if api_key.contains(':') {
+        let mut parts = api_key.splitn(3, ':');
+        let access_key_id = parts.next().unwrap_or_default().trim();
+        let secret_access_key = parts.next().unwrap_or_default().trim();
+        let session_token = parts
+            .next()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_string);
+        if access_key_id.is_empty() || secret_access_key.is_empty() {
+            return Err(ProviderError::Auth(
+                "Bedrock api_key with `:` must be \
+                 'access_key_id:secret_access_key[:session_token]' with both keys non-empty"
+                    .into(),
+            ));
+        }
+        return Ok(Auth::SigV4(Credentials {
+            access_key_id: access_key_id.to_string(),
+            secret_access_key: secret_access_key.to_string(),
+            session_token,
+        }));
+    }
+    if looks_like_access_key_id(api_key) {
+        // A bare access key id would go out as a bearer token and be
+        // rejected; say what is missing instead.
+        return Err(ProviderError::Auth(
+            "Bedrock api_key looks like an AWS access key id alone; pass \
+             'access_key_id:secret_access_key[:session_token]' or a Bedrock API key"
+                .into(),
+        ));
+    }
+    Ok(Auth::Bearer(api_key.to_string()))
+}
+
+/// `AKIA…` / `ASIA…`, 20 uppercase alphanumerics: the shape of an access key
+/// id, which is never a Bedrock API key.
+fn looks_like_access_key_id(s: &str) -> bool {
+    s.len() == 20
+        && (s.starts_with("AKIA") || s.starts_with("ASIA"))
+        && s.bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+}
+
+/// The SigV4 region: from the endpoint host when it is a Bedrock Runtime
+/// host, else `AWS_REGION`, else `AWS_DEFAULT_REGION`.
+fn signing_region(
+    host: &str,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<String, ProviderError> {
+    if let Some(region) = region_from_host(host) {
+        return Ok(region);
+    }
+    ["AWS_REGION", "AWS_DEFAULT_REGION"]
+        .iter()
+        .find_map(|name| {
+            env(name)
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        })
+        .ok_or_else(|| {
+            ProviderError::Auth(format!(
+                "cannot determine the AWS region for SigV4: the endpoint host `{host}` \
+                 is not bedrock-runtime.<region>.amazonaws.com; set AWS_REGION"
+            ))
+        })
+}
+
+/// `bedrock-runtime[-fips].<region>.amazonaws.com[.cn]`, or a VPC endpoint
+/// `vpce-….bedrock-runtime.<region>.vpce.amazonaws.com`: the label after
+/// `bedrock-runtime`.
+fn region_from_host(host: &str) -> Option<String> {
+    let host = host.to_ascii_lowercase();
+    let labels: Vec<&str> = host.split('.').collect();
+    let at = labels
+        .iter()
+        .position(|l| *l == "bedrock-runtime" || *l == "bedrock-runtime-fips")?;
+    let region = labels.get(at + 1)?;
+    let aws_domain = labels[at + 2..].contains(&"amazonaws");
+    let valid = region
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && region.bytes().any(|b| b.is_ascii_digit());
+    (aws_domain && valid).then(|| region.to_string())
+}
+
+/// The SigV4 headers (`x-amz-date`, `x-amz-security-token` with a session
+/// token, `x-amz-content-sha256`, `authorization`) for a POST of `body` to
+/// `url`. Signs `host` and `content-type`; other headers are sent unsigned.
+fn sigv4_headers(
+    url: &reqwest::Url,
+    body: &[u8],
+    credentials: &Credentials,
+    amz_date: &str,
+    env: &dyn Fn(&str) -> Option<String>,
+) -> Result<Vec<(String, String)>, ProviderError> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| ProviderError::Other(format!("Bedrock URL `{url}` has no host")))?;
+    let region = signing_region(host, env)?;
+    // As reqwest writes the Host header: the port only when not the default.
+    let host_header = match url.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_string(),
+    };
+    let signed = sigv4::sign(
+        "POST",
+        url.path(),
+        &[("host", &host_header), ("content-type", "application/json")],
+        body,
+        &sigv4::SigningParams {
+            credentials,
+            region: &region,
+            service: SIGNING_NAME,
+            amz_date,
+            sign_content_sha256: true,
+        },
+    );
+    Ok(signed.headers)
 }
 
 /// Classify a non-2xx ConverseStream response. The body is AWS's JSON error
@@ -1599,5 +1823,224 @@ mod tests {
         assert!(crate::provider::traits::is_context_overflow_message(
             &msg.unwrap()
         ));
+    }
+
+    // --- Authentication (#174) -------------------------------------------
+
+    fn env_of(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let vars: Vec<(String, String)> = vars
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        move |name| vars.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
+    }
+
+    fn no_env(_: &str) -> Option<String> {
+        None
+    }
+
+    fn sigv4_of(auth: Auth) -> Credentials {
+        match auth {
+            Auth::SigV4(c) => c,
+            other => panic!("expected SigV4, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_key_with_colons_is_iam_credentials() {
+        let c = sigv4_of(parse_api_key("AKID:SECRET").unwrap());
+        assert_eq!(c.access_key_id, "AKID");
+        assert_eq!(c.secret_access_key, "SECRET");
+        assert_eq!(c.session_token, None);
+        let c = sigv4_of(parse_api_key("AKID:SECRET:TOKEN").unwrap());
+        assert_eq!(c.session_token.as_deref(), Some("TOKEN"));
+        // An empty third part is no token.
+        let c = sigv4_of(parse_api_key("AKID:SECRET:").unwrap());
+        assert_eq!(c.session_token, None);
+        for bad in [":SECRET", "AKID:", ":", "AKID::TOKEN"] {
+            let err = parse_api_key(bad).unwrap_err();
+            assert!(matches!(err, ProviderError::Auth(_)), "{bad}");
+        }
+    }
+
+    #[test]
+    fn api_key_without_colon_is_a_bearer_token() {
+        match parse_api_key("bedrock-api-key-YmVkcm9jay5hbWF6b25hd3MuY29t").unwrap() {
+            Auth::Bearer(t) => assert_eq!(t, "bedrock-api-key-YmVkcm9jay5hbWF6b25hd3MuY29t"),
+            other => panic!("{other:?}"),
+        }
+        // A lone access key id is refused rather than sent as a bearer token.
+        assert!(matches!(
+            parse_api_key("AKIAIOSFODNN7EXAMPLE"),
+            Err(ProviderError::Auth(_))
+        ));
+        assert!(matches!(
+            parse_api_key("ASIAIOSFODNN7EXAMPLE"),
+            Err(ProviderError::Auth(_))
+        ));
+    }
+
+    #[test]
+    fn auth_precedence() {
+        let mut headers = HashMap::new();
+        let env = env_of(&[
+            ("AWS_BEARER_TOKEN_BEDROCK", "env-token"),
+            ("AWS_ACCESS_KEY_ID", "ENVAKID"),
+            ("AWS_SECRET_ACCESS_KEY", "ENVSECRET"),
+        ]);
+        // An explicit api_key beats the environment.
+        assert!(matches!(
+            resolve_auth("AKID:SECRET", &headers, &env).unwrap(),
+            Auth::SigV4(_)
+        ));
+        // Empty api_key: the bearer env var beats IAM env credentials.
+        match resolve_auth("", &headers, &env).unwrap() {
+            Auth::Bearer(t) => assert_eq!(t, "env-token"),
+            other => panic!("{other:?}"),
+        }
+        // An authorization header (any case) beats everything.
+        headers.insert("Authorization".to_string(), "Custom x".to_string());
+        assert!(matches!(
+            resolve_auth("AKID:SECRET", &headers, &env).unwrap(),
+            Auth::Explicit
+        ));
+    }
+
+    #[test]
+    fn env_iam_credentials_with_session_token() {
+        let env = env_of(&[
+            ("AWS_BEARER_TOKEN_BEDROCK", "  "),
+            ("AWS_ACCESS_KEY_ID", "ENVAKID"),
+            ("AWS_SECRET_ACCESS_KEY", "ENVSECRET"),
+            ("AWS_SESSION_TOKEN", "ENVTOKEN"),
+        ]);
+        let c = sigv4_of(resolve_auth("", &HashMap::new(), &env).unwrap());
+        assert_eq!(c.access_key_id, "ENVAKID");
+        assert_eq!(c.secret_access_key, "ENVSECRET");
+        assert_eq!(c.session_token.as_deref(), Some("ENVTOKEN"));
+    }
+
+    #[test]
+    fn no_credentials_is_an_auth_error() {
+        let err = resolve_auth("", &HashMap::new(), &no_env).unwrap_err();
+        assert!(
+            matches!(err, ProviderError::Auth(ref m) if m.contains("AWS_BEARER_TOKEN_BEDROCK"))
+        );
+        // Half a credential pair is none.
+        let env = env_of(&[("AWS_ACCESS_KEY_ID", "ENVAKID")]);
+        assert!(resolve_auth("", &HashMap::new(), &env).is_err());
+    }
+
+    #[test]
+    fn auth_debug_never_prints_secrets() {
+        let s = format!(
+            "{:?}",
+            parse_api_key("AKID:SUPERSECRET:SESSIONTOK").unwrap()
+        );
+        assert!(s.contains("AKID"));
+        assert!(
+            !s.contains("SUPERSECRET") && !s.contains("SESSIONTOK"),
+            "{s}"
+        );
+        let s = format!("{:?}", parse_api_key("bearer-secret-value").unwrap());
+        assert!(!s.contains("bearer-secret-value"), "{s}");
+    }
+
+    #[test]
+    fn region_comes_from_the_endpoint_host() {
+        for (host, region) in [
+            ("bedrock-runtime.us-east-1.amazonaws.com", Some("us-east-1")),
+            (
+                "bedrock-runtime.eu-central-1.amazonaws.com",
+                Some("eu-central-1"),
+            ),
+            ("BEDROCK-RUNTIME.us-west-2.amazonaws.com", Some("us-west-2")),
+            (
+                "bedrock-runtime-fips.us-gov-west-1.amazonaws.com",
+                Some("us-gov-west-1"),
+            ),
+            (
+                "bedrock-runtime.cn-north-1.amazonaws.com.cn",
+                Some("cn-north-1"),
+            ),
+            (
+                "vpce-0abc-xyz.bedrock-runtime.ap-southeast-2.vpce.amazonaws.com",
+                Some("ap-southeast-2"),
+            ),
+            ("127.0.0.1", None),
+            ("localhost", None),
+            ("bedrock-runtime.example.com", None),
+            ("bedrock-runtime.amazonaws.com", None),
+            ("bedrock.us-east-1.amazonaws.com", None),
+        ] {
+            assert_eq!(region_from_host(host).as_deref(), region, "{host}");
+        }
+    }
+
+    #[test]
+    fn region_precedence_host_then_aws_region_then_default() {
+        let both = env_of(&[
+            ("AWS_REGION", "eu-west-1"),
+            ("AWS_DEFAULT_REGION", "ap-south-1"),
+        ]);
+        // The host wins: signing for another region than the host's fails.
+        assert_eq!(
+            signing_region("bedrock-runtime.us-east-1.amazonaws.com", &both).unwrap(),
+            "us-east-1"
+        );
+        assert_eq!(signing_region("127.0.0.1", &both).unwrap(), "eu-west-1");
+        let default_only = env_of(&[("AWS_DEFAULT_REGION", "ap-south-1")]);
+        assert_eq!(
+            signing_region("127.0.0.1", &default_only).unwrap(),
+            "ap-south-1"
+        );
+        assert!(matches!(
+            signing_region("127.0.0.1", &no_env),
+            Err(ProviderError::Auth(_))
+        ));
+    }
+
+    /// The model id is encoded once on the wire and again in the canonical
+    /// URI, for both a `:` version suffix and an ARN's `/`.
+    #[test]
+    fn signed_path_double_encodes_the_model_id() {
+        let creds = Credentials {
+            access_key_id: "AKIDEXAMPLE".into(),
+            secret_access_key: "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".into(),
+            session_token: None,
+        };
+        for (model, wire, canonical) in [
+            (
+                "anthropic.claude-sonnet-5-v1:0",
+                "/model/anthropic.claude-sonnet-5-v1%3A0/converse-stream",
+                "/model/anthropic.claude-sonnet-5-v1%253A0/converse-stream",
+            ),
+            (
+                "arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.x",
+                "/model/arn%3Aaws%3Abedrock%3Aus-east-1%3A123456789012%3Ainference-profile%2Fus.anthropic.x/converse-stream",
+                "/model/arn%253Aaws%253Abedrock%253Aus-east-1%253A123456789012%253Ainference-profile%252Fus.anthropic.x/converse-stream",
+            ),
+        ] {
+            let url = reqwest::Url::parse(&format!(
+                "https://bedrock-runtime.us-east-1.amazonaws.com/model/{}/converse-stream",
+                sigv4::uri_encode(model)
+            ))
+            .unwrap();
+            assert_eq!(url.path(), wire);
+            let signed = sigv4::sign(
+                "POST",
+                url.path(),
+                &[("host", "bedrock-runtime.us-east-1.amazonaws.com")],
+                b"{}",
+                &sigv4::SigningParams {
+                    credentials: &creds,
+                    region: "us-east-1",
+                    service: SIGNING_NAME,
+                    amz_date: "20260928T000000Z",
+                    sign_content_sha256: true,
+                },
+            );
+            assert_eq!(signed.canonical_request.lines().nth(1), Some(canonical));
+        }
     }
 }
