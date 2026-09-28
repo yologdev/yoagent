@@ -51,8 +51,12 @@ fn content_tokens(content: &[Content]) -> usize {
             Content::Thinking {
                 thinking, redacted, ..
             } => {
-                // Redacted reasoning is replayed and billed as input too:
-                // base64 len * 3/4 = raw bytes, ~4 bytes per token.
+                // Redacted reasoning is replayed and billed as input too.
+                // Both kinds are base64-like text (Bedrock's `redactedContent`
+                // is base64; Anthropic's opaque `redacted_thinking` data is
+                // base64-alphabet ciphertext), so len * 3/4 ≈ encrypted
+                // bytes, at ~4 bytes per token. A rough estimate: the real
+                // count is the hidden reasoning's, which only usage reports.
                 estimate_tokens(thinking) + redacted.as_ref().map_or(0, |r| r.len() * 3 / 4 / 4)
             }
             Content::ToolCall {

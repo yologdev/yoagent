@@ -110,7 +110,7 @@ impl StreamProvider for OpenAiCompatProvider {
                                     let idx = match thinking_idx {
                                         Some(i) => i,
                                         None => {
-                                            content.push(Content::Thinking { thinking: String::new(), signature: None, redacted: None });
+                                            content.push(Content::thinking(String::new()));
                                             content.len() - 1
                                         }
                                     };
@@ -1822,6 +1822,32 @@ mod tests {
         assert!(msgs[0].get("reasoning_content").is_none());
         assert!(msgs[2].get("reasoning_content").is_none());
         assert!(msgs[4].get("reasoning_content").is_none());
+    }
+
+    /// Encrypted reasoning from another API has no text: a turn holding only
+    /// that sends no `reasoning_content` (never an empty one), and its
+    /// opaque data never leaves.
+    #[test]
+    fn test_redacted_thinking_is_not_replayed_as_reasoning_content() {
+        use crate::provider::ApiProtocol;
+        let deepseek = ModelConfig::deepseek("deepseek-v4-pro", "DeepSeek V4 Pro");
+        let history = vec![
+            Message::user("hi"),
+            Message::assistant(
+                vec![
+                    Content::thinking_redacted(ApiProtocol::AnthropicMessages, "OPAQUE"),
+                    Content::Text { text: "ok".into() },
+                ],
+                StopReason::Stop,
+                "claude-opus-5-5",
+                "anthropic",
+                Usage::default(),
+            ),
+            Message::user("next"),
+        ];
+        let body = history_body(&deepseek, history, true);
+        assert!(body["messages"][1].get("reasoning_content").is_none());
+        assert!(!body.to_string().contains("OPAQUE"), "{body}");
     }
 
     #[test]

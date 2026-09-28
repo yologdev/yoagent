@@ -654,6 +654,7 @@ impl ConverseStreamState {
             thinking,
             signature,
             redacted: slot,
+            redacted_protocol,
         }) = self.content.get_mut(ci)
         {
             if let Some(text) = reasoning.text {
@@ -672,6 +673,7 @@ impl ConverseStreamState {
             }
             if redacted.is_some() {
                 *slot = redacted;
+                *redacted_protocol = Some(crate::provider::ApiProtocol::BedrockConverseStream);
             }
         }
         Ok(())
@@ -974,12 +976,20 @@ fn content_to_bedrock(content: &[Content], signed_reasoning_only: bool) -> Vec<s
             // multi-turn tool use, unmodified ("include the text and its
             // signature unmodified" — ReasoningTextBlock). The block is a
             // union (ReasoningContentBlock: `reasoningText` | `redactedContent`).
+            // Only Bedrock's own `redactedContent` goes back: AWS does not
+            // document it as the same bytes as Anthropic's `redacted_thinking`
+            // data, so another API's encrypted reasoning is skipped.
             Content::Thinking {
-                redacted: Some(data),
-                ..
-            } => Some(serde_json::json!({
-                "reasoningContent": {"redactedContent": data}
-            })),
+                redacted: Some(_), ..
+            } => match c.redacted_for(crate::provider::ApiProtocol::BedrockConverseStream) {
+                Some(data) => Some(serde_json::json!({
+                    "reasoningContent": {"redactedContent": data}
+                })),
+                None => {
+                    warn!("Bedrock: skipping a redacted thinking block from another provider");
+                    None
+                }
+            },
             Content::Thinking {
                 thinking,
                 signature: Some(signature),
@@ -1468,7 +1478,7 @@ mod tests {
         let content = [
             Content::thinking("unsigned reasoning"),
             Content::thinking(""),
-            Content::thinking_redacted("AAEC"),
+            Content::thinking_redacted(crate::provider::ApiProtocol::BedrockConverseStream, "AAEC"),
             Content::thinking_signed("real", "sig"),
             Content::Text { text: "t".into() },
         ];

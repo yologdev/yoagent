@@ -2,11 +2,13 @@
 
 use super::tool_args::UNPARSED_ARGUMENTS_KEY;
 use super::traits::*;
+use crate::provider::ApiProtocol;
 use crate::types::*;
 use async_trait::async_trait;
 use futures::StreamExt;
 use reqwest_eventsource::{Event, EventSource};
 use serde::Deserialize;
+use std::collections::{HashMap, HashSet};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
@@ -177,6 +179,15 @@ impl StreamProvider for AnthropicProvider {
         // delta without a stop_reason: that proves nothing about completeness.
         let mut saw_stop_reason = false;
         let mut error_message: Option<String> = None;
+        // Anthropic's block `index` → position in `content`. A block this
+        // provider does not surface gets no entry and no placeholder, so the
+        // blocks after it keep their order and their deltas still land on
+        // the right block.
+        let mut positions: HashMap<u64, usize> = HashMap::new();
+        // Blocks that were skipped at `content_block_start` (already warned
+        // about), so their deltas and stop are dropped quietly.
+        let mut skipped: HashSet<u64> = HashSet::new();
+        let mut warned: HashSet<String> = HashSet::new();
 
         let _ = tx.send(StreamEvent::Start);
 
@@ -199,42 +210,64 @@ impl StreamProvider for AnthropicProvider {
                                         usage.cache_write = data.message.usage.cache_creation_input_tokens;
                                     }
                                 }
-                                "content_block_start" => {
-                                    if let Ok(data) = serde_json::from_str::<AnthropicContentBlockStart>(&msg.data) {
-                                        let idx = data.index as usize;
-                                        match data.content_block {
-                                            AnthropicContentBlock::Text { .. } => {
-                                                while content.len() <= idx {
-                                                    content.push(Content::Text { text: String::new() });
-                                                }
-                                            }
-                                            AnthropicContentBlock::Thinking { .. } => {
-                                                while content.len() <= idx {
-                                                    content.push(Content::Thinking { thinking: String::new(), signature: None, redacted: None });
-                                                }
-                                            }
-                                            AnthropicContentBlock::ToolUse { id, name, .. } => {
-                                                while content.len() <= idx {
-                                                    content.push(Content::ToolCall { provider_metadata: None,
+                                "content_block_start" => match serde_json::from_str::<AnthropicContentBlockStart>(&msg.data) {
+                                    Err(e) => warn!(
+                                        "content_block_start does not parse ({e}); the block is dropped: {}",
+                                        truncate_for_error(&msg.data)
+                                    ),
+                                    Ok(data) if positions.contains_key(&data.index) || skipped.contains(&data.index) => warn!(
+                                        "duplicate content_block_start for block {}; ignored",
+                                        data.index
+                                    ),
+                                    Ok(data) => {
+                                        let idx = data.index;
+                                        let ci = content.len();
+                                        match start_block(data.content_block) {
+                                            StartedBlock::Content(block) => {
+                                                if let Content::ToolCall { id, name, .. } = &block {
+                                                    let _ = tx.send(StreamEvent::ToolCallStart {
+                                                        content_index: ci,
                                                         id: id.clone(),
                                                         name: name.clone(),
-                                                        arguments: serde_json::Value::Object(Default::default()),
                                                     });
                                                 }
-                                                let _ = tx.send(StreamEvent::ToolCallStart {
-                                                    content_index: idx,
-                                                    id,
-                                                    name,
+                                                content.push(block);
+                                                positions.insert(idx, ci);
+                                            }
+                                            StartedBlock::Skipped { key, reason } => {
+                                                skipped.insert(idx);
+                                                warn_once(&mut warned, key, || {
+                                                    format!("Anthropic: skipping content block {idx}: {reason}")
                                                 });
                                             }
                                         }
                                     }
-                                }
-                                "content_block_delta" => {
-                                    if let Ok(data) = serde_json::from_str::<AnthropicContentBlockDelta>(&msg.data) {
-                                        let idx = data.index as usize;
-                                        match data.delta {
-                                            AnthropicDelta::TextDelta { text } => {
+                                },
+                                "content_block_delta" => match serde_json::from_str::<AnthropicContentBlockDelta>(&msg.data) {
+                                    Err(e) => warn!(
+                                        "content_block_delta does not parse ({e}); the delta is dropped: {}",
+                                        truncate_for_error(&msg.data)
+                                    ),
+                                    Ok(data) => match positions.get(&data.index).copied() {
+                                        None => {
+                                            let idx = data.index;
+                                            if !skipped.contains(&idx) {
+                                                warn_once(&mut warned, format!("orphan:{idx}"), || {
+                                                    format!("content_block_delta for block {idx}, which never started; dropped")
+                                                });
+                                            }
+                                        }
+                                        Some(idx) => match parse_delta(data.delta) {
+                                            Err(DeltaError::Unknown(kind)) => {
+                                                warn_once(&mut warned, format!("delta:{kind}"), || {
+                                                    format!("Anthropic: dropping `{kind}` deltas (not surfaced by this provider)")
+                                                });
+                                            }
+                                            Err(DeltaError::Malformed(e)) => warn!(
+                                                "content_block_delta for block {} does not parse ({e}); dropped",
+                                                data.index
+                                            ),
+                                            Ok(AnthropicDelta::TextDelta { text }) => {
                                                 if let Some(Content::Text { text: ref mut t }) = content.get_mut(idx) {
                                                     t.push_str(&text);
                                                 }
@@ -243,7 +276,7 @@ impl StreamProvider for AnthropicProvider {
                                                     delta: text,
                                                 });
                                             }
-                                            AnthropicDelta::ThinkingDelta { thinking } => {
+                                            Ok(AnthropicDelta::ThinkingDelta { thinking }) => {
                                                 if let Some(Content::Thinking { thinking: ref mut t, .. }) = content.get_mut(idx) {
                                                     t.push_str(&thinking);
                                                 }
@@ -252,7 +285,7 @@ impl StreamProvider for AnthropicProvider {
                                                     delta: thinking,
                                                 });
                                             }
-                                            AnthropicDelta::InputJsonDelta { partial_json } => {
+                                            Ok(AnthropicDelta::InputJsonDelta { partial_json }) => {
                                                 // Accumulate JSON into a buffer for this tool call
                                                 if let Some(Content::ToolCall { ref mut arguments, .. }) = content.get_mut(idx) {
                                                     // Append to string buffer stored in arguments
@@ -271,14 +304,14 @@ impl StreamProvider for AnthropicProvider {
                                                     delta: partial_json,
                                                 });
                                             }
-                                            AnthropicDelta::SignatureDelta { signature } => {
+                                            Ok(AnthropicDelta::SignatureDelta { signature }) => {
                                                 if let Some(Content::Thinking { signature: ref mut s, .. }) = content.get_mut(idx) {
                                                     *s = Some(signature);
                                                 }
                                             }
-                                        }
-                                    }
-                                }
+                                        },
+                                    },
+                                },
                                 "content_block_stop" => match serde_json::from_str::<serde_json::Value>(&msg.data) {
                                     // Skipping this silently would leave a tool
                                     // call's accumulator unparsed *and* never emit
@@ -298,8 +331,9 @@ impl StreamProvider for AnthropicProvider {
                                              refusing to guess which block it closes: {}",
                                             msg.data
                                         ),
-                                        Some(idx) => {
-                                            let idx = idx as usize;
+                                        // A block that was skipped at its start (or
+                                        // never started) has nothing to close.
+                                        Some(idx) => if let Some(idx) = positions.get(&idx).copied() {
                                             // A block whose accumulator does not
                                             // parse is left carrying it. The sweep
                                             // after the loop is what fails the
@@ -324,7 +358,9 @@ impl StreamProvider for AnthropicProvider {
                                                 }
                                             }
                                             let _ = tx.send(StreamEvent::ToolCallEnd { content_index: idx });
-                                        }
+                                        } else if !skipped.contains(&idx) {
+                                            debug!("content_block_stop for block {idx}, which never started");
+                                        },
                                     },
                                 },
                                 "message_delta" => {
@@ -452,8 +488,8 @@ impl StreamProvider for AnthropicProvider {
             // none of them, so any that survived would return to the API as a
             // `tool_use` with no `tool_result` and be rejected on the *next*
             // request — breaking the conversation rather than just this turn.
-            // Replacing in place keeps `content.len()` aligned with the
-            // provider's block indices.
+            // Replacing in place keeps every block at its position, so the
+            // `content_index` already reported in stream events stays valid.
             for block in content.iter_mut() {
                 if let Content::ToolCall { name, .. } = block {
                     let name = name.clone();
@@ -791,24 +827,32 @@ fn content_to_anthropic(content: &[Content]) -> Vec<serde_json::Value> {
     content
         .iter()
         .filter(|c| !matches!(c, Content::Text { text } if text.is_empty()))
-        // Redacted reasoning from another provider (Bedrock's
-        // `redactedContent`) is opaque to this API; replaying it as a
-        // `thinking` block would send empty text with a bogus signature.
+        // Redacted reasoning is replayed only if this API produced it. Any
+        // other (Bedrock's `redactedContent`, or data of unknown origin) is
+        // opaque here; replaying it as a `thinking` block would send empty
+        // text with a bogus signature.
         .filter(|c| {
-            let redacted = matches!(
+            let foreign = matches!(
                 c,
                 Content::Thinking {
                     redacted: Some(_),
                     ..
                 }
-            );
-            if redacted {
+            ) && c.redacted_for(ApiProtocol::AnthropicMessages).is_none();
+            if foreign {
                 warn!("skipping a redacted thinking block from another provider");
             }
-            !redacted
+            !foreign
         })
         .map(|c| match c {
             Content::Text { text } => serde_json::json!({"type": "text", "text": text}),
+            // Anthropic's own `redacted_thinking`, sent back unmodified and in
+            // place: the API rejects a tool-use turn whose thinking blocks
+            // (redacted ones included) were dropped, reordered or edited.
+            Content::Thinking {
+                redacted: Some(data),
+                ..
+            } => serde_json::json!({"type": "redacted_thinking", "data": data}),
             Content::Image { data, mime_type } => serde_json::json!({
                 "type": "image",
                 "source": {"type": "base64", "media_type": mime_type, "data": data},
@@ -860,33 +904,96 @@ struct AnthropicUsage {
     cache_creation_input_tokens: u64,
 }
 
+/// `content_block_start`. The block stays raw JSON until [`start_block`]
+/// looks at its `type`, so a type this provider does not know is reported by
+/// name instead of failing the whole event.
 #[derive(Deserialize)]
 struct AnthropicContentBlockStart {
     index: u64,
-    content_block: AnthropicContentBlock,
+    content_block: serde_json::Value,
 }
 
+/// The `content_block` types this provider surfaces. A block's opening
+/// `text` / `thinking` is not read: the API sends it empty and fills it
+/// with deltas.
 #[derive(Deserialize)]
 #[serde(tag = "type")]
 enum AnthropicContentBlock {
     #[serde(rename = "text")]
-    Text {
-        #[allow(dead_code)]
-        text: String,
-    },
+    Text {},
     #[serde(rename = "thinking")]
-    Thinking {
-        #[allow(dead_code)]
-        thinking: String,
-    },
+    Thinking {},
+    /// Safety-redacted reasoning. `data` is opaque and arrives whole here:
+    /// the API defines no delta type for it (the SDKs' delta union is text,
+    /// input JSON, citations, thinking and signature), so the block is
+    /// complete at its start.
+    #[serde(rename = "redacted_thinking")]
+    RedactedThinking { data: String },
     #[serde(rename = "tool_use")]
     ToolUse { id: String, name: String },
+}
+
+enum StartedBlock {
+    Content(Content),
+    /// Not surfaced; `key` deduplicates the warning within a stream.
+    Skipped {
+        key: String,
+        reason: String,
+    },
+}
+
+/// Turn a `content_block_start` payload into the block it opens.
+///
+/// Types added to the API later (and server-side blocks this provider never
+/// requests, such as `server_tool_use` or `fallback`) are skipped by name.
+fn start_block(block: serde_json::Value) -> StartedBlock {
+    let kind = block
+        .get("type")
+        .and_then(|t| t.as_str())
+        .unwrap_or("<missing type>")
+        .to_string();
+    match serde_json::from_value::<AnthropicContentBlock>(block) {
+        Ok(AnthropicContentBlock::Text {}) => StartedBlock::Content(Content::Text {
+            text: String::new(),
+        }),
+        Ok(AnthropicContentBlock::Thinking {}) => {
+            StartedBlock::Content(Content::thinking(String::new()))
+        }
+        Ok(AnthropicContentBlock::RedactedThinking { data }) => StartedBlock::Content(
+            Content::thinking_redacted(ApiProtocol::AnthropicMessages, data),
+        ),
+        Ok(AnthropicContentBlock::ToolUse { id, name }) => {
+            StartedBlock::Content(Content::ToolCall {
+                provider_metadata: None,
+                id,
+                name,
+                arguments: serde_json::Value::Object(Default::default()),
+            })
+        }
+        Err(_) if !KNOWN_BLOCK_TYPES.contains(&kind.as_str()) => StartedBlock::Skipped {
+            reason: format!("`{kind}` blocks are not surfaced by this provider"),
+            key: format!("block:{kind}"),
+        },
+        Err(e) => StartedBlock::Skipped {
+            reason: format!("malformed `{kind}` block ({e})"),
+            key: format!("malformed:{kind}"),
+        },
+    }
+}
+
+const KNOWN_BLOCK_TYPES: &[&str] = &["text", "thinking", "redacted_thinking", "tool_use"];
+
+/// Log `message` the first time `key` is seen in this stream.
+fn warn_once(warned: &mut HashSet<String>, key: String, message: impl FnOnce() -> String) {
+    if warned.insert(key) {
+        warn!("{}", message());
+    }
 }
 
 #[derive(Deserialize)]
 struct AnthropicContentBlockDelta {
     index: u64,
-    delta: AnthropicDelta,
+    delta: serde_json::Value,
 }
 
 #[derive(Deserialize)]
@@ -902,6 +1009,36 @@ enum AnthropicDelta {
     #[serde(rename = "signature_delta")]
     SignatureDelta { signature: String },
 }
+
+enum DeltaError {
+    /// A delta type this provider does not surface (`citations_delta`, and
+    /// types added to the API later), by name.
+    Unknown(String),
+    /// A known delta type whose payload does not parse.
+    Malformed(serde_json::Error),
+}
+
+fn parse_delta(delta: serde_json::Value) -> Result<AnthropicDelta, DeltaError> {
+    let kind = delta
+        .get("type")
+        .and_then(|t| t.as_str())
+        .unwrap_or("<missing type>")
+        .to_string();
+    serde_json::from_value(delta).map_err(|e| {
+        if KNOWN_DELTA_TYPES.contains(&kind.as_str()) {
+            DeltaError::Malformed(e)
+        } else {
+            DeltaError::Unknown(kind)
+        }
+    })
+}
+
+const KNOWN_DELTA_TYPES: &[&str] = &[
+    "text_delta",
+    "thinking_delta",
+    "input_json_delta",
+    "signature_delta",
+];
 
 #[derive(Deserialize)]
 struct AnthropicMessageDelta {
@@ -950,7 +1087,7 @@ mod tests {
     #[test]
     fn redacted_thinking_from_another_provider_is_not_replayed() {
         let blocks = content_to_anthropic(&[
-            Content::thinking_redacted("AAEC"),
+            Content::thinking_redacted(ApiProtocol::BedrockConverseStream, "AAEC"),
             Content::thinking_signed("t", "s"),
         ]);
         assert_eq!(

@@ -978,7 +978,10 @@ async fn redacted_reasoning_is_kept_and_replayed() {
 
     let msg = run(first.clone()).await.unwrap();
     let (content, ..) = parts(&msg);
-    assert_eq!(content[0], Content::thinking_redacted("AAECAwQ="));
+    assert_eq!(
+        content[0],
+        Content::thinking_redacted(ApiProtocol::BedrockConverseStream, "AAECAwQ=")
+    );
     // The text next to it keeps its own block and index.
     assert!(matches!(&content[1], Content::Text { text } if text == "Reading."));
 
@@ -995,6 +998,50 @@ async fn redacted_reasoning_is_kept_and_replayed() {
     assert!(
         !body.to_string().contains("\"signature\":\"\""),
         "no empty signature may be sent: {body}"
+    );
+}
+
+/// #197 provenance: encrypted reasoning goes back only to the API that
+/// produced it. Anthropic's `redacted_thinking` data is not documented to be
+/// Bedrock's `redactedContent` bytes, so it is skipped here, while Bedrock's
+/// own block in the same turn is still replayed in place.
+#[tokio::test]
+async fn redacted_thinking_from_the_anthropic_api_is_not_replayed_to_bedrock() {
+    let server = serve(text_response("ok")).await;
+    let mut config = stream_config(&server.uri());
+    config.messages = vec![
+        Message::user("hi"),
+        Message::assistant(
+            vec![
+                Content::thinking_redacted(ApiProtocol::AnthropicMessages, "ANTHROPIC-DATA"),
+                Content::thinking_redacted(ApiProtocol::BedrockConverseStream, "AAEC"),
+                Content::Text { text: "a".into() },
+            ],
+            StopReason::Stop,
+            MODEL,
+            "anthropic",
+            Usage::default(),
+        ),
+        Message::user("next"),
+    ];
+    let (tx, _rx) = mpsc::unbounded_channel();
+    BedrockProvider
+        .stream(config, tx, CancellationToken::new())
+        .await
+        .expect("stream succeeds");
+
+    let requests = server.received_requests().await.unwrap();
+    let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+    assert!(
+        !body.to_string().contains("ANTHROPIC-DATA"),
+        "Anthropic's redacted data must not reach Bedrock: {body}"
+    );
+    assert_eq!(
+        body["messages"][1]["content"],
+        json!([
+            {"reasoningContent": {"redactedContent": "AAEC"}},
+            {"text": "a"},
+        ])
     );
 }
 
