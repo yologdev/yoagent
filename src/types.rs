@@ -35,13 +35,32 @@ pub enum Content {
         thinking: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         signature: Option<String>,
-        /// Reasoning the provider returned encrypted instead of as text
-        /// (Amazon Bedrock's `redactedContent`, base64). `thinking` is empty
-        /// for such a block. It is replayed unmodified to the provider that
-        /// produced it; other providers skip it, since it is meaningless to
-        /// them.
+        /// Reasoning the provider returned encrypted instead of as text:
+        /// Anthropic's `redacted_thinking` `data`, or Amazon Bedrock's
+        /// `redactedContent` (base64). `thinking` is empty for such a block.
+        /// It is opaque: replayed unmodified, and only to the protocol named
+        /// by `redacted_protocol`; every other provider skips it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         redacted: Option<String>,
+        /// The API protocol whose response carried `redacted`, so the
+        /// payload is replayed only where it came from. Encrypted reasoning
+        /// from one API is not documented to be valid on another (Bedrock's
+        /// `redactedContent` is not documented to be Anthropic's
+        /// `redacted_thinking` data, even for Claude on Bedrock), so a
+        /// mismatch — or `None`, which only deserialized data written
+        /// before this field existed can have — is never sent anywhere.
+        /// Set together with `redacted` by [`Content::thinking_redacted`].
+        ///
+        /// An unrecognised value (a protocol added in a newer yoagent) loads
+        /// as `None` rather than failing the whole message.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            rename = "redactedProtocol",
+            alias = "redacted_protocol",
+            deserialize_with = "lenient_protocol"
+        )]
+        redacted_protocol: Option<crate::provider::ApiProtocol>,
     },
     #[serde(rename = "toolCall")]
     #[non_exhaustive]
@@ -60,6 +79,19 @@ pub enum Content {
         )]
         provider_metadata: Option<serde_json::Value>,
     },
+}
+
+/// `redacted_protocol`: an unknown protocol (written by a newer yoagent,
+/// `ApiProtocol` being `#[non_exhaustive]`) deserializes as `None`, which is
+/// never replayed, instead of failing the whole message.
+fn lenient_protocol<'de, D>(
+    deserializer: D,
+) -> Result<Option<crate::provider::ApiProtocol>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = <Option<serde_json::Value> as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(value.and_then(|v| serde_json::from_value(v).ok()))
 }
 
 impl Content {
@@ -87,16 +119,48 @@ impl Content {
             thinking: text.into(),
             signature: None,
             redacted: None,
+            redacted_protocol: None,
         }
     }
 
     /// Construct a redacted (provider-encrypted) thinking block: no text,
-    /// the opaque base64 `data` kept for replay.
-    pub fn thinking_redacted(data: impl Into<String>) -> Self {
+    /// the opaque `data` kept for replay to `protocol` — the API whose
+    /// response carried it — and to no other.
+    ///
+    /// ```
+    /// use yoagent::provider::ApiProtocol;
+    /// use yoagent::types::Content;
+    ///
+    /// let block = Content::thinking_redacted(ApiProtocol::AnthropicMessages, "EmwKAhgB...");
+    /// assert!(matches!(
+    ///     block,
+    ///     Content::Thinking { redacted_protocol: Some(ApiProtocol::AnthropicMessages), .. }
+    /// ));
+    /// ```
+    pub fn thinking_redacted(
+        protocol: crate::provider::ApiProtocol,
+        data: impl Into<String>,
+    ) -> Self {
         Self::Thinking {
             thinking: String::new(),
             signature: None,
             redacted: Some(data.into()),
+            redacted_protocol: Some(protocol),
+        }
+    }
+
+    /// The encrypted reasoning `protocol` may be sent back, if this is a
+    /// redacted thinking block that came from `protocol`. `None` for any
+    /// other block, and for redacted data from another protocol (or of
+    /// unknown origin), which must not be replayed there.
+    pub(crate) fn redacted_for(&self, protocol: crate::provider::ApiProtocol) -> Option<&str> {
+        match self {
+            Self::Thinking {
+                redacted: Some(data),
+                redacted_protocol: Some(p),
+                ..
+            } if *p == protocol => Some(data),
+            _ => None,
         }
     }
 
@@ -106,6 +170,7 @@ impl Content {
             thinking: text.into(),
             signature: Some(signature.into()),
             redacted: None,
+            redacted_protocol: None,
         }
     }
 

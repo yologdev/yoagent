@@ -1069,3 +1069,412 @@ async fn prompt_structured_on_opus_5_5_uses_native_output_format() {
     assert!(body.get("tool_choice").is_none(), "no forced tool: {body}");
     assert!(body.get("tools").is_none(), "no synthetic tool: {body}");
 }
+
+// ---------------------------------------------------------------------------
+// #197: redacted_thinking blocks, unknown block types, provenance
+// ---------------------------------------------------------------------------
+
+/// SSE body from `(event, data)` pairs, each data serialized as one line.
+fn sse(events: &[(&str, serde_json::Value)]) -> String {
+    events
+        .iter()
+        .map(|(event, data)| format!("event: {event}\ndata: {data}\n\n"))
+        .collect()
+}
+
+fn ev_message_start() -> (&'static str, serde_json::Value) {
+    (
+        "message_start",
+        serde_json::json!({"type": "message_start", "message": {"usage": {"input_tokens": 10}}}),
+    )
+}
+
+fn ev_start(index: u64, block: serde_json::Value) -> (&'static str, serde_json::Value) {
+    (
+        "content_block_start",
+        serde_json::json!({"type": "content_block_start", "index": index, "content_block": block}),
+    )
+}
+
+fn ev_delta(index: u64, delta: serde_json::Value) -> (&'static str, serde_json::Value) {
+    (
+        "content_block_delta",
+        serde_json::json!({"type": "content_block_delta", "index": index, "delta": delta}),
+    )
+}
+
+fn ev_stop(index: u64) -> (&'static str, serde_json::Value) {
+    (
+        "content_block_stop",
+        serde_json::json!({"type": "content_block_stop", "index": index}),
+    )
+}
+
+fn ev_finish(stop_reason: &str) -> [(&'static str, serde_json::Value); 2] {
+    [
+        (
+            "message_delta",
+            serde_json::json!({"type": "message_delta", "delta": {"stop_reason": stop_reason}, "usage": {"output_tokens": 5}}),
+        ),
+        ("message_stop", serde_json::json!({"type": "message_stop"})),
+    ]
+}
+
+/// The opaque payload of the redacted block in these streams.
+const REDACTED_DATA: &str = "EmwKAhgBEgy3va3pzix/LafPsn4aDFIT2Xlxh0L5L8rLVyIwxtE3rAFBa8cr3qpP";
+
+/// A turn shaped like the documented extended-thinking-with-tools response:
+/// a signed thinking block, a `redacted_thinking` block (whose `data`
+/// arrives whole at `content_block_start`, with no deltas), then a tool call.
+fn sse_thinking_redacted_tool_use() -> String {
+    let mut events = vec![
+        ev_message_start(),
+        ev_start(0, serde_json::json!({"type": "thinking", "thinking": ""})),
+        ev_delta(
+            0,
+            serde_json::json!({"type": "thinking_delta", "thinking": "reasoning"}),
+        ),
+        ev_delta(
+            0,
+            serde_json::json!({"type": "signature_delta", "signature": "sig-1"}),
+        ),
+        ev_stop(0),
+        ev_start(
+            1,
+            serde_json::json!({"type": "redacted_thinking", "data": REDACTED_DATA}),
+        ),
+        ev_stop(1),
+        ev_start(
+            2,
+            serde_json::json!({"type": "tool_use", "id": "tu_1", "name": "read_file", "input": {}}),
+        ),
+        ev_delta(
+            2,
+            serde_json::json!({"type": "input_json_delta", "partial_json": "{\"path\": \"x\"}"}),
+        ),
+        ev_stop(2),
+    ];
+    events.extend(ev_finish("tool_use"));
+    sse(&events)
+}
+
+async fn serve_once(body: String) -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
+        .mount(&server)
+        .await;
+    server
+}
+
+/// Run `config` and collect every stream event it emitted.
+async fn run_with_events(
+    config: StreamConfig,
+) -> (
+    Result<Message, yoagent::provider::ProviderError>,
+    Vec<yoagent::provider::StreamEvent>,
+) {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let result = AnthropicProvider
+        .stream(config, tx, CancellationToken::new())
+        .await;
+    let mut events = Vec::new();
+    while let Ok(e) = rx.try_recv() {
+        events.push(e);
+    }
+    (result, events)
+}
+
+fn assistant_content(message: &Message) -> &Vec<Content> {
+    match message {
+        Message::Assistant { content, .. } => content,
+        other => panic!("expected an assistant message, got {other:?}"),
+    }
+}
+
+/// The #197 headline: a `redacted_thinking` block is kept, in order, at its
+/// own position — not dropped, and with no empty `Text` placeholder standing
+/// in for it — and the blocks after it keep their indices.
+#[tokio::test]
+async fn redacted_thinking_is_kept_in_order_without_a_placeholder() {
+    use yoagent::provider::{ApiProtocol, StreamEvent};
+
+    let server = serve_once(sse_thinking_redacted_tool_use()).await;
+    let (result, events) = run_with_events(stream_config(&server.uri(), None)).await;
+    let message = result.expect("the stream is well-formed");
+
+    assert_eq!(
+        *assistant_content(&message),
+        vec![
+            Content::thinking_signed("reasoning", "sig-1"),
+            Content::thinking_redacted(ApiProtocol::AnthropicMessages, REDACTED_DATA),
+            Content::tool_call("tu_1", "read_file", serde_json::json!({"path": "x"})),
+        ]
+    );
+    // Stream events address the same positions as the final content.
+    assert!(events.iter().any(|e| matches!(
+        e,
+        StreamEvent::ToolCallStart { content_index: 2, id, .. } if id == "tu_1"
+    )));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        StreamEvent::ToolCallDelta {
+            content_index: 2,
+            ..
+        }
+    )));
+}
+
+/// Records the arguments of every `read_file` execution.
+struct ReadFile(std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>);
+
+#[async_trait::async_trait]
+impl AgentTool for ReadFile {
+    fn name(&self) -> &str {
+        "read_file"
+    }
+    fn label(&self) -> &str {
+        "Read file"
+    }
+    fn description(&self) -> &str {
+        "Read a file"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}})
+    }
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        _ctx: ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        self.0.lock().unwrap().push(params);
+        Ok(ToolResult {
+            content: vec![Content::Text {
+                text: "file contents".into(),
+            }],
+            details: serde_json::Value::Null,
+        })
+    }
+}
+
+/// Two turns through the agent loop: the continuation after the tool call
+/// sends the assistant turn back with the signed thinking block intact and
+/// the `redacted_thinking` block unmodified, in its original position —
+/// Anthropic rejects a tool-use turn whose thinking blocks were dropped,
+/// reordered or edited.
+#[tokio::test]
+async fn redacted_thinking_is_replayed_unmodified_in_the_next_request() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/messages"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_raw(sse_thinking_redacted_tool_use(), "text/event-stream"),
+        )
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    let mut done = vec![
+        ev_message_start(),
+        ev_start(0, serde_json::json!({"type": "text", "text": ""})),
+        ev_delta(
+            0,
+            serde_json::json!({"type": "text_delta", "text": "Done."}),
+        ),
+        ev_stop(0),
+    ];
+    done.extend(ev_finish("end_turn"));
+    Mock::given(method("POST"))
+        .and(path("/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(sse(&done), "text/event-stream"))
+        .with_priority(2)
+        .mount(&server)
+        .await;
+
+    let mut mc = ModelConfig::claude_opus_5_5();
+    mc.base_url = server.uri();
+    let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut agent = yoagent::Agent::from_provider(AnthropicProvider, mc)
+        .with_api_key("test-key")
+        .with_thinking(ThinkingLevel::High)
+        .with_tools(vec![Box::new(ReadFile(calls.clone()))]);
+    let mut rx = agent.prompt("read x").await;
+    while rx.recv().await.is_some() {}
+    agent.finish().await;
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec![serde_json::json!({"path": "x"})]
+    );
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2, "one request per turn");
+    let body: serde_json::Value = requests[1].body_json().expect("json body");
+    let assistant = &body["messages"][1];
+    assert_eq!(assistant["role"], "assistant");
+    let blocks = assistant["content"].as_array().expect("content blocks");
+    assert_eq!(blocks.len(), 3, "no block dropped or added: {assistant}");
+    assert_eq!(
+        blocks[0],
+        serde_json::json!({"type": "thinking", "thinking": "reasoning", "signature": "sig-1"})
+    );
+    assert_eq!(
+        blocks[1],
+        serde_json::json!({"type": "redacted_thinking", "data": REDACTED_DATA})
+    );
+    // The last block may carry a cache breakpoint; the call itself is intact.
+    assert_eq!(blocks[2]["type"], "tool_use");
+    assert_eq!(blocks[2]["id"], "tu_1");
+    assert_eq!(blocks[2]["input"], serde_json::json!({"path": "x"}));
+}
+
+/// Provenance, the other direction: Bedrock's `redactedContent` (and a
+/// redacted block of unknown origin, as a session file written before
+/// provenance was recorded holds) is never sent to the Anthropic API, while
+/// Anthropic's own redacted block in the same turn is replayed in place.
+#[tokio::test]
+async fn redacted_thinking_from_another_provider_is_not_replayed_to_anthropic() {
+    use yoagent::provider::ApiProtocol;
+
+    let server = serve_once(sse_empty_with_stop("end_turn")).await;
+    let legacy: Content =
+        serde_json::from_str(r#"{"type":"thinking","thinking":"","redacted":"TEVHQUNZ"}"#)
+            .expect("the pre-provenance format still loads");
+    let mut config = stream_config(&server.uri(), None);
+    config.messages = vec![
+        Message::user("hi"),
+        Message::assistant(
+            vec![
+                Content::thinking_redacted(ApiProtocol::BedrockConverseStream, "AAEC"),
+                legacy,
+                Content::thinking_redacted(ApiProtocol::AnthropicMessages, REDACTED_DATA),
+                Content::Text { text: "a".into() },
+            ],
+            StopReason::Stop,
+            "claude-sonnet-5",
+            "bedrock",
+            Usage::default(),
+        ),
+        Message::user("next"),
+    ];
+    run_stream(config).await.expect("stream succeeds");
+
+    let requests = server.received_requests().await.unwrap();
+    let body: serde_json::Value = requests[0].body_json().expect("json body");
+    let text = body.to_string();
+    assert!(!text.contains("AAEC"), "Bedrock data leaked: {body}");
+    assert!(
+        !text.contains("TEVHQUNZ"),
+        "data of unknown origin leaked: {body}"
+    );
+    let blocks = body["messages"][1]["content"].as_array().unwrap();
+    assert_eq!(blocks.len(), 2, "{body}");
+    assert_eq!(
+        blocks[0],
+        serde_json::json!({"type": "redacted_thinking", "data": REDACTED_DATA})
+    );
+    assert_eq!(blocks[1]["text"], "a");
+}
+
+/// Run `body` with `tracing` captured.
+async fn run_body_capturing_logs(
+    body: String,
+) -> (
+    Result<Message, yoagent::provider::ProviderError>,
+    Vec<yoagent::provider::StreamEvent>,
+    CapturedLogs,
+) {
+    use tracing_subscriber::layer::SubscriberExt;
+
+    let logs = CapturedLogs::default();
+    let _guard =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(logs.clone()));
+    let server = serve_once(body).await;
+    let (result, events) = run_with_events(stream_config(&server.uri(), None)).await;
+    (result, events, logs)
+}
+
+/// A block type this provider does not know (here `fallback`, which the API
+/// sends as a start/stop pair with no deltas, and an invented type with
+/// deltas of an invented delta type) is skipped with one warning per type
+/// that names it. It leaves no placeholder, and every later block keeps its
+/// deltas and its position.
+#[tokio::test]
+async fn unknown_block_types_are_skipped_without_shifting_later_blocks() {
+    use yoagent::provider::StreamEvent;
+
+    let mut events = vec![
+        ev_message_start(),
+        ev_start(0, serde_json::json!({"type": "text", "text": ""})),
+        ev_delta(0, serde_json::json!({"type": "text_delta", "text": "a"})),
+        ev_stop(0),
+        ev_start(
+            1,
+            serde_json::json!({"type": "fallback", "from": {"model": "m1"}, "to": {"model": "m2"}}),
+        ),
+        ev_stop(1),
+        ev_start(2, serde_json::json!({"type": "hologram", "payload": 1})),
+        ev_delta(
+            2,
+            serde_json::json!({"type": "hologram_delta", "bits": "01"}),
+        ),
+        ev_stop(2),
+        ev_start(3, serde_json::json!({"type": "hologram", "payload": 2})),
+        ev_stop(3),
+        ev_start(
+            4,
+            serde_json::json!({"type": "tool_use", "id": "tu_1", "name": "read_file", "input": {}}),
+        ),
+        ev_delta(
+            4,
+            serde_json::json!({"type": "input_json_delta", "partial_json": "{\"path\": \"x\"}"}),
+        ),
+        ev_stop(4),
+        ev_start(5, serde_json::json!({"type": "text", "text": ""})),
+        // A delta type this provider does not know, on a known block.
+        ev_delta(
+            5,
+            serde_json::json!({"type": "sparkle_delta", "sparkle": "*"}),
+        ),
+        ev_delta(
+            5,
+            serde_json::json!({"type": "sparkle_delta", "sparkle": "*"}),
+        ),
+        ev_delta(5, serde_json::json!({"type": "text_delta", "text": "b"})),
+        ev_stop(5),
+    ];
+    events.extend(ev_finish("tool_use"));
+
+    let (result, stream_events, logs) = run_body_capturing_logs(sse(&events)).await;
+    let message = result.expect("unknown blocks do not fail the turn");
+    assert_eq!(
+        *assistant_content(&message),
+        vec![
+            Content::Text { text: "a".into() },
+            Content::tool_call("tu_1", "read_file", serde_json::json!({"path": "x"})),
+            Content::Text { text: "b".into() },
+        ]
+    );
+    assert!(stream_events.iter().any(|e| matches!(
+        e,
+        StreamEvent::ToolCallStart {
+            content_index: 1,
+            ..
+        }
+    )));
+    assert!(stream_events.iter().any(|e| matches!(
+        e,
+        StreamEvent::TextDelta { content_index: 2, delta } if delta == "b"
+    )));
+
+    let captured = logs.0.lock().unwrap().clone();
+    let count = |needle: &str| captured.iter().filter(|l| l.contains(needle)).count();
+    assert_eq!(count("`fallback`"), 1, "{captured:?}");
+    assert_eq!(count("`hologram`"), 1, "warned once per type: {captured:?}");
+    assert_eq!(count("`sparkle_delta`"), 1, "{captured:?}");
+    assert!(
+        captured.iter().all(|l| !l.contains("hologram_delta")),
+        "a skipped block's deltas are covered by its own warning: {captured:?}"
+    );
+}

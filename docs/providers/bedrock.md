@@ -97,7 +97,12 @@ is any union member or event type added after this was written.
 
 Reasoning is kept for replay: a signed reasoning block is sent back as
 `reasoningText {text, signature}`, and encrypted reasoning (`redactedContent`)
-is kept in `Content::Thinking::redacted` and sent back as `redactedContent`.
+is kept in `Content::Thinking::redacted` (with `redacted_protocol` set to
+`BedrockConverseStream`) and sent back as `redactedContent`. Encrypted
+reasoning from another API is not: AWS does not document `redactedContent` as
+the same bytes as the Anthropic API's `redacted_thinking` data, so an Anthropic
+redacted block is skipped here with a warning (and Bedrock's is skipped by the
+Anthropic provider).
 Reasoning without a signature is sent back as `reasoningText {text}` with no
 signature key (the signature is optional in `ReasoningTextBlock`, and Bedrock's
 non-Claude reasoning models such as gpt-oss never sign). The exception is a

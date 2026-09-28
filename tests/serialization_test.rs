@@ -104,6 +104,85 @@ fn test_content_variants_roundtrip() {
     ));
 }
 
+/// #197: a redacted block records which API produced it, and that survives a
+/// session file. Files without redacted content are byte-identical to the
+/// format before the field existed, and that older format still loads.
+#[test]
+fn redacted_thinking_provenance_roundtrips_and_old_format_loads() {
+    use yoagent::provider::ApiProtocol;
+
+    let msg = Message::assistant(
+        vec![
+            Content::thinking_signed("hmm", "sig"),
+            Content::thinking_redacted(ApiProtocol::AnthropicMessages, "EmwKAhgB"),
+            Content::tool_call("tu_1", "bash", serde_json::json!({})),
+        ],
+        StopReason::ToolUse,
+        "claude-opus-5-5",
+        "anthropic",
+        Usage::default(),
+    );
+    roundtrip(&msg);
+    let json = serde_json::to_value(&msg).unwrap();
+    assert_eq!(
+        json["content"][1],
+        serde_json::json!({
+            "type": "thinking",
+            "thinking": "",
+            "redacted": "EmwKAhgB",
+            "redactedProtocol": "anthropic_messages",
+        })
+    );
+
+    // Unredacted thinking serializes exactly as before.
+    assert_eq!(
+        serde_json::to_string(&Content::thinking_signed("hmm", "sig")).unwrap(),
+        r#"{"type":"thinking","thinking":"hmm","signature":"sig"}"#
+    );
+
+    // The old format: no provenance. It loads, with none recorded (so no
+    // provider replays it).
+    let old: Content =
+        serde_json::from_str(r#"{"type":"thinking","thinking":"","redacted":"AAEC"}"#).unwrap();
+    assert!(matches!(
+        &old,
+        Content::Thinking { redacted: Some(r), redacted_protocol: None, .. } if r == "AAEC"
+    ));
+    // snake_case is accepted too, like `provider_metadata`.
+    let snake: Content = serde_json::from_str(
+        r#"{"type":"thinking","thinking":"","redacted":"AAEC","redacted_protocol":"bedrock_converse_stream"}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        snake,
+        Content::thinking_redacted(ApiProtocol::BedrockConverseStream, "AAEC")
+    );
+
+    // A protocol this version does not know (written by a newer yoagent)
+    // loads as no provenance, so the block is kept but sent nowhere, instead
+    // of failing the whole message.
+    let newer: Content = serde_json::from_str(
+        r#"{"type":"thinking","thinking":"","redacted":"AAEC","redactedProtocol":"some_future_protocol"}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        &newer,
+        Content::Thinking { redacted: Some(r), redacted_protocol: None, .. } if r == "AAEC"
+    ));
+    // Explicit null behaves like absence.
+    let null: Content = serde_json::from_str(
+        r#"{"type":"thinking","thinking":"","redacted":"AAEC","redactedProtocol":null}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        null,
+        Content::Thinking {
+            redacted_protocol: None,
+            ..
+        }
+    ));
+}
+
 // ---------------------------------------------------------------------------
 // Full conversation
 // ---------------------------------------------------------------------------
