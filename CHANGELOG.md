@@ -16,7 +16,9 @@ adheres to [Semantic Versioning](https://semver.org/).
   `redacted_protocol` records which API produced the payload, and it is
   replayed only to that API: neither API documents the other's encrypted
   reasoning as valid, so each provider skips the other's (and a block with no
-  recorded protocol) with a warning. The variant is `#[non_exhaustive]`, so
+  recorded protocol), logged at debug. An unknown `redactedProtocol` (written
+  by a newer yoagent) loads as none recorded rather than failing the
+  message. The variant is `#[non_exhaustive]`, so
   this is not a breaking change; both fields are omitted from JSON when
   `None` (`redactedProtocol` when present, `redacted_protocol` also
   accepted), so session files and the event wire format are unchanged for
