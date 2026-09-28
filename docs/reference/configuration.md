@@ -283,8 +283,10 @@ cache rate left at `0.0` bills at that tier's input rate.
 
 One caveat if you add a tier: prompt size is derived as
 `input + cache_read + cache_write`, which holds only where the provider
-subtracts cached tokens out of `input`. `bedrock.rs` populates neither cache
-field, so a heavily-cached prompt reads small there.
+subtracts cached tokens out of `input`. `bedrock.rs` fills both cache fields
+from `cacheReadInputTokens` / `cacheWriteInputTokens` and `input` from
+`inputTokens`; whether Bedrock's `inputTokens` already excludes the cached
+tokens has not been checked against a live endpoint.
 
 ## ModelConfig Presets
 

@@ -24,6 +24,43 @@ adheres to [Semantic Versioning](https://semver.org/).
   compacts to 0.30. To compact harder, set `compact_headroom_turns: None`:
   compaction then uses `compact_target_ratio` unfloored.
 
+### Fixed
+
+- **Amazon Bedrock streaming works** ([#174](https://github.com/yologdev/yoagent/issues/174)).
+  `BedrockProvider` parsed the ConverseStream body as newline-delimited JSON
+  and silently skipped every line that did not parse. Real responses are
+  binary `application/vnd.amazon.eventstream` frames, so nothing parsed and
+  every turn came back as an empty *successful* assistant message
+  (`StopReason::Stop`, zero usage). The payload structs did not match AWS's
+  shapes either; streamed `toolUse.input` was never collected, so every
+  Bedrock tool call ran with `{}`; text split across network chunks was
+  decoded per chunk, corrupting multi-byte characters; a dropped connection
+  returned the partial content as a success; and all text and reasoning went
+  into the first block of each kind.
+
+  The response is now decoded as event stream frames: bytes are buffered
+  across network chunks, both CRC-32 checksums are verified (in-house, no new
+  dependency; checked against the AWS SDK eventstream test vectors), and
+  events are dispatched on the `:event-type` / `:message-type` headers with
+  payload shapes taken from the AWS Bedrock Runtime API reference. Text,
+  reasoning (with its signature, so it replays) and tool input accumulate per
+  `contentBlockIndex`; tool input is parsed at `contentBlockStop` with the
+  same rule as the other providers, so truncated or unparseable arguments —
+  and a tool block that never closed — are answered with an error tool result
+  instead of running on `{}`. Every documented `stopReason` is mapped
+  (`max_tokens` → `Length`, `guardrail_intervened` and `content_filtered` →
+  `Refusal`, `model_context_window_exceeded` → a context-overflow `Error`),
+  and usage includes cache reads and writes. In-stream exceptions classify
+  like their HTTP status (`throttlingException` → retryable rate limit, an
+  over-long-input `validationException` → context overflow). A checksum
+  mismatch, a truncated frame, a dropped connection, or a stream without
+  `messageStop` (including an empty body) is now an error.
+
+  Tested against mock frames built to AWS's documented format, not against a
+  live Bedrock endpoint. Request signing is unchanged: yoagent still does not
+  SigV4-sign, so supply an `authorization` header or a signing proxy (see the
+  Bedrock provider page).
+
 ## 0.21.0
 
 ### Added
