@@ -8,37 +8,95 @@
 use yoagent::provider::{ApiProtocol, ModelConfig};
 
 // Bedrock has no dedicated ModelConfig preset — build one with `custom`.
+// Credentials come from the environment (see Authentication below).
 let agent = Agent::from_config(ModelConfig::custom(
     ApiProtocol::BedrockConverseStream,
     "bedrock",
     "https://bedrock-runtime.us-east-1.amazonaws.com",
     "anthropic.claude-opus-4-8",
     "Claude Opus 4.8",
-))
-    .with_api_key("ACCESS_KEY:SECRET_KEY");  // or ACCESS_KEY:SECRET_KEY:SESSION_TOKEN
+));
+
+// Or pass credentials explicitly:
+//   .with_api_key(bedrock_api_key)                       // Bedrock API key
+//   .with_api_key("ACCESS_KEY_ID:SECRET_ACCESS_KEY")      // IAM, SigV4-signed
+//   .with_api_key("ACCESS_KEY_ID:SECRET_ACCESS_KEY:SESSION_TOKEN")
 ```
 
 ## Authentication
 
-The `api_key` field uses a colon-separated format:
+Two AWS mechanisms are supported:
 
-```
-{access_key_id}:{secret_access_key}
-{access_key_id}:{secret_access_key}:{session_token}
-```
+- **Bedrock API keys** — a bearer token, sent as
+  `Authorization: Bearer <key>` (see AWS's
+  [Bedrock API keys](https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys.html)
+  guide). AWS's environment variable for it is `AWS_BEARER_TOKEN_BEDROCK`.
+- **IAM credentials** — an access key id, secret access key and optional
+  session token. The request is signed with
+  [Signature Version 4](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv4.html):
+  the secret key never leaves the process; the request carries only the
+  access key id, an HMAC signature, `x-amz-date`, `x-amz-content-sha256` (the
+  hash of the exact body sent) and, with a session token,
+  `x-amz-security-token`.
 
-Alternatively, provide pre-computed auth headers via `ModelConfig.headers` or use an IAM proxy that handles SigV4 signing.
+**Which is used**, first match wins:
 
-> **Caution:** yoagent does not SigV4-sign requests. When `ModelConfig.headers`
-> has no `authorization` entry, the provider sends `Authorization: Bearer
-> {api_key}` — the whole `access:secret` string — which Bedrock rejects and
-> which puts the secret key in a header. Until this is fixed (tracked in
-> [#174](https://github.com/yologdev/yoagent/issues/174)), supply your own
-> `authorization` header or route through a signing proxy.
+1. An `authorization` header in `ModelConfig.headers` (any case). It is sent
+   as given and nothing else is added — for pre-computed auth or a signing
+   proxy.
+2. The API key (`with_api_key`, or what `Agent::from_config` resolved from the
+   environment when the agent was built):
+   - a value **without `:`** is a Bedrock API key (bearer);
+   - `access_key_id:secret_access_key` or
+     `access_key_id:secret_access_key:session_token` is IAM credentials
+     (SigV4). A value with `:` but an empty key id or secret is an error, as
+     is a bare access key id (`AKIA…`/`ASIA…`).
+3. With no API key, the environment at request time:
+   `AWS_BEARER_TOKEN_BEDROCK`, then `AWS_ACCESS_KEY_ID` +
+   `AWS_SECRET_ACCESS_KEY` (+ `AWS_SESSION_TOKEN`).
+
+`Agent::from_config` resolves the key the same way
+(`provider::resolve_api_key("bedrock")`): `AWS_BEARER_TOKEN_BEDROCK` first,
+then the IAM variables composed as `access:secret[:token]`. An explicit
+`with_api_key` always wins over the environment. With no credentials at all
+the provider returns `ProviderError::Auth` without sending anything.
+
+Other headers in `ModelConfig.headers` are sent but not signed. Credentials
+are not refreshed: temporary credentials from the environment are read when
+the agent is built (`from_config`) or on each request (empty API key). There
+is no support for profiles, `~/.aws/credentials`, SSO or instance roles —
+export the variables (for example with `aws configure export-credentials
+--format env`) or pass them explicitly.
+
+### Region (SigV4)
+
+The signing region is, in order:
+
+1. the region in the endpoint host — `bedrock-runtime.<region>.amazonaws.com`,
+   `bedrock-runtime-fips.<region>.amazonaws.com`, `….amazonaws.com.cn`, or a
+   VPC endpoint `vpce-….bedrock-runtime.<region>.vpce.amazonaws.com`;
+2. `AWS_REGION`;
+3. `AWS_DEFAULT_REGION`.
+
+The host wins because a signature for any other region than the endpoint's is
+rejected. A custom endpoint (proxy, private DNS) needs `AWS_REGION`; without a
+region, SigV4 fails with `ProviderError::Auth` before sending. The signing
+name is `bedrock` (Bedrock Runtime's signing name, not the `bedrock-runtime`
+endpoint prefix). Bearer tokens need no region.
+
+The model id is percent-encoded in the request path as the AWS SDKs send it
+(`anthropic.claude-sonnet-5-v1:0` → `anthropic.claude-sonnet-5-v1%3A0`, and the
+`/` in an inference-profile ARN → `%2F`), and encoded once more in the
+signature's canonical request, as SigV4 requires for every service but S3.
+
+The signer is checked against AWS's published SigV4 test vectors and against
+a mock server that recomputes each signature from the request it received.
+Like the rest of this provider, it has not been run against a live Bedrock
+endpoint.
 
 ## API Details
 
-- **Endpoint**: `{base_url}/model/{model}/converse-stream`
+- **Endpoint**: `{base_url}/model/{model}/converse-stream` (model id percent-encoded)
 - **Default base URL**: `https://bedrock-runtime.us-east-1.amazonaws.com`
 - **Protocol**: `ApiProtocol::BedrockConverseStream`
 

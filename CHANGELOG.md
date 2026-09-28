@@ -22,6 +22,17 @@ adheres to [Semantic Versioning](https://semver.org/).
   accepted), so session files and the event wire format are unchanged for
   content without redacted reasoning.
 
+- **Amazon Bedrock API keys** ([#174](https://github.com/yologdev/yoagent/issues/174)).
+  An `api_key` without `:` is a Bedrock API key and is sent as
+  `Authorization: Bearer <key>`; `AWS_BEARER_TOKEN_BEDROCK`, AWS's variable
+  for it, is read by `resolve_api_key("bedrock")` (and so by
+  `Agent::from_config`) before the IAM variables. With an empty `api_key` the
+  provider reads the environment at request time: `AWS_BEARER_TOKEN_BEDROCK`,
+  then `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` (+ `AWS_SESSION_TOKEN`).
+  The SigV4 region comes from the endpoint host
+  (`bedrock-runtime.<region>.amazonaws.com`, FIPS, China and VPC endpoint
+  hosts), else `AWS_REGION`, else `AWS_DEFAULT_REGION`.
+
 ### Changed
 
 - **Behaviour change: `MIN_HEADROOM_RATIO` is 0.30 (was 0.15).** It is the
@@ -107,9 +118,30 @@ adheres to [Semantic Versioning](https://semver.org/).
   `usage_missing = true`.
 
   Tested against mock frames built to AWS's documented format, not against a
-  live Bedrock endpoint. Request signing is unchanged: yoagent still does not
-  SigV4-sign, so supply an `authorization` header or a signing proxy (see the
-  Bedrock provider page).
+  live Bedrock endpoint. Requests are now also authenticated properly (next
+  entry).
+
+- **Amazon Bedrock no longer sends the secret access key in a bearer header**
+  ([#174](https://github.com/yologdev/yoagent/issues/174)). Without an
+  `authorization` header in `ModelConfig.headers`, `BedrockProvider` sent
+  `Authorization: Bearer {api_key}` — with `api_key` in the documented
+  `access_key_id:secret_access_key[:session_token]` form, the secret key went
+  out in a header, and Bedrock rejected the request. IAM credentials are now
+  used to SigV4-sign the request (signing name `bedrock`; `x-amz-date`,
+  `x-amz-content-sha256` over the exact body bytes sent, and
+  `x-amz-security-token` for a session token); only the access key id and a
+  signature are sent. An `authorization` header in `ModelConfig.headers`
+  still wins and is sent alone (now matched in any case, and no longer
+  requires `api_key` to contain `:`). No credentials, a malformed
+  `access:secret` value, or SigV4 with no region is a `ProviderError::Auth`
+  before anything is sent. The model id is now percent-encoded in the request
+  path as the AWS SDKs send it (`:` → `%3A`, `/` → `%2F`); ids without those
+  characters are sent as before.
+
+  The signer is hand-written (private `provider::sigv4`, on the RustCrypto
+  `sha2` and `hmac` crates — two new dependencies) and pinned to AWS's
+  `aws-sig-v4-test-suite` vectors; a mock-server test recomputes each
+  signature from the request received. Not tested against a live endpoint.
 
 ## 0.21.0
 
