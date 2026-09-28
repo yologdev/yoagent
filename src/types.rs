@@ -50,11 +50,15 @@ pub enum Content {
         /// mismatch — or `None`, which only deserialized data written
         /// before this field existed can have — is never sent anywhere.
         /// Set together with `redacted` by [`Content::thinking_redacted`].
+        ///
+        /// An unrecognised value (a protocol added in a newer yoagent) loads
+        /// as `None` rather than failing the whole message.
         #[serde(
             default,
             skip_serializing_if = "Option::is_none",
             rename = "redactedProtocol",
-            alias = "redacted_protocol"
+            alias = "redacted_protocol",
+            deserialize_with = "lenient_protocol"
         )]
         redacted_protocol: Option<crate::provider::ApiProtocol>,
     },
@@ -75,6 +79,19 @@ pub enum Content {
         )]
         provider_metadata: Option<serde_json::Value>,
     },
+}
+
+/// `redacted_protocol`: an unknown protocol (written by a newer yoagent,
+/// `ApiProtocol` being `#[non_exhaustive]`) deserializes as `None`, which is
+/// never replayed, instead of failing the whole message.
+fn lenient_protocol<'de, D>(
+    deserializer: D,
+) -> Result<Option<crate::provider::ApiProtocol>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = <Option<serde_json::Value> as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(value.and_then(|v| serde_json::from_value(v).ok()))
 }
 
 impl Content {

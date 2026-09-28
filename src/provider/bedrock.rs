@@ -986,7 +986,7 @@ fn content_to_bedrock(content: &[Content], signed_reasoning_only: bool) -> Vec<s
                     "reasoningContent": {"redactedContent": data}
                 })),
                 None => {
-                    warn!("Bedrock: skipping a redacted thinking block from another provider");
+                    debug!("Bedrock: skipping a redacted thinking block from another provider");
                     None
                 }
             },

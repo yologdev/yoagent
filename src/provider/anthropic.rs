@@ -840,7 +840,7 @@ fn content_to_anthropic(content: &[Content]) -> Vec<serde_json::Value> {
                 }
             ) && c.redacted_for(ApiProtocol::AnthropicMessages).is_none();
             if foreign {
-                warn!("skipping a redacted thinking block from another provider");
+                debug!("skipping a redacted thinking block from another provider");
             }
             !foreign
         })

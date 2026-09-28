@@ -157,6 +157,30 @@ fn redacted_thinking_provenance_roundtrips_and_old_format_loads() {
         snake,
         Content::thinking_redacted(ApiProtocol::BedrockConverseStream, "AAEC")
     );
+
+    // A protocol this version does not know (written by a newer yoagent)
+    // loads as no provenance, so the block is kept but sent nowhere, instead
+    // of failing the whole message.
+    let newer: Content = serde_json::from_str(
+        r#"{"type":"thinking","thinking":"","redacted":"AAEC","redactedProtocol":"some_future_protocol"}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        &newer,
+        Content::Thinking { redacted: Some(r), redacted_protocol: None, .. } if r == "AAEC"
+    ));
+    // Explicit null behaves like absence.
+    let null: Content = serde_json::from_str(
+        r#"{"type":"thinking","thinking":"","redacted":"AAEC","redactedProtocol":null}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        null,
+        Content::Thinking {
+            redacted_protocol: None,
+            ..
+        }
+    ));
 }
 
 // ---------------------------------------------------------------------------

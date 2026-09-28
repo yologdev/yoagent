@@ -20,14 +20,14 @@ Uses `reqwest-eventsource` to parse Anthropic's SSE stream. Events handled:
 - `content_block_start` — Text, thinking, `redacted_thinking`, or tool_use block
 - `content_block_delta` — Text, thinking, input JSON, or signature deltas
 - `content_block_stop` — Block complete
+- `message_delta` — Stop reason, output usage
+- `message_stop` — Stream complete
 
 Blocks are kept in the order the API sends them, each at its own position in
 `Content`. A block type this provider does not surface (server-side tool
 blocks, `fallback`, anything added to the API later) is skipped with one
 warning per type that names it; it leaves no placeholder, and the blocks after
 it keep their deltas. An unknown delta type is dropped the same way.
-- `message_delta` — Stop reason, output usage
-- `message_stop` — Stream complete
 
 ### Thinking
 
