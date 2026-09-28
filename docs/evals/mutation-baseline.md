@@ -151,6 +151,243 @@ excluded in `.cargo/mutants.toml`, with this reason. They are detected
 rather than missed, because any test that reaches level 2 hangs on them.
 With them excluded there are 928 mutants.
 
+## First full run — 2026-09-28
+
+Run [36480327733](https://github.com/yologdev/yoagent/actions/runs/36480327733)
+tested all 928 mutants at commit `4feda1e`, with 16 shards, incremental builds
+and the runner-killing mutants excluded. It took 30 minutes. Every shard
+finished in 20–29 minutes; a mutant now takes about 11–33 s to build and
+20–26 s to test.
+
+| module | caught | missed | timeout | unviable | total | detected |
+|---|---:|---:|---:|---:|---:|---:|
+| `agent_loop.rs` | 68 | 39 | 6 | 25 | 138 | 65% |
+| `context.rs` | 186 | 69 | 2 | 12 | 269 | 73% |
+| `llm_compaction.rs` | 86 | 45 | 0 | 22 | 153 | 65% |
+| `provider/model.rs` | 144 | 40 | 0 | 38 | 222 | 78% |
+| `provider/prices.rs` | 64 | 9 | 0 | 17 | 90 | 87% |
+| `provider/prices/global.rs` | 39 | 0 | 0 | 17 | 56 | 100% |
+| **total** | **587** | **202** | **8** | **131** | **928** | **75%** |
+
+"Detected" means (caught + timeout) / (caught + missed + timeout); unviable
+mutants do not compile and are left out.
+
+This run supersedes the 1-in-10 sample above as the baseline to compare
+against. The sample's triage still applies: its 13 real gaps and 7 acceptable
+survivors all appear in the list below. The other survivors have not been
+triaged yet. The list is kept here in full, because a run's artifacts expire
+after 30 days.
+
+<details>
+<summary>All 202 missed mutants (sorted by file and line)</summary>
+
+```text
+src/agent_loop.rs:209:9: delete field prompts from struct LoopScope expression in with_loop_scope
+src/agent_loop.rs:500:16: delete ! in run_loop
+src/agent_loop.rs:556:28: replace > with < in run_loop
+src/agent_loop.rs:556:28: replace > with == in run_loop
+src/agent_loop.rs:556:28: replace > with >= in run_loop
+src/agent_loop.rs:562:25: replace += with *= in run_loop
+src/agent_loop.rs:588:36: replace += with *= in run_loop
+src/agent_loop.rs:589:34: replace += with *= in run_loop
+src/agent_loop.rs:591:57: replace > with < in run_loop
+src/agent_loop.rs:591:57: replace > with == in run_loop
+src/agent_loop.rs:591:57: replace > with >= in run_loop
+src/agent_loop.rs:592:41: replace / with * in run_loop
+src/agent_loop.rs:592:41: replace / with % in run_loop
+src/agent_loop.rs:623:30: replace != with == in run_loop
+src/agent_loop.rs:633:29: delete field compact_target_ratio from struct ContextConfig expression in run_loop
+src/agent_loop.rs:715:76: replace - with / in run_loop
+src/agent_loop.rs:927:37: delete match arm Message::Assistant{usage, ..} in run_loop
+src/agent_loop.rs:1085:44: delete ! in run_loop
+src/agent_loop.rs:1118:38: replace + with * in run_loop
+src/agent_loop.rs:1118:53: replace + with * in run_loop
+src/agent_loop.rs:1118:72: replace + with - in run_loop
+src/agent_loop.rs:1128:21: delete match arm Message::Assistant{usage, ..} in run_loop
+src/agent_loop.rs:1157:20: delete ! in run_loop
+src/agent_loop.rs:1282:21: delete match arm StreamEvent::ThinkingDelta{delta, ..} in stream_assistant_response
+src/agent_loop.rs:1294:21: delete match arm StreamEvent::ToolCallDelta{delta, ..} in stream_assistant_response
+src/agent_loop.rs:1311:21: delete match arm StreamEvent::Error{message} in stream_assistant_response
+src/agent_loop.rs:1430:14: replace match guard *name == schema.name with true in unwrap_structured_tool_call
+src/agent_loop.rs:1451:36: replace == with != in unwrap_structured_tool_call
+src/agent_loop.rs:1510:24: delete ! in execute_tool_calls
+src/agent_loop.rs:1513:51: replace + with - in execute_tool_calls
+src/agent_loop.rs:1513:51: replace + with * in execute_tool_calls
+src/agent_loop.rs:1513:56: replace * with / in execute_tool_calls
+src/agent_loop.rs:1513:56: replace * with + in execute_tool_calls
+src/agent_loop.rs:1514:37: replace < with <= in execute_tool_calls
+src/agent_loop.rs:1514:37: replace < with == in execute_tool_calls
+src/agent_loop.rs:1514:37: replace < with > in execute_tool_calls
+src/agent_loop.rs:1555:16: delete ! in execute_sequential
+src/agent_loop.rs:1557:66: replace + with - in execute_sequential
+src/agent_loop.rs:1557:66: replace + with * in execute_sequential
+src/context.rs:33:71: replace + with * in message_tokens
+src/context.rs:35:80: replace + with - in message_tokens
+src/context.rs:35:80: replace + with * in message_tokens
+src/context.rs:48:44: replace * with / in content_tokens
+src/context.rs:48:44: replace * with + in content_tokens
+src/context.rs:48:48: replace / with * in content_tokens
+src/context.rs:48:48: replace / with % in content_tokens
+src/context.rs:49:28: replace / with * in content_tokens
+src/context.rs:49:28: replace / with % in content_tokens
+src/context.rs:56:43: replace + with * in content_tokens
+src/context.rs:56:85: replace * with / in content_tokens
+src/context.rs:56:85: replace * with + in content_tokens
+src/context.rs:56:89: replace / with * in content_tokens
+src/context.rs:56:89: replace / with % in content_tokens
+src/context.rs:56:93: replace / with * in content_tokens
+src/context.rs:56:93: replace / with % in content_tokens
+src/context.rs:60:40: replace + with * in content_tokens
+src/context.rs:110:67: replace + with * in ContextTracker::record_usage
+src/context.rs:111:18: replace > with >= in ContextTracker::record_usage
+src/context.rs:124:48: replace match guard idx < messages.len() with true in ContextTracker::estimate_context_tokens
+src/context.rs:124:52: replace < with <= in ContextTracker::estimate_context_tokens
+src/context.rs:134:9: replace ContextTracker::reset with ()
+src/context.rs:319:23: replace || with && in ContextConfig::effective_target_ratio
+src/context.rs:319:62: replace || with && in ContextConfig::effective_target_ratio
+src/context.rs:437:17: replace < with <= in compact_messages
+src/context.rs:437:17: replace < with == in compact_messages
+src/context.rs:437:17: replace < with > in compact_messages
+src/context.rs:451:24: replace != with == in compact_messages
+src/context.rs:487:5: replace message_text -> String with "xyzzy".into()
+src/context.rs:487:5: replace message_text -> String with String::new()
+src/context.rs:530:14: replace ^= with |= in fnv1a
+src/context.rs:717:13: replace < with <= in level2_summarize_old_turns
+src/context.rs:727:25: delete match arm Content::Text{text} in level2_summarize_old_turns
+src/context.rs:728:43: replace > with < in level2_summarize_old_turns
+src/context.rs:728:43: replace > with == in level2_summarize_old_turns
+src/context.rs:728:43: replace > with >= in level2_summarize_old_turns
+src/context.rs:743:34: delete ! in level2_summarize_old_turns
+src/context.rs:745:38: replace > with < in level2_summarize_old_turns
+src/context.rs:745:38: replace > with == in level2_summarize_old_turns
+src/context.rs:745:38: replace > with >= in level2_summarize_old_turns
+src/context.rs:764:25: replace < with <= in level2_summarize_old_turns
+src/context.rs:764:25: replace < with == in level2_summarize_old_turns
+src/context.rs:764:25: replace < with > in level2_summarize_old_turns
+src/context.rs:813:5: replace message_timestamp -> u64 with 0
+src/context.rs:813:5: replace message_timestamp -> u64 with 1
+src/context.rs:825:5: replace opens_tool_calls -> bool with false
+src/context.rs:840:5: replace safe_head_end -> usize with 1
+src/context.rs:840:15: replace > with < in safe_head_end
+src/context.rs:840:15: replace > with == in safe_head_end
+src/context.rs:840:15: replace > with >= in safe_head_end
+src/context.rs:841:13: replace -= with /= in safe_head_end
+src/context.rs:841:13: replace -= with += in safe_head_end
+src/context.rs:849:17: replace < with > in safe_tail_start
+src/context.rs:850:15: replace += with -= in safe_tail_start
+src/context.rs:858:17: replace > with >= in safe_turn_start
+src/context.rs:859:15: replace -= with += in safe_turn_start
+src/context.rs:880:17: replace >= with < in level3_drop_middle
+src/context.rs:902:23: replace - with / in level3_drop_middle
+src/context.rs:902:23: replace - with + in level3_drop_middle
+src/context.rs:918:30: replace > with >= in level3_drop_middle
+src/context.rs:935:19: replace > with >= in keep_within_budget
+src/context.rs:938:19: replace -= with /= in keep_within_budget
+src/context.rs:946:14: replace > with >= in keep_within_budget
+src/context.rs:1009:9: replace ExecutionLimits::with_max_turns -> Self with Default::default()
+src/context.rs:1043:5: replace signature_hash -> u64 with 0
+src/context.rs:1043:5: replace signature_hash -> u64 with 1
+src/context.rs:1044:7: replace ^= with &= in signature_hash
+src/context.rs:1044:7: replace ^= with |= in signature_hash
+src/context.rs:1181:30: replace > with >= in ExecutionTracker::record_tool_calls
+src/llm_compaction.rs:367:5: replace safe_head_boundary -> usize with 1
+src/llm_compaction.rs:403:9: replace Phase::is_idle -> bool with true
+src/llm_compaction.rs:474:9: replace InflightGuard::disarm with ()
+src/llm_compaction.rs:551:9: replace <impl Drop for LlmCompaction>::drop with ()
+src/llm_compaction.rs:630:20: replace != with == in LlmCompaction::with_trigger_ratio
+src/llm_compaction.rs:675:19: replace < with <= in LlmCompaction::with_max_summary_tokens
+src/llm_compaction.rs:675:19: replace < with == in LlmCompaction::with_max_summary_tokens
+src/llm_compaction.rs:675:19: replace < with > in LlmCompaction::with_max_summary_tokens
+src/llm_compaction.rs:737:9: replace LlmCompaction::summary_cost -> Option<f64> with None
+src/llm_compaction.rs:764:19: replace > with >= in LlmCompaction::choose_cut
+src/llm_compaction.rs:764:45: replace < with <= in LlmCompaction::choose_cut
+src/llm_compaction.rs:773:16: replace > with >= in LlmCompaction::choose_cut
+src/llm_compaction.rs:773:34: replace - with / in LlmCompaction::choose_cut
+src/llm_compaction.rs:773:34: replace - with + in LlmCompaction::choose_cut
+src/llm_compaction.rs:780:41: replace < with <= in LlmCompaction::choose_cut
+src/llm_compaction.rs:780:63: replace + with - in LlmCompaction::choose_cut
+src/llm_compaction.rs:780:63: replace + with * in LlmCompaction::choose_cut
+src/llm_compaction.rs:872:16: delete ! in LlmCompaction::spawn_summarize
+src/llm_compaction.rs:912:13: delete field enabled from struct CacheConfig expression in LlmCompaction::spawn_summarize
+src/llm_compaction.rs:998:13: delete field system_prompt_tokens from struct ContextConfig expression in LlmCompaction::shrink_tail
+src/llm_compaction.rs:1082:48: replace < with > in summarize
+src/llm_compaction.rs:1090:76: replace + with - in summarize
+src/llm_compaction.rs:1090:76: replace + with * in summarize
+src/llm_compaction.rs:1100:20: replace < with > in summarize
+src/llm_compaction.rs:1101:64: replace + with - in summarize
+src/llm_compaction.rs:1101:64: replace + with * in summarize
+src/llm_compaction.rs:1151:17: replace > with >= in <impl CompactionStrategy for LlmCompaction>::compact
+src/llm_compaction.rs:1165:49: replace - with / in <impl CompactionStrategy for LlmCompaction>::compact
+src/llm_compaction.rs:1165:49: replace - with + in <impl CompactionStrategy for LlmCompaction>::compact
+src/llm_compaction.rs:1168:46: replace > with >= in <impl CompactionStrategy for LlmCompaction>::compact
+src/llm_compaction.rs:1170:50: replace > with >= in <impl CompactionStrategy for LlmCompaction>::compact
+src/llm_compaction.rs:1252:17: replace > with >= in <impl CompactionStrategy for LlmCompaction>::compact
+src/llm_compaction.rs:1286:19: replace <= with > in clip
+src/llm_compaction.rs:1291:15: replace > with < in clip
+src/llm_compaction.rs:1291:15: replace > with == in clip
+src/llm_compaction.rs:1291:15: replace > with >= in clip
+src/llm_compaction.rs:1291:19: replace && with || in clip
+src/llm_compaction.rs:1292:13: replace -= with /= in clip
+src/llm_compaction.rs:1292:13: replace -= with += in clip
+src/llm_compaction.rs:1327:25: delete match arm Content::Image{..} in serialize_transcript
+src/llm_compaction.rs:1335:25: delete match arm Content::Text{text} in serialize_transcript
+src/llm_compaction.rs:1340:25: delete match arm Content::ToolCall{name, arguments, ..} in serialize_transcript
+src/llm_compaction.rs:1346:25: delete match arm Content::Thinking{..} in serialize_transcript
+src/llm_compaction.rs:1383:5: replace assistant_usage -> Usage with Default::default()
+src/llm_compaction.rs:1384:9: delete match arm Message::Assistant{usage, ..} in assistant_usage
+src/provider/model.rs:215:9: replace ContextTier::is_configured -> bool with true
+src/provider/model.rs:215:32: replace != with == in ContextTier::is_configured
+src/provider/model.rs:216:13: replace || with && in ContextTier::is_configured
+src/provider/model.rs:216:40: replace != with == in ContextTier::is_configured
+src/provider/model.rs:217:13: replace || with && in ContextTier::is_configured
+src/provider/model.rs:217:44: replace != with == in ContextTier::is_configured
+src/provider/model.rs:218:13: replace || with && in ContextTier::is_configured
+src/provider/model.rs:218:45: replace != with == in ContextTier::is_configured
+src/provider/model.rs:504:5: replace warn_effort_clamp with ()
+src/provider/model.rs:601:13: delete field supports_usage_in_streaming from struct Self expression in OpenAiCompat::openai
+src/provider/model.rs:617:13: delete field supports_usage_in_streaming from struct Self expression in OpenAiCompat::meta
+src/provider/model.rs:644:13: delete field supports_usage_in_streaming from struct Self expression in OpenAiCompat::xai
+src/provider/model.rs:653:9: replace OpenAiCompat::groq -> Self with Default::default()
+src/provider/model.rs:654:13: delete field supports_usage_in_streaming from struct Self expression in OpenAiCompat::groq
+src/provider/model.rs:661:9: replace OpenAiCompat::cerebras -> Self with Default::default()
+src/provider/model.rs:666:9: replace OpenAiCompat::openrouter -> Self with Default::default()
+src/provider/model.rs:667:13: delete field supports_usage_in_streaming from struct Self expression in OpenAiCompat::openrouter
+src/provider/model.rs:668:13: delete field max_tokens_field from struct Self expression in OpenAiCompat::openrouter
+src/provider/model.rs:675:9: replace OpenAiCompat::mistral -> Self with Default::default()
+src/provider/model.rs:676:13: delete field supports_usage_in_streaming from struct Self expression in OpenAiCompat::mistral
+src/provider/model.rs:677:13: delete field max_tokens_field from struct Self expression in OpenAiCompat::mistral
+src/provider/model.rs:687:13: delete field supports_usage_in_streaming from struct Self expression in OpenAiCompat::deepseek
+src/provider/model.rs:688:13: delete field max_tokens_field from struct Self expression in OpenAiCompat::deepseek
+src/provider/model.rs:696:9: replace OpenAiCompat::zai -> Self with Default::default()
+src/provider/model.rs:697:13: delete field supports_usage_in_streaming from struct Self expression in OpenAiCompat::zai
+src/provider/model.rs:704:9: replace OpenAiCompat::minimax -> Self with Default::default()
+src/provider/model.rs:705:13: delete field supports_usage_in_streaming from struct Self expression in OpenAiCompat::minimax
+src/provider/model.rs:713:13: delete field supports_usage_in_streaming from struct Self expression in OpenAiCompat::qwen
+src/provider/model.rs:714:13: delete field max_tokens_field from struct Self expression in OpenAiCompat::qwen
+src/provider/model.rs:856:47: replace < with > in claude_version::leading_digits
+src/provider/model.rs:1283:13: delete field max_tokens from struct Self expression in ModelConfig::claude_fable_5
+src/provider/model.rs:1396:13: delete field max_tokens from struct Self expression in ModelConfig::claude_opus_4_8
+src/provider/model.rs:1409:13: delete field context_window from struct Self expression in ModelConfig::claude_sonnet_5
+src/provider/model.rs:1410:13: delete field max_tokens from struct Self expression in ModelConfig::claude_sonnet_5
+src/provider/model.rs:1426:13: delete field context_window from struct Self expression in ModelConfig::claude_haiku_4_5
+src/provider/model.rs:1427:13: delete field max_tokens from struct Self expression in ModelConfig::claude_haiku_4_5
+src/provider/model.rs:1467:13: delete field reasoning from struct Self expression in ModelConfig::gpt_5_5
+src/provider/model.rs:1469:13: delete field max_tokens from struct Self expression in ModelConfig::gpt_5_5
+src/provider/model.rs:1569:13: delete field reasoning from struct Self expression in ModelConfig::gpt_6
+src/provider/model.rs:1571:13: delete field max_tokens from struct Self expression in ModelConfig::gpt_6
+src/provider/prices.rs:403:38: replace || with && in is_iso_date
+src/provider/prices.rs:640:17: delete match arm (None, None) in diff_tables
+src/provider/prices.rs:721:5: replace describe -> String with "xyzzy".into()
+src/provider/prices.rs:721:5: replace describe -> String with String::new()
+src/provider/prices.rs:728:8: delete ! in describe
+src/provider/prices.rs:735:5: replace describe_tiers -> String with "xyzzy".into()
+src/provider/prices.rs:735:5: replace describe_tiers -> String with String::new()
+src/provider/prices.rs:777:5: replace is_zero -> bool with false
+src/provider/prices.rs:781:5: replace is_false -> bool with false
+```
+
+</details>
+
 ## Reading a scheduled run
 
 The workflow summary lists every missed mutant. For each one:
