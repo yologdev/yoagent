@@ -218,7 +218,7 @@ effective     = clamp( min(target / budget, compact_target_ratio), MIN_HEADROOM_
 - `turns` — `compact_headroom_turns`, how many more turns you want before the next compaction (default 30)
 - `growth_per_turn` — mean tokens added per turn, measured by the agent loop
 - `compact_target_ratio` — a **ceiling on retention**: the policy may compact harder than the ratio, never softer
-- `MIN_HEADROOM_RATIO` (0.15) — a floor, so runaway growth cannot ask compaction to discard everything
+- `MIN_HEADROOM_RATIO` (0.30; 0.15 before 0.22) — a floor, so runaway growth cannot ask compaction to discard everything. It was raised because compacting to 15% of the budget dropped the opening task prompt in most tool-heavy compactions; see [Compaction defaults](../evals/compaction-defaults.md)
 
 One interpretable knob — *how often am I willing to compact* — that behaves the same at turn 50 and turn 2400, and self-adjusts to workload: an agent producing huge tool output gets compacted harder automatically. It is also self-limiting; on short sessions where compaction is already rare, the derived ratio ties the fixed one and nothing changes.
 
@@ -248,7 +248,7 @@ Replaying a 2400-turn session at a 1:10 cache-to-input price ratio:
 
 The 4% that is *not* proportional is the genuinely free part, and it comes from compacting less often rather than from retaining less.
 
-**Above roughly 60 the setting stops doing anything.** The derived ratio hits [`MIN_HEADROOM_RATIO`] (0.15) and clamps, so 60, 80, 100 and 140 produce byte-identical runs. To compact harder than that, lower `compact_target_ratio` — it is the ceiling the headroom policy is capped by, not an independent knob.
+**Above roughly 60 the setting stops doing anything.** (These runs predate 0.22 and used the old 0.15 floor; with today's 0.30 floor the clamp is reached at a lower setting.) The derived ratio hits [`MIN_HEADROOM_RATIO`] and clamps, so 60, 80, 100 and 140 produce byte-identical runs. To compact harder than that, lower `compact_target_ratio` — it is the ceiling the headroom policy is capped by, not an independent knob.
 
 **Cheaper cache argues for a smaller context, not a larger one.** The same step from a fixed ratio to headroom 60 saves 19.4% at a 1:4 cache-to-input ratio and 26.0% at 1:50. That reads backwards until you notice that once cached tokens are nearly free per token, they dominate the *count* — and you are re-sending them on every request. Vendor ratios in practice run from about 1:10 to 1:50, so the payoff for a smaller working context is larger than a 1:4 assumption would suggest.
 

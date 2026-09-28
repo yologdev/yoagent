@@ -4,6 +4,26 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Changed
+
+- **Behaviour change: `MIN_HEADROOM_RATIO` is 0.30 (was 0.15).** It is the
+  lowest ratio of the context budget the headroom policy may compact to. For
+  tool-heavy sessions the policy's "leave room for 30 turns" demand exceeds
+  the budget and pins compaction to this floor. At 0.15 that dropped the
+  opening task prompt in 91% of compactions at the default 96K budget (and
+  the latest request in 41%). At 0.30 it is 0% and 2%, for about 7% more input
+  tokens per request and no measurable change in compaction count or
+  prefix-cache hit rate. Measured offline against the real compaction code
+  with `examples/compaction_sweep` (#164, #150; see
+  `docs/evals/compaction-defaults.md`); live cache hit rates are unconfirmed.
+  Small budgets (around 26K) can still collapse, because the newest turn
+  alone can exceed any target. With the headroom policy on, the floor also
+  applies when `compact_target_ratio` is set below 0.30, so such a config now
+  compacts to 0.30. To compact harder, set `compact_headroom_turns: None`:
+  compaction then uses `compact_target_ratio` unfloored.
+
 ## 0.21.0
 
 ### Added
