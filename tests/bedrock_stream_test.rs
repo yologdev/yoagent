@@ -642,10 +642,10 @@ async fn reasoning_with_signature_is_accumulated_and_replayed() {
 /// chunk per piece with a pause between, so the client sees the body in
 /// those pieces. `complete = false` drops the connection without the final
 /// chunk.
-async fn serve_chunked(pieces: Vec<Vec<u8>>, complete: bool) -> String {
+async fn serve_chunked(pieces: Vec<Vec<u8>>, complete: bool) -> ChunkedServer {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         let (mut sock, _) = listener.accept().await.unwrap();
         // Read the request: headers, then Content-Length bytes of body.
         let mut req = Vec::new();
@@ -685,7 +685,34 @@ async fn serve_chunked(pieces: Vec<Vec<u8>>, complete: bool) -> String {
         }
         sock.shutdown().await.ok();
     });
-    format!("http://{addr}")
+    ChunkedServer {
+        base: format!("http://{addr}"),
+        handle,
+    }
+}
+
+struct ChunkedServer {
+    base: String,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl ChunkedServer {
+    /// Wait for the server task, so a panic in it surfaces as itself and a
+    /// hung accept cannot hang the suite.
+    async fn join(self) {
+        tokio::time::timeout(std::time::Duration::from_secs(10), self.handle)
+            .await
+            .expect("raw-socket test server hung")
+            .expect("raw-socket test server panicked");
+    }
+}
+
+/// Run one request against a raw-socket server and join it.
+async fn run_chunked(pieces: Vec<Vec<u8>>, complete: bool) -> Result<Message, ProviderError> {
+    let server = serve_chunked(pieces, complete).await;
+    let (result, _) = run_with_events(&server.base).await;
+    server.join().await;
+    result
 }
 
 fn split_at_offsets(body: &[u8], offsets: &[usize]) -> Vec<Vec<u8>> {
@@ -699,8 +726,12 @@ fn split_at_offsets(body: &[u8], offsets: &[usize]) -> Vec<Vec<u8>> {
     pieces
 }
 
-/// Frames split inside a prelude, inside a header, and inside a multi-byte
-/// UTF-8 character still decode — and the character is not corrupted.
+/// Smoke test of the real HTTP path: the body arrives in chunks that split
+/// frames inside a prelude, inside headers and between the bytes of a
+/// multi-byte character, and still decodes. (A split character is harmless
+/// by construction — payloads are only decoded from complete frames; the
+/// proof that *every* split point works is the every-chunk-size unit tests
+/// in `bedrock.rs` and `eventstream.rs`.)
 #[tokio::test]
 async fn frames_split_across_network_chunks_at_awkward_offsets() {
     let frames = [
@@ -729,10 +760,9 @@ async fn frames_split_across_network_chunks_at_awkward_offsets() {
         utf8 + 2,
         f0 + frames[1].len() + 1,
     ];
-    let base = serve_chunked(split_at_offsets(&body, &offsets), true).await;
-
-    let (result, _) = run_with_events(&base).await;
-    let msg = result.unwrap();
+    let msg = run_chunked(split_at_offsets(&body, &offsets), true)
+        .await
+        .unwrap();
     let (content, stop, ..) = parts(&msg);
     assert_eq!(stop, StopReason::ToolUse);
     assert!(
@@ -755,8 +785,7 @@ async fn connection_dropped_mid_stream_is_an_error() {
     ]
     .concat();
     let cut = body.len() - 10;
-    let base = serve_chunked(vec![body[..cut].to_vec()], false).await;
-    let (result, _) = run_with_events(&base).await;
+    let result = run_chunked(vec![body[..cut].to_vec()], false).await;
     assert!(
         matches!(result, Err(ProviderError::Network(_))),
         "{result:?}"
@@ -770,10 +799,10 @@ async fn connection_dropped_mid_stream_is_an_error() {
 #[tokio::test]
 async fn crc_mismatch_is_an_error() {
     let mut body = text_response("hello");
-    // Flip one payload byte of the second frame; its message CRC no longer
-    // matches.
-    let first_len = message_start().len();
-    body[first_len + 60] ^= 0x01;
+    // Flip a byte inside the second frame's JSON payload (10 bytes before
+    // its trailing CRC); its message CRC no longer matches.
+    let end_of_second = message_start().len() + text(0, "hello").len();
+    body[end_of_second - 10] ^= 0x01;
     let result = run(body).await;
     let err = result.expect_err("a corrupted frame must fail the turn");
     assert!(err.to_string().contains("checksum"), "{err}");
@@ -814,7 +843,12 @@ async fn empty_body_is_an_error_not_an_empty_turn() {
 async fn json_lines_body_is_an_error() {
     let body = b"{\"contentBlockDelta\":{\"delta\":{\"text\":\"hi\"},\"contentBlockIndex\":0}}\n{\"messageStop\":{\"stopReason\":\"end_turn\"}}\n".to_vec();
     let result = run(body).await;
-    assert!(result.is_err(), "{result:?}");
+    // Rejected by the framing layer: the first 12 bytes are not a prelude
+    // with a matching CRC.
+    match result {
+        Err(ProviderError::Other(m)) => assert!(m.contains("prelude checksum"), "{m}"),
+        other => panic!("expected a framing error, got {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -915,4 +949,401 @@ async fn json_success_body_is_an_error() {
         .await;
     let (result, _) = run_with_events(&server.uri()).await;
     assert!(matches!(result, Err(ProviderError::Api(_))), "{result:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Review round: redacted reasoning, completeness, dropped content, protocol
+// ---------------------------------------------------------------------------
+
+/// A reasoning block that is only `redactedContent` is kept as a redacted
+/// thinking block and replayed as `redactedContent` — never as an empty
+/// `reasoningText` with an empty signature, which Bedrock rejects.
+#[tokio::test]
+async fn redacted_reasoning_is_kept_and_replayed() {
+    // Two deltas: the bytes are concatenated, not the base64 strings.
+    let first = [
+        message_start(),
+        reasoning(0, json!({"redactedContent": "AAEC"})), // 00 01 02
+        reasoning(0, json!({"redactedContent": "AwQ="})), // 03 04
+        block_stop(0),
+        text(1, "Reading."),
+        block_stop(1),
+        tool_start(2, "t1", "read_file"),
+        tool_input(2, "{\"path\":\"x\"}"),
+        block_stop(2),
+        message_stop("tool_use"),
+        small_usage(),
+    ]
+    .concat();
+
+    let msg = run(first.clone()).await.unwrap();
+    let (content, ..) = parts(&msg);
+    assert_eq!(content[0], Content::thinking_redacted("AAECAwQ="));
+    // The text next to it keeps its own block and index.
+    assert!(matches!(&content[1], Content::Text { text } if text == "Reading."));
+
+    let (ran, _, server) = run_agent(first, text_response("done")).await;
+    assert_eq!(ran, vec![json!({"path": "x"})]);
+    let requests = server.received_requests().await.unwrap();
+    let body: Value = serde_json::from_slice(&requests[1].body).unwrap();
+    let replayed = &body["messages"][1]["content"];
+    assert_eq!(
+        replayed[0],
+        json!({"reasoningContent": {"redactedContent": "AAECAwQ="}})
+    );
+    assert_eq!(replayed[1], json!({"text": "Reading."}));
+    assert!(
+        !body.to_string().contains("\"signature\":\"\""),
+        "no empty signature may be sent: {body}"
+    );
+}
+
+/// Signature deltas are appended (a delta union member, like text).
+#[tokio::test]
+async fn signature_deltas_are_appended() {
+    let body = [
+        message_start(),
+        reasoning(0, json!({"text": "hmm"})),
+        reasoning(0, json!({"signature": "sig-a"})),
+        reasoning(0, json!({"signature": "sig-b"})),
+        block_stop(0),
+        text(1, "ok"),
+        block_stop(1),
+        message_stop("end_turn"),
+        small_usage(),
+    ]
+    .concat();
+    let msg = run(body).await.unwrap();
+    assert_eq!(
+        parts(&msg).0[0],
+        Content::thinking_signed("hmm", "sig-asig-b")
+    );
+}
+
+/// Once `messageStop` and `metadata` have arrived the response is complete:
+/// a connection that then drops (cleanly or mid-frame) keeps it rather than
+/// failing into a re-billed retry.
+#[tokio::test]
+async fn drop_after_a_complete_response_keeps_it() {
+    let complete = text_response("all here");
+    // Drop without the terminating chunk.
+    let msg = run_chunked(vec![complete.clone()], false).await.unwrap();
+    assert!(matches!(&parts(&msg).0[0], Content::Text { text } if text == "all here"));
+    // Half a trailing frame, then a clean end of body.
+    let mut body = complete.clone();
+    body.extend_from_slice(&text(0, "extra")[..10]);
+    let msg = run(body).await.unwrap();
+    assert_eq!(parts(&msg).1, StopReason::Stop);
+    // Half a trailing frame, then a dropped connection.
+    let mut body = complete;
+    body.extend_from_slice(&text(0, "extra")[..10]);
+    let msg = run_chunked(vec![body], false).await.unwrap();
+    assert_eq!(parts(&msg).2.total_tokens, 5);
+}
+
+/// `messageStop` alone is not complete: a drop before `metadata` is still an
+/// error (usage would be unknown).
+#[tokio::test]
+async fn drop_before_metadata_is_an_error() {
+    let mut body = [
+        message_start(),
+        text(0, "hi"),
+        block_stop(0),
+        message_stop("end_turn"),
+    ]
+    .concat();
+    body.extend_from_slice(&small_usage()[..10]);
+    let result = run_chunked(vec![body], false).await;
+    assert!(
+        matches!(result, Err(ProviderError::Network(_))),
+        "{result:?}"
+    );
+}
+
+/// A stream that ends cleanly after `messageStop` without `metadata` is a
+/// finished turn with zero usage, as the other providers report it.
+#[tokio::test]
+async fn message_stop_without_metadata_reports_zero_usage() {
+    let body = [
+        message_start(),
+        text(0, "hi"),
+        block_stop(0),
+        message_stop("end_turn"),
+    ]
+    .concat();
+    let msg = run(body).await.unwrap();
+    assert_eq!(*parts(&msg).2, Usage::default());
+}
+
+/// The last `metadata` event wins.
+#[tokio::test]
+async fn last_metadata_wins() {
+    let body = [
+        message_start(),
+        text(0, "hi"),
+        message_stop("end_turn"),
+        metadata(json!({"inputTokens": 1, "outputTokens": 1, "totalTokens": 2})),
+        metadata(json!({"inputTokens": 9, "outputTokens": 4, "totalTokens": 13})),
+    ]
+    .concat();
+    let msg = run(body).await.unwrap();
+    assert_eq!(parts(&msg).2.input, 9);
+    assert_eq!(parts(&msg).2.total_tokens, 13);
+}
+
+/// Fields the provider does not need may be missing without failing a
+/// finished turn.
+#[tokio::test]
+async fn unneeded_fields_may_be_missing() {
+    let body = [
+        event("messageStart", json!({})),
+        text(0, "hi"),
+        message_stop("end_turn"),
+        metadata(json!({"inputTokens": 2, "outputTokens": 3})),
+    ]
+    .concat();
+    let msg = run(body).await.unwrap();
+    assert_eq!(parts(&msg).2.input, 2);
+    assert_eq!(parts(&msg).2.total_tokens, 0);
+}
+
+/// A server-side tool (`type: server_tool_use`) runs on AWS's side: it is
+/// not surfaced as a tool call and nothing executes locally; the text block
+/// after it keeps index 0.
+#[tokio::test]
+async fn server_side_tool_use_is_not_executed() {
+    let first = [
+        message_start(),
+        event(
+            "contentBlockStart",
+            json!({"contentBlockIndex": 0, "start": {"toolUse": {"toolUseId": "s1", "name": "read_file", "type": "server_tool_use"}}}),
+        ),
+        tool_input(0, "{\"path\":\"secret\"}"),
+        block_stop(0),
+        event(
+            "contentBlockStart",
+            json!({"contentBlockIndex": 1, "start": {"toolResult": {"toolUseId": "s1"}}}),
+        ),
+        block_stop(1),
+        text(2, "The answer."),
+        block_stop(2),
+        message_stop("end_turn"),
+        small_usage(),
+    ]
+    .concat();
+    let msg = run(first.clone()).await.unwrap();
+    let (content, stop, ..) = parts(&msg);
+    assert_eq!(stop, StopReason::Stop);
+    assert_eq!(content.len(), 1, "{content:?}");
+    assert!(matches!(&content[0], Content::Text { text } if text == "The answer."));
+
+    let (ran, messages, _server) = run_agent(first, text_response("unused")).await;
+    assert!(ran.is_empty(), "{ran:?}");
+    assert!(tool_results(&messages).is_empty());
+}
+
+/// A refusal or an error stop after a complete tool block keeps its verdict
+/// and the tool is not run.
+#[tokio::test]
+async fn refusal_or_error_after_a_tool_block_is_not_run() {
+    for (reason, expected) in [
+        ("guardrail_intervened", StopReason::Refusal),
+        ("malformed_tool_use", StopReason::Error),
+    ] {
+        let first = [
+            message_start(),
+            tool_start(0, "t", "read_file"),
+            tool_input(0, "{\"path\":\"a\"}"),
+            block_stop(0),
+            message_stop(reason),
+            small_usage(),
+        ]
+        .concat();
+        let msg = run(first.clone()).await.unwrap();
+        assert_eq!(parts(&msg).1, expected, "{reason}");
+        let (ran, _, _server) = run_agent(first, text_response("unused")).await;
+        assert!(ran.is_empty(), "{reason}: tool ran with {ran:?}");
+    }
+}
+
+/// An unmodeled error frame (`:message-type: error`, name in `:error-code`).
+#[tokio::test]
+async fn error_frame_with_throttling_code_is_a_rate_limit() {
+    let body = [
+        message_start(),
+        text(0, "partial"),
+        frame(
+            &[
+                (":message-type", "error"),
+                (":error-code", "ThrottlingException"),
+                (":error-message", "Rate exceeded"),
+            ],
+            b"",
+        ),
+    ]
+    .concat();
+    let result = run(body).await;
+    assert!(
+        matches!(result, Err(ProviderError::RateLimited { .. })),
+        "{result:?}"
+    );
+}
+
+/// Protocol violations are errors, not guesses.
+#[tokio::test]
+async fn protocol_violations_are_errors() {
+    let cases: Vec<(&str, Vec<u8>)> = vec![
+        (
+            "delta after stop",
+            [message_start(), text(0, "a"), block_stop(0), text(0, "b")].concat(),
+        ),
+        (
+            "duplicate start",
+            [
+                message_start(),
+                tool_start(0, "a", "read_file"),
+                tool_start(0, "b", "read_file"),
+            ]
+            .concat(),
+        ),
+        (
+            "tool delta without start",
+            [message_start(), tool_input(0, "{}")].concat(),
+        ),
+        (
+            "kind mismatch",
+            [
+                message_start(),
+                text(0, "a"),
+                reasoning(0, json!({"text": "b"})),
+            ]
+            .concat(),
+        ),
+    ];
+    for (name, mut body) in cases {
+        body.extend(message_stop("end_turn"));
+        body.extend(small_usage());
+        let result = run(body).await;
+        assert!(
+            matches!(result, Err(ProviderError::Other(ref m)) if m.contains("Bedrock stream")),
+            "{name}: {result:?}"
+        );
+    }
+}
+
+/// An unclosed tool block still closes its lifecycle with `ToolCallEnd`.
+#[tokio::test]
+async fn unclosed_tool_block_emits_tool_call_end() {
+    let body = [
+        message_start(),
+        text(0, "x"),
+        tool_start(1, "t", "read_file"),
+        tool_input(1, "{\"pa"),
+        message_stop("max_tokens"),
+        small_usage(),
+    ]
+    .concat();
+    let server = serve(body).await;
+    let (result, events) = run_with_events(&server.uri()).await;
+    result.unwrap();
+    let ends: Vec<usize> = events
+        .iter()
+        .filter_map(|e| match e {
+            StreamEvent::ToolCallEnd { content_index } => Some(*content_index),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ends, vec![1]);
+}
+
+/// Forward compatibility: an unknown event type, an unknown `start` member
+/// and a not-surfaced delta member do not fail the turn or shift indices,
+/// and a block whose start was unrecognised is typed by its first delta.
+#[tokio::test]
+async fn unknown_members_and_events_are_skipped() {
+    let body = [
+        message_start(),
+        event("someFutureEvent", json!({"data": 1})),
+        event(
+            "contentBlockStart",
+            json!({"contentBlockIndex": 0, "start": {"futureThing": {"a": 1}}}),
+        ),
+        text(0, "typed by its delta"),
+        block_stop(0),
+        event(
+            "contentBlockStart",
+            json!({"contentBlockIndex": 1, "start": {"image": {"format": "png"}}}),
+        ),
+        event(
+            "contentBlockDelta",
+            json!({"contentBlockIndex": 1, "delta": {"image": {"source": {}}}}),
+        ),
+        block_stop(1),
+        event(
+            "contentBlockDelta",
+            json!({"contentBlockIndex": 2, "delta": {"citation": {"title": "x"}}}),
+        ),
+        text(3, "after"),
+        block_stop(3),
+        message_stop("end_turn"),
+        small_usage(),
+    ]
+    .concat();
+    let server = serve(body).await;
+    let (result, events) = run_with_events(&server.uri()).await;
+    let msg = result.unwrap();
+    let (content, ..) = parts(&msg);
+    assert_eq!(content.len(), 2, "{content:?}");
+    assert!(matches!(&content[0], Content::Text { text } if text == "typed by its delta"));
+    assert!(matches!(&content[1], Content::Text { text } if text == "after"));
+    let indices: Vec<usize> = events
+        .iter()
+        .filter_map(|e| match e {
+            StreamEvent::TextDelta { content_index, .. } => Some(*content_index),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(indices, vec![0, 1]);
+}
+
+/// `x-amzn-ErrorType` names the error in the message.
+#[tokio::test]
+async fn http_error_names_the_aws_error_type() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(403)
+                .insert_header("x-amzn-ErrorType", "AccessDeniedException:http://x/")
+                .set_body_json(json!({"message": "not allowed"})),
+        )
+        .mount(&server)
+        .await;
+    let (result, _) = run_with_events(&server.uri()).await;
+    match result {
+        Err(ProviderError::Auth(m)) => assert!(
+            m.contains("AccessDeniedException") && m.contains("not allowed"),
+            "{m}"
+        ),
+        other => panic!("expected Auth, got {other:?}"),
+    }
+}
+
+/// A 200 with some other declared content type reports its body.
+#[tokio::test]
+async fn non_eventstream_content_type_reports_the_body() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw("<html>gateway says no</html>", "text/html"),
+        )
+        .mount(&server)
+        .await;
+    let (result, _) = run_with_events(&server.uri()).await;
+    match result {
+        Err(ProviderError::Api(m)) => assert!(
+            m.contains("text/html") && m.contains("gateway says no"),
+            "{m}"
+        ),
+        other => panic!("expected Api, got {other:?}"),
+    }
 }
