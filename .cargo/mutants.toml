@@ -68,4 +68,13 @@ exclude_re = [
     # cargo-mutants can generate.
     '<impl std::fmt::Debug for ModelConfig>::fmt -> std::fmt::Result with Ok\(Default::default\(\)\)',
     '<impl std::fmt::Debug for LlmCompaction>::fmt -> std::fmt::Result with Ok\(Default::default\(\)\)',
+    # Not survivors: these KILL THE CI RUNNER. `level2_summarize_old_turns`
+    # advances with `i += 1` and pushes a summary or a cloned message on every
+    # step. Turning any of its four increments into `-=` or `*=` makes the loop
+    # revisit a message forever, pushing each time, so the test process grows
+    # until the 16 GB runner is shut down ("The runner has received a shutdown
+    # signal") before cargo-mutants' 60 s test timeout fires. That lost 4 of 8
+    # shards in each of the first two CI runs. Any test that reaches level 2
+    # would hang on them, so they are detected, not missed.
+    'src/context.rs:\d+:\d+: replace \+= with (-=|\*=) in level2_summarize_old_turns',
 ]

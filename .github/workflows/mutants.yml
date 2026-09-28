@@ -52,19 +52,13 @@ jobs:
       matrix:
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
-      # The first dispatched run lost 4 of 8 shards to "The runner has received
-      # a shutdown signal" 69-109 min in, with no error from cargo-mutants.
-      # Each of the 2 jobs builds its own all-features tree (~2-3 GB, growing
-      # with incremental rebuilds) on a runner with ~14 GB free, so disk is the
-      # likely cause. Free the preinstalled toolchains this job never uses
-      # (~20 GB) and log disk and memory, so a repeat names its cause.
-      - name: Free disk space
-        run: |
-          df -h / && free -m
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
-            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
-          sudo docker image prune --all --force >/dev/null 2>&1 || true
-          df -h /
+      # Logged so a runner that dies mid-run leaves evidence. The first two
+      # dispatched runs lost 4 of 8 shards to "The runner has received a
+      # shutdown signal" with ~86 GB of disk free; the cause was mutants in
+      # `level2_summarize_old_turns` that turn the loop into an endless
+      # allocation (now excluded in `.cargo/mutants.toml`), not disk.
+      - name: Disk and memory before the run
+        run: df -h / && free -m
 
       - uses: actions/checkout@v4
         with:

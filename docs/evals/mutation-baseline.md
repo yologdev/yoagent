@@ -138,9 +138,18 @@ mutants in 2.2–3.3 h, inside the 320 min cap.
 
 **The other four (0, 3, 6, 7) were lost.** Each one received "The runner has
 received a shutdown signal" 69–109 min in, with no error from cargo-mutants.
-Disk exhaustion is the likely cause: two all-features build trees on about
-14 GB free. The workflow now frees the unused preinstalled toolchains before
-building, and logs disk and memory before and after the run.
+A second run, after freeing about 20 GB of disk, lost the same four shards,
+although the runners had 110 GB free. So disk was not the cause.
+
+The cause was deterministic. `level2_summarize_old_turns` advances with
+`i += 1` and pushes a summary or a cloned message on every step. Mutating
+any of its four increments to `-=` or `*=` makes it revisit a message
+forever, pushing each time. The test process then grows until the 16 GB
+runner is shut down, before cargo-mutants' 60 s timeout fires. Round-robin
+sharding placed those eight mutants in shards 0, 3, 6 and 7. They are now
+excluded in `.cargo/mutants.toml`, with this reason. They are detected
+rather than missed, because any test that reaches level 2 hangs on them.
+With them excluded there are 928 mutants.
 
 ## Reading a scheduled run
 
