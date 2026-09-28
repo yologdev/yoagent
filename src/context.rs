@@ -1237,6 +1237,55 @@ mod tests {
     }
 
     #[test]
+    fn extension_message_token_estimate_includes_message_overhead() {
+        let extension = ExtensionMessage::new("status", serde_json::json!({"state": "ready"}));
+        let expected = estimate_tokens(&extension.data.to_string()) + 4;
+        assert_eq!(
+            message_tokens(&AgentMessage::Extension(extension)),
+            expected
+        );
+    }
+
+    #[test]
+    fn level2_summary_keeps_short_assistant_text() {
+        let messages = vec![
+            AgentMessage::Llm(Message::user("request")),
+            AgentMessage::Llm(
+                Message::assistant(
+                    vec![Content::Text {
+                        text: "the parser is ready".into(),
+                    }],
+                    StopReason::Stop,
+                    "test",
+                    "test",
+                    Usage::default(),
+                )
+                .with_timestamp(7),
+            ),
+            AgentMessage::Llm(Message::user("recent")),
+        ];
+
+        let compacted = level2_summarize_old_turns(&messages, 1);
+        assert!(matches!(
+            compacted.get(1),
+            Some(AgentMessage::Llm(Message::User { content, timestamp }))
+                if *timestamp == 7
+                    && content.iter().any(|content| matches!(
+                        content,
+                        Content::Text { text } if text == "[Summary] the parser is ready"
+                    ))
+        ));
+        assert!(matches!(
+            compacted.last(),
+            Some(AgentMessage::Llm(Message::User { content, .. }))
+                if content.iter().any(|content| matches!(
+                    content,
+                    Content::Text { text } if text == "recent"
+                ))
+        ));
+    }
+
+    #[test]
     fn test_context_config_from_context_window() {
         let config = ContextConfig::from_context_window(200_000);
         assert_eq!(config.max_context_tokens, 160_000); // 80% of 200K
@@ -1329,6 +1378,14 @@ mod tests {
                 timestamp: i as u64,
             }),
         ]
+    }
+
+    #[test]
+    fn tool_boundaries_never_split_an_open_call_from_its_result() {
+        let messages = tool_turn(0, 1);
+        assert_eq!(safe_head_end(&messages, 1), 0);
+        assert_eq!(safe_head_end(&messages, 2), 2);
+        assert_eq!(safe_turn_start(&messages, 1), 0);
     }
 
     fn tool_session(turns: usize, output_lines: usize) -> Vec<AgentMessage> {
