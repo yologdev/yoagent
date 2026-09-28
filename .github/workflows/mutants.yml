@@ -1,0 +1,147 @@
+name: Mutation testing
+
+# cargo-mutants over the modules where a silent failure costs most (#163):
+# context/compaction, the loop, LlmCompaction and pricing. The file list,
+# features, test profile and known-acceptable exclusions live in
+# `.cargo/mutants.toml`; the baseline and the triage of survivors in
+# `docs/evals/mutation-baseline.md`.
+#
+# Deliberately NOT per-PR: ~930 mutants, each an incremental rebuild plus the
+# full test suite, is many runner-hours, and a surviving mutant needs a human to
+# decide whether it is a missing assertion or an equivalent mutation. It is a
+# REPORT: surviving mutants never turn the run red. A broken build, a failing
+# unmutated baseline or a config error does — a report that silently did not
+# run is the failure mode this job exists to catch.
+on:
+  schedule:
+    # Mondays 03:17 UTC — off the hour, when the runner queue is short.
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch or tag to mutate (defaults to the current branch)"
+        required: false
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+  # Bump deliberately, after re-running the baseline locally with the new
+  # version: mutant generation changes between releases, and an unexplained
+  # jump in the missed count should mean the tests changed, not the tool.
+  CARGO_MUTANTS_VERSION: "27.1.0"
+
+permissions:
+  contents: read
+
+jobs:
+  mutants:
+    name: Mutants (shard ${{ matrix.shard }}/8)
+    runs-on: ubuntu-latest
+    # Sharded so each job stays well inside GitHub's 6 h job limit: 928
+    # mutants / 8 shards = 116 per shard. Measured locally: ~55 s per mutant at
+    # -j 2 (≈14 h unsharded); estimated ~2.5 min per mutant per job on a 4-vCPU
+    # runner, so ~2.5–3 h per shard including the cold baseline build. The caps
+    # (job 345 min, the mutants step 320) are below 6 h so a runaway shard still
+    # uploads its partial results; if shards approach them, add shards rather
+    # than raising them. Round-robin sharding spreads each module over all
+    # shards, so one slow module (context.rs) does not make one slow shard.
+    timeout-minutes: 345
+    strategy:
+      # Every shard reports independently; one slow shard must not cancel the rest.
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # cargo-mutants builds in its own copies of the tree, so `./target` is
+      # never reused; this caches the registry and git checkouts only.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-targets: false
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants@${{ env.CARGO_MUTANTS_VERSION }}
+
+      - name: Run cargo-mutants
+        # Step-level cap under the job's, so the upload below still runs.
+        timeout-minutes: 320
+        # Exit codes (https://mutants.rs/exit-codes.html): 0 all caught,
+        # 2 some missed, 3 some timed out — all three are a completed report.
+        # Anything else (1 usage/config error, 4 the unmutated tree fails its
+        # own tests, or a crash) fails the job.
+        run: |
+          set +e
+          cargo mutants --shard ${{ matrix.shard }}/8 --sharding round-robin --jobs 2 --colors never
+          code=$?
+          set -e
+          echo "cargo-mutants exited $code"
+          case "$code" in
+            0|2|3) exit 0 ;;
+            *) echo "::error::cargo-mutants did not complete (exit $code)"; exit "$code" ;;
+          esac
+
+      - name: Upload mutants.out
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-out-shard-${{ matrix.shard }}
+          path: mutants.out
+          if-no-files-found: warn
+          retention-days: 30
+
+  report:
+    name: Mutation report
+    needs: mutants
+    # Summarise whatever the shards produced, including when one of them failed.
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: mutants-out-shard-*
+          path: shards
+
+      - name: Write summary
+        run: |
+          count() { cat shards/*/"$1" 2>/dev/null | grep -c . || true; }
+          missed=$(count missed.txt)
+          caught=$(count caught.txt)
+          timeout=$(count timeout.txt)
+          unviable=$(count unviable.txt)
+          shards=$(find shards -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d " ")
+          {
+            echo "## Mutation testing"
+            echo
+            echo "Shards reporting: ${shards}/8 · cargo-mutants ${{ env.CARGO_MUTANTS_VERSION }}"
+            echo
+            echo "| caught | missed | timeout | unviable |"
+            echo "|---:|---:|---:|---:|"
+            echo "| ${caught} | ${missed} | ${timeout} | ${unviable} |"
+            echo
+            echo "Compare against \`docs/evals/mutation-baseline.md\`: a mutant listed"
+            echo "there as acceptable is not news; anything else below is."
+            echo
+            echo "### Missed mutants (${missed})"
+            echo
+            echo '```'
+            cat shards/*/missed.txt 2>/dev/null | sort -V || true
+            echo '```'
+            if [ "$timeout" -gt 0 ]; then
+              echo
+              echo "### Timeouts (${timeout})"
+              echo
+              echo '```'
+              cat shards/*/timeout.txt 2>/dev/null | sort -V || true
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$shards" -lt 8 ]; then
+            echo "::error::only ${shards} of 8 shards uploaded results"
+            exit 1
+          fi
