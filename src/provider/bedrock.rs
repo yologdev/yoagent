@@ -2284,6 +2284,12 @@ mod tests {
             assert!(m.starts_with("api_key is not a Bedrock API key"), "{m}");
             assert!(!m.contains(SECRET_40) && !m.contains("EXAMPLE"), "{m}");
         }
+        // The reason names what is wrong: a separator between two keys, not
+        // just "odd characters".
+        let m = auth_message(parse_api_key(&format!("AKIAIOSFODNN7EXAMPLE {SECRET_40}")));
+        assert!(m.contains("whitespace"), "{m}");
+        let m = auth_message(parse_api_key("bedrock-api-key-abc\rdef"));
+        assert!(m.contains("control characters"), "{m}");
         // Real key shapes pass: short-term (prefix + base64), long-term
         // (`ABSK` + base64), and an unknown base64 shape (warned, not refused).
         for good in [
