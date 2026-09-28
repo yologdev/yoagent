@@ -12,7 +12,8 @@
 //!
 //! Axes: `repro150` (#150's live compaction log, reproduced offline), `floor`
 //! (`MIN_HEADROOM_RATIO`), `ratio` (`compact_target_ratio`), `keep_recent`,
-//! `keep_first`, `max_lines` (`tool_output_max_lines`), `trigger`
+//! `joint` (`keep_recent` x floor), `keep_first`, `max_lines`
+//! (`tool_output_max_lines`), `trigger`
 //! (`LlmCompaction`'s `trigger_ratio`). Results and verdicts:
 //! `docs/evals/compaction-defaults.md`.
 //!
@@ -93,7 +94,7 @@ fn pct(n: usize, d: usize) -> f64 {
 
 fn header(extra: &str) {
     println!(
-        "  {:<22} {:>7} {:>6} {:>7} {:>7} {:>7} {:>6} {:>6} {:>6} {:>6} {:>5} {:>5}{extra}",
+        "  {:<26} {:>7} {:>6} {:>7} {:>7} {:>7} {:>6} {:>6} {:>6} {:>6} {:>5} {:>5}{extra}",
         "value",
         "cmp/100",
         "hit%",
@@ -119,7 +120,7 @@ fn row(label: &str, budget: usize, m: &Metrics, extra: &str) {
         100.0 * m.after_sum as f64 / m.compactions as f64 / budget as f64
     };
     println!(
-        "  {:<22} {:>7.1} {:>6.1} {:>7.1} {:>7.2} {:>7.1} {:>6.1} {:>6.1} {:>5.0}% {:>5.0}% {:>5} {:>5}{extra}",
+        "  {:<26} {:>7.1} {:>6.1} {:>7.1} {:>7.2} {:>7.1} {:>6.1} {:>6.1} {:>5.0}% {:>5.0}% {:>5} {:>5}{extra}",
         label,
         100.0 * m.compactions as f64 / req,
         pct(m.cached, m.input),
@@ -252,6 +253,30 @@ fn keep_recent_axis() {
         })
         .collect();
     sweep("keep_recent (messages)", v);
+}
+
+/// `keep_recent` under the shipped floor and under a raised one. The two
+/// interact: `keep_recent` sizes the protected tail, and the floor decides
+/// whether the compaction target leaves room for it.
+fn joint_axis() {
+    let d = ContextConfig::default().keep_recent;
+    let mut v: Vec<Variant> = Vec::new();
+    for floor in [None, Some(0.30f32)] {
+        for n in [4usize, 6, 10, 16] {
+            let tag = match floor {
+                None => format!("kr {n} floor {MIN_HEADROOM_RATIO}"),
+                Some(f) => format!("kr {n} floor {f:.2}"),
+            };
+            v.push((
+                mark(tag, n == d && floor.is_none()),
+                Box::new(move |k: &mut Knobs| {
+                    k.keep_recent = n;
+                    k.floor = floor;
+                }),
+            ));
+        }
+    }
+    sweep("keep_recent x MIN_HEADROOM_RATIO", v);
 }
 
 fn keep_first_axis() {
@@ -412,6 +437,9 @@ fn main() {
     }
     if all || axis == "keep_recent" {
         keep_recent_axis();
+    }
+    if all || axis == "joint" {
+        joint_axis();
     }
     if all || axis == "keep_first" {
         keep_first_axis();
