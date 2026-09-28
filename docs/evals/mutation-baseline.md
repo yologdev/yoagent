@@ -16,7 +16,7 @@ coverage: code that runs under test while nothing checks what it does.
 | | |
 |---|---|
 | Config | [`.cargo/mutants.toml`](https://github.com/yologdev/yoagent/blob/main/.cargo/mutants.toml) |
-| CI | [`.github/workflows/mutants.yml`](https://github.com/yologdev/yoagent/blob/main/.github/workflows/mutants.yml): weekly (Mon 03:17 UTC) + manual, 8 round-robin shards |
+| CI | [`.github/workflows/mutants.yml`](https://github.com/yologdev/yoagent/blob/main/.github/workflows/mutants.yml): weekly (Mon 03:17 UTC) + manual, 16 round-robin shards |
 | Scope | `src/context.rs`, `src/agent_loop.rs`, `src/llm_compaction.rs`, `src/provider/model.rs`, `src/provider/prices.rs`, `src/provider/prices/global.rs` |
 | Build | `--all-features`, `--tests` (no doctests or examples), profile `mutants` (test profile, opt-level 1, no debuginfo) |
 | Excluded | the empty-body mutants of the two redacting `Debug` impls (see the config for why) |
@@ -165,8 +165,10 @@ The workflow summary lists every missed mutant. For each one:
 
 **Timing.** Locally the run averaged about 55 s per mutant at `-j 2` after a
 13-minute cold baseline. At that rate a full run is roughly 14 hours on one
-machine. CI splits it into 8 shards of about 116 mutants each. A GitHub
-`ubuntu-latest` runner (4 vCPU) is estimated to need about 2.5 minutes per
-mutant per job, so about 2.5–3 hours per shard including the cold baseline
-build, inside the 330-minute job cap. If shards start approaching the cap, add
-shards rather than raising the timeout.
+machine. The first CI runs, with 8 shards of about 116 mutants, took about
+231 s per mutant (205 s of it building) and 2.2–3.3 hours per shard. The
+build dominated because rust-cache exports `CARGO_INCREMENTAL=0` for the whole
+job, so every mutant rebuilt the crate and relinked every test binary from
+scratch. The workflow now re-enables incremental builds for the mutants step
+and uses 16 shards of about 58 mutants each. If shards start approaching the
+200-minute step cap, add shards rather than raising the timeout.

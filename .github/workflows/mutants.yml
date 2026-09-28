@@ -35,22 +35,23 @@ permissions:
 
 jobs:
   mutants:
-    name: Mutants (shard ${{ matrix.shard }}/8)
+    name: Mutants (shard ${{ matrix.shard }}/16)
     runs-on: ubuntu-latest
-    # Sharded so each job stays well inside GitHub's 6 h job limit: 928
-    # mutants / 8 shards = 116 per shard. Measured locally: ~55 s per mutant at
-    # -j 2 (≈14 h unsharded); estimated ~2.5 min per mutant per job on a 4-vCPU
-    # runner, so ~2.5–3 h per shard including the cold baseline build. The caps
-    # (job 345 min, the mutants step 320) are below 6 h so a runaway shard still
-    # uploads its partial results; if shards approach them, add shards rather
-    # than raising them. Round-robin sharding spreads each module over all
-    # shards, so one slow module (context.rs) does not make one slow shard.
-    timeout-minutes: 345
+    # 928 mutants / 16 shards = 58 per shard, round-robin so one slow module
+    # (context.rs) does not make one slow shard. Measured on the first CI runs
+    # with 8 shards and incremental builds off: ~205 s build + ~26 s test per
+    # mutant, 2.2-3.3 h per shard. The build was the cost: rust-cache sets
+    # CARGO_INCREMENTAL=0 for the whole job, so every mutant rebuilt the crate
+    # and relinked every test binary from scratch (locally, with incremental
+    # on, a mutant takes ~55 s). The mutants step turns incremental back on.
+    # The caps are well below GitHub's 6 h job limit so a runaway shard still
+    # uploads its partial results; if shards approach them, add shards.
+    timeout-minutes: 220
     strategy:
       # Every shard reports independently; one slow shard must not cancel the rest.
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     steps:
       # Logged so a runner that dies mid-run leaves evidence. The first two
       # dispatched runs lost 4 of 8 shards to "The runner has received a
@@ -78,14 +79,20 @@ jobs:
 
       - name: Run cargo-mutants
         # Step-level cap under the job's, so the upload below still runs.
-        timeout-minutes: 320
+        timeout-minutes: 200
+        # rust-cache exports CARGO_INCREMENTAL=0 for the rest of the job, which
+        # suits a one-off CI build but makes every mutant a from-scratch
+        # rebuild. cargo-mutants rebuilds the same tree hundreds of times, which
+        # is exactly what incremental compilation is for.
+        env:
+          CARGO_INCREMENTAL: "1"
         # Exit codes (https://mutants.rs/exit-codes.html): 0 all caught,
         # 2 some missed, 3 some timed out — all three are a completed report.
         # Anything else (1 usage/config error, 4 the unmutated tree fails its
         # own tests, or a crash) fails the job.
         run: |
           set +e
-          cargo mutants --shard ${{ matrix.shard }}/8 --sharding round-robin --jobs 2 --colors never
+          cargo mutants --shard ${{ matrix.shard }}/16 --sharding round-robin --jobs 2 --colors never
           code=$?
           set -e
           echo "cargo-mutants exited $code"
@@ -130,7 +137,7 @@ jobs:
           {
             echo "## Mutation testing"
             echo
-            echo "Shards reporting: ${shards}/8 · cargo-mutants ${{ env.CARGO_MUTANTS_VERSION }}"
+            echo "Shards reporting: ${shards}/16 · cargo-mutants ${{ env.CARGO_MUTANTS_VERSION }}"
             echo
             echo "| caught | missed | timeout | unviable |"
             echo "|---:|---:|---:|---:|"
@@ -153,7 +160,7 @@ jobs:
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
-          if [ "$shards" -lt 8 ]; then
-            echo "::error::only ${shards} of 8 shards uploaded results"
+          if [ "$shards" -lt 16 ]; then
+            echo "::error::only ${shards} of 16 shards uploaded results"
             exit 1
           fi
