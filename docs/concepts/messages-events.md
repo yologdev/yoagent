@@ -76,7 +76,8 @@ pub enum Content {
     Thinking {
         thinking: String,
         signature: Option<String>,
-        redacted: Option<String>, // provider-encrypted reasoning (Bedrock `redactedContent`)
+        redacted: Option<String>, // provider-encrypted reasoning (Anthropic `redacted_thinking`, Bedrock `redactedContent`)
+        redacted_protocol: Option<ApiProtocol>, // the API that produced `redacted`
     },
     ToolCall {
         id: String,
@@ -88,6 +89,11 @@ pub enum Content {
 ```
 
 An assistant message can contain multiple content blocks — e.g., thinking + text + tool calls.
+
+Redacted (encrypted) reasoning is opaque. It is sent back unmodified, and only
+to the API protocol recorded in `redacted_protocol`; every other provider skips
+it. A block without a recorded protocol (a session saved before the field
+existed) is sent nowhere. Both fields are omitted from JSON when `None`.
 
 `Content` is `#[non_exhaustive]` (match with a wildcard arm), and the `ToolCall` and `Thinking` variants are separately `#[non_exhaustive]` — construct them via `Content::tool_call()` / `tool_call_with_metadata()` / `thinking()` / `thinking_signed()` / `thinking_redacted()`. `Message::Assistant` is likewise `#[non_exhaustive]`; custom providers construct it via `Message::assistant()`.
 

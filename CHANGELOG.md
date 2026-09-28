@@ -8,13 +8,19 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- **`Content::Thinking` gains `redacted: Option<String>`** and a
-  `Content::thinking_redacted(data)` constructor, for reasoning a provider
-  returns encrypted instead of as text (Amazon Bedrock's `redactedContent`,
-  base64). The variant is `#[non_exhaustive]`, so this is not a breaking
-  change; the field is omitted from JSON when `None`, so session files and
-  the event wire format are unchanged. It is replayed only to the provider
-  that produced it; the Anthropic provider skips such blocks.
+- **`Content::Thinking` gains `redacted: Option<String>` and
+  `redacted_protocol: Option<ApiProtocol>`**, and a
+  `Content::thinking_redacted(protocol, data)` constructor, for reasoning a
+  provider returns encrypted instead of as text (the Anthropic API's
+  `redacted_thinking` data, Amazon Bedrock's base64 `redactedContent`).
+  `redacted_protocol` records which API produced the payload, and it is
+  replayed only to that API: neither API documents the other's encrypted
+  reasoning as valid, so each provider skips the other's (and a block with no
+  recorded protocol) with a warning. The variant is `#[non_exhaustive]`, so
+  this is not a breaking change; both fields are omitted from JSON when
+  `None` (`redactedProtocol` when present, `redacted_protocol` also
+  accepted), so session files and the event wire format are unchanged for
+  content without redacted reasoning.
 
 ### Changed
 
@@ -35,6 +41,24 @@ adheres to [Semantic Versioning](https://semver.org/).
   compaction then uses `compact_target_ratio` unfloored.
 
 ### Fixed
+
+- **The Anthropic provider keeps and replays `redacted_thinking` blocks**
+  ([#197](https://github.com/yologdev/yoagent/issues/197)). The block did not
+  deserialize, so it was dropped without a log, a later block padded the gap
+  with an empty text placeholder, and it was never sent back. With thinking
+  and tool use the API requires a turn's thinking blocks, redacted ones
+  included, to come back unmodified, so a continuation could be rejected or
+  lose the model's reasoning. The block is now kept in order at its own
+  position (its `data` arrives whole in `content_block_start`) and replayed
+  as `{"type": "redacted_thinking", "data": ...}` in place. Any other block
+  type the provider does not surface (server-side tool blocks, `fallback`,
+  types added later) and any unknown delta type is skipped with one warning
+  per type naming it, instead of silently; skipped blocks leave no
+  placeholder and later blocks keep their deltas. Stream events'
+  `content_index` now always matches the block's position in the final
+  message. A `content_block_start` or `content_block_delta` that does not
+  parse is logged instead of dropped silently. Tested against mock streams,
+  not the live API.
 
 - **Amazon Bedrock streaming works** ([#174](https://github.com/yologdev/yoagent/issues/174)).
   `BedrockProvider` parsed the ConverseStream body as newline-delimited JSON

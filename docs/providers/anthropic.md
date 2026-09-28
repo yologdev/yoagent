@@ -17,9 +17,15 @@ let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude
 Uses `reqwest-eventsource` to parse Anthropic's SSE stream. Events handled:
 
 - `message_start` — Input token usage, cache stats
-- `content_block_start` — Text, thinking, or tool_use block
+- `content_block_start` — Text, thinking, `redacted_thinking`, or tool_use block
 - `content_block_delta` — Text, thinking, input JSON, or signature deltas
 - `content_block_stop` — Block complete
+
+Blocks are kept in the order the API sends them, each at its own position in
+`Content`. A block type this provider does not surface (server-side tool
+blocks, `fallback`, anything added to the API later) is skipped with one
+warning per type that names it; it leaves no placeholder, and the blocks after
+it keep their deltas. An unknown delta type is dropped the same way.
 - `message_delta` — Stop reason, output usage
 - `message_stop` — Stream complete
 
@@ -70,6 +76,17 @@ Bedrock uses the same budgets but does **not** raise `max_tokens`: there the
 caller must set `max_tokens` above the budget (for `Max`, above 30,720).
 
 Thinking content is streamed as `Content::Thinking` with a cryptographic `signature` for verification.
+
+When the API safety-redacts reasoning it returns a `redacted_thinking` block
+instead: no text, an opaque encrypted `data` string that arrives whole in
+`content_block_start` (there is no delta type for it). It is kept as a
+`Content::Thinking` with empty `thinking`, `redacted: Some(data)` and
+`redacted_protocol: Some(ApiProtocol::AnthropicMessages)`, and sent back as
+`{"type": "redacted_thinking", "data": ...}`, unmodified and in its original
+position — within a tool-use turn the API rejects thinking blocks, redacted
+ones included, that were dropped, reordered or edited. Redacted reasoning from
+another API (Amazon Bedrock's `redactedContent`), or of unknown origin (a
+session saved before the protocol was recorded), is skipped with a warning.
 
 ### Structured Outputs
 
