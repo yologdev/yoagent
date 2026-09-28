@@ -1,20 +1,33 @@
 //! Amazon Bedrock ConverseStream provider.
 //!
-//! Uses the Bedrock ConverseStream API with AWS SigV4 request signing.
-//! For simplicity, we implement minimal SigV4 signing using the `aws-sigv4`
-//! and `aws-credential-types` crates. If those aren't available, callers
-//! can pass pre-signed requests or use an IAM proxy.
-//!
-//! The `api_key` field in StreamConfig is expected to be formatted as:
+//! **Authentication.** Requests are *not* SigV4-signed: this crate has no
+//! SigV4 implementation. Headers in `ModelConfig.headers` are sent as given
+//! (pre-computed auth headers, or an IAM proxy that signs for you); without an
+//! `authorization` header the provider sends `Authorization: Bearer {api_key}`.
+//! The `api_key` must currently be formatted as
 //! `{access_key_id}:{secret_access_key}` (with optional `:{session_token}`).
-//! The `base_url` in ModelConfig should be the Bedrock endpoint, e.g.:
-//! `https://bedrock-runtime.us-east-1.amazonaws.com`
+//! The `base_url` in ModelConfig should be the Bedrock endpoint, e.g.
+//! `https://bedrock-runtime.us-east-1.amazonaws.com`.
+//!
+//! **Response stream.** ConverseStream answers with binary
+//! `application/vnd.amazon.eventstream` frames (see
+//! [`eventstream`](super::eventstream)), not JSON lines. The event type is
+//! the `:event-type` header of each frame, and the JSON payload is the event
+//! structure itself — `{"contentBlockIndex":0,"delta":{"text":"Hi"}}` for a
+//! `contentBlockDelta`, with no wrapper key. The shapes below follow the AWS
+//! Bedrock Runtime API reference (`ConverseStreamOutput` and the event types
+//! it lists). Tested against mock frames built to that format, not against a
+//! live endpoint.
 
+use super::eventstream::{Frame, FrameDecoder, FrameError};
+use super::tool_args::finalize_tool_arguments;
 use super::traits::*;
+use crate::provider::UNPARSED_ARGUMENTS_KEY;
 use crate::types::*;
 use async_trait::async_trait;
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
@@ -57,7 +70,10 @@ impl StreamProvider for BedrockProvider {
         }
 
         let client = reqwest::Client::new();
-        let mut request = client.post(&url).header("content-type", "application/json");
+        let mut request = client
+            .post(&url)
+            .header("content-type", "application/json")
+            .header("accept", "application/vnd.amazon.eventstream");
 
         // Add AWS auth headers. In a real implementation, this would use SigV4.
         // For now, we support a simplified auth model where the caller provides
@@ -72,169 +88,623 @@ impl StreamProvider for BedrockProvider {
             request = request.header("authorization", format!("Bearer {}", config.api_key));
         }
 
-        let response = request
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| ProviderError::Network(e.to_string()))?;
+        let response = tokio::select! {
+            _ = cancel.cancelled() => return Err(ProviderError::Cancelled),
+            r = request.json(&body).send() => r.map_err(|e| ProviderError::Network(e.to_string()))?,
+        };
 
         if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(ProviderError::classify(
-                status.as_u16(),
-                &format!("Bedrock error {}: {}", status, body),
-            ));
+            return Err(http_error(response).await);
         }
 
-        let mut content: Vec<Content> = Vec::new();
-        let mut usage = Usage::default();
-        let mut stop_reason = StopReason::Stop;
+        // A 200 whose body is JSON is not an event stream (a proxy, or an
+        // endpoint that is not ConverseStream). Report the body rather than a
+        // checksum error from trying to frame it.
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if content_type.contains("json") {
+            let body = response.text().await.unwrap_or_default();
+            return Err(ProviderError::Api(format!(
+                "Bedrock returned `{content_type}` instead of an event stream: {}",
+                truncate_for_error(&body)
+            )));
+        }
 
         let _ = tx.send(StreamEvent::Start);
 
-        // Bedrock ConverseStream returns event-stream format (application/vnd.amazon.eventstream)
-        // For simplicity, we parse it as newline-delimited JSON chunks.
-        let mut stream = response.bytes_stream();
-        let mut buffer = String::new();
-
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => {
-                    return Err(ProviderError::Cancelled);
-                }
-                chunk = stream.next() => {
-                    match chunk {
-                        None => break,
-                        Some(Err(e)) => {
-                            warn!("Bedrock stream error: {}", e);
-                            break;
-                        }
-                        Some(Ok(bytes)) => {
-                            buffer.push_str(&String::from_utf8_lossy(&bytes));
-
-                            // Try to parse complete JSON objects
-                            while let Some(pos) = buffer.find('\n') {
-                                let line = buffer[..pos].trim().to_string();
-                                buffer = buffer[pos + 1..].to_string();
-
-                                if line.is_empty() {
-                                    continue;
-                                }
-
-                                let event: BedrockEvent = match serde_json::from_str(&line) {
-                                    Ok(e) => e,
-                                    Err(_) => continue,
-                                };
-
-                                match event {
-                                    BedrockEvent::ContentBlockDelta { delta, .. } => {
-                                        if let Some(text) = delta.text {
-                                            let text_idx = content.iter().position(|c| matches!(c, Content::Text { .. }));
-                                            let idx = match text_idx {
-                                                Some(i) => i,
-                                                None => {
-                                                    content.push(Content::Text { text: String::new() });
-                                                    content.len() - 1
-                                                }
-                                            };
-                                            if let Some(Content::Text { text: t }) = content.get_mut(idx) {
-                                                t.push_str(&text);
-                                            }
-                                            let _ = tx.send(StreamEvent::TextDelta {
-                                                content_index: idx,
-                                                delta: text,
-                                            });
-                                        }
-                                        if let Some(tool_use) = delta.tool_use {
-                                            let _ = tx.send(StreamEvent::ToolCallDelta {
-                                                content_index: content.len(),
-                                                delta: tool_use.input,
-                                            });
-                                        }
-                                        if let Some(reasoning) = delta.reasoning_content {
-                                            let think_idx = content.iter().position(|c| matches!(c, Content::Thinking { .. }));
-                                            let idx = match think_idx {
-                                                Some(i) => i,
-                                                None => {
-                                                    content.push(Content::thinking(String::new()));
-                                                    content.len() - 1
-                                                }
-                                            };
-                                            if let Some(Content::Thinking { thinking, signature }) = content.get_mut(idx) {
-                                                if let Some(text) = reasoning.text {
-                                                    thinking.push_str(&text);
-                                                    let _ = tx.send(StreamEvent::ThinkingDelta {
-                                                        content_index: idx,
-                                                        delta: text,
-                                                    });
-                                                }
-                                                if reasoning.signature.is_some() {
-                                                    *signature = reasoning.signature;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    BedrockEvent::ContentBlockStart { start, .. } => {
-                                        if let Some(tool_use) = start.tool_use {
-                                            let idx = content.len();
-                                            content.push(Content::ToolCall { provider_metadata: None,
-                                                id: tool_use.tool_use_id.clone(),
-                                                name: tool_use.name.clone(),
-                                                arguments: serde_json::Value::Object(Default::default()),
-                                            });
-                                            let _ = tx.send(StreamEvent::ToolCallStart {
-                                                content_index: idx,
-                                                id: tool_use.tool_use_id,
-                                                name: tool_use.name,
-                                            });
-                                        }
-                                    }
-                                    BedrockEvent::ContentBlockStop { .. } => {
-                                        if content.iter().any(|c| matches!(c, Content::ToolCall { .. })) {
-                                            let _ = tx.send(StreamEvent::ToolCallEnd {
-                                                content_index: content.len() - 1,
-                                            });
-                                        }
-                                    }
-                                    BedrockEvent::MessageStop { stop_reason: sr } => {
-                                        stop_reason = match sr.as_deref() {
-                                            Some("end_turn") => StopReason::Stop,
-                                            Some("max_tokens") => StopReason::Length,
-                                            Some("tool_use") => StopReason::ToolUse,
-                                            _ => StopReason::Stop,
-                                        };
-                                    }
-                                    BedrockEvent::Metadata { usage: u } => {
-                                        if let Some(u) = u {
-                                            usage.input = u.input_tokens;
-                                            usage.output = u.output_tokens;
-                                            usage.total_tokens = u.input_tokens + u.output_tokens;
-                                        }
-                                    }
-                                    BedrockEvent::Unknown => {}
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        let outcome = read_converse_stream(response.bytes_stream(), &tx, &cancel).await?;
 
         let message = Message::Assistant {
-            content,
-            stop_reason,
+            content: outcome.content,
+            stop_reason: outcome.stop_reason,
             model: config.model.clone(),
             provider: model_config.provider.clone(),
-            usage,
+            usage: outcome.usage,
             timestamp: now_ms(),
-            error_message: None,
+            error_message: outcome.error_message,
         };
 
         let _ = tx.send(StreamEvent::Done {
             message: message.clone(),
         });
         Ok(message)
+    }
+}
+
+/// Classify a non-2xx ConverseStream response. The body is AWS's JSON error
+/// (`{"message": "..."}`) and the error name is in `x-amzn-ErrorType`
+/// (`ThrottlingException:http://...`). A 429 is a retryable rate limit; a
+/// validation error whose message is a context-overflow phrase ("Input is too
+/// long for requested model") is an overflow.
+async fn http_error(response: reqwest::Response) -> ProviderError {
+    let status = response.status();
+    let retry_after_ms = parse_retry_after(response.headers());
+    let kind = response
+        .headers()
+        .get("x-amzn-errortype")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(':').next())
+        .map(str::to_string);
+    let body = response.text().await.unwrap_or_default();
+    let message = error_message_of(body.as_bytes());
+    let text = match kind {
+        Some(kind) => format!("Bedrock error {status} ({kind}): {message}"),
+        None => format!("Bedrock error {status}: {message}"),
+    };
+    ProviderError::classify_with_retry_after(status.as_u16(), &text, retry_after_ms)
+}
+
+/// The `message` of an AWS JSON error body, or the body itself when it has
+/// none (or is not JSON).
+fn error_message_of(payload: &[u8]) -> String {
+    let text = String::from_utf8_lossy(payload);
+    serde_json::from_slice::<serde_json::Value>(payload)
+        .ok()
+        .and_then(|v| {
+            ["message", "Message"]
+                .iter()
+                .find_map(|k| v.get(*k).and_then(|m| m.as_str()).map(str::to_string))
+        })
+        .unwrap_or_else(|| text.into_owned())
+}
+
+/// Map an in-stream exception (`:message-type: exception`) onto a
+/// [`ProviderError`] through the HTTP status AWS documents for it in
+/// `ConverseStreamOutput`, so it classifies exactly like the same error
+/// returned as an HTTP response: `throttlingException` (429) is a retryable
+/// rate limit, `validationException` (400) carrying an overflow phrase is a
+/// context overflow, the rest are API errors.
+fn exception_error(kind: &str, message: &str) -> ProviderError {
+    let status = match kind.to_ascii_lowercase().as_str() {
+        "throttlingexception" => 429,
+        "validationexception" => 400,
+        "accessdeniedexception" => 403,
+        "modelstreamerrorexception" | "modelerrorexception" => 424,
+        "internalserverexception" => 500,
+        "serviceunavailableexception" => 503,
+        _ => 0,
+    };
+    ProviderError::classify(status, &format!("Bedrock {kind}: {message}"))
+}
+
+fn truncate_for_error(s: &str) -> String {
+    const MAX: usize = 300;
+    if s.chars().count() <= MAX {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(MAX).collect();
+    format!("{head}\u{2026} ({} bytes total)", s.len())
+}
+
+/// What one ConverseStream response assembled into.
+struct StreamOutcome {
+    content: Vec<Content>,
+    usage: Usage,
+    stop_reason: StopReason,
+    error_message: Option<String>,
+}
+
+/// Drive the frame decoder and the event state machine over a byte stream.
+///
+/// Generic over the chunk and error types so tests can feed arbitrary chunk
+/// boundaries; the provider passes `reqwest`'s `bytes_stream()`.
+async fn read_converse_stream<S, B, E>(
+    stream: S,
+    tx: &mpsc::UnboundedSender<StreamEvent>,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<StreamOutcome, ProviderError>
+where
+    S: Stream<Item = Result<B, E>>,
+    B: AsRef<[u8]>,
+    E: std::fmt::Display,
+{
+    let mut stream = std::pin::pin!(stream);
+    let mut decoder = FrameDecoder::new();
+    let mut state = ConverseStreamState::default();
+
+    loop {
+        let chunk = tokio::select! {
+            _ = cancel.cancelled() => return Err(ProviderError::Cancelled),
+            chunk = stream.next() => chunk,
+        };
+        match chunk {
+            None => break,
+            // A dropped connection is a transport failure, never a finished
+            // response — whatever arrived so far is discarded.
+            Some(Err(e)) => {
+                warn!("Bedrock stream transport error: {e}");
+                return Err(ProviderError::Network(format!(
+                    "Bedrock stream interrupted: {e}"
+                )));
+            }
+            Some(Ok(bytes)) => {
+                decoder.push(bytes.as_ref());
+                while let Some(frame) = decoder.next_frame().map_err(frame_error)? {
+                    state.handle_frame(&frame, tx)?;
+                }
+            }
+        }
+    }
+    decoder.finish().map_err(frame_error)?;
+    state.finish(tx)
+}
+
+/// A body that ends inside a frame is truncation (retryable, like any other
+/// dropped stream); a checksum or structure error means the body is not an
+/// intact event stream, which retrying the same endpoint will not fix.
+fn frame_error(e: FrameError) -> ProviderError {
+    warn!("Bedrock event stream: {e}");
+    match e {
+        FrameError::Truncated { .. } => ProviderError::Network(e.to_string()),
+        _ => ProviderError::Other(format!("Bedrock {e}")),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BlockKind {
+    Text,
+    Thinking,
+    Tool,
+    /// A block this provider does not surface (image, server-side tool use
+    /// and its result); its deltas are skipped.
+    Ignored,
+}
+
+#[derive(Debug)]
+struct Block {
+    kind: BlockKind,
+    /// Position in `content` (unused for `Ignored`).
+    content_index: usize,
+    /// Tool blocks: the name, and the `toolUse.input` text accumulated so far.
+    name: String,
+    input: String,
+    closed: bool,
+}
+
+/// Accumulates one ConverseStream response, keyed by `contentBlockIndex`.
+///
+/// Tool calls are pushed into `content` with the unparsed-arguments marker
+/// (`{"__partial_json": ""}`) as a placeholder, which the agent loop never
+/// runs; only `contentBlockStop` replaces it with the parsed arguments. A
+/// path that skips finalization therefore fails closed instead of running
+/// the tool on `{}`.
+#[derive(Default)]
+struct ConverseStreamState {
+    content: Vec<Content>,
+    blocks: BTreeMap<u64, Block>,
+    stop: Option<(StopReason, Option<String>)>,
+    usage: Option<Usage>,
+    events: usize,
+}
+
+fn parse_payload<'a, T: Deserialize<'a>>(
+    event: &str,
+    payload: &'a [u8],
+) -> Result<T, ProviderError> {
+    serde_json::from_slice(payload).map_err(|e| {
+        ProviderError::Other(format!(
+            "Bedrock `{event}` payload does not match the documented shape ({e}): {}",
+            truncate_for_error(&String::from_utf8_lossy(payload))
+        ))
+    })
+}
+
+fn protocol_error(msg: String) -> ProviderError {
+    warn!("Bedrock stream: {msg}");
+    ProviderError::Other(format!("Bedrock stream: {msg}"))
+}
+
+fn unfinalized_arguments(raw: &str) -> serde_json::Value {
+    serde_json::json!({ UNPARSED_ARGUMENTS_KEY: raw })
+}
+
+impl ConverseStreamState {
+    fn handle_frame(
+        &mut self,
+        frame: &Frame,
+        tx: &mpsc::UnboundedSender<StreamEvent>,
+    ) -> Result<(), ProviderError> {
+        let message_type = frame
+            .header_str(":message-type")
+            .ok_or_else(|| protocol_error("frame without a `:message-type` header".into()))?;
+        match message_type {
+            "event" => {
+                let event = frame.header_str(":event-type").ok_or_else(|| {
+                    protocol_error("event frame without an `:event-type` header".into())
+                })?;
+                self.events += 1;
+                self.handle_event(event, &frame.payload, tx)
+            }
+            // A modeled error (`throttlingException`, `validationException`,
+            // ...): the name is in `:exception-type`, the payload is
+            // `{"message": "..."}`.
+            "exception" => {
+                let kind = frame.header_str(":exception-type").unwrap_or("exception");
+                let err = exception_error(kind, &error_message_of(&frame.payload));
+                warn!("Bedrock stream exception: {err}");
+                Err(err)
+            }
+            // An unmodeled error: name and text travel in headers.
+            "error" => {
+                let code = frame.header_str(":error-code").unwrap_or("error");
+                let message = frame.header_str(":error-message").unwrap_or("");
+                let err = exception_error(code, message);
+                warn!("Bedrock stream error: {err}");
+                Err(err)
+            }
+            other => Err(protocol_error(format!("unknown `:message-type` `{other}`"))),
+        }
+    }
+
+    fn handle_event(
+        &mut self,
+        event: &str,
+        payload: &[u8],
+        tx: &mpsc::UnboundedSender<StreamEvent>,
+    ) -> Result<(), ProviderError> {
+        match event {
+            "messageStart" => {
+                let e: MessageStartEvent = parse_payload(event, payload)?;
+                debug!("Bedrock messageStart role={}", e.role);
+            }
+            "contentBlockStart" => {
+                let e: ContentBlockStartEvent = parse_payload(event, payload)?;
+                self.block_start(e, tx)?;
+            }
+            "contentBlockDelta" => {
+                let e: ContentBlockDeltaEvent = parse_payload(event, payload)?;
+                self.block_delta(e, tx)?;
+            }
+            "contentBlockStop" => {
+                let e: ContentBlockStopEvent = parse_payload(event, payload)?;
+                self.block_stop(e.content_block_index, tx);
+            }
+            "messageStop" => {
+                let e: MessageStopEvent = parse_payload(event, payload)?;
+                self.stop = Some(map_stop_reason(&e.stop_reason));
+            }
+            "metadata" => {
+                let e: MetadataEvent = parse_payload(event, payload)?;
+                match e.usage {
+                    Some(u) => self.usage = Some(u.into_usage()),
+                    None => warn!("Bedrock metadata event without usage"),
+                }
+            }
+            other => debug!("Bedrock: ignoring unknown event `{other}`"),
+        }
+        Ok(())
+    }
+
+    fn block_start(
+        &mut self,
+        e: ContentBlockStartEvent,
+        tx: &mpsc::UnboundedSender<StreamEvent>,
+    ) -> Result<(), ProviderError> {
+        let index = e.content_block_index;
+        if self.blocks.contains_key(&index) {
+            return Err(protocol_error(format!(
+                "contentBlockStart for block {index}, which already started"
+            )));
+        }
+        let block = match e.start.tool_use {
+            // A server-side tool runs on AWS's side and its result streams
+            // back; it is not a call for the agent loop to execute.
+            Some(t) if t.kind.as_deref() == Some("server_tool_use") => {
+                debug!("Bedrock: server-side tool `{}` is not surfaced", t.name);
+                Block::ignored()
+            }
+            Some(t) => {
+                let content_index = self.content.len();
+                self.content.push(Content::ToolCall {
+                    provider_metadata: None,
+                    id: t.tool_use_id.clone(),
+                    name: t.name.clone(),
+                    arguments: unfinalized_arguments(""),
+                });
+                let _ = tx.send(StreamEvent::ToolCallStart {
+                    content_index,
+                    id: t.tool_use_id,
+                    name: t.name.clone(),
+                });
+                Block {
+                    kind: BlockKind::Tool,
+                    content_index,
+                    name: t.name,
+                    input: String::new(),
+                    closed: false,
+                }
+            }
+            None => {
+                debug!(
+                    "Bedrock: block {index} starts a content type this provider does not surface"
+                );
+                Block::ignored()
+            }
+        };
+        self.blocks.insert(index, block);
+        Ok(())
+    }
+
+    /// The block for `index`, created as `kind` if this is its first event
+    /// (text and reasoning blocks have no `contentBlockStart`).
+    fn block_for(
+        &mut self,
+        index: u64,
+        kind: BlockKind,
+    ) -> Result<Option<&mut Block>, ProviderError> {
+        if !self.blocks.contains_key(&index) {
+            let content_index = self.content.len();
+            match kind {
+                BlockKind::Text => self.content.push(Content::Text {
+                    text: String::new(),
+                }),
+                BlockKind::Thinking => self.content.push(Content::thinking(String::new())),
+                // A tool delta needs the id and name its start carried.
+                BlockKind::Tool => {
+                    return Err(protocol_error(format!(
+                        "toolUse delta for block {index} without a contentBlockStart"
+                    )))
+                }
+                BlockKind::Ignored => {}
+            }
+            self.blocks.insert(
+                index,
+                Block {
+                    kind,
+                    content_index,
+                    name: String::new(),
+                    input: String::new(),
+                    closed: false,
+                },
+            );
+        }
+        let block = self.blocks.get_mut(&index).expect("inserted above");
+        if block.kind == BlockKind::Ignored {
+            return Ok(None);
+        }
+        if block.kind != kind {
+            return Err(protocol_error(format!(
+                "block {index} is a {:?} block but received a {kind:?} delta",
+                block.kind
+            )));
+        }
+        if block.closed {
+            return Err(protocol_error(format!(
+                "delta for block {index} after its contentBlockStop"
+            )));
+        }
+        Ok(Some(block))
+    }
+
+    fn block_delta(
+        &mut self,
+        e: ContentBlockDeltaEvent,
+        tx: &mpsc::UnboundedSender<StreamEvent>,
+    ) -> Result<(), ProviderError> {
+        let index = e.content_block_index;
+        let delta = e.delta;
+        if let Some(text) = delta.text {
+            if let Some(block) = self.block_for(index, BlockKind::Text)? {
+                let ci = block.content_index;
+                if let Some(Content::Text { text: t }) = self.content.get_mut(ci) {
+                    t.push_str(&text);
+                }
+                let _ = tx.send(StreamEvent::TextDelta {
+                    content_index: ci,
+                    delta: text,
+                });
+            }
+        }
+        if let Some(tool) = delta.tool_use {
+            if let Some(block) = self.block_for(index, BlockKind::Tool)? {
+                block.input.push_str(&tool.input);
+                let _ = tx.send(StreamEvent::ToolCallDelta {
+                    content_index: block.content_index,
+                    delta: tool.input,
+                });
+            }
+        }
+        if let Some(reasoning) = delta.reasoning_content {
+            if let Some(block) = self.block_for(index, BlockKind::Thinking)? {
+                let ci = block.content_index;
+                if let Some(Content::Thinking {
+                    thinking,
+                    signature,
+                }) = self.content.get_mut(ci)
+                {
+                    if let Some(text) = reasoning.text {
+                        thinking.push_str(&text);
+                        let _ = tx.send(StreamEvent::ThinkingDelta {
+                            content_index: ci,
+                            delta: text,
+                        });
+                    }
+                    if let Some(sig) = reasoning.signature {
+                        signature.get_or_insert_with(String::new).push_str(&sig);
+                    }
+                    if reasoning.redacted_content.is_some() {
+                        // `Content` has no redacted-reasoning variant to keep
+                        // it in, so it cannot be replayed.
+                        warn!("Bedrock: redacted reasoning content is not preserved");
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn block_stop(&mut self, index: u64, tx: &mpsc::UnboundedSender<StreamEvent>) {
+        let Some(block) = self.blocks.get_mut(&index) else {
+            debug!("Bedrock: contentBlockStop for unseen block {index}");
+            return;
+        };
+        if block.closed {
+            debug!("Bedrock: duplicate contentBlockStop for block {index}");
+            return;
+        }
+        block.closed = true;
+        if block.kind == BlockKind::Tool {
+            let args = finalize_tool_arguments(&block.name, &block.input);
+            if let Some(Content::ToolCall { arguments, .. }) =
+                self.content.get_mut(block.content_index)
+            {
+                *arguments = args;
+            }
+            let _ = tx.send(StreamEvent::ToolCallEnd {
+                content_index: block.content_index,
+            });
+        }
+    }
+
+    fn finish(
+        self,
+        tx: &mpsc::UnboundedSender<StreamEvent>,
+    ) -> Result<StreamOutcome, ProviderError> {
+        let Some((mut stop_reason, error_message)) = self.stop else {
+            // No messageStop: the connection closed early, or the body held no
+            // events at all. Either way this is not a finished response, and
+            // must never read as an empty successful turn.
+            let msg = format!(
+                "Bedrock stream ended without a messageStop event ({} events received)",
+                self.events
+            );
+            warn!("{msg}");
+            return Err(ProviderError::Network(msg));
+        };
+        let mut content = self.content;
+        let mut has_tool_calls = false;
+        for block in self.blocks.values() {
+            if block.kind != BlockKind::Tool {
+                continue;
+            }
+            has_tool_calls = true;
+            if !block.closed {
+                // No contentBlockStop: the input may be cut short, and an
+                // empty buffer cannot be told apart from a tool with no
+                // parameters. Keep the marker so the call is answered with an
+                // error, never run.
+                warn!(
+                    tool = %block.name,
+                    "Bedrock tool call block was never closed; the call will not be run"
+                );
+                if let Some(Content::ToolCall { arguments, .. }) =
+                    content.get_mut(block.content_index)
+                {
+                    *arguments = unfinalized_arguments(&block.input);
+                }
+                let _ = tx.send(StreamEvent::ToolCallEnd {
+                    content_index: block.content_index,
+                });
+            }
+        }
+        // Same rule as the OpenAI-shaped providers: tool calls make this a
+        // ToolUse turn, unless it hit the token limit (how a call ends up with
+        // unparsed arguments), was refused, or failed.
+        if has_tool_calls
+            && !matches!(
+                stop_reason,
+                StopReason::Length | StopReason::Refusal | StopReason::Error
+            )
+        {
+            stop_reason = StopReason::ToolUse;
+        }
+        let usage = self.usage.unwrap_or_else(|| {
+            warn!("Bedrock stream carried no metadata usage; reporting zero tokens");
+            Usage::default()
+        });
+        Ok(StreamOutcome {
+            content,
+            usage,
+            stop_reason,
+            error_message,
+        })
+    }
+}
+
+impl Block {
+    fn ignored() -> Self {
+        Block {
+            kind: BlockKind::Ignored,
+            content_index: 0,
+            name: String::new(),
+            input: String::new(),
+            closed: false,
+        }
+    }
+}
+
+/// Map a `MessageStopEvent.stopReason` onto [`StopReason`], with a diagnosis
+/// for the terminal ones. Every documented value is listed ("Valid Values:
+/// end_turn | tool_use | max_tokens | stop_sequence | guardrail_intervened |
+/// content_filtered | malformed_model_output | malformed_tool_use |
+/// model_context_window_exceeded").
+fn map_stop_reason(reason: &str) -> (StopReason, Option<String>) {
+    match reason {
+        "end_turn" | "stop_sequence" => (StopReason::Stop, None),
+        "tool_use" => (StopReason::ToolUse, None),
+        "max_tokens" => (StopReason::Length, None),
+        "guardrail_intervened" => {
+            warn!("Bedrock: a guardrail intervened (stopReason=guardrail_intervened)");
+            (
+                StopReason::Refusal,
+                Some("Response blocked by an Amazon Bedrock guardrail (stopReason: guardrail_intervened)".into()),
+            )
+        }
+        "content_filtered" => {
+            warn!("Bedrock: response stopped by the content filter (stopReason=content_filtered)");
+            (
+                StopReason::Refusal,
+                Some(
+                    "Response stopped by the content filter (stopReason: content_filtered)".into(),
+                ),
+            )
+        }
+        // Same Error + overflow-phrase shape as the Anthropic provider, so
+        // `Message::is_context_overflow()` and compaction keep working.
+        "model_context_window_exceeded" => {
+            warn!("Bedrock: context window exceeded mid-stream");
+            (
+                StopReason::Error,
+                Some("model_context_window_exceeded".into()),
+            )
+        }
+        "malformed_model_output" | "malformed_tool_use" => {
+            warn!("Bedrock: the model produced malformed output (stopReason={reason})");
+            (
+                StopReason::Error,
+                Some(format!(
+                    "Bedrock stopped the response: the model produced malformed output (stopReason: {reason})"
+                )),
+            )
+        }
+        other => {
+            warn!("unrecognized Bedrock stopReason '{other}'; treating it as a normal stop");
+            (StopReason::Stop, None)
+        }
     }
 }
 
@@ -388,76 +858,152 @@ fn content_to_bedrock(content: &[Content]) -> Vec<serde_json::Value> {
         .collect()
 }
 
-// Bedrock event types
+// ---------------------------------------------------------------------------
+// ConverseStream event payloads.
+//
+// Each struct is the JSON payload of the frame whose `:event-type` header
+// names it, as documented in the Amazon Bedrock Runtime API reference
+// (docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_<Type>.html).
+// Unknown fields are ignored: Bedrock pads payloads with an extra `p` field,
+// and new optional members appear over time. Union members this provider
+// does not surface (`image`, `toolResult`, `citation`) are left out and
+// skipped.
+// ---------------------------------------------------------------------------
+
+/// `MessageStartEvent`: "role — The role for the message. Valid Values: user
+/// | assistant | system. Required: Yes".
 #[derive(Deserialize)]
-#[serde(untagged)]
-enum BedrockEvent {
-    ContentBlockDelta {
-        #[serde(rename = "contentBlockDelta")]
-        delta: BedrockDelta,
-    },
-    ContentBlockStart {
-        #[serde(rename = "contentBlockStart")]
-        start: BedrockBlockStart,
-    },
-    ContentBlockStop {
-        #[serde(rename = "contentBlockStop")]
-        #[allow(dead_code)]
-        stop: serde_json::Value,
-    },
-    MessageStop {
-        #[serde(rename = "messageStop")]
-        stop_reason: Option<String>,
-    },
-    Metadata {
-        #[serde(rename = "metadata")]
-        usage: Option<BedrockUsage>,
-    },
-    Unknown,
+struct MessageStartEvent {
+    role: String,
 }
 
+/// `ContentBlockStartEvent`: "contentBlockIndex — The index for a content
+/// block start event. Required: Yes"; "start — Start information about a
+/// content block start event. Type: ContentBlockStart object ... a Union".
 #[derive(Deserialize)]
-struct BedrockDelta {
+#[serde(rename_all = "camelCase")]
+struct ContentBlockStartEvent {
+    content_block_index: u64,
+    start: ContentBlockStart,
+}
+
+/// `ContentBlockStart` (union): `toolUse` | `image` | `toolResult`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ContentBlockStart {
+    #[serde(default)]
+    tool_use: Option<ToolUseBlockStart>,
+}
+
+/// `ToolUseBlockStart`: `name` and `toolUseId` required; optional `type`
+/// ("Valid Values: server_tool_use").
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ToolUseBlockStart {
+    tool_use_id: String,
+    name: String,
+    #[serde(default, rename = "type")]
+    kind: Option<String>,
+}
+
+/// `ContentBlockDeltaEvent`: "contentBlockIndex — The block index for a
+/// content block delta event. Required: Yes"; "delta — The delta for a
+/// content block delta event. Type: ContentBlockDelta object ... a Union".
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ContentBlockDeltaEvent {
+    content_block_index: u64,
+    delta: ContentBlockDelta,
+}
+
+/// `ContentBlockDelta` (union): `text` (String) | `toolUse`
+/// (`ToolUseBlockDelta`) | `reasoningContent` (`ReasoningContentBlockDelta`)
+/// | `citation` | `image` | `toolResult`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ContentBlockDelta {
     #[serde(default)]
     text: Option<String>,
-    #[serde(default, rename = "toolUse")]
-    tool_use: Option<BedrockToolUseDelta>,
-    #[serde(default, rename = "reasoningContent")]
-    reasoning_content: Option<BedrockReasoningDelta>,
+    #[serde(default)]
+    tool_use: Option<ToolUseBlockDelta>,
+    #[serde(default)]
+    reasoning_content: Option<ReasoningContentBlockDelta>,
 }
 
+/// `ToolUseBlockDelta`: "input — The input for a requested tool. Type:
+/// String. Required: Yes" — a fragment of the argument JSON text.
 #[derive(Deserialize)]
-struct BedrockReasoningDelta {
+struct ToolUseBlockDelta {
+    input: String,
+}
+
+/// `ReasoningContentBlockDelta` (union): `text` | `signature` ("If you pass a
+/// reasoning block back to the API in a multi-turn conversation, include the
+/// text and its signature unmodified") | `redactedContent` (base64).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReasoningContentBlockDelta {
     #[serde(default)]
     text: Option<String>,
     #[serde(default)]
     signature: Option<String>,
+    #[serde(default)]
+    redacted_content: Option<String>,
 }
 
+/// `ContentBlockStopEvent`: "contentBlockIndex — The index for a content
+/// block. Required: Yes".
 #[derive(Deserialize)]
-struct BedrockToolUseDelta {
-    input: String,
+#[serde(rename_all = "camelCase")]
+struct ContentBlockStopEvent {
+    content_block_index: u64,
 }
 
+/// `MessageStopEvent`: "stopReason — The reason why the model stopped
+/// generating output. Type: String ... Required: Yes";
+/// `additionalModelResponseFields` (JSON, optional) is not used.
 #[derive(Deserialize)]
-struct BedrockBlockStart {
-    #[serde(default, rename = "toolUse")]
-    tool_use: Option<BedrockToolUseStart>,
+#[serde(rename_all = "camelCase")]
+struct MessageStopEvent {
+    stop_reason: String,
 }
 
+/// `ConverseStreamMetadataEvent`: `usage` (`TokenUsage`) and `metrics`
+/// (`ConverseStreamMetrics`, `latencyMs`) are documented as required; only
+/// usage is read, and its absence is tolerated (with a warning) rather than
+/// failing an otherwise finished response.
 #[derive(Deserialize)]
-struct BedrockToolUseStart {
-    #[serde(rename = "toolUseId")]
-    tool_use_id: String,
-    name: String,
+struct MetadataEvent {
+    #[serde(default)]
+    usage: Option<TokenUsage>,
 }
 
+/// `TokenUsage`: `inputTokens`, `outputTokens`, `totalTokens` required;
+/// `cacheReadInputTokens` ("The number of input tokens read from the cache
+/// for the request") and `cacheWriteInputTokens` ("... written to the cache
+/// ...") optional.
 #[derive(Deserialize)]
-struct BedrockUsage {
-    #[serde(default, rename = "inputTokens")]
+#[serde(rename_all = "camelCase")]
+struct TokenUsage {
     input_tokens: u64,
-    #[serde(default, rename = "outputTokens")]
     output_tokens: u64,
+    total_tokens: u64,
+    #[serde(default)]
+    cache_read_input_tokens: Option<u64>,
+    #[serde(default)]
+    cache_write_input_tokens: Option<u64>,
+}
+
+impl TokenUsage {
+    fn into_usage(self) -> Usage {
+        Usage {
+            input: self.input_tokens,
+            output: self.output_tokens,
+            cache_read: self.cache_read_input_tokens.unwrap_or(0),
+            cache_write: self.cache_write_input_tokens.unwrap_or(0),
+            total_tokens: self.total_tokens,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -618,5 +1164,156 @@ mod tests {
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0]["text"], "hello");
         assert_eq!(blocks[1]["toolUse"]["name"], "bash");
+    }
+
+    // -- Response stream ---------------------------------------------------
+
+    use super::super::eventstream::{encode_frame, HeaderValue};
+
+    fn event(event_type: &str, payload: serde_json::Value) -> Vec<u8> {
+        encode_frame(
+            &[
+                (":message-type", HeaderValue::String("event".into())),
+                (":event-type", HeaderValue::String(event_type.into())),
+                (
+                    ":content-type",
+                    HeaderValue::String("application/json".into()),
+                ),
+            ],
+            payload.to_string().as_bytes(),
+        )
+    }
+
+    /// A text + tool-call response whose text has multi-byte characters.
+    fn full_response() -> Vec<u8> {
+        use serde_json::json;
+        [
+            event("messageStart", json!({"role": "assistant"})),
+            event(
+                "contentBlockDelta",
+                json!({"contentBlockIndex": 0, "delta": {"text": "héllo 世界 🌍"}}),
+            ),
+            event("contentBlockStop", json!({"contentBlockIndex": 0})),
+            event(
+                "contentBlockStart",
+                json!({"contentBlockIndex": 1, "start": {"toolUse": {"toolUseId": "t1", "name": "read"}}}),
+            ),
+            event(
+                "contentBlockDelta",
+                json!({"contentBlockIndex": 1, "delta": {"toolUse": {"input": "{\"path\":"}}}),
+            ),
+            event(
+                "contentBlockDelta",
+                json!({"contentBlockIndex": 1, "delta": {"toolUse": {"input": "\"ß.txt\"}"}}}),
+            ),
+            event("contentBlockStop", json!({"contentBlockIndex": 1})),
+            event("messageStop", json!({"stopReason": "tool_use"})),
+            event(
+                "metadata",
+                json!({"usage": {"inputTokens": 5, "outputTokens": 7, "totalTokens": 12}, "metrics": {"latencyMs": 3}}),
+            ),
+        ]
+        .concat()
+    }
+
+    async fn read_chunks(
+        chunks: Vec<Result<Vec<u8>, String>>,
+    ) -> Result<StreamOutcome, ProviderError> {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        read_converse_stream(
+            futures::stream::iter(chunks),
+            &tx,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+    }
+
+    /// The provider's byte-stream path buffers across network chunks: every
+    /// chunk size from 1 byte up splits frames inside the prelude, inside
+    /// headers and inside multi-byte UTF-8 characters, and the result is the
+    /// same as one chunk.
+    #[tokio::test]
+    async fn byte_stream_is_buffered_across_arbitrary_chunks() {
+        let body = full_response();
+        for size in 1..=body.len() {
+            let chunks = body.chunks(size).map(|c| Ok(c.to_vec())).collect();
+            let out = read_chunks(chunks)
+                .await
+                .unwrap_or_else(|e| panic!("chunk size {size}: {e}"));
+            assert_eq!(out.stop_reason, StopReason::ToolUse, "chunk size {size}");
+            assert!(
+                matches!(&out.content[0], Content::Text { text } if text == "héllo 世界 🌍"),
+                "chunk size {size}: {:?}",
+                out.content
+            );
+            assert!(
+                matches!(&out.content[1], Content::ToolCall { arguments, .. }
+                    if *arguments == serde_json::json!({"path": "ß.txt"})),
+                "chunk size {size}: {:?}",
+                out.content
+            );
+            assert_eq!(out.usage.total_tokens, 12);
+        }
+    }
+
+    #[tokio::test]
+    async fn transport_error_mid_stream_is_a_network_error() {
+        let body = full_response();
+        let (head, _) = body.split_at(body.len() / 2);
+        let result = read_chunks(vec![Ok(head.to_vec()), Err("connection reset".into())]).await;
+        assert!(
+            matches!(result, Err(ProviderError::Network(_))),
+            "{:?}",
+            result.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn zero_bytes_is_an_error_not_an_empty_turn() {
+        let result = read_chunks(vec![]).await;
+        assert!(matches!(result, Err(ProviderError::Network(_))));
+    }
+
+    #[test]
+    fn exceptions_classify_like_their_http_status() {
+        assert!(matches!(
+            exception_error("throttlingException", "Too many requests"),
+            ProviderError::RateLimited { .. }
+        ));
+        assert!(exception_error(
+            "validationException",
+            "Input is too long for requested model."
+        )
+        .is_context_overflow());
+        assert!(matches!(
+            exception_error("validationException", "bad field"),
+            ProviderError::Api(_)
+        ));
+        assert!(matches!(
+            exception_error("modelStreamErrorException", "boom"),
+            ProviderError::Api(_)
+        ));
+    }
+
+    #[test]
+    fn every_documented_stop_reason_is_mapped() {
+        use StopReason::*;
+        for (reason, expected) in [
+            ("end_turn", Stop),
+            ("stop_sequence", Stop),
+            ("tool_use", ToolUse),
+            ("max_tokens", Length),
+            ("guardrail_intervened", Refusal),
+            ("content_filtered", Refusal),
+            ("malformed_model_output", Error),
+            ("malformed_tool_use", Error),
+            ("model_context_window_exceeded", Error),
+        ] {
+            assert_eq!(map_stop_reason(reason).0, expected, "{reason}");
+        }
+        let (_, msg) = map_stop_reason("model_context_window_exceeded");
+        assert!(crate::provider::traits::is_context_overflow_message(
+            &msg.unwrap()
+        ));
     }
 }
