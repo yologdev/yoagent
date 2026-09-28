@@ -7,9 +7,12 @@ question: whether `MIN_HEADROOM_RATIO` causes the post-compaction cliff. This
 page reports what an offline sweep of the real compaction code says about each
 one.
 
-**No default was changed.** Each section ends in a verdict for the maintainer:
-*confirmed*, *change to X* (with the trade-off quantified), or *inconclusive
-offline* (with the live experiment that would settle it).
+Each section ends in a verdict: *confirmed*, *change to X* (with the
+trade-off quantified), or *inconclusive offline* (with the live experiment
+that would settle it). The sweep itself changed no default. Its one *change*
+verdict was adopted afterwards: `MIN_HEADROOM_RATIO` is 0.30 since 0.22 (it
+was 0.15). The tables below were measured when the floor was 0.15; rows
+labelled `[current]` refer to that value.
 
 ## Method
 
