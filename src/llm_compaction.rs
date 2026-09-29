@@ -1437,6 +1437,8 @@ mod tests {
         assert_eq!(clip("0123456789", 4), "0123");
         assert_eq!(clip("0123456789", 0), "");
         assert_eq!(clip("éclair", 2), "é");
+        // A limit inside a multi-byte char backs off to the previous boundary.
+        assert_eq!(clip("éclair", 1), "");
     }
 
     fn mock(text: &str) -> LlmCompaction {
