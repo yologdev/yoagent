@@ -102,6 +102,28 @@ fn every_preset_cost_config_is_pinned() {
     }
 }
 
+fn expected_max_tokens(name: &str) -> u32 {
+    match name {
+        "claude_fable_5" | "claude_fable_5_1" | "claude_opus_5_5" | "claude_opus_5"
+        | "claude_opus_4_8" | "claude_sonnet_5" | "gpt_5_5" | "gpt_6_astra" | "gpt_6_sol"
+        | "gpt_6_luna" => 64_000,
+        "claude_haiku_4_5" => 32_000,
+        "meta(muse-spark-1.1)" | "meta(muse-spark-1.2)" => 131_072,
+        _ => panic!("unrecognized pinned preset: {name}"),
+    }
+}
+
+#[test]
+fn every_preset_output_limit_is_pinned() {
+    for (name, config, _) in pinned() {
+        assert_eq!(
+            config.max_tokens,
+            expected_max_tokens(name),
+            "{name}: the resolved max_tokens changed"
+        );
+    }
+}
+
 /// Positive control: the pin is exact, so a one-ULP change is caught.
 #[test]
 fn the_pin_detects_a_one_ulp_change() {

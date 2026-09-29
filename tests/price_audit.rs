@@ -878,6 +878,8 @@ async fn models_dev_source_still_maps() {
 /// so it survived flipping the `||` chain to `&&`.
 #[test]
 fn is_configured_means_any_rate_set() {
+    use yoagent::provider::ContextTier;
+
     assert!(
         !CostConfig::default().is_configured(),
         "all-zero rates set no rate"
@@ -893,6 +895,17 @@ fn is_configured_means_any_rate_set() {
     assert!(
         only_one_field.is_configured(),
         "any single rate is enough to count as priced"
+    );
+
+    assert!(
+        !ContextTier::new(1, 0.0, 0.0).is_configured(),
+        "a tier with no rates is not configured"
+    );
+    assert!(
+        ContextTier::new(1, 0.0, 0.0)
+            .with_cache_read(0.1)
+            .is_configured(),
+        "a single configured tier rate is enough"
     );
 
     for p in presets() {

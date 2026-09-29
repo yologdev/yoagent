@@ -1432,6 +1432,15 @@ mod tests {
         }
     }
 
+    #[test]
+    fn clip_keeps_only_the_prefix_within_the_byte_limit() {
+        assert_eq!(clip("0123456789", 4), "0123");
+        assert_eq!(clip("0123456789", 0), "");
+        assert_eq!(clip("éclair", 2), "é");
+        // A limit inside a multi-byte char backs off to the previous boundary.
+        assert_eq!(clip("éclair", 1), "");
+    }
+
     fn mock(text: &str) -> LlmCompaction {
         LlmCompaction::from_provider(Arc::new(MockProvider::text(text)), ModelConfig::mock())
     }

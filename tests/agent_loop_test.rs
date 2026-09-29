@@ -725,6 +725,27 @@ struct UsageProvider {
     calls: std::sync::atomic::AtomicUsize,
 }
 
+/// Records completed provider calls so tests can observe when the next turn
+/// starts without depending on wall-clock scheduling.
+struct NotifyingProvider {
+    inner: MockProvider,
+    calls: mpsc::UnboundedSender<()>,
+}
+
+#[async_trait::async_trait]
+impl StreamProvider for NotifyingProvider {
+    async fn stream(
+        &self,
+        config: StreamConfig,
+        tx: tokio::sync::mpsc::UnboundedSender<StreamEvent>,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<Message, ProviderError> {
+        let result = self.inner.stream(config, tx, cancel).await;
+        self.calls.send(()).expect("the test still observes calls");
+        result
+    }
+}
+
 #[async_trait::async_trait]
 impl StreamProvider for UsageProvider {
     async fn stream(
@@ -751,6 +772,161 @@ impl StreamProvider for UsageProvider {
         });
         Ok(message)
     }
+}
+
+#[tokio::test]
+async fn turn_delay_is_skipped_first_then_applied_between_turns() {
+    tokio::time::pause();
+
+    let (call_tx, mut call_rx) = mpsc::unbounded_channel();
+    let mut config = make_config(MockProvider::text("unused"));
+    config.provider = std::sync::Arc::new(NotifyingProvider {
+        inner: MockProvider::new(vec![
+            MockResponse::Text("first".into()),
+            MockResponse::Text("second".into()),
+        ]),
+        calls: call_tx,
+    });
+    config.turn_delay = Some(std::time::Duration::from_secs(5));
+
+    let follow_up_used = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let follow_up_used_clone = follow_up_used.clone();
+    config.get_follow_up_messages = Some(Box::new(move || {
+        if !follow_up_used_clone.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            vec![AgentMessage::Llm(Message::user("follow up"))]
+        } else {
+            Vec::new()
+        }
+    }));
+
+    let task = tokio::spawn(async move {
+        let mut context = AgentContext {
+            system_prompt: "test".into(),
+            messages: Vec::new(),
+            tools: Vec::new(),
+        };
+        let (tx, _rx) = mpsc::unbounded_channel();
+        agent_loop(
+            vec![AgentMessage::Llm(Message::user("start"))],
+            &mut context,
+            &config,
+            tx,
+            CancellationToken::new(),
+        )
+        .await;
+    });
+
+    call_rx
+        .recv()
+        .await
+        .expect("the first turn starts immediately");
+    // Let the completed first turn reach the inter-turn sleep before moving
+    // the paused clock. Otherwise the test could advance before the sleep is
+    // registered and accidentally test task scheduling instead of the delay.
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        call_rx.try_recv().is_err(),
+        "the follow-up call must not start before the delay"
+    );
+
+    tokio::time::advance(std::time::Duration::from_secs(4)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        call_rx.try_recv().is_err(),
+        "the follow-up call must still be waiting after four seconds"
+    );
+
+    tokio::time::advance(std::time::Duration::from_secs(1)).await;
+    call_rx
+        .recv()
+        .await
+        .expect("the follow-up call starts after five seconds");
+    task.await.expect("the agent loop completes");
+}
+
+struct EmbeddedErrorProvider;
+
+#[async_trait::async_trait]
+impl StreamProvider for EmbeddedErrorProvider {
+    async fn stream(
+        &self,
+        _config: StreamConfig,
+        tx: tokio::sync::mpsc::UnboundedSender<StreamEvent>,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<Message, ProviderError> {
+        let message = Message::assistant(
+            Vec::new(),
+            StopReason::Error,
+            "error-model",
+            "error-provider",
+            Usage::default(),
+        )
+        .with_error_message("embedded failure");
+        tx.send(StreamEvent::Error {
+            message: message.clone(),
+        })
+        .expect("the forwarder is still listening");
+        Ok(message)
+    }
+}
+
+#[tokio::test]
+async fn embedded_stream_error_emits_balanced_start_and_end_events() {
+    let mut config = make_config(MockProvider::text("unused"));
+    config.provider = std::sync::Arc::new(EmbeddedErrorProvider);
+    config.retry_config = yoagent::RetryConfig::none();
+
+    let mut context = AgentContext {
+        system_prompt: "test".into(),
+        messages: Vec::new(),
+        tools: Vec::new(),
+    };
+    let (tx, rx) = mpsc::unbounded_channel();
+    agent_loop(
+        vec![AgentMessage::Llm(Message::user("start"))],
+        &mut context,
+        &config,
+        tx,
+        CancellationToken::new(),
+    )
+    .await;
+
+    let events = collect_events(rx);
+    let error_start_count = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                AgentEvent::MessageStart {
+                    message: AgentMessage::Llm(Message::Assistant {
+                        stop_reason: StopReason::Error,
+                        error_message: Some(message),
+                        ..
+                    })
+                } if message == "embedded failure"
+            )
+        })
+        .count();
+    let error_end_count = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event,
+                AgentEvent::MessageEnd {
+                    message: AgentMessage::Llm(Message::Assistant {
+                        stop_reason: StopReason::Error,
+                        error_message: Some(message),
+                        ..
+                    })
+                } if message == "embedded failure"
+            )
+        })
+        .count();
+
+    assert_eq!(error_start_count, 1, "an embedded error needs one start");
+    assert_eq!(error_end_count, 1, "an embedded error needs one end");
 }
 
 #[tokio::test]
@@ -1538,6 +1714,62 @@ async fn test_tool_ignoring_progress_no_panic() {
     assert_eq!(progress_count, 0);
 }
 
+/// Steering collected after a tool batch must survive until the next turn.
+///
+/// The callback is intentionally empty at run start, returns a message after
+/// the tool completes, then becomes empty again. This distinguishes the
+/// post-tool result from the ordinary next-turn poll.
+#[tokio::test]
+async fn steering_queued_after_tool_execution_reaches_the_next_turn() {
+    let provider = MockProvider::new(vec![
+        MockResponse::ToolCalls(vec![MockToolCall {
+            provider_metadata: None,
+            name: "silent_tool".into(),
+            arguments: serde_json::json!({}),
+        }]),
+        MockResponse::Text("done".into()),
+    ]);
+    let mut config = make_config(provider);
+    let polls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let polls_clone = polls.clone();
+    config.get_steering_messages = Some(Box::new(move || {
+        if polls_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+            vec![AgentMessage::Llm(Message::user("interrupt"))]
+        } else {
+            Vec::new()
+        }
+    }));
+
+    let mut context = AgentContext {
+        system_prompt: "test".into(),
+        messages: Vec::new(),
+        tools: vec![Box::new(SilentTool)],
+    };
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let new_messages = agent_loop(
+        vec![AgentMessage::Llm(Message::user("start"))],
+        &mut context,
+        &config,
+        tx,
+        CancellationToken::new(),
+    )
+    .await;
+
+    assert!(
+        new_messages.iter().any(|message| {
+            matches!(
+                message,
+                AgentMessage::Llm(Message::User { content, .. })
+                    if content.iter().any(|content| matches!(
+                        content,
+                        Content::Text { text } if text == "interrupt"
+                    ))
+            )
+        }),
+        "steering returned after tool execution must be injected into the next turn"
+    );
+}
+
 /// Two parallel tools both emit progress — events are distinguishable by tool_call_id.
 struct NamedProgressTool {
     tool_name: String,
@@ -2260,7 +2492,7 @@ async fn test_tool_call_with_provider_metadata_executes() {
 /// Records the ContextConfig each compact call receives; never modifies
 /// messages, so the loop's behavior is otherwise unaffected.
 struct RecordingCompaction {
-    calls: std::sync::Mutex<Vec<(usize, usize)>>, // (max_context_tokens, system_prompt_tokens)
+    calls: std::sync::Mutex<Vec<(usize, usize, f32)>>, // (max_context_tokens, system_prompt_tokens, target_ratio)
 }
 
 impl yoagent::CompactionStrategy for RecordingCompaction {
@@ -2269,10 +2501,11 @@ impl yoagent::CompactionStrategy for RecordingCompaction {
         messages: Vec<AgentMessage>,
         config: &yoagent::context::ContextConfig,
     ) -> Vec<AgentMessage> {
-        self.calls
-            .lock()
-            .unwrap()
-            .push((config.max_context_tokens, config.system_prompt_tokens));
+        self.calls.lock().unwrap().push((
+            config.max_context_tokens,
+            config.system_prompt_tokens,
+            config.compact_target_ratio,
+        ));
         messages
     }
 }
@@ -2325,7 +2558,7 @@ fn calibration_config(
     }
 }
 
-async fn run_calibration_loop(max_context_tokens: usize) -> Vec<(usize, usize)> {
+async fn run_calibration_loop(max_context_tokens: usize) -> Vec<(usize, usize, f32)> {
     // Real usage (5010 tokens) dwarfs the char-based estimate of the tiny
     // messages, so the measured overhead is ~5000 tokens.
     let provider = std::sync::Arc::new(UsageProvider {
@@ -2368,13 +2601,14 @@ async fn test_calibration_subtracts_measured_overhead() {
     assert!(calls.len() >= 2, "expected 2 turns, got {:?}", calls);
 
     // Turn 1: no real usage yet — config passes through unchanged.
-    assert_eq!(calls[0], (8000, 500));
+    assert_eq!(calls[0], (8000, 500, 0.7));
 
     // Turn 2: usage anchored at ~5010 vs a tiny estimate, so ~5000 tokens of
     // overhead are subtracted and the static reserve is zeroed (the measured
     // overhead already includes the real system prompt).
-    let (max, reserve) = calls[1];
+    let (max, reserve, ratio) = calls[1];
     assert_eq!(reserve, 0);
+    assert_eq!(ratio, 0.7);
     assert!(
         (2500..=3500).contains(&max),
         "expected ~3000 calibrated budget, got {}",
@@ -2389,8 +2623,61 @@ async fn test_calibration_floor_prevents_budget_collapse() {
     // calibrated budget must never drop below 10% of the configured one.
     let calls = run_calibration_loop(4000).await;
     assert!(calls.len() >= 2, "expected 2 turns, got {:?}", calls);
-    assert_eq!(calls[0], (4000, 500));
-    assert_eq!(calls[1], (400, 0));
+    assert_eq!(calls[0], (4000, 500, 0.7));
+    assert_eq!(calls[1], (400, 0, 0.3));
+}
+
+#[tokio::test]
+async fn compaction_headroom_ratio_reaches_the_strategy() {
+    let provider = std::sync::Arc::new(UsageProvider {
+        usage: Usage {
+            input: 5000,
+            output: 10,
+            cache_read: 0,
+            cache_write: 0,
+            total_tokens: 5010,
+        },
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let strategy = std::sync::Arc::new(RecordingCompaction {
+        calls: std::sync::Mutex::new(Vec::new()),
+    });
+    let mut config = calibration_config(provider, strategy.clone(), 800);
+    let context_config = config
+        .context_config
+        .as_mut()
+        .expect("calibration config has context settings");
+    context_config.compact_target_ratio = 0.95;
+    context_config.compact_headroom_turns = Some(30);
+    config.get_follow_up_messages = Some(Box::new(|| {
+        vec![AgentMessage::Llm(Message::user("x".repeat(4000)))]
+    }));
+
+    let mut context = AgentContext {
+        system_prompt: "test".into(),
+        messages: Vec::new(),
+        tools: Vec::new(),
+    };
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent_loop(
+        vec![AgentMessage::Llm(Message::user("start"))],
+        &mut context,
+        &config,
+        tx,
+        CancellationToken::new(),
+    )
+    .await;
+
+    let calls = strategy.calls.lock().unwrap().clone();
+    assert!(
+        calls.len() >= 2,
+        "expected two compaction calls, got {calls:?}"
+    );
+    assert_eq!(calls[0].2, 0.95, "the configured ratio is used initially");
+    assert!(
+        calls[1].2 < 0.95,
+        "measured growth must adapt the ratio before compaction: {calls:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -3687,6 +3974,33 @@ fn key_order_does_not_disguise_a_repeat() {
         matches!(tracker.record_tool_calls(&b), LoopVerdict::Steer { .. }),
         "reordered keys are the same call — string comparison would miss the loop"
     );
+}
+
+/// A second signature that is steered must not make the first signature look
+/// already steered (or vice versa).
+#[test]
+fn steered_signatures_are_tracked_independently() {
+    use yoagent::context::{ExecutionLimits, ExecutionTracker, LoopVerdict};
+    let mut tracker = ExecutionTracker::new(
+        ExecutionLimits::default().with_max_consecutive_identical_tool_calls(Some(2)),
+    );
+    let call = |name: &str| vec![(name.to_string(), serde_json::json!({"q": 1}))];
+
+    assert_eq!(tracker.record_tool_calls(&call("a")), LoopVerdict::Continue);
+    assert!(matches!(
+        tracker.record_tool_calls(&call("a")),
+        LoopVerdict::Steer { tool_name, .. } if tool_name == "a"
+    ));
+    assert_eq!(tracker.record_tool_calls(&call("b")), LoopVerdict::Continue);
+    assert!(matches!(
+        tracker.record_tool_calls(&call("b")),
+        LoopVerdict::Steer { tool_name, .. } if tool_name == "b"
+    ));
+    assert_eq!(tracker.record_tool_calls(&call("a")), LoopVerdict::Continue);
+    assert!(matches!(
+        tracker.record_tool_calls(&call("a")),
+        LoopVerdict::Abort { tool_name, .. } if tool_name == "a"
+    ));
 }
 
 /// `Some(0)` disables the check rather than tripping on every call.
