@@ -8,7 +8,9 @@
 //!
 //! - **allow** — call `next` and return what it returns;
 //! - **deny** — return [`ToolVerdict::Deny`] *without* calling `next` (later
-//!   listeners never see the call — a rate counter after you is not bumped);
+//!   listeners never see the call — a rate counter after you is not bumped;
+//!   a chain that times out is abandoned where it stands, so a listener that
+//!   counted the call before it awaited has already counted it);
 //! - **modify** — [`ToolCallEvent::set_args`], then call `next`: later
 //!   listeners see the rewritten arguments, and the tool runs with them.
 //!
@@ -202,6 +204,9 @@ impl RutisToolMiddleware {
     /// timeouts, a shut-down host, a short-circuited `Allow` and — with
     /// `require_policy` — an unjudged call already turned into denials).
     pub async fn judge(&self, event: &ToolCallEvent) -> ToolVerdict {
+        // A fresh verdict: nothing carries over if a caller judges one event twice.
+        event.reached_end.store(false, Ordering::SeqCst);
+        event.judged.store(0, Ordering::SeqCst);
         if let Some(why) = crate::host::closed(&self.ctx) {
             return deny_closed(event, why.to_string());
         }

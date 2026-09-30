@@ -112,13 +112,19 @@ impl Terminal<TurnEvent> for DoneTerminal {
 pub struct RutisTurnHook {
     ctx: Ctx,
     timeout: Option<Duration>,
+    /// Warn about a stopped host once, not on every turn.
+    warned_closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl RutisTurnHook {
     /// Dispatch on `ctx`'s bus, giving up (keeping notes so far) after
     /// `timeout` (`None`: no bound — you own liveness).
     pub fn new(ctx: Ctx, timeout: Option<Duration>) -> Self {
-        Self { ctx, timeout }
+        Self {
+            ctx,
+            timeout,
+            warned_closed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
     }
 }
 
@@ -126,7 +132,12 @@ impl RutisTurnHook {
 impl TurnHook for RutisTurnHook {
     async fn before_turn(&self, turn: &TurnContext<'_>) -> Option<String> {
         if let Some(why) = crate::host::closed(&self.ctx) {
-            tracing::warn!(why, "skipping plugin turn notes");
+            if !self
+                .warned_closed
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+            {
+                tracing::warn!(why, "skipping plugin turn notes");
+            }
             return None;
         }
         let event = TurnEvent::from_turn(turn);

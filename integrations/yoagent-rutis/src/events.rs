@@ -134,7 +134,7 @@ fn spawn_forwarder(
                 event,
             };
             if !emit_agent_event(&ctx, wrapped) && !dropped_logged {
-                tracing::debug!("the plugin host has shut down; dropping agent events");
+                tracing::debug!("the plugin host is not running; dropping agent events");
                 dropped_logged = true;
             }
         }
