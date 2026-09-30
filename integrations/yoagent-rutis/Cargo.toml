@@ -1,0 +1,35 @@
+[package]
+name = "yoagent-rutis"
+version = "0.1.0"
+edition = "2021"
+resolver = "3"
+description = "Extend a yoagent Agent at runtime with rutis plugins: tools, tool policy, turn notes, input filters and events"
+license = "MIT"
+repository = "https://github.com/yologdev/yoagent"
+documentation = "https://docs.rs/yoagent-rutis"
+readme = "README.md"
+keywords = ["agent", "llm", "plugin", "rutis", "yoagent"]
+categories = ["asynchronous", "development-tools"]
+authors = ["Yuanhao <yuanhao@yolog.dev>"]
+# yoagent's MSRV; rutis 0.5 declares 1.85.
+rust-version = "1.86"
+# Publish after the yoagent release that includes `ToolSource`: until then
+# the `yoagent` requirement below resolves to a crates.io version without it.
+publish = false
+
+[dependencies]
+# `ToolSource` is unreleased: this needs the yoagent release that ships it.
+yoagent = { path = "../..", version = "0.22.0" }
+# 0.x caret: 0.5.x only (0.6 is breaking). Any rutis minor bump is a
+# yoagent-rutis minor bump — its types are part of this crate's API.
+rutis = "0.5"
+async-trait = "0.1"
+futures = "0.3"
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+# Same crate rutis hands its cancellation tokens out as.
+tokio-util = "0.7"
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
