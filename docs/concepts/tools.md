@@ -479,9 +479,18 @@ The contract:
   each source for its tools before the first request; the list is then fixed
   for that run. A tool withdrawn mid-run stays offered until the run ends (make
   it fail cleanly if its backend is gone); a tool added mid-run is offered from
-  the next run. Changing the list turn to turn would change the request prefix
-  under the model (defeating prompt caching) and could strand a call the model
+  the next run. Changing the list turn to turn could strand a call the model
   already made.
+- **Prompt caching.** Tool definitions open the provider's cached prefix, so
+  *any* change to the offered set rewrites the whole cache. Per-run
+  consultation bounds that cost to run boundaries — it does not prevent it: a
+  run whose set differs from the previous run's pays a full prefix rewrite.
+  Order alone never costs anything: sourced tools are sorted by name after
+  collisions are resolved (the agent's own tools keep their order).
+- **No timeout.** The run waits for every source. On an `Agent`, dropping the
+  prompt future while it waits is the escape (sources are consulted before
+  any agent state is touched); a `SubAgentTool` stops waiting when the parent
+  run is cancelled.
 - **For that run only.** Sourced tools are appended after the agent's own
   tools and dropped again when the run ends; they never join `with_tools`'
   list. A model that calls a tool that is no longer offered gets the usual
@@ -491,7 +500,8 @@ The contract:
   tool) win, then earlier sources in installation order, then the earlier
   tool within one source. Each dropped duplicate is logged with
   `tracing::warn!`; the run is never refused.
-- **Failures.** A source that panics is contained, logged, and contributes no
+- **Failures.** A source that panics — while building its future or while it
+  runs — is contained, logged with the panic message, and contributes no
   tools to that run.
 
 Several sources may be added. `SubAgentTool::with_tool_source` mirrors it —

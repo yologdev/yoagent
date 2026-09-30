@@ -12,11 +12,24 @@
 //!
 //! The list is fixed for the whole run. A tool that disappears mid-run stays
 //! offered (and callable) until the run ends, and a tool that appears mid-run
-//! is first offered on the next run. A turn-to-turn change would also change
-//! the request prefix under the model, which defeats prompt caching and can
-//! strand a tool call the model already emitted; run boundaries have neither
-//! problem. A source whose tools can go stale mid-run should make them fail
-//! cleanly (return an error result) rather than rely on being withdrawn.
+//! is first offered on the next run. Changing the list turn to turn could
+//! strand a tool call the model already emitted.
+//!
+//! **Prompt caching.** Tool definitions open the provider's cached prefix, so
+//! any change to the offered set rewrites the whole cache. Consulting once per
+//! run *bounds* that cost to run boundaries; it does not prevent it — a run
+//! that starts with a different set than the previous one pays for a full
+//! prefix rewrite. The same set in a different order costs nothing: sourced
+//! tools are sorted by name (the agent's own tools keep their order).
+//!
+//! A source whose tools can go stale mid-run should make them fail cleanly
+//! (return an error result) rather than rely on being withdrawn.
+//!
+//! **No timeout.** The run waits for every source. On an
+//! [`Agent`](crate::Agent), dropping the prompt future while it waits is the
+//! escape hatch — sources are consulted before any agent state is touched, so
+//! the agent is left as it was. A [`SubAgentTool`](crate::SubAgentTool)
+//! stops waiting when the parent run is cancelled.
 //!
 //! # Name collisions
 //!
@@ -29,7 +42,8 @@
 //! 2. **Then earlier sources win** (installation order), and within one
 //!    source, the earlier tool in its list.
 //!
-//! Every dropped duplicate is logged with `tracing::warn!` naming the tool.
+//! The surviving sourced tools are then sorted by name (see *Prompt
+//! caching* above). Every dropped duplicate is logged with `tracing::warn!` naming the tool.
 //! The run is never refused over a collision: a misbehaving source must not be
 //! able to take the whole agent down.
 //!
@@ -106,18 +120,20 @@ impl AgentTool for ArcTool {
 }
 
 /// Ask every source for its tools, in installation order. A panicking source
-/// is contained and contributes nothing.
+/// — whether it panics while building its future or while it runs — is
+/// contained, logged with its payload, and contributes nothing.
 pub(crate) async fn collect(sources: &[Arc<dyn ToolSource>]) -> Vec<Arc<dyn AgentTool>> {
     use futures::FutureExt;
     let mut out = Vec::new();
     for (index, source) in sources.iter().enumerate() {
-        match std::panic::AssertUnwindSafe(source.tools())
-            .catch_unwind()
-            .await
-        {
+        // The call itself is inside the guarded block, so a hand-written
+        // `tools()` that panics before returning its future is caught too.
+        let guarded = std::panic::AssertUnwindSafe(async move { (**source).tools().await });
+        match guarded.catch_unwind().await {
             Ok(tools) => out.extend(tools),
-            Err(_) => tracing::warn!(
+            Err(payload) => tracing::warn!(
                 source = index,
+                panic = %panic_message(payload.as_ref()),
                 "tool source panicked; it contributes no tools to this run"
             ),
         }
@@ -125,16 +141,29 @@ pub(crate) async fn collect(sources: &[Arc<dyn ToolSource>]) -> Vec<Arc<dyn Agen
     out
 }
 
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<non-string panic payload>".to_string()
+    }
+}
+
 /// Append `sourced` to `tools`, skipping any whose name is already taken
-/// (static tools first, then earlier sourced ones). Returns how many were
-/// appended.
-pub(crate) fn merge(
-    tools: &mut Vec<Box<dyn AgentTool>>,
-    sourced: Vec<Arc<dyn AgentTool>>,
-) -> usize {
-    let mut taken: HashSet<String> = tools.iter().map(|t| t.name().to_string()).collect();
-    let static_names: HashSet<String> = taken.clone();
-    let mut added = 0;
+/// (static tools first, then earlier sourced ones), then sort the appended
+/// tools by name.
+///
+/// Dedup happens before the sort so "earlier wins" keeps its meaning. The
+/// sort makes the offered list independent of the order a source returns
+/// its tools in (a `HashMap`-backed source, say): tool definitions open the
+/// provider's cached prefix, so a mere reordering would rewrite the whole
+/// cache. The agent's own tools keep their order.
+pub(crate) fn merge(tools: &mut Vec<Box<dyn AgentTool>>, sourced: Vec<Arc<dyn AgentTool>>) {
+    let static_names: HashSet<String> = tools.iter().map(|t| t.name().to_string()).collect();
+    let mut taken = static_names.clone();
+    let mut kept: Vec<Arc<dyn AgentTool>> = Vec::new();
     for tool in sourced {
         let name = tool.name().to_string();
         if taken.contains(&name) {
@@ -154,8 +183,11 @@ pub(crate) fn merge(
             continue;
         }
         taken.insert(name);
-        tools.push(Box::new(ArcTool(tool)));
-        added += 1;
+        kept.push(tool);
     }
-    added
+    kept.sort_by(|a, b| a.name().cmp(b.name()));
+    tools.extend(
+        kept.into_iter()
+            .map(|t| Box::new(ArcTool(t)) as Box<dyn AgentTool>),
+    );
 }

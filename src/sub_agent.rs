@@ -505,7 +505,11 @@ impl AgentTool for SubAgentTool {
         // Tools resolved for this run come after the static ones (which win
         // a name collision).
         if !self.tool_sources.is_empty() {
-            let sourced = crate::tool_source::collect(&self.tool_sources).await;
+            // A hung source must not outlive the parent's abort.
+            let sourced = tokio::select! {
+                sourced = crate::tool_source::collect(&self.tool_sources) => sourced,
+                _ = cancel.cancelled() => return Err(ToolError::Cancelled),
+            };
             crate::tool_source::merge(&mut tools, sourced);
         }
 
