@@ -104,6 +104,33 @@ jobs:
       - name: Check
         run: cargo check --all-features
 
+  # The rutis bridge is its own crate (its own Cargo.toml, not a workspace
+  # member, not in the published yoagent package). It depends on yoagent by
+  # path, so it is built against this checkout; `rutis` is pinned exactly.
+  rutis-bridge:
+    name: yoagent-rutis bridge
+    runs-on: ubuntu-latest
+    env:
+      MANIFEST: integrations/yoagent-rutis/Cargo.toml
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: integrations/yoagent-rutis
+      - name: Format
+        run: cargo fmt --manifest-path "$MANIFEST" -- --check
+      - name: Clippy
+        run: cargo clippy --manifest-path "$MANIFEST" --all-targets
+      - name: Documentation
+        run: RUSTDOCFLAGS="-Dwarnings" cargo doc --manifest-path "$MANIFEST" --no-deps
+      - name: Test
+        run: cargo test --manifest-path "$MANIFEST"
+      - name: Example
+        run: cargo run --manifest-path "$MANIFEST" --example policy_plugin
+
   # yoagent claims to be a tested GASP-conformant runtime — this job is the
   # test: emit an agent repo with the gasp bridge (mock provider, no network)
   # and run the protocol's conformance checker against it.
