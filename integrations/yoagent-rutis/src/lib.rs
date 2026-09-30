@@ -92,14 +92,14 @@
 //! - **Route rutis's `ErrorSink`** (default: stderr) into your logging with
 //!   `Ctx::root_with_sink`.
 
-mod bridge;
-mod events;
+pub mod bridge;
+pub mod events;
 mod host;
-mod input;
-mod plugin;
-mod policy;
-mod tools;
-mod turn;
+pub mod input;
+pub mod plugin;
+pub mod policy;
+pub mod tools;
+pub mod turn;
 
 pub use bridge::{attach, AgentRutisExt, RutisBridge};
 pub use events::{emit_agent_event, event_sender, event_sender_labeled, AgentEventEmitted};
