@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberState, FiberView, Plugin, TypeKey};
 use yoagent::provider::mock::{MockResponse, MockToolCall};
@@ -122,15 +123,32 @@ fn call(name: &str, args: serde_json::Value) -> MockResponse {
     }])
 }
 
-async fn wait_active(view: &FiberView) {
+type BoxError = Box<dyn std::error::Error>;
+
+/// Wait until the plugin is active; fail if it failed, was disposed, or took
+/// too long.
+async fn wait_active(view: &FiberView) -> Result<(), BoxError> {
     let mut rx = view.watch();
-    while rx.borrow_and_update().state != FiberState::Active {
-        rx.changed().await.expect("fiber driver alive");
-    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let snapshot = rx.borrow_and_update().clone();
+            match snapshot.state {
+                FiberState::Active => return Ok(()),
+                FiberState::Failed | FiberState::Disposed => {
+                    return Err(
+                        format!("plugin `{}` did not start: {snapshot:?}", view.name()).into(),
+                    )
+                }
+                _ => rx.changed().await?,
+            }
+        }
+    })
+    .await
+    .map_err(|_| format!("plugin `{}` did not start within 5 s", view.name()))?
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), BoxError> {
     let root = Ctx::root()?;
     let bridge = RutisBridge::install(&root)?;
 
@@ -142,21 +160,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_calls_per_tool: 2,
         injects: vec![TypeKey::of::<ToolRegistry>()],
     });
-    wait_active(&tools).await;
-    wait_active(&policy).await;
+    wait_active(&tools).await?;
+    wait_active(&policy).await?;
 
     // Observe the agent's events on the bus. (A plugin would do the same
     // from its `apply`; registered on the root, it lives as long as the root.)
     let log = Arc::new(Mutex::new(Vec::<String>::new()));
     {
         let log = log.clone();
-        root.on_agent_event(move |event| {
+        root.on_agent_event(move |emitted| {
             if let AgentEvent::ToolExecutionEnd {
                 tool_name,
                 result,
                 is_error,
                 ..
-            } = event
+            } = emitted.event()
             {
                 let text: String = result
                     .content
@@ -186,22 +204,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_rutis(&bridge);
 
     let (tx, forwarder) = bridge.event_sender(None);
-    agent
-        .prompt_with_sender("Count some words, then clean up.", tx)
-        .await;
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        agent.prompt_with_sender("Count some words, then clean up.", tx),
+    )
+    .await
+    .map_err(|_| "the agent run did not finish within 10 s")?;
     forwarder.await?;
 
-    // Bus dispatch is asynchronous: give the listener a moment to finish.
-    for _ in 0..100 {
-        if log.lock().unwrap().len() == 4 {
-            break;
+    // Bus dispatch is asynchronous: wait (bounded) for the listener.
+    let expected = [
+        "word_count: [ok] 3 words",
+        "word_count: [ok] 2 words",
+        "word_count: [denied/error] Tool call denied: rate cap: `word_count` may run at most 2 times",
+        "bash: [denied/error] Tool call denied: `bash` is disabled",
+    ];
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while log.lock().unwrap().len() < expected.len() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    for line in log.lock().unwrap().iter() {
+    })
+    .await
+    .map_err(|_| format!("only these events arrived: {:?}", log.lock().unwrap()))?;
+
+    let lines = log.lock().unwrap().clone();
+    for line in &lines {
         println!("{line}");
     }
+    if lines != expected {
+        return Err(format!("unexpected tool results: {lines:?}").into());
+    }
 
-    root.shutdown().await?;
+    tokio::time::timeout(Duration::from_secs(5), root.shutdown())
+        .await
+        .map_err(|_| "shutdown did not finish within 5 s")??;
     Ok(())
 }

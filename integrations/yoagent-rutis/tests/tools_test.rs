@@ -12,7 +12,9 @@ use rutis::{
 };
 use yoagent::provider::mock::MockResponse;
 use yoagent::{AgentTool, SubAgentTool, ToolContext, ToolError, ToolResult};
-use yoagent_rutis::{AgentPlugin, AgentRutisExt, PluginCtxExt, RutisBridge, ToolRegistry};
+use yoagent_rutis::{
+    AgentPlugin, AgentRutisExt, PluginCtxExt, RutisBridge, ToolRegistry, ToolVerdict,
+};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_plugin_tool_is_offered_while_the_plugin_is_loaded() {
@@ -151,8 +153,9 @@ async fn two_plugins_contribute_and_a_taken_name_is_refused() {
         ]),
         text("done"),
     ]);
-    // The agent's own tool named like a plugin tool would win; here it has
-    // its own name, and a plugin tool may not take it either at run time.
+    // Plugin `d` offers a tool named like the agent's own `own`: the registry
+    // accepts it (no other plugin holds the name), and at run time the
+    // agent's own tool wins.
     let d = root.plugin(AgentPlugin::new("d").with_tool(Reply::new("own", "from d")));
     wait_active(&d).await;
     let mut agent = agent
@@ -296,28 +299,71 @@ async fn a_config_update_changes_the_tool_between_runs() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_sub_agent_attached_to_the_bridge_sees_plugin_tools() {
+async fn a_sub_agent_attached_to_the_bridge_gets_tools_policy_and_input_filter() {
     let root = Ctx::root().unwrap();
     let bridge = RutisBridge::install(&root).unwrap();
-    let view = root.plugin(AgentPlugin::new("greeter").with_tool(Reply::new("greet", "hi")));
+    let greet = Reply::new("greet", "hi");
+    let greet_runs = greet.runs();
+    let secret = Reply::new("secret", "leaked");
+    let secret_runs = secret.runs();
+    let view = root.plugin(
+        AgentPlugin::new("child-plugin")
+            .with_tool(greet)
+            .with_tool(secret)
+            .with_policy(|call| match call.tool_name() {
+                "secret" => ToolVerdict::deny("secret is off limits"),
+                _ => ToolVerdict::Allow,
+            })
+            .with_input_check(|input| {
+                input
+                    .text()
+                    .contains("forbidden")
+                    .then(|| "forbidden task".to_string())
+            }),
+    );
     wait_active(&view).await;
 
     let (child, child_seen) = recording(vec![
         call("greet", serde_json::json!({})),
+        call("secret", serde_json::json!({})),
         text("child done"),
     ]);
     let sub = SubAgentTool::from_provider("helper", child, yoagent::provider::ModelConfig::mock())
         .with_rutis(&bridge);
     let (parent, _) = agent(vec![
         call("helper", serde_json::json!({"task": "greet"})),
+        call(
+            "helper",
+            serde_json::json!({"task": "do the forbidden thing"}),
+        ),
         text("done"),
     ]);
     let mut parent = parent.with_sub_agent(sub);
-    run(&mut parent, "delegate").await;
+    let (_, results) = run(&mut parent, "delegate").await;
+
+    let child_seen = child_seen.lock().unwrap().clone();
     assert_eq!(
-        child_seen.lock().unwrap()[0].tools,
-        vec!["greet".to_string()]
+        child_seen[0].tools,
+        vec!["greet".to_string(), "secret".into()]
     );
+    assert_eq!(
+        greet_runs.load(Ordering::SeqCst),
+        1,
+        "the allowed plugin tool ran"
+    );
+    assert_eq!(
+        secret_runs.load(Ordering::SeqCst),
+        0,
+        "the policy denied inside the child"
+    );
+    assert_eq!(
+        child_seen.len(),
+        3,
+        "the rejected task never reached the child model"
+    );
+    assert!(!results[0].2, "{results:?}");
+    assert!(results[1].2, "the rejected delegation fails: {results:?}");
+    assert!(results[1].1.contains("forbidden task"), "{results:?}");
     root.shutdown().await.unwrap();
 }
 

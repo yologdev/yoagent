@@ -110,6 +110,7 @@ jobs:
   rutis-bridge:
     name: yoagent-rutis bridge
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     env:
       MANIFEST: integrations/yoagent-rutis/Cargo.toml
     steps:
@@ -130,6 +131,27 @@ jobs:
         run: cargo test --manifest-path "$MANIFEST"
       - name: Example
         run: cargo run --manifest-path "$MANIFEST" --example policy_plugin
+
+  # The bridge declares rust-version 1.86 (yoagent's MSRV; rutis 0.5 declares
+  # 1.85). Mirrors the `msrv` job above, including its yoke-derive pin.
+  rutis-bridge-msrv:
+    name: yoagent-rutis MSRV (1.86)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      MANIFEST: integrations/yoagent-rutis/Cargo.toml
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.86
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: integrations/yoagent-rutis
+      - name: Pin transitive deps that dropped 1.86 without declaring it
+        run: |
+          cargo generate-lockfile --manifest-path "$MANIFEST"
+          cargo update --manifest-path "$MANIFEST" -p yoke-derive --precise 0.8.2
+      - name: Check
+        run: cargo check --manifest-path "$MANIFEST" --all-targets
 
   # yoagent claims to be a tested GASP-conformant runtime — this job is the
   # test: emit an agent repo with the gasp bridge (mock provider, no network)

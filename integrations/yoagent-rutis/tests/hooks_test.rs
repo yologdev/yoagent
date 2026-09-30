@@ -211,8 +211,10 @@ async fn a_policy_that_times_out_denies() {
         .expect("the timeout bounds the run");
     assert!(results[0].2);
     assert!(results[0].1.contains("did not answer"), "{results:?}");
-    // Dispose rather than shut down: the hung listener holds a dispatch.
+    // The timed-out dispatch was dropped with the middleware's future, so
+    // nothing holds the root open.
     drop(hanging);
+    root.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -249,11 +251,10 @@ async fn a_panicking_turn_listener_fails_open() {
     wait_active(&second).await;
     let (agent, seen) = agent(vec![text("done")]);
     let mut agent = agent.with_rutis(&bridge);
-    let (events, _) = run(&mut agent, "hi").await;
-    assert!(events
-        .iter()
-        .any(|e| matches!(e, AgentEvent::AgentEnd { .. })));
-    assert!(seen.lock().unwrap()[0].last_user.contains("[kept]"));
+    run(&mut agent, "hi").await;
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1, "the request still went out");
+    assert_eq!(seen[0].last_user, "hi|[kept]", "the earlier note survives");
     root.shutdown().await.unwrap();
 }
 
