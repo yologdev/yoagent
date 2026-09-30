@@ -448,6 +448,67 @@ When an AI agent (like a coding assistant) uses yoagent, streaming tool output h
 
 The LLM itself doesn't see updates — it works with final results only. This is intentional: partial output would waste context tokens and confuse the model. The streaming is purely a **human-facing** feature.
 
+## Tools That Change at Runtime: `ToolSource`
+
+`with_tools` fixes an agent's tool list until you replace it. When the set of
+tools changes while the agent lives — plugins loaded and unloaded, an MCP
+server that reconnects with a different list, a feature flag — add a
+`ToolSource` instead:
+
+```rust
+use std::sync::{Arc, Mutex};
+use yoagent::{Agent, AgentTool, ToolSource};
+
+struct Swappable(Mutex<Vec<Arc<dyn AgentTool>>>);
+
+#[async_trait::async_trait]
+impl ToolSource for Swappable {
+    async fn tools(&self) -> Vec<Arc<dyn AgentTool>> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+let agent = Agent::from_provider(provider, config)
+    .with_tools(my_static_tools)
+    .with_tool_source(Arc::new(Swappable(Mutex::new(vec![]))));
+```
+
+The contract:
+
+- **Consulted once per run.** Every `prompt*` and `continue_loop*` call asks
+  each source for its tools before the first request; the list is then fixed
+  for that run. A tool withdrawn mid-run stays offered until the run ends (make
+  it fail cleanly if its backend is gone); a tool added mid-run is offered from
+  the next run. Changing the list turn to turn could strand a call the model
+  already made.
+- **Prompt caching.** Tool definitions open the provider's cached prefix, so
+  *any* change to the offered set rewrites the whole cache. Per-run
+  consultation bounds that cost to run boundaries — it does not prevent it: a
+  run whose set differs from the previous run's pays a full prefix rewrite.
+  Order alone never costs anything: sourced tools are sorted by name after
+  collisions are resolved (the agent's own tools keep their order).
+- **No timeout.** The run waits for every source. On an `Agent`, dropping the
+  prompt future while it waits is the escape (sources are consulted before
+  any agent state is touched); a `SubAgentTool` stops waiting when the parent
+  run is cancelled.
+- **For that run only.** Sourced tools are appended after the agent's own
+  tools and dropped again when the run ends; they never join `with_tools`'
+  list. A model that calls a tool that is no longer offered gets the usual
+  `Tool … not found` error result.
+- **Name collisions.** Providers reject two tools with one name, so exactly
+  one survives: the agent's own tools (including the injected `shared_state`
+  tool) win, then earlier sources in installation order, then the earlier
+  tool within one source. Each dropped duplicate is logged with
+  `tracing::warn!`; the run is never refused.
+- **Failures.** A source that panics — while building its future or while it
+  runs — is contained, logged with the panic message, and contributes no
+  tools to that run.
+
+Several sources may be added. `SubAgentTool::with_tool_source` mirrors it —
+consulted once per delegation. The [rutis bridge](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis)
+(`yoagent-rutis`) is built on it: plugins contribute tools, and an agent sees
+exactly the tools of the currently loaded plugins at each run start.
+
 ## Execution Strategies
 
 When the LLM returns multiple tool calls in a single response (e.g., "read file A, read file B, run bash C"), `ToolExecutionStrategy` controls how they run:

@@ -39,7 +39,9 @@
 //! - **Tools** ([`tools`]) — bash, read/write/edit file, search; add your own
 //!   via the [`AgentTool`] trait. [MCP](mcp) servers and
 //!   [OpenAPI specs](https://docs.rs/yoagent/latest/yoagent/openapi/index.html)
-//!   (feature `openapi`) become tools transparently.
+//!   (feature `openapi`) become tools transparently. A [`ToolSource`]
+//!   supplies tools resolved at the start of every run, for tool sets that
+//!   change while the agent lives (plugins, reconnecting servers).
 //! - **Steering** — inject guidance into a running agent ([`Agent::steer`]);
 //!   picked up between tool executions (per batch under the default parallel
 //!   strategy). Queue follow-ups, inspect/edit the queues.
@@ -92,6 +94,7 @@ pub mod session;
 pub mod shared_state;
 pub mod skills;
 pub mod sub_agent;
+pub mod tool_source;
 pub mod tools;
 pub mod types;
 
@@ -116,4 +119,5 @@ pub use session::{Session, SessionEntry, SessionError};
 pub use shared_state::SharedState;
 pub use skills::SkillSet;
 pub use sub_agent::SubAgentTool;
+pub use tool_source::ToolSource;
 pub use types::*;

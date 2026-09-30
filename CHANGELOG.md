@@ -4,6 +4,31 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- **`ToolSource`: tools resolved per run.** A new trait
+  (`yoagent::ToolSource`, module `tool_source`) with one async method,
+  `tools() -> Vec<Arc<dyn AgentTool>>`, installed with
+  `Agent::with_tool_source` / `SubAgentTool::with_tool_source`. Each source is
+  consulted once at the start of every run (every `prompt*` and
+  `continue_loop*` call; once per delegation for a sub-agent), and its tools
+  are offered alongside the agent's own for that run only — they are dropped
+  again when the run ends. On a name collision the agent's own tools win, then
+  earlier sources, then the earlier tool within a source; each dropped
+  duplicate is logged, and the run is never refused. The surviving sourced
+  tools are sorted by name, so a source returning the same set in another
+  order never changes the request prefix (any change to the *set* still
+  rewrites the prompt cache — per-run consultation bounds that to run
+  boundaries). Sources have no timeout: a sub-agent stops waiting when the
+  parent run is cancelled; on an `Agent`, dropping the prompt future leaves
+  its state untouched. A panicking source (even one that panics before
+  returning its future) is contained and contributes nothing. For tool sets that change while the agent
+  lives (plugin systems, reconnecting MCP servers); nothing changes for agents
+  without a source. Non-breaking: `AgentTool`, `AgentContext` and
+  `AgentLoopConfig` are unchanged.
+
 ## 0.22.0
 
 ### Added

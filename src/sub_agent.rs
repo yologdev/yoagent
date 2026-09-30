@@ -34,6 +34,7 @@ use crate::context::ExecutionLimits;
 use crate::provider::model::ModelConfig;
 use crate::provider::StreamProvider;
 use crate::shared_state::SharedState;
+use crate::tool_source::{ArcTool, ToolSource};
 use crate::tools::shared_state_tool::SharedStateTool;
 use crate::types::*;
 use std::sync::Arc;
@@ -56,6 +57,7 @@ pub struct SubAgentTool {
     api_key: String,
     provider: Arc<dyn StreamProvider>,
     tools: Vec<Arc<dyn AgentTool>>,
+    tool_sources: Vec<Arc<dyn ToolSource>>,
     thinking_level: ThinkingLevel,
     max_tokens: Option<u32>,
     temperature: Option<f32>,
@@ -103,6 +105,7 @@ impl SubAgentTool {
             api_key: String::new(),
             provider,
             tools: Vec::new(),
+            tool_sources: Vec::new(),
             thinking_level: ThinkingLevel::Off,
             max_tokens: None,
             temperature: None,
@@ -241,6 +244,15 @@ impl SubAgentTool {
 
     pub fn with_tools(mut self, tools: Vec<Arc<dyn AgentTool>>) -> Self {
         self.tools = tools;
+        self
+    }
+
+    /// Add a [`ToolSource`], consulted once per delegation (each delegation
+    /// is one run of the sub-agent). Mirrors
+    /// [`Agent::with_tool_source`](crate::Agent::with_tool_source): the
+    /// sub-agent's own tools win a name collision, then earlier sources.
+    pub fn with_tool_source(mut self, source: impl ToolSource + 'static) -> Self {
+        self.tool_sources.push(Arc::new(source));
         self
     }
 
@@ -421,33 +433,6 @@ impl SubAgentTool {
     }
 }
 
-/// Thin adapter: wraps `Arc<dyn AgentTool>` so it can be placed in a
-/// `Vec<Box<dyn AgentTool>>` (required by `AgentContext`).
-struct ArcToolWrapper(Arc<dyn AgentTool>);
-
-#[async_trait::async_trait]
-impl AgentTool for ArcToolWrapper {
-    fn name(&self) -> &str {
-        self.0.name()
-    }
-    fn label(&self) -> &str {
-        self.0.label()
-    }
-    fn description(&self) -> &str {
-        self.0.description()
-    }
-    fn parameters_schema(&self) -> serde_json::Value {
-        self.0.parameters_schema()
-    }
-    async fn execute(
-        &self,
-        params: serde_json::Value,
-        ctx: ToolContext,
-    ) -> Result<ToolResult, ToolError> {
-        self.0.execute(params, ctx).await
-    }
-}
-
 #[async_trait::async_trait]
 impl AgentTool for SubAgentTool {
     fn name(&self) -> &str {
@@ -494,7 +479,7 @@ impl AgentTool for SubAgentTool {
         let mut tools: Vec<Box<dyn AgentTool>> = self
             .tools
             .iter()
-            .map(|t| Box::new(ArcToolWrapper(Arc::clone(t))) as Box<dyn AgentTool>)
+            .map(|t| Box::new(ArcTool(Arc::clone(t))) as Box<dyn AgentTool>)
             .collect();
 
         // Append the skills index (if any) so the sub-agent can discover skills.
@@ -515,6 +500,17 @@ impl AgentTool for SubAgentTool {
                 "\n\n## Shared State\nYou have access to a shared variable store via the `shared_state` tool.\nAvailable: {}",
                 summary
             ));
+        }
+
+        // Tools resolved for this run come after the static ones (which win
+        // a name collision).
+        if !self.tool_sources.is_empty() {
+            // A hung source must not outlive the parent's abort.
+            let sourced = tokio::select! {
+                sourced = crate::tool_source::collect(&self.tool_sources) => sourced,
+                _ = cancel.cancelled() => return Err(ToolError::Cancelled),
+            };
+            crate::tool_source::merge(&mut tools, sourced);
         }
 
         // Fresh context for the sub-agent
