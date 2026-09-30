@@ -5,21 +5,24 @@
 //! notes are joined (one per line, in listener order) and appended to the
 //! request's latest user turn by yoagent — transient, never stored in
 //! history. Turn notes are advisory, so this hook **fails open**: a listener
-//! that errors or panics, a chain past its timeout (default
-//! [`DEFAULT_TURN_TIMEOUT`]) or a host that has shut down keeps the notes
-//! added so far and the request proceeds; the failure is logged.
+//! that errors or panics, or a chain past its timeout (default
+//! [`DEFAULT_TURN_TIMEOUT`]), keeps the notes added so far and the request
+//! proceeds; the failure is logged. A host that is not running adds no notes
+//! (warned once per hook).
 //!
 //! Notes are recomputed for every request (never accumulated across turns).
 //! A raw `WaterfallListener` that does not call `next` drops the notes every
 //! later listener would have added; the [`PluginCtxExt::on_turn`](crate::PluginCtxExt::on_turn)
 //! helper always calls it.
 
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use futures::FutureExt;
-use rutis::{BoxFuture, CordisError, Ctx, Event, EventKey, Terminal};
+use rutis::{BoxFuture, CordisError, Ctx, Event, EventKey, Next, Terminal, WaterfallListener};
 use yoagent::{TurnContext, TurnHook};
+
+use crate::host::{run_chain, Outcome};
 
 /// Default bound on one request's turn-note chain (notes so far are kept).
 pub const DEFAULT_TURN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -49,6 +52,18 @@ impl TurnEvent {
             tool_names,
             notes: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Set what the user asked for (testing).
+    pub fn with_user_request(mut self, request: impl Into<String>) -> Self {
+        self.user_request = Some(request.into());
+        self
+    }
+
+    /// Set the text of the user's latest message (testing).
+    pub fn with_latest_user_text(mut self, text: impl Into<String>) -> Self {
+        self.latest_user_text = Some(text.into());
+        self
     }
 
     fn from_turn(turn: &TurnContext<'_>) -> Self {
@@ -108,22 +123,22 @@ impl Terminal<TurnEvent> for DoneTerminal {
 }
 
 /// yoagent [`TurnHook`] dispatching a [`TurnEvent`] per request.
+///
+/// Built by [`RutisBridge::turn_hook`](crate::RutisBridge::turn_hook).
 #[derive(Clone)]
 pub struct RutisTurnHook {
     ctx: Ctx,
     timeout: Option<Duration>,
     /// Warn about a stopped host once, not on every turn.
-    warned_closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    warned_closed: Arc<AtomicBool>,
 }
 
 impl RutisTurnHook {
-    /// Dispatch on `ctx`'s bus, giving up (keeping notes so far) after
-    /// `timeout` (`None`: no bound — you own liveness).
-    pub fn new(ctx: Ctx, timeout: Option<Duration>) -> Self {
+    pub(crate) fn new(ctx: Ctx, timeout: Option<Duration>) -> Self {
         Self {
             ctx,
             timeout,
-            warned_closed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            warned_closed: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -131,36 +146,34 @@ impl RutisTurnHook {
 #[async_trait::async_trait]
 impl TurnHook for RutisTurnHook {
     async fn before_turn(&self, turn: &TurnContext<'_>) -> Option<String> {
-        if let Some(why) = crate::host::closed(&self.ctx) {
-            if !self
-                .warned_closed
-                .swap(true, std::sync::atomic::Ordering::Relaxed)
-            {
-                tracing::warn!(why, "skipping plugin turn notes");
-            }
-            return None;
-        }
         let event = TurnEvent::from_turn(turn);
         let key = EventKey::<TurnEvent>::of();
-        let chain = std::panic::AssertUnwindSafe(self.ctx.events().waterfall(
-            &self.ctx,
-            &key,
-            &event,
-            DoneTerminal,
-        ))
-        .catch_unwind();
-        let outcome = match self.timeout {
-            Some(limit) => tokio::time::timeout(limit, chain)
-                .await
-                .unwrap_or_else(|_| Ok(Err(CordisError::PluginFailed("timed out".into())))),
-            None => chain.await,
-        };
+        let outcome = run_chain(&self.ctx, self.timeout, || {
+            self.ctx
+                .events()
+                .waterfall(&self.ctx, &key, &event, DoneTerminal)
+        })
+        .await;
         match outcome {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
+            Outcome::Closed(why) => {
+                if !self.warned_closed.swap(true, Ordering::Relaxed) {
+                    tracing::warn!(why, "skipping plugin turn notes");
+                }
+                return None;
+            }
+            Outcome::TimedOut(limit) => {
+                tracing::warn!(
+                    ?limit,
+                    "the plugin turn hooks timed out; keeping earlier notes"
+                )
+            }
+            Outcome::Panicked => {
+                tracing::warn!("a plugin turn hook panicked; keeping earlier notes")
+            }
+            Outcome::Finished(Err(error)) => {
                 tracing::warn!(%error, "a plugin turn hook failed; keeping earlier notes")
             }
-            Err(_) => tracing::warn!("a plugin turn hook panicked; keeping earlier notes"),
+            Outcome::Finished(Ok(())) => {}
         }
         let notes = event.notes();
         (!notes.is_empty()).then(|| notes.join("\n"))
@@ -170,7 +183,7 @@ impl TurnHook for RutisTurnHook {
 /// Waterfall listener around a note closure.
 pub(crate) struct NoteListener<F>(pub(crate) F);
 
-impl<F> rutis::WaterfallListener<TurnEvent> for NoteListener<F>
+impl<F> WaterfallListener<TurnEvent> for NoteListener<F>
 where
     F: Fn(&TurnEvent) -> Option<String> + Send + Sync + 'static,
 {
@@ -178,7 +191,7 @@ where
         &'a self,
         _ctx: &'a Ctx,
         e: &'a TurnEvent,
-        next: rutis::Next<'a, TurnEvent>,
+        next: Next<'a, TurnEvent>,
     ) -> BoxFuture<'a, Result<(), CordisError>> {
         Box::pin(async move {
             if let Some(note) = (self.0)(e) {

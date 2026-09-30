@@ -32,8 +32,9 @@ adheres to [Semantic Versioning](https://semver.org/).
 - **`yoagent-rutis` (new crate, `integrations/yoagent-rutis/`)**: a bridge
   that lets [rutis](https://crates.io/crates/rutis) plugins extend a live
   `Agent` — contribute tools (via `ToolSource`), gate tool calls, add turn
-  notes, reject input and observe `AgentEvent`s on the rutis bus. Published
-  separately; yoagent itself does not depend on rutis.
+  notes, reject input and observe `AgentEvent`s on the rutis bus. Its own
+  crate, not yet on crates.io (it needs a yoagent release with `ToolSource`);
+  yoagent itself does not depend on rutis.
 
 ## 0.22.0
 

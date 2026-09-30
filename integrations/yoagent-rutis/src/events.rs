@@ -1,15 +1,17 @@
 //! Agent events out: the [`AgentEvent`] stream forwarded onto the rutis bus.
 //!
-//! Each event is published with rutis `emit` as an [`AgentEventEmitted`] —
-//! fire-and-forget. `emit` only queues a dispatch and returns, so a slow or
-//! failing listener never slows the agent (listener errors and panics go to
-//! the rutis `ErrorSink`).
+//! Hand the sender from [`RutisBridge::event_sender`](crate::RutisBridge::event_sender)
+//! (or [`event_sender_labeled`](crate::RutisBridge::event_sender_labeled)) to
+//! a yoagent `*_with_sender` call. Each event is published with rutis `emit`
+//! as an [`AgentEventEmitted`] — fire-and-forget. `emit` only queues a
+//! dispatch and returns, so a slow or failing listener never slows the agent
+//! (listener errors and panics go to the rutis `ErrorSink`).
 //!
 //! **Ordering.** rutis dispatches emits of one event key in emit order, one
 //! listener after another in registration order, so every listener sees each
 //! agent's events in the order that agent produced them. Events of several
 //! agents on one bridge interleave; tell them apart by
-//! [`AgentEventEmitted::label`] (see [`event_sender_labeled`]).
+//! [`AgentEventEmitted::label`].
 //!
 //! **Cost.** Every published event that has at least one listener spawns one
 //! tokio task, and streaming produces one `MessageUpdate` event per text
@@ -19,12 +21,12 @@
 //! themselves), and a listener permanently slower than the agents builds an
 //! unbounded backlog.
 //!
-//! **After the host shut down** events are dropped (logged at debug once per
-//! sender): rutis would accept the emit and deliver it to no one.
+//! **While the host is not running** events are dropped (logged at debug once
+//! per event sender): rutis would accept the emit and deliver it to no one.
 
 use std::sync::Arc;
 
-use rutis::{Ctx, Event, EventKey};
+use rutis::{BoxFuture, CordisError, Ctx, Event, EventKey, Listener};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use yoagent::AgentEvent;
@@ -42,13 +44,12 @@ impl Event for AgentEventEmitted {
 }
 
 impl AgentEventEmitted {
-    /// Wrap an event for publishing, without a label.
+    /// Wrap an event, without a label (for testing an observer).
     pub fn new(event: AgentEvent) -> Self {
         Self { label: None, event }
     }
 
-    /// Wrap an event for publishing, labelled with the agent (or run) it
-    /// came from.
+    /// Wrap an event with a label (for testing an observer).
     pub fn labeled(label: impl Into<Arc<str>>, event: AgentEvent) -> Self {
         Self {
             label: Some(label.into()),
@@ -61,17 +62,17 @@ impl AgentEventEmitted {
         &self.event
     }
 
-    /// The label the sender attached, if any.
+    /// The label the event sender attached, if any. Informational — whatever
+    /// string the host chose; nothing checks it is unique, so it is not an
+    /// identity.
     pub fn label(&self) -> Option<&str> {
         self.label.as_deref()
     }
 }
 
 /// Publish one event on `ctx`'s bus (fire-and-forget; never blocks).
-///
-/// Returns `false` when it was dropped because the host shut down (or rutis
-/// refused it).
-pub fn emit_agent_event(ctx: &Ctx, event: AgentEventEmitted) -> bool {
+/// Returns `false` when it was dropped (host not running, or refused).
+fn emit_agent_event(ctx: &Ctx, event: AgentEventEmitted) -> bool {
     if crate::host::closed(ctx).is_some() {
         return false;
     }
@@ -85,33 +86,10 @@ pub fn emit_agent_event(ctx: &Ctx, event: AgentEventEmitted) -> bool {
     }
 }
 
-/// A sender to hand to `Agent::prompt_with_sender` (and the other
-/// `*_with_sender` methods) that publishes every event on the bus and, when
-/// `forward` is given, also passes it on — **before** publishing, so your own
-/// consumer is never behind the bus.
-///
-/// The returned task ends when every clone of the sender is dropped (the
-/// agent drops its copy when the run ends); await it to know the last event
-/// was handed over. A closed `forward` receiver stops forwarding (logged at
-/// debug once) but not publishing.
-pub fn event_sender(
-    ctx: &Ctx,
-    forward: Option<mpsc::UnboundedSender<AgentEvent>>,
-) -> (mpsc::UnboundedSender<AgentEvent>, JoinHandle<()>) {
-    spawn_forwarder(ctx, None, forward)
-}
-
-/// [`event_sender`] whose events carry `label` ([`AgentEventEmitted::label`]),
-/// so listeners can tell several agents on one bridge apart.
-pub fn event_sender_labeled(
-    ctx: &Ctx,
-    label: impl Into<Arc<str>>,
-    forward: Option<mpsc::UnboundedSender<AgentEvent>>,
-) -> (mpsc::UnboundedSender<AgentEvent>, JoinHandle<()>) {
-    spawn_forwarder(ctx, Some(label.into()), forward)
-}
-
-fn spawn_forwarder(
+/// The forwarder behind [`RutisBridge::event_sender`](crate::RutisBridge::event_sender):
+/// passes each event to `forward` first (a closed `forward` stops forwarding,
+/// logged once, not publishing), then publishes it.
+pub(crate) fn spawn_forwarder(
     ctx: &Ctx,
     label: Option<Arc<str>>,
     forward: Option<mpsc::UnboundedSender<AgentEvent>>,
@@ -140,4 +118,24 @@ fn spawn_forwarder(
         }
     });
     (tx, task)
+}
+
+/// Bus listener around an observer closure
+/// ([`PluginCtxExt::on_agent_event`](crate::PluginCtxExt::on_agent_event)).
+pub(crate) struct ObserverListener<F>(pub(crate) F);
+
+impl<F> Listener<AgentEventEmitted> for ObserverListener<F>
+where
+    F: Fn(&AgentEventEmitted) + Send + Sync + 'static,
+{
+    fn call<'a>(
+        &'a self,
+        _ctx: &'a Ctx,
+        e: &'a AgentEventEmitted,
+    ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
+        Box::pin(async move {
+            (self.0)(e);
+            Ok(None)
+        })
+    }
 }

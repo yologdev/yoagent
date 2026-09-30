@@ -17,8 +17,9 @@ can contribute to a live agent:
 | observing agent events | `emit` of `AgentEventEmitted` | the `*_with_sender` event channel |
 
 yoagent does not depend on rutis; this crate uses only yoagent's public
-builder methods. It pins `rutis = "=0.5.0"`, because rutis is 0.x and its
-API moves between minor releases.
+API. It depends on `rutis = "0.5"` (0.x caret: any 0.5.x, never 0.6). rutis
+types are part of this crate's API, so every rutis minor bump is a
+yoagent-rutis minor bump.
 
 ## Host
 
@@ -27,7 +28,7 @@ use rutis::Ctx;
 use yoagent_rutis::{AgentRutisExt, RutisBridge};
 
 let root = Ctx::root()?;
-let bridge = RutisBridge::install(&root)?;           // once per rutis root
+let bridge = RutisBridge::install(&root)?;           // on the root, once
 let mut agent = Agent::from_config(config).with_rutis(&bridge);
 
 root.plugin(MyPlugin);                                // any time
@@ -37,9 +38,13 @@ agent.prompt_with_sender("hello", tx).await;
 forwarder.await?;
 ```
 
-`yoagent_rutis::attach(agent, &ctx)` is the one-call form.
+`bridge.attach(agent)` is the same as `agent.with_rutis(&bridge)`;
 `bridge.attach_sub_agent(sub)` (or `sub.with_rutis(&bridge)`) wires a
 `SubAgentTool` the same way.
+
+**Install on the root.** A bridge installed on a plugin's context is bound to
+that plugin's generation: once the plugin unloads or reloads, the bridge reads
+as stopped for good — every tool call denied, every prompt rejected.
 
 ## Plugin
 
@@ -89,19 +94,34 @@ policy plugin that denies a tool by name and caps calls per tool).
 
 ### Policy, input, turn notes
 
+- **Policies gate every tool call** of an attached agent — its own tools
+  too, not only plugin tools. A stopped host or an unmet `require_policy`
+  therefore blocks *every* tool.
 - **Every policy must pass.** Any `Deny` wins; a denying listener does not
   call `next`, so later policies (a rate counter, say) never see a denied
-  call. A raw `WaterfallListener` that returns `Allow` without calling `next`
-  would skip later policies; the bridge treats that as a denial.
-- **Fail closed** — a listener that errors or panics, a host that has shut
-  down (`root.shutdown()`), or a chain past its timeout denies the call /
-  rejects the prompt.
+  call. The tool runs with the arguments approved when the chain reached its
+  end.
+- **Raw `WaterfallListener`s** get the same event and `next`, so the bridge
+  checks what rutis 0.5 lets it see: an `Allow` that skipped `next` is denied;
+  `set_args` after approval is ignored (returns `false`); a denial made by a
+  bridge listener or with `ToolCallEvent::deny` is recorded and wins even if
+  an earlier listener returns `Allow`. **Not covered:** a raw listener's plain
+  `ToolVerdict::deny(..)` overridden by another raw listener — rutis passes
+  verdicts between listeners only as return values. Raw listeners must deny
+  with `event.deny(..)`.
+- **Fail closed** — a listener that errors or panics, a host that is not
+  running (`root.shutdown()`, or a disposed root), or a chain past its
+  timeout denies the call / rejects the prompt.
 - **…except the empty chain.** No policy listener allows, no input listener
   passes. That includes the window **while a policy plugin reloads**
   (restart, config update, dependency-driven eviction drain the old listener
   before the new generation registers) and **before it first becomes
   active**. If a policy plugin is load-bearing, build the bridge with
-  `.require_policy()`: a call no policy judged is then denied.
+  `.require_policy()`: a call no policy judged is then denied. "Judged" is
+  counted by `ToolCallEvent::mark_judged`, which listeners attest themselves
+  (the bridge's helpers do it; raw listeners must) — trust, not enforcement.
+  Input filtering has **no** such switch: an input plugin's reload window
+  passes prompts.
 - **Turn notes fail open**: a failing or slow turn chain keeps the notes
   added so far. Notes are recomputed for every request. A raw turn listener
   that does not call `next` drops the notes of every later listener.

@@ -15,9 +15,13 @@ use crate::turn::{RutisTurnHook, DEFAULT_TURN_TIMEOUT};
 
 /// Connects one rutis context to yoagent agents.
 ///
-/// Cheap to clone. Install it on the context plugins are loaded under —
-/// normally the root — once; every agent attached to it sees the same
-/// plugins. Dispatch happens on that context's bus.
+/// Cheap to clone. Install it **on the root** once; every agent attached to
+/// it sees the same plugins. Dispatch happens on that context's bus.
+///
+/// **Policies gate every tool.** The policy chain runs for each tool call of
+/// an attached agent — its own tools included, not just plugin tools. So a
+/// host that is not running, or a [`require_policy`](Self::require_policy)
+/// bridge with no policy loaded, blocks *every* tool call.
 ///
 /// **Timeouts.** yoagent awaits tool middleware, input filters and turn hooks
 /// without watching the run's cancel token, so `Agent::abort()` cannot
@@ -45,9 +49,12 @@ impl RutisBridge {
     /// Install the bridge on `ctx`: provide the [`ToolRegistry`] service
     /// there (or reuse the one already visible from `ctx`).
     ///
-    /// The registry lives as long as the fiber that provides it, so install
-    /// on the root (or a plugin that outlives every tool plugin). Fails only
-    /// when rutis refuses the registration (e.g. the root was shut down).
+    /// **Install on the root.** The registry lives as long as the fiber that
+    /// provides it, and the bridge is bound to `ctx`'s generation: installed
+    /// on a plugin's context, it reads as stopped — denying every tool call
+    /// and rejecting every prompt, for good — once that plugin unloads or
+    /// reloads. Fails only when rutis refuses the registration (e.g. the root
+    /// was shut down).
     pub fn install(ctx: &Ctx) -> Result<Self, CordisError> {
         let registry = match ctx.get::<ToolRegistry>() {
             Some(existing) => existing,
@@ -101,7 +108,9 @@ impl RutisBridge {
     /// window while a policy plugin reloads (restart, config update,
     /// dependency-driven eviction) and before it first becomes active. Use
     /// this when a policy plugin is load-bearing: during that window calls
-    /// are denied instead.
+    /// are denied instead — all of them, the agent's own tools included.
+    /// "Judged" is counted by [`ToolCallEvent::mark_judged`](crate::ToolCallEvent::mark_judged),
+    /// which listeners attest themselves. Input filtering has no counterpart.
     pub fn require_policy(mut self) -> Self {
         self.require_policy = true;
         self
@@ -137,9 +146,9 @@ impl RutisBridge {
         RutisInputFilter::new(self.ctx.clone(), self.input_timeout)
     }
 
-    /// Wire tools, tool policy, turn notes and input filtering into `agent`,
-    /// using only yoagent's own builder methods (`with_tool_source`,
-    /// `with_tool_middleware`, `with_turn_hook`, `with_async_input_filter`).
+    /// Wire tools, tool policy, turn notes and input filtering into `agent`
+    /// (`with_tool_source`, `with_tool_middleware`, `with_turn_hook`,
+    /// `with_async_input_filter` — yoagent's public API only).
     ///
     /// The middleware is appended after any already installed, so plugin
     /// policy sees arguments after the host's own middleware. Events are not
@@ -162,34 +171,43 @@ impl RutisBridge {
             .with_async_input_filter(self.input_filter())
     }
 
-    /// A sender that publishes every agent event on the bus (and forwards it
-    /// to `forward` first, if given). See [`event_sender`](crate::event_sender).
+    /// A sender for yoagent's `*_with_sender` calls that publishes every
+    /// agent event on the bus, after forwarding it to `forward` (if given) —
+    /// your own consumer is never behind the bus. The returned task ends when
+    /// every clone of the sender is dropped (the agent drops its copy when the
+    /// run ends); await it to know the last event was handed over. See the
+    /// [`events`](crate::events) module for ordering and cost.
     pub fn event_sender(
         &self,
         forward: Option<mpsc::UnboundedSender<AgentEvent>>,
     ) -> (mpsc::UnboundedSender<AgentEvent>, JoinHandle<()>) {
-        crate::events::event_sender(&self.ctx, forward)
+        crate::events::spawn_forwarder(&self.ctx, None, forward)
     }
 
     /// [`event_sender`](Self::event_sender) with a label on every published
-    /// event, to tell several agents on one bridge apart.
+    /// event, to tell several agents on one bridge apart (informational: it
+    /// is not checked for uniqueness).
     pub fn event_sender_labeled(
         &self,
         label: impl Into<Arc<str>>,
         forward: Option<mpsc::UnboundedSender<AgentEvent>>,
     ) -> (mpsc::UnboundedSender<AgentEvent>, JoinHandle<()>) {
-        crate::events::event_sender_labeled(&self.ctx, label, forward)
+        crate::events::spawn_forwarder(&self.ctx, Some(label.into()), forward)
     }
 }
 
-/// Install the bridge on `ctx` (or reuse it) and attach `agent` — the one-line
-/// form of [`RutisBridge::install`] + [`RutisBridge::attach`].
-pub fn attach(agent: Agent, ctx: &Ctx) -> Result<Agent, CordisError> {
-    Ok(RutisBridge::install(ctx)?.attach(agent))
+pub(crate) mod sealed {
+    /// Seals the extension traits: they are implemented here, for yoagent's
+    /// and rutis's types, and nowhere else.
+    pub trait Sealed {}
+    impl Sealed for yoagent::Agent {}
+    impl Sealed for yoagent::SubAgentTool {}
+    impl Sealed for rutis::Ctx {}
 }
 
 /// `agent.with_rutis(&bridge)` — builder-style [`RutisBridge::attach`].
-pub trait AgentRutisExt: Sized {
+/// Sealed: implemented for [`Agent`] and [`SubAgentTool`] only.
+pub trait AgentRutisExt: sealed::Sealed + Sized {
     /// Attach this agent (or sub-agent) to the bridge's plugins.
     fn with_rutis(self, bridge: &RutisBridge) -> Self;
 }

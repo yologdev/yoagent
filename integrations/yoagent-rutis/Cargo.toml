@@ -20,8 +20,9 @@ publish = false
 [dependencies]
 # `ToolSource` is unreleased: this needs the yoagent release that ships it.
 yoagent = { path = "../..", version = "0.22.0" }
-# Pinned exactly: rutis is 0.x and its API moves between minor releases.
-rutis = "=0.5.0"
+# 0.x caret: 0.5.x only (0.6 is breaking). Any rutis minor bump is a
+# yoagent-rutis minor bump — its types are part of this crate's API.
+rutis = "0.5"
 async-trait = "0.1"
 futures = "0.3"
 serde_json = "1"

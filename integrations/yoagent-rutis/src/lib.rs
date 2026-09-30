@@ -14,8 +14,8 @@
 //! | input rejection | `serial` of [`InputEvent`] | [`AsyncInputFilter`](yoagent::AsyncInputFilter) |
 //! | observing agent events | `emit` of [`AgentEventEmitted`] | the `*_with_sender` event channel |
 //!
-//! yoagent itself knows nothing about rutis: the bridge only uses yoagent's
-//! public builder methods.
+//! yoagent itself knows nothing about rutis; the bridge uses only yoagent's
+//! public API.
 //!
 //! # Host
 //!
@@ -26,7 +26,7 @@
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let root = Ctx::root()?;
-//! let bridge = RutisBridge::install(&root)?;
+//! let bridge = RutisBridge::install(&root)?; // on the root, once
 //! let mut agent = bridge.attach(Agent::from_provider(MockProvider::text("hi"), ModelConfig::mock()));
 //!
 //! // Load plugins whenever you like; each run sees the ones active at its start.
@@ -76,13 +76,21 @@
 //! - **Tool names are unique across plugins**: a second plugin registering a
 //!   taken name is refused (`CordisError::ServiceExists`, logged; no retry
 //!   when the holder unloads). The agent's own tools win over plugin tools.
+//! - **Policies gate every tool call** — the agent's own tools too, not only
+//!   plugin tools.
 //! - **Every policy must pass.** Any `Deny` wins; an `Allow` that skips the
-//!   rest of the chain is treated as a denial.
+//!   rest of the chain is treated as a denial; the tool runs with the
+//!   arguments approved at the end of the chain. See [`policy`] for exactly
+//!   what is enforced against raw listeners.
 //! - **Policy and input filtering fail closed** — an erroring, panicking or
-//!   timed-out plugin, or a host that has shut down, denies / rejects —
+//!   timed-out plugin, or a host that is not running, denies / rejects —
 //!   **except for an empty chain**, which allows / passes. That includes the
 //!   window while a policy plugin reloads and before it first loads; close it
-//!   with [`RutisBridge::require_policy`]. **Turn notes fail open.**
+//!   for tool calls with [`RutisBridge::require_policy`] (input filtering has
+//!   no counterpart). **Turn notes fail open.**
+//! - **Install on the root.** A bridge installed on a plugin's context reads
+//!   as stopped — every tool call denied, every prompt rejected — for good
+//!   once that plugin unloads or reloads.
 //! - **Finite default timeouts** per chain (60 s policy, 30 s input, 5 s
 //!   turn notes): yoagent's `abort()` cannot interrupt a hung hook. `None`
 //!   opts out.
@@ -101,15 +109,17 @@ pub mod policy;
 pub mod tools;
 pub mod turn;
 
-pub use bridge::{attach, AgentRutisExt, RutisBridge};
-pub use events::{emit_agent_event, event_sender, event_sender_labeled, AgentEventEmitted};
+pub use bridge::{AgentRutisExt, RutisBridge};
+pub use events::AgentEventEmitted;
 pub use input::{InputEvent, RutisInputFilter, DEFAULT_INPUT_TIMEOUT};
 pub use plugin::{AgentPlugin, PluginCtxExt};
 pub use policy::{
-    RutisToolMiddleware, ToolCallEvent, ToolPolicy, ToolVerdict, DEFAULT_POLICY_TIMEOUT,
+    Judgement, RutisToolMiddleware, ToolCallEvent, ToolPolicy, ToolVerdict, DEFAULT_POLICY_TIMEOUT,
 };
 pub use tools::{PluginToolSource, ToolRegistry};
 pub use turn::{RutisTurnHook, TurnEvent, DEFAULT_TURN_TIMEOUT};
 
-/// The exact rutis version this bridge is built against (`=0.5.0`).
+/// The rutis this bridge is built against (`0.5`). Its types are part of this
+/// crate's API, so any rutis minor bump (0.5 → 0.6) is a yoagent-rutis minor
+/// bump.
 pub use rutis;

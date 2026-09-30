@@ -3,16 +3,19 @@
 //! Each prompt dispatches one [`InputEvent`]. Listeners run in registration
 //! order; the first that returns `Some(reason)` rejects the prompt (the run
 //! ends with `AgentEvent::InputRejected { reason }`), `None` passes it on. No
-//! listener means pass — including while an input-filter plugin reloads.
-//! **Fail closed**, like yoagent's own filters: a listener error or panic
-//! (rutis's `serial` turns a panic into an error), a host that has shut
-//! down, or a chain past its timeout (default [`DEFAULT_INPUT_TIMEOUT`])
-//! rejects.
+//! listener means pass — including while an input-filter plugin reloads or
+//! before it first loads: unlike tool policy, input filtering has no
+//! `require_*` counterpart. **Fail closed**, like yoagent's own filters: a
+//! listener error or panic (rutis's `serial` turns a panic into an error), a
+//! host that is not running, or a chain past its timeout (default
+//! [`DEFAULT_INPUT_TIMEOUT`]) rejects.
 
 use std::time::Duration;
 
 use rutis::{BoxFuture, CordisError, Ctx, Event, EventKey, Listener};
 use yoagent::{AsyncInputFilter, FilterResult};
+
+use crate::host::{run_chain, Outcome};
 
 /// Default bound on one prompt's input-filter chain (fail closed past it).
 pub const DEFAULT_INPUT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -42,6 +45,8 @@ impl InputEvent {
 }
 
 /// yoagent [`AsyncInputFilter`] dispatching an [`InputEvent`] per prompt.
+///
+/// Built by [`RutisBridge::input_filter`](crate::RutisBridge::input_filter).
 #[derive(Clone)]
 pub struct RutisInputFilter {
     ctx: Ctx,
@@ -49,9 +54,7 @@ pub struct RutisInputFilter {
 }
 
 impl RutisInputFilter {
-    /// Dispatch on `ctx`'s bus, rejecting after `timeout` (`None`: no
-    /// bound — you own liveness).
-    pub fn new(ctx: Ctx, timeout: Option<Duration>) -> Self {
+    pub(crate) fn new(ctx: Ctx, timeout: Option<Duration>) -> Self {
         Self { ctx, timeout }
     }
 }
@@ -59,27 +62,25 @@ impl RutisInputFilter {
 #[async_trait::async_trait]
 impl AsyncInputFilter for RutisInputFilter {
     async fn filter(&self, text: &str) -> FilterResult {
-        if let Some(why) = crate::host::closed(&self.ctx) {
-            return reject_closed(why.to_string());
-        }
         let event = InputEvent::new(text);
         let key = EventKey::<InputEvent>::of();
-        let dispatch = self.ctx.events().serial(&self.ctx, &key, &event);
-        let outcome = match self.timeout {
-            Some(limit) => match tokio::time::timeout(limit, dispatch).await {
-                Ok(outcome) => outcome,
-                Err(_) => {
-                    return reject_closed(format!(
-                        "the plugin input filter did not answer within {limit:?}"
-                    ))
-                }
-            },
-            None => dispatch.await,
-        };
+        let outcome = run_chain(&self.ctx, self.timeout, || {
+            self.ctx.events().serial(&self.ctx, &key, &event)
+        })
+        .await;
         match outcome {
-            Ok(None) => FilterResult::Pass,
-            Ok(Some(reason)) => FilterResult::Reject(reason),
-            Err(error) => reject_closed(format!("a plugin input filter failed: {error}")),
+            Outcome::Closed(why) => reject_closed(why.to_string()),
+            Outcome::TimedOut(limit) => reject_closed(format!(
+                "the plugin input filter did not answer within {limit:?}"
+            )),
+            // rutis's `serial` already turns a listener panic into an error;
+            // this arm is the backstop.
+            Outcome::Panicked => reject_closed("a plugin input filter panicked".into()),
+            Outcome::Finished(Err(error)) => {
+                reject_closed(format!("a plugin input filter failed: {error}"))
+            }
+            Outcome::Finished(Ok(Some(reason))) => FilterResult::Reject(reason),
+            Outcome::Finished(Ok(None)) => FilterResult::Pass,
         }
     }
 }

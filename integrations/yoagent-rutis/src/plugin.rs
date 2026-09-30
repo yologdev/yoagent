@@ -9,17 +9,19 @@ use std::sync::Arc;
 use rutis::{BoxFuture, CordisError, Ctx, Disposer, Effect, EventKey, Plugin, TypeKey};
 use yoagent::AgentTool;
 
-use crate::events::AgentEventEmitted;
+use crate::bridge::sealed::Sealed;
+use crate::events::{AgentEventEmitted, ObserverListener};
 use crate::input::{InputEvent, InputListener};
 use crate::policy::{FnPolicy, PolicyListener, ToolCallEvent, ToolPolicy, ToolVerdict};
 use crate::tools::ToolRegistry;
 use crate::turn::{NoteListener, TurnEvent};
 
-/// Extension methods on a plugin's [`Ctx`].
+/// Extension methods on a plugin's [`Ctx`]. Sealed: implemented for `Ctx`
+/// only.
 ///
 /// Each returns a [`Disposer`] that removes the contribution early; dropping
 /// it does nothing (the plugin's unload still removes it).
-pub trait PluginCtxExt {
+pub trait PluginCtxExt: Sealed {
     /// Contribute a tool to every attached agent, from the next run on.
     ///
     /// Needs the bridge installed ([`RutisBridge::install`](crate::RutisBridge::install)):
@@ -31,9 +33,9 @@ pub trait PluginCtxExt {
     /// [`provide_tool`](Self::provide_tool) for a shared tool.
     fn provide_tool_arc(&self, tool: Arc<dyn AgentTool>) -> Result<Disposer, CordisError>;
 
-    /// Judge every tool call with a synchronous closure: return
-    /// [`ToolVerdict::Allow`] to pass it on (after optionally
-    /// [`set_args`](ToolCallEvent::set_args)) or [`ToolVerdict::Deny`] to
+    /// Judge every tool call — the agent's own tools too — with a synchronous
+    /// closure: return [`ToolVerdict::Allow`] to pass it on (after optionally
+    /// [`set_args`](ToolCallEvent::set_args)) or [`ToolVerdict::deny`] to
     /// stop it.
     fn on_tool_call(
         &self,
@@ -59,9 +61,9 @@ pub trait PluginCtxExt {
     /// Observe the agents' events (published with an event sender from
     /// [`RutisBridge::event_sender`](crate::RutisBridge::event_sender) or
     /// [`event_sender_labeled`](crate::RutisBridge::event_sender_labeled)):
-    /// `e.event()` is the event, `e.label()` the sending agent's label.
+    /// `e.event()` is the event, `e.label()` the sender's label.
     /// Runs on rutis's dispatch task, never on the agent's — but a slow
-    /// observer delays every later event on the bus (see [`crate::event_sender`]).
+    /// observer delays every later event on the bus (see [`crate::events`]).
     fn on_agent_event(
         &self,
         observer: impl Fn(&AgentEventEmitted) + Send + Sync + 'static,
@@ -93,7 +95,7 @@ impl PluginCtxExt for Ctx {
         self.events().on_waterfall(
             self,
             &EventKey::<ToolCallEvent>::of(),
-            PolicyListener(Arc::new(policy)),
+            PolicyListener(policy),
         )
     }
 
@@ -125,27 +127,18 @@ impl PluginCtxExt for Ctx {
     }
 }
 
-struct ObserverListener<F>(F);
-
-impl<F> rutis::Listener<AgentEventEmitted> for ObserverListener<F>
-where
-    F: Fn(&AgentEventEmitted) + Send + Sync + 'static,
-{
-    fn call<'a>(
-        &'a self,
-        _ctx: &'a Ctx,
-        e: &'a AgentEventEmitted,
-    ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
-        Box::pin(async move {
-            (self.0)(e);
-            Ok(None)
-        })
-    }
-}
-
-type PolicyFn = Arc<dyn Fn(&ToolCallEvent) -> ToolVerdict + Send + Sync>;
 type NoteFn = Arc<dyn Fn(&TurnEvent) -> Option<String> + Send + Sync>;
 type InputFn = Arc<dyn Fn(&InputEvent) -> Option<String> + Send + Sync>;
+
+/// A shared policy, so one [`AgentPlugin`] can register it on every load.
+struct SharedPolicy(Arc<dyn ToolPolicy>);
+
+#[async_trait::async_trait]
+impl ToolPolicy for SharedPolicy {
+    async fn check(&self, call: &ToolCallEvent) -> Result<ToolVerdict, CordisError> {
+        self.0.check(call).await
+    }
+}
 
 /// A ready-made rutis [`Plugin`] from tools and closures — for the common
 /// case where a plugin is "these tools plus this policy":
@@ -166,14 +159,15 @@ type InputFn = Arc<dyn Fn(&InputEvent) -> Option<String> + Send + Sync>;
 ///
 /// It declares the [`ToolRegistry`] as a dependency (plus any
 /// [`with_inject`](Self::with_inject) keys), so it waits for the bridge.
-/// Tools are shared across reloads (`Arc`); closures are called on every
-/// dispatch. For per-generation state or config, write a `Plugin` (or a
+/// Tools and policies are shared across reloads (`Arc`); closures are called
+/// on every dispatch. Policies (sync and async) run in the order they were
+/// added. For per-generation state or config, write a `Plugin` (or a
 /// `PluginFactory`) using [`PluginCtxExt`] directly.
 pub struct AgentPlugin {
     name: String,
     injects: Vec<TypeKey>,
     tools: Vec<Arc<dyn AgentTool>>,
-    policies: Vec<PolicyFn>,
+    policies: Vec<Arc<dyn ToolPolicy>>,
     notes: Vec<NoteFn>,
     inputs: Vec<InputFn>,
 }
@@ -202,11 +196,16 @@ impl AgentPlugin {
         self
     }
 
-    /// Add a tool-call policy (see [`PluginCtxExt::on_tool_call`]).
+    /// Add a synchronous tool-call policy (see [`PluginCtxExt::on_tool_call`]).
     pub fn with_policy(
-        mut self,
+        self,
         policy: impl Fn(&ToolCallEvent) -> ToolVerdict + Send + Sync + 'static,
     ) -> Self {
+        self.with_tool_policy(FnPolicy(policy))
+    }
+
+    /// Add an async tool-call policy (see [`PluginCtxExt::on_tool_call_async`]).
+    pub fn with_tool_policy(mut self, policy: impl ToolPolicy) -> Self {
         self.policies.push(Arc::new(policy));
         self
     }
@@ -251,8 +250,7 @@ impl Plugin for AgentPlugin {
                 ctx.provide_tool_arc(tool.clone())?;
             }
             for policy in &self.policies {
-                let policy = policy.clone();
-                ctx.on_tool_call(move |call| policy(call))?;
+                ctx.on_tool_call_async(SharedPolicy(policy.clone()))?;
             }
             for note in &self.notes {
                 let note = note.clone();

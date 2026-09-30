@@ -7,8 +7,8 @@
 //! (`Ctx::effect_named`), so rutis removes it exactly when that plugin
 //! unloads — on `dispose`, on a restart, on a config update, and on a
 //! dependency-driven eviction. [`PluginToolSource`] implements yoagent's
-//! [`ToolSource`] over the registry: an agent sees exactly the tools of the
-//! plugins active when its run starts.
+//! [`ToolSource`] over the registry: an agent sees the tools of the plugins
+//! active (not unloading) when its run starts.
 //!
 //! # A plugin that unloads while its tool is in use
 //!
@@ -26,7 +26,6 @@
 //! schema may differ — is offered from the next run. The bridge never
 //! silently rebinds a call to a newer generation.
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -58,11 +57,13 @@ pub struct ToolRegistry {
 #[derive(Default)]
 struct Inner {
     next_seq: u64,
-    entries: HashMap<String, Entry>,
+    /// In registration order (ascending `seq`); names are unique.
+    entries: Vec<Entry>,
 }
 
 struct Entry {
     seq: u64,
+    name: String,
     tool: Arc<dyn AgentTool>,
     owner: String,
     live: Arc<AtomicBool>,
@@ -99,7 +100,7 @@ impl ToolRegistry {
         let live = Arc::new(AtomicBool::new(true));
         let seq = {
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(existing) = inner.entries.get(&name) {
+            if let Some(existing) = inner.entries.iter().find(|e| e.name == name) {
                 tracing::warn!(
                     tool = %name,
                     holder = %existing.owner,
@@ -114,16 +115,14 @@ impl ToolRegistry {
             }
             let seq = inner.next_seq;
             inner.next_seq += 1;
-            inner.entries.insert(
-                name.clone(),
-                Entry {
-                    seq,
-                    tool,
-                    owner,
-                    live: live.clone(),
-                    generation: ctx.cancellation_token(),
-                },
-            );
+            inner.entries.push(Entry {
+                seq,
+                name: name.clone(),
+                tool,
+                owner,
+                live: live.clone(),
+                generation: ctx.cancellation_token(),
+            });
             seq
         };
         let registry = Arc::downgrade(self);
@@ -146,14 +145,17 @@ impl ToolRegistry {
 
     fn remove_if(&self, name: &str, seq: u64) {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if inner.entries.get(name).is_some_and(|e| e.seq == seq) {
-            if let Some(entry) = inner.entries.remove(name) {
-                entry.live.store(false, Ordering::SeqCst);
-            }
+        if let Some(at) = inner
+            .entries
+            .iter()
+            .position(|e| e.seq == seq && e.name == name)
+        {
+            inner.entries.remove(at).live.store(false, Ordering::SeqCst);
         }
     }
 
-    /// Names of the registered tools, in registration order.
+    /// Names of the tools a run starting now would get, in registration
+    /// order.
     pub fn names(&self) -> Vec<String> {
         self.snapshot()
             .into_iter()
@@ -161,15 +163,18 @@ impl ToolRegistry {
             .collect()
     }
 
-    /// The registered tools, in registration order. Each is wrapped so that a
-    /// call made after its plugin began unloading fails with an error result
-    /// instead of reaching a torn-down plugin (see the [module docs](self)).
+    /// The tools of the plugins that are active now, in registration order.
+    /// A plugin that has begun unloading (its generation cancelled, cleanups
+    /// not yet finished) contributes nothing, though its name stays taken
+    /// until its cleanup runs. Each tool is wrapped so that a call made after
+    /// its plugin began unloading fails with an error result instead of
+    /// reaching a torn-down plugin (see the [module docs](self)).
     pub fn snapshot(&self) -> Vec<Arc<dyn AgentTool>> {
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let mut entries: Vec<&Entry> = inner.entries.values().collect();
-        entries.sort_by_key(|e| e.seq);
-        entries
-            .into_iter()
+        inner
+            .entries
+            .iter()
+            .filter(|e| !e.generation.is_cancelled() && e.live.load(Ordering::SeqCst))
             .map(|e| {
                 Arc::new(LiveTool {
                     inner: e.tool.clone(),
