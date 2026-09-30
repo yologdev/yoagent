@@ -36,6 +36,9 @@ pub struct Agent {
     model_config: Option<ModelConfig>,
     messages: Vec<AgentMessage>,
     tools: Vec<Box<dyn AgentTool>>,
+    // Consulted at the start of every run; their tools are appended after
+    // `tools` for that run only (see `tool_source`).
+    tool_sources: Vec<Arc<dyn crate::tool_source::ToolSource>>,
     provider: Arc<dyn StreamProvider>,
     /// Whether `provider` was supplied explicitly by the caller (`new` /
     /// `from_provider`) rather than resolved from a registry (`from_config`).
@@ -299,6 +302,7 @@ impl Agent {
             model_config: None,
             messages: Vec::new(),
             tools: Vec::new(),
+            tool_sources: Vec::new(),
             provider,
             // Explicit by default (new / from_provider); from_config_with
             // flips this to false after resolving from the registry.
@@ -366,6 +370,24 @@ impl Agent {
         self
     }
 
+    /// Add a [`ToolSource`](crate::ToolSource): tools resolved at the start
+    /// of every run (each `prompt*` and `continue_loop*` call) and offered
+    /// alongside this agent's own tools for that run only.
+    ///
+    /// For tool sets that change while the agent lives — plugins loaded and
+    /// unloaded, an MCP server that reconnects. Several sources may be
+    /// added; they are consulted in installation order. On a name
+    /// collision the agent's own tools win, then earlier sources; each
+    /// dropped duplicate is logged. See [`tool_source`](crate::tool_source)
+    /// for the full contract.
+    pub fn with_tool_source(
+        mut self,
+        source: impl crate::tool_source::ToolSource + 'static,
+    ) -> Self {
+        self.tool_sources.push(Arc::new(source));
+        self
+    }
+
     #[deprecated(
         since = "0.10.0",
         note = "pass the ModelConfig to Agent::from_config(config) or \
@@ -402,14 +424,34 @@ impl Agent {
     /// later `with_tools` (which replaces the vector) can desynchronise the
     /// tool from the sink. A marker naming a tool the model cannot see is the
     /// failure this ordering prevents.
-    fn take_tools(&mut self) -> Vec<Box<dyn AgentTool>> {
+    ///
+    /// `sourced` are this run's [`ToolSource`](crate::ToolSource) tools
+    /// (see [`collect_sourced_tools`](Self::collect_sourced_tools)); they are
+    /// appended after the static ones, which win a name collision. Returns
+    /// the list and how many leading entries are the agent's own — the run's
+    /// list is truncated back to that length before it is stored again, so
+    /// sourced tools never outlive their run.
+    fn take_tools(&mut self, sourced: Vec<Arc<dyn AgentTool>>) -> (Vec<Box<dyn AgentTool>>, usize) {
         let mut tools = std::mem::take(&mut self.tools);
         if let Some(state) = &self.shared_state {
             if !tools.iter().any(|t| t.name() == "shared_state") {
                 tools.push(Box::new(crate::tools::SharedStateTool::new(state.clone())));
             }
         }
-        tools
+        let own = tools.len();
+        crate::tool_source::merge(&mut tools, sourced);
+        (tools, own)
+    }
+
+    /// Ask every [`ToolSource`](crate::ToolSource) for this run's tools.
+    ///
+    /// Awaited before any agent state is touched, so a caller that drops the
+    /// prompt future here leaves the agent as it was.
+    async fn collect_sourced_tools(&self) -> Vec<Arc<dyn AgentTool>> {
+        if self.tool_sources.is_empty() {
+            return Vec::new();
+        }
+        crate::tool_source::collect(&self.tool_sources).await
     }
 
     /// Attach a shared key-value store.
@@ -1041,16 +1083,20 @@ impl Agent {
             "Agent is already streaming. Use steer() or follow_up()."
         );
 
+        // Resolve this run's sourced tools before touching any state.
+        let sourced = self.collect_sourced_tools().await;
+
         let cancel = CancellationToken::new();
         self.cancel = Some(cancel.clone());
         self.is_streaming = true;
 
         let (tx, rx) = mpsc::unbounded_channel();
 
+        let (tools, own_tools) = self.take_tools(sourced);
         let mut context = AgentContext {
             system_prompt: self.system_prompt.clone(),
             messages: self.messages.clone(),
-            tools: self.take_tools(),
+            tools,
         };
 
         let mut config = self.build_config();
@@ -1059,6 +1105,8 @@ impl Agent {
         let handle = tokio::spawn(async move {
             let (_new_messages, stats) =
                 agent_loop_with_stats(messages, &mut context, &config, tx, cancel).await;
+            // Sourced tools belong to this run only.
+            context.tools.truncate(own_tools);
             (context.tools, context.messages, stats)
         });
 
@@ -1126,15 +1174,19 @@ impl Agent {
             "Agent is already streaming. Use steer() or follow_up()."
         );
 
+        // Resolve this run's sourced tools before touching any state.
+        let sourced = self.collect_sourced_tools().await;
+
         let cancel = CancellationToken::new();
         self.cancel = Some(cancel.clone());
         self.is_streaming = true;
 
         // Move tools temporarily into context for the loop; restored after
+        let (tools, own_tools) = self.take_tools(sourced);
         let mut context = AgentContext {
             system_prompt: self.system_prompt.clone(),
             messages: self.messages.clone(),
-            tools: self.take_tools(),
+            tools,
         };
 
         let config = self.build_config();
@@ -1143,6 +1195,8 @@ impl Agent {
             agent_loop_with_stats(messages, &mut context, &config, tx, cancel).await;
 
         self.spend.merge(&stats);
+        // Sourced tools belong to this run only.
+        context.tools.truncate(own_tools);
         self.tools = context.tools;
         self.messages = context.messages;
         self.is_streaming = false;
@@ -1166,16 +1220,20 @@ impl Agent {
         assert!(!self.is_streaming, "Agent is already streaming.");
         assert!(!self.messages.is_empty(), "No messages to continue from.");
 
+        // Resolve this run's sourced tools before touching any state.
+        let sourced = self.collect_sourced_tools().await;
+
         let cancel = CancellationToken::new();
         self.cancel = Some(cancel.clone());
         self.is_streaming = true;
 
         let (tx, rx) = mpsc::unbounded_channel();
 
+        let (tools, own_tools) = self.take_tools(sourced);
         let mut context = AgentContext {
             system_prompt: self.system_prompt.clone(),
             messages: self.messages.clone(),
-            tools: self.take_tools(),
+            tools,
         };
 
         let config = self.build_config();
@@ -1183,6 +1241,8 @@ impl Agent {
         let handle = tokio::spawn(async move {
             let (_new_messages, stats) =
                 agent_loop_continue_with_stats(&mut context, &config, tx, cancel).await;
+            // Sourced tools belong to this run only.
+            context.tools.truncate(own_tools);
             (context.tools, context.messages, stats)
         });
 
@@ -1205,15 +1265,19 @@ impl Agent {
         assert!(!self.is_streaming, "Agent is already streaming.");
         assert!(!self.messages.is_empty(), "No messages to continue from.");
 
+        // Resolve this run's sourced tools before touching any state.
+        let sourced = self.collect_sourced_tools().await;
+
         let cancel = CancellationToken::new();
         self.cancel = Some(cancel.clone());
         self.is_streaming = true;
 
         // Move tools temporarily into context for the loop; restored after
+        let (tools, own_tools) = self.take_tools(sourced);
         let mut context = AgentContext {
             system_prompt: self.system_prompt.clone(),
             messages: self.messages.clone(),
-            tools: self.take_tools(),
+            tools,
         };
 
         let config = self.build_config();
@@ -1222,6 +1286,8 @@ impl Agent {
             agent_loop_continue_with_stats(&mut context, &config, tx, cancel).await;
 
         self.spend.merge(&stats);
+        // Sourced tools belong to this run only.
+        context.tools.truncate(own_tools);
         self.tools = context.tools;
         self.messages = context.messages;
         self.is_streaming = false;
