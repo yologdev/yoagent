@@ -27,20 +27,23 @@
 //! - **Arguments changed after approval**: the arguments are frozen when the
 //!   chain reaches its terminal — the tool runs with exactly what the last
 //!   policy approved — and a later [`set_args`](ToolCallEvent::set_args) is
-//!   ignored (it returns `false` and logs a warning).
+//!   refused and denies the call (it returns `false` and logs a warning).
 //! - **A `Deny` overridden by an earlier listener** (one that calls `next`,
 //!   receives a denial and returns `Allow`): every denial made by a bridge
 //!   listener, or built by a raw listener with [`ToolCallEvent::deny`], is
 //!   recorded on the event, and a recorded denial wins whatever the chain
-//!   returns. **Not covered:** a raw listener that builds its denial as a
-//!   plain [`ToolVerdict::deny`] and is overridden by another raw listener —
-//!   rutis 0.5 passes verdicts between listeners only as return values, with
-//!   no hook in between, so such a denial is invisible to the bridge. Raw
-//!   listeners must deny through [`ToolCallEvent::deny`].
+//!   returns. **Not covered:** an objection a raw listener produces *after*
+//!   calling `next` — a plain [`ToolVerdict::deny`], an `Err`, or a panic
+//!   another listener catches — that an earlier raw listener turns into
+//!   `Allow`. rutis 0.5 passes results between listeners only as return
+//!   values, with no hook in between, so such an objection is invisible to
+//!   the bridge. Raw listeners must object through [`ToolCallEvent::deny`]
+//!   (record it before returning an `Err`, too).
 //!
 //! # Failure modes
 //!
-//! **Fail closed:** a listener that returns an error or panics, a host that is
+//! **Fail closed:** a listener whose error or panic reaches the bridge (see
+//! "Not covered" above for raw listeners), a host that is
 //! not running, or a chain that outlives its timeout (default
 //! [`DEFAULT_POLICY_TIMEOUT`]) denies the call, with a reason the model sees —
 //! matching yoagent's own middleware contract, where a panicking middleware is
@@ -160,15 +163,22 @@ impl ToolCallEvent {
     /// Replace the arguments; later listeners and the tool see the new value.
     ///
     /// Only before approval: once the chain reached its end the arguments are
-    /// frozen, and this returns `false` (and logs a warning) without changing
-    /// anything.
+    /// frozen. A change attempted after that is refused and **denies the
+    /// call** — a listener that meant to sanitise the arguments must not see
+    /// its change silently dropped while the call goes ahead — and this
+    /// returns `false` (and logs a warning).
+    #[must_use = "`false` means the change was refused and the call will be denied"]
     pub fn set_args(&self, args: Value) -> bool {
         let mut current = self.args.lock().unwrap_or_else(|e| e.into_inner());
         if self.approved.get().is_some() {
             tracing::warn!(
                 tool = %self.tool_name,
-                "a plugin policy tried to change the arguments after the call was approved; ignored"
+                "a plugin policy tried to change the arguments after the call was approved; denying"
             );
+            let _ = self.denied.set(format!(
+                "a plugin policy tried to change the arguments of `{}` after the call was approved",
+                self.tool_name
+            ));
             return false;
         }
         *current = args;
@@ -321,7 +331,12 @@ impl RutisToolMiddleware {
             Outcome::Finished(Err(error)) => {
                 deny_closed(&event, format!("a plugin policy failed: {error}"))
             }
-            Outcome::Finished(Ok(verdict)) => self.check_allow(&event, verdict),
+            // The host can shut down between the liveness check and the
+            // dispatch (the chain then ran empty and "allowed"): check again.
+            Outcome::Finished(Ok(verdict)) => match crate::host::closed(&self.ctx) {
+                Some(why) => deny_closed(&event, why.to_string()),
+                None => self.check_allow(&event, verdict),
+            },
         };
         let args = match (&verdict, event.approved.get()) {
             (ToolVerdict::Allow, Some(approved)) => approved.clone(),

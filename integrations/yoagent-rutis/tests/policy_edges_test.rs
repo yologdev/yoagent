@@ -230,7 +230,7 @@ impl WaterfallListener<ToolCallEvent> for LateRewrite {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn arguments_changed_after_approval_are_ignored() {
+async fn arguments_changed_after_approval_deny_the_call() {
     let (root, bridge) = setup();
     let accepted = Arc::new(Mutex::new(None));
     let late = root.plugin(Setup::new("late-rewrite", {
@@ -264,10 +264,13 @@ async fn arguments_changed_after_approval_are_ignored() {
         .with_tools(vec![Box::new(EchoArgs)])
         .with_rutis(&bridge);
     let (_, results) = run(&mut agent, "go").await;
-    assert_eq!(
-        results,
-        vec![("echo_args".into(), r#"{"path":"/tmp/ok"}"#.into(), false)],
-        "the tool ran with the approved arguments, never the post-approval ones"
+    assert_eq!(results.len(), 1, "{results:?}");
+    let (name, output, is_error) = &results[0];
+    assert_eq!(name, "echo_args");
+    assert!(*is_error, "the call is denied, not run: {output}");
+    assert!(
+        output.contains("after the call was approved"),
+        "denied for the late change; the tool never ran with either argument: {output}"
     );
     assert_eq!(*accepted.lock().unwrap(), Some(false), "set_args refused");
     root.shutdown().await.unwrap();
@@ -558,6 +561,68 @@ async fn notes_are_joined_in_listener_order_and_recomputed_every_turn() {
     assert_eq!(
         seen[1].last_user, "go|[a2]\n[b]",
         "the second turn's notes replace the first's"
+    );
+    root.shutdown().await.unwrap();
+}
+
+/// Calls `next` (the call is approved at the terminal), then objects through
+/// `ToolCallEvent::deny` — the one case where only the recorded denial stops
+/// an earlier listener's `Allow`.
+struct DenyAfterNext;
+
+impl WaterfallListener<ToolCallEvent> for DenyAfterNext {
+    fn call<'a>(
+        &'a self,
+        _ctx: &'a Ctx,
+        e: &'a ToolCallEvent,
+        next: Next<'a, ToolCallEvent>,
+    ) -> BoxFuture<'a, Result<ToolVerdict, CordisError>> {
+        e.mark_judged();
+        Box::pin(async move {
+            let _approved = next.call().await?;
+            Ok(e.deny("late objection after the terminal"))
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_recorded_denial_after_approval_beats_an_earlier_allow() {
+    let (root, bridge) = setup();
+    let late = root.plugin(Setup::new("deny-after-next", |ctx| {
+        ctx.events()
+            .on_waterfall(ctx, &EventKey::<ToolCallEvent>::of(), DenyAfterNext)
+            .map(drop)
+    }));
+    wait_active(&late).await;
+    let overrider = root.plugin(Setup::new("overrider", |ctx| {
+        ctx.events()
+            .on_waterfall_opt(
+                ctx,
+                &EventKey::<ToolCallEvent>::of(),
+                Overrider,
+                EventOptions {
+                    prepend: true,
+                    ..EventOptions::default()
+                },
+            )
+            .map(drop)
+    }));
+    wait_active(&overrider).await;
+
+    let (agent, _) = agent(vec![
+        call("echo_args", serde_json::json!({"path": "/tmp/ok"})),
+        text("done"),
+    ]);
+    let mut agent = agent
+        .with_tools(vec![Box::new(EchoArgs)])
+        .with_rutis(&bridge);
+    let (_, results) = run(&mut agent, "go").await;
+    assert_eq!(results.len(), 1, "{results:?}");
+    let (_, output, is_error) = &results[0];
+    assert!(
+        *is_error && output.contains("late objection after the terminal"),
+        "the chain reached its end and the prepended listener returned Allow, \
+         yet the recorded denial stops the call: {output}"
     );
     root.shutdown().await.unwrap();
 }

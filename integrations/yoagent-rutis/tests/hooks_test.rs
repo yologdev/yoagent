@@ -66,7 +66,7 @@ async fn a_policy_can_rewrite_arguments_and_later_listeners_see_them() {
         let mut args = call.args();
         if let Some(path) = args.get("path").and_then(|p| p.as_str()) {
             args["path"] = format!("/sandbox{path}").into();
-            call.set_args(args);
+            assert!(call.set_args(args), "a rewrite before approval is accepted");
         }
         ToolVerdict::Allow
     }));

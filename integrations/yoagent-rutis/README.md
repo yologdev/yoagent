@@ -103,15 +103,19 @@ policy plugin that denies a tool by name and caps calls per tool).
   end.
 - **Raw `WaterfallListener`s** get the same event and `next`, so the bridge
   checks what rutis 0.5 lets it see: an `Allow` that skipped `next` is denied;
-  `set_args` after approval is ignored (returns `false`); a denial made by a
-  bridge listener or with `ToolCallEvent::deny` is recorded and wins even if
-  an earlier listener returns `Allow`. **Not covered:** a raw listener's plain
-  `ToolVerdict::deny(..)` overridden by another raw listener — rutis passes
-  verdicts between listeners only as return values. Raw listeners must deny
-  with `event.deny(..)`.
-- **Fail closed** — a listener that errors or panics, a host that is not
-  running (`root.shutdown()`, or a disposed root), or a chain past its
-  timeout denies the call / rejects the prompt.
+  `set_args` after approval is refused and denies the call (it returns
+  `false`); a denial made by a bridge listener or with `ToolCallEvent::deny`
+  is recorded and wins even if an earlier listener returns `Allow`. **Not
+  covered:** an objection a raw listener produces after calling `next` — a
+  plain `ToolVerdict::deny(..)`, an `Err`, or a panic another listener
+  catches — that an earlier raw listener turns into `Allow`; rutis passes
+  results between listeners only as return values. Raw listeners must object
+  with `event.deny(..)` (record it before returning an `Err`, too).
+- **Fail closed** — a listener whose error or panic reaches the bridge, a
+  host that is not running (`root.shutdown()`, or a disposed root — checked
+  before the dispatch and again after it, so a shutdown racing the dispatch
+  still denies), or a chain past its timeout denies the call / rejects the
+  prompt.
 - **…except the empty chain.** No policy listener allows, no input listener
   passes. That includes the window **while a policy plugin reloads**
   (restart, config update, dependency-driven eviction drain the old listener

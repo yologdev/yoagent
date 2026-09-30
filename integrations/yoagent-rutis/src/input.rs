@@ -80,7 +80,12 @@ impl AsyncInputFilter for RutisInputFilter {
                 reject_closed(format!("a plugin input filter failed: {error}"))
             }
             Outcome::Finished(Ok(Some(reason))) => FilterResult::Reject(reason),
-            Outcome::Finished(Ok(None)) => FilterResult::Pass,
+            // The host can shut down between the liveness check and the
+            // dispatch (the chain then ran empty and "passed"): check again.
+            Outcome::Finished(Ok(None)) => match crate::host::closed(&self.ctx) {
+                Some(why) => reject_closed(why.to_string()),
+                None => FilterResult::Pass,
+            },
         }
     }
 }
