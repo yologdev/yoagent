@@ -1,0 +1,30 @@
+[package]
+name = "yoagent-rutis"
+version = "0.1.0"
+edition = "2021"
+resolver = "3"
+description = "Extend a yoagent Agent at runtime with rutis plugins: tools, tool policy, turn notes, input filters and events"
+license = "MIT"
+repository = "https://github.com/yologdev/yoagent"
+documentation = "https://docs.rs/yoagent-rutis"
+readme = "README.md"
+keywords = ["agent", "llm", "plugin", "rutis", "yoagent"]
+categories = ["asynchronous", "development-tools"]
+authors = ["Yuanhao <yuanhao@yolog.dev>"]
+# yoagent's MSRV; rutis 0.5 declares 1.85.
+rust-version = "1.86"
+
+[dependencies]
+# `ToolSource` is unreleased: this needs the yoagent release that ships it.
+yoagent = { path = "../..", version = "0.22.0" }
+# Pinned exactly: rutis is 0.x and its API moves between minor releases.
+rutis = "=0.5.0"
+async-trait = "0.1"
+futures = "0.3"
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+tokio-util = "0.7"
