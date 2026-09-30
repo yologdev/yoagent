@@ -8,12 +8,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::*;
-use rutis::{
-    BoxFuture, CordisError, Ctx, Effect, FiberState, FiberView, Plugin, PluginFactory, TypeKey,
-};
+use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberState, FiberView, Plugin, TypeKey};
 use tokio::sync::Notify;
 use yoagent::{AgentTool, ToolContext, ToolError, ToolResult};
-use yoagent_rutis::{AgentPlugin, AgentRutisExt, PluginCtxExt, RutisBridge, ToolRegistry};
+use yoagent_rutis::{AgentPlugin, AgentRutisExt, PluginCtxExt, ToolRegistry};
 
 /// Blocks for a long time; signals when it started.
 struct Blocking {
@@ -52,8 +50,7 @@ impl AgentTool for Blocking {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_call_in_flight_when_its_plugin_unloads_fails() {
-    let root = Ctx::root().unwrap();
-    let bridge = RutisBridge::install(&root).unwrap();
+    let (root, bridge) = setup();
     let started = Arc::new(Notify::new());
     let finished = Arc::new(AtomicBool::new(false));
     let view = root.plugin(AgentPlugin::new("slow").with_tool(Blocking {
@@ -108,8 +105,7 @@ impl Plugin for Keeper {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failed_registration_leaves_no_name_locked() {
-    let root = Ctx::root().unwrap();
-    let bridge = RutisBridge::install(&root).unwrap();
+    let (root, bridge) = setup();
 
     // 1. Through a context whose plugin has unloaded: refused, not kept.
     let kept = Arc::new(Mutex::new(None));
@@ -152,24 +148,6 @@ async fn a_failed_registration_leaves_no_name_locked() {
     root.shutdown().await.unwrap();
 }
 
-/// Builds a plugin whose tool replies with the current config.
-struct GreeterFactory;
-
-impl PluginFactory<String> for GreeterFactory {
-    fn name(&self) -> &str {
-        "configurable-greeter"
-    }
-    fn injects(&self) -> &[TypeKey] {
-        static KEYS: std::sync::OnceLock<Vec<TypeKey>> = std::sync::OnceLock::new();
-        KEYS.get_or_init(|| vec![TypeKey::of::<ToolRegistry>()])
-    }
-    fn build(&self, greeting: &String) -> Result<Box<dyn Plugin>, CordisError> {
-        Ok(Box::new(
-            AgentPlugin::new("configurable-greeter").with_tool(Reply::new("greet", greeting)),
-        ))
-    }
-}
-
 /// Updates a factory plugin's config from inside a run.
 struct Update(FiberView);
 
@@ -205,8 +183,7 @@ impl AgentTool for Update {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_config_update_mid_run_does_not_rebind_the_runs_tool() {
-    let root = Ctx::root().unwrap();
-    let bridge = RutisBridge::install(&root).unwrap();
+    let (root, bridge) = setup();
     let view = root.plugin_with(GreeterFactory, "hello".to_string());
     wait_active(&view).await;
     let (agent, _) = agent(vec![
@@ -228,5 +205,49 @@ async fn a_config_update_mid_run_does_not_rebind_the_runs_tool() {
     wait_active(&view).await;
     let (_, results) = run(&mut agent, "second").await;
     assert_eq!(results, vec![("greet".into(), "bonjour".into(), false)]);
+    root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_starting_while_a_plugin_unloads_does_not_get_its_tools() {
+    let (root, bridge) = setup();
+    let gate = Arc::new(Notify::new());
+    // The tool is registered first, so its cleanup runs last (LIFO): while
+    // the gated cleanup blocks, the plugin is unloading — its generation is
+    // cancelled — yet its entry is still in the registry.
+    let view = root.plugin(Setup::new("slow-unload", {
+        let gate = gate.clone();
+        move |ctx| {
+            ctx.provide_tool(Reply::new("greet", "hi"))?;
+            let gate = gate.clone();
+            ctx.effect(move || {
+                Effect::AsyncDisposer(Box::new(move || {
+                    Box::pin(async move {
+                        gate.notified().await;
+                        Ok(())
+                    })
+                }))
+            })
+            .map(drop)
+        }
+    }));
+    wait_active(&view).await;
+    assert_eq!(bridge.registry().names(), vec!["greet".to_string()]);
+
+    let disposing = tokio::spawn({
+        let view = view.clone();
+        async move { view.dispose().await }
+    });
+    wait_state(&view, FiberState::Unloading).await;
+    let (agent, seen) = agent(vec![text("done")]);
+    let mut agent = agent.with_rutis(&bridge);
+    run(&mut agent, "go").await;
+    assert!(
+        seen.lock().unwrap()[0].tools.is_empty(),
+        "an unloading plugin's tools are not offered"
+    );
+
+    gate.notify_one();
+    disposing.await.unwrap().unwrap();
     root.shutdown().await.unwrap();
 }

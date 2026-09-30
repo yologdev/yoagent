@@ -6,22 +6,13 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use common::*;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Plugin, TypeKey};
+use rutis::CordisError;
 use yoagent::AgentEvent;
-use yoagent_rutis::{
-    AgentPlugin, AgentRutisExt, PluginCtxExt, RutisBridge, ToolCallEvent, ToolPolicy, ToolRegistry,
-    ToolVerdict,
-};
-
-async fn setup() -> (Ctx, RutisBridge) {
-    let root = Ctx::root().unwrap();
-    let bridge = RutisBridge::install(&root).unwrap();
-    (root, bridge)
-}
+use yoagent_rutis::{AgentPlugin, AgentRutisExt, ToolCallEvent, ToolPolicy, ToolVerdict};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn no_policy_listener_allows_the_call() {
-    let (root, bridge) = setup().await;
+    let (root, bridge) = setup();
     let tool = Reply::new("act", "acted");
     let runs = tool.runs();
     let (agent, _) = agent(vec![call("act", serde_json::json!({})), text("done")]);
@@ -34,7 +25,7 @@ async fn no_policy_listener_allows_the_call() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_policy_plugin_denies_a_call_and_the_model_gets_the_reason() {
-    let (root, bridge) = setup().await;
+    let (root, bridge) = setup();
     let policy = root.plugin(AgentPlugin::new("no-act").with_policy(|call| {
         if call.tool_name() == "act" {
             ToolVerdict::deny("act is forbidden by policy")
@@ -70,7 +61,7 @@ async fn a_policy_plugin_denies_a_call_and_the_model_gets_the_reason() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_policy_can_rewrite_arguments_and_later_listeners_see_them() {
-    let (root, bridge) = setup().await;
+    let (root, bridge) = setup();
     let sandbox = root.plugin(AgentPlugin::new("sandbox").with_policy(|call| {
         let mut args = call.args();
         if let Some(path) = args.get("path").and_then(|p| p.as_str()) {
@@ -123,24 +114,10 @@ impl ToolPolicy for Failing {
     }
 }
 
-struct FailingPolicyPlugin;
-
-impl Plugin for FailingPolicyPlugin {
-    fn name(&self) -> &str {
-        "failing-policy"
-    }
-    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            ctx.on_tool_call_async(Failing)?;
-            Ok(Effect::Done)
-        })
-    }
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn an_erroring_policy_denies_fail_closed() {
-    let (root, bridge) = setup().await;
-    let failing = root.plugin(FailingPolicyPlugin);
+    let (root, bridge) = setup();
+    let failing = root.plugin(AgentPlugin::new("failing-policy").with_tool_policy(Failing));
     wait_active(&failing).await;
     let tool = Reply::new("act", "acted");
     let runs = tool.runs();
@@ -158,7 +135,7 @@ async fn an_erroring_policy_denies_fail_closed() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_panicking_policy_denies_fail_closed() {
-    let (root, bridge) = setup().await;
+    let (root, bridge) = setup();
     let panicking = root.plugin(AgentPlugin::new("panicky").with_policy(|_| panic!("policy bug")));
     wait_active(&panicking).await;
     let tool = Reply::new("act", "acted");
@@ -182,25 +159,11 @@ impl ToolPolicy for Hanging {
     }
 }
 
-struct HangingPolicyPlugin;
-
-impl Plugin for HangingPolicyPlugin {
-    fn name(&self) -> &str {
-        "hanging-policy"
-    }
-    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            ctx.on_tool_call_async(Hanging)?;
-            Ok(Effect::Done)
-        })
-    }
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn a_policy_that_times_out_denies() {
-    let (root, bridge) = setup().await;
+    let (root, bridge) = setup();
     let bridge = bridge.with_timeout(Duration::from_millis(100));
-    let hanging = root.plugin(HangingPolicyPlugin);
+    let hanging = root.plugin(AgentPlugin::new("hanging-policy").with_tool_policy(Hanging));
     wait_active(&hanging).await;
     let (agent, _) = agent(vec![call("act", serde_json::json!({})), text("done")]);
     let mut agent = agent
@@ -219,7 +182,7 @@ async fn a_policy_that_times_out_denies() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_turn_note_reaches_the_request_but_not_history() {
-    let (root, bridge) = setup().await;
+    let (root, bridge) = setup();
     let noter = root.plugin(
         AgentPlugin::new("noter")
             .with_turn_note(|turn| Some(format!("[note for {}]", turn.model())))
@@ -244,7 +207,7 @@ async fn a_turn_note_reaches_the_request_but_not_history() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_panicking_turn_listener_fails_open() {
-    let (root, bridge) = setup().await;
+    let (root, bridge) = setup();
     let first = root.plugin(AgentPlugin::new("first").with_turn_note(|_| Some("[kept]".into())));
     wait_active(&first).await;
     let second = root.plugin(AgentPlugin::new("second").with_turn_note(|_| panic!("note bug")));
@@ -260,7 +223,7 @@ async fn a_panicking_turn_listener_fails_open() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn an_input_plugin_rejects_a_prompt() {
-    let (root, bridge) = setup().await;
+    let (root, bridge) = setup();
     let filter = root.plugin(AgentPlugin::new("filter").with_input_check(|input| {
         input
             .text()
@@ -286,31 +249,11 @@ async fn an_input_plugin_rejects_a_prompt() {
     root.shutdown().await.unwrap();
 }
 
-struct PanickingInput {
-    injects: Vec<TypeKey>,
-}
-
-impl Plugin for PanickingInput {
-    fn name(&self) -> &str {
-        "panicking-input"
-    }
-    fn injects(&self) -> &[TypeKey] {
-        &self.injects
-    }
-    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            ctx.on_input(|_| panic!("filter bug"))?;
-            Ok(Effect::Done)
-        })
-    }
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn a_panicking_input_listener_rejects_fail_closed() {
-    let (root, bridge) = setup().await;
-    let p = root.plugin(PanickingInput {
-        injects: vec![TypeKey::of::<ToolRegistry>()],
-    });
+    let (root, bridge) = setup();
+    let p =
+        root.plugin(AgentPlugin::new("panicking-input").with_input_check(|_| panic!("filter bug")));
     wait_active(&p).await;
     let (agent, seen) = agent(vec![text("fine")]);
     let mut agent = agent.with_rutis(&bridge);

@@ -7,19 +7,14 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use common::*;
-use rutis::{
-    BoxFuture, CordisError, Ctx, Effect, FiberState, FiberView, Plugin, PluginFactory, TypeKey,
-};
+use rutis::{Ctx, FiberState, FiberView, TypeKey};
 use yoagent::provider::mock::MockResponse;
 use yoagent::{AgentTool, SubAgentTool, ToolContext, ToolError, ToolResult};
-use yoagent_rutis::{
-    AgentPlugin, AgentRutisExt, PluginCtxExt, RutisBridge, ToolRegistry, ToolVerdict,
-};
+use yoagent_rutis::{AgentPlugin, AgentRutisExt, PluginCtxExt, RutisBridge, ToolVerdict};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_plugin_tool_is_offered_while_the_plugin_is_loaded() {
-    let root = Ctx::root().unwrap();
-    let bridge = RutisBridge::install(&root).unwrap();
+    let (root, bridge) = setup();
     let (agent, seen) = agent(vec![
         call("greet", serde_json::json!({})),
         text("done"),
@@ -92,8 +87,7 @@ impl AgentTool for Unload {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_tool_whose_plugin_unloads_mid_run_fails_cleanly() {
-    let root = Ctx::root().unwrap();
-    let bridge = RutisBridge::install(&root).unwrap();
+    let (root, bridge) = setup();
     let greet = Reply::new("greet", "hello");
     let runs = greet.runs();
     let view = root.plugin(AgentPlugin::new("greeter").with_tool(greet));
@@ -121,8 +115,7 @@ async fn a_tool_whose_plugin_unloads_mid_run_fails_cleanly() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn two_plugins_contribute_and_a_taken_name_is_refused() {
-    let root = Ctx::root().unwrap();
-    let bridge = RutisBridge::install(&root).unwrap();
+    let (root, bridge) = setup();
     let a = root.plugin(AgentPlugin::new("a").with_tool(Reply::new("alpha", "from a")));
     wait_active(&a).await;
     let b = root.plugin(AgentPlugin::new("b").with_tool(Reply::new("beta", "from b")));
@@ -181,53 +174,31 @@ async fn two_plugins_contribute_and_a_taken_name_is_refused() {
 /// A service plugin B depends on.
 struct Backend(String);
 
-struct BackendPlugin(&'static str);
-
-impl Plugin for BackendPlugin {
-    fn name(&self) -> &str {
-        "backend"
-    }
-    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            ctx.provide(Backend(self.0.into()))?;
-            Ok(Effect::Done)
-        })
-    }
+fn backend(version: &'static str) -> Setup {
+    Setup::new("backend", move |ctx| {
+        ctx.provide(Backend(version.into())).map(drop)
+    })
 }
 
 /// Provides a tool that reports the backend it was loaded against.
-struct Consumer {
-    injects: Vec<TypeKey>,
-}
-
-impl Plugin for Consumer {
-    fn name(&self) -> &str {
-        "consumer"
-    }
-    fn injects(&self) -> &[TypeKey] {
-        &self.injects
-    }
-    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            let backend = ctx.require::<Backend>()?;
-            ctx.provide_tool(Reply::new("query", &format!("answered by {}", backend.0)))?;
-            Ok(Effect::Done)
-        })
-    }
+fn consumer() -> Setup {
+    Setup::new("consumer", |ctx| {
+        let backend = ctx.require::<Backend>()?;
+        ctx.provide_tool(Reply::new("query", &format!("answered by {}", backend.0)))
+            .map(drop)
+    })
+    .with_inject(TypeKey::of::<Backend>())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_dependency_going_away_takes_the_dependents_tools_with_it() {
-    let root = Ctx::root().unwrap();
-    let bridge = RutisBridge::install(&root).unwrap();
-    let consumer = root.plugin(Consumer {
-        injects: vec![TypeKey::of::<ToolRegistry>(), TypeKey::of::<Backend>()],
-    });
+    let (root, bridge) = setup();
+    let consumer = root.plugin(consumer());
     (&consumer).await.unwrap();
     assert_eq!(consumer.state().state, FiberState::Pending);
     assert!(bridge.registry().names().is_empty());
 
-    let v1 = root.plugin(BackendPlugin("v1"));
+    let v1 = root.plugin(backend("v1"));
     wait_active(&consumer).await;
     assert_eq!(bridge.registry().names(), vec!["query".to_string()]);
 
@@ -246,7 +217,7 @@ async fn a_dependency_going_away_takes_the_dependents_tools_with_it() {
     assert!(seen.lock().unwrap()[0].tools.is_empty());
 
     // A new provider brings the consumer — and its tool — back.
-    let _v2 = root.plugin(BackendPlugin("v2"));
+    let _v2 = root.plugin(backend("v2"));
     wait_active(&consumer).await;
     let (_, results) = run(&mut agent, "and now").await;
     assert_eq!(
@@ -256,28 +227,9 @@ async fn a_dependency_going_away_takes_the_dependents_tools_with_it() {
     root.shutdown().await.unwrap();
 }
 
-/// Builds a plugin whose tool replies with the current config.
-struct GreeterFactory;
-
-impl PluginFactory<String> for GreeterFactory {
-    fn name(&self) -> &str {
-        "configurable-greeter"
-    }
-    fn injects(&self) -> &[TypeKey] {
-        static KEYS: std::sync::OnceLock<Vec<TypeKey>> = std::sync::OnceLock::new();
-        KEYS.get_or_init(|| vec![TypeKey::of::<ToolRegistry>()])
-    }
-    fn build(&self, greeting: &String) -> Result<Box<dyn Plugin>, CordisError> {
-        Ok(Box::new(
-            AgentPlugin::new("configurable-greeter").with_tool(Reply::new("greet", greeting)),
-        ))
-    }
-}
-
 #[tokio::test(flavor = "multi_thread")]
 async fn a_config_update_changes_the_tool_between_runs() {
-    let root = Ctx::root().unwrap();
-    let bridge = RutisBridge::install(&root).unwrap();
+    let (root, bridge) = setup();
     let view = root.plugin_with(GreeterFactory, "hello".to_string());
     wait_active(&view).await;
 
@@ -300,8 +252,7 @@ async fn a_config_update_changes_the_tool_between_runs() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_sub_agent_attached_to_the_bridge_gets_tools_policy_and_input_filter() {
-    let root = Ctx::root().unwrap();
-    let bridge = RutisBridge::install(&root).unwrap();
+    let (root, bridge) = setup();
     let greet = Reply::new("greet", "hi");
     let greet_runs = greet.runs();
     let secret = Reply::new("secret", "leaked");
@@ -371,19 +322,12 @@ async fn a_sub_agent_attached_to_the_bridge_gets_tools_policy_and_input_filter()
 async fn installing_twice_shares_one_registry_and_provide_tool_without_a_bridge_fails() {
     let root = Ctx::root().unwrap();
     // No bridge yet: a plugin that does not wait for it fails to load.
-    struct Eager;
-    impl Plugin for Eager {
-        fn name(&self) -> &str {
-            "eager"
-        }
-        fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
-            Box::pin(async move {
-                ctx.provide_tool(Reply::new("x", "x"))?;
-                Ok(Effect::Done)
-            })
-        }
-    }
-    let eager = root.plugin(Eager);
+    let eager = root.plugin(
+        Setup::new("eager", |ctx| {
+            ctx.provide_tool(Reply::new("x", "x")).map(drop)
+        })
+        .eager(),
+    );
     wait_state(&eager, FiberState::Failed).await;
 
     let first = RutisBridge::install(&root).unwrap();

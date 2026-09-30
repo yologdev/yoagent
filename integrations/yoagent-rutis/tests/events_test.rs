@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::*;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, EventKey, Listener, Plugin};
+use rutis::{BoxFuture, CordisError, Ctx, EventKey, Listener};
 use tokio::sync::{mpsc, Semaphore};
 use yoagent::AgentEvent;
 use yoagent_rutis::{AgentEventEmitted, AgentRutisExt, PluginCtxExt, RutisBridge};
@@ -55,23 +55,17 @@ fn script() -> Vec<yoagent::provider::mock::MockResponse> {
 
 type Log = Arc<Mutex<Vec<(Option<String>, &'static str)>>>;
 
-struct Observer(Log);
-
-impl Plugin for Observer {
-    fn name(&self) -> &str {
-        "observer"
-    }
-    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        let log = self.0.clone();
-        Box::pin(async move {
-            ctx.on_agent_event(move |e| {
-                log.lock()
-                    .unwrap()
-                    .push((e.label().map(str::to_string), kind(e.event())))
-            })?;
-            Ok(Effect::Done)
+/// A plugin recording `(label, kind)` of every event it observes.
+fn observer_plugin(log: Log) -> Setup {
+    Setup::new("observer", move |ctx| {
+        let log = log.clone();
+        ctx.on_agent_event(move |e| {
+            log.lock()
+                .unwrap()
+                .push((e.label().map(str::to_string), kind(e.event())))
         })
-    }
+        .map(drop)
+    })
 }
 
 fn kinds(log: &Log, label: Option<&str>) -> Vec<&'static str> {
@@ -102,10 +96,9 @@ async fn attached(bridge: &RutisBridge) -> yoagent::Agent {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_bus_listener_sees_exactly_the_agents_events_in_order() {
-    let root = Ctx::root().unwrap();
-    let bridge = RutisBridge::install(&root).unwrap();
+    let (root, bridge) = setup();
     let log = Log::default();
-    let observer = root.plugin(Observer(log.clone()));
+    let observer = root.plugin(observer_plugin(log.clone()));
     wait_active(&observer).await;
     let mut agent = attached(&bridge).await;
 
@@ -145,34 +138,27 @@ impl Listener<AgentEventEmitted> for Gated {
     }
 }
 
-struct GatedObserver(Arc<Semaphore>, Log);
-
-impl Plugin for GatedObserver {
-    fn name(&self) -> &str {
-        "gated-observer"
-    }
-    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            ctx.events().on(
+fn gated_observer(gate: Arc<Semaphore>, log: Log) -> Setup {
+    Setup::new("gated-observer", move |ctx| {
+        ctx.events()
+            .on(
                 ctx,
                 &EventKey::<AgentEventEmitted>::of(),
                 Gated {
-                    gate: self.0.clone(),
-                    log: self.1.clone(),
+                    gate: gate.clone(),
+                    log: log.clone(),
                 },
-            )?;
-            Ok(Effect::Done)
-        })
-    }
+            )
+            .map(drop)
+    })
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_blocked_listener_does_not_hold_the_agent_back() {
-    let root = Ctx::root().unwrap();
-    let bridge = RutisBridge::install(&root).unwrap();
+    let (root, bridge) = setup();
     let gate = Arc::new(Semaphore::new(0));
     let log = Log::default();
-    let slow = root.plugin(GatedObserver(gate.clone(), log.clone()));
+    let slow = root.plugin(gated_observer(gate.clone(), log.clone()));
     wait_active(&slow).await;
     let mut agent = attached(&bridge).await;
 
@@ -198,10 +184,9 @@ async fn a_blocked_listener_does_not_hold_the_agent_back() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_closed_forward_receiver_does_not_stop_publishing() {
-    let root = Ctx::root().unwrap();
-    let bridge = RutisBridge::install(&root).unwrap();
+    let (root, bridge) = setup();
     let log = Log::default();
-    let observer = root.plugin(Observer(log.clone()));
+    let observer = root.plugin(observer_plugin(log.clone()));
     wait_active(&observer).await;
     let mut agent = attached(&bridge).await;
 
@@ -237,38 +222,31 @@ impl Listener<AgentEventEmitted> for ForwardFirst {
     }
 }
 
-struct ForwardFirstPlugin(
-    Arc<Mutex<mpsc::UnboundedReceiver<AgentEvent>>>,
-    Arc<Mutex<Vec<bool>>>,
-);
-
-impl Plugin for ForwardFirstPlugin {
-    fn name(&self) -> &str {
-        "forward-first"
-    }
-    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            ctx.events().on(
+fn forward_first_plugin(
+    forwarded: Arc<Mutex<mpsc::UnboundedReceiver<AgentEvent>>>,
+    ahead: Arc<Mutex<Vec<bool>>>,
+) -> Setup {
+    Setup::new("forward-first", move |ctx| {
+        ctx.events()
+            .on(
                 ctx,
                 &EventKey::<AgentEventEmitted>::of(),
                 ForwardFirst {
-                    forwarded: self.0.clone(),
-                    ahead: self.1.clone(),
+                    forwarded: forwarded.clone(),
+                    ahead: ahead.clone(),
                 },
-            )?;
-            Ok(Effect::Done)
-        })
-    }
+            )
+            .map(drop)
+    })
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_callers_consumer_is_never_behind_the_bus() {
-    let root = Ctx::root().unwrap();
-    let bridge = RutisBridge::install(&root).unwrap();
+    let (root, bridge) = setup();
     let (ui_tx, ui_rx) = mpsc::unbounded_channel();
     let forwarded = Arc::new(Mutex::new(ui_rx));
     let ahead = Arc::new(Mutex::new(Vec::new()));
-    let p = root.plugin(ForwardFirstPlugin(forwarded, ahead.clone()));
+    let p = root.plugin(forward_first_plugin(forwarded, ahead.clone()));
     wait_active(&p).await;
     let mut agent = attached(&bridge).await;
     let (tx, forwarder) = bridge.event_sender(Some(ui_tx));
@@ -291,10 +269,9 @@ async fn the_callers_consumer_is_never_behind_the_bus() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn two_agents_on_one_bridge_are_told_apart_by_label() {
-    let root = Ctx::root().unwrap();
-    let bridge = RutisBridge::install(&root).unwrap();
+    let (root, bridge) = setup();
     let log = Log::default();
-    let observer = root.plugin(Observer(log.clone()));
+    let observer = root.plugin(observer_plugin(log.clone()));
     wait_active(&observer).await;
     let mut a = attached(&bridge).await;
     let mut b = attached(&bridge).await;

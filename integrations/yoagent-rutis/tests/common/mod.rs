@@ -240,3 +240,80 @@ pub async fn wait_state(view: &FiberView, want: FiberState) {
 pub async fn wait_active(view: &FiberView) {
     wait_state(view, FiberState::Active).await
 }
+
+/// A fresh root with the bridge installed on it.
+pub fn setup() -> (rutis::Ctx, yoagent_rutis::RutisBridge) {
+    let root = rutis::Ctx::root().expect("inside a tokio runtime");
+    let bridge = yoagent_rutis::RutisBridge::install(&root).expect("bridge installs on the root");
+    (root, bridge)
+}
+
+type SetupFn = dyn Fn(&rutis::Ctx) -> Result<(), rutis::CordisError> + Send + Sync;
+
+/// A plugin whose `apply` runs a closure — registering listeners, tools,
+/// services — and returns no cleanup of its own. It waits for the bridge
+/// (and any [`with_inject`](Setup::with_inject) keys).
+pub struct Setup {
+    name: String,
+    injects: Vec<rutis::TypeKey>,
+    apply: Arc<SetupFn>,
+}
+
+impl Setup {
+    pub fn new(
+        name: &str,
+        apply: impl Fn(&rutis::Ctx) -> Result<(), rutis::CordisError> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            injects: vec![rutis::TypeKey::of::<yoagent_rutis::ToolRegistry>()],
+            apply: Arc::new(apply),
+        }
+    }
+
+    pub fn with_inject(mut self, key: rutis::TypeKey) -> Self {
+        self.injects.push(key);
+        self
+    }
+
+    /// Do not wait for the bridge.
+    pub fn eager(mut self) -> Self {
+        self.injects.clear();
+        self
+    }
+}
+
+impl rutis::Plugin for Setup {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn injects(&self) -> &[rutis::TypeKey] {
+        &self.injects
+    }
+    fn apply<'a>(
+        &'a self,
+        ctx: &'a rutis::Ctx,
+    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+        let result = (self.apply)(ctx);
+        Box::pin(async move { result.map(|()| rutis::Effect::Done) })
+    }
+}
+
+/// Builds a plugin whose `greet` tool replies with the current config.
+pub struct GreeterFactory;
+
+impl rutis::PluginFactory<String> for GreeterFactory {
+    fn name(&self) -> &str {
+        "configurable-greeter"
+    }
+    fn injects(&self) -> &[rutis::TypeKey] {
+        static KEYS: std::sync::OnceLock<Vec<rutis::TypeKey>> = std::sync::OnceLock::new();
+        KEYS.get_or_init(|| vec![rutis::TypeKey::of::<yoagent_rutis::ToolRegistry>()])
+    }
+    fn build(&self, greeting: &String) -> Result<Box<dyn rutis::Plugin>, rutis::CordisError> {
+        Ok(Box::new(
+            yoagent_rutis::AgentPlugin::new("configurable-greeter")
+                .with_tool(Reply::new("greet", greeting)),
+        ))
+    }
+}
