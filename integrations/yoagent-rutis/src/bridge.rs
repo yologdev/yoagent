@@ -8,21 +8,37 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use yoagent::{Agent, AgentEvent, SubAgentTool};
 
-use crate::input::RutisInputFilter;
-use crate::policy::RutisToolMiddleware;
+use crate::input::{RutisInputFilter, DEFAULT_INPUT_TIMEOUT};
+use crate::policy::{RutisToolMiddleware, DEFAULT_POLICY_TIMEOUT};
 use crate::tools::{PluginToolSource, ToolRegistry};
-use crate::turn::RutisTurnHook;
+use crate::turn::{RutisTurnHook, DEFAULT_TURN_TIMEOUT};
 
 /// Connects one rutis context to yoagent agents.
 ///
 /// Cheap to clone. Install it on the context plugins are loaded under —
 /// normally the root — once; every agent attached to it sees the same
 /// plugins. Dispatch happens on that context's bus.
+///
+/// **Timeouts.** yoagent awaits tool middleware, input filters and turn hooks
+/// without watching the run's cancel token, so `Agent::abort()` cannot
+/// unstick a plugin that never answers. Each chain therefore has a finite
+/// default bound: tool policy [`DEFAULT_POLICY_TIMEOUT`] (60 s, then deny),
+/// input filter [`DEFAULT_INPUT_TIMEOUT`] (30 s, then reject), turn notes
+/// [`DEFAULT_TURN_TIMEOUT`] (5 s, then keep the notes so far). Passing `None`
+/// to a setter removes the bound — you then own liveness (e.g. for a policy
+/// that waits on a human approval).
+///
+/// **Errors from plugins.** rutis reports runtime errors (listener failures
+/// on `emit`, cleanup errors) to its `ErrorSink`, which by default prints to
+/// stderr. Route it into your logging with `Ctx::root_with_sink`.
 #[derive(Clone)]
 pub struct RutisBridge {
     ctx: Ctx,
     registry: Arc<ToolRegistry>,
-    timeout: Option<Duration>,
+    policy_timeout: Option<Duration>,
+    input_timeout: Option<Duration>,
+    turn_timeout: Option<Duration>,
+    require_policy: bool,
 }
 
 impl RutisBridge {
@@ -44,16 +60,50 @@ impl RutisBridge {
         Ok(Self {
             ctx: ctx.clone(),
             registry,
-            timeout: None,
+            policy_timeout: Some(DEFAULT_POLICY_TIMEOUT),
+            input_timeout: Some(DEFAULT_INPUT_TIMEOUT),
+            turn_timeout: Some(DEFAULT_TURN_TIMEOUT),
+            require_policy: false,
         })
     }
 
-    /// Bound how long the policy chain, turn-hook chain and input-filter
-    /// chain may take per dispatch. Past it a tool call is denied, a prompt
-    /// rejected (both fail closed), and a turn keeps the notes added so far.
-    /// Default: no limit — a plugin that never answers stalls the agent.
-    pub fn with_timeout(mut self, limit: Duration) -> Self {
-        self.timeout = Some(limit);
+    /// Set the same bound on all three chains.
+    pub fn with_timeout(self, limit: Duration) -> Self {
+        self.with_policy_timeout(Some(limit))
+            .with_input_timeout(Some(limit))
+            .with_turn_timeout(Some(limit))
+    }
+
+    /// Bound one tool call's policy chain; past it the call is denied.
+    /// `None`: no bound (you own liveness).
+    pub fn with_policy_timeout(mut self, limit: Option<Duration>) -> Self {
+        self.policy_timeout = limit;
+        self
+    }
+
+    /// Bound one prompt's input-filter chain; past it the prompt is rejected.
+    /// `None`: no bound (you own liveness).
+    pub fn with_input_timeout(mut self, limit: Option<Duration>) -> Self {
+        self.input_timeout = limit;
+        self
+    }
+
+    /// Bound one request's turn-note chain; past it the notes added so far
+    /// are used. `None`: no bound (you own liveness).
+    pub fn with_turn_timeout(mut self, limit: Option<Duration>) -> Self {
+        self.turn_timeout = limit;
+        self
+    }
+
+    /// Deny every tool call that no plugin policy judged.
+    ///
+    /// By default an empty policy chain allows — which also covers the
+    /// window while a policy plugin reloads (restart, config update,
+    /// dependency-driven eviction) and before it first becomes active. Use
+    /// this when a policy plugin is load-bearing: during that window calls
+    /// are denied instead.
+    pub fn require_policy(mut self) -> Self {
+        self.require_policy = true;
         self
     }
 
@@ -74,17 +124,17 @@ impl RutisBridge {
 
     /// yoagent `ToolMiddleware` dispatching the tool-call policy chain.
     pub fn tool_middleware(&self) -> RutisToolMiddleware {
-        RutisToolMiddleware::new(self.ctx.clone(), self.timeout)
+        RutisToolMiddleware::new(self.ctx.clone(), self.policy_timeout, self.require_policy)
     }
 
     /// yoagent `TurnHook` dispatching the turn-note chain.
     pub fn turn_hook(&self) -> RutisTurnHook {
-        RutisTurnHook::new(self.ctx.clone(), self.timeout)
+        RutisTurnHook::new(self.ctx.clone(), self.turn_timeout)
     }
 
     /// yoagent `AsyncInputFilter` dispatching the input chain.
     pub fn input_filter(&self) -> RutisInputFilter {
-        RutisInputFilter::new(self.ctx.clone(), self.timeout)
+        RutisInputFilter::new(self.ctx.clone(), self.input_timeout)
     }
 
     /// Wire tools, tool policy, turn notes and input filtering into `agent`,
@@ -119,6 +169,16 @@ impl RutisBridge {
         forward: Option<mpsc::UnboundedSender<AgentEvent>>,
     ) -> (mpsc::UnboundedSender<AgentEvent>, JoinHandle<()>) {
         crate::events::event_sender(&self.ctx, forward)
+    }
+
+    /// [`event_sender`](Self::event_sender) with a label on every published
+    /// event, to tell several agents on one bridge apart.
+    pub fn event_sender_labeled(
+        &self,
+        label: impl Into<Arc<str>>,
+        forward: Option<mpsc::UnboundedSender<AgentEvent>>,
+    ) -> (mpsc::UnboundedSender<AgentEvent>, JoinHandle<()>) {
+        crate::events::event_sender_labeled(&self.ctx, label, forward)
     }
 }
 

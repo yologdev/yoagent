@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use rutis::{BoxFuture, CordisError, Ctx, Disposer, Effect, EventKey, Plugin, TypeKey};
-use yoagent::{AgentEvent, AgentTool};
+use yoagent::AgentTool;
 
 use crate::events::AgentEventEmitted;
 use crate::input::{InputEvent, InputListener};
@@ -56,12 +56,15 @@ pub trait PluginCtxExt {
         check: impl Fn(&InputEvent) -> Option<String> + Send + Sync + 'static,
     ) -> Result<Disposer, CordisError>;
 
-    /// Observe the agent's events (published with an event sender from
-    /// [`RutisBridge::event_sender`](crate::RutisBridge::event_sender)).
-    /// Runs on rutis's dispatch task, never on the agent's.
+    /// Observe the agents' events (published with an event sender from
+    /// [`RutisBridge::event_sender`](crate::RutisBridge::event_sender) or
+    /// [`event_sender_labeled`](crate::RutisBridge::event_sender_labeled)):
+    /// `e.event()` is the event, `e.label()` the sending agent's label.
+    /// Runs on rutis's dispatch task, never on the agent's — but a slow
+    /// observer delays every later event on the bus (see [`crate::event_sender`]).
     fn on_agent_event(
         &self,
-        observer: impl Fn(&AgentEvent) + Send + Sync + 'static,
+        observer: impl Fn(&AgentEventEmitted) + Send + Sync + 'static,
     ) -> Result<Disposer, CordisError>;
 }
 
@@ -112,7 +115,7 @@ impl PluginCtxExt for Ctx {
 
     fn on_agent_event(
         &self,
-        observer: impl Fn(&AgentEvent) + Send + Sync + 'static,
+        observer: impl Fn(&AgentEventEmitted) + Send + Sync + 'static,
     ) -> Result<Disposer, CordisError> {
         self.events().on(
             self,
@@ -126,7 +129,7 @@ struct ObserverListener<F>(F);
 
 impl<F> rutis::Listener<AgentEventEmitted> for ObserverListener<F>
 where
-    F: Fn(&AgentEvent) + Send + Sync + 'static,
+    F: Fn(&AgentEventEmitted) + Send + Sync + 'static,
 {
     fn call<'a>(
         &'a self,
@@ -134,7 +137,7 @@ where
         e: &'a AgentEventEmitted,
     ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
         Box::pin(async move {
-            (self.0)(e.event());
+            (self.0)(e);
             Ok(None)
         })
     }

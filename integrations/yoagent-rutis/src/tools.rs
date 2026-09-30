@@ -9,12 +9,29 @@
 //! dependency-driven eviction. [`PluginToolSource`] implements yoagent's
 //! [`ToolSource`] over the registry: an agent sees exactly the tools of the
 //! plugins active when its run starts.
+//!
+//! # A plugin that unloads while its tool is in use
+//!
+//! An agent's tool list is fixed per run, so a run that started before an
+//! unload still offers the tool. Each entry remembers the contributing
+//! plugin generation's cancellation token, which rutis cancels at the start
+//! of an unload (before any cleanup runs):
+//!
+//! - a call that **starts** after that fails with *"no longer available"*;
+//! - a call **in flight** is abandoned (its future dropped) and fails with
+//!   *"plugin unloaded during the call"*.
+//!
+//! The same holds for a restart or config update: the run keeps the old
+//! generation's tool and gets the error; the new generation's tool — whose
+//! schema may differ — is offered from the next run. The bridge never
+//! silently rebinds a call to a newer generation.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use rutis::{CordisError, Ctx, Disposer, Effect, InstanceId};
+use rutis::{CordisError, Ctx, Disposer, Effect};
+use tokio_util::sync::CancellationToken;
 use yoagent::{AgentTool, ToolContext, ToolError, ToolResult, ToolSource};
 
 /// The rutis service through which plugins contribute tools.
@@ -25,10 +42,14 @@ use yoagent::{AgentTool, ToolContext, ToolError, ToolResult, ToolSource};
 ///
 /// **One tool per name.** A registration whose name is already held by a
 /// live entry is refused with [`CordisError::ServiceExists`] (the same error
-/// rutis uses for a doubly-provided service): a plugin that `?`s it fails to
-/// load, which is visible in rutis diagnostics, instead of silently shadowing
-/// or being shadowed. Tools the agent was built with win over plugin tools at
-/// run start (yoagent's [`ToolSource`] collision rule).
+/// rutis uses for a doubly-provided service) and logged with `warn!` naming
+/// the tool and its holder — rutis keeps a failed `apply`'s error on the
+/// fiber (visible through `FiberView::state()` / diagnostics), not in its
+/// error sink, so the log is where a host notices it. There is **no
+/// automatic retry**: when the holder later unloads, the refused plugin
+/// stays failed until something restarts it. Tools the agent was built with
+/// win over plugin tools at run start (yoagent's [`ToolSource`] collision
+/// rule).
 #[derive(Default)]
 pub struct ToolRegistry {
     inner: Mutex<Inner>,
@@ -43,8 +64,21 @@ struct Inner {
 struct Entry {
     seq: u64,
     tool: Arc<dyn AgentTool>,
-    owner: InstanceId,
+    owner: String,
     live: Arc<AtomicBool>,
+    generation: CancellationToken,
+}
+
+/// The plugin's display name, for messages (a diagnostics scan: only on the
+/// registration path, never per call).
+fn plugin_name(ctx: &Ctx) -> String {
+    let instance = ctx.instance();
+    ctx.diagnostics()
+        .plugins
+        .into_iter()
+        .find(|p| p.instance == instance)
+        .map(|p| p.name)
+        .unwrap_or_else(|| format!("instance {instance}"))
 }
 
 impl ToolRegistry {
@@ -54,19 +88,27 @@ impl ToolRegistry {
     /// [`Disposer`] removes it earlier (dropping it does nothing). Refused
     /// with [`CordisError::ServiceExists`] when another live entry has the
     /// same name, and with rutis's own error when the plugin is no longer
-    /// loading or active.
+    /// loading or active — in both cases nothing stays registered.
     pub fn register(
         self: &Arc<Self>,
         ctx: &Ctx,
         tool: Arc<dyn AgentTool>,
     ) -> Result<Disposer, CordisError> {
         let name = tool.name().to_string();
+        let owner = plugin_name(ctx);
         let live = Arc::new(AtomicBool::new(true));
         let seq = {
             let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(existing) = inner.entries.get(&name) {
+                tracing::warn!(
+                    tool = %name,
+                    holder = %existing.owner,
+                    refused = %owner,
+                    "plugin tool name already taken; registration refused \
+                     (the refused plugin is not retried when the holder unloads)"
+                );
                 return Err(CordisError::ServiceExists(format!(
-                    "yoagent tool `{name}` (already provided by plugin instance {})",
+                    "yoagent tool `{name}` (already provided by plugin `{}`)",
                     existing.owner
                 )));
             }
@@ -77,8 +119,9 @@ impl ToolRegistry {
                 Entry {
                     seq,
                     tool,
-                    owner: ctx.instance(),
+                    owner,
                     live: live.clone(),
+                    generation: ctx.cancellation_token(),
                 },
             );
             seq
@@ -119,9 +162,8 @@ impl ToolRegistry {
     }
 
     /// The registered tools, in registration order. Each is wrapped so that a
-    /// call made after its plugin unloaded (possible within a run that
-    /// started earlier) fails with an error result instead of reaching a
-    /// torn-down plugin.
+    /// call made after its plugin began unloading fails with an error result
+    /// instead of reaching a torn-down plugin (see the [module docs](self)).
     pub fn snapshot(&self) -> Vec<Arc<dyn AgentTool>> {
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let mut entries: Vec<&Entry> = inner.entries.values().collect();
@@ -132,6 +174,7 @@ impl ToolRegistry {
                 Arc::new(LiveTool {
                     inner: e.tool.clone(),
                     live: e.live.clone(),
+                    generation: e.generation.clone(),
                 }) as Arc<dyn AgentTool>
             })
             .collect()
@@ -159,10 +202,20 @@ impl ToolSource for PluginToolSource {
     }
 }
 
-/// A plugin tool that refuses to run once its plugin unloaded.
+/// A plugin tool bound to the generation that provided it.
 struct LiveTool {
     inner: Arc<dyn AgentTool>,
     live: Arc<AtomicBool>,
+    generation: CancellationToken,
+}
+
+impl LiveTool {
+    fn gone(&self) -> ToolError {
+        ToolError::Failed(format!(
+            "tool `{}` is no longer available: the plugin that provided it was unloaded",
+            self.inner.name()
+        ))
+    }
 }
 
 #[async_trait::async_trait]
@@ -184,12 +237,15 @@ impl AgentTool for LiveTool {
         params: serde_json::Value,
         ctx: ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        if !self.live.load(Ordering::SeqCst) {
-            return Err(ToolError::Failed(format!(
-                "tool `{}` is no longer available: the plugin that provided it was unloaded",
-                self.inner.name()
-            )));
+        if self.generation.is_cancelled() || !self.live.load(Ordering::SeqCst) {
+            return Err(self.gone());
         }
-        self.inner.execute(params, ctx).await
+        tokio::select! {
+            result = self.inner.execute(params, ctx) => result,
+            _ = self.generation.cancelled() => Err(ToolError::Failed(format!(
+                "tool `{}` failed: its plugin unloaded during the call",
+                self.inner.name()
+            ))),
+        }
     }
 }

@@ -5,8 +5,14 @@
 //! notes are joined (one per line, in listener order) and appended to the
 //! request's latest user turn by yoagent — transient, never stored in
 //! history. Turn notes are advisory, so this hook **fails open**: a listener
-//! that errors or panics (or a chain that times out) keeps the notes added so
-//! far and the request proceeds; the failure is logged.
+//! that errors or panics, a chain past its timeout (default
+//! [`DEFAULT_TURN_TIMEOUT`]) or a host that has shut down keeps the notes
+//! added so far and the request proceeds; the failure is logged.
+//!
+//! Notes are recomputed for every request (never accumulated across turns).
+//! A raw `WaterfallListener` that does not call `next` drops the notes every
+//! later listener would have added; the [`PluginCtxExt::on_turn`](crate::PluginCtxExt::on_turn)
+//! helper always calls it.
 
 use std::sync::Mutex;
 use std::time::Duration;
@@ -14,6 +20,9 @@ use std::time::Duration;
 use futures::FutureExt;
 use rutis::{BoxFuture, CordisError, Ctx, Event, EventKey, Terminal};
 use yoagent::{TurnContext, TurnHook};
+
+/// Default bound on one request's turn-note chain (notes so far are kept).
+pub const DEFAULT_TURN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The request about to be sent, dispatched as a `waterfall` event.
 #[derive(Debug)]
@@ -107,7 +116,7 @@ pub struct RutisTurnHook {
 
 impl RutisTurnHook {
     /// Dispatch on `ctx`'s bus, giving up (keeping notes so far) after
-    /// `timeout`.
+    /// `timeout` (`None`: no bound — you own liveness).
     pub fn new(ctx: Ctx, timeout: Option<Duration>) -> Self {
         Self { ctx, timeout }
     }
@@ -116,6 +125,10 @@ impl RutisTurnHook {
 #[async_trait::async_trait]
 impl TurnHook for RutisTurnHook {
     async fn before_turn(&self, turn: &TurnContext<'_>) -> Option<String> {
+        if let Some(why) = crate::host::closed(&self.ctx) {
+            tracing::warn!(why, "skipping plugin turn notes");
+            return None;
+        }
         let event = TurnEvent::from_turn(turn);
         let key = EventKey::<TurnEvent>::of();
         let chain = std::panic::AssertUnwindSafe(self.ctx.events().waterfall(

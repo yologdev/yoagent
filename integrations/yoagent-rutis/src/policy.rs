@@ -1,27 +1,47 @@
 //! Tool-call policy: a yoagent [`ToolMiddleware`] over a rutis `waterfall`.
 //!
 //! Every tool call dispatches one [`ToolCallEvent`] down the waterfall chain
-//! (listeners in registration order, then a terminal that allows). A listener
-//! may:
+//! (listeners in registration order, then a terminal that allows).
+//!
+//! **Every policy must pass.** Any `Deny` wins, and the call runs only if the
+//! chain reached its end:
 //!
 //! - **allow** — call `next` and return what it returns;
-//! - **deny** — return [`ToolVerdict::Deny`] without calling `next` (the rest
-//!   of the chain never sees the call);
+//! - **deny** — return [`ToolVerdict::Deny`] *without* calling `next` (later
+//!   listeners never see the call — a rate counter after you is not bumped);
 //! - **modify** — [`ToolCallEvent::set_args`], then call `next`: later
 //!   listeners see the rewritten arguments, and the tool runs with them.
 //!
-//! No listener means allow. **Fail closed:** a listener that returns an error
-//! or panics, a dispatch rutis refuses (e.g. the root was shut down), or a
-//! chain that outlives the optional timeout denies the call, with a reason
-//! the model sees. This matches yoagent's own middleware contract, where a
-//! panicking middleware is contained as a denial.
+//! A raw `WaterfallListener` that returns `Allow` *without* calling `next`
+//! would skip every later policy (in rutis, not calling `next` vetoes the rest
+//! of the chain). The bridge treats that as a denial: an `Allow` that never
+//! reached the end of the chain is denied, fail closed.
+//!
+//! # Failure modes
+//!
+//! **Fail closed:** a listener that returns an error or panics, a host that
+//! has shut down, or a chain that outlives its timeout (default
+//! [`DEFAULT_POLICY_TIMEOUT`]) denies the call, with a reason the model sees —
+//! matching yoagent's own middleware contract, where a panicking middleware is
+//! contained as a denial.
+//!
+//! **The empty-chain window.** No listener means allow — including *while a
+//! policy plugin reloads* (restart, config update, dependency-driven eviction
+//! drain the old listener before the new generation registers its own) and
+//! *before it first reaches Active*. A host whose safety depends on a policy
+//! plugin should call [`RutisBridge::require_policy`](crate::RutisBridge::require_policy):
+//! then a call no policy judged is denied.
 
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::FutureExt;
 use rutis::{BoxFuture, CordisError, Ctx, Event, EventKey, Terminal};
 use yoagent::{ToolCallRequest, ToolDecision, ToolMiddleware};
+
+/// Default bound on one tool call's policy chain (fail closed past it).
+pub const DEFAULT_POLICY_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// One pending tool call, dispatched on the rutis bus as a `waterfall` event.
 ///
@@ -35,6 +55,8 @@ pub struct ToolCallEvent {
     args: Mutex<serde_json::Value>,
     user_request: Option<String>,
     latest_user_text: Option<String>,
+    judged: AtomicUsize,
+    reached_end: AtomicBool,
 }
 
 impl Event for ToolCallEvent {
@@ -56,6 +78,8 @@ impl ToolCallEvent {
             args: Mutex::new(args),
             user_request: None,
             latest_user_text: None,
+            judged: AtomicUsize::new(0),
+            reached_end: AtomicBool::new(false),
         }
     }
 
@@ -104,12 +128,28 @@ impl ToolCallEvent {
     pub fn latest_user_text(&self) -> Option<&str> {
         self.latest_user_text.as_deref()
     }
+
+    /// Record that a policy judged this call. Listeners registered through
+    /// [`PluginCtxExt`](crate::PluginCtxExt) do this for you; a raw
+    /// `WaterfallListener` must call it, or a bridge built with
+    /// [`require_policy`](crate::RutisBridge::require_policy) denies the call
+    /// as unjudged.
+    pub fn mark_judged(&self) {
+        self.judged.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// How many policies judged this call so far.
+    pub fn judged(&self) -> usize {
+        self.judged.load(Ordering::SeqCst)
+    }
 }
 
 /// A listener's answer about a tool call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolVerdict {
-    /// Let the call proceed (with the arguments as they stand).
+    /// Let the call proceed (with the arguments as they stand). Only
+    /// meaningful as the result of calling `next`: an `Allow` that skipped
+    /// the rest of the chain is treated as a denial.
     Allow,
     /// Block the call; the reason is returned to the model as an error result.
     Deny(String),
@@ -129,8 +169,9 @@ impl Terminal<ToolCallEvent> for AllowTerminal {
     fn call<'a>(
         &'a self,
         _ctx: &'a Ctx,
-        _e: &'a ToolCallEvent,
+        e: &'a ToolCallEvent,
     ) -> BoxFuture<'a, Result<ToolVerdict, CordisError>> {
+        e.reached_end.store(true, Ordering::SeqCst);
         Box::pin(async { Ok(ToolVerdict::Allow) })
     }
 }
@@ -142,18 +183,28 @@ impl Terminal<ToolCallEvent> for AllowTerminal {
 pub struct RutisToolMiddleware {
     ctx: Ctx,
     timeout: Option<Duration>,
+    require_policy: bool,
 }
 
 impl RutisToolMiddleware {
     /// Dispatch on `ctx`'s bus; deny any call whose chain takes longer than
-    /// `timeout` (`None`: wait as long as it takes).
-    pub fn new(ctx: Ctx, timeout: Option<Duration>) -> Self {
-        Self { ctx, timeout }
+    /// `timeout` (`None`: no bound — you own liveness); with
+    /// `require_policy`, deny any call no policy judged.
+    pub fn new(ctx: Ctx, timeout: Option<Duration>, require_policy: bool) -> Self {
+        Self {
+            ctx,
+            timeout,
+            require_policy,
+        }
     }
 
-    /// Run the chain for `event` and return the raw verdict (errors, panics
-    /// and timeouts already turned into denials).
+    /// Run the chain for `event` and return the verdict (errors, panics,
+    /// timeouts, a shut-down host, a short-circuited `Allow` and — with
+    /// `require_policy` — an unjudged call already turned into denials).
     pub async fn judge(&self, event: &ToolCallEvent) -> ToolVerdict {
+        if let Some(why) = crate::host::closed(&self.ctx) {
+            return deny_closed(event, why.to_string());
+        }
         let key = EventKey::<ToolCallEvent>::of();
         let chain = self
             .ctx
@@ -175,7 +226,24 @@ impl RutisToolMiddleware {
             None => guarded.await,
         };
         match outcome {
-            Ok(Ok(verdict)) => verdict,
+            Ok(Ok(ToolVerdict::Allow)) => {
+                if !event.reached_end.load(Ordering::SeqCst) {
+                    deny_closed(
+                        event,
+                        "a plugin policy allowed the call without passing it on to the \
+                         remaining policies"
+                            .into(),
+                    )
+                } else if self.require_policy && event.judged() == 0 {
+                    deny_closed(
+                        event,
+                        "no plugin policy is loaded to judge this call".into(),
+                    )
+                } else {
+                    ToolVerdict::Allow
+                }
+            }
+            Ok(Ok(deny)) => deny,
             Ok(Err(error)) => deny_closed(event, format!("a plugin policy failed: {error}")),
             Err(_) => deny_closed(event, "a plugin policy panicked".into()),
         }
@@ -211,14 +279,17 @@ impl ToolMiddleware for RutisToolMiddleware {
 ///
 /// Return `Ok(Allow)` to pass the call on (after optionally
 /// [`set_args`](ToolCallEvent::set_args)), `Ok(Deny(..))` to stop it; an
-/// `Err` denies it too (fail closed).
+/// `Err` denies it too (fail closed). A policy that waits on a human should
+/// run under a bridge whose policy timeout is raised or disabled
+/// ([`RutisBridge::with_policy_timeout`](crate::RutisBridge::with_policy_timeout)).
 #[async_trait::async_trait]
 pub trait ToolPolicy: Send + Sync + 'static {
     /// Judge one call.
     async fn check(&self, call: &ToolCallEvent) -> Result<ToolVerdict, CordisError>;
 }
 
-/// Waterfall listener around a [`ToolPolicy`].
+/// Waterfall listener around a [`ToolPolicy`]: a denial returns without
+/// calling `next`, so later policies never see a denied call.
 pub(crate) struct PolicyListener<P>(pub(crate) Arc<P>);
 
 impl<P: ToolPolicy> rutis::WaterfallListener<ToolCallEvent> for PolicyListener<P> {
@@ -229,7 +300,9 @@ impl<P: ToolPolicy> rutis::WaterfallListener<ToolCallEvent> for PolicyListener<P
         next: rutis::Next<'a, ToolCallEvent>,
     ) -> BoxFuture<'a, Result<ToolVerdict, CordisError>> {
         Box::pin(async move {
-            match self.0.check(e).await? {
+            let verdict = self.0.check(e).await?;
+            e.mark_judged();
+            match verdict {
                 ToolVerdict::Allow => next.call().await,
                 deny => Ok(deny),
             }

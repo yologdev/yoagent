@@ -69,18 +69,32 @@
 //! # Semantics worth knowing
 //!
 //! - **Tools change at run boundaries.** An agent asks for plugin tools once
-//!   per run; a plugin unloaded mid-run leaves its tools offered until the
-//!   run ends, but calling one then returns an error result.
+//!   per run; a plugin unloaded (or restarted / updated) mid-run leaves its
+//!   tools offered until the run ends, but a call that starts afterwards
+//!   fails as *no longer available* and a call in flight is abandoned with an
+//!   error — never rebound to the new generation.
 //! - **Tool names are unique across plugins**: a second plugin registering a
-//!   taken name is refused (`CordisError::ServiceExists`). The agent's own
-//!   tools win over plugin tools.
-//! - **Policy and input filtering fail closed** (an erroring, panicking or
-//!   timed-out plugin denies / rejects); **turn notes fail open**.
+//!   taken name is refused (`CordisError::ServiceExists`, logged; no retry
+//!   when the holder unloads). The agent's own tools win over plugin tools.
+//! - **Every policy must pass.** Any `Deny` wins; an `Allow` that skips the
+//!   rest of the chain is treated as a denial.
+//! - **Policy and input filtering fail closed** — an erroring, panicking or
+//!   timed-out plugin, or a host that has shut down, denies / rejects —
+//!   **except for an empty chain**, which allows / passes. That includes the
+//!   window while a policy plugin reloads and before it first loads; close it
+//!   with [`RutisBridge::require_policy`]. **Turn notes fail open.**
+//! - **Finite default timeouts** per chain (60 s policy, 30 s input, 5 s
+//!   turn notes): yoagent's `abort()` cannot interrupt a hung hook. `None`
+//!   opts out.
 //! - **One bridge per rutis root.** All attached agents share its plugins;
-//!   events of several agents share one bus channel.
+//!   their events share one bus queue (label them with
+//!   [`RutisBridge::event_sender_labeled`]).
+//! - **Route rutis's `ErrorSink`** (default: stderr) into your logging with
+//!   `Ctx::root_with_sink`.
 
 mod bridge;
 mod events;
+mod host;
 mod input;
 mod plugin;
 mod policy;
@@ -88,12 +102,14 @@ mod tools;
 mod turn;
 
 pub use bridge::{attach, AgentRutisExt, RutisBridge};
-pub use events::{emit_agent_event, event_sender, AgentEventEmitted};
-pub use input::{InputEvent, RutisInputFilter};
+pub use events::{emit_agent_event, event_sender, event_sender_labeled, AgentEventEmitted};
+pub use input::{InputEvent, RutisInputFilter, DEFAULT_INPUT_TIMEOUT};
 pub use plugin::{AgentPlugin, PluginCtxExt};
-pub use policy::{RutisToolMiddleware, ToolCallEvent, ToolPolicy, ToolVerdict};
+pub use policy::{
+    RutisToolMiddleware, ToolCallEvent, ToolPolicy, ToolVerdict, DEFAULT_POLICY_TIMEOUT,
+};
 pub use tools::{PluginToolSource, ToolRegistry};
-pub use turn::{RutisTurnHook, TurnEvent};
+pub use turn::{RutisTurnHook, TurnEvent, DEFAULT_TURN_TIMEOUT};
 
 /// The exact rutis version this bridge is built against (`=0.5.0`).
 pub use rutis;

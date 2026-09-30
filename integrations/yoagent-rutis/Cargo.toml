@@ -13,6 +13,9 @@ categories = ["asynchronous", "development-tools"]
 authors = ["Yuanhao <yuanhao@yolog.dev>"]
 # yoagent's MSRV; rutis 0.5 declares 1.85.
 rust-version = "1.86"
+# Publish after the yoagent release that includes `ToolSource`: until then
+# the `yoagent` requirement below resolves to a crates.io version without it.
+publish = false
 
 [dependencies]
 # `ToolSource` is unreleased: this needs the yoagent release that ships it.
@@ -22,9 +25,10 @@ rutis = "=0.5.0"
 async-trait = "0.1"
 futures = "0.3"
 serde_json = "1"
-tokio = { version = "1", features = ["rt", "sync", "time"] }
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+# Same crate rutis hands its cancellation tokens out as.
+tokio-util = "0.7"
 tracing = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
-tokio-util = "0.7"

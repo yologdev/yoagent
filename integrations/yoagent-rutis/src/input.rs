@@ -3,14 +3,19 @@
 //! Each prompt dispatches one [`InputEvent`]. Listeners run in registration
 //! order; the first that returns `Some(reason)` rejects the prompt (the run
 //! ends with `AgentEvent::InputRejected { reason }`), `None` passes it on. No
-//! listener means pass. **Fail closed**, like yoagent's own filters: a
-//! listener error or panic (rutis's `serial` turns a panic into an error), or
-//! a timeout, rejects.
+//! listener means pass — including while an input-filter plugin reloads.
+//! **Fail closed**, like yoagent's own filters: a listener error or panic
+//! (rutis's `serial` turns a panic into an error), a host that has shut
+//! down, or a chain past its timeout (default [`DEFAULT_INPUT_TIMEOUT`])
+//! rejects.
 
 use std::time::Duration;
 
 use rutis::{BoxFuture, CordisError, Ctx, Event, EventKey, Listener};
 use yoagent::{AsyncInputFilter, FilterResult};
+
+/// Default bound on one prompt's input-filter chain (fail closed past it).
+pub const DEFAULT_INPUT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A prompt about to reach the model, dispatched as a `serial` event.
 /// The value a listener short-circuits with is the rejection reason.
@@ -44,7 +49,8 @@ pub struct RutisInputFilter {
 }
 
 impl RutisInputFilter {
-    /// Dispatch on `ctx`'s bus, rejecting after `timeout`.
+    /// Dispatch on `ctx`'s bus, rejecting after `timeout` (`None`: no
+    /// bound — you own liveness).
     pub fn new(ctx: Ctx, timeout: Option<Duration>) -> Self {
         Self { ctx, timeout }
     }
@@ -53,6 +59,9 @@ impl RutisInputFilter {
 #[async_trait::async_trait]
 impl AsyncInputFilter for RutisInputFilter {
     async fn filter(&self, text: &str) -> FilterResult {
+        if let Some(why) = crate::host::closed(&self.ctx) {
+            return reject_closed(why.to_string());
+        }
         let event = InputEvent::new(text);
         let key = EventKey::<InputEvent>::of();
         let dispatch = self.ctx.events().serial(&self.ctx, &key, &event);
