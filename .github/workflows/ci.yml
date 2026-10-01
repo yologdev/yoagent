@@ -77,6 +77,21 @@ jobs:
         run: cargo test ${{ matrix.flags }}
 
   # Built-in tools shell out to unix commands, so Windows only checks compilation.
+  wasm32:
+    name: Check (wasm32, no default features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: cargo clippy --target wasm32-unknown-unknown --no-default-features
+      - name: Clippy (decision)
+        run: cargo clippy --target wasm32-unknown-unknown --no-default-features --features decision
+
   windows-check:
     name: Check (windows)
     runs-on: windows-latest

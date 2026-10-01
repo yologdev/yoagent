@@ -19,9 +19,12 @@ adheres to [Semantic Versioning](https://semver.org/).
   sub-agents and compaction. New `yoagent::rt` gives `spawn`, `sleep`,
   `timeout` and `JoinHandle` that are Tokio's on native targets (unchanged
   behaviour) and the host executor and `setTimeout` on wasm32.
-  `StreamProvider`, `AgentTool`, `McpTransport` and `CompactionStrategy` now
-  require `rt::MaybeSend + rt::MaybeSync`, which is exactly `Send + Sync` on
-  native targets; implementations that run on wasm32 should use
+  `StreamProvider`, `AgentTool`, `McpTransport`, `CompactionStrategy`,
+  `TurnHook`, `ToolMiddleware`, `InputFilter`, `AsyncInputFilter` and
+  `DecisionBackend` now require `rt::MaybeSend + rt::MaybeSync`, which is
+  exactly `Send + Sync` on native targets, so the `decision` feature also
+  builds for wasm32 (`rt::Instant` is Tokio's natively, keeping paused-clock
+  tests intact, and `web-time`'s on wasm32); implementations that run on wasm32 should use
   `#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]` /
   `#[cfg_attr(not(target_arch = "wasm32"), async_trait)]`. On wasm32,
   `LlmCompaction` takes its existing no-runtime path (deterministic tiers).
@@ -32,6 +35,8 @@ adheres to [Semantic Versioning](https://semver.org/).
   (`retry::Never`): providers already stop at the first stream error and the
   agent loop owns retries, so it never took effect, but its timer panicked
   on wasm32 and a reconnect would re-send a completion request.
+  Guide: [WebAssembly & Cloudflare Workers](docs/guides/wasm-workers.md);
+  CI gains a `wasm32` clippy job (default and `decision`).
   Default features are unchanged, so native users see no difference.
 
 - **`ToolSource`: tools resolved per run.** A new trait

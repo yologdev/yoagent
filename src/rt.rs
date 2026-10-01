@@ -41,7 +41,7 @@ impl<T: ?Sized> MaybeSync for T {}
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
     pub use tokio::task::{spawn, JoinError, JoinHandle};
-    pub use tokio::time::{error::Elapsed, sleep, timeout};
+    pub use tokio::time::{error::Elapsed, sleep, timeout, Instant};
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -55,6 +55,9 @@ mod wasm {
     use std::task::{Context, Poll};
     use std::time::Duration;
     use tokio::sync::oneshot;
+
+    /// The host clock (`performance.now()`); `std::time::Instant` panics here.
+    pub use web_time::Instant;
 
     /// Why a task produced no value: it was aborted, or it panicked.
     #[derive(Debug)]

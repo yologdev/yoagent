@@ -1745,7 +1745,7 @@ pub enum FilterResult {
 /// [`Agent::with_async_input_filter`](crate::Agent::with_async_input_filter)
 /// (or push an [`AsyncFilter`] onto
 /// [`AgentLoopConfig::input_filters`](crate::agent_loop::AgentLoopConfig)).
-pub trait InputFilter: Send + Sync {
+pub trait InputFilter: crate::rt::MaybeSend + crate::rt::MaybeSync {
     fn filter(&self, text: &str) -> FilterResult;
 
     /// The async filter behind this one, if any. The loop awaits it instead
@@ -1770,8 +1770,9 @@ pub trait InputFilter: Send + Sync {
 /// rejects. A filter that **panics** is contained and treated as a
 /// `Reject` (fail closed): the run ends with an
 /// [`AgentEvent::InputRejected`] and the agent keeps its state.
-#[async_trait::async_trait]
-pub trait AsyncInputFilter: Send + Sync {
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+pub trait AsyncInputFilter: crate::rt::MaybeSend + crate::rt::MaybeSync {
     /// Judge the prompt's text (every user text block, joined by newlines).
     async fn filter(&self, text: &str) -> FilterResult;
 }
@@ -2231,8 +2232,9 @@ impl<'a> ToolCallRequest<'a> {
 /// [`parse_tool_arguments`](crate::provider::parse_tool_arguments)). The loop
 /// answers such a call with an error tool result *before* the chain runs, so
 /// there is no real call to approve, deny or rewrite.
-#[async_trait::async_trait]
-pub trait ToolMiddleware: Send + Sync {
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+pub trait ToolMiddleware: crate::rt::MaybeSend + crate::rt::MaybeSync {
     async fn before_tool(&self, call: &ToolCallRequest<'_>) -> ToolDecision;
 }
 
@@ -2328,8 +2330,9 @@ impl<'a> TurnContext<'a> {
 /// [`TurnHookProvider`](crate::provider::TurnHookProvider). The hook runs
 /// once per provider call, so a retried request runs it again; memoize if it
 /// is expensive. A panicking hook is contained and contributes nothing.
-#[async_trait::async_trait]
-pub trait TurnHook: Send + Sync {
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+pub trait TurnHook: crate::rt::MaybeSend + crate::rt::MaybeSync {
     /// Return a note to append to this request's latest user turn, or `None`.
     async fn before_turn(&self, turn: &TurnContext<'_>) -> Option<String>;
 }

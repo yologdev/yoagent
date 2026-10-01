@@ -34,6 +34,7 @@ All providers and built-in tools are included by default. Optional features:
 
 | Feature | Dependencies | Description |
 |---------|-------------|-------------|
+| `native` (default) | Tokio `fs`/`process`, reqwest TLS + SOCKS | Filesystem and shell tools, stdio MCP, disk-backed shared state and price cache. Disable it to build for [WebAssembly / Cloudflare Workers](../guides/wasm-workers.md) |
 | `openapi` | `openapiv3`, `serde_yaml_ng` | Auto-generate tools from OpenAPI 3.0 specs |
 | `gasp` | `yoagent-state` | Record runs into a [GASP](../concepts/gasp.md) agent repo |
 | `decision` | none | [Decision models](../concepts/decision-models.md): typed yes/no, choice and score questions; advisory hints, the tool gate and the input guard. Nothing is sent until you pick a model |

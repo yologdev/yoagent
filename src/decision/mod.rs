@@ -614,7 +614,7 @@ impl DecisionModel {
             record_attempt(&result);
             return result;
         }
-        let deadline = tokio::time::Instant::now() + self.timeout;
+        let deadline = crate::rt::Instant::now() + self.timeout;
         let mut attempts: Vec<FallbackAttempt> = Vec::new();
         let mut sent = false;
         let members = std::iter::once(self).chain(self.fallbacks.iter());
@@ -628,7 +628,7 @@ impl DecisionModel {
                 attempts.push(FallbackAttempt::new(req.model, e, false));
                 continue;
             }
-            let now = tokio::time::Instant::now();
+            let now = crate::rt::Instant::now();
             if now >= deadline {
                 let result = Err(DecisionError::Timeout(self.timeout));
                 if !sent {
@@ -645,7 +645,7 @@ impl DecisionModel {
                 Ok(eval) => return Ok(eval),
                 // The clock, not the error kind, says whether the overall
                 // budget is spent: a backend may report a timeout of its own.
-                Err(_) if tokio::time::Instant::now() >= deadline => {
+                Err(_) if crate::rt::Instant::now() >= deadline => {
                     return Err(DecisionError::Timeout(self.timeout))
                 }
                 // Every other error falls through — `Invalid` included: a
@@ -700,12 +700,19 @@ impl DecisionModel {
         billed: &std::sync::Mutex<Option<Evaluation>>,
     ) -> Result<Vec<Evaluation>, DecisionError> {
         use futures::StreamExt;
+        // `Send` where work can move between threads; wasm32 has one thread
+        // and its host futures are not `Send`.
+        #[cfg(not(target_arch = "wasm32"))]
         type Single<'a> = std::pin::Pin<
             Box<
                 dyn std::future::Future<Output = (usize, Result<Evaluation, DecisionError>)>
                     + Send
                     + 'a,
             >,
+        >;
+        #[cfg(target_arch = "wasm32")]
+        type Single<'a> = std::pin::Pin<
+            Box<dyn std::future::Future<Output = (usize, Result<Evaluation, DecisionError>)> + 'a>,
         >;
         // Built in a loop, not a closure: a closure over borrowed questions
         // trips the `Send` check of `async_trait`-boxed callers.
@@ -812,7 +819,7 @@ impl DecisionModel {
         };
         let result = {
             use tracing::Instrument;
-            tokio::time::timeout(limit, work.instrument(span.clone())).await
+            crate::rt::timeout(limit, work.instrument(span.clone())).await
         };
         let result = match result {
             Ok(inner) => inner,

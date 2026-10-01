@@ -250,7 +250,8 @@ pub(crate) async fn post_json(
     })
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl DecisionBackend for SystemOneBackend {
     fn capabilities(&self) -> Capabilities {
         self.capabilities.clone()
@@ -293,7 +294,7 @@ where
                     delay.as_secs_f64(),
                     e
                 );
-                tokio::time::sleep(delay).await;
+                crate::rt::sleep(delay).await;
             }
             other => return other,
         }

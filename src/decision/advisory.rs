@@ -341,7 +341,8 @@ impl Advisor {
     }
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl TurnHook for Advisor {
     async fn before_turn(&self, turn: &TurnContext<'_>) -> Option<String> {
         self.advise(turn).await
