@@ -4770,3 +4770,190 @@ async fn malformed_but_complete_arguments_are_not_called_cut_off() {
         assert!(!text.contains("cut off"), "{raw}: got: {text}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Failed attempts are drained and closed, not raced
+// ---------------------------------------------------------------------------
+
+/// Streams a partial text delta, then fails with a retryable error, for its
+/// first `failures` attempts; afterwards answers with `inner`.
+struct PartialThenFailProvider {
+    attempts: std::sync::atomic::AtomicUsize,
+    failures: usize,
+    inner: MockProvider,
+}
+
+#[async_trait::async_trait]
+impl StreamProvider for PartialThenFailProvider {
+    async fn stream(
+        &self,
+        config: StreamConfig,
+        tx: tokio::sync::mpsc::UnboundedSender<StreamEvent>,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<yoagent::Message, ProviderError> {
+        let attempt = self
+            .attempts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if attempt < self.failures {
+            let _ = tx.send(StreamEvent::Start);
+            let _ = tx.send(StreamEvent::TextDelta {
+                content_index: 0,
+                delta: format!("partial-{attempt}"),
+            });
+            return Err(ProviderError::Network("stream cut".into()));
+        }
+        self.inner.stream(config, tx, cancel).await
+    }
+}
+
+fn partial_then_fail_config(failures: usize, max_retries: usize) -> AgentLoopConfig {
+    AgentLoopConfig {
+        provider: std::sync::Arc::new(PartialThenFailProvider {
+            attempts: std::sync::atomic::AtomicUsize::new(0),
+            failures,
+            inner: MockProvider::text("final answer"),
+        }),
+        model: "mock".into(),
+        api_key: "test".into(),
+        thinking_level: ThinkingLevel::Off,
+        max_tokens: None,
+        temperature: None,
+        model_config: None,
+        convert_to_llm: None,
+        transform_context: None,
+        get_steering_messages: None,
+        get_follow_up_messages: None,
+        context_config: None,
+        compaction_strategy: None,
+        execution_limits: None,
+        cache_config: CacheConfig::default(),
+        tool_output_sink: None,
+        output_schema: None,
+        tool_execution: ToolExecutionStrategy::default(),
+        retry_config: yoagent::RetryConfig {
+            max_retries,
+            initial_delay_ms: 1,
+            backoff_multiplier: 1.0,
+            max_delay_ms: 1,
+        },
+        before_turn: None,
+        after_turn: None,
+        on_error: None,
+        input_filters: vec![],
+        tool_middleware: vec![],
+        turn_delay: None,
+    }
+}
+
+/// The assistant message lifecycle seen by consumers, one entry per event:
+/// "start", "delta:<text>", "end:<stop reason>:<error message>".
+fn assistant_lifecycle(events: &[AgentEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::MessageStart {
+                message: AgentMessage::Llm(Message::Assistant { .. }),
+            } => Some("start".to_string()),
+            AgentEvent::MessageUpdate {
+                delta: StreamDelta::Text { delta },
+                ..
+            } => Some(format!("delta:{delta}")),
+            AgentEvent::MessageEnd {
+                message:
+                    AgentMessage::Llm(Message::Assistant {
+                        stop_reason,
+                        error_message,
+                        ..
+                    }),
+            } => Some(format!(
+                "end:{stop_reason:?}:{}",
+                error_message.clone().unwrap_or_default()
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every failed attempt's partial output is forwarded (deterministically,
+/// whatever the scheduler) and then closed by a `MessageEnd` with
+/// `StopReason::Error`, so consumers can discard it before the retry streams.
+#[tokio::test]
+async fn failed_attempts_are_forwarded_completely_and_then_closed() {
+    let config = partial_then_fail_config(2, 3);
+    let mut context = AgentContext {
+        system_prompt: "test".into(),
+        messages: Vec::new(),
+        tools: Vec::new(),
+    };
+    let (tx, rx) = mpsc::unbounded_channel();
+    let new_messages = agent_loop(
+        vec![AgentMessage::Llm(Message::user("hi"))],
+        &mut context,
+        &config,
+        tx,
+        CancellationToken::new(),
+    )
+    .await;
+    let lifecycle = assistant_lifecycle(&collect_events(rx));
+    let closing = |n: usize| {
+        format!("end:Error:attempt {n} of 4 failed and will be retried: Network error: stream cut")
+    };
+    assert_eq!(
+        lifecycle[..6],
+        [
+            "start".to_string(),
+            "delta:partial-0".into(),
+            closing(1),
+            "start".into(),
+            "delta:partial-1".into(),
+            closing(2),
+        ],
+        "{lifecycle:#?}"
+    );
+    assert_eq!(lifecycle[6], "start");
+    assert!(
+        lifecycle.last().unwrap().starts_with("end:Stop"),
+        "{lifecycle:#?}"
+    );
+    // History holds only the successful answer, not the failed attempts.
+    assert_eq!(new_messages.len(), 2);
+}
+
+/// When retries run out, the last attempt's message is closed with the very
+/// error message the turn returns.
+#[tokio::test]
+async fn an_exhausted_retry_closes_the_last_attempt_with_the_returned_error() {
+    let config = partial_then_fail_config(10, 1);
+    let mut context = AgentContext {
+        system_prompt: "test".into(),
+        messages: Vec::new(),
+        tools: Vec::new(),
+    };
+    let (tx, rx) = mpsc::unbounded_channel();
+    let new_messages = agent_loop(
+        vec![AgentMessage::Llm(Message::user("hi"))],
+        &mut context,
+        &config,
+        tx,
+        CancellationToken::new(),
+    )
+    .await;
+    let lifecycle = assistant_lifecycle(&collect_events(rx));
+    assert_eq!(
+        lifecycle,
+        [
+            "start",
+            "delta:partial-0",
+            "end:Error:attempt 1 of 2 failed and will be retried: Network error: stream cut",
+            "start",
+            "delta:partial-1",
+            "end:Error:Network error: stream cut",
+        ],
+        "{lifecycle:#?}"
+    );
+    let returned = new_messages.iter().rev().find_map(|m| match m {
+        AgentMessage::Llm(Message::Assistant { error_message, .. }) => error_message.clone(),
+        _ => None,
+    });
+    assert_eq!(returned.as_deref(), Some("Network error: stream cut"));
+}

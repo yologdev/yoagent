@@ -1248,6 +1248,7 @@ async fn stream_assistant_response(
         let model_for_events = config.model.clone();
         let forward_handle = crate::rt::spawn(async move {
             let mut partial_message: Option<AgentMessage> = None;
+            let mut ended = false;
             while let Some(event) = stream_rx.recv().await {
                 match &event {
                     StreamEvent::Start => {
@@ -1306,6 +1307,7 @@ async fn stream_assistant_response(
                     StreamEvent::Done { message } => {
                         let am: AgentMessage = message.clone().into();
                         partial_message = Some(am.clone());
+                        ended = true;
                         event_tx.send(AgentEvent::MessageEnd { message: am }).ok();
                     }
                     StreamEvent::Error { message } => {
@@ -1318,10 +1320,15 @@ async fn stream_assistant_response(
                                 .ok();
                         }
                         partial_message = Some(am.clone());
+                        ended = true;
                         event_tx.send(AgentEvent::MessageEnd { message: am }).ok();
                     }
                     _ => {}
                 }
+            }
+            AttemptEvents {
+                started: partial_message.is_some(),
+                ended,
             }
         });
 
@@ -1332,10 +1339,30 @@ async fn stream_assistant_response(
             .stream(stream_config, stream_tx, provider_cancel)
             .await;
 
+        // The provider has returned, so its sender is gone and the forwarder
+        // ends once it has forwarded what the attempt produced. Draining it
+        // (rather than aborting it) makes what consumers see deterministic:
+        // every event of every attempt, never a timing-dependent subset.
+        let attempt_events = forward_handle.await.unwrap_or_default();
+
         match &result {
             Err(e) if e.is_retryable() && attempt < retry.max_retries && !cancel.is_cancelled() => {
-                // Abort forwarder to prevent forwarding events from failed attempt
-                forward_handle.abort();
+                // Close the failed attempt's message so consumers can discard
+                // whatever partial content it streamed before the retry.
+                if attempt_events.needs_end() {
+                    let failed = error_message(
+                        &config.model,
+                        format!(
+                            "attempt {} of {} failed and will be retried: {e}",
+                            attempt + 1,
+                            retry.max_retries + 1
+                        ),
+                    );
+                    tx.send(AgentEvent::MessageEnd {
+                        message: failed.into(),
+                    })
+                    .ok();
+                }
                 attempt += 1;
                 // Server-provided Retry-After wins over backoff, but is
                 // clamped to max_delay_ms so a bad header can't stall the loop.
@@ -1347,30 +1374,57 @@ async fn stream_assistant_response(
                 crate::rt::sleep(delay).await;
                 continue;
             }
-            _ => {
-                // Final attempt — wait for forwarder to finish processing remaining events
-                let _ = forward_handle.await;
-                break result;
-            }
+            _ => break (result, attempt_events),
         }
     };
 
+    let (result, attempt_events) = result;
     match result {
         Ok(msg) => msg,
         Err(e) => {
             warn!("Provider error: {}", e);
-            Message::Assistant {
-                content: vec![Content::Text {
-                    text: String::new(),
-                }],
-                stop_reason: StopReason::Error,
-                model: config.model.clone(),
-                provider: "unknown".into(),
-                usage: Usage::default(),
-                timestamp: now_ms(),
-                error_message: Some(e.to_string()),
+            let failed = error_message(&config.model, e.to_string());
+            // Close the message the final attempt opened, with the same
+            // error message this turn returns.
+            if attempt_events.needs_end() {
+                tx.send(AgentEvent::MessageEnd {
+                    message: failed.clone().into(),
+                })
+                .ok();
             }
+            failed
         }
+    }
+}
+
+/// What one provider attempt's forwarder emitted.
+#[derive(Debug, Default, Clone, Copy)]
+struct AttemptEvents {
+    /// A `MessageStart` was sent for this attempt.
+    started: bool,
+    /// Its `MessageEnd` was sent too.
+    ended: bool,
+}
+
+impl AttemptEvents {
+    /// The attempt opened a message that nothing closed.
+    fn needs_end(self) -> bool {
+        self.started && !self.ended
+    }
+}
+
+/// The assistant message for a provider failure.
+fn error_message(model: &str, error: String) -> Message {
+    Message::Assistant {
+        content: vec![Content::Text {
+            text: String::new(),
+        }],
+        stop_reason: StopReason::Error,
+        model: model.to_string(),
+        provider: "unknown".into(),
+        usage: Usage::default(),
+        timestamp: now_ms(),
+        error_message: Some(error),
     }
 }
 

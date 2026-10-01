@@ -62,6 +62,21 @@ adheres to [Semantic Versioning](https://semver.org/).
   crate, not yet on crates.io (it needs a yoagent release with `ToolSource`);
   yoagent itself does not depend on rutis.
 
+### Fixed
+
+- **Failed provider attempts reach consumers deterministically and are
+  closed.** On a retryable error the loop used to abort the event forwarder,
+  so how much of the failed attempt's partial output (its `MessageStart` and
+  deltas) had already reached consumers depended on the scheduler, and that
+  message was never closed. The loop now drains the forwarder after each
+  attempt and, if the attempt left its message open, sends a `MessageEnd`
+  carrying an assistant message with `StopReason::Error` and an
+  `error_message` saying the attempt will be retried. The final failed
+  attempt is closed with the same error message the turn returns. Consumers
+  that render streamed deltas can discard a message that ends with
+  `StopReason::Error`. History is unchanged: it holds only the successful
+  answer (or the final error).
+
 ## 0.22.0
 
 ### Added
