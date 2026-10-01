@@ -25,6 +25,9 @@ adheres to [Semantic Versioning](https://semver.org/).
   `#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]` /
   `#[cfg_attr(not(target_arch = "wasm32"), async_trait)]`. On wasm32,
   `LlmCompaction` takes its existing no-runtime path (deterministic tiers).
+  Wall-clock reads on the agent path (`types::now_ms`, `ExecutionTracker`,
+  SigV4) use `web-time`, which is `std::time` on native targets and the host
+  clock on wasm32 (where `std::time` panics).
   Default features are unchanged, so native users see no difference.
 
 - **`ToolSource`: tools resolved per run.** A new trait

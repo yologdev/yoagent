@@ -1085,7 +1085,7 @@ pub struct ExecutionTracker {
     pub limits: ExecutionLimits,
     pub turns: usize,
     pub tokens_used: usize,
-    pub started_at: std::time::Instant,
+    pub started_at: web_time::Instant,
     /// The tool signature seen most recently, and how many times in a row.
     ///
     /// A signature is `(name, arguments)` compared as `serde_json::Value`, not
@@ -1118,7 +1118,7 @@ impl ExecutionTracker {
             limits,
             turns: 0,
             tokens_used: 0,
-            started_at: std::time::Instant::now(),
+            started_at: web_time::Instant::now(),
             last_signature: None,
             consecutive: 0,
             steered: Vec::new(),
