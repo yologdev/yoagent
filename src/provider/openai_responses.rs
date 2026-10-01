@@ -8,7 +8,6 @@ use super::responses_stream::{Flow, ResponsesStreamState};
 use super::traits::*;
 use crate::types::*;
 use futures::StreamExt;
-use reqwest_eventsource::EventSource;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
@@ -55,8 +54,7 @@ impl StreamProvider for OpenAiResponsesProvider {
         }
 
         let request = request.json(&body);
-        let mut es =
-            EventSource::new(request).map_err(|e| ProviderError::Network(e.to_string()))?;
+        let mut es = super::sse::open_event_source(request)?;
 
         let mut state = ResponsesStreamState::new("OpenAI Responses");
 

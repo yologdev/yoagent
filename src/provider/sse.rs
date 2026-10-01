@@ -9,6 +9,23 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
+/// Open an SSE stream for a provider request.
+///
+/// The stream's own reconnect is disabled (`retry::Never`). Providers already
+/// stop at the first stream error and leave retries to the agent loop, so the
+/// library's reconnect never took effect — it only scheduled a timer. That
+/// timer reads `std::time::Instant`, which panics on wasm32. A reconnect
+/// would also re-send a completion request, which must not happen behind the
+/// loop's retry accounting.
+pub(crate) fn open_event_source(
+    request: reqwest::RequestBuilder,
+) -> Result<EventSource, crate::provider::ProviderError> {
+    let mut es = EventSource::new(request)
+        .map_err(|e| crate::provider::ProviderError::Network(e.to_string()))?;
+    es.set_retry_policy(Box::new(reqwest_eventsource::retry::Never));
+    Ok(es)
+}
+
 /// A parsed SSE event with event type and data.
 #[derive(Debug, Clone)]
 pub struct SseEvent {

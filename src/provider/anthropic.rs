@@ -5,7 +5,7 @@ use super::traits::*;
 use crate::provider::ApiProtocol;
 use crate::types::*;
 use futures::StreamExt;
-use reqwest_eventsource::{Event, EventSource};
+use reqwest_eventsource::Event;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use tokio::sync::mpsc;
@@ -167,8 +167,7 @@ impl StreamProvider for AnthropicProvider {
 
         let request = builder.json(&body);
 
-        let mut es =
-            EventSource::new(request).map_err(|e| ProviderError::Network(e.to_string()))?;
+        let mut es = super::sse::open_event_source(request)?;
 
         let mut content: Vec<Content> = Vec::new();
         let mut usage = Usage::default();

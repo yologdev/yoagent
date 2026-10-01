@@ -28,6 +28,10 @@ adheres to [Semantic Versioning](https://semver.org/).
   Wall-clock reads on the agent path (`types::now_ms`, `ExecutionTracker`,
   SigV4) use `web-time`, which is `std::time` on native targets and the host
   clock on wasm32 (where `std::time` panics).
+  Provider SSE streams disable the eventsource library's own reconnect
+  (`retry::Never`): providers already stop at the first stream error and the
+  agent loop owns retries, so it never took effect, but its timer panicked
+  on wasm32 and a reconnect would re-send a completion request.
   Default features are unchanged, so native users see no difference.
 
 - **`ToolSource`: tools resolved per run.** A new trait
