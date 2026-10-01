@@ -96,7 +96,8 @@ impl<T: ToolSource + ?Sized> ToolSource for Arc<T> {
 /// `Vec<Box<dyn AgentTool>>` (see [`AgentContext`](crate::AgentContext)).
 pub(crate) struct ArcTool(pub(crate) Arc<dyn AgentTool>);
 
-#[async_trait::async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl AgentTool for ArcTool {
     fn name(&self) -> &str {
         self.0.name()

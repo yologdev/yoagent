@@ -21,5 +21,7 @@ pub mod types;
 
 pub use client::McpClient;
 pub use tool_adapter::McpToolAdapter;
-pub use transport::{HttpTransport, McpTransport, StdioTransport};
+#[cfg(feature = "native")]
+pub use transport::StdioTransport;
+pub use transport::{HttpTransport, McpTransport};
 pub use types::{McpContent, McpError, McpToolCallResult, McpToolInfo, ServerInfo};

@@ -8,6 +8,25 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`wasm32-unknown-unknown` builds (e.g. Cloudflare Workers).** A new default
+  `native` feature holds what needs a native host: the filesystem and shell
+  tools (`BashTool`, `ReadFileTool`, `WriteFileTool`, `EditFileTool`,
+  `ListFilesTool`, `SearchTool`, `default_tools()`), the stdio MCP transport,
+  `FileBackend` for `SharedState`, `PriceTable::fetch_cached`'s disk cache,
+  SOCKS proxies and reqwest's default TLS. `cargo build --target
+  wasm32-unknown-unknown --no-default-features` builds the agent loop, all
+  providers (over the host's `fetch`), HTTP MCP, `SharedState` in memory,
+  sub-agents and compaction. New `yoagent::rt` gives `spawn`, `sleep`,
+  `timeout` and `JoinHandle` that are Tokio's on native targets (unchanged
+  behaviour) and the host executor and `setTimeout` on wasm32.
+  `StreamProvider`, `AgentTool`, `McpTransport` and `CompactionStrategy` now
+  require `rt::MaybeSend + rt::MaybeSync`, which is exactly `Send + Sync` on
+  native targets; implementations that run on wasm32 should use
+  `#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]` /
+  `#[cfg_attr(not(target_arch = "wasm32"), async_trait)]`. On wasm32,
+  `LlmCompaction` takes its existing no-runtime path (deterministic tiers).
+  Default features are unchanged, so native users see no difference.
+
 - **`ToolSource`: tools resolved per run.** A new trait
   (`yoagent::ToolSource`, module `tool_source`) with one async method,
   `tools() -> Vec<Arc<dyn AgentTool>>`, installed with

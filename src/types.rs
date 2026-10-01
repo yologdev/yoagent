@@ -895,8 +895,9 @@ impl std::fmt::Debug for ToolContext {
 }
 
 /// A tool the agent can call. Implement this trait for your tools.
-#[async_trait::async_trait]
-pub trait AgentTool: Send + Sync {
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+pub trait AgentTool: crate::rt::MaybeSend + crate::rt::MaybeSync {
     /// Unique tool name (used in LLM tool_use)
     fn name(&self) -> &str;
     /// Human-readable label for UI

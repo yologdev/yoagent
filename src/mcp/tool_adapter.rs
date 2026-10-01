@@ -3,7 +3,6 @@
 use super::client::McpClient;
 use super::types::{McpContent, McpError, McpToolInfo};
 use crate::types::{AgentTool, Content, ToolContext, ToolError, ToolResult};
-use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -54,7 +53,8 @@ impl McpToolAdapter {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl AgentTool for McpToolAdapter {
     fn name(&self) -> &str {
         // Return the tool name; prefix is applied in label for display.
@@ -126,6 +126,7 @@ mod tests {
     use super::*;
     use crate::mcp::transport::McpTransport;
     use crate::mcp::types::*;
+    use async_trait::async_trait;
 
     /// A mock transport that returns predefined responses.
     struct MockTransport {

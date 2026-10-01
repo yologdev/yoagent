@@ -8,11 +8,12 @@ use crate::agent_loop::{
 use crate::context::{CompactionStrategy, ContextConfig, ExecutionLimits};
 use crate::mcp::{McpClient, McpError, McpToolAdapter};
 use crate::provider::{ModelConfig, StreamProvider};
+use crate::rt::JoinHandle;
 use crate::types::*;
+#[cfg(feature = "native")]
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 /// Queue mode for steering and follow-up messages
@@ -749,6 +750,8 @@ impl Agent {
     // -- MCP integration --
 
     /// Connect to an MCP server via stdio and add its tools to the agent.
+    /// Native hosts only.
+    #[cfg(feature = "native")]
     pub async fn with_mcp_server_stdio(
         mut self,
         command: &str,
@@ -1102,7 +1105,7 @@ impl Agent {
         let mut config = self.build_config();
         config.output_schema = output_schema;
 
-        let handle = tokio::spawn(async move {
+        let handle = crate::rt::spawn(async move {
             let (_new_messages, stats) =
                 agent_loop_with_stats(messages, &mut context, &config, tx, cancel).await;
             // Sourced tools belong to this run only.
@@ -1238,7 +1241,7 @@ impl Agent {
 
         let config = self.build_config();
 
-        let handle = tokio::spawn(async move {
+        let handle = crate::rt::spawn(async move {
             let (_new_messages, stats) =
                 agent_loop_continue_with_stats(&mut context, &config, tx, cancel).await;
             // Sourced tools belong to this run only.

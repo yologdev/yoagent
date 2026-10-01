@@ -20,6 +20,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+#[cfg(feature = "native")]
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -241,11 +242,13 @@ impl SharedStateBackend for MemoryBackend {
 /// // Creates /tmp/agent-state/summary with the content
 /// # }
 /// ```
+#[cfg(feature = "native")]
 pub struct FileBackend {
     dir: PathBuf,
     max_bytes: usize,
 }
 
+#[cfg(feature = "native")]
 impl FileBackend {
     /// Create a new filesystem backend. The directory is created lazily on first write.
     ///
@@ -391,6 +394,7 @@ impl FileBackend {
     }
 }
 
+#[cfg(feature = "native")]
 #[async_trait::async_trait]
 impl SharedStateBackend for FileBackend {
     async fn get(&self, key: &str) -> Result<Option<String>, SharedStateError> {

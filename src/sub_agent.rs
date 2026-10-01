@@ -433,7 +433,8 @@ impl SubAgentTool {
     }
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl AgentTool for SubAgentTool {
     fn name(&self) -> &str {
         &self.tool_name
@@ -587,7 +588,7 @@ impl AgentTool for SubAgentTool {
             let tool_name = self.tool_name.clone();
             let rejected = rejected.clone();
             let mut rx = unforwarded.take().expect("receiver not taken yet");
-            Some(tokio::spawn(async move {
+            Some(crate::rt::spawn(async move {
                 while let Some(event) = rx.recv().await {
                     if let AgentEvent::InputRejected { reason } = &event {
                         *rejected.lock().unwrap_or_else(|e| e.into_inner()) = Some(reason.clone());

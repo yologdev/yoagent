@@ -1,18 +1,25 @@
 //! MCP transport implementations: stdio and HTTP+SSE.
 
 use super::types::*;
+#[cfg(feature = "native")]
 use async_trait::async_trait;
 use futures::StreamExt;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
+#[cfg(feature = "native")]
+use std::collections::HashMap;
+#[cfg(feature = "native")]
 use std::sync::Arc;
+#[cfg(feature = "native")]
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+#[cfg(feature = "native")]
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
 /// Transport trait for MCP communication.
-#[async_trait]
-pub trait McpTransport: Send + Sync {
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+pub trait McpTransport: crate::rt::MaybeSend + crate::rt::MaybeSync {
     /// Send a JSON-RPC request and receive the response.
     async fn send(&self, request: JsonRpcRequest) -> Result<JsonRpcResponse, McpError>;
     /// Close the transport.
@@ -24,13 +31,15 @@ pub trait McpTransport: Send + Sync {
 // ---------------------------------------------------------------------------
 
 /// Communicates with an MCP server via stdin/stdout of a child process.
-/// One JSON-RPC message per line (newline-delimited JSON).
+/// One JSON-RPC message per line (newline-delimited JSON). Native hosts only.
+#[cfg(feature = "native")]
 pub struct StdioTransport {
     stdin: Arc<Mutex<tokio::process::ChildStdin>>,
     stdout: Arc<Mutex<BufReader<tokio::process::ChildStdout>>>,
     child: Arc<Mutex<Child>>,
 }
 
+#[cfg(feature = "native")]
 impl StdioTransport {
     /// Spawn a child process and create a stdio transport.
     pub async fn new(
@@ -71,6 +80,7 @@ impl StdioTransport {
     }
 }
 
+#[cfg(feature = "native")]
 #[async_trait]
 impl McpTransport for StdioTransport {
     async fn send(&self, request: JsonRpcRequest) -> Result<JsonRpcResponse, McpError> {
@@ -164,12 +174,17 @@ impl HttpTransport {
     /// streams progress frames keeps its connection alive while a stalled one
     /// is cut. (A whole-request `timeout` cannot tell those apart, which is why
     /// it is deliberately not used here.)
+    #[cfg(not(target_arch = "wasm32"))]
     const READ_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
     /// Create a new HTTP transport.
     pub fn new(url: &str) -> Result<Self, McpError> {
-        let client = reqwest::Client::builder()
-            .read_timeout(Self::READ_IDLE_TIMEOUT)
+        let builder = reqwest::Client::builder();
+        // The fetch-based wasm client has no read timeout; the host's own
+        // request limits apply there instead.
+        #[cfg(not(target_arch = "wasm32"))]
+        let builder = builder.read_timeout(Self::READ_IDLE_TIMEOUT);
+        let client = builder
             .build()
             .map_err(|e| McpError::Transport(format!("Failed to build HTTP client: {e}")))?;
         Ok(Self {
@@ -480,7 +495,8 @@ impl HttpTransport {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl McpTransport for HttpTransport {
     async fn send(&self, request: JsonRpcRequest) -> Result<JsonRpcResponse, McpError> {
         let request_id = request.id;

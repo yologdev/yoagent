@@ -48,7 +48,6 @@ use super::tool_args::finalize_tool_arguments;
 use super::traits::*;
 use crate::provider::UNPARSED_ARGUMENTS_KEY;
 use crate::types::*;
-use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde::Deserialize;
@@ -58,7 +57,8 @@ use tracing::{debug, warn};
 
 pub struct BedrockProvider;
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl StreamProvider for BedrockProvider {
     fn protocol(&self) -> Option<crate::provider::ApiProtocol> {
         Some(crate::provider::ApiProtocol::BedrockConverseStream)

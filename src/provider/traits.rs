@@ -1,5 +1,4 @@
 use crate::types::*;
-use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use super::model::ModelConfig;
@@ -218,8 +217,9 @@ pub struct ToolDefinition {
 use serde::{Deserialize, Serialize};
 
 /// The core provider trait. Implement this for each LLM backend.
-#[async_trait]
-pub trait StreamProvider: Send + Sync {
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+pub trait StreamProvider: crate::rt::MaybeSend + crate::rt::MaybeSync {
     /// Stream a completion, sending [`StreamEvent`]s through the channel.
     ///
     /// On success returns the final complete assistant [`Message`].

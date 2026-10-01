@@ -1,7 +1,10 @@
 //! High-level MCP client.
 
-use super::transport::{HttpTransport, McpTransport, StdioTransport};
+#[cfg(feature = "native")]
+use super::transport::StdioTransport;
+use super::transport::{HttpTransport, McpTransport};
 use super::types::*;
+#[cfg(feature = "native")]
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -14,7 +17,8 @@ pub struct McpClient {
 }
 
 impl McpClient {
-    /// Connect to an MCP server via stdio (spawn a child process).
+    /// Connect to an MCP server via stdio (spawn a child process). Native hosts only.
+    #[cfg(feature = "native")]
     pub async fn connect_stdio(
         command: &str,
         args: &[&str],

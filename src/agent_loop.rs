@@ -555,7 +555,7 @@ async fn run_loop(
             // Skipped on the first turn so the agent starts immediately.
             if turn_number > 0 {
                 if let Some(delay) = config.turn_delay {
-                    tokio::time::sleep(delay).await;
+                    crate::rt::sleep(delay).await;
                 }
             }
 
@@ -1246,7 +1246,7 @@ async fn stream_assistant_response(
         // Spawn a task to forward events in real-time as the provider streams
         let event_tx = tx.clone();
         let model_for_events = config.model.clone();
-        let forward_handle = tokio::spawn(async move {
+        let forward_handle = crate::rt::spawn(async move {
             let mut partial_message: Option<AgentMessage> = None;
             while let Some(event) = stream_rx.recv().await {
                 match &event {
@@ -1344,7 +1344,7 @@ async fn stream_assistant_response(
                     .map(|d| d.min(std::time::Duration::from_millis(retry.max_delay_ms)))
                     .unwrap_or_else(|| retry.delay_for_attempt(attempt));
                 crate::retry::log_retry(attempt, retry.max_retries, &delay, e);
-                tokio::time::sleep(delay).await;
+                crate::rt::sleep(delay).await;
                 continue;
             }
             _ => {

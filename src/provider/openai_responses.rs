@@ -7,7 +7,6 @@ use super::model::{ModelConfig, OpenAiCompat};
 use super::responses_stream::{Flow, ResponsesStreamState};
 use super::traits::*;
 use crate::types::*;
-use async_trait::async_trait;
 use futures::StreamExt;
 use reqwest_eventsource::EventSource;
 use tokio::sync::mpsc;
@@ -15,7 +14,8 @@ use tracing::{debug, warn};
 
 pub struct OpenAiResponsesProvider;
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl StreamProvider for OpenAiResponsesProvider {
     fn protocol(&self) -> Option<crate::provider::ApiProtocol> {
         Some(crate::provider::ApiProtocol::OpenAiResponses)

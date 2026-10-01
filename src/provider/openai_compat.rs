@@ -10,7 +10,6 @@ use super::model::{MaxTokensField, ModelConfig, OpenAiCompat, ThinkingFormat};
 use super::tool_args::finalize_tool_arguments;
 use super::traits::*;
 use crate::types::*;
-use async_trait::async_trait;
 use futures::StreamExt;
 use reqwest_eventsource::EventSource;
 use serde::Deserialize;
@@ -19,7 +18,8 @@ use tracing::{debug, warn};
 
 pub struct OpenAiCompatProvider;
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl StreamProvider for OpenAiCompatProvider {
     fn protocol(&self) -> Option<crate::provider::ApiProtocol> {
         Some(crate::provider::ApiProtocol::OpenAiCompletions)

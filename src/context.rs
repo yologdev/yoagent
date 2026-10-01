@@ -368,7 +368,7 @@ impl ContextConfig {
 ///
 /// See the [Custom Compaction](https://yologdev.github.io/yoagent/concepts/agent-loop.html#custom-compaction)
 /// docs for examples.
-pub trait CompactionStrategy: Send + Sync {
+pub trait CompactionStrategy: crate::rt::MaybeSend + crate::rt::MaybeSync {
     /// Compact messages to fit within the token budget defined by `config`.
     ///
     /// Called before each LLM turn when `context_config` is set.
