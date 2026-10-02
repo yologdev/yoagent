@@ -102,6 +102,14 @@ already set `default-features = false`.
   crate, not yet on crates.io (it needs a yoagent release with `ToolSource`);
   yoagent itself does not depend on rutis.
 
+- **wasm32 tests run in CI.** `tests/wasm32.rs` runs under Node with
+  `wasm-bindgen-test`: the `rt` shims (`sleep` waits on the host timer,
+  `timeout`, `spawn` and abort, `Instant`) and two whole agent runs, a tool
+  turn and a retried provider failure on real timers. Lint alone cannot see
+  code that compiles for wasm32 but panics or hangs there. Native
+  dev-dependencies are now target-scoped so the test builds for wasm32; no
+  library code changes.
+
 ### Changed
 
 - **A cancelled run ends as `StopReason::Aborted`, not `Error`.** When the

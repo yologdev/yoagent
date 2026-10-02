@@ -82,10 +82,12 @@ jobs:
         run: cargo test ${{ matrix.flags }}
 
   # The agent loop without the `native` feature, as a Cloudflare Worker builds
-  # it. The wasm32 test runner is not wired up, so this lints only.
+  # it: lints, then runs `tests/wasm32.rs` under Node.
   wasm32:
     name: Check (wasm32, no default features)
     runs-on: ubuntu-latest
+    # A broken timer or spawn shim hangs under Node rather than failing.
+    timeout-minutes: 15
     env:
       # Bans calls that compile for wasm32 but panic there (std clocks, Tokio).
       CLIPPY_CONF_DIR: .github/clippy-wasm32
@@ -100,6 +102,18 @@ jobs:
         run: cargo clippy --target wasm32-unknown-unknown --no-default-features
       - name: Clippy (decision)
         run: cargo clippy --target wasm32-unknown-unknown --no-default-features --features decision
+      # Lint can't see code that compiles for wasm32 but panics or hangs there,
+      # so `tests/wasm32.rs` runs under Node. The runner must match the
+      # wasm-bindgen version this run resolved (Cargo.lock is not committed).
+      - name: Install wasm-bindgen-test-runner
+        run: |
+          version=$(cargo metadata --format-version 1 \
+            | jq -r '.packages[] | select(.name == "wasm-bindgen") | .version')
+          cargo install wasm-bindgen-cli --version "$version" --locked
+      - name: Test (Node)
+        env:
+          CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
+        run: cargo test --target wasm32-unknown-unknown --no-default-features --test wasm32
 
   # Built-in tools shell out to unix commands, so Windows only checks compilation.
   windows-check:
