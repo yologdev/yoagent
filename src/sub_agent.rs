@@ -725,12 +725,17 @@ fn extract_error(messages: &[AgentMessage]) -> Option<String> {
             ..
         }) = msg
         {
-            if *stop_reason == StopReason::Error {
-                return Some(
-                    error_message
-                        .clone()
-                        .unwrap_or_else(|| "Unknown error".into()),
-                );
+            // A cancelled run ends as `Aborted`. Its message is empty, so
+            // falling through would hand back an earlier turn's text as if
+            // the delegation had finished.
+            if *stop_reason == StopReason::Error || *stop_reason == StopReason::Aborted {
+                return Some(error_message.clone().unwrap_or_else(|| {
+                    if *stop_reason == StopReason::Aborted {
+                        "Cancelled".into()
+                    } else {
+                        "Unknown error".into()
+                    }
+                }));
             }
         }
     }

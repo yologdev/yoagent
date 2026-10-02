@@ -1009,7 +1009,8 @@ impl Agent {
         };
 
         // A failed provider call is not a parse problem — surface it as such.
-        if *stop_reason == StopReason::Error {
+        // A cancelled call (`Aborted`) carries the provider's "Cancelled".
+        if *stop_reason == StopReason::Error || *stop_reason == StopReason::Aborted {
             return Err(StructuredPromptError::Provider {
                 message: error_message
                     .clone()

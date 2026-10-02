@@ -190,6 +190,43 @@ async fn test_sub_agent_cancellation() {
     );
 }
 
+#[tokio::test]
+async fn test_sub_agent_cancelled_mid_call_fails_the_delegation() {
+    // The child's provider call is cancelled: its run ends as `Aborted` with
+    // empty text. That is a failed delegation, not an empty success.
+    struct CancelledProvider;
+
+    #[async_trait::async_trait]
+    impl yoagent::provider::StreamProvider for CancelledProvider {
+        async fn stream(
+            &self,
+            _config: yoagent::provider::StreamConfig,
+            _tx: tokio::sync::mpsc::UnboundedSender<yoagent::provider::StreamEvent>,
+            _cancel: CancellationToken,
+        ) -> Result<Message, yoagent::provider::ProviderError> {
+            Err(yoagent::provider::ProviderError::Cancelled)
+        }
+    }
+
+    let sub_agent = SubAgentTool::from_provider(
+        "cancelled_agent",
+        Arc::new(CancelledProvider),
+        ModelConfig::mock(),
+    );
+    let err = sub_agent
+        .execute(
+            serde_json::json!({"task": "Do something"}),
+            ToolContext::new("tc-1", "cancelled_agent"),
+        )
+        .await
+        .expect_err("a cancelled delegation must fail");
+    let text = err.to_string();
+    assert!(
+        text.contains("cancelled_agent") && text.contains("Cancelled"),
+        "got: {text}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Max turns limit
 // ---------------------------------------------------------------------------

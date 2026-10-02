@@ -109,7 +109,10 @@ already set `default-features = false`.
   a provider call fails, the turn's message (and its closing `MessageEnd`)
   now carries `Aborted`, so `on_error` is no longer called for a
   cancellation. Cancelling during a retry's backoff ends the turn at once
-  instead of after the delay and one more request.
+  instead of after the delay and one more request. A cancelled
+  `SubAgentTool` delegation still fails the tool call, and a cancelled
+  `prompt_structured` still returns `StructuredPromptError::Provider`
+  ("Cancelled"), as before.
 
 ### Fixed
 

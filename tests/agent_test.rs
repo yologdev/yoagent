@@ -1113,6 +1113,38 @@ async fn test_prompt_structured_surfaces_provider_error() {
     }
 }
 
+/// Provider whose call is cancelled from its side.
+struct CancelledProvider;
+
+#[async_trait::async_trait]
+impl yoagent::provider::StreamProvider for CancelledProvider {
+    async fn stream(
+        &self,
+        _config: yoagent::provider::StreamConfig,
+        _tx: mpsc::UnboundedSender<yoagent::provider::StreamEvent>,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<Message, yoagent::provider::ProviderError> {
+        Err(yoagent::provider::ProviderError::Cancelled)
+    }
+}
+
+#[tokio::test]
+async fn test_prompt_structured_reports_a_cancelled_call_as_provider_error() {
+    // A cancelled run ends as `Aborted` with empty text; it must still be
+    // reported as the provider's cancellation, not as NoOutput.
+    let mut agent = Agent::from_provider(CancelledProvider, yoagent::provider::ModelConfig::mock());
+    let err = agent
+        .prompt_structured::<Extracted>("extract", serde_json::json!({"type": "object"}))
+        .await
+        .unwrap_err();
+    match err {
+        yoagent::StructuredPromptError::Provider { message } => {
+            assert_eq!(message, "Cancelled");
+        }
+        other => panic!("expected Provider error, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn test_prompt_structured_never_parses_stale_history() {
     // Seed history with an earlier turn's perfectly-parsable JSON; a failed
