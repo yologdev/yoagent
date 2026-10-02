@@ -6,13 +6,22 @@ removes what needs an operating system:
 
 ```toml
 [dependencies]
-yoagent = { version = "0.22", default-features = false }
+yoagent = { version = "0.23", default-features = false }
 ```
 
 ```bash
 rustup target add wasm32-unknown-unknown
 cargo build --target wasm32-unknown-unknown
 ```
+
+0.23 is the first release with the `native` feature; 0.22 and earlier do not
+build for wasm32.
+
+> **Upgrading from 0.22 with `default-features = false`?** That line did
+> nothing before 0.23, because there were no default features. It now turns
+> `native` off, which removes the built-in tools and, more subtly, reqwest's
+> default TLS: the build succeeds but every HTTPS provider call fails at
+> runtime. Native users who set it add `features = ["native"]`.
 
 ## What is available
 
@@ -21,16 +30,32 @@ cargo build --target wasm32-unknown-unknown
 | The agent loop, `Agent`, retries, execution limits | `BashTool`, `ReadFileTool`, `WriteFileTool`, `EditFileTool`, `ListFilesTool`, `SearchTool`, `default_tools()` |
 | All providers, over the host's `fetch` | `StdioTransport` / `with_mcp_server_stdio` |
 | `AgentTool`s you write; HTTP MCP (`with_mcp_server_http`) | `FileBackend` for `SharedState` |
-| `SharedState` (in memory), sub-agents, skills from bytes | `PriceTable::fetch_cached` (its disk cache) |
-| Compaction — `LlmCompaction` uses its deterministic tiers | SOCKS proxies; reqwest's default TLS stack |
+| `SharedState` (in memory, or your own `SharedStateBackend`), sub-agents | `SkillSet` loading (it reads skill directories from disk) |
+| The `decision` feature | `PriceTable::fetch_cached` (its disk cache) |
+| Compaction: `LlmCompaction` runs only its deterministic tiers and never summarises | reqwest's default features (rustls TLS, HTTP/2, system proxy settings, charset decoding); SOCKS proxies |
+| | The `openapi` and `gasp` features (they need the filesystem and a full Tokio) |
 
-The `native` feature is on by default, so native users see no difference.
+The `native` feature is on by default, so a dependency that keeps default
+features sees no difference.
+
+Only `wasm32-unknown-unknown` is supported. WASI targets are not.
+
+## API keys
+
+There are no environment variables on wasm32, so `Agent::from_config` never
+finds a key there. Pass it explicitly, for example from a Worker secret:
+
+```rust,ignore
+let key = env.secret("API_KEY")?.to_string();
+let agent = Agent::from_config(config).with_api_key(key);
+```
 
 ## Writing tools and providers for both targets
 
 `AgentTool`, `StreamProvider`, `McpTransport`, `CompactionStrategy`,
-`TurnHook`, `ToolMiddleware`, `InputFilter`, `AsyncInputFilter` and
-`DecisionBackend` require `yoagent::rt::MaybeSend + MaybeSync`. On native targets that is exactly
+`ToolSource`, `SharedStateBackend`, `TurnHook`, `ToolMiddleware`,
+`InputFilter`, `AsyncInputFilter` and `DecisionBackend` require
+`yoagent::rt::MaybeSend + MaybeSync`. On native targets that is exactly
 `Send + Sync`. On wasm32 it is nothing, because the host is single-threaded and
 its futures (for example `fetch`) are not `Send`. Use `async_trait`'s
 non-`Send` form on wasm32 only:
@@ -53,15 +78,19 @@ impl AgentTool for Lookup {
 }
 ```
 
+A custom `StreamProvider` must drop every clone of its event sender before
+`stream` returns: the loop waits for that channel to close before it retries
+or ends the turn.
+
 ## Tasks and timers
 
 There is no Tokio runtime inside a Worker. `yoagent::rt` provides `spawn`,
-`sleep`, `timeout`, `JoinHandle` and `Instant` for both targets: on native targets they
-*are* Tokio's, and on wasm32 they use the host executor
-(`wasm_bindgen_futures::spawn_local`) and `setTimeout`. Use them instead of
-`tokio::spawn` / `tokio::time` in code that must run on both. Wall-clock reads
-go through [`web-time`](https://docs.rs/web-time), because
-`std::time::Instant::now()` panics on wasm32.
+`sleep`, `timeout`, `JoinHandle` and `Instant` for both targets: on native
+targets they *are* Tokio's, and on wasm32 they use the host executor
+(`wasm_bindgen_futures::spawn_local`), `setTimeout` and `performance.now()`.
+Use them instead of `tokio::spawn` / `tokio::time` in code that must run on
+both. Wall-clock reads go through [`web-time`](https://docs.rs/web-time),
+because `std::time::Instant::now()` and `SystemTime::now()` panic on wasm32.
 
 ## Cloudflare Workers notes
 
@@ -70,7 +99,8 @@ go through [`web-time`](https://docs.rs/web-time), because
   event receiver before responding. The run lives as long as that request, so
   keep it bounded with `ExecutionLimits`. Durable, long-running work belongs
   in a Durable Object.
-- Inside a request, `Date.now()` advances only when the Worker does I/O, so
+- Inside a request, the Worker's clocks (`performance.now()`, which `web-time`
+  reads, and `Date.now()`) advance only when the Worker does I/O, so
   `ExecutionLimits::max_duration` is coarse there.
 - Keep the `target_features` custom section when stripping release builds
   (`strip = "debuginfo"`, not `strip = true`). wasm-bindgen reads it to create
