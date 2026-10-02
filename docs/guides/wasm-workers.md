@@ -28,8 +28,9 @@ The `native` feature is on by default, so native users see no difference.
 
 ## Writing tools and providers for both targets
 
-`AgentTool`, `StreamProvider`, `McpTransport` and `CompactionStrategy` require
-`yoagent::rt::MaybeSend + MaybeSync`. On native targets that is exactly
+`AgentTool`, `StreamProvider`, `McpTransport`, `CompactionStrategy`,
+`TurnHook`, `ToolMiddleware`, `InputFilter`, `AsyncInputFilter` and
+`DecisionBackend` require `yoagent::rt::MaybeSend + MaybeSync`. On native targets that is exactly
 `Send + Sync`. On wasm32 it is nothing, because the host is single-threaded and
 its futures (for example `fetch`) are not `Send`. Use `async_trait`'s
 non-`Send` form on wasm32 only:
@@ -55,7 +56,7 @@ impl AgentTool for Lookup {
 ## Tasks and timers
 
 There is no Tokio runtime inside a Worker. `yoagent::rt` provides `spawn`,
-`sleep`, `timeout` and `JoinHandle` for both targets: on native targets they
+`sleep`, `timeout`, `JoinHandle` and `Instant` for both targets: on native targets they
 *are* Tokio's, and on wasm32 they use the host executor
 (`wasm_bindgen_futures::spawn_local`) and `setTimeout`. Use them instead of
 `tokio::spawn` / `tokio::time` in code that must run on both. Wall-clock reads
