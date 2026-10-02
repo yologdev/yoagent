@@ -467,6 +467,7 @@ fn a_marker_inside_the_tools_own_output_is_left_alone() {
     );
 }
 
+#[cfg(feature = "native")]
 #[tokio::test]
 async fn file_backend_evicts_the_oldest_stash_entry_to_stay_under_its_cap() {
     let dir = tempfile::tempdir().unwrap();
@@ -502,6 +503,7 @@ async fn file_backend_evicts_the_oldest_stash_entry_to_stay_under_its_cap() {
     );
 }
 
+#[cfg(feature = "native")]
 /// Caller-owned keys are never evicted; only stashed tool output is.
 ///
 /// The old policy evicted whatever was oldest, so a parent that stored a plan
@@ -605,6 +607,7 @@ async fn the_default_backend_does_not_wedge_once_full() {
     );
 }
 
+#[cfg(feature = "native")]
 /// A value larger than the cap is rejected, not written-then-evicted. Returning
 /// `Ok(())` for a value already deleted would let the loop annotate a marker
 /// naming a key that never existed — and would take unrelated keys with it.

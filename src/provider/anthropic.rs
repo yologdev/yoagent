@@ -4,9 +4,8 @@ use super::tool_args::UNPARSED_ARGUMENTS_KEY;
 use super::traits::*;
 use crate::provider::ApiProtocol;
 use crate::types::*;
-use async_trait::async_trait;
 use futures::StreamExt;
-use reqwest_eventsource::{Event, EventSource};
+use reqwest_eventsource::Event;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use tokio::sync::mpsc;
@@ -107,7 +106,8 @@ fn anthropic_compat(config: &StreamConfig) -> crate::provider::AnthropicCompat {
 
 pub struct AnthropicProvider;
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl StreamProvider for AnthropicProvider {
     fn protocol(&self) -> Option<crate::provider::ApiProtocol> {
         Some(crate::provider::ApiProtocol::AnthropicMessages)
@@ -167,8 +167,7 @@ impl StreamProvider for AnthropicProvider {
 
         let request = builder.json(&body);
 
-        let mut es =
-            EventSource::new(request).map_err(|e| ProviderError::Network(e.to_string()))?;
+        let mut es = super::sse::open_event_source(request)?;
 
         let mut content: Vec<Content> = Vec::new();
         let mut usage = Usage::default();

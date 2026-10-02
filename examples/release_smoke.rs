@@ -159,6 +159,9 @@ async fn drain(
             } => {
                 err = Some(error_message.unwrap_or_else(|| "unknown provider error".into()));
             }
+            // The error above closed an attempt that is being retried; only
+            // an error with no retry after it is the run's result.
+            AgentEvent::ProviderRetry { .. } => err = None,
             _ => {}
         }
     }

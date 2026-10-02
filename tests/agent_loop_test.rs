@@ -4770,3 +4770,360 @@ async fn malformed_but_complete_arguments_are_not_called_cut_off() {
         assert!(!text.contains("cut off"), "{raw}: got: {text}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Failed attempts are drained and closed, not raced
+// ---------------------------------------------------------------------------
+
+/// How a failing attempt of [`FailingProvider`] behaves before it returns
+/// its retryable error.
+#[derive(Clone, Copy)]
+enum Failure {
+    /// `Start`, a text delta, then the error: the loop must close the message.
+    Partial,
+    /// The error with no events at all: there is no message to close.
+    BeforeStart,
+    /// `Start`, a delta, and the provider's own `StreamEvent::Error`, then the
+    /// error: the provider closed the message, so the loop must not again.
+    ClosedByProvider,
+}
+
+/// Fails its first `failures` attempts as `mode` says; afterwards answers
+/// with `inner`.
+struct FailingProvider {
+    attempts: std::sync::atomic::AtomicUsize,
+    failures: usize,
+    mode: Failure,
+    inner: MockProvider,
+}
+
+#[async_trait::async_trait]
+impl StreamProvider for FailingProvider {
+    async fn stream(
+        &self,
+        config: StreamConfig,
+        tx: tokio::sync::mpsc::UnboundedSender<StreamEvent>,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<yoagent::Message, ProviderError> {
+        let attempt = self
+            .attempts
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if attempt >= self.failures {
+            return self.inner.stream(config, tx, cancel).await;
+        }
+        if !matches!(self.mode, Failure::BeforeStart) {
+            let _ = tx.send(StreamEvent::Start);
+            let _ = tx.send(StreamEvent::TextDelta {
+                content_index: 0,
+                delta: format!("partial-{attempt}"),
+            });
+        }
+        if matches!(self.mode, Failure::ClosedByProvider) {
+            let _ = tx.send(StreamEvent::Error {
+                message: Message::assistant(
+                    vec![],
+                    StopReason::Error,
+                    "mock",
+                    "mock",
+                    Usage::default(),
+                )
+                .with_error_message("provider closed it"),
+            });
+        }
+        Err(ProviderError::Network("stream cut".into()))
+    }
+}
+
+fn failing_config(
+    failures: usize,
+    mode: Failure,
+    max_retries: usize,
+    delay_ms: u64,
+) -> AgentLoopConfig {
+    AgentLoopConfig {
+        provider: std::sync::Arc::new(FailingProvider {
+            attempts: std::sync::atomic::AtomicUsize::new(0),
+            failures,
+            mode,
+            inner: MockProvider::text("final answer"),
+        }),
+        model: "mock".into(),
+        api_key: "test".into(),
+        thinking_level: ThinkingLevel::Off,
+        max_tokens: None,
+        temperature: None,
+        model_config: None,
+        convert_to_llm: None,
+        transform_context: None,
+        get_steering_messages: None,
+        get_follow_up_messages: None,
+        context_config: None,
+        compaction_strategy: None,
+        execution_limits: None,
+        cache_config: CacheConfig::default(),
+        tool_output_sink: None,
+        output_schema: None,
+        tool_execution: ToolExecutionStrategy::default(),
+        retry_config: yoagent::RetryConfig {
+            max_retries,
+            initial_delay_ms: delay_ms,
+            backoff_multiplier: 1.0,
+            max_delay_ms: delay_ms,
+        },
+        before_turn: None,
+        after_turn: None,
+        on_error: None,
+        input_filters: vec![],
+        tool_middleware: vec![],
+        turn_delay: None,
+    }
+}
+
+/// The assistant message lifecycle seen by consumers, one entry per event:
+/// "start", "delta:<text>", "end:<stop reason>:<error message>", and
+/// "retry:<attempt>/<max attempts>".
+fn assistant_lifecycle(events: &[AgentEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::MessageStart {
+                message: AgentMessage::Llm(Message::Assistant { .. }),
+            } => Some("start".to_string()),
+            AgentEvent::MessageUpdate {
+                delta: StreamDelta::Text { delta },
+                ..
+            } => Some(format!("delta:{delta}")),
+            AgentEvent::MessageEnd {
+                message:
+                    AgentMessage::Llm(Message::Assistant {
+                        stop_reason,
+                        error_message,
+                        ..
+                    }),
+            } => Some(format!(
+                "end:{stop_reason:?}:{}",
+                error_message.clone().unwrap_or_default()
+            )),
+            AgentEvent::ProviderRetry {
+                attempt,
+                max_attempts,
+                ..
+            } => Some(format!("retry:{attempt}/{max_attempts}")),
+            _ => None,
+        })
+        .collect()
+}
+
+async fn run_failing(config: &AgentLoopConfig) -> (Vec<String>, Vec<AgentMessage>) {
+    let mut context = AgentContext {
+        system_prompt: "test".into(),
+        messages: Vec::new(),
+        tools: Vec::new(),
+    };
+    let (tx, rx) = mpsc::unbounded_channel();
+    let new_messages = agent_loop(
+        vec![AgentMessage::Llm(Message::user("hi"))],
+        &mut context,
+        config,
+        tx,
+        CancellationToken::new(),
+    )
+    .await;
+    (assistant_lifecycle(&collect_events(rx)), new_messages)
+}
+
+fn closing(n: usize, of: usize) -> String {
+    format!("end:Error:attempt {n} of {of} failed and will be retried: Network error: stream cut")
+}
+
+/// The sequence two failed `Partial` attempts and a success must produce.
+fn two_partial_failures_then_success() -> Vec<String> {
+    vec![
+        "start".into(),
+        "delta:partial-0".into(),
+        closing(1, 4),
+        "retry:1/4".into(),
+        "start".into(),
+        "delta:partial-1".into(),
+        closing(2, 4),
+        "retry:2/4".into(),
+        "start".into(),
+        "delta:final answer".into(),
+        "end:Stop:".into(),
+    ]
+}
+
+/// Every failed attempt's partial output is forwarded (deterministically,
+/// whatever the scheduler), closed by a `MessageEnd` with
+/// `StopReason::Error`, and marked as retried by `ProviderRetry`, so
+/// consumers can discard it and need not mistake it for the turn's result.
+#[tokio::test]
+async fn failed_attempts_are_forwarded_completely_closed_and_marked_as_retried() {
+    let (lifecycle, new_messages) = run_failing(&failing_config(2, Failure::Partial, 3, 1)).await;
+    assert_eq!(lifecycle, two_partial_failures_then_success());
+    // History holds only the successful answer, not the failed attempts.
+    assert_eq!(new_messages.len(), 2);
+}
+
+/// The same on a multi-threaded runtime, where the old abort let a
+/// scheduler-dependent subset of the failed attempt's events through (the
+/// race this fix removes; it reproduced in most runs). Repeated, because a
+/// race shows up only some of the time.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn failed_attempts_are_deterministic_on_a_multi_threaded_runtime() {
+    for _ in 0..20 {
+        let (lifecycle, _) = run_failing(&failing_config(2, Failure::Partial, 3, 1)).await;
+        assert_eq!(lifecycle, two_partial_failures_then_success());
+    }
+}
+
+/// An attempt that fails before streaming anything opened no message, so it
+/// gets no closing `MessageEnd` — only the `ProviderRetry`.
+#[tokio::test]
+async fn an_attempt_that_failed_before_starting_is_not_closed() {
+    let (lifecycle, _) = run_failing(&failing_config(1, Failure::BeforeStart, 3, 1)).await;
+    assert_eq!(
+        lifecycle,
+        ["retry:1/4", "start", "delta:final answer", "end:Stop:"]
+    );
+}
+
+/// A provider that closed its own attempt with `StreamEvent::Error` is not
+/// closed a second time.
+#[tokio::test]
+async fn an_attempt_the_provider_closed_is_not_closed_again() {
+    let (lifecycle, _) = run_failing(&failing_config(1, Failure::ClosedByProvider, 3, 1)).await;
+    assert_eq!(
+        lifecycle,
+        [
+            "start",
+            "delta:partial-0",
+            "end:Error:provider closed it",
+            "retry:1/4",
+            "start",
+            "delta:final answer",
+            "end:Stop:",
+        ]
+    );
+}
+
+/// When retries run out, the last attempt's message is closed with the very
+/// error message the turn returns, and no `ProviderRetry` follows it.
+#[tokio::test]
+async fn an_exhausted_retry_closes_the_last_attempt_with_the_returned_error() {
+    let (lifecycle, new_messages) = run_failing(&failing_config(10, Failure::Partial, 1, 1)).await;
+    assert_eq!(
+        lifecycle,
+        [
+            "start",
+            "delta:partial-0",
+            &closing(1, 2),
+            "retry:1/2",
+            "start",
+            "delta:partial-1",
+            "end:Error:Network error: stream cut",
+        ],
+    );
+    let returned = new_messages.iter().rev().find_map(|m| match m {
+        AgentMessage::Llm(Message::Assistant { error_message, .. }) => error_message.clone(),
+        _ => None,
+    });
+    assert_eq!(returned.as_deref(), Some("Network error: stream cut"));
+}
+
+/// `ProviderRetry` carries the error and the delay the loop then waits:
+/// the jittered backoff (±20% of 100 ms here), not the configured base.
+#[tokio::test]
+async fn provider_retry_reports_the_error_and_the_delay() {
+    let config = failing_config(1, Failure::Partial, 3, 100);
+    let mut context = AgentContext {
+        system_prompt: "test".into(),
+        messages: Vec::new(),
+        tools: Vec::new(),
+    };
+    let (tx, rx) = mpsc::unbounded_channel();
+    agent_loop(
+        vec![AgentMessage::Llm(Message::user("hi"))],
+        &mut context,
+        &config,
+        tx,
+        CancellationToken::new(),
+    )
+    .await;
+    let retries: Vec<_> = collect_events(rx)
+        .into_iter()
+        .filter_map(|e| match e {
+            AgentEvent::ProviderRetry {
+                attempt,
+                max_attempts,
+                error,
+                delay_ms,
+                ..
+            } => Some((attempt, max_attempts, error, delay_ms)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(retries.len(), 1, "{retries:?}");
+    let (attempt, max_attempts, error, delay_ms) = &retries[0];
+    assert_eq!(
+        (*attempt, *max_attempts, error.as_str()),
+        (1, 4, "Network error: stream cut")
+    );
+    assert!((80..=120).contains(delay_ms), "delay_ms = {delay_ms}");
+}
+
+/// Cancelling during the backoff ends the turn at once, as aborted (not a
+/// failure: `on_error` is not called), without the announced attempt.
+#[tokio::test]
+async fn cancelling_during_the_backoff_aborts_the_turn_without_retrying() {
+    let errors = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen = errors.clone();
+    let mut config = failing_config(10, Failure::Partial, 3, 60_000);
+    config.on_error = Some(std::sync::Arc::new(move |e: &str| {
+        seen.lock().unwrap().push(e.to_string())
+    }));
+    let mut context = AgentContext {
+        system_prompt: "test".into(),
+        messages: Vec::new(),
+        tools: Vec::new(),
+    };
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let cancel = CancellationToken::new();
+    let canceller = cancel.clone();
+    let (events_tx, events_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let mut events = Vec::new();
+        while let Some(e) = rx.recv().await {
+            if matches!(e, AgentEvent::ProviderRetry { .. }) {
+                canceller.cancel();
+            }
+            events.push(e);
+        }
+        let _ = events_tx.send(events);
+    });
+    let started = std::time::Instant::now();
+    let new_messages = agent_loop(
+        vec![AgentMessage::Llm(Message::user("hi"))],
+        &mut context,
+        &config,
+        tx,
+        cancel,
+    )
+    .await;
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "the 60 s backoff was not interrupted"
+    );
+    let lifecycle = assistant_lifecycle(&events_rx.await.unwrap());
+    assert_eq!(
+        lifecycle,
+        ["start", "delta:partial-0", &closing(1, 4), "retry:1/4"],
+        "no second attempt after the cancel"
+    );
+    let last = new_messages.iter().rev().find_map(|m| match m {
+        AgentMessage::Llm(Message::Assistant { stop_reason, .. }) => Some(stop_reason.clone()),
+        _ => None,
+    });
+    assert_eq!(last, Some(StopReason::Aborted));
+    assert!(errors.lock().unwrap().is_empty(), "{:?}", errors.lock());
+}

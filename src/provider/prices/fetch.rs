@@ -10,9 +10,12 @@
 use super::{builtin_ref, PriceEntry, PriceError, PriceTable, Strictness};
 use crate::provider::model::{ContextTier, CostConfig};
 use serde_json::{Map, Value};
+#[cfg(feature = "native")]
 use std::path::Path;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
+#[cfg(feature = "native")]
+use std::time::SystemTime;
 
 /// How long a fetch waits for a source before giving up, unless
 /// [`FetchOptions`] or [`CacheOptions`] say otherwise.
@@ -23,6 +26,7 @@ const YOAGENT_MAIN_URL: &str =
     "https://raw.githubusercontent.com/yologdev/yoagent/main/src/provider/prices.json";
 
 /// Marks a file written by [`PriceTable::fetch_cached`], and its version.
+#[cfg(feature = "native")]
 const CACHE_MARKER: &str = "yoagent_price_cache";
 
 /// Where [`PriceTable::fetch`] gets prices from.
@@ -299,11 +303,15 @@ impl PriceTable {
                 }
             }
         };
-        let client = reqwest::Client::builder()
+        // A per-request timeout rather than the client builder's: the
+        // fetch-based wasm32 client has only the former (an `AbortSignal`).
+        let client = reqwest::Client::builder().build().map_err(request_error)?;
+        let resp = client
+            .get(&url)
             .timeout(timeout)
-            .build()
+            .send()
+            .await
             .map_err(request_error)?;
-        let resp = client.get(&url).send().await.map_err(request_error)?;
         let status = resp.status();
         if !status.is_success() {
             return Err(PriceError::Http {
@@ -482,6 +490,8 @@ impl PriceTable {
     /// // ...now build configs.
     /// # }
     /// ```
+    #[cfg(feature = "native")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "native")))]
     pub async fn fetch_cached(
         source: &PriceSource,
         cache_path: impl AsRef<Path>,
@@ -567,6 +577,7 @@ fn models_dev_provider(key: &str) -> &str {
     }
 }
 
+#[cfg(feature = "native")]
 struct Cached {
     table: PriceTable,
     /// `None` when unknown.
@@ -574,6 +585,7 @@ struct Cached {
     ignored: Vec<String>,
 }
 
+#[cfg(feature = "native")]
 enum CacheRead {
     Missing,
     Problem(CacheProblem),
@@ -582,6 +594,7 @@ enum CacheRead {
 
 /// Read the cache at `path`, which must cache `url`. Every problem but a
 /// missing file is logged.
+#[cfg(feature = "native")]
 async fn read_cache(path: &Path, url: &str) -> CacheRead {
     let problem = |p: CacheProblem| {
         tracing::warn!(
@@ -647,6 +660,7 @@ async fn read_cache(path: &Path, url: &str) -> CacheRead {
 
 /// Write the cache through a temporary file and a rename, so a concurrent
 /// reader never sees half a file. A failure is logged and returned.
+#[cfg(feature = "native")]
 async fn write_cache(path: &Path, url: &str, table: &PriceTable) -> Result<(), PriceError> {
     let body = serde_json::json!({
         CACHE_MARKER: 1,

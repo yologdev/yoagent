@@ -136,8 +136,9 @@ impl Capabilities {
 ///
 /// Report your own failures with
 /// [`DecisionError::backend`] / [`backend_with_source`](DecisionError::backend_with_source).
-#[async_trait::async_trait]
-pub trait DecisionBackend: Send + Sync {
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+pub trait DecisionBackend: crate::rt::MaybeSend + crate::rt::MaybeSync {
     /// What this backend can answer.
     fn capabilities(&self) -> Capabilities;
 

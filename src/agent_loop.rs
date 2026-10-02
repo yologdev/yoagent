@@ -11,7 +11,9 @@ use crate::context::{
     self, CompactionStrategy, ContextConfig, ContextTracker, DefaultCompaction, ExecutionLimits,
     ExecutionTracker,
 };
-use crate::provider::{ModelConfig, StreamConfig, StreamEvent, StreamProvider, ToolDefinition};
+use crate::provider::{
+    ModelConfig, ProviderError, StreamConfig, StreamEvent, StreamProvider, ToolDefinition,
+};
 use crate::types::*;
 use std::sync::Arc;
 
@@ -555,7 +557,7 @@ async fn run_loop(
             // Skipped on the first turn so the agent starts immediately.
             if turn_number > 0 {
                 if let Some(delay) = config.turn_delay {
-                    tokio::time::sleep(delay).await;
+                    crate::rt::sleep(delay).await;
                 }
             }
 
@@ -1246,8 +1248,9 @@ async fn stream_assistant_response(
         // Spawn a task to forward events in real-time as the provider streams
         let event_tx = tx.clone();
         let model_for_events = config.model.clone();
-        let forward_handle = tokio::spawn(async move {
+        let forward_handle = crate::rt::spawn(async move {
             let mut partial_message: Option<AgentMessage> = None;
+            let mut ended = false;
             while let Some(event) = stream_rx.recv().await {
                 match &event {
                     StreamEvent::Start => {
@@ -1306,6 +1309,7 @@ async fn stream_assistant_response(
                     StreamEvent::Done { message } => {
                         let am: AgentMessage = message.clone().into();
                         partial_message = Some(am.clone());
+                        ended = true;
                         event_tx.send(AgentEvent::MessageEnd { message: am }).ok();
                     }
                     StreamEvent::Error { message } => {
@@ -1318,10 +1322,15 @@ async fn stream_assistant_response(
                                 .ok();
                         }
                         partial_message = Some(am.clone());
+                        ended = true;
                         event_tx.send(AgentEvent::MessageEnd { message: am }).ok();
                     }
                     _ => {}
                 }
+            }
+            AttemptEvents {
+                started: partial_message.is_some(),
+                ended,
             }
         });
 
@@ -1332,10 +1341,31 @@ async fn stream_assistant_response(
             .stream(stream_config, stream_tx, provider_cancel)
             .await;
 
+        // The provider has returned, so its sender is gone and the forwarder
+        // ends once it has forwarded what the attempt produced. Draining it
+        // (rather than aborting it) makes what consumers see deterministic:
+        // every event of every attempt, never a timing-dependent subset.
+        let attempt_events = forward_handle.await.unwrap_or_default();
+
         match &result {
             Err(e) if e.is_retryable() && attempt < retry.max_retries && !cancel.is_cancelled() => {
-                // Abort forwarder to prevent forwarding events from failed attempt
-                forward_handle.abort();
+                // Close the failed attempt's message so consumers can discard
+                // whatever partial content it streamed before the retry. The
+                // `ProviderRetry` that follows marks it as retried, not final.
+                if attempt_events.needs_end() {
+                    let failed = error_message(
+                        &config.model,
+                        format!(
+                            "attempt {} of {} failed and will be retried: {e}",
+                            attempt + 1,
+                            retry.max_retries + 1
+                        ),
+                    );
+                    tx.send(AgentEvent::MessageEnd {
+                        message: failed.into(),
+                    })
+                    .ok();
+                }
                 attempt += 1;
                 // Server-provided Retry-After wins over backoff, but is
                 // clamped to max_delay_ms so a bad header can't stall the loop.
@@ -1344,33 +1374,82 @@ async fn stream_assistant_response(
                     .map(|d| d.min(std::time::Duration::from_millis(retry.max_delay_ms)))
                     .unwrap_or_else(|| retry.delay_for_attempt(attempt));
                 crate::retry::log_retry(attempt, retry.max_retries, &delay, e);
-                tokio::time::sleep(delay).await;
+                tx.send(AgentEvent::provider_retry(
+                    attempt,
+                    retry.max_retries + 1,
+                    e.to_string(),
+                    delay,
+                ))
+                .ok();
+                // Cancelling during the backoff ends the turn now rather than
+                // after the delay (and a wasted request).
+                let backoff = std::pin::pin!(crate::rt::sleep(delay));
+                let cancelled = std::pin::pin!(cancel.cancelled());
+                if let futures::future::Either::Right(_) =
+                    futures::future::select(backoff, cancelled).await
+                {
+                    break (Err(ProviderError::Cancelled), AttemptEvents::default());
+                }
                 continue;
             }
-            _ => {
-                // Final attempt — wait for forwarder to finish processing remaining events
-                let _ = forward_handle.await;
-                break result;
-            }
+            _ => break (result, attempt_events),
         }
     };
 
+    let (result, attempt_events) = result;
     match result {
         Ok(msg) => msg,
         Err(e) => {
             warn!("Provider error: {}", e);
-            Message::Assistant {
-                content: vec![Content::Text {
-                    text: String::new(),
-                }],
-                stop_reason: StopReason::Error,
-                model: config.model.clone(),
-                provider: "unknown".into(),
-                usage: Usage::default(),
-                timestamp: now_ms(),
-                error_message: Some(e.to_string()),
+            let mut failed = error_message(&config.model, e.to_string());
+            // A cancelled run is aborted, not failed: it does not reach
+            // `on_error`, and consumers can tell the two apart.
+            if matches!(e, ProviderError::Cancelled) || cancel.is_cancelled() {
+                if let Message::Assistant { stop_reason, .. } = &mut failed {
+                    *stop_reason = StopReason::Aborted;
+                }
             }
+            // Close the message the final attempt opened, with the same
+            // error message this turn returns.
+            if attempt_events.needs_end() {
+                tx.send(AgentEvent::MessageEnd {
+                    message: failed.clone().into(),
+                })
+                .ok();
+            }
+            failed
         }
+    }
+}
+
+/// What one provider attempt's forwarder emitted.
+#[derive(Debug, Default, Clone, Copy)]
+struct AttemptEvents {
+    /// A `MessageStart` was sent for this attempt.
+    started: bool,
+    /// Its `MessageEnd` was sent too.
+    ended: bool,
+}
+
+impl AttemptEvents {
+    /// The attempt opened a message that nothing closed.
+    fn needs_end(self) -> bool {
+        self.started && !self.ended
+    }
+}
+
+/// The assistant message for a provider failure.
+fn error_message(model: &str, error: String) -> Message {
+    Message::Assistant {
+        content: vec![Content::Text {
+            text: String::new(),
+        }],
+        stop_reason: StopReason::Error,
+        model: model.to_string(),
+        provider: "unknown".into(),
+        usage: Usage::default(),
+        timestamp: now_ms(),
+        error_message: Some(error),
     }
 }
 

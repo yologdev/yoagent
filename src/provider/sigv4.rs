@@ -17,7 +17,7 @@
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 use std::fmt;
-use std::time::{SystemTime, UNIX_EPOCH};
+use web_time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) const ALGORITHM: &str = "AWS4-HMAC-SHA256";
 

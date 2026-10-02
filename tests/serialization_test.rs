@@ -446,7 +446,26 @@ fn all_agent_events() -> Vec<AgentEvent> {
             )),
         },
         AgentEvent::loop_detected("bash", 3, false),
+        AgentEvent::provider_retry(1, 4, "rate limited", std::time::Duration::from_millis(1500)),
     ]
+}
+
+/// `providerRetry` is part of the frozen wire format: its tag and camelCase
+/// fields are what a client keys on to tell a retried attempt from a failure.
+#[test]
+fn test_provider_retry_payload_shape_is_frozen() {
+    let event =
+        AgentEvent::provider_retry(2, 4, "HTTP 529", std::time::Duration::from_millis(2000));
+    assert_eq!(
+        serde_json::to_value(&event).unwrap(),
+        serde_json::json!({
+            "type": "providerRetry",
+            "attempt": 2,
+            "maxAttempts": 4,
+            "error": "HTTP 529",
+            "delayMs": 2000,
+        })
+    );
 }
 
 /// The deterministic half of the same variant. Sampled separately because it
@@ -542,6 +561,7 @@ fn expected_event_tag(event: &AgentEvent) -> &'static str {
         AgentEvent::InputRejected { .. } => "inputRejected",
         AgentEvent::ContextCompacted { .. } => "contextCompacted",
         AgentEvent::LoopDetected { .. } => "loopDetected",
+        AgentEvent::ProviderRetry { .. } => "providerRetry",
         _ => "unknown",
     }
 }
@@ -565,7 +585,7 @@ fn expected_delta_tag(delta: &StreamDelta) -> &'static str {
 /// forces no edit to this file at all — but deleting a sample here quietly
 /// removes the payload coverage below, and that it does catch. Adding a variant
 /// is `wire_tag_freeze`'s job, where the compiler enforces it.
-const SAMPLED_EVENT_COUNT: usize = 14;
+const SAMPLED_EVENT_COUNT: usize = 15;
 
 #[test]
 fn test_agent_event_type_tags_are_frozen() {

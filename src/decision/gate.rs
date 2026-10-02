@@ -295,7 +295,8 @@ fn shorten(v: &Value) -> Value {
     }
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl ToolMiddleware for ToolGate {
     async fn before_tool(&self, call: &ToolCallRequest<'_>) -> ToolDecision {
         self.decide(call).await

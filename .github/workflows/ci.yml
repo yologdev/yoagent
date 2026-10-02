@@ -65,6 +65,11 @@ jobs:
             flags: "--features gasp"
           - name: decision
             flags: "--features decision"
+          # Native without the default `native` feature: the library, its
+          # tests and examples must still build (targets that need the
+          # feature declare `required-features = ["native"]`).
+          - name: no-default
+            flags: "--no-default-features"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -75,6 +80,26 @@ jobs:
         run: cargo clippy --all-targets ${{ matrix.flags }}
       - name: Test
         run: cargo test ${{ matrix.flags }}
+
+  # The agent loop without the `native` feature, as a Cloudflare Worker builds
+  # it. The wasm32 test runner is not wired up, so this lints only.
+  wasm32:
+    name: Check (wasm32, no default features)
+    runs-on: ubuntu-latest
+    env:
+      # Bans calls that compile for wasm32 but panic there (std clocks, Tokio).
+      CLIPPY_CONF_DIR: .github/clippy-wasm32
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: cargo clippy --target wasm32-unknown-unknown --no-default-features
+      - name: Clippy (decision)
+        run: cargo clippy --target wasm32-unknown-unknown --no-default-features --features decision
 
   # Built-in tools shell out to unix commands, so Windows only checks compilation.
   windows-check:

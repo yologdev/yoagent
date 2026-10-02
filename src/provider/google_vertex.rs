@@ -13,7 +13,6 @@
 use super::model::ModelConfig;
 use super::traits::*;
 use crate::types::*;
-use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 pub struct GoogleVertexProvider;
@@ -29,7 +28,8 @@ impl GoogleVertexProvider {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl StreamProvider for GoogleVertexProvider {
     fn protocol(&self) -> Option<crate::provider::ApiProtocol> {
         Some(crate::provider::ApiProtocol::GoogleVertex)

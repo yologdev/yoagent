@@ -1,5 +1,4 @@
 use crate::types::*;
-use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 use super::model::ModelConfig;
@@ -218,13 +217,20 @@ pub struct ToolDefinition {
 use serde::{Deserialize, Serialize};
 
 /// The core provider trait. Implement this for each LLM backend.
-#[async_trait]
-pub trait StreamProvider: Send + Sync {
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+pub trait StreamProvider: crate::rt::MaybeSend + crate::rt::MaybeSync {
     /// Stream a completion, sending [`StreamEvent`]s through the channel.
     ///
     /// On success returns the final complete assistant [`Message`].
     /// On failure returns a [`ProviderError`] (used by retry logic to decide
     /// whether the call is retryable).
+    ///
+    /// **Drop every clone of `tx` before returning.** The agent loop forwards
+    /// the attempt's events until the channel closes, and only then decides
+    /// whether to retry or end the turn. A sender kept alive past the return
+    /// (for example by a task spawned with a clone of `tx`) keeps that channel
+    /// open, and the loop waits on it.
     async fn stream(
         &self,
         config: StreamConfig,

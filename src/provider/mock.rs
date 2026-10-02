@@ -2,7 +2,6 @@
 
 use super::traits::*;
 use crate::types::*;
-use async_trait::async_trait;
 use tokio::sync::mpsc;
 
 /// A mock response: either plain text or tool calls.
@@ -143,7 +142,8 @@ impl MockProvider {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl StreamProvider for MockProvider {
     async fn stream(
         &self,

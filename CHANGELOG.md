@@ -6,7 +6,73 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+The next release is **0.23.0**: the `native` feature below breaks builds that
+already set `default-features = false`.
+
+### Breaking
+
+- **`default-features = false` now turns off the new `native` feature.**
+  Before this release yoagent had no default features, so that line did
+  nothing. It now removes the filesystem and shell tools, `default_tools()`,
+  `StdioTransport` / `with_mcp_server_stdio`, `FileBackend`,
+  `PriceTable::fetch_cached` and all of reqwest's default features. The last
+  one is the dangerous part: without reqwest's TLS the build still succeeds,
+  but every HTTPS provider call fails at runtime (as a retryable network
+  error, so each turn spends its retries first). **Migration:** native users
+  who set `default-features = false` add `features = ["native"]`.
+- **A retried provider attempt now ends with a `MessageEnd`, followed by the
+  new `AgentEvent::ProviderRetry`.** Previously the abandoned attempt had no
+  closing `MessageEnd` (and, depending on the scheduler, some or all of its
+  events never reached consumers). Now every attempt that opened a message
+  is closed: a retried one by a `MessageEnd` with `StopReason::Error` and an
+  `error_message` saying it will be retried, then a `ProviderRetry
+  { attempt, max_attempts, error, delay_ms }`. **Migration:** a consumer
+  that treats an error `MessageEnd` as the turn's failure should check
+  whether the next event is `ProviderRetry` (see
+  [the event contract](docs/concepts/messages-events.md)). The bundled
+  consumers do: the GASP recorder no longer records retried attempts as model
+  calls, and `examples/release_smoke` / `examples/long_horizon` no longer
+  report a run whose retry succeeded as failed.
+
 ### Added
+
+- **`wasm32-unknown-unknown` builds (e.g. Cloudflare Workers).** A new
+  default `native` feature holds what needs a native host (see Breaking).
+  `cargo build --target wasm32-unknown-unknown --no-default-features` builds
+  the agent loop, all providers (over the host's `fetch`), HTTP MCP,
+  `SharedState` in memory, sub-agents, compaction and the `decision`
+  feature; `openapi` and `gasp` stay native-only, and WASI targets are not
+  supported. New `yoagent::rt` gives `spawn`, `sleep`, `timeout`,
+  `JoinHandle` and `Instant`: Tokio's own on native targets (unchanged
+  behaviour, paused-clock tests intact), and the host executor,
+  `setTimeout` and `performance.now()` on wasm32. `StreamProvider`,
+  `AgentTool`, `McpTransport`, `CompactionStrategy`, `ToolSource`,
+  `SharedStateBackend`, `TurnHook`, `ToolMiddleware`, `InputFilter`,
+  `AsyncInputFilter` and `DecisionBackend` now require
+  `rt::MaybeSend + rt::MaybeSync`. That is a blanket over `Send + Sync` on
+  native targets, so existing implementations and bounds are unaffected;
+  implementations that run on wasm32 use
+  `#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]` /
+  `#[cfg_attr(not(target_arch = "wasm32"), async_trait)]`. On wasm32,
+  `LlmCompaction` takes its existing no-runtime path and never summarises,
+  and there are no environment variables, so keys must be passed explicitly.
+  Wall-clock reads on the agent path (`types::now_ms`, `ExecutionTracker`,
+  SigV4) use `web-time`, which is `std::time` on native targets and the host
+  clock on wasm32 (where `std::time` panics). Provider SSE streams disable
+  the eventsource library's own reconnect (`retry::Never`): providers
+  already stop at the first stream error and the agent loop owns retries, so
+  it never took effect, but its timer panicked on wasm32 and a reconnect
+  would re-send a completion request. `PriceTable::fetch` keeps its timeout
+  on wasm32 (a per-request timeout). Items that need `native` carry a docs.rs
+  badge. Guide: [WebAssembly & Cloudflare Workers](docs/guides/wasm-workers.md).
+  CI gains a `wasm32` clippy job (default and `decision`, with a lint that
+  bans the std clock and Tokio calls that panic there) and a native
+  `--no-default-features` row.
+
+- **`AgentEvent::ProviderRetry`** (wire tag `providerRetry`), sent when a
+  provider attempt fails with a retryable error and will be retried: the
+  failed attempt (1-based), the attempts allowed, the error text, and the
+  backoff it waits. See Breaking for how it pairs with `MessageEnd`.
 
 - **`ToolSource`: tools resolved per run.** A new trait
   (`yoagent::ToolSource`, module `tool_source`) with one async method,
@@ -35,6 +101,30 @@ adheres to [Semantic Versioning](https://semver.org/).
   notes, reject input and observe `AgentEvent`s on the rutis bus. Its own
   crate, not yet on crates.io (it needs a yoagent release with `ToolSource`);
   yoagent itself does not depend on rutis.
+
+### Changed
+
+- **A cancelled run ends as `StopReason::Aborted`, not `Error`.** When the
+  provider returns `ProviderError::Cancelled`, or the run is cancelled while
+  a provider call fails, the turn's message (and its closing `MessageEnd`)
+  now carries `Aborted`, so `on_error` is no longer called for a
+  cancellation. Cancelling during a retry's backoff ends the turn at once
+  instead of after the delay and one more request. A cancelled
+  `SubAgentTool` delegation still fails the tool call, and a cancelled
+  `prompt_structured` still returns `StructuredPromptError::Provider`
+  ("Cancelled"), as before.
+
+### Fixed
+
+- **Failed provider attempts reach consumers deterministically.** On a
+  retryable error the loop used to abort the event forwarder, so how much of
+  the failed attempt's partial output had already reached consumers depended
+  on the scheduler. The loop now drains the forwarder after each attempt,
+  then closes the attempt (see Breaking). The final failed attempt is closed
+  with the same error message the turn returns. History is unchanged: it
+  holds only the successful answer (or the final error). A custom
+  `StreamProvider` must drop every clone of its event sender before `stream`
+  returns, or the loop waits for it.
 
 ## 0.22.0
 

@@ -1,5 +1,9 @@
 // Enables the `doc_cfg` feature badges on docs.rs only; a no-op on stable.
 #![cfg_attr(docsrs, feature(doc_cfg))]
+// wasm32 is single-threaded: `MaybeSend`/`MaybeSync` drop `Send`/`Sync` there
+// on purpose (host futures are not `Send`), so an `Arc` of such a value is
+// shared within one thread only. Native builds keep the lint.
+#![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
 
 //! **yoagent** — the agent runtime for Rust.
 //!
@@ -12,6 +16,7 @@
 //! ```no_run
 //! use yoagent::{Agent, provider::ModelConfig, tools};
 //!
+//! # #[cfg(feature = "native")]
 //! # #[tokio::main]
 //! # async fn main() {
 //! // Provider is selected from the config's protocol; the API key is read
@@ -26,6 +31,8 @@
 //! }
 //! agent.finish().await;
 //! # }
+//! # #[cfg(not(feature = "native"))]
+//! # fn main() {}
 //! ```
 //!
 //! # What's in the box
@@ -90,6 +97,7 @@ pub mod llm_compaction;
 pub mod mcp;
 pub mod provider;
 pub mod retry;
+pub mod rt;
 pub mod session;
 pub mod shared_state;
 pub mod skills;

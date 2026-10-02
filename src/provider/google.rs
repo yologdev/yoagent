@@ -25,7 +25,6 @@
 
 use super::traits::*;
 use crate::types::*;
-use async_trait::async_trait;
 use futures::StreamExt;
 use serde::Deserialize;
 use tokio::sync::mpsc;
@@ -33,7 +32,8 @@ use tracing::{debug, warn};
 
 pub struct GoogleProvider;
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl StreamProvider for GoogleProvider {
     fn protocol(&self) -> Option<crate::provider::ApiProtocol> {
         Some(crate::provider::ApiProtocol::GoogleGenerativeAi)

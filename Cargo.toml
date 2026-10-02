@@ -31,7 +31,9 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
-tokio = { version = "1", features = ["rt", "sync", "fs", "macros", "process", "time", "io-util"] }
+# `fs` and `process` (which pulls in mio networking) are native-only; see
+# the `native` feature.
+tokio = { version = "1", default-features = false, features = ["rt", "sync", "macros", "time", "io-util"] }
 tokio-util = "0.7"
 tokio-stream = "0.1"
 # 1.0.177 floor: the release that added rename_all_fields (AgentEvent wire format)
@@ -41,11 +43,14 @@ async-trait = "0.1"
 thiserror = "2"
 uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
-reqwest = { version = "0.13", features = ["json", "stream", "socks"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }
 reqwest-eventsource = { package = "kameleoon-reqwest-eventsource", version = "0.6" }
 futures = "0.3"
 rand = "0.10.0"
 base64 = "0.22"
+# `Instant`/`SystemTime` that work on wasm32 too; plain re-exports of
+# `std::time` on native targets.
+web-time = "1"
 # SigV4 request signing for Amazon Bedrock (`provider::sigv4`). RustCrypto,
 # pure Rust. Used directly rather than through the TLS stack's primitives
 # (aws-lc-rs today), which are a transitive detail of reqwest's backend choice.
@@ -57,6 +62,13 @@ serde_yaml_ng = { version = "0.10", optional = true }
 yoagent-state = { version = "0.5", optional = true }
 
 [features]
+default = ["native"]
+# Native hosts: built-in filesystem/shell tools, stdio MCP, shared state on
+# disk, the price-table disk cache, SOCKS proxies and all of reqwest's default
+# features (TLS among them: without it HTTPS provider calls fail at runtime).
+# Turning it off is how yoagent builds for `wasm32-unknown-unknown`
+# (e.g. Cloudflare Workers); see docs for what remains available there.
+native = ["tokio/process", "tokio/fs", "reqwest/default", "reqwest/socks"]
 openapi = ["dep:openapiv3", "dep:serde_yaml_ng", "reqwest/query"]
 gasp = ["dep:yoagent-state"]
 # Decision models (typed questions -> calibrated answers), e.g. TypeSafe Jev.
@@ -68,6 +80,39 @@ tokio = { version = "1", features = ["full", "test-util"] }
 tracing-subscriber = { version = "0.3", features = ["registry", "fmt"] }
 tempfile = "3"
 wiremock = "0.6"
+
+[[example]]
+name = "cli"
+required-features = ["native"]
+
+[[example]]
+name = "rlm"
+required-features = ["native"]
+
+[[example]]
+name = "sub_agent"
+required-features = ["native"]
+
+[[test]]
+name = "tools_test"
+required-features = ["native"]
+
+# Replays the native read tool's paging (`tools::DEFAULT_READ_MAX_LINES`).
+[[test]]
+name = "context_cache_test"
+required-features = ["native"]
+
+[[test]]
+name = "price_fetch_test"
+required-features = ["native"]
+
+[[test]]
+name = "integration_anthropic"
+required-features = ["native"]
+
+[[test]]
+name = "integration_gemini"
+required-features = ["native"]
 
 [[example]]
 name = "gasp_emit"
@@ -121,3 +166,13 @@ required-features = ["decision"]
 inherits = "test"
 debug = false
 opt-level = 1
+
+# wasm32 (e.g. Cloudflare Workers): randomness from the JS host, and a
+# JS-backed executor/timer in place of a Tokio runtime.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
+uuid = { version = "1", features = ["v4", "js"] }
+wasm-bindgen-futures = "0.4"
+wasm-bindgen = "0.2"
+js-sys = "0.3"

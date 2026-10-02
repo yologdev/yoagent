@@ -302,7 +302,8 @@ impl InputGuard {
     }
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl AsyncInputFilter for InputGuard {
     async fn filter(&self, text: &str) -> FilterResult {
         self.screen(text).await

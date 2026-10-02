@@ -327,6 +327,10 @@ async fn consume(
         outcome: "interrupted".to_string(),
     };
     let mut recording_error: Option<StateError> = None;
+    // An error `MessageEnd` waits for the next event: a `ProviderRetry` right
+    // after it means the attempt was retried, not the turn's result, so it is
+    // not recorded as a model call (and does not advance the turn count).
+    let mut held: Option<AgentEvent> = None;
 
     while let Some(event) = rx.recv().await {
         // Forward FIRST: the tee observes the loop, not the recorder's disk.
@@ -338,12 +342,32 @@ async fn consume(
         if recording_error.is_some() {
             continue; // recording is dead; keep draining + forwarding
         }
+        let mut due = Vec::with_capacity(2);
+        if let Some(previous) = held.take() {
+            if !matches!(event, AgentEvent::ProviderRetry { .. }) {
+                due.push(previous);
+            }
+        }
+        if is_error_message_end(&event) {
+            held = Some(event);
+        } else {
+            due.push(event);
+        }
+        for event in &due {
+            if let Err(e) = record_event(&sink, &summarize, &mut tracking, event).await {
+                tracing::error!(
+                    run = %tracking.run_id,
+                    error = %e,
+                    "GASP recording failed; recording stops but event forwarding continues"
+                );
+                recording_error = Some(e);
+                break;
+            }
+        }
+    }
+    if let (Some(event), None) = (held.take(), &recording_error) {
+        // The stream ended on the error: it was the final one.
         if let Err(e) = record_event(&sink, &summarize, &mut tracking, &event).await {
-            tracing::error!(
-                run = %tracking.run_id,
-                error = %e,
-                "GASP recording failed; recording stops but event forwarding continues"
-            );
             recording_error = Some(e);
         }
     }
@@ -372,6 +396,18 @@ async fn consume(
     // immediately instead of waiting out the TTL.
     let _ = store.release_lease();
     Ok(Some(tracking.run_id))
+}
+
+fn is_error_message_end(event: &AgentEvent) -> bool {
+    matches!(
+        event,
+        AgentEvent::MessageEnd {
+            message: AgentMessage::Llm(Message::Assistant {
+                stop_reason: StopReason::Error,
+                ..
+            }),
+        }
+    )
 }
 
 /// Record a single event. Mutates tracking state; any sink error aborts

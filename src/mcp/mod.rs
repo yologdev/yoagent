@@ -7,6 +7,7 @@
 //! ```rust,no_run
 //! use yoagent::mcp::McpClient;
 //!
+//! # #[cfg(feature = "native")]
 //! # async fn example() -> Result<(), yoagent::mcp::McpError> {
 //! // Connect to an MCP server via stdio
 //! let client = McpClient::connect_stdio("npx", &["-y", "@modelcontextprotocol/server-filesystem", "/tmp"], None).await?;
@@ -21,5 +22,8 @@ pub mod types;
 
 pub use client::McpClient;
 pub use tool_adapter::McpToolAdapter;
-pub use transport::{HttpTransport, McpTransport, StdioTransport};
+#[cfg(feature = "native")]
+#[cfg_attr(docsrs, doc(cfg(feature = "native")))]
+pub use transport::StdioTransport;
+pub use transport::{HttpTransport, McpTransport};
 pub use types::{McpContent, McpError, McpToolCallResult, McpToolInfo, ServerInfo};

@@ -863,7 +863,13 @@ impl LlmCompaction {
 
     /// Spawn the standalone summarization request for `messages[head_end..cut)`.
     fn spawn_summarize(&self, messages: &[AgentMessage], head_end: usize, cut: usize) {
-        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        // wasm32 has no Tokio runtime: the same no-runtime path as below,
+        // decided at compile time. Compaction stays deterministic there.
+        #[cfg(target_arch = "wasm32")]
+        let handle: Result<tokio::runtime::Handle, ()> = Err(());
+        #[cfg(not(target_arch = "wasm32"))]
+        let handle = tokio::runtime::Handle::try_current();
+        let Ok(handle) = handle else {
             // Note: `ever_spawned` stays false here on purpose — no request is
             // issued, so nothing is being paid for.
             // The strategy is wholly inert here — every compaction will be
@@ -926,7 +932,7 @@ impl LlmCompaction {
             cut
         );
 
-        handle.spawn(async move {
+        spawn_on(&handle, async move {
             // Whatever happens below — hung request, panic, runtime shutdown —
             // the slot returns to Idle when this guard drops.
             let mut guard = InflightGuard {
@@ -1063,8 +1069,8 @@ async fn summarize(
         }
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         // Drain events we don't consume so the provider never blocks.
-        let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
-        let result = tokio::time::timeout(
+        let drain = crate::rt::spawn(async move { while rx.recv().await.is_some() {} });
+        let result = crate::rt::timeout(
             timeout,
             provider.stream(stream_config.clone(), tx, cancel.clone()),
         )
@@ -1089,7 +1095,7 @@ async fn summarize(
                         // calling; this did not.
                         .unwrap_or_else(|| retry.delay_for_attempt(attempt + 1));
                     tracing::debug!("llm compaction: {e}, retrying in {delay:?}");
-                    tokio::time::sleep(delay).await;
+                    crate::rt::sleep(delay).await;
                     continue;
                 }
                 tracing::warn!("llm compaction: summarization failed: {e}");
@@ -1098,7 +1104,7 @@ async fn summarize(
             Ok(Ok(message)) => return accept_summary(message),
         }
         if attempt < retry.max_retries {
-            tokio::time::sleep(retry.delay_for_attempt(attempt + 1)).await;
+            crate::rt::sleep(retry.delay_for_attempt(attempt + 1)).await;
         }
     }
     None
@@ -1136,6 +1142,25 @@ fn accept_summary(message: Message) -> Option<(String, Usage)> {
     }
     tracing::debug!("llm compaction: summary ready ({} chars)", text.len());
     Some((text, assistant_usage(&message)))
+}
+
+/// Start the background summary on the runtime it was found on. On wasm32
+/// this is never reached (there is no runtime handle), but it must compile;
+/// there the host executor stands in.
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_on<F>(handle: &tokio::runtime::Handle, future: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    handle.spawn(future);
+}
+
+#[cfg(target_arch = "wasm32")]
+fn spawn_on<F>(_handle: &tokio::runtime::Handle, future: F)
+where
+    F: std::future::Future<Output = ()> + 'static,
+{
+    crate::rt::spawn(future);
 }
 
 impl CompactionStrategy for LlmCompaction {

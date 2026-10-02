@@ -1,6 +1,5 @@
 use super::types::*;
 use crate::types::{AgentTool, Content, ToolContext, ToolError, ToolResult};
-use async_trait::async_trait;
 use openapiv3::{
     OpenAPI, Operation, Parameter, ParameterSchemaOrContent, ReferenceOr, RequestBody, Schema,
 };
@@ -120,7 +119,8 @@ impl OpenApiToolAdapter {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl AgentTool for OpenApiToolAdapter {
     fn name(&self) -> &str {
         &self.tool_name

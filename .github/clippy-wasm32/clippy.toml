@@ -1,0 +1,16 @@
+# Used only by the `wasm32` CI job (CLIPPY_CONF_DIR=.github/clippy-wasm32).
+#
+# These calls compile for wasm32-unknown-unknown but panic at runtime there,
+# or need a Tokio runtime a Worker does not have. Clippy cannot otherwise tell.
+# Native targets do not use this file: there `yoagent::rt` *is* Tokio, so the
+# same paths are the correct calls.
+disallowed-methods = [
+    { path = "std::time::Instant::now", reason = "panics on wasm32; use web_time::Instant or yoagent::rt::Instant" },
+    { path = "std::time::SystemTime::now", reason = "panics on wasm32; use web_time::SystemTime" },
+    { path = "std::thread::sleep", reason = "no threads on wasm32; use yoagent::rt::sleep" },
+    { path = "tokio::task::spawn", reason = "no Tokio runtime on wasm32; use yoagent::rt::spawn" },
+    { path = "tokio::task::spawn_blocking", reason = "no Tokio runtime on wasm32" },
+    { path = "tokio::time::sleep", reason = "no Tokio timer on wasm32; use yoagent::rt::sleep" },
+    { path = "tokio::time::timeout", reason = "no Tokio timer on wasm32; use yoagent::rt::timeout" },
+    { path = "tokio::time::Instant::now", reason = "no Tokio clock on wasm32; use yoagent::rt::Instant" },
+]

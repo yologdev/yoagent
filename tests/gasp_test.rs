@@ -892,3 +892,111 @@ fn every_field_and_argument_type_is_nameable_from_gasp_alone() {
     _takes::<GoalId>(None);
     _takes::<RunId>(None);
 }
+
+/// Events a retried attempt and a final failure produce, for the recorder.
+fn assistant_end(stop: StopReason, error: Option<&str>) -> AgentEvent {
+    let message = Message::assistant(
+        vec![Content::Text { text: "x".into() }],
+        stop,
+        "m",
+        "mock",
+        Usage::default(),
+    );
+    AgentEvent::MessageEnd {
+        message: AgentMessage::Llm(match error {
+            Some(e) => message.with_error_message(e),
+            None => message,
+        }),
+    }
+}
+
+/// Record `events` as one run; return its semantic kinds and its outcome.
+async fn record(events: Vec<AgentEvent>, end: bool) -> (Vec<String>, String) {
+    ensure_git_identity();
+    let dir = tempfile::tempdir().unwrap();
+    let recorder = GaspRecorder::init(
+        dir.path(),
+        "test-agent",
+        "w1",
+        GoalRef::New {
+            title: "retries".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let (tx, handle) = recorder.recording_sender("t", None);
+    tx.send(AgentEvent::AgentStart).unwrap();
+    for e in events {
+        tx.send(e).unwrap();
+    }
+    if end {
+        tx.send(AgentEvent::agent_end(vec![], Default::default()))
+            .unwrap();
+    }
+    drop(tx);
+    handle.await.unwrap().unwrap().expect("recorded");
+    let kinds = event_kinds(dir.path())
+        .into_iter()
+        .filter(|k| k.starts_with("model.") || k.starts_with("run."))
+        .collect();
+    let log = std::fs::read_to_string(dir.path().join("state/events.jsonl")).unwrap();
+    let finish = log.lines().rfind(|l| l.contains("run.finished")).unwrap();
+    let outcome = serde_json::from_str::<serde_json::Value>(finish).unwrap()["payload"]["outcome"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    (kinds, outcome)
+}
+
+/// A retried attempt is closed with an error `MessageEnd` that the next
+/// `ProviderRetry` marks as not the turn's result: it is no model call of
+/// the run, and the successful retry is recorded as turn 1.
+#[tokio::test]
+async fn a_retried_attempt_is_not_recorded_as_a_model_call() {
+    let (kinds, outcome) = record(
+        vec![
+            assistant_end(
+                StopReason::Error,
+                Some("attempt 1 of 4 failed and will be retried"),
+            ),
+            AgentEvent::provider_retry(1, 4, "HTTP 529", std::time::Duration::from_millis(5)),
+            assistant_end(StopReason::Stop, None),
+        ],
+        true,
+    )
+    .await;
+    assert_eq!(
+        kinds,
+        [
+            "run.started",
+            "model.called",
+            "model.finished",
+            "run.finished"
+        ]
+    );
+    assert_eq!(outcome, "completed");
+}
+
+/// An error `MessageEnd` with no `ProviderRetry` after it is the run's
+/// result, whether `AgentEnd` follows or the stream just ends.
+#[tokio::test]
+async fn a_final_error_is_recorded_however_the_stream_ends() {
+    for end in [true, false] {
+        let (kinds, outcome) = record(
+            vec![assistant_end(StopReason::Error, Some("HTTP 529"))],
+            end,
+        )
+        .await;
+        assert_eq!(
+            kinds,
+            [
+                "run.started",
+                "model.called",
+                "model.finished",
+                "run.finished"
+            ],
+            "end = {end}"
+        );
+        assert_eq!(outcome, "error", "end = {end}");
+    }
+}

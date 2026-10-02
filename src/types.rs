@@ -895,8 +895,9 @@ impl std::fmt::Debug for ToolContext {
 }
 
 /// A tool the agent can call. Implement this trait for your tools.
-#[async_trait::async_trait]
-pub trait AgentTool: Send + Sync {
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+pub trait AgentTool: crate::rt::MaybeSend + crate::rt::MaybeSync {
     /// Unique tool name (used in LLM tool_use)
     fn name(&self) -> &str;
     /// Human-readable label for UI
@@ -1021,6 +1022,27 @@ pub enum AgentEvent {
     InputRejected {
         reason: String,
     },
+    /// A provider attempt failed with a retryable error and will be retried.
+    ///
+    /// Sent after that attempt's messages: when the attempt had opened one, a
+    /// `MessageEnd` with [`StopReason::Error`] closes it first, so a streaming
+    /// client discards its partial text. That `MessageEnd` is **not** the
+    /// turn's result — this event is what tells the two apart, so a consumer
+    /// that reacts to an error `MessageEnd` should wait for the next event. A
+    /// final failure is never followed by `ProviderRetry`. If the run is
+    /// cancelled during `delay_ms`, the announced attempt does not happen and
+    /// the turn ends with [`StopReason::Aborted`].
+    #[non_exhaustive]
+    ProviderRetry {
+        /// The attempt that failed, 1-based.
+        attempt: usize,
+        /// Attempts allowed in total: `RetryConfig::max_retries + 1`.
+        max_attempts: usize,
+        /// The provider error, as text.
+        error: String,
+        /// How long the loop waits before the next attempt.
+        delay_ms: u64,
+    },
     /// A tool was called repeatedly with identical arguments.
     ///
     /// Emitted on both escalations: the first trip steers the model and
@@ -1064,6 +1086,21 @@ impl AgentEvent {
     /// crates (and tests) build it here rather than with a struct literal.
     pub fn agent_end(messages: Vec<AgentMessage>, stats: SessionStats) -> Self {
         Self::AgentEnd { messages, stats }
+    }
+
+    /// Construct an [`AgentEvent::ProviderRetry`].
+    pub fn provider_retry(
+        attempt: usize,
+        max_attempts: usize,
+        error: impl Into<String>,
+        delay: std::time::Duration,
+    ) -> Self {
+        Self::ProviderRetry {
+            attempt,
+            max_attempts,
+            error: error.into(),
+            delay_ms: u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+        }
     }
 
     /// Construct an [`AgentEvent::LoopDetected`].
@@ -1744,7 +1781,7 @@ pub enum FilterResult {
 /// [`Agent::with_async_input_filter`](crate::Agent::with_async_input_filter)
 /// (or push an [`AsyncFilter`] onto
 /// [`AgentLoopConfig::input_filters`](crate::agent_loop::AgentLoopConfig)).
-pub trait InputFilter: Send + Sync {
+pub trait InputFilter: crate::rt::MaybeSend + crate::rt::MaybeSync {
     fn filter(&self, text: &str) -> FilterResult;
 
     /// The async filter behind this one, if any. The loop awaits it instead
@@ -1769,8 +1806,9 @@ pub trait InputFilter: Send + Sync {
 /// rejects. A filter that **panics** is contained and treated as a
 /// `Reject` (fail closed): the run ends with an
 /// [`AgentEvent::InputRejected`] and the agent keeps its state.
-#[async_trait::async_trait]
-pub trait AsyncInputFilter: Send + Sync {
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+pub trait AsyncInputFilter: crate::rt::MaybeSend + crate::rt::MaybeSync {
     /// Judge the prompt's text (every user text block, joined by newlines).
     async fn filter(&self, text: &str) -> FilterResult;
 }
@@ -2230,8 +2268,9 @@ impl<'a> ToolCallRequest<'a> {
 /// [`parse_tool_arguments`](crate::provider::parse_tool_arguments)). The loop
 /// answers such a call with an error tool result *before* the chain runs, so
 /// there is no real call to approve, deny or rewrite.
-#[async_trait::async_trait]
-pub trait ToolMiddleware: Send + Sync {
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+pub trait ToolMiddleware: crate::rt::MaybeSend + crate::rt::MaybeSync {
     async fn before_tool(&self, call: &ToolCallRequest<'_>) -> ToolDecision;
 }
 
@@ -2327,8 +2366,9 @@ impl<'a> TurnContext<'a> {
 /// [`TurnHookProvider`](crate::provider::TurnHookProvider). The hook runs
 /// once per provider call, so a retried request runs it again; memoize if it
 /// is expensive. A panicking hook is contained and contributes nothing.
-#[async_trait::async_trait]
-pub trait TurnHook: Send + Sync {
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+pub trait TurnHook: crate::rt::MaybeSend + crate::rt::MaybeSync {
     /// Return a note to append to this request's latest user turn, or `None`.
     async fn before_turn(&self, turn: &TurnContext<'_>) -> Option<String>;
 }
@@ -2338,8 +2378,10 @@ pub trait TurnHook: Send + Sync {
 // ---------------------------------------------------------------------------
 
 pub fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    // web_time: std::time on native targets; the host clock on wasm32, where
+    // std::time::SystemTime::now() panics.
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
 }
@@ -2534,6 +2576,8 @@ mod wire_tag_freeze {
             },
         AgentEvent::InputRejected { .. } => "inputRejected"
             = AgentEvent::InputRejected { reason: "injection detected".into() },
+        AgentEvent::ProviderRetry { .. } => "providerRetry"
+            = AgentEvent::provider_retry(1, 4, "rate limited", std::time::Duration::from_millis(1500)),
         AgentEvent::LoopDetected { .. } => "loopDetected"
             = AgentEvent::loop_detected("bash", 3, false),
         AgentEvent::ContextCompacted { .. } => "contextCompacted"
