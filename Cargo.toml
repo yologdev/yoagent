@@ -75,7 +75,10 @@ gasp = ["dep:yoagent-state"]
 # Off by default; adds no dependencies. Nothing is sent until you pick a model.
 decision = []
 
-[dev-dependencies]
+# Native test tooling. Target-scoped because Cargo builds every
+# dev-dependency for the target under test, and Tokio's `full`, tempfile and
+# wiremock do not build for wasm32 (see `tests/wasm32.rs`).
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
 tracing-subscriber = { version = "0.3", features = ["registry", "fmt"] }
 tempfile = "3"
@@ -176,3 +179,9 @@ uuid = { version = "1", features = ["v4", "js"] }
 wasm-bindgen-futures = "0.4"
 wasm-bindgen = "0.2"
 js-sys = "0.3"
+
+# Runs `tests/wasm32.rs` under Node. Its runner, `wasm-bindgen-test-runner`
+# from wasm-bindgen-cli, must match the resolved wasm-bindgen version (the CI
+# job looks it up with `cargo metadata`).
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3.76"

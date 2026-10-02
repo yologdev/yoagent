@@ -185,7 +185,11 @@ yoagent builds for `wasm32-unknown-unknown` (Cloudflare Workers) with `--no-defa
 ```bash
 cargo clippy --all-targets --no-default-features            # native without `native` — CI's no-default row
 CLIPPY_CONF_DIR=.github/clippy-wasm32 cargo clippy --target wasm32-unknown-unknown --no-default-features [--features decision]
+# tests/wasm32.rs under Node (rt shims + whole agent runs); needs wasm-bindgen-cli at the resolved wasm-bindgen version
+CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner cargo test --target wasm32-unknown-unknown --no-default-features --test wasm32
 ```
+
+Native dev-dependencies (Tokio `full`, tempfile, wiremock) are under `[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]` because Cargo builds every dev-dependency for the target under test; only `--test wasm32` is built for wasm32, and a new wasm32 test belongs in that file, not in a native test target.
 
 ### Testing
 
