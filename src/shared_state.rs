@@ -88,8 +88,9 @@ impl From<std::io::Error> for SharedStateError {
 ///
 /// Implement this trait to back shared state with a custom store
 /// (database, Redis, HTTP service, etc.).
-#[async_trait::async_trait]
-pub trait SharedStateBackend: Send + Sync {
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+pub trait SharedStateBackend: crate::rt::MaybeSend + crate::rt::MaybeSync {
     /// Get a value by key. Returns `None` if the key doesn't exist.
     async fn get(&self, key: &str) -> Result<Option<String>, SharedStateError>;
 
@@ -143,7 +144,8 @@ impl MemoryBackend {
     }
 }
 
-#[async_trait::async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl SharedStateBackend for MemoryBackend {
     async fn get(&self, key: &str) -> Result<Option<String>, SharedStateError> {
         Ok(self.inner.read().await.get(key).map(|(_, v)| v.clone()))
@@ -243,6 +245,7 @@ impl SharedStateBackend for MemoryBackend {
 /// # }
 /// ```
 #[cfg(feature = "native")]
+#[cfg_attr(docsrs, doc(cfg(feature = "native")))]
 pub struct FileBackend {
     dir: PathBuf,
     max_bytes: usize,
@@ -824,6 +827,7 @@ mod tests {
         assert_eq!(state.keys().await.len(), 10);
     }
 
+    #[cfg(feature = "native")]
     #[tokio::test]
     async fn test_file_backend() {
         let dir = tempfile::tempdir().unwrap();
@@ -857,6 +861,7 @@ mod tests {
         assert!(!state.remove("report").await);
     }
 
+    #[cfg(feature = "native")]
     #[tokio::test]
     async fn test_file_backend_key_encoding() {
         let dir = tempfile::tempdir().unwrap();

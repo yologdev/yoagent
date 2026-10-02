@@ -303,15 +303,15 @@ impl PriceTable {
                 }
             }
         };
-        let builder = reqwest::Client::builder();
-        // The fetch-based wasm client has no request timeout; the host's own
-        // request limits bound it there.
-        #[cfg(not(target_arch = "wasm32"))]
-        let builder = builder.timeout(timeout);
-        #[cfg(target_arch = "wasm32")]
-        let _ = timeout;
-        let client = builder.build().map_err(request_error)?;
-        let resp = client.get(&url).send().await.map_err(request_error)?;
+        // A per-request timeout rather than the client builder's: the
+        // fetch-based wasm32 client has only the former (an `AbortSignal`).
+        let client = reqwest::Client::builder().build().map_err(request_error)?;
+        let resp = client
+            .get(&url)
+            .timeout(timeout)
+            .send()
+            .await
+            .map_err(request_error)?;
         let status = resp.status();
         if !status.is_success() {
             return Err(PriceError::Http {
@@ -491,6 +491,7 @@ impl PriceTable {
     /// # }
     /// ```
     #[cfg(feature = "native")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "native")))]
     pub async fn fetch_cached(
         source: &PriceSource,
         cache_path: impl AsRef<Path>,

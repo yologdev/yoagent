@@ -19,6 +19,7 @@ pub struct McpClient {
 impl McpClient {
     /// Connect to an MCP server via stdio (spawn a child process). Native hosts only.
     #[cfg(feature = "native")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "native")))]
     pub async fn connect_stdio(
         command: &str,
         args: &[&str],

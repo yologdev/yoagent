@@ -16,6 +16,7 @@
 //! ```no_run
 //! use yoagent::{Agent, provider::ModelConfig, tools};
 //!
+//! # #[cfg(feature = "native")]
 //! # #[tokio::main]
 //! # async fn main() {
 //! // Provider is selected from the config's protocol; the API key is read
@@ -30,6 +31,8 @@
 //! }
 //! agent.finish().await;
 //! # }
+//! # #[cfg(not(feature = "native"))]
+//! # fn main() {}
 //! ```
 //!
 //! # What's in the box

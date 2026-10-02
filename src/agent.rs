@@ -752,6 +752,7 @@ impl Agent {
     /// Connect to an MCP server via stdio and add its tools to the agent.
     /// Native hosts only.
     #[cfg(feature = "native")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "native")))]
     pub async fn with_mcp_server_stdio(
         mut self,
         command: &str,

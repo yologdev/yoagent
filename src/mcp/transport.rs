@@ -33,6 +33,7 @@ pub trait McpTransport: crate::rt::MaybeSend + crate::rt::MaybeSync {
 /// Communicates with an MCP server via stdin/stdout of a child process.
 /// One JSON-RPC message per line (newline-delimited JSON). Native hosts only.
 #[cfg(feature = "native")]
+#[cfg_attr(docsrs, doc(cfg(feature = "native")))]
 pub struct StdioTransport {
     stdin: Arc<Mutex<tokio::process::ChildStdin>>,
     stdout: Arc<Mutex<BufReader<tokio::process::ChildStdout>>>,
@@ -599,6 +600,7 @@ impl McpTransport for HttpTransport {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "native")]
     #[tokio::test]
     async fn test_stdio_transport_with_cat() {
         // Use `cat` as a simple echo server — it reflects stdin to stdout.
