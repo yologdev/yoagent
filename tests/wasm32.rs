@@ -50,8 +50,23 @@ async fn timeout_returns_the_value_or_elapsed() {
     let fast = rt::timeout(Duration::from_secs(5), async { 7 }).await;
     assert_eq!(fast.ok(), Some(7));
 
-    let slow = rt::timeout(Duration::from_millis(10), futures::future::pending::<()>()).await;
+    // The future is polled before the timer, so the two checks above and
+    // below would pass with a timer that fires at once: also check timing.
+    let waited = rt::timeout(Duration::from_secs(1), async {
+        rt::sleep(Duration::from_millis(5)).await;
+        8
+    })
+    .await;
+    assert_eq!(waited.ok(), Some(8), "the timer fired before its deadline");
+
+    let start = rt::Instant::now();
+    let slow = rt::timeout(Duration::from_millis(30), futures::future::pending::<()>()).await;
     assert!(slow.is_err(), "a pending future must time out");
+    assert!(
+        start.elapsed() >= Duration::from_millis(20),
+        "timed out after {:?}",
+        start.elapsed()
+    );
 }
 
 #[wasm_bindgen_test]
