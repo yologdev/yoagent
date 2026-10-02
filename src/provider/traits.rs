@@ -225,6 +225,12 @@ pub trait StreamProvider: crate::rt::MaybeSend + crate::rt::MaybeSync {
     /// On success returns the final complete assistant [`Message`].
     /// On failure returns a [`ProviderError`] (used by retry logic to decide
     /// whether the call is retryable).
+    ///
+    /// **Drop every clone of `tx` before returning.** The agent loop forwards
+    /// the attempt's events until the channel closes, and only then decides
+    /// whether to retry or end the turn. A sender kept alive past the return
+    /// (for example by a task spawned with a clone of `tx`) keeps that channel
+    /// open, and the loop waits on it.
     async fn stream(
         &self,
         config: StreamConfig,

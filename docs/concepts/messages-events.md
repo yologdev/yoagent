@@ -142,6 +142,7 @@ Events emitted during the agent loop for real-time UI updates:
 | `ToolExecutionEnd { tool_call_id, tool_name, result, is_error }` | Tool finished |
 | `ProgressMessage { tool_call_id, tool_name, text }` | User-facing progress text from a tool |
 | `InputRejected { reason }` | Input filter rejected the user's message |
+| `ProviderRetry { attempt, max_attempts, error, delay_ms }` | A provider attempt failed with a retryable error; the next starts after `delay_ms` |
 
 ### Wire format
 
@@ -160,12 +161,28 @@ field names, and the tagging scheme won't change in minor releases.
 Streaming semantics: clients accumulate text from each `MessageUpdate`'s
 `delta`; the `message` field during streaming is an empty-content
 placeholder (the complete message arrives as a new value in `MessageEnd`).
-Reset accumulation on each `MessageStart` — after a transient provider
-error the stream restarts from a fresh `MessageStart` with no closing
-`MessageEnd` for the abandoned attempt, so a client that doesn't reset
-duplicates the replayed text. A client that misses events entirely (e.g. a
-lagged websocket subscriber) resyncs from the next `MessageEnd` without
-replay.
+Reset accumulation on each `MessageStart`.
+
+Retries: when a provider attempt fails with a retryable error, every event it
+produced is delivered, then the attempt is closed and marked:
+
+```text
+messageStart → messageUpdate… → messageEnd (stopReason "error",
+  errorMessage "attempt 1 of 4 failed and will be retried: …") → providerRetry
+messageStart → messageUpdate… → messageEnd (the retry's result)
+```
+
+Discard the partial text of a message that ends with `stopReason: "error"`.
+That `messageEnd` is **not** the turn's result when `providerRetry` follows
+it, so a client that reports failures should look at the next event first. An
+attempt that failed before streaming anything has no `messageStart`, so it
+gets only the `providerRetry`. A final failure is closed with the error the
+turn returns and is never followed by `providerRetry`; a cancelled run ends
+with `stopReason: "aborted"`, including one cancelled during a retry's
+backoff.
+
+A client that misses events entirely (e.g. a lagged websocket subscriber)
+resyncs from the next `MessageEnd` without replay.
 
 ## StreamDelta
 

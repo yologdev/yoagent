@@ -136,8 +136,12 @@ async fn drain(rx: &mut tokio::sync::mpsc::UnboundedReceiver<AgentEvent>) -> Run
         cache_read_after_compaction: 0,
     };
     let mut assistant_turns = 0usize;
+    // Set by an error `MessageEnd` for one event: what to undo if the next
+    // event says that attempt is being retried.
+    let mut retryable: Option<u64> = None;
 
     while let Some(event) = rx.recv().await {
+        let just_errored = retryable.take();
         match event {
             AgentEvent::MessageUpdate {
                 delta: StreamDelta::Text { delta },
@@ -176,13 +180,27 @@ async fn drain(rx: &mut tokio::sync::mpsc::UnboundedReceiver<AgentEvent>) -> Run
                     // instead: by then compaction has certainly run, and a
                     // byte-stable prefix should still be producing hits.
                     assistant_turns += 1;
-                    if assistant_turns > 6 {
-                        out.cache_read_after_compaction += usage.cache_read;
-                    }
+                    let counted = if assistant_turns > 6 {
+                        usage.cache_read
+                    } else {
+                        0
+                    };
+                    out.cache_read_after_compaction += counted;
                     if stop_reason == StopReason::Error {
                         out.error =
                             Some(error_message.unwrap_or_else(|| "unknown provider error".into()));
+                        retryable = Some(counted);
                     }
+                }
+            }
+
+            // The error just counted closed an attempt that is being retried:
+            // it was neither a turn nor the run's result.
+            AgentEvent::ProviderRetry { .. } => {
+                if let Some(counted) = just_errored {
+                    assistant_turns -= 1;
+                    out.cache_read_after_compaction -= counted;
+                    out.error = None;
                 }
             }
 

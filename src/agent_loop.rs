@@ -11,7 +11,9 @@ use crate::context::{
     self, CompactionStrategy, ContextConfig, ContextTracker, DefaultCompaction, ExecutionLimits,
     ExecutionTracker,
 };
-use crate::provider::{ModelConfig, StreamConfig, StreamEvent, StreamProvider, ToolDefinition};
+use crate::provider::{
+    ModelConfig, ProviderError, StreamConfig, StreamEvent, StreamProvider, ToolDefinition,
+};
 use crate::types::*;
 use std::sync::Arc;
 
@@ -1348,7 +1350,8 @@ async fn stream_assistant_response(
         match &result {
             Err(e) if e.is_retryable() && attempt < retry.max_retries && !cancel.is_cancelled() => {
                 // Close the failed attempt's message so consumers can discard
-                // whatever partial content it streamed before the retry.
+                // whatever partial content it streamed before the retry. The
+                // `ProviderRetry` that follows marks it as retried, not final.
                 if attempt_events.needs_end() {
                     let failed = error_message(
                         &config.model,
@@ -1371,7 +1374,22 @@ async fn stream_assistant_response(
                     .map(|d| d.min(std::time::Duration::from_millis(retry.max_delay_ms)))
                     .unwrap_or_else(|| retry.delay_for_attempt(attempt));
                 crate::retry::log_retry(attempt, retry.max_retries, &delay, e);
-                crate::rt::sleep(delay).await;
+                tx.send(AgentEvent::provider_retry(
+                    attempt,
+                    retry.max_retries + 1,
+                    e.to_string(),
+                    delay,
+                ))
+                .ok();
+                // Cancelling during the backoff ends the turn now rather than
+                // after the delay (and a wasted request).
+                let backoff = std::pin::pin!(crate::rt::sleep(delay));
+                let cancelled = std::pin::pin!(cancel.cancelled());
+                if let futures::future::Either::Right(_) =
+                    futures::future::select(backoff, cancelled).await
+                {
+                    break (Err(ProviderError::Cancelled), AttemptEvents::default());
+                }
                 continue;
             }
             _ => break (result, attempt_events),
@@ -1383,7 +1401,14 @@ async fn stream_assistant_response(
         Ok(msg) => msg,
         Err(e) => {
             warn!("Provider error: {}", e);
-            let failed = error_message(&config.model, e.to_string());
+            let mut failed = error_message(&config.model, e.to_string());
+            // A cancelled run is aborted, not failed: it does not reach
+            // `on_error`, and consumers can tell the two apart.
+            if matches!(e, ProviderError::Cancelled) || cancel.is_cancelled() {
+                if let Message::Assistant { stop_reason, .. } = &mut failed {
+                    *stop_reason = StopReason::Aborted;
+                }
+            }
             // Close the message the final attempt opened, with the same
             // error message this turn returns.
             if attempt_events.needs_end() {

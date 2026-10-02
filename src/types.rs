@@ -1022,6 +1022,27 @@ pub enum AgentEvent {
     InputRejected {
         reason: String,
     },
+    /// A provider attempt failed with a retryable error and will be retried.
+    ///
+    /// Sent after that attempt's messages: when the attempt had opened one, a
+    /// `MessageEnd` with [`StopReason::Error`] closes it first, so a streaming
+    /// client discards its partial text. That `MessageEnd` is **not** the
+    /// turn's result — this event is what tells the two apart, so a consumer
+    /// that reacts to an error `MessageEnd` should wait for the next event. A
+    /// final failure is never followed by `ProviderRetry`. If the run is
+    /// cancelled during `delay_ms`, the announced attempt does not happen and
+    /// the turn ends with [`StopReason::Aborted`].
+    #[non_exhaustive]
+    ProviderRetry {
+        /// The attempt that failed, 1-based.
+        attempt: usize,
+        /// Attempts allowed in total: `RetryConfig::max_retries + 1`.
+        max_attempts: usize,
+        /// The provider error, as text.
+        error: String,
+        /// How long the loop waits before the next attempt.
+        delay_ms: u64,
+    },
     /// A tool was called repeatedly with identical arguments.
     ///
     /// Emitted on both escalations: the first trip steers the model and
@@ -1065,6 +1086,21 @@ impl AgentEvent {
     /// crates (and tests) build it here rather than with a struct literal.
     pub fn agent_end(messages: Vec<AgentMessage>, stats: SessionStats) -> Self {
         Self::AgentEnd { messages, stats }
+    }
+
+    /// Construct an [`AgentEvent::ProviderRetry`].
+    pub fn provider_retry(
+        attempt: usize,
+        max_attempts: usize,
+        error: impl Into<String>,
+        delay: std::time::Duration,
+    ) -> Self {
+        Self::ProviderRetry {
+            attempt,
+            max_attempts,
+            error: error.into(),
+            delay_ms: u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
+        }
     }
 
     /// Construct an [`AgentEvent::LoopDetected`].
@@ -2540,6 +2576,8 @@ mod wire_tag_freeze {
             },
         AgentEvent::InputRejected { .. } => "inputRejected"
             = AgentEvent::InputRejected { reason: "injection detected".into() },
+        AgentEvent::ProviderRetry { .. } => "providerRetry"
+            = AgentEvent::provider_retry(1, 4, "rate limited", std::time::Duration::from_millis(1500)),
         AgentEvent::LoopDetected { .. } => "loopDetected"
             = AgentEvent::loop_detected("bash", 3, false),
         AgentEvent::ContextCompacted { .. } => "contextCompacted"
