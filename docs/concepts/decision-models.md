@@ -32,7 +32,7 @@ Everything here is behind the `decision` Cargo feature, which is **not** in
 the default features and adds no dependencies:
 
 ```toml
-yoagent = { version = "0.21", features = ["decision"] }
+yoagent = { version = "0.23", features = ["decision"] }
 ```
 
 Without the feature, the `decision` module and the `with_decision_model` /

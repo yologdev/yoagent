@@ -4,9 +4,9 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.23.0
 
-The next release is **0.23.0**: the `native` feature below breaks builds that
+A minor bump because it breaks: the `native` feature below breaks builds that
 already set `default-features = false`.
 
 ### Breaking
