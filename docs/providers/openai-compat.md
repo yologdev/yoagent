@@ -1,12 +1,12 @@
 # OpenAI Compatible Provider
 
-`OpenAiCompatProvider` implements the OpenAI Chat Completions API. One implementation covers OpenAI, xAI, Groq, Cerebras, OpenRouter, Mistral, DeepSeek, MiniMax, Z.ai, Qwen, Ollama, and any other compatible API.
+`OpenAiCompatProvider` implements the OpenAI Chat Completions API. One implementation covers OpenAI, xAI, Groq, Cerebras, OpenRouter, Mistral, DeepSeek, MiniMax, Meta (Muse Spark), Z.ai, Qwen, Ollama, and any other compatible API.
 
 For the first-class `ModelConfig::*` constructors and default model metadata, see [Model Presets](model-presets.md).
 
 ## Usage
 
-Requires a `ModelConfig` with `compat` flags set in `StreamConfig.model_config`:
+Requires `StreamConfig.model_config`; its `compat` flags are optional (`None` uses `OpenAiCompat::default()`):
 
 ```rust
 use yoagent::provider::ModelConfig;
@@ -50,6 +50,7 @@ pub struct OpenAiCompat {
 | Mistral | `OpenAiCompat::mistral()` | `max_tokens` field |
 | DeepSeek | `OpenAiCompat::deepseek()` | `max_tokens`, `thinking`, `reasoning_effort`, 1M context window |
 | MiniMax | `OpenAiCompat::minimax()` | Standard defaults, 1M context window |
+| Meta (Muse Spark) | `OpenAiCompat::meta()` | `max_completion_tokens`, `reasoning_effort`, streaming usage |
 | Z.ai (Zhipu) | `OpenAiCompat::zai()` | Standard defaults |
 | Qwen | `OpenAiCompat::qwen()` | Qwen reasoning content format, `max_tokens`, streaming usage |
 | Ollama | `OpenAiCompat::ollama()` | Inserts an empty assistant message after tool result runs |

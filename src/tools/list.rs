@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use std::time::Duration;
 use tokio::process::Command;
 
-/// List files and directories. Uses `find` or `fd` for efficient traversal.
+/// List files under a directory. Uses `find` for traversal.
 pub struct ListFilesTool {
     pub max_results: usize,
     pub timeout: Duration,

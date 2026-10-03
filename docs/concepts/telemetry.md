@@ -13,8 +13,11 @@ agent_loop                (model)
 └─ tool                   (tool, tool_call_id, is_error)
 ```
 
-- `llm_stream` — one per turn, wrapping the provider call. Token counts are
-  recorded from real usage; `cost_usd` is recorded whenever the `ModelConfig`
+- `llm_stream` — one per turn, wrapping the provider call, including any
+  retried attempts and their backoff (retries get no span of their own; see
+  the `WARN` log and [`AgentEvent::ProviderRetry`](retry.md#events)). `error`
+  is `true` only for `StopReason::Error`; a cancelled turn (`Aborted`)
+  records `false`. Token counts are recorded from real usage; `cost_usd` is recorded whenever the `ModelConfig`
   has a `cost` — `0` for a free model (`Some` with zero rates). For an unpriced
   model (`cost: None`) the field is left empty, never `0`.
 - `tool` — one per tool execution, with the tool name and error status;

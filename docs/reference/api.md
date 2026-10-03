@@ -31,6 +31,8 @@ Resume from existing context. The last message must not be an assistant message.
 
 ### `default_tools()`
 
+*(feature `native`, on by default)*
+
 ```rust
 pub fn default_tools() -> Vec<Box<dyn AgentTool>>
 ```
@@ -53,6 +55,8 @@ let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude
 | `Agent::from_provider(provider: impl StreamProvider + 'static, config: ModelConfig) -> Self` | Build from an explicit provider plus its `ModelConfig` (custom providers and test doubles — pair with `ModelConfig::mock()`) |
 | `Agent::from_config_with(registry: &ProviderRegistry, config: ModelConfig) -> Result<Self, AgentBuildError>` | Like `from_config`, but resolves the provider from a caller-supplied registry |
 
+`Agent::new(provider)` with `with_model` / `with_model_config` still works but is deprecated since 0.10.0.
+
 ### Builder Methods
 
 All return `Self` for chaining (unless noted as `Result`).
@@ -65,15 +69,19 @@ All return `Self` for chaining (unless noted as `Result`).
 | `with_api_key(key) -> Self` | Override the env-resolved API key |
 | `with_thinking(level: ThinkingLevel) -> Self` | Set thinking level (`Off`, `Minimal`, `Low`, `Medium`, `High`, `XHigh`, `Max`) |
 | `with_max_tokens(max: u32) -> Self` | Set max output tokens |
+| `with_temperature(t: f32) -> Self` | Set the sampling temperature (the newest reasoning models reject it) |
 
 **Tools & Integrations**
 
 | Method | Description |
 |--------|-------------|
 | `with_tools(tools: Vec<Box<dyn AgentTool>>) -> Self` | Set tools (replaces existing) |
+| `with_tool_source(source: impl ToolSource) -> Self` | Add a tool source consulted once at the start of every run; its tools are offered for that run only (the agent's own tools win on name collisions). See [Tools](../concepts/tools.md#tools-that-change-at-runtime-toolsource) |
+| `with_tool_middleware(m: impl ToolMiddleware) -> Self` | Add an approve/modify/deny hook gating every tool call |
 | `with_sub_agent(sub: SubAgentTool) -> Self` | Add a sub-agent tool |
+| `with_shared_state(state: SharedState) -> Self` | Register the `shared_state` tool and stash truncated tool output under a retrievable key |
 | `with_skills(skills: SkillSet) -> Self` | Load skills and append their index to the system prompt |
-| `async with_mcp_server_stdio(command, args, env) -> Result<Self, McpError>` | Connect to MCP server via stdio and add its tools |
+| `async with_mcp_server_stdio(command, args, env) -> Result<Self, McpError>` | Connect to MCP server via stdio and add its tools *(feature `native`)* |
 | `async with_mcp_server_http(url) -> Result<Self, McpError>` | Connect to MCP server via HTTP and add its tools |
 | `async with_openapi_file(path, config, filter) -> Result<Self, OpenApiError>` | Load tools from an OpenAPI spec file *(requires `openapi` feature)* |
 | `async with_openapi_url(url, config, filter) -> Result<Self, OpenApiError>` | Fetch spec from URL and add tools *(requires `openapi` feature)* |
@@ -102,6 +110,7 @@ All return `Self` for chaining (unless noted as `Result`).
 | `with_decision_model(model: DecisionModel) -> Self` | *(feature `decision`)* Advisory skill/tool hints from a decision model; never blocks; needs skills or 40+ tools |
 | `with_decision_advisory(advisory: Advisory) -> Self` | *(feature `decision`)* The same, with explicit thresholds and timeout |
 | `with_tool_gate(gate: ToolGate) -> Self` | *(feature `decision`)* Deny destructive, unrequested tool calls; runs last; fails closed |
+| `with_input_guard(guard: InputGuard) -> Self` | *(feature `decision`)* Reject injection / harmful prompts; fails closed; panics if the guard has no checks |
 
 **Callbacks**
 
@@ -109,7 +118,7 @@ All return `Self` for chaining (unless noted as `Result`).
 |--------|-------------|
 | `on_before_turn(f: Fn(&[AgentMessage], usize) -> bool) -> Self` | Called before each LLM call; return `false` to abort |
 | `on_after_turn(f: Fn(&[AgentMessage], &Usage)) -> Self` | Called after each LLM response and tool execution |
-| `on_error(f: Fn(&str)) -> Self` | Called when the LLM returns `StopReason::Error` |
+| `on_error(f: Fn(&str)) -> Self` | Called when the LLM returns `StopReason::Error` (not for cancellations, which end `StopReason::Aborted` since 0.23) |
 
 ### Prompting
 
@@ -119,6 +128,7 @@ All return `Self` for chaining (unless noted as `Result`).
 | `async prompt_messages(messages) -> UnboundedReceiver<AgentEvent>` | Send messages as prompt; spawns concurrently, returns event stream immediately |
 | `async prompt_with_sender(text, tx: UnboundedSender<AgentEvent>)` | Send a text prompt, streaming events to a caller-provided sender; blocks until the loop finishes |
 | `async prompt_messages_with_sender(messages, tx)` | Send messages, streaming events to a caller-provided sender; blocks until the loop finishes |
+| `async prompt_structured::<T>(text, schema: serde_json::Value) -> Result<T, StructuredPromptError>` | Run to completion and parse a schema-constrained reply into `T`. See [Structured Outputs](../concepts/structured-outputs.md) |
 | `async continue_loop() -> UnboundedReceiver<AgentEvent>` | Resume from current context; spawns concurrently, returns event stream immediately |
 | `async continue_loop_with_sender(tx: UnboundedSender<AgentEvent>)` | Resume from current context, streaming events to a caller-provided sender; blocks until the loop finishes |
 | `async finish()` | Await a pending spawned loop and restore tools/messages/state. Called automatically at the start of each prompt method |
@@ -129,12 +139,18 @@ All return `Self` for chaining (unless noted as `Result`).
 |--------|-------------|
 | `messages() -> &[AgentMessage]` | Get the full message history |
 | `is_streaming() -> bool` | Whether the agent is currently running |
+| `session_cost_usd() -> Option<f64>` | Cost of the current history at the current rates (excludes sub-agents); `None` = unpriced |
+| `sub_agent_spend() -> &SubAgentSpend` | What sub-agents spent on this agent's behalf since construction or `reset()` |
+| `total_cost_usd() -> Option<f64>` | Everything this agent's runs spent, sub-agents included |
+| `total_usage() -> Usage` | Token usage over the same window as `total_cost_usd()` |
 
 ### State Mutation
 
 | Method | Description |
 |--------|-------------|
 | `set_tools(tools: Vec<Box<dyn AgentTool>>)` | Replace the tool set |
+| `set_model(config: ModelConfig)` | Switch model mid-session; re-resolves the env key, re-selects the provider only if it was not supplied explicitly |
+| `reprice()` | Re-run the price lookup for the current `ModelConfig` |
 | `clear_messages()` | Clear all messages |
 | `append_message(msg: AgentMessage)` | Add a message to history |
 | `replace_messages(msgs: Vec<AgentMessage>)` | Replace all messages |
@@ -165,7 +181,7 @@ All return `Self` for chaining (unless noted as `Result`).
 
 | Method | Description |
 |--------|-------------|
-| `abort()` | Cancel the current run via `CancellationToken` |
+| `abort()` | Cancel the current run via `CancellationToken`; the turn ends with `StopReason::Aborted` |
 | `async reset()` | Cancel any pending loop, recover tools, clear all state (messages, queues, streaming flag) |
 
 ## SubAgentTool
@@ -177,6 +193,8 @@ Delegates tasks to a child agent loop.
 ```rust
 // Provider auto-selected from the config's protocol; env key resolved automatically:
 let sub = SubAgentTool::from_config("name", ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"));
+
+// Or resolve against a custom registry: SubAgentTool::from_config_with(&registry, "name", config) -> Result<_, AgentBuildError>
 
 // Or pass an explicit provider Arc (custom providers, or a shared handle across sub-agents):
 let sub = SubAgentTool::from_provider("name", Arc::new(provider), ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"));
@@ -192,14 +210,24 @@ All return `Self` for chaining.
 | `with_system_prompt(prompt) -> Self` | The sub-agent's own instructions |
 | `with_api_key(key) -> Self` | Override the env-resolved API key |
 | `with_tools(tools: Vec<Arc<dyn AgentTool>>) -> Self` | Tools available to the sub-agent |
+| `with_tool_source(source: impl ToolSource) -> Self` | Add a tool source, consulted once per delegation |
+| `with_tool_middleware(m: impl ToolMiddleware) -> Self` | Gate the sub-agent's own tool calls |
+| `with_turn_hook(hook: impl TurnHook) -> Self` | Per-request hook for the sub-agent's own LLM requests |
+| `with_async_input_filter(f: impl AsyncInputFilter) -> Self` | Filter the task the parent hands over; a rejection fails the tool call |
+| `with_skills(skills: SkillSet) -> Self` | Append the skills index to the sub-agent's system prompt |
 | `with_shared_state(state: SharedState) -> Self` | Attach a shared key-value store (injects `shared_state` tool automatically) |
+| `with_scoped_shared_state(state: SharedState, scope) -> Self` | Same, restricted to keys under `scope` |
+| `with_context_config(config: ContextConfig) -> Self` | Give the child loop its own context management (truncation, compaction) |
 | `with_max_turns(N) -> Self` | Turn limit (default: 10) |
 | `with_thinking(level: ThinkingLevel) -> Self` | Enable extended thinking |
 | `with_max_tokens(max: u32) -> Self` | Set max output tokens |
+| `with_temperature(t: f32) -> Self` | Set the sampling temperature |
 | `with_cache_config(config: CacheConfig) -> Self` | Prompt caching settings |
 | `with_tool_execution(strategy: ToolExecutionStrategy) -> Self` | Tool execution strategy (`Parallel`, `Sequential`, `Batched`) |
 | `with_retry_config(config: RetryConfig) -> Self` | Custom retry configuration |
 | `with_turn_delay(delay: Duration) -> Self` | Inter-turn delay to throttle API calls (skips first turn) |
+| `with_decision_model` / `with_decision_advisory` / `with_tool_gate` / `with_input_guard` | *(feature `decision`)* Mirror the `Agent` methods for the sub-agent's own turns |
+| `reprice() -> Self` | Re-run the price lookup for the sub-agent's `ModelConfig` |
 
 ## SharedState
 
@@ -212,7 +240,7 @@ use yoagent::shared_state::{SharedState, FileBackend};
 
 let state = SharedState::new();                              // MemoryBackend, 10MB cap
 let state = SharedState::with_max_bytes(50 * 1024 * 1024);  // MemoryBackend, 50MB cap
-let state = SharedState::with_backend(FileBackend::new("./state-dir")); // FileBackend
+let state = SharedState::with_backend(FileBackend::new("./state-dir")); // FileBackend (feature `native`)
 ```
 
 ### Methods
@@ -224,21 +252,25 @@ let state = SharedState::with_backend(FileBackend::new("./state-dir")); // FileB
 | `async remove(key) -> bool` | Delete a key, returns whether it existed |
 | `async keys() -> Vec<String>` | List all keys |
 | `async summary() -> String` | Human-readable summary of keys and sizes |
+| `async prompt_summary() -> String` | Like `summary()`, minus truncation stashes (for system prompts) |
+| `scoped(scope) -> SharedState` | A handle restricted to keys under `scope` |
+| `scope() -> Option<&str>` | This handle's scope, if any |
 
 ### Built-in Backends
 
 | Backend | Description |
 |---------|-------------|
 | `MemoryBackend` | In-memory `HashMap` with byte capacity limit (default) |
-| `FileBackend` | One file per key, percent-encoded filenames, persistent |
+| `FileBackend` | One file per key, percent-encoded filenames, persistent *(feature `native`)* |
 
 ### Custom Backends
 
 Implement the `SharedStateBackend` trait:
 
 ```rust
-#[async_trait::async_trait]
-pub trait SharedStateBackend: Send + Sync {
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+pub trait SharedStateBackend: yoagent::rt::MaybeSend + yoagent::rt::MaybeSync {
     async fn get(&self, key: &str) -> Result<Option<String>, SharedStateError>;
     async fn set(&self, key: &str, value: String) -> Result<(), SharedStateError>;
     async fn remove(&self, key: &str) -> Result<bool, SharedStateError>;
@@ -247,12 +279,24 @@ pub trait SharedStateBackend: Send + Sync {
 }
 ```
 
+`MaybeSend + MaybeSync` is exactly `Send + Sync` on native targets, so a native-only implementation can keep plain `#[async_trait]`. See [WebAssembly & Cloudflare Workers](../guides/wasm-workers.md).
+
 ## Re-exports
 
 The crate re-exports key types from `lib.rs`:
 
 ```rust
-pub use agent::Agent;
+pub use agent::{Agent, AgentBuildError, StructuredPromptError};
 pub use agent_loop::{agent_loop, agent_loop_continue};
+pub use context::{CompactionStrategy, DefaultCompaction};
+pub use llm_compaction::LlmCompaction;
+pub use retry::RetryConfig;
+pub use session::{Session, SessionEntry, SessionError};
+pub use shared_state::SharedState;
+pub use skills::SkillSet;
+pub use sub_agent::SubAgentTool;
+pub use tool_source::ToolSource;
 pub use types::*;  // Message, Content, AgentMessage, AgentEvent, etc.
 ```
+
+Runtime shims (`spawn`, `sleep`, `timeout`, `JoinHandle`, `Instant`, `MaybeSend`, `MaybeSync`) live in `yoagent::rt`: Tokio's own on native targets, the host executor on wasm32.

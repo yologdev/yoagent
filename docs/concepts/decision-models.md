@@ -41,6 +41,10 @@ until you construct a model and use it** — an API key in the environment
 enables nothing on its own (a test proves this against a server that fails on
 any request).
 
+The feature also builds for wasm32 (`default-features = false, features =
+["decision"]`). There the environment is empty, so the presets find no key:
+pass it with `.with_api_key(..)`. `TYPESAFE_BASE_URL` is never read there.
+
 ## Choosing a model: one line
 
 ```rust
@@ -157,8 +161,9 @@ server `retry-after` wins over the backoff (capped at `max_delay_ms`).
 `DecisionModel` wraps a `DecisionBackend`:
 
 ```rust
-#[async_trait]
-pub trait DecisionBackend: Send + Sync {
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+pub trait DecisionBackend: rt::MaybeSend + rt::MaybeSync { // Send + Sync on native targets
     fn capabilities(&self) -> Capabilities;   // kinds, limits, batching, local
     async fn evaluate(&self, request: &Request) -> Result<Evaluation, DecisionError>;
 }

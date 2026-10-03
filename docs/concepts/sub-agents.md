@@ -37,6 +37,9 @@ let researcher = SubAgentTool::from_config(
     .with_max_turns(10);
 ```
 
+(`ReadFileTool` and `SearchTool` are among the filesystem tools behind the
+default `native` feature.)
+
 ## Registering on a Parent Agent
 
 ```rust
@@ -64,6 +67,13 @@ When the parent LLM calls multiple sub-agents in a single response, they run con
 | `from_config(name, config)` / `from_provider(name, provider, config)` | Set the sub-agent's model, provider, and metadata from a `ModelConfig` — resolves the env key automatically and can use a different model than the parent |
 | `with_api_key()` | Override the env-resolved API key explicitly |
 | `with_tools()` | Tools available to the sub-agent (accepts `Vec<Arc<dyn AgentTool>>`) |
+| `with_tool_source()` | A `ToolSource` consulted once per delegation; its tools are offered for that run only, and the sub-agent's own tools win a name collision (see [Tools](tools.md#tools-that-change-at-runtime-toolsource)) |
+| `with_tool_middleware()` | Approve/deny/modify the sub-agent's own tool calls |
+| `with_turn_hook()` | A `TurnHook` for the sub-agent's own LLM requests |
+| `with_async_input_filter()` | Screen the task before the sub-agent runs; a `Reject` fails the tool call |
+| `with_shared_state()` / `with_scoped_shared_state()` | Shared key-value store (see [Shared State](#shared-state)) |
+| `with_context_config()` | Compaction budget for the sub-agent's context |
+| `with_model()` / `with_max_tokens()` / `with_temperature()` | Override model id and sampling settings |
 | `with_max_turns(N)` | Turn limit (default: 10). Primary guard against runaway execution. |
 | `with_thinking()` | Enable extended thinking for the sub-agent |
 | `with_cache_config()` | Prompt caching settings |
@@ -76,7 +86,10 @@ When the parent LLM calls multiple sub-agents in a single response, they run con
 When the parent provides an `on_update` callback (standard for all tools), sub-agent events are forwarded as `ToolExecutionUpdate` events. The parent's UI sees real-time progress from the child:
 
 - Text deltas from the sub-agent's LLM responses
-- Tool call notifications from the sub-agent's tool usage
+- Tool call notifications from the sub-agent's tool usage (`[sub-agent calling tool: <name>]`)
+- Retry notices: a provider attempt that fails with a retryable error has its text deltas forwarded like any other, followed by `[sub-agent retrying after: <error>]`, so discard the partial text before that marker
+
+The sub-agent's `ProgressMessage` events go to the parent's `on_progress` callback.
 
 ## Shared State
 
@@ -151,7 +164,7 @@ let state = SharedState::with_max_bytes(50 * 1024 * 1024); // 50MB
 
 A `set` call that would exceed capacity returns `Err(CapacityError)`.
 
-**FileBackend** — one file per key, persistent across process restarts:
+**FileBackend** (requires the default `native` feature; not available on wasm32) — one file per key, persistent across process restarts:
 
 ```rust
 use yoagent::shared_state::FileBackend;
@@ -166,7 +179,8 @@ Keys are percent-encoded to filenames (reversible, no collisions). Useful for de
 ```rust
 use yoagent::shared_state::{SharedStateBackend, SharedStateError};
 
-#[async_trait::async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl SharedStateBackend for MyRedisBackend {
     async fn get(&self, key: &str) -> Result<Option<String>, SharedStateError> { ... }
     async fn set(&self, key: &str, value: String) -> Result<(), SharedStateError> { ... }
@@ -201,8 +215,8 @@ This works with all providers: OpenAI, Groq, DeepSeek, Gemini, Mistral, xAI, and
 
 - **Context isolation**: Each invocation starts fresh. Sub-agents don't accumulate history across calls.
 - **Nesting supported**: Sub-agents can be given other `SubAgentTool`s for recursive delegation (see [`examples/rlm.rs`](../../examples/rlm.rs)). Use `with_max_turns()` to prevent infinite chains.
-- **Cancellation propagation**: The parent's cancellation token is forwarded. Aborting the parent aborts all sub-agents.
-- **Turn limiting**: The default 10-turn limit prevents runaway execution. The parent's execution limits also apply to total wall-clock time.
+- **Cancellation propagation**: The parent's cancellation token is forwarded. Aborting the parent aborts all sub-agents. A delegation cancelled during one of its LLM calls fails the tool call (`Sub-agent '<name>' failed: Cancelled`), and waiting on a tool source is abandoned with `ToolError::Cancelled`.
+- **Turn limiting**: The default 10-turn limit prevents runaway execution; each delegation also runs under its own 300-second duration and 1M-token limits. The parent's limits are checked between its own turns and do not interrupt a running delegation.
 
 ## Isolating sub-agents from each other
 

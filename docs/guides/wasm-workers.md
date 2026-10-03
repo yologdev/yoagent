@@ -25,18 +25,19 @@ build for wasm32.
 
 ## What is available
 
-| On wasm32 | Not on wasm32 (needs the `native` feature) |
+| On wasm32 | Not on wasm32 |
 |-----------|--------------------------------------------|
 | The agent loop, `Agent`, retries, execution limits | `BashTool`, `ReadFileTool`, `WriteFileTool`, `EditFileTool`, `ListFilesTool`, `SearchTool`, `default_tools()` |
 | All providers, over the host's `fetch` | `StdioTransport` / `with_mcp_server_stdio` |
 | `AgentTool`s you write; HTTP MCP (`with_mcp_server_http`) | `FileBackend` for `SharedState` |
-| `SharedState` (in memory, or your own `SharedStateBackend`), sub-agents | `SkillSet` loading (it reads skill directories from disk) |
+| `SharedState` (in memory, or your own `SharedStateBackend`), sub-agents | `SkillSet` loading (compiles, but finds no directories: there is no filesystem) |
 | The `decision` feature | `PriceTable::fetch_cached` (its disk cache) |
 | Compaction: `LlmCompaction` runs only its deterministic tiers and never summarises | reqwest's default features (rustls TLS, HTTP/2, system proxy settings, charset decoding); SOCKS proxies |
 | | The `openapi` and `gasp` features (they need the filesystem and a full Tokio) |
 
-The `native` feature is on by default, so a dependency that keeps default
-features sees no difference.
+Everything in the right-hand column except `SkillSet` and the `openapi` /
+`gasp` features is gated by the `native` feature, which is on by default, so
+a dependency that keeps default features sees no difference.
 
 Only `wasm32-unknown-unknown` is supported. WASI targets are not.
 
@@ -49,6 +50,19 @@ finds a key there. Pass it explicitly, for example from a Worker secret:
 let key = env.secret("API_KEY")?.to_string();
 let agent = Agent::from_config(config).with_api_key(key);
 ```
+
+The same holds everywhere yoagent would read the environment (see
+[API keys](../providers/overview.md#api-keys)):
+
+- **Amazon Bedrock** reads `AWS_*` variables when the key is empty, which
+  fails here with an `Auth` error. Pass `access_key:secret[:session_token]`
+  (SigV4) or a Bedrock API key with `with_api_key`, and use a regional
+  `base_url` (`https://bedrock-runtime.<region>.amazonaws.com`): the signing
+  region cannot fall back to `AWS_REGION`.
+- **Decision models**: `DecisionModel::jev()` and the OpenCode presets find no
+  key; pass one with `.with_api_key(..)`.
+- **Prices**: `YOAGENT_PRICES` is never set; install an override with
+  `prices::global::install_override(..)`.
 
 ## Writing tools and providers for both targets
 
@@ -85,7 +99,8 @@ or ends the turn.
 ## Tasks and timers
 
 There is no Tokio runtime inside a Worker. `yoagent::rt` provides `spawn`,
-`sleep`, `timeout`, `JoinHandle` and `Instant` for both targets: on native
+`sleep`, `timeout`, `JoinHandle` and `Instant` (plus the `JoinError` and
+`Elapsed` error types) for both targets: on native
 targets they *are* Tokio's, and on wasm32 they use the host executor
 (`wasm_bindgen_futures::spawn_local`), `setTimeout` and `performance.now()`.
 Use them instead of `tokio::spawn` / `tokio::time` in code that must run on

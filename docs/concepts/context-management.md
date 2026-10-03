@@ -41,50 +41,61 @@ When the context exceeds a model's window, providers return overflow errors. yoa
 
 ### HTTP-level detection
 
-Providers that check before streaming (Google, Bedrock, Vertex) return `ProviderError::ContextOverflow`:
+An HTTP error response is classified by `ProviderError::classify()`; an
+overflow becomes `ProviderError::ContextOverflow`, which
+`ProviderError::is_context_overflow()` reports. You only see a
+`ProviderError` when calling a `StreamProvider` directly — the agent loop does
+not recover from an overflow, it turns the error into an assistant message
+with `StopReason::Error` (calling `on_error`).
 
-```rust
-use yoagent::provider::ProviderError;
-
-match agent.prompt("...").await {
-    // The loop already handles this — but you can also match it:
-    Err(ProviderError::ContextOverflow { message }) => {
-        // Compact and retry
-    }
-    _ => {}
-}
-```
-
-`ProviderError::classify()` auto-detects overflow from error messages covering Anthropic, OpenAI, Google, AWS Bedrock, xAI, Groq, OpenRouter, llama.cpp, LM Studio, MiniMax, Kimi, GitHub Copilot, and generic patterns.
+`classify()` recognizes overflow messages from Anthropic, OpenAI, Google, AWS Bedrock, xAI, Groq, OpenRouter, llama.cpp, LM Studio, MiniMax, Kimi, GitHub Copilot, and generic patterns.
 
 ### Message-level detection
 
-SSE-based providers (Anthropic, OpenAI) return overflow as a `StopReason::Error` message. Check with:
+Whichever way the provider reported it (an HTTP error, or an in-stream error
+on Anthropic and OpenAI), the turn ends with an assistant message whose
+`error_message` names the overflow. Check it with
+`Message::is_context_overflow()`:
 
 ```rust
-if message.is_context_overflow() {
-    // Compact and retry
-}
+let mut rx = agent.prompt("...").await;
+while rx.recv().await.is_some() {}
+agent.finish().await;
+
+let overflowed = agent
+    .messages()
+    .last()
+    .and_then(|m| m.as_llm())
+    .is_some_and(|m| m.is_context_overflow());
 ```
 
 ### Handling overflow in your application
 
-yoagent provides the detection and building blocks. Your application wires the compaction strategy:
+When `context_config` is set (the default — see below), the loop already
+compacts before every turn with the configured `CompactionStrategy`. What it
+does not do is recover from an overflow the provider reports anyway; that is
+yours to wire:
 
 ```rust
-// Proactive: check before each prompt
-let tokens = tracker.estimate_context_tokens(agent.messages());
-if tokens > context_window - reserve {
-    let compacted = compact_messages(agent.messages().to_vec(), &config);
-    agent.replace_messages(compacted);
-}
+use yoagent::context::{compact_messages, ContextConfig};
 
-// Reactive: catch overflow errors
-// ... on ContextOverflow or message.is_context_overflow():
-//   compact, then retry with agent.continue_loop()
+if overflowed {
+    let config = ContextConfig::from_context_window(200_000);
+    let mut history = agent.messages().to_vec();
+    history.pop(); // drop the error message: continue_loop() cannot resume from an assistant message
+    agent.replace_messages(compact_messages(history, &config));
+    let mut rx = agent.continue_loop().await;
+    while rx.recv().await.is_some() {}
+    agent.finish().await;
+}
 ```
 
-For LLM-based summarization (asking the model to summarize old messages), implement that in your application layer — yoagent provides `replace_messages()` and `compact_messages()` as building blocks.
+For LLM-based summarization, install `LlmCompaction` with
+`with_compaction_strategy(LlmCompaction::from_config(..))`: it summarizes old
+turns in a background request and falls back to deterministic compaction
+whenever no summary is ready. On wasm32 it never summarizes (compaction stays deterministic).
+`replace_messages()` and `compact_messages()` remain available for manual
+control.
 
 ## ContextConfig
 
@@ -178,7 +189,7 @@ Two limits worth knowing:
 - **Lossy compaction drops the marker but not the stash entry.** Levels 2 and 3
   drop whole turns, taking the pointer with them, while the stored value lives
   on and keeps consuming cap quota.
-- **Stash entries are evictable; caller keys are not.** Both backends evict
+- **Stash entries are evictable; caller keys are not.** Both backends (`MemoryBackend`, and the native-only `FileBackend`) evict
   oldest-first under their cap, but only `tool-out-*` entries — losing one
   degrades a marker to an ordinary "key not found" the agent can act on, and the
   head+tail is still in the transcript. Nothing regenerates an artifact you
@@ -216,7 +227,7 @@ config.tool_output_max_lines_overrides.insert("my_paging_tool".into(), usize::MA
 config.tool_output_max_lines_overrides.insert("noisy_tool".into(), 40);
 ```
 
-To restore pre-0.15 behaviour, set `truncate_tool_output_on_append: false` and construct `ReadFileTool { max_lines: usize::MAX, ..Default::default() }`.
+To restore pre-0.15 behaviour, set `truncate_tool_output_on_append: false` and construct `ReadFileTool { max_lines: usize::MAX, ..Default::default() }` (a filesystem tool, behind the default `native` feature).
 
 ### Measured effect
 

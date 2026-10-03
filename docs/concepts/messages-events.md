@@ -105,7 +105,7 @@ pub enum StopReason {
     Length,     // Hit max tokens
     ToolUse,    // Wants to call tools
     Error,      // Provider error
-    Aborted,    // Cancelled by user
+    Aborted,    // Run cancelled during an LLM call or a retry's backoff (on_error is not called)
     Refusal,    // Declined by the provider's safety system
 }
 ```
@@ -131,7 +131,7 @@ Events emitted during the agent loop for real-time UI updates:
 | Event | When |
 |-------|------|
 | `AgentStart` | Loop begins |
-| `AgentEnd { messages }` | Loop finishes, all new messages |
+| `AgentEnd { messages, stats }` | Loop finishes: all new messages plus the run's `SessionStats` |
 | `TurnStart` | New LLM call starting |
 | `TurnEnd { message, tool_results }` | LLM call + tool execution complete |
 | `MessageStart { message }` | A message is available |
@@ -143,6 +143,8 @@ Events emitted during the agent loop for real-time UI updates:
 | `ProgressMessage { tool_call_id, tool_name, text }` | User-facing progress text from a tool |
 | `InputRejected { reason }` | Input filter rejected the user's message |
 | `ProviderRetry { attempt, max_attempts, error, delay_ms }` | A provider attempt failed with a retryable error; the next starts after `delay_ms` |
+| `LoopDetected { tool_name, repetitions, aborted }` | Identical tool calls tripped loop detection (`aborted`: the run stopped) |
+| `ContextCompacted { method, messages_before, messages_after, tokens_before, tokens_after, summary }` | History was compacted before a turn (sent by `LlmCompaction` to the sender given to its `with_event_sender`, not by the loop itself) |
 
 ### Wire format
 
@@ -177,9 +179,10 @@ That `messageEnd` is **not** the turn's result when `providerRetry` follows
 it, so a client that reports failures should look at the next event first. An
 attempt that failed before streaming anything has no `messageStart`, so it
 gets only the `providerRetry`. A final failure is closed with the error the
-turn returns and is never followed by `providerRetry`; a cancelled run ends
-with `stopReason: "aborted"`, including one cancelled during a retry's
-backoff.
+turn returns and is never followed by `providerRetry`. A run cancelled during
+an LLM call ends with `stopReason: "aborted"`, including one cancelled during
+a retry's backoff; cancelling between turns or while tools run ends the run
+without a new assistant message.
 
 A client that misses events entirely (e.g. a lagged websocket subscriber)
 resyncs from the next `MessageEnd` without replay.

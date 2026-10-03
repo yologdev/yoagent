@@ -72,6 +72,11 @@ yoagent = "0.23"
 tokio = { version = "1", features = ["full"] }
 ```
 
+Building for wasm32? Use `default-features = false` (see
+[WebAssembly & Cloudflare Workers](https://yologdev.github.io/yoagent/guides/wasm-workers.html)).
+On a native target keep the default `native` feature: without it reqwest has no TLS, and every
+HTTPS provider call fails at runtime.
+
 ## Quick start
 
 An agent that actually uses a tool — the thing the crate exists for:
@@ -145,7 +150,7 @@ What that focus bought:
   event log in a git repo — restore is clone + replay. Conformance-checked in CI.
 - **The whole loop is testable offline.** `MockProvider` scripts multi-turn tool-calling
   conversations and honours cancellation, so abort and steering paths are testable with no
-  network. 1,037 of our tests run with no network and no key.
+  network. 1,197 of our tests run with no network and no key.
 
 ---
 
@@ -172,7 +177,7 @@ Built something on yoagent? [Open a PR](CONTRIBUTING.md) and add it here — we'
 <details open>
 <summary><b>The loop &amp; control</b></summary>
 
-- Full event stream: `AgentStart` → `TurnStart` → `MessageUpdate` (deltas) → `ToolExecution*` → `TurnEnd` → `AgentEnd`
+- Full event stream: `AgentStart` → `TurnStart` → `MessageUpdate` (deltas) → `ToolExecution*` → `TurnEnd` → `AgentEnd`; a retried provider attempt is closed by `MessageEnd` (`StopReason::Error`) followed by `ProviderRetry`
 - Parallel tool execution by default; `Sequential` and `Batched { size }` strategies available
 - **Steering** — interrupt mid-run; **follow-ups** — queue work after completion; both queues are inspectable and editable
 - **`ToolMiddleware`** — async `Allow` / `Modify(args)` / `Deny(reason)` hooks gating every call. A denial becomes an error tool result the model sees, so the loop keeps going
@@ -215,8 +220,8 @@ provider-specific error strings.
 <summary><b>Tools</b> — built-in, custom, MCP, OpenAPI</summary>
 
 Built in: `bash` (timeout, deny patterns), `read_file` / `write_file` (line numbers, path
-restrictions), `edit_file` (fuzzy-match hints on failure), `list_files`, `search` (ripgrep).
-Tools return stdout *and* stderr even on failure, so the model can self-correct.
+restrictions), `edit_file` (fuzzy-match hints on failure), `list_files`, `search` (ripgrep) —
+native hosts only (the default `native` feature; not on wasm32). Tools return stdout *and* stderr even on failure, so the model can self-correct.
 
 Custom tools implement one trait:
 
@@ -241,9 +246,18 @@ impl AgentTool for GreetTool {
 }
 ```
 
+A tool that must also build for wasm32 swaps the bare `#[async_trait]` for the `cfg_attr` pair in
+the [wasm guide](https://yologdev.github.io/yoagent/guides/wasm-workers.html#writing-tools-and-providers-for-both-targets).
+
 **MCP** — `with_mcp_server_stdio()` / `with_mcp_server_http()` connect to Model Context Protocol
 servers over stdio or Streamable HTTP (session ids, SSE framing, incremental parsing) and register
-their tools transparently.
+their tools transparently. Stdio needs the default `native` feature; HTTP works on wasm32 too.
+
+**`ToolSource`** — tools resolved at the start of every run (`with_tool_source`), for tool sets
+that change while the agent lives: plugin systems, reconnecting MCP servers. The
+[`yoagent-rutis`](integrations/yoagent-rutis/) bridge (not yet on crates.io) builds on it so
+[rutis](https://crates.io/crates/rutis) plugins can add tools, gate calls, add turn notes and
+filter input.
 
 **OpenAPI** (`features = ["openapi"]`) — point `with_openapi_url()` at a spec and every operation
 becomes a tool, filtered by `OperationFilter`.
@@ -263,7 +277,7 @@ becomes a tool, filtered by `OperationFilter`.
 middleware, retry policy, and turn limits — a fully independent configuration, not a thin shim.
 Run a cheap model for triage and an expensive one for the hard step in the same session.
 
-`SharedState` is a pluggable key-value store (`MemoryBackend`, `FileBackend`, or your own via the
+`SharedState` is a pluggable key-value store (`MemoryBackend`, `FileBackend` (native), or your own via the
 `SharedStateBackend` trait). A parent stores a large artifact once and sub-agents read it by key,
 so it never gets re-pasted into every context window. Opt in with `.with_shared_state(state)` —
 it injects the `shared_state` tool and a state summary into the sub-agent's system prompt.
@@ -320,6 +334,7 @@ let agent = Agent::from_config(ModelConfig::claude_sonnet_5())
 - **GASP** (`features = ["gasp"]`) — record runs into a [GASP](https://github.com/yologdev/gasp) agent repo; yoagent is a tested-conformant runtime, with the 7-check suite running in CI
 - **Serde throughout** — every core type is `Serialize` / `Deserialize` / `PartialEq`, so sessions persist and replay
 - **`set_model()`** — hot-swap the model mid-session without rebuilding the agent
+- **WebAssembly** — `--no-default-features` builds for `wasm32-unknown-unknown` (e.g. Cloudflare Workers): the loop, every provider over the host's `fetch`, HTTP MCP, in-memory `SharedState`, sub-agents and `decision`. See [WebAssembly & Cloudflare Workers](https://yologdev.github.io/yoagent/guides/wasm-workers.html)
 
 </details>
 
@@ -327,11 +342,11 @@ let agent = Agent::from_config(ModelConfig::claude_sonnet_5())
 
 ## Examples
 
-Eleven runnable examples in [`examples/`](examples/). Five need no API key at all.
+Eleven of the runnable examples in [`examples/`](examples/) are below; five need no API key at all. The rest are live-provider harnesses and offline evaluation sweeps.
 
 | Example | What it shows | Key needed |
 |---|---|---|
-| [`cli`](examples/cli.rs) | A 370-line coding agent — all tools, skills, streaming, colored output. Like a baby Claude Code | optional¹ |
+| [`cli`](examples/cli.rs) | A 385-line coding agent — all tools, skills, streaming, colored output. Like a baby Claude Code | optional¹ |
 | [`rlm`](examples/rlm.rs) | An LLM that explores a codebase on its own by spawning sub-agents | yes |
 | [`code_review`](examples/code_review.rs) | Three sub-agents reviewing a diff in parallel, results merged | yes |
 | [`shared_state`](examples/shared_state.rs) | Passing a large artifact between sub-agents by reference | yes |
@@ -368,10 +383,10 @@ let agent = Agent::from_provider(provider, ModelConfig::mock());
 It emits real `StreamEvent`s and honours the `CancellationToken`, so abort and steering paths are
 testable too.
 
-- **1,037 tests run with no network and no API keys** — `cargo test --all-features`; 16 more are opt-in live checks and benchmarks
-- HTTP-level tests with `wiremock` across 17 suites: provider SSE streams, MCP over HTTP, OpenAPI, decision backends and price fetching
+- **1,197 tests run with no network and no API keys** — `cargo test --all-features`; 16 more are opt-in live checks and benchmarks
+- HTTP-level tests with `wiremock` across 19 suites: provider SSE streams, Bedrock auth and eventstream, MCP over HTTP, OpenAPI, decision backends and price fetching
 - `clippy --all-targets --all-features` with `-Dwarnings`, `cargo fmt --check`
-- Linux + macOS test matrix, a Windows compile check, a pinned **MSRV 1.86** job, per-feature builds (default, `openapi`, `gasp`, `decision`), and a GASP conformance job
+- Linux + macOS test matrix, a Windows compile check, a pinned **MSRV 1.86** job, per-feature builds (default, `openapi`, `gasp`, `decision`, `--no-default-features`), a `wasm32-unknown-unknown` clippy job plus a wasm32 test suite under Node, the `yoagent-rutis` bridge jobs, and a GASP conformance job
 
 ---
 
@@ -381,16 +396,19 @@ testable too.
 |---|---|
 | [`agent_loop`](src/agent_loop.rs) | The loop itself — `agent_loop`, `agent_loop_continue`, `AgentLoopConfig`, execution strategies |
 | [`agent`](src/agent.rs) | Optional stateful wrapper — history, tool registry, steering/follow-up queues |
+| [`rt`](src/rt.rs) | `spawn`, `sleep`, `timeout`, `Instant`, `MaybeSend` / `MaybeSync` — Tokio on native targets, the host executor on wasm32 |
 | [`types`](src/types.rs) | `Message`, `Content`, `AgentEvent`, `AgentTool`, `ToolMiddleware`, `InputFilter` |
 | [`provider/`](src/provider/) | `StreamProvider` trait, `ModelConfig`, registry, and the 7 protocol implementations + `MockProvider` |
 | [`tools/`](src/tools/) | `bash`, `file`, `edit`, `list`, `search`, `shared_state_tool` |
+| [`tool_source`](src/tool_source.rs) | `ToolSource` — tools resolved at the start of every run |
 | [`sub_agent`](src/sub_agent.rs) | `SubAgentTool` — delegation to child loops |
 | [`shared_state`](src/shared_state.rs) | `SharedState` + pluggable backends |
 | [`session`](src/session.rs) | Branching conversation trees with JSONL persistence |
 | [`context`](src/context.rs) | Token tracking, tiered compaction, execution limits |
+| [`llm_compaction`](src/llm_compaction.rs) | `LlmCompaction` — summarise the dropped span with a background LLM request |
 | [`skills`](src/skills.rs) | AgentSkills `SKILL.md` loading |
 | [`retry`](src/retry.rs) | Backoff with jitter |
-| [`mcp/`](src/mcp/) | MCP client, stdio + HTTP transports, tool adapter |
+| [`mcp/`](src/mcp/) | MCP client, stdio (native) + HTTP transports, tool adapter |
 | [`openapi/`](src/openapi/) | OpenAPI 3.0 → tools (feature `openapi`) |
 | [`gasp`](src/gasp.rs) | Run recording into a GASP repo (feature `gasp`) |
 | [`decision/`](src/decision/) | Decision models (SystemOne and logprob backends, fallbacks, calibration), advisory hints, the tool gate and the input guard (feature `decision`) |

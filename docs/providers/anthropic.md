@@ -14,7 +14,10 @@ let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude
 
 ### Streaming SSE
 
-Uses `reqwest-eventsource` to parse Anthropic's SSE stream. Events handled:
+Uses `reqwest-eventsource` to parse Anthropic's SSE stream, with the library's
+own reconnect disabled: a dropped stream is a `ProviderError`, and the agent
+loop decides whether to retry, so a completion request is never re-sent behind
+its back. Events handled:
 
 - `message_start` — Input token usage, cache stats
 - `content_block_start` — Text, thinking, `redacted_thinking`, or tool_use block
@@ -169,12 +172,17 @@ request.
 
 ### Cache Control
 
-Automatic prompt caching via `cache_control` markers:
+Up to three `cache_control: {"type": "ephemeral"}` breakpoints, controlled by
+`CacheConfig` (default `CacheStrategy::Auto` places all three):
 
-- **System prompt**: Always cached with `{"type": "ephemeral"}`
-- **Second-to-last message**: Gets `cache_control` on its last content block, creating a cache breakpoint
+- **System prompt**
+- **Last tool definition**
+- **The last block of the latest earlier message with non-empty content**
+  (normally the second-to-last message)
 
-This means on repeated calls, only the latest message is processed at full price.
+`enabled: false` or `CacheStrategy::Disabled` places none; `Manual` picks them
+individually. On repeated calls only the newest message is processed at full
+price. See [Prompt Caching](../concepts/prompt-caching.md).
 
 ## Configuration
 
@@ -194,3 +202,7 @@ speaks the Anthropic Messages protocol (e.g. OpenCode Zen/Go — see
 | Variable | Purpose |
 |----------|---------|
 | `ANTHROPIC_API_KEY` | API key |
+
+Read by `Agent::from_config`; `with_api_key` overrides it. On wasm32 there are
+no environment variables, so pass the key with `with_api_key` (see
+[API keys](overview.md#api-keys)).

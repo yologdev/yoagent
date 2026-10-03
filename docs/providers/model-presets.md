@@ -36,6 +36,7 @@ Use a preset when the provider is listed here. Use a custom `ModelConfig` when y
 | `ModelConfig::ollama(base_url, model_id)` | Ollama | `OpenAiCompletions` | caller provided | 128K | 4,096 |
 | `ModelConfig::openai_compat(base_url, model_id, provider, compat)` | Custom compatible server | `OpenAiCompletions` | caller provided | 128K | 4,096 |
 | `ModelConfig::local(base_url, model_id)` | Local compatible server | `OpenAiCompletions` | caller provided | 128K | 4,096 |
+| `ModelConfig::custom(api, provider, base_url, model_id, name)` | Any (Azure, Bedrock, Vertex, gateways) | caller provided | caller provided | 128K | 16,000 |
 
 The constructors do not validate model IDs. They send the `id` you pass through to the provider, which lets you use newly released model IDs before yoagent updates its examples.
 
@@ -166,4 +167,4 @@ let non_thinking = Agent::from_config(ModelConfig::deepseek("deepseek-flash", "D
 
 ## Compat Flags Without Constructors
 
-`OpenAiCompat` also has quirk presets such as `OpenAiCompat::cerebras()` and `OpenAiCompat::openrouter()`. Those are compatibility profiles, not full `ModelConfig` constructors. To use them, call `ModelConfig::openai_compat(...)` with the provider name, base URL, and `compat` value you need.
+`OpenAiCompat` also has quirk presets such as `OpenAiCompat::cerebras()` and `OpenAiCompat::openrouter()`. Those are compatibility profiles, not full `ModelConfig` constructors. To use them, call `ModelConfig::openai_compat(...)` with the provider name, base URL, and `compat` value you need. The API key is resolved from the provider string, so pass `"cerebras"` / `"openrouter"` as `provider` to pick up `CEREBRAS_API_KEY` / `OPENROUTER_API_KEY`; any other name falls back to `YOAGENT_API_KEY` / `API_KEY` (see [API keys](overview.md#api-keys)).

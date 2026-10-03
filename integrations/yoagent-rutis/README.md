@@ -3,6 +3,8 @@
 Extend a [yoagent](https://crates.io/crates/yoagent) `Agent` at runtime with
 [rutis](https://crates.io/crates/rutis) plugins.
 
+**Status:** 0.1.0, not yet on crates.io; built against yoagent 0.23.
+
 rutis (a Rust port of the [Cordis](https://github.com/shigma/cordis) plugin
 kernel) loads, unloads, reloads and hot-updates plugins, and tears down
 everything a plugin registered when it goes. With this bridge such plugins
@@ -67,8 +69,10 @@ For per-generation state or config, implement `rutis::Plugin` (or
 `on_agent_event`. Declare `TypeKey::of::<ToolRegistry>()` in `injects` so a
 tool plugin waits for the bridge.
 
-Runnable offline: `cargo run --example policy_plugin` (a tool plugin plus a
-policy plugin that denies a tool by name and caps calls per tool).
+Runnable offline: `cargo run --example policy_plugin` from this directory, or
+with `--manifest-path integrations/yoagent-rutis/Cargo.toml` from the repo
+root (a tool plugin plus a policy plugin that denies a tool by name and caps
+calls per tool).
 
 ## Semantics
 
@@ -158,8 +162,13 @@ policy plugin that denies a tool by name and caps calls per tool).
 
 ## Publishing
 
-`publish = false` for now: the crate needs the yoagent release that ships
-`ToolSource`. Flip it (and bump the `yoagent` requirement) after that release.
+Not yet on crates.io (`publish = false`). It requires yoagent 0.23.0, the
+first release with `ToolSource`, which is now published, so the remaining step
+is flipping `publish`. Until then, depend on it by git:
+
+```toml
+yoagent-rutis = { git = "https://github.com/yologdev/yoagent" }
+```
 
 ## License
 
