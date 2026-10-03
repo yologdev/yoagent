@@ -115,7 +115,7 @@ pub use guard::InputGuard;
 pub use logprobs::LogprobBackend;
 pub use mock::MockBackend;
 pub use question::{Question, QuestionKind, Request};
-pub use systemone::SystemOneBackend;
+pub use systemone::{parse_systemone_response, SystemOneBackend};
 
 use crate::provider::CostConfig;
 use serde_json::Value;
@@ -244,12 +244,20 @@ impl DecisionModel {
         }
     }
 
-    /// Cloudflare's Clef (`@cf/cloudflare/clef`, 27B) on Workers AI, run on
-    /// Cloudflare account `account_id`. The API token is read at call time
-    /// from `CLOUDFLARE_API_TOKEN`, then `CLOUDFLARE_AUTH_TOKEN` (or set it
-    /// with [`with_api_key`](Self::with_api_key) — on wasm32 there is no
-    /// environment). Priced from the built-in table ($0.24 per million input
-    /// tokens) while requests go to Cloudflare; unpriced elsewhere.
+    /// Cloudflare's Clef (`@cf/cloudflare/clef`, 27B) on Workers AI, called
+    /// through the REST API on Cloudflare account `account_id`. The API token
+    /// (Workers AI Read and Edit) is read at call time from
+    /// `CLOUDFLARE_API_TOKEN`, then `CLOUDFLARE_AUTH_TOKEN`, or set with
+    /// [`with_api_key`](Self::with_api_key) — on wasm32 there is no process
+    /// environment. Priced from the resolved price table ($0.24 per million
+    /// input tokens by default) by the model id the response reports; that is
+    /// the list price, while Cloudflare bills in neurons with a daily free
+    /// allocation.
+    ///
+    /// Keep the preset's model id: Clef's input schema accepts only `clef`
+    /// and `clef-flash`, each at its own URL, and
+    /// [`with_model`](Self::with_model) changes the id but not the URL. For
+    /// Clef Flash use [`clef_flash`](Self::clef_flash).
     ///
     /// ```no_run
     /// # async fn demo() -> Result<(), yoagent::decision::DecisionError> {
@@ -259,10 +267,8 @@ impl DecisionModel {
     /// # Ok(()) }
     /// ```
     ///
-    /// Through Cloudflare AI Gateway, point the backend at the gateway URL:
-    /// `SystemOneBackend::workers_ai(..).with_endpoint_url(..)` and
-    /// [`from_backend`](Self::from_backend) (unpriced until
-    /// [`with_cost`](Self::with_cost)).
+    /// Inside a Cloudflare Worker, the `yoagent-workers` crate runs Clef
+    /// through the Worker's AI binding instead, with no token.
     pub fn clef(account_id: impl AsRef<str>) -> Self {
         Self::workers_ai(account_id, "clef")
     }
@@ -556,7 +562,17 @@ impl DecisionModel {
                 }
                 // The model may report itself by its catalog path.
                 let id = model.strip_prefix("@cf/cloudflare/").unwrap_or(model);
-                crate::provider::prices::global::resolved().cost(CLOUDFLARE_PRICE_PROVIDER, id)?
+                let cost =
+                    crate::provider::prices::global::resolved().cost(CLOUDFLARE_PRICE_PROVIDER, id);
+                if cost.is_none() && warn_once(format!("unlisted:{CLOUDFLARE_PRICE_PROVIDER}/{id}"))
+                {
+                    tracing::warn!(
+                        model = %id,
+                        "no price for {CLOUDFLARE_PRICE_PROVIDER}/{id} in the price table; \
+                         its evaluations are unpriced"
+                    );
+                }
+                cost?
             }
             Pricing::Fixed(c) => c.clone(),
             Pricing::Unpriced => return None,
@@ -734,7 +750,7 @@ impl DecisionModel {
             _ => {}
         }
         if !eval.usage_reported {
-            if !WARNED_NO_USAGE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            if warn_once(format!("no-usage:{}", eval.model)) {
                 tracing::warn!(
                     model = %eval.model,
                     "decision backend reported no usage; its evaluations are unpriced"
@@ -953,8 +969,13 @@ fn is_free(c: &CostConfig) -> bool {
         })
 }
 
-/// Warned once per process that a backend reported no usage.
-static WARNED_NO_USAGE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Whether `key` is new to this process: each warning that would repeat on
+/// every evaluation (no usage, an unlisted price) is logged once per model.
+pub(crate) fn warn_once(key: String) -> bool {
+    static WARNED: std::sync::Mutex<std::collections::BTreeSet<String>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    WARNED.lock().unwrap_or_else(|e| e.into_inner()).insert(key)
+}
 
 /// Every question must have a valid answer of its own type, and nothing
 /// else survives: answers nobody asked for are dropped (so a backend cannot
@@ -1069,14 +1090,7 @@ mod pricing_tests {
         assert!((cost - 0.18).abs() < 1e-12, "{cost}");
         assert_eq!(clef.cost_usd("clef-9", &usage), None, "unlisted unpriced");
 
-        // AI Gateway bills the same; any other host is unpriced.
-        let gateway = DecisionModel {
-            backend: Slot::SystemOne(SystemOneBackend::workers_ai("acct", "x").with_endpoint_url(
-                "https://gateway.ai.cloudflare.com/v1/acct/gw/workers-ai/@cf/cloudflare/clef",
-            )),
-            ..DecisionModel::clef("acct")
-        };
-        assert!(gateway.cost_usd("clef", &usage).is_some());
+        // Any other host is unpriced: its bill is not Cloudflare's list price.
         let proxied = DecisionModel {
             backend: Slot::SystemOne(
                 SystemOneBackend::workers_ai("acct", "x")

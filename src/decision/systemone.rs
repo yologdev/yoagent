@@ -28,9 +28,14 @@ pub(crate) const WORKERS_AI_API_BASE: &str = "https://api.cloudflare.com/client/
 pub(crate) const CLOUDFLARE_API_TOKEN_ENV: &str = "CLOUDFLARE_API_TOKEN";
 /// The name Workers AI's model pages use, read second.
 pub(crate) const CLOUDFLARE_AUTH_TOKEN_ENV: &str = "CLOUDFLARE_AUTH_TOKEN";
-/// Hosts that bill Workers AI at its list price: the REST API, and AI
-/// Gateway in front of it.
-const CLOUDFLARE_HOSTS: &[&str] = &["api.cloudflare.com", "gateway.ai.cloudflare.com"];
+/// The host that bills Workers AI at its list price: the REST API.
+const CLOUDFLARE_HOST: &str = "api.cloudflare.com";
+/// Workers AI's error code for an account that used up its daily free
+/// allocation: answered with a 429, but no retry succeeds until the reset.
+const CLOUDFLARE_DAILY_LIMIT: u64 = 3036;
+/// Workers AI's error code for a request that does not match the model's
+/// input schema.
+const CLOUDFLARE_SCHEMA_ERROR: u64 = 5006;
 
 /// Longest error-body excerpt kept in a [`DecisionError`].
 pub(crate) const MAX_ERROR_BODY: usize = 2_000;
@@ -39,7 +44,7 @@ pub(crate) const MAX_ERROR_BODY: usize = 2_000;
 enum Endpoint {
     /// A base URL; requests go to `{base}/v1/systemone`.
     Fixed(String),
-    /// The exact URL requests go to (Workers AI, AI Gateway, a proxy).
+    /// The exact URL requests go to (a Workers AI model, a proxy).
     Exact(String),
     /// Read the variable at call time, falling back to the default.
     EnvOr { var: String, default: String },
@@ -177,9 +182,8 @@ impl SystemOneBackend {
     }
 
     /// Send requests to exactly this URL, with no `/v1/systemone` appended:
-    /// a SystemOne model served at its own path, such as Clef through
-    /// Cloudflare AI Gateway
-    /// (`https://gateway.ai.cloudflare.com/v1/{account}/{gateway}/workers-ai/@cf/cloudflare/clef`).
+    /// a SystemOne model served at its own path (a Workers AI model, or a
+    /// proxy in front of one).
     pub fn with_endpoint_url(mut self, url: impl Into<String>) -> Self {
         self.endpoint = Endpoint::Exact(url.into());
         self
@@ -240,60 +244,133 @@ impl SystemOneBackend {
         self.host() == TYPESAFE_HOST
     }
 
-    /// Whether requests currently go to Cloudflare (the REST API or AI
-    /// Gateway), so Workers AI's list prices apply.
+    /// Whether requests currently go to Cloudflare's REST API, so Workers
+    /// AI's list prices apply.
     pub(crate) fn is_cloudflare_host(&self) -> bool {
-        CLOUDFLARE_HOSTS.contains(&self.host().as_str())
+        self.host() == CLOUDFLARE_HOST
     }
 
-    fn key(&self) -> Result<Option<String>, DecisionError> {
+    /// The key to send, and the variable it came from (to name in an auth
+    /// error). The value is trimmed: a trailing newline in an exported token
+    /// would otherwise fail the request before it is sent.
+    fn key(&self) -> Result<Option<(String, Option<&str>)>, DecisionError> {
         match &self.key {
             Key::None => Ok(None),
-            Key::Fixed(k) => Ok(Some(k.clone())),
-            Key::Env(vars) => vars
-                .iter()
-                .find_map(|var| std::env::var(var).ok().filter(|v| !v.trim().is_empty()))
-                .map(Some)
-                .ok_or_else(|| DecisionError::MissingApiKey(vars.join(" or "))),
+            Key::Fixed(k) => Ok(Some((k.trim().to_string(), None))),
+            Key::Env(vars) => {
+                let found = vars.iter().find_map(|var| {
+                    let value = std::env::var(var).ok()?;
+                    let value = value.trim();
+                    (!value.is_empty()).then(|| (value.to_string(), Some(var.as_str())))
+                });
+                match found {
+                    Some(found) => Ok(Some(found)),
+                    None => {
+                        let mut names = vars.join(" or ");
+                        if vars.iter().any(|v| std::env::var_os(v).is_some()) {
+                            names.push_str(" (set, but empty)");
+                        }
+                        Err(DecisionError::MissingApiKey(names))
+                    }
+                }
+            }
         }
     }
 
     async fn send_once(&self, request: &Request, body: &[u8]) -> Result<Evaluation, DecisionError> {
         let key = self.key()?;
-        let value = post_json(&self.client, &self.endpoint_url(), key.as_deref(), body).await?;
-        parse_evaluation(&unwrap_envelope(value)?, request)
+        let value = post_json(
+            &self.client,
+            &self.endpoint_url(),
+            key.as_ref().map(|(k, _)| k.as_str()),
+            body,
+        )
+        .await
+        .map_err(|e| match (e, key.as_ref().and_then(|(_, var)| *var)) {
+            // Say which variable the rejected key came from.
+            (DecisionError::Http { status, body }, Some(var)) if status == 401 || status == 403 => {
+                DecisionError::http(status, format!("{body} (key from ${var})"))
+            }
+            (e, _) => e,
+        })?;
+        parse_systemone_response(value, request)
+    }
+}
+
+/// Cloudflare's REST API wraps a model's output as
+/// `{"result": {...}, "success": true, "errors": [], "messages": []}`; take
+/// the `result`. A plain SystemOne response (it has `answers`) passes through.
+/// A 2xx body that says `"success": false` is an error carrying Cloudflare's
+/// `errors` (non-2xx responses never reach here: [`status_error`] classifies
+/// them by status).
+fn unwrap_envelope(value: Value) -> Result<Value, DecisionError> {
+    if value.get("answers").is_some() {
+        return Ok(value);
+    }
+    if value.get("success").and_then(Value::as_bool) == Some(false) {
+        let errors = match value.get("errors") {
+            Some(errors) => excerpt(&errors.to_string(), MAX_ERROR_BODY),
+            None => "(no errors given)".to_string(),
+        };
+        if cloudflare_codes(&value).contains(&CLOUDFLARE_SCHEMA_ERROR) {
+            return Err(DecisionError::Invalid(format!(
+                "Cloudflare rejected the request: {errors}"
+            )));
+        }
+        return Err(DecisionError::backend(format!(
+            "Cloudflare reported failure: {errors}"
+        )));
+    }
+    let Value::Object(mut map) = value else {
+        return Ok(value);
+    };
+    let Some(result) = map.remove("result") else {
+        return Ok(Value::Object(map));
+    };
+    match result {
+        Value::Object(_) => Ok(result),
+        // A model may hand back its JSON as text.
+        Value::String(text) => match serde_json::from_str::<Value>(&text) {
+            Ok(parsed @ Value::Object(_)) => Ok(parsed),
+            _ => Err(DecisionError::BadResponse(format!(
+                "Cloudflare's `result` is text, not a SystemOne response: {}",
+                excerpt(&text, 200)
+            ))),
+        },
+        other => Err(DecisionError::BadResponse(format!(
+            "Cloudflare's `result` is {}, not a SystemOne response",
+            json_kind(&other)
+        ))),
+    }
+}
+
+/// The `code` of each entry in a Cloudflare body's `errors`.
+fn cloudflare_codes(body: &Value) -> Vec<u64> {
+    body.get("errors")
+        .and_then(Value::as_array)
+        .map(|errors| {
+            errors
+                .iter()
+                .filter_map(|e| e.get("code").and_then(Value::as_u64))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn json_kind(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
     }
 }
 
 /// POST a JSON `body` (bearer `key` when set) and read a JSON response,
 /// mapping failures to [`DecisionError`]s the retry policy understands.
 /// Shared by the HTTP backends.
-/// Cloudflare's REST API wraps a model's output as
-/// `{"result": {...}, "success": true, "errors": [], "messages": []}`; take
-/// the `result`. A plain SystemOne response (it has `answers`) passes through.
-/// A body that says `"success": false` is an error carrying its `errors`.
-fn unwrap_envelope(value: Value) -> Result<Value, DecisionError> {
-    if value.get("answers").is_some() {
-        return Ok(value);
-    }
-    if value.get("success").and_then(Value::as_bool) == Some(false) {
-        let errors = value
-            .get("errors")
-            .map(Value::to_string)
-            .unwrap_or_default();
-        return Err(DecisionError::BadResponse(format!(
-            "the server reported failure: {}",
-            excerpt(&errors, MAX_ERROR_BODY)
-        )));
-    }
-    match value {
-        Value::Object(mut map) if map.get("result").is_some_and(Value::is_object) => {
-            Ok(map.remove("result").unwrap_or_default())
-        }
-        other => Ok(other),
-    }
-}
-
 pub(crate) async fn post_json(
     client: &reqwest::Client,
     url: &str,
@@ -409,10 +486,17 @@ pub(crate) fn status_error(
     headers: &reqwest::header::HeaderMap,
     body: &str,
 ) -> DecisionError {
+    let parsed = || serde_json::from_str::<Value>(body).unwrap_or_default();
     match status {
-        429 | 529 => DecisionError::rate_limited(
+        // A daily allowance that ran out is a 429 no retry can fix before
+        // the reset: report it, with its explanation, without retrying.
+        429 if cloudflare_codes(&parsed()).contains(&CLOUDFLARE_DAILY_LIMIT) => {
+            DecisionError::http(status, excerpt(body, MAX_ERROR_BODY))
+        }
+        429 | 529 => DecisionError::rate_limited_with_body(
             status,
             crate::provider::traits::parse_retry_after(headers).map(Duration::from_millis),
+            excerpt(body, MAX_ERROR_BODY),
         ),
         422 => DecisionError::Invalid(format!(
             "server rejected the request (422): {}",
@@ -436,6 +520,23 @@ fn level_text(v: &Value) -> String {
         Value::String(s) => s.clone(),
         other => other.to_string(),
     }
+}
+
+/// Parse a SystemOne response `body` against the `request` that produced it,
+/// for a backend that moves the request itself — such as a Cloudflare
+/// Workers AI binding (`yoagent-workers`), which calls the model without
+/// HTTP. Cloudflare's `{"result": ...}` envelope is unwrapped, and
+/// `"success": false` is a [`DecisionError::BadResponse`].
+///
+/// Parses leniently, like [`SystemOneBackend`]: unknown fields are ignored and
+/// a missing `confidence`, `choice`, `score` or `legend` is computed. It checks
+/// shape only; [`DecisionModel`](super::DecisionModel) validates the values of
+/// every backend's answers.
+pub fn parse_systemone_response(
+    body: Value,
+    request: &Request,
+) -> Result<Evaluation, DecisionError> {
+    parse_evaluation(&unwrap_envelope(body)?, request)
 }
 
 /// Parse a SystemOne response against the request that produced it. Shape
@@ -607,12 +708,10 @@ mod tests {
         assert!(b.is_cloudflare_host());
         assert!(!b.is_typesafe_host());
         // An exact URL is used as given: no `/v1/systemone` appended.
-        let gw = b.with_endpoint_url("https://gateway.ai.cloudflare.com/v1/a/g/workers-ai/m");
-        assert_eq!(
-            gw.endpoint_url(),
-            "https://gateway.ai.cloudflare.com/v1/a/g/workers-ai/m"
-        );
-        assert!(gw.is_cloudflare_host());
+        let proxy = b.with_endpoint_url("https://proxy.example/ai/run/m");
+        assert_eq!(proxy.endpoint_url(), "https://proxy.example/ai/run/m");
+        assert!(!proxy.is_cloudflare_host());
+        assert!(SystemOneBackend::new("https://API.Cloudflare.com/client/v4").is_cloudflare_host());
         assert!(
             !SystemOneBackend::new("https://api.cloudflare.com.evil.example").is_cloudflare_host()
         );
@@ -635,13 +734,60 @@ mod tests {
         // field named `result`.
         let plain = serde_json::json!({"answers": {}, "result": {"x": 1}});
         assert_eq!(unwrap_envelope(plain.clone()).unwrap(), plain);
+        // A schema error is the request's fault; any other failure is
+        // Cloudflare's.
         let failed = serde_json::json!({
             "result": null, "success": false,
             "errors": [{"code": 5006, "message": "Error: oneOf at '/' not met"}]
         });
         match unwrap_envelope(failed) {
-            Err(DecisionError::BadResponse(m)) => assert!(m.contains("oneOf"), "{m}"),
+            Err(DecisionError::Invalid(m)) => assert!(m.contains("oneOf"), "{m}"),
+            other => panic!("expected Invalid, got {other:?}"),
+        }
+        let failed = serde_json::json!({"success": false});
+        match unwrap_envelope(failed) {
+            Err(DecisionError::Backend { message, .. }) => {
+                assert!(message.contains("(no errors given)"), "{message}")
+            }
+            other => panic!("expected Backend, got {other:?}"),
+        }
+        // A `result` that is not a SystemOne object says so.
+        match unwrap_envelope(serde_json::json!({"result": null, "success": true})) {
+            Err(DecisionError::BadResponse(m)) => assert!(m.contains("`result` is null"), "{m}"),
             other => panic!("expected BadResponse, got {other:?}"),
         }
+        match unwrap_envelope(serde_json::json!({"result": "sorry", "success": true})) {
+            Err(DecisionError::BadResponse(m)) => assert!(m.contains("sorry"), "{m}"),
+            other => panic!("expected BadResponse, got {other:?}"),
+        }
+        // JSON handed back as text is read.
+        let text = serde_json::json!({"result": inner.to_string(), "success": true});
+        assert_eq!(unwrap_envelope(text).unwrap(), inner);
+    }
+
+    #[test]
+    fn a_used_up_daily_allocation_is_not_retried_but_capacity_is() {
+        let headers = reqwest::header::HeaderMap::new();
+        let daily = r#"{"success":false,"errors":[{"code":3036,"message":"You have used up your daily free allocation of 10,000 neurons."}]}"#;
+        let e = status_error(429, &headers, daily);
+        assert!(
+            matches!(e, DecisionError::Http { status: 429, .. }),
+            "{e:?}"
+        );
+        assert!(!e.is_retryable());
+        assert!(e.to_string().contains("daily free allocation"), "{e}");
+
+        let busy = r#"{"success":false,"errors":[{"code":3040,"message":"Capacity temporarily exceeded, please try again."}]}"#;
+        let e = status_error(429, &headers, busy);
+        assert!(e.is_retryable());
+        assert!(
+            e.to_string().contains("Capacity temporarily exceeded"),
+            "{e}"
+        );
+        // A plain 429 with no body still reads cleanly.
+        assert_eq!(
+            status_error(429, &headers, "").to_string(),
+            "decision model rate limited or overloaded (HTTP 429)"
+        );
     }
 }
