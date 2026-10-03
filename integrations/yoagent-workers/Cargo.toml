@@ -14,10 +14,8 @@ authors = ["Yuanhao <yuanhao@yolog.dev>"]
 # Mirrors yoagent's MSRV; not checked by CI (the wasm32 test tooling tracks
 # newer compilers).
 rust-version = "1.86"
-# Not published yet: it needs `decision::parse_systemone_response`, which is
-# unreleased (the release after yoagent 0.23.0). Before publishing, raise the
-# `yoagent` requirement below to that release: "0.23.0" would accept a
-# crates.io 0.23.x without it.
+# Not published yet. It needs `decision::parse_systemone_response`, first
+# released in yoagent 0.24.0: keep the requirement below at 0.24 or later.
 publish = false
 
 [package.metadata.docs.rs]
@@ -26,7 +24,7 @@ targets = ["wasm32-unknown-unknown"]
 # Everything here exists only on wasm32: a binding is a JavaScript object the
 # Workers runtime hands the Worker. On other targets the crate is empty.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-yoagent = { path = "../..", version = "0.23.0", default-features = false, features = ["decision"] }
+yoagent = { path = "../..", version = "0.24.0", default-features = false, features = ["decision"] }
 async-trait = "0.1"
 js-sys = "0.3"
 serde_json = "1"
