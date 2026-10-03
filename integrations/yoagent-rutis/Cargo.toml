@@ -13,13 +13,12 @@ categories = ["asynchronous", "development-tools"]
 authors = ["Yuanhao <yuanhao@yolog.dev>"]
 # yoagent's MSRV; rutis 0.5 declares 1.85.
 rust-version = "1.86"
-# Not published yet; yoagent 0.23.0, the first release with `ToolSource`, is
-# what the requirement below needs on crates.io.
+# Not published yet. It needs yoagent 0.23 or later (`ToolSource`).
 publish = false
 
 [dependencies]
-# 0.23.0 is the first release with `ToolSource`.
-yoagent = { path = "../..", version = "0.23.0" }
+# The path's version; 0.23.0 is the first release with `ToolSource`.
+yoagent = { path = "../..", version = "0.24.0" }
 # 0.x caret: 0.5.x only (0.6 is breaking). Any rutis minor bump is a
 # yoagent-rutis minor bump — its types are part of this crate's API.
 rutis = "0.5"

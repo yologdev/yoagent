@@ -3,9 +3,9 @@
 Run [yoagent](https://crates.io/crates/yoagent) on Cloudflare Workers through
 the Worker's own bindings.
 
-**Status:** 0.1.0, not on crates.io. It needs
-`yoagent::decision::parse_systemone_response`, which ships in the yoagent
-release after 0.23.0. Until then, take both crates from git (below).
+**Status:** 0.1.0, not on crates.io; built against yoagent 0.24 (the first
+release with `decision::parse_systemone_response`). Until it is published,
+take both crates from git (below).
 
 yoagent itself builds for `wasm32-unknown-unknown` (`default-features = false`)
 and reaches every LLM provider over the Worker's `fetch` (see the

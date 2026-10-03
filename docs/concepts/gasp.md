@@ -13,7 +13,7 @@ runtime). The bridge is a consumer of the [`AgentEvent`] stream — **zero
 agent-loop changes**:
 
 ```toml
-yoagent = { version = "0.23", features = ["gasp"] }
+yoagent = { version = "0.24", features = ["gasp"] }
 ```
 
 The `gasp` feature needs the filesystem and git, so it is native-only: it

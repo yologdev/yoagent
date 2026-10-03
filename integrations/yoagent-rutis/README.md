@@ -3,7 +3,7 @@
 Extend a [yoagent](https://crates.io/crates/yoagent) `Agent` at runtime with
 [rutis](https://crates.io/crates/rutis) plugins.
 
-**Status:** 0.1.0, not yet on crates.io; built against yoagent 0.23.
+**Status:** 0.1.0, not yet on crates.io; built against yoagent 0.24.
 
 rutis (a Rust port of the [Cordis](https://github.com/shigma/cordis) plugin
 kernel) loads, unloads, reloads and hot-updates plugins, and tears down
@@ -162,11 +162,14 @@ calls per tool).
 
 ## Publishing
 
-Not yet on crates.io (`publish = false`). It requires yoagent 0.23.0, the
-first release with `ToolSource`, which is now published, so the remaining step
-is flipping `publish`. Until then, depend on it by git:
+Not yet on crates.io (`publish = false`). It requires yoagent 0.23 or later
+(the first release with `ToolSource`), which is published, so the remaining
+step is flipping `publish`. Until then, depend on it by git, and take yoagent
+from the same git source: a crates.io `yoagent` next to a git `yoagent-rutis`
+is two `yoagent` crates whose types do not match.
 
 ```toml
+yoagent = { git = "https://github.com/yologdev/yoagent" }
 yoagent-rutis = { git = "https://github.com/yologdev/yoagent" }
 ```
 

@@ -4,7 +4,12 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.24.0
+
+Cloudflare's Clef decision models, over the REST API and (new crate
+`yoagent-workers`) through a Worker's AI binding, plus two fixes. No breaking
+changes: `DecisionError::RateLimited` gains a `body` field, and the variant is
+`#[non_exhaustive]`.
 
 ### Added
 

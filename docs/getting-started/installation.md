@@ -9,7 +9,7 @@
 
 ```toml
 [dependencies]
-yoagent = "0.23"
+yoagent = "0.24"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -44,5 +44,5 @@ Enable in `Cargo.toml`:
 
 ```toml
 [dependencies]
-yoagent = { version = "0.23", features = ["openapi", "decision"] }
+yoagent = { version = "0.24", features = ["openapi", "decision"] }
 ```
