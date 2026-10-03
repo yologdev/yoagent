@@ -14,11 +14,17 @@ adheres to [Semantic Versioning](https://semver.org/).
   speak the SystemOne API. The token is read at call time from
   `CLOUDFLARE_API_TOKEN`, then `CLOUDFLARE_AUTH_TOKEN`. Priced from
   `prices.json` (`cloudflare/clef` $0.24, `cloudflare/clef-flash` $0.09 per
-  million input tokens) while requests go to Cloudflare. Underneath,
+  million input tokens) while requests go to `api.cloudflare.com`. Underneath,
   `SystemOneBackend::workers_ai(account_id, model_path)` and
-  `SystemOneBackend::with_endpoint_url(url)` (an exact URL, e.g. AI Gateway);
-  the backend unwraps Cloudflare's `{"result": ...}` envelope. Tested against
-  a mock server only.
+  `SystemOneBackend::with_endpoint_url(url)` (an exact URL). The backend
+  unwraps Cloudflare's `{"result": ...}` envelope and keeps Cloudflare's
+  error text: a 429 for a used-up daily allocation (code 3036) is not retried,
+  out of capacity (3040) is; a 2xx `"success": false` is `Invalid` (schema
+  error 5006) or `Backend`. Tested against a mock server only.
+- **`DecisionError::RateLimited` carries the server's `body`** (new field;
+  the variant is `#[non_exhaustive]`), shown in its message, with
+  `DecisionError::rate_limited_with_body`. A SystemOne key read from the
+  environment is trimmed, and a 401/403 names the variable it came from.
 - **`decision::parse_systemone_response(body, request)`**: the SystemOne
   response parser `SystemOneBackend` uses (lenient, Cloudflare's envelope
   unwrapped), public for backends that move the request themselves.
@@ -26,7 +32,9 @@ adheres to [Semantic Versioning](https://semver.org/).
   on Cloudflare Workers through the Worker's own bindings. First,
   `yoagent_workers::ai::{clef, clef_flash, AiBackend}` run Clef through the
   Workers AI binding (`env.AI`) as a `DecisionBackend` — no API token, no
-  account id. wasm32 only; tested under Node against fake bindings. Not yet on
+  account id. Binding errors are read for Workers AI's codes: out of capacity
+  (3040) is retried (`AiBackend::with_retry`), a used-up daily allocation
+  (3036) is not. wasm32 only; tested under Node against fake bindings. Not yet on
   crates.io (it needs `parse_systemone_response`); yoagent's core does not
   depend on it.
 

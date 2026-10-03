@@ -121,15 +121,16 @@ async fn clef_flash_asks_for_its_own_model() {
 #[wasm_bindgen_test]
 async fn a_rejected_run_is_a_backend_error_with_its_message() {
     let binding = fake_ai(
-        "return Promise.reject(new Error('3040: Capacity temporarily exceeded, please try again.'));",
+        "return Promise.reject(new Error('5007: No such model @cf/cloudflare/clef or task'));",
     );
     let err = ai::clef(JsValue::from(binding))
         .noul("s", "Is it?")
         .await
         .unwrap_err();
+    assert!(!err.is_retryable());
     match err {
         DecisionError::Backend { message, .. } => {
-            assert!(message.contains("3040: Capacity"), "{message}")
+            assert!(message.contains("5007: No such model"), "{message}")
         }
         other => panic!("expected Backend, got {other:?}"),
     }
@@ -182,4 +183,107 @@ async fn the_backend_plugs_into_any_decision_model() {
     let eval = eval.unwrap();
     assert!(eval.choice("team").is_none());
     assert_eq!(eval.cost_usd(), None, "from_backend is unpriced");
+}
+
+fn no_wait(retries: usize) -> yoagent::retry::RetryConfig {
+    yoagent::retry::RetryConfig {
+        max_retries: retries,
+        initial_delay_ms: 1,
+        backoff_multiplier: 1.0,
+        max_delay_ms: 1,
+    }
+}
+
+#[wasm_bindgen_test]
+async fn an_oversized_state_is_refused_before_the_binding_runs() {
+    let binding = answering(&clef_output());
+    let err = ai::clef(JsValue::from(binding.clone()))
+        .noul("word ".repeat(400_000), "Urgent?")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DecisionError::Invalid(_)), "{err:?}");
+    assert!(calls(&binding).is_empty(), "nothing is sent");
+}
+
+#[wasm_bindgen_test]
+async fn a_run_that_returns_synchronously_is_still_read() {
+    let binding = fake_ai(&format!("return {};", clef_output()));
+    let eval = ai::clef(JsValue::from(binding))
+        .ask("s")
+        .noul("urgent", "Urgent?")
+        .send()
+        .await
+        .unwrap();
+    assert!((eval.noul("urgent").unwrap().p_true() - 0.93).abs() < 1e-9);
+}
+
+#[wasm_bindgen_test]
+async fn a_rejection_with_a_plain_string_keeps_it() {
+    let binding = fake_ai("return Promise.reject('upstream went away');");
+    let err = ai::clef(JsValue::from(binding))
+        .noul("s", "Is it?")
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("upstream went away"), "{err}");
+}
+
+#[wasm_bindgen_test]
+async fn out_of_capacity_is_retried_then_succeeds() {
+    // The first call fails with 3040, the second answers.
+    let binding = fake_ai(&format!(
+        "if (this.calls.length === 1) {{ \
+           return Promise.reject(new Error('InferenceUpstreamError: 3040: Capacity temporarily exceeded, please try again.')); \
+         }} \
+         return Promise.resolve({});",
+        clef_output()
+    ));
+    let model = DecisionModel::from_backend(
+        AiBackend::new(JsValue::from(binding.clone()), CLEF).with_retry(no_wait(2)),
+        "clef",
+    );
+    let eval = model
+        .ask("s")
+        .noul("urgent", "Urgent?")
+        .send()
+        .await
+        .unwrap();
+    assert!(eval.noul("urgent").is_some());
+    assert_eq!(calls(&binding).len(), 2);
+}
+
+#[wasm_bindgen_test]
+async fn out_of_capacity_every_time_is_a_retryable_rate_limit() {
+    let binding = fake_ai(
+        "return Promise.reject(new Error('3040: Capacity temporarily exceeded, please try again.'));",
+    );
+    let model = DecisionModel::from_backend(
+        AiBackend::new(JsValue::from(binding.clone()), CLEF).with_retry(no_wait(2)),
+        "clef",
+    );
+    let err = model.noul("s", "Is it?").await.unwrap_err();
+    assert!(matches!(err, DecisionError::RateLimited { .. }), "{err:?}");
+    assert!(err.is_retryable());
+    assert!(
+        err.to_string().contains("Capacity temporarily exceeded"),
+        "{err}"
+    );
+    assert_eq!(calls(&binding).len(), 3, "one call and two retries");
+}
+
+#[wasm_bindgen_test]
+async fn a_used_up_daily_allocation_is_not_retried() {
+    let binding = fake_ai(
+        "return Promise.reject(new Error('3036: You have used up your daily free allocation of 10,000 neurons.'));",
+    );
+    let model = DecisionModel::from_backend(
+        AiBackend::new(JsValue::from(binding.clone()), CLEF).with_retry(no_wait(2)),
+        "clef",
+    );
+    let err = model.noul("s", "Is it?").await.unwrap_err();
+    assert!(
+        matches!(err, DecisionError::Http { status: 429, .. }),
+        "{err:?}"
+    );
+    assert!(!err.is_retryable());
+    assert_eq!(calls(&binding).len(), 1);
 }

@@ -114,7 +114,7 @@ async fn sends_cloudflares_example_and_reads_the_envelope() {
 }
 
 #[tokio::test]
-async fn a_success_false_envelope_is_a_bad_response() {
+async fn a_2xx_schema_failure_is_an_invalid_request() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -127,8 +127,8 @@ async fn a_success_false_envelope_is_a_bad_response() {
         .await;
     let model = DecisionModel::from_backend(backend(&server).with_api_key("t"), "clef");
     match model.noul("state", "Is it?").await {
-        Err(DecisionError::BadResponse(m)) => assert!(m.contains("required properties"), "{m}"),
-        other => panic!("expected BadResponse, got {other:?}"),
+        Err(DecisionError::Invalid(m)) => assert!(m.contains("required properties"), "{m}"),
+        other => panic!("expected Invalid, got {other:?}"),
     }
 }
 
@@ -217,4 +217,166 @@ async fn no_token_fails_before_sending_and_names_both_variables() {
 fn presets_ask_for_clef_and_clef_flash() {
     assert_eq!(DecisionModel::clef("a").model(), "clef");
     assert_eq!(DecisionModel::clef_flash("a").model(), "clef-flash");
+}
+
+fn cloudflare_429(code: u64, message: &str) -> ResponseTemplate {
+    ResponseTemplate::new(429).set_body_json(json!({
+        "result": null,
+        "success": false,
+        "errors": [{"code": code, "message": message}],
+        "messages": []
+    }))
+}
+
+#[tokio::test]
+async fn a_used_up_daily_allocation_is_reported_once_not_retried() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(cloudflare_429(
+            3036,
+            "You have used up your daily free allocation of 10,000 neurons.",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let retrying = RetryConfig {
+        max_retries: 3,
+        initial_delay_ms: 1,
+        backoff_multiplier: 1.0,
+        max_delay_ms: 1,
+    };
+    let model = DecisionModel::from_backend(
+        backend(&server).with_api_key("t").with_retry(retrying),
+        "clef",
+    );
+    let err = model.noul("s", "Is it?").await.unwrap_err();
+    assert!(!err.is_retryable(), "{err:?}");
+    assert!(err.to_string().contains("daily free allocation"), "{err}");
+}
+
+#[tokio::test]
+async fn out_of_capacity_is_retried_and_keeps_cloudflares_message() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(cloudflare_429(
+            3040,
+            "Capacity temporarily exceeded, please try again.",
+        ))
+        .expect(3)
+        .mount(&server)
+        .await;
+    let retrying = RetryConfig {
+        max_retries: 2,
+        initial_delay_ms: 1,
+        backoff_multiplier: 1.0,
+        max_delay_ms: 1,
+    };
+    let model = DecisionModel::from_backend(
+        backend(&server).with_api_key("t").with_retry(retrying),
+        "clef",
+    );
+    let err = model.noul("s", "Is it?").await.unwrap_err();
+    assert!(
+        matches!(err, DecisionError::RateLimited { status: 429, .. }),
+        "{err:?}"
+    );
+    assert!(
+        err.to_string().contains("Capacity temporarily exceeded"),
+        "{err}"
+    );
+}
+
+/// A server answering every request with `answers`, recording the
+/// `authorization` header it received.
+async fn recording_server() -> (MockServer, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    let server = MockServer::start().await;
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let sink = seen.clone();
+    Mock::given(method("POST"))
+        .respond_with(move |req: &WireRequest| {
+            let auth = req
+                .headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
+            sink.lock().unwrap().push(auth);
+            ResponseTemplate::new(200).set_body_json(json!({
+                "result": {
+                    "model": "clef",
+                    "answers": {"q": {"type": "noul", "noul": 0.5}},
+                    "usage": {"input_tokens": 1, "output_tokens": 0}
+                },
+                "success": true
+            }))
+        })
+        .mount(&server)
+        .await;
+    (server, seen)
+}
+
+#[tokio::test]
+async fn an_empty_api_token_falls_through_and_values_are_trimmed() {
+    let _env = ENV.lock().await;
+    let (server, seen) = recording_server().await;
+    let model = DecisionModel::from_backend(backend(&server), "clef");
+
+    // CI systems export unset secrets as empty strings.
+    std::env::set_var("CLOUDFLARE_API_TOKEN", "  ");
+    std::env::set_var("CLOUDFLARE_AUTH_TOKEN", "auth-token\n");
+    let result = model.noul("s", "q").await;
+    std::env::remove_var("CLOUDFLARE_API_TOKEN");
+    std::env::remove_var("CLOUDFLARE_AUTH_TOKEN");
+    result.unwrap();
+    assert_eq!(*seen.lock().unwrap(), ["Bearer auth-token"]);
+}
+
+#[tokio::test]
+async fn variables_set_but_empty_are_called_that() {
+    let _env = ENV.lock().await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(500))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let model = DecisionModel::from_backend(backend(&server), "clef");
+    std::env::set_var("CLOUDFLARE_API_TOKEN", "");
+    std::env::remove_var("CLOUDFLARE_AUTH_TOKEN");
+    let result = model.noul("s", "q").await;
+    std::env::remove_var("CLOUDFLARE_API_TOKEN");
+    match result {
+        Err(DecisionError::MissingApiKey(vars)) => assert_eq!(
+            vars,
+            "CLOUDFLARE_API_TOKEN or CLOUDFLARE_AUTH_TOKEN (set, but empty)"
+        ),
+        other => panic!("expected MissingApiKey, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_rejected_token_names_its_variable() {
+    let _env = ENV.lock().await;
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+            "success": false,
+            "errors": [{"code": 10000, "message": "Authentication error"}]
+        })))
+        .mount(&server)
+        .await;
+    let model = DecisionModel::from_backend(backend(&server), "clef");
+    std::env::set_var("CLOUDFLARE_API_TOKEN", "wrong-scope");
+    let result = model.noul("s", "q").await;
+    std::env::remove_var("CLOUDFLARE_API_TOKEN");
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, DecisionError::Http { status: 403, .. }),
+        "{err:?}"
+    );
+    assert!(err.to_string().contains("$CLOUDFLARE_API_TOKEN"), "{err}");
+    assert!(
+        !err.to_string().contains("wrong-scope"),
+        "the key is never shown"
+    );
 }

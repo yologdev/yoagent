@@ -24,13 +24,15 @@ pub enum DecisionError {
         body: String,
     },
     /// 429 Too Many Requests or 529 Overloaded, after retries were spent.
-    #[error("decision model rate limited or overloaded (HTTP {status}){}", .retry_after.map(|d| format!(", retry after {:.1}s", d.as_secs_f64())).unwrap_or_default())]
+    #[error("decision model rate limited or overloaded (HTTP {status}){}{}", .retry_after.map(|d| format!(", retry after {:.1}s", d.as_secs_f64())).unwrap_or_default(), if .body.is_empty() { String::new() } else { format!(": {}", .body) })]
     #[non_exhaustive]
     RateLimited {
         /// 429 or 529.
         status: u16,
         /// The server's `retry-after`, when it sent one.
         retry_after: Option<Duration>,
+        /// What the server said, truncated; empty when it said nothing.
+        body: String,
     },
     /// The call did not finish within the configured timeout.
     #[error("decision model call timed out after {:.1}s", .0.as_secs_f64())]
@@ -55,7 +57,8 @@ pub enum DecisionError {
         source: Option<Arc<dyn std::error::Error + Send + Sync + 'static>>,
     },
     /// A preset's API key environment variable is unset or empty. Names the
-    /// variable, never a value.
+    /// variable — or the variables, `"A or B"`, when a preset reads several —
+    /// never a value.
     #[error("decision model API key missing: set {0}")]
     MissingApiKey(String),
     /// A custom backend's own failure, in its words.
@@ -162,9 +165,20 @@ impl DecisionError {
 
     /// A [`RateLimited`](Self::RateLimited) error, for custom backends.
     pub fn rate_limited(status: u16, retry_after: Option<Duration>) -> Self {
+        Self::rate_limited_with_body(status, retry_after, String::new())
+    }
+
+    /// A [`RateLimited`](Self::RateLimited) error keeping what the server
+    /// said (truncate it first).
+    pub fn rate_limited_with_body(
+        status: u16,
+        retry_after: Option<Duration>,
+        body: impl Into<String>,
+    ) -> Self {
         Self::RateLimited {
             status,
             retry_after,
+            body: body.into(),
         }
     }
 

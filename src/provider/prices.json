@@ -162,7 +162,7 @@
       "clef": {
         "input": 0.24,
         "output": 0.0,
-        "note": "A decision model (feature `decision`), not a ModelConfig: DecisionModel::clef() prices each evaluation by its model id while requests go to Cloudflare (the REST API or AI Gateway). Workers AI lists a unit price for input tokens only; output is not listed and is recorded as 0.",
+        "note": "A decision model (feature `decision`), not a ModelConfig: DecisionModel::clef() prices each evaluation by its model id while requests go to Cloudflare's REST API (yoagent-workers' binding presets use the same rate). Workers AI lists a unit price for input tokens only; output is not listed and is recorded as 0.",
         "source": "https://developers.cloudflare.com/workers-ai/models/clef/",
         "verified": "2026-10-03",
         "absent_upstream": "models.dev lists no Clef model; checked 2026-10-03"
