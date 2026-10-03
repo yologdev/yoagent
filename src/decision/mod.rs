@@ -125,6 +125,9 @@ use std::time::Duration;
 /// The `prices.json` provider key for TypeSafe's models.
 pub(crate) const TYPESAFE_PRICE_PROVIDER: &str = "typesafe";
 
+/// The `prices.json` provider key for Cloudflare Workers AI's models.
+pub(crate) const CLOUDFLARE_PRICE_PROVIDER: &str = "cloudflare";
+
 /// Default overall timeout of one [`DecisionModel`] call, retries included.
 pub(crate) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -150,6 +153,9 @@ enum Pricing {
     /// TypeSafe's list prices from the resolved price table, by the reported
     /// model id — only while requests go to TypeSafe's own host.
     TypeSafeList,
+    /// Workers AI's list prices from the resolved price table, by the model
+    /// id (`clef`, `clef-flash`) — only while requests go to Cloudflare.
+    CloudflareList,
     Fixed(CostConfig),
     Unpriced,
 }
@@ -159,7 +165,8 @@ enum Pricing {
 ///
 /// Cheap to clone (the backend is shared). Choose one with a preset —
 /// [`jev`](Self::jev), [`jev_opencode`](Self::jev_opencode),
-/// [`jev_opencode_free`](Self::jev_opencode_free), [`local`](Self::local),
+/// [`jev_opencode_free`](Self::jev_opencode_free),
+/// [`clef`](Self::clef), [`clef_flash`](Self::clef_flash), [`local`](Self::local),
 /// [`logprobs`](Self::logprobs) — or [`from_backend`](Self::from_backend);
 /// everything else has defaults. Chain fallbacks with [`or`](Self::or).
 #[derive(Clone)]
@@ -234,6 +241,48 @@ impl DecisionModel {
         Self {
             model: "jev-1.13-free".into(),
             ..Self::jev_opencode()
+        }
+    }
+
+    /// Cloudflare's Clef (`@cf/cloudflare/clef`, 27B) on Workers AI, run on
+    /// Cloudflare account `account_id`. The API token is read at call time
+    /// from `CLOUDFLARE_API_TOKEN`, then `CLOUDFLARE_AUTH_TOKEN` (or set it
+    /// with [`with_api_key`](Self::with_api_key) — on wasm32 there is no
+    /// environment). Priced from the built-in table ($0.24 per million input
+    /// tokens) while requests go to Cloudflare; unpriced elsewhere.
+    ///
+    /// ```no_run
+    /// # async fn demo() -> Result<(), yoagent::decision::DecisionError> {
+    /// use yoagent::decision::DecisionModel;
+    /// let model = DecisionModel::clef("your-account-id");
+    /// let urgent = model.noul("Checkout fails for every customer.", "Is this urgent?").await?;
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// Through Cloudflare AI Gateway, point the backend at the gateway URL:
+    /// `SystemOneBackend::workers_ai(..).with_endpoint_url(..)` and
+    /// [`from_backend`](Self::from_backend) (unpriced until
+    /// [`with_cost`](Self::with_cost)).
+    pub fn clef(account_id: impl AsRef<str>) -> Self {
+        Self::workers_ai(account_id, "clef")
+    }
+
+    /// Cloudflare's Clef Flash (`@cf/cloudflare/clef-flash`, 9B, faster) on
+    /// Workers AI; otherwise as [`clef`](Self::clef). $0.09 per million
+    /// input tokens.
+    pub fn clef_flash(account_id: impl AsRef<str>) -> Self {
+        Self::workers_ai(account_id, "clef-flash")
+    }
+
+    fn workers_ai(account_id: impl AsRef<str>, model: &str) -> Self {
+        let backend = SystemOneBackend::workers_ai(account_id, format!("@cf/cloudflare/{model}"));
+        Self {
+            backend: Slot::SystemOne(backend),
+            model: model.into(),
+            timeout: DEFAULT_TIMEOUT,
+            pricing: Pricing::CloudflareList,
+            attempt_timeout: None,
+            fallbacks: Vec::new(),
         }
     }
 
@@ -498,6 +547,16 @@ impl DecisionModel {
                     return None;
                 }
                 crate::provider::prices::global::resolved().cost(TYPESAFE_PRICE_PROVIDER, model)?
+            }
+            Pricing::CloudflareList => {
+                let on_cloudflare =
+                    matches!(&self.backend, Slot::SystemOne(b) if b.is_cloudflare_host());
+                if !on_cloudflare {
+                    return None;
+                }
+                // The model may report itself by its catalog path.
+                let id = model.strip_prefix("@cf/cloudflare/").unwrap_or(model);
+                crate::provider::prices::global::resolved().cost(CLOUDFLARE_PRICE_PROVIDER, id)?
             }
             Pricing::Fixed(c) => c.clone(),
             Pricing::Unpriced => return None,
@@ -995,6 +1054,38 @@ pub(crate) fn wire(
 #[cfg(test)]
 mod pricing_tests {
     use super::*;
+
+    #[test]
+    fn clef_prices_by_model_only_on_cloudflare() {
+        let usage = DecisionUsage::new(2_000_000, 500);
+        let clef = DecisionModel::clef("acct");
+        let cost = clef.cost_usd("clef", &usage).unwrap();
+        assert!((cost - 0.48).abs() < 1e-12, "{cost}");
+        // Reported by its catalog path: the same price.
+        let cost = clef.cost_usd("@cf/cloudflare/clef", &usage).unwrap();
+        assert!((cost - 0.48).abs() < 1e-12, "{cost}");
+        let flash = DecisionModel::clef_flash("acct");
+        let cost = flash.cost_usd("clef-flash", &usage).unwrap();
+        assert!((cost - 0.18).abs() < 1e-12, "{cost}");
+        assert_eq!(clef.cost_usd("clef-9", &usage), None, "unlisted unpriced");
+
+        // AI Gateway bills the same; any other host is unpriced.
+        let gateway = DecisionModel {
+            backend: Slot::SystemOne(SystemOneBackend::workers_ai("acct", "x").with_endpoint_url(
+                "https://gateway.ai.cloudflare.com/v1/acct/gw/workers-ai/@cf/cloudflare/clef",
+            )),
+            ..DecisionModel::clef("acct")
+        };
+        assert!(gateway.cost_usd("clef", &usage).is_some());
+        let proxied = DecisionModel {
+            backend: Slot::SystemOne(
+                SystemOneBackend::workers_ai("acct", "x")
+                    .with_endpoint_url("https://proxy.example/ai/run/@cf/cloudflare/clef"),
+            ),
+            ..DecisionModel::clef("acct")
+        };
+        assert_eq!(proxied.cost_usd("clef", &usage), None);
+    }
 
     #[test]
     fn jev_prices_by_reported_version_only_on_typesafe() {

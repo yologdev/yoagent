@@ -158,6 +158,24 @@
         "verified": "2026-09-25"
       }
     },
+    "cloudflare": {
+      "clef": {
+        "input": 0.24,
+        "output": 0.0,
+        "note": "A decision model (feature `decision`), not a ModelConfig: DecisionModel::clef() prices each evaluation by its model id while requests go to Cloudflare (the REST API or AI Gateway). Workers AI lists a unit price for input tokens only; output is not listed and is recorded as 0.",
+        "source": "https://developers.cloudflare.com/workers-ai/models/clef/",
+        "verified": "2026-10-03",
+        "absent_upstream": "models.dev lists no Clef model; checked 2026-10-03"
+      },
+      "clef-flash": {
+        "input": 0.09,
+        "output": 0.0,
+        "note": "A decision model (feature `decision`): DecisionModel::clef_flash(). Workers AI lists a unit price for input tokens only; output is not listed and is recorded as 0.",
+        "source": "https://developers.cloudflare.com/workers-ai/models/clef-flash/",
+        "verified": "2026-10-03",
+        "absent_upstream": "models.dev lists no Clef model; checked 2026-10-03"
+      }
+    },
     "typesafe": {
       "jev-1.13.0": {
         "input": 0.042,
