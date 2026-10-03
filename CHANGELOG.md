@@ -4,6 +4,17 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Fixed
+
+- **A sub-agent's retried attempt is marked in its updates.** A sub-agent
+  forwards its text deltas to the parent's `on_update`, including those of a
+  provider attempt that then fails and is retried. It now also forwards
+  `[sub-agent retrying after: <error>]` on `AgentEvent::ProviderRetry`, like
+  the existing `[sub-agent calling tool: <name>]` marker, so the failed
+  attempt's partial text is not read as the start of the answer.
+
 ## 0.23.0
 
 A minor bump because it breaks: the `native` feature below breaks builds that

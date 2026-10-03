@@ -610,6 +610,11 @@ impl AgentTool for SubAgentTool {
                             AgentEvent::ToolExecutionStart { tool_name, .. } => {
                                 Some(format!("[sub-agent calling tool: {}]", tool_name))
                             }
+                            // The failed attempt's text was forwarded above;
+                            // mark where the retry's text starts.
+                            AgentEvent::ProviderRetry { error, .. } => {
+                                Some(format!("[sub-agent retrying after: {}]", error))
+                            }
                             _ => None,
                         };
 
