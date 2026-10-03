@@ -474,6 +474,12 @@ pub(crate) fn is_context_overflow_message(message: &str) -> bool {
     OVERFLOW_PHRASES.iter().any(|phrase| lower.contains(phrase))
 }
 
+/// How a [`ProviderError::ContextOverflow`] displays, up to its message. The
+/// loop records a failed turn's error as its `Display` text, and an overflow
+/// classified from status alone (an empty 400/413 body) carries no phrase to
+/// match, so this prefix is what identifies it.
+pub(crate) const CONTEXT_OVERFLOW_DISPLAY_PREFIX: &str = "Context overflow: ";
+
 /// Check if an HTTP error response indicates context overflow.
 fn is_context_overflow(status: u16, message: &str) -> bool {
     // Some providers (Cerebras, Mistral) return 400/413 with empty body on overflow
@@ -574,6 +580,16 @@ mod tests {
             "Please reduce the length of the messages or completion",
         );
         assert!(err.is_context_overflow());
+    }
+
+    #[test]
+    fn overflow_display_prefix_matches_the_error() {
+        // Message::is_context_overflow keys on this prefix; it must track the
+        // `#[error]` text of the variant.
+        let err = ProviderError::ContextOverflow {
+            message: String::new(),
+        };
+        assert_eq!(err.to_string(), CONTEXT_OVERFLOW_DISPLAY_PREFIX);
     }
 
     #[test]

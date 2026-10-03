@@ -297,14 +297,22 @@ impl Message {
     ///
     /// Some providers (SSE-based: Anthropic, OpenAI) return overflow as a
     /// `StopReason::Error` message rather than an HTTP error. This method
-    /// checks the `error_message` field against known overflow patterns.
+    /// checks the `error_message` field against known overflow patterns, and
+    /// recognizes a turn the loop ended with a [`ProviderError::ContextOverflow`]
+    /// (including one classified from an empty 400/413 body, which has no
+    /// overflow phrase in it).
+    ///
+    /// [`ProviderError::ContextOverflow`]: crate::provider::ProviderError::ContextOverflow
     pub fn is_context_overflow(&self) -> bool {
         match self {
             Self::Assistant {
                 stop_reason: StopReason::Error,
                 error_message: Some(msg),
                 ..
-            } => crate::provider::is_context_overflow_message(msg),
+            } => {
+                msg.starts_with(crate::provider::traits::CONTEXT_OVERFLOW_DISPLAY_PREFIX)
+                    || crate::provider::is_context_overflow_message(msg)
+            }
             _ => false,
         }
     }

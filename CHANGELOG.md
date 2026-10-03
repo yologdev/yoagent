@@ -14,6 +14,13 @@ adheres to [Semantic Versioning](https://semver.org/).
   `[sub-agent retrying after: <error>]` on `AgentEvent::ProviderRetry`, like
   the existing `[sub-agent calling tool: <name>]` marker, so the failed
   attempt's partial text is not read as the start of the answer.
+- **An overflow reported by an empty 400/413 body is detected on the
+  message.** Cerebras and Mistral answer an oversized request with an empty
+  400/413, which `ProviderError::classify` already treats as
+  `ContextOverflow`. But the turn's recorded error (`"Context overflow: "`)
+  holds no overflow phrase, so `Message::is_context_overflow()` returned
+  `false` for it. It now recognises any turn that ended with a
+  `ContextOverflow` error.
 
 ## 0.23.0
 
