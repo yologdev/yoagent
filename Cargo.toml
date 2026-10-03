@@ -138,6 +138,10 @@ name = "decision_env_test"
 required-features = ["decision"]
 
 [[test]]
+name = "decision_clef_test"
+required-features = ["decision"]
+
+[[test]]
 name = "decision_live"
 required-features = ["decision"]
 

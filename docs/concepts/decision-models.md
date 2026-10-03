@@ -20,9 +20,10 @@ the small judgments an agent makes all the time and an LLM is slow and costly
 at: *does this request need a skill? which one? does this tool call delete
 something the user did not ask to delete?*
 
-The first supported vendor is [TypeSafe](https://docs.typesafe.ai)'s **Jev**.
-yoagent depends on a trait, not on Jev: any backend that speaks the SystemOne
-API, **any OpenAI-compatible server that returns logprobs** (llama.cpp, vLLM,
+The first supported vendor is [TypeSafe](https://docs.typesafe.ai)'s **Jev**;
+Cloudflare's **Clef** (27B) and **Clef Flash** (9B) on Workers AI speak the
+same API. yoagent depends on a trait, not on a vendor: any backend that speaks
+the SystemOne API, **any OpenAI-compatible server that returns logprobs** (llama.cpp, vLLM,
 SGLang, LM Studio, hosted APIs) — or anything you implement — plugs in the
 same way.
 
@@ -54,6 +55,8 @@ let jev = DecisionModel::jev();                                  // TypeSafe, TY
 let jev = DecisionModel::jev_opencode();                         // OpenCode Zen, OPENCODE_API_KEY
 let jev = DecisionModel::jev_opencode_free();                    // OpenCode Zen free tier
 let jev = DecisionModel::local("http://localhost:8000");         // self-hosted (JevK5, ...), no key
+let clef = DecisionModel::clef("your-account-id");               // Cloudflare Workers AI, CLOUDFLARE_API_TOKEN
+let clef = DecisionModel::clef_flash("your-account-id");         // Clef Flash: smaller, faster, cheaper
 let llm = DecisionModel::logprobs("http://localhost:8080", "llama-3.1-8b-instruct"); // any OpenAI-compatible server with logprobs (thinking off)
 let both = DecisionModel::jev().or(DecisionModel::local("http://localhost:8000")); // fallback
 ```
@@ -64,6 +67,8 @@ let both = DecisionModel::jev().or(DecisionModel::local("http://localhost:8000")
 | `jev_opencode()` | `https://opencode.ai/zen/v1/systemone` | `OPENCODE_API_KEY` | `jev-1.13` | unpriced (a gateway) |
 | `jev_opencode_free()` | same | `OPENCODE_API_KEY` | `jev-1.13-free` | unpriced |
 | `local(url)` | `{url}/v1/systemone` | none | `jev-latest` | $0 |
+| `clef(account_id)` | `https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/@cf/cloudflare/clef` | `CLOUDFLARE_API_TOKEN`, then `CLOUDFLARE_AUTH_TOKEN` | `clef` | from `prices.json` — only while requests go to Cloudflare |
+| `clef_flash(account_id)` | same, `…/@cf/cloudflare/clef-flash` | same | `clef-flash` | same |
 | `logprobs(url, id)` | `{url}/chat/completions` (`/v1` added to a bare host) | none unless `with_api_key` | `id` | $0 on a loopback host, otherwise unpriced |
 | `from_logprob_backend(backend, id)` | as `logprobs`, with your `LogprobBackend` settings | as `logprobs` | `id` | as `logprobs` |
 | `from_backend(b, id)` / `from_arc(arc, id)` | yours | yours | `id` | unpriced |
@@ -725,9 +730,39 @@ notes — design around them:
 - Limits: 64k tokens per request, 32k for the state plus the longest
   question, ~1,200 requests per minute (TypeSafe adjusts limits dynamically).
 
+### Clef on Cloudflare Workers AI
+
+`clef(account_id)` and `clef_flash(account_id)` call Workers AI's REST API
+with a Cloudflare API token (Workers AI read permission). The request is
+SystemOne's; Cloudflare wraps the response as `{"result": ..., "success":
+...}`, which the backend unwraps, and a `"success": false` body is a
+`BadResponse` carrying Cloudflare's `errors`. Clef accepts at most 64
+questions per request (yoagent's own uses send one or two). Its image input
+(up to four images per request) is not exposed.
+
+Through [AI Gateway](https://developers.cloudflare.com/ai-gateway/), build the
+backend yourself and point it at the gateway URL:
+
+```rust
+use yoagent::decision::{DecisionModel, SystemOneBackend};
+
+let backend = SystemOneBackend::workers_ai("your-account-id", "@cf/cloudflare/clef")
+    .with_endpoint_url("https://gateway.ai.cloudflare.com/v1/your-account-id/your-gateway/workers-ai/@cf/cloudflare/clef");
+let clef = DecisionModel::from_backend(backend, "clef")
+    .with_cost(Some(yoagent::provider::CostConfig::new(0.24, 0.0)));
+```
+
+In a Worker there are no environment variables: pass the token from a secret
+with `.with_api_key(..)`.
+
 ## Pricing
 
-`prices.json` carries `typesafe/jev-1.13.0` (input $0.042 per million, output
+`prices.json` carries `cloudflare/clef` (input $0.24 per million) and
+`cloudflare/clef-flash` (input $0.09 per million), priced by model id while
+requests go to `api.cloudflare.com` or `gateway.ai.cloudflare.com`; Workers AI
+lists no output price for them, recorded as $0.
+
+`prices.json` also carries `typesafe/jev-1.13.0` (input $0.042 per million, output
 $0.00). `DecisionModel::jev()` prices each evaluation by the **versioned id
 the API reports**, and only while its base URL is TypeSafe's own host: an
 alias, an unlisted version, or a `TYPESAFE_BASE_URL` pointing elsewhere is

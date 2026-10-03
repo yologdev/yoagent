@@ -1,8 +1,9 @@
 //! [`SystemOneBackend`]: the SystemOne HTTP API (`POST /v1/systemone`).
 //!
 //! Served by TypeSafe (`https://api.typesafe.ai`), by OpenCode Zen
-//! (`https://opencode.ai/zen`), and by self-hosted TypeSafe-style servers
-//! such as JevK5. Responses are parsed leniently: unknown fields are ignored,
+//! (`https://opencode.ai/zen`), by Cloudflare Workers AI (Clef, at its own
+//! URL — see [`SystemOneBackend::workers_ai`]), and by self-hosted
+//! TypeSafe-style servers such as JevK5. Responses are parsed leniently: unknown fields are ignored,
 //! and a missing `confidence`, `choice`, `score` or `legend` is computed from
 //! what is present. What is present is then validated like every backend's
 //! answers (see [`DecisionBackend`]).
@@ -21,26 +22,36 @@ pub(crate) const OPENCODE_ZEN_BASE_URL: &str = "https://opencode.ai/zen";
 pub(crate) const TYPESAFE_API_KEY_ENV: &str = "TYPESAFE_API_KEY";
 pub(crate) const TYPESAFE_BASE_URL_ENV: &str = "TYPESAFE_BASE_URL";
 pub(crate) const OPENCODE_API_KEY_ENV: &str = "OPENCODE_API_KEY";
+/// Cloudflare's REST API, under which Workers AI models run.
+pub(crate) const WORKERS_AI_API_BASE: &str = "https://api.cloudflare.com/client/v4";
+/// Wrangler's name for a Cloudflare API token, read first.
+pub(crate) const CLOUDFLARE_API_TOKEN_ENV: &str = "CLOUDFLARE_API_TOKEN";
+/// The name Workers AI's model pages use, read second.
+pub(crate) const CLOUDFLARE_AUTH_TOKEN_ENV: &str = "CLOUDFLARE_AUTH_TOKEN";
+/// Hosts that bill Workers AI at its list price: the REST API, and AI
+/// Gateway in front of it.
+const CLOUDFLARE_HOSTS: &[&str] = &["api.cloudflare.com", "gateway.ai.cloudflare.com"];
 
 /// Longest error-body excerpt kept in a [`DecisionError`].
 pub(crate) const MAX_ERROR_BODY: usize = 2_000;
 
 #[derive(Clone)]
 enum Endpoint {
+    /// A base URL; requests go to `{base}/v1/systemone`.
     Fixed(String),
+    /// The exact URL requests go to (Workers AI, AI Gateway, a proxy).
+    Exact(String),
     /// Read the variable at call time, falling back to the default.
-    EnvOr {
-        var: String,
-        default: String,
-    },
+    EnvOr { var: String, default: String },
 }
 
 #[derive(Clone)]
 enum Key {
     None,
     Fixed(String),
-    /// Read at call time; unset or empty is an error.
-    Env(String),
+    /// Read at call time, the first set and non-empty variable winning;
+    /// none set is an error.
+    Env(Vec<String>),
 }
 
 /// An HTTP client for the SystemOne API.
@@ -62,7 +73,11 @@ impl std::fmt::Debug for SystemOneBackend {
         let key = match &self.key {
             Key::None => "none".to_string(),
             Key::Fixed(_) => "[redacted]".to_string(),
-            Key::Env(var) => format!("${var}"),
+            Key::Env(vars) => vars
+                .iter()
+                .map(|v| format!("${v}"))
+                .collect::<Vec<_>>()
+                .join(" or "),
         };
         f.debug_struct("SystemOneBackend")
             .field("endpoint", &self.endpoint_url())
@@ -102,7 +117,7 @@ impl SystemOneBackend {
                 var: TYPESAFE_BASE_URL_ENV.into(),
                 default: TYPESAFE_BASE_URL.into(),
             },
-            key: Key::Env(TYPESAFE_API_KEY_ENV.into()),
+            key: Key::Env(vec![TYPESAFE_API_KEY_ENV.into()]),
             capabilities: Capabilities::systemone(),
             ..Self::new(TYPESAFE_BASE_URL)
         }
@@ -112,9 +127,33 @@ impl SystemOneBackend {
     /// at call time).
     pub fn opencode_zen() -> Self {
         Self {
-            key: Key::Env(OPENCODE_API_KEY_ENV.into()),
+            key: Key::Env(vec![OPENCODE_API_KEY_ENV.into()]),
             capabilities: Capabilities::systemone(),
             ..Self::new(OPENCODE_ZEN_BASE_URL)
+        }
+    }
+
+    /// A Workers AI model on Cloudflare account `account_id`, such as
+    /// `@cf/cloudflare/clef`: requests go to
+    /// `https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/{model_path}`
+    /// and the key is read at call time from `CLOUDFLARE_API_TOKEN`, then
+    /// `CLOUDFLARE_AUTH_TOKEN`. Cloudflare's `{"result": ...}` envelope is
+    /// unwrapped. Most callers want [`DecisionModel::clef`](super::DecisionModel::clef).
+    pub fn workers_ai(account_id: impl AsRef<str>, model_path: impl AsRef<str>) -> Self {
+        let url = format!(
+            "{}/accounts/{}/ai/run/{}",
+            WORKERS_AI_API_BASE,
+            account_id.as_ref().trim(),
+            model_path.as_ref().trim().trim_start_matches('/'),
+        );
+        Self {
+            endpoint: Endpoint::Exact(url),
+            key: Key::Env(vec![
+                CLOUDFLARE_API_TOKEN_ENV.into(),
+                CLOUDFLARE_AUTH_TOKEN_ENV.into(),
+            ]),
+            capabilities: Capabilities::systemone(),
+            ..Self::new(WORKERS_AI_API_BASE)
         }
     }
 
@@ -126,13 +165,23 @@ impl SystemOneBackend {
 
     /// Read the key from this environment variable at call time.
     pub fn with_api_key_env(mut self, var: impl Into<String>) -> Self {
-        self.key = Key::Env(var.into());
+        self.key = Key::Env(vec![var.into()]);
         self
     }
 
-    /// Use this base URL (replaces any environment variable).
+    /// Use this base URL (replaces any environment variable); requests go
+    /// to `{base_url}/v1/systemone`.
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.endpoint = Endpoint::Fixed(base_url.into());
+        self
+    }
+
+    /// Send requests to exactly this URL, with no `/v1/systemone` appended:
+    /// a SystemOne model served at its own path, such as Clef through
+    /// Cloudflare AI Gateway
+    /// (`https://gateway.ai.cloudflare.com/v1/{account}/{gateway}/workers-ai/@cf/cloudflare/clef`).
+    pub fn with_endpoint_url(mut self, url: impl Into<String>) -> Self {
+        self.endpoint = Endpoint::Exact(url.into());
         self
     }
 
@@ -152,7 +201,7 @@ impl SystemOneBackend {
 
     fn base(&self) -> String {
         let raw = match &self.endpoint {
-            Endpoint::Fixed(url) => url.clone(),
+            Endpoint::Fixed(url) | Endpoint::Exact(url) => url.clone(),
             Endpoint::EnvOr { var, default } => std::env::var(var)
                 .ok()
                 .filter(|v| !v.trim().is_empty())
@@ -166,42 +215,85 @@ impl SystemOneBackend {
 
     /// The URL requests are sent to, resolved now.
     pub fn endpoint_url(&self) -> String {
-        format!("{}/v1/systemone", self.base())
+        match &self.endpoint {
+            Endpoint::Exact(url) => url.trim().to_string(),
+            _ => format!("{}/v1/systemone", self.base()),
+        }
+    }
+
+    /// The host requests currently go to.
+    fn host(&self) -> String {
+        let url = self.endpoint_url();
+        let rest = url
+            .strip_prefix("https://")
+            .or_else(|| url.strip_prefix("http://"))
+            .unwrap_or(&url);
+        rest.split(['/', ':', '?', '#'])
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase()
     }
 
     /// Whether requests currently go to TypeSafe's own host (so TypeSafe's
     /// list prices apply).
     pub(crate) fn is_typesafe_host(&self) -> bool {
-        let base = self.base();
-        let rest = base
-            .strip_prefix("https://")
-            .or_else(|| base.strip_prefix("http://"))
-            .unwrap_or(&base);
-        let host = rest.split(['/', ':', '?', '#']).next().unwrap_or("");
-        host.eq_ignore_ascii_case(TYPESAFE_HOST)
+        self.host() == TYPESAFE_HOST
+    }
+
+    /// Whether requests currently go to Cloudflare (the REST API or AI
+    /// Gateway), so Workers AI's list prices apply.
+    pub(crate) fn is_cloudflare_host(&self) -> bool {
+        CLOUDFLARE_HOSTS.contains(&self.host().as_str())
     }
 
     fn key(&self) -> Result<Option<String>, DecisionError> {
         match &self.key {
             Key::None => Ok(None),
             Key::Fixed(k) => Ok(Some(k.clone())),
-            Key::Env(var) => match std::env::var(var) {
-                Ok(v) if !v.trim().is_empty() => Ok(Some(v)),
-                _ => Err(DecisionError::MissingApiKey(var.clone())),
-            },
+            Key::Env(vars) => vars
+                .iter()
+                .find_map(|var| std::env::var(var).ok().filter(|v| !v.trim().is_empty()))
+                .map(Some)
+                .ok_or_else(|| DecisionError::MissingApiKey(vars.join(" or "))),
         }
     }
 
     async fn send_once(&self, request: &Request, body: &[u8]) -> Result<Evaluation, DecisionError> {
         let key = self.key()?;
         let value = post_json(&self.client, &self.endpoint_url(), key.as_deref(), body).await?;
-        parse_evaluation(&value, request)
+        parse_evaluation(&unwrap_envelope(value)?, request)
     }
 }
 
 /// POST a JSON `body` (bearer `key` when set) and read a JSON response,
 /// mapping failures to [`DecisionError`]s the retry policy understands.
 /// Shared by the HTTP backends.
+/// Cloudflare's REST API wraps a model's output as
+/// `{"result": {...}, "success": true, "errors": [], "messages": []}`; take
+/// the `result`. A plain SystemOne response (it has `answers`) passes through.
+/// A body that says `"success": false` is an error carrying its `errors`.
+fn unwrap_envelope(value: Value) -> Result<Value, DecisionError> {
+    if value.get("answers").is_some() {
+        return Ok(value);
+    }
+    if value.get("success").and_then(Value::as_bool) == Some(false) {
+        let errors = value
+            .get("errors")
+            .map(Value::to_string)
+            .unwrap_or_default();
+        return Err(DecisionError::BadResponse(format!(
+            "the server reported failure: {}",
+            excerpt(&errors, MAX_ERROR_BODY)
+        )));
+    }
+    match value {
+        Value::Object(mut map) if map.get("result").is_some_and(Value::is_object) => {
+            Ok(map.remove("result").unwrap_or_default())
+        }
+        other => Ok(other),
+    }
+}
+
 pub(crate) async fn post_json(
     client: &reqwest::Client,
     url: &str,
@@ -503,5 +595,53 @@ mod tests {
         assert!(!SystemOneBackend::new("http://127.0.0.1:8000").is_typesafe_host());
         assert!(!SystemOneBackend::new("https://api.typesafe.ai.evil.example").is_typesafe_host());
         assert!(!SystemOneBackend::opencode_zen().is_typesafe_host());
+    }
+
+    #[test]
+    fn workers_ai_posts_to_the_model_url() {
+        let b = SystemOneBackend::workers_ai(" acct ", "/@cf/cloudflare/clef");
+        assert_eq!(
+            b.endpoint_url(),
+            "https://api.cloudflare.com/client/v4/accounts/acct/ai/run/@cf/cloudflare/clef"
+        );
+        assert!(b.is_cloudflare_host());
+        assert!(!b.is_typesafe_host());
+        // An exact URL is used as given: no `/v1/systemone` appended.
+        let gw = b.with_endpoint_url("https://gateway.ai.cloudflare.com/v1/a/g/workers-ai/m");
+        assert_eq!(
+            gw.endpoint_url(),
+            "https://gateway.ai.cloudflare.com/v1/a/g/workers-ai/m"
+        );
+        assert!(gw.is_cloudflare_host());
+        assert!(
+            !SystemOneBackend::new("https://api.cloudflare.com.evil.example").is_cloudflare_host()
+        );
+        // The key names both variables, never a value.
+        let debug = format!("{:?}", SystemOneBackend::workers_ai("a", "m"));
+        assert!(
+            debug.contains("$CLOUDFLARE_API_TOKEN or $CLOUDFLARE_AUTH_TOKEN"),
+            "{debug}"
+        );
+    }
+
+    #[test]
+    fn the_cloudflare_envelope_is_unwrapped() {
+        let inner = serde_json::json!({"model": "clef", "answers": {}});
+        let wrapped = serde_json::json!({
+            "result": inner, "success": true, "errors": [], "messages": []
+        });
+        assert_eq!(unwrap_envelope(wrapped).unwrap(), inner);
+        // A plain SystemOne response passes through untouched, even with a
+        // field named `result`.
+        let plain = serde_json::json!({"answers": {}, "result": {"x": 1}});
+        assert_eq!(unwrap_envelope(plain.clone()).unwrap(), plain);
+        let failed = serde_json::json!({
+            "result": null, "success": false,
+            "errors": [{"code": 5006, "message": "Error: oneOf at '/' not met"}]
+        });
+        match unwrap_envelope(failed) {
+            Err(DecisionError::BadResponse(m)) => assert!(m.contains("oneOf"), "{m}"),
+            other => panic!("expected BadResponse, got {other:?}"),
+        }
     }
 }

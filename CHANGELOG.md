@@ -6,6 +6,20 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- **Cloudflare's Clef decision models** (feature `decision`):
+  `DecisionModel::clef(account_id)` and `DecisionModel::clef_flash(account_id)`
+  call `@cf/cloudflare/clef` / `@cf/cloudflare/clef-flash` on Workers AI, which
+  speak the SystemOne API. The token is read at call time from
+  `CLOUDFLARE_API_TOKEN`, then `CLOUDFLARE_AUTH_TOKEN`. Priced from
+  `prices.json` (`cloudflare/clef` $0.24, `cloudflare/clef-flash` $0.09 per
+  million input tokens) while requests go to Cloudflare. Underneath,
+  `SystemOneBackend::workers_ai(account_id, model_path)` and
+  `SystemOneBackend::with_endpoint_url(url)` (an exact URL, e.g. AI Gateway);
+  the backend unwraps Cloudflare's `{"result": ...}` envelope. Tested against
+  a mock server only.
+
 ### Fixed
 
 - **A sub-agent's retried attempt is marked in its updates.** A sub-agent
