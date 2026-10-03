@@ -6,7 +6,7 @@ yoagent provides three lifecycle callbacks that let you observe and control the 
 
 ### `before_turn`
 
-Called before each LLM call. Receives the current message history and the turn number (0-indexed). Return `false` to abort the loop.
+Called before each LLM call. Receives the current message history and the turn number (0-indexed). Return `false` to end the run: no assistant message is produced for that turn, and `AgentEnd` still fires.
 
 ```rust
 let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"))
@@ -36,7 +36,7 @@ let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude
 
 ### `on_error`
 
-Called when the LLM returns a `StopReason::Error`. Receives the error message string.
+Called when a turn ends with `StopReason::Error` (after any retries are exhausted). Receives the error message string. It is not called for a cancelled run (`StopReason::Aborted`) or for a provider attempt that is retried.
 
 ```rust
 let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"))
@@ -80,6 +80,10 @@ impl AsyncInputFilter for Moderation {
 
 let agent = agent.with_async_input_filter(Moderation);
 ```
+
+The examples on this page use plain `#[async_trait::async_trait]`, which
+builds on native targets only; for wasm32 use the `cfg_attr` pair in
+[WebAssembly & Cloudflare Workers](../guides/wasm-workers.md#writing-tools-and-providers-for-both-targets).
 
 **You own the timeout**: the loop awaits the filter as long as it takes.
 A filter that panics is contained and treated as a `Reject` (fail closed):
@@ -172,9 +176,11 @@ Loop iteration:
   2. Check execution limits
   3. before_turn(messages, turn_number)  <-- return false to abort
   4. Compact context
-  5. Stream LLM response
-  6. Check for error/abort → on_error(message) if StopReason::Error
-     → after_turn(messages, usage) even on error/abort
+  5. Stream LLM response (a retryable error closes the attempt with
+     MessageEnd(Error) + ProviderRetry, waits, and re-requests; turn hooks
+     run again for each attempt)
+  6. Check for error/abort → on_error(message) only if StopReason::Error
+     (not Aborted) → after_turn(messages, usage) on both
   7. Execute tool calls
   8. Track turn
   9. after_turn(messages, usage)

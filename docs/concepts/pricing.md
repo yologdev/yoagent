@@ -222,6 +222,9 @@ returns a snapshot of what a constructor would use now.
   check this at startup. `global::load_env_override()` reads and strictly
   parses the file right away and returns
   `Result<Option<PriceTable>, PriceError>`.
+- On wasm32 there are no environment variables or files: `YOAGENT_PRICES` is
+  always `Unset` and `PriceTable::from_path` fails. Install an override with
+  `global::install_override(PriceTable::from_json_str(json)?)` instead.
 - This crate's own unit tests never read `YOAGENT_PRICES`. Integration tests
   and doctests that assert list prices call `global::clear_override()`
   first, and the suite passes with the variable set.
@@ -246,7 +249,8 @@ yoagent **never fetches prices on its own**. When you ask,
 | `PriceSource::Url(url)` | Any URL serving this crate's format — typically a file you maintain. | strictly |
 
 `PriceTable::fetch_with(&source, FetchOptions)` takes a timeout (default
-10 s: `FetchOptions::new().with_timeout(..)`) and returns a `FetchReport`:
+10 s: `FetchOptions::new().with_timeout(..)`; a per-request timeout, so it also
+applies on wasm32) and returns a `FetchReport`:
 
 - `table`: the fetched prices;
 - `skipped`: every model a models.dev source listed but could not map, and
@@ -262,6 +266,8 @@ document you already have.
 cache file. It never fails. `CacheOptions::new()` defaults to refetching
 after a day (`max_age`), accepting a stale cache at most a week old when
 offline (`max_stale`), and a 10 s timeout. Each has a `with_*` setter.
+`fetch_cached` needs the default `native` feature (its disk cache); on wasm32
+use `PriceTable::fetch` / `fetch_with`.
 
 ```rust
 use yoagent::provider::prices::global;

@@ -12,6 +12,9 @@ The [Model Context Protocol (MCP)](https://modelcontextprotocol.io) is a JSON-RP
 
 ### Stdio Transport
 
+> Needs the default `native` feature: not available with
+> `default-features = false` or on wasm32.
+
 Use `with_mcp_server_stdio()` to spawn an MCP server process and register its tools:
 
 ```rust
@@ -50,7 +53,8 @@ let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude
 
 ### HTTP Transport
 
-For remote MCP servers exposed over HTTP:
+For remote MCP servers exposed over HTTP. This works on every target,
+including wasm32 / Cloudflare Workers (over the host's `fetch`):
 
 ```rust
 let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"))
@@ -82,12 +86,14 @@ an SSE-framed response, whether or not they then close the stream:
 - The body is parsed incrementally, so a call returns at the blank-line-terminated
   frame carrying its response rather than at end-of-stream. A server that holds
   the POST stream open after answering does not block it. Two trade-offs come
-  with that: returning mid-body forgoes connection reuse (a fresh connection,
-  and TLS handshake, on the next call to such a server), and a plain JSON-RPC
+  with that: returning mid-body forgoes connection reuse on native targets (a
+  fresh connection, and TLS handshake, on the next call to such a server), and a plain JSON-RPC
   body has no frames to return early at, so it is read to the end as before.
 - A stalled server — one that accepts the POST then sends nothing — is bounded
   by an idle read timeout (120s) rather than hanging. The timer resets on every
   read, so a long `tools/call` streaming progress frames is never cut off.
+  (Native targets only. On wasm32 the fetch-based client has no read timeout;
+  the host's own request limits apply.)
 
 **Not supported:** the `GET` server→client stream and `Last-Event-ID`
 resumability. `McpTransport` is `send`/`close` only, with nowhere to deliver a
@@ -157,6 +163,8 @@ MCP operations return `McpError`:
 - `McpError::Transport` — connection or I/O failure
 - `McpError::Protocol` — unexpected response format
 - `McpError::JsonRpc` — server returned a JSON-RPC error
+- `McpError::Serialization` — a message could not be (de)serialized as JSON
+- `McpError::Io` — an I/O error, e.g. on the stdio pipes
 - `McpError::ConnectionClosed` — server process exited
 
 When an MCP tool returns `isError: true`, the adapter converts it to a `ToolError::Failed`, which the agent loop sends back to the LLM with `is_error: true` so it can self-correct.

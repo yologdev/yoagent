@@ -17,9 +17,9 @@ coverage: code that runs under test while nothing checks what it does.
 |---|---|
 | Config | [`.cargo/mutants.toml`](https://github.com/yologdev/yoagent/blob/main/.cargo/mutants.toml) |
 | CI | [`.github/workflows/mutants.yml`](https://github.com/yologdev/yoagent/blob/main/.github/workflows/mutants.yml): weekly (Mon 03:17 UTC) + manual, 16 round-robin shards |
-| Scope | `src/context.rs`, `src/agent_loop.rs`, `src/llm_compaction.rs`, `src/provider/model.rs`, `src/provider/prices.rs`, `src/provider/prices/global.rs` |
+| Scope | `src/context.rs`, `src/agent_loop.rs`, `src/llm_compaction.rs`, `src/provider/model.rs`, `src/provider/prices.rs`, `src/provider/prices/global.rs`, `src/provider/sigv4.rs` (added with #200, after this baseline; not in the counts below) |
 | Build | `--all-features`, `--tests` (no doctests or examples), profile `mutants` (test profile, opt-level 1, no debuginfo) |
-| Excluded | the empty-body mutants of the two redacting `Debug` impls (see the config for why) |
+| Excluded | the empty-body mutants of the two redacting `Debug` impls, and the `+=` → `-=`/`*=` mutants in `level2_summarize_old_turns` that kill the CI runner (see the config, and "First CI run" below) |
 
 Pricing has been data since 0.20, so it lives in three files. `model.rs` holds
 the arithmetic (`CostConfig::cost_usd`, context tiers) and the lookup made at
@@ -116,7 +116,8 @@ Do not reopen these unless the code around them changes.
 | `provider/model.rs:713` | delete `supports_usage_in_streaming` from `OpenAiCompat::qwen` | Falls back to the default, which is the same `true`. **Equivalent.** It would stop being equivalent if the default ever changed. |
 | `provider/prices.rs:777` | `is_zero` → `false` | Used only as `skip_serializing_if`, so `to_json` writes explicit `0.0` rates instead of omitting them. The parse reads both forms the same way. **Serialization verbosity only.** |
 
-Only the two redacting `Debug` impls are excluded in the config. The survivors
+Besides the two redacting `Debug` impls, only the runner-killing
+`level2_summarize_old_turns` mutants (below) are excluded in the config. The survivors
 above are matched by line and column, which drifts with every edit, so they are
 recorded here instead of being written into `exclude_re`.
 

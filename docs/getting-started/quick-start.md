@@ -27,7 +27,7 @@ async fn main() {
             AgentEvent::ToolExecutionStart { tool_name, .. } => {
                 println!("\n→ Running tool: {}", tool_name);
             }
-            AgentEvent::ToolExecutionEnd { tool_name, result, is_error, .. } => {
+            AgentEvent::ToolExecutionEnd { tool_name, is_error, .. } => {
                 if is_error {
                     println!("  ✗ {} failed", tool_name);
                 } else {
@@ -153,12 +153,16 @@ async fn main() {
         compaction_strategy: None,
         execution_limits: None,
         cache_config: CacheConfig::default(),
+        tool_output_sink: None,
         tool_execution: ToolExecutionStrategy::default(),
+        tool_middleware: vec![],
+        output_schema: None,
         retry_config: yoagent::RetryConfig::default(),
         before_turn: None,
         after_turn: None,
         on_error: None,
         input_filters: vec![],
+        turn_delay: None,
     };
 
     let prompts = vec![AgentMessage::Llm(Message::user("Hello!"))];

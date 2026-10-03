@@ -15,7 +15,7 @@ Request → Error? → Retryable? → Wait (backoff + jitter) → Retry → ...
    - If a `retry-after` delay was provided (rate limits), use that
    - Otherwise, calculate delay: `initial_delay × multiplier^(attempt-1)` with ±20% jitter
    - Wait, then retry
-3. After `max_retries` attempts, the error propagates normally
+3. After `max_retries` retries (`max_retries + 1` attempts), the error propagates normally
 
 ## What gets retried
 
@@ -97,13 +97,28 @@ let config = AgentLoopConfig {
 
 ## Rate limit headers
 
-When a provider returns `ProviderError::RateLimited { retry_after_ms: Some(5000) }`, yoagent uses that exact delay instead of the calculated backoff. This respects the provider's guidance — if Anthropic says "retry after 5 seconds", we wait 5 seconds, not our own estimate.
+When a provider returns `ProviderError::RateLimited { retry_after_ms: Some(5000) }`, yoagent uses that delay instead of the calculated backoff, capped at `max_delay_ms` so a bad header cannot stall the loop. This respects the provider's guidance — if Anthropic says "retry after 5 seconds", we wait 5 seconds, not our own estimate.
 
 If no `retry_after_ms` is provided, the exponential backoff kicks in.
 
 ## Observability
 
-Retry attempts are logged via `tracing` at the `WARN` level:
+### Events
+
+Each retried attempt is visible on the event stream. If the attempt opened a
+message, it is closed with a `MessageEnd` carrying `StopReason::Error` and an
+`error_message` of the form `attempt N of M failed and will be retried: …`;
+then `AgentEvent::ProviderRetry { attempt, max_attempts, error, delay_ms }`
+follows (`attempt` is 1-based, `max_attempts` is `max_retries + 1`). An attempt
+that failed before streaming anything gets only the `ProviderRetry`. The final
+failure is never followed by `ProviderRetry`, and only the successful answer
+(or the final error) enters history. See
+[Messages & Events](messages-events.md#wire-format) for how a client should
+read the sequence.
+
+### Logs
+
+Retry attempts are also logged via `tracing` at the `WARN` level:
 
 ```
 WARN Provider error (attempt 1/3), retrying in 1.1s: Rate limited, retry after 1000ms
@@ -128,5 +143,5 @@ tracing_subscriber::fmt()
 
 - **Retry lives in the agent loop**, not inside individual providers. One config controls all retry behavior.
 - **Jitter** prevents thundering herd: when many agents hit a rate limit simultaneously, jitter spreads their retries so they don't all retry at the same instant.
-- **Cancellation is respected**: if the user cancels while waiting for a retry, the loop exits immediately.
+- **Cancellation is respected**: cancelling during a retry's backoff ends the turn at once, with no further request. The turn's message carries `StopReason::Aborted`, and `on_error` is not called.
 - **No retry on API errors**: a malformed request will fail the same way every time. Retrying wastes time and tokens.

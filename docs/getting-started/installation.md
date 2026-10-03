@@ -3,7 +3,7 @@
 ## Requirements
 
 - Rust 1.86+ (2021 edition)
-- Tokio async runtime
+- Tokio async runtime (native targets; on wasm32 the host's executor — see [WebAssembly & Cloudflare Workers](../guides/wasm-workers.md))
 
 ## Add to Cargo.toml
 
@@ -19,7 +19,7 @@ yoagent brings in these key dependencies automatically:
 
 | Crate | Purpose |
 |-------|---------|
-| `tokio` | Async runtime (full features) |
+| `tokio` | Async runtime (`rt`, `sync`, `macros`, `time`, `io-util`; `native` adds `fs`, `process`) |
 | `serde` / `serde_json` | Serialization |
 | `reqwest` | HTTP client for provider APIs |
 | `reqwest-eventsource` | SSE streaming |
@@ -27,10 +27,11 @@ yoagent brings in these key dependencies automatically:
 | `tokio-util` | `CancellationToken` |
 | `thiserror` | Error types |
 | `tracing` | Logging |
+| `web-time` | Wall clock that also works on wasm32 |
 
 ## Feature Flags
 
-All providers and built-in tools are included by default. Optional features:
+All providers are always included; the built-in filesystem and shell tools come with the default `native` feature. Optional features:
 
 | Feature | Dependencies | Description |
 |---------|-------------|-------------|

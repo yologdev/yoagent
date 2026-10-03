@@ -184,7 +184,7 @@ yoagent 0.15 treats this as a first-class design constraint, in three parts.
 
 ### 1. History stops churning
 
-Compaction is a pure function of its input, and idempotent where it can be:
+Compaction is a pure function of its input, and idempotent where it can be. (On wasm32, `LlmCompaction` never summarises — there is no runtime to run the request on — so only its deterministic tiers apply.)
 
 - **Tool-output truncation fits its own budget.** The `[... N lines truncated ...]` marker is charged against `tool_output_max_lines`, so truncating an already-truncated result returns it byte for byte. Previously the marker pushed the result *over* the limit, so the next pass re-truncated it and restated the count — a second full-prefix invalidation on top of the first.
 - **Markers carry no drifting state.** The compaction marker's text is constant and generated summaries inherit the timestamp of what they replace, so the same history always compacts to the same bytes.
@@ -298,7 +298,7 @@ session. Compare rewrite counts, or compare dollars.
 
 ### Measured live: DeepSeek vs Anthropic
 
-`examples/llm_compaction_live.rs` runs a real multi-turn session and reports
+`examples/llm_compaction_live.rs` (run with `--features gasp`) runs a real multi-turn session and reports
 per-turn cache accounting. **"Not cached" means `input + cache_write`** — both
 halves are prompt tokens the provider had to process and bill for. Counting only
 `input` is the trap: Anthropic books a re-processed prefix to `cache_write` and
@@ -392,7 +392,7 @@ That is a consequence of the work above rather than an argument against the mode
 ## Best Practices
 
 1. **Keep system prompts stable** — changing the system prompt between turns invalidates the cache
-2. **Don't shuffle tools** — tool order matters for cache prefix matching
+2. **Don't shuffle tools** — tool order matters for cache prefix matching. Sourced tools ([`ToolSource`](tools.md#tools-that-change-at-runtime-toolsource)) are sorted by name, so order alone never costs anything, but any change to the *set* a source returns rewrites the cached prefix at the next run start
 3. **Let it work automatically** — the default `CacheStrategy::Auto` is optimal for most use cases
 4. **Monitor `cache_hit_rate()`** — if it's consistently low, check if your system prompt or tools are changing unexpectedly
 5. **Don't rewrite history yourself** — a custom `CompactionStrategy` or `transform_context` that edits already-sent messages costs the whole prefix from that point on. Append, or cut at a boundary and leave everything before it byte-identical.

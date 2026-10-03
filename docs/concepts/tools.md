@@ -5,8 +5,9 @@
 Every tool implements `AgentTool`:
 
 ```rust
-#[async_trait]
-pub trait AgentTool: Send + Sync {
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+pub trait AgentTool: rt::MaybeSend + rt::MaybeSync {
     fn name(&self) -> &str;
     fn label(&self) -> &str;
     fn description(&self) -> &str;
@@ -18,6 +19,10 @@ pub trait AgentTool: Send + Sync {
     ) -> Result<ToolResult, ToolError>;
 }
 ```
+
+`rt::MaybeSend + rt::MaybeSync` is exactly `Send + Sync` on native targets, so
+a plain `#[async_trait]` impl is unchanged there. On wasm32 the bound is empty;
+see [WebAssembly & Cloudflare Workers](../guides/wasm-workers.md).
 
 | Method | Purpose |
 |--------|---------|
@@ -49,7 +54,10 @@ pub struct ToolContext {
 | `on_update` | Callback for streaming partial `ToolResult` updates to the UI (emits `ToolExecutionUpdate`) |
 | `on_progress` | Callback for emitting user-facing progress messages (emits `ProgressMessage`) |
 
-`ToolContext` implements `Clone` and `Debug`.
+`ToolContext` implements `Clone` and `Debug`. It is `#[non_exhaustive]`: outside
+the loop (tests, or driving a tool directly) build one with
+`ToolContext::new(id, name)` and its `with_*` builders. Delegation tools report
+a child run's stats with `ctx.report_delegated_run(..)`.
 
 ## ToolResult
 
@@ -123,6 +131,11 @@ impl AgentTool for WeatherTool {
 }
 ```
 
+> The built-in tools (`BashTool`, `ReadFileTool`, `WriteFileTool`,
+> `EditFileTool`, `ListFilesTool`, `SearchTool`) and `default_tools()` need the
+> default `native` feature. They do not exist with `default-features = false`
+> or on wasm32.
+
 Register custom tools alongside defaults:
 
 ```rust
@@ -155,7 +168,7 @@ Enforcement is against the **resolved** path, not the string, so neither `..` no
 
 `deny_patterns` is a substring check that catches typos and obvious mistakes — `rm  -rf /` with two spaces, a base64-decoded pipe, or an equivalent `find -delete` all sail past it. Treat it as a guardrail, never as a security boundary.
 
-Real isolation belongs outside the tool: run the agent in a container or VM, or gate calls through [`ToolMiddleware`](#tool-middleware), which sees the arguments before execution and can deny them.
+Real isolation belongs outside the tool: run the agent in a container or VM, or gate calls through [`ToolMiddleware`](#permissions-tool-middleware), which sees the arguments before execution and can deny them.
 
 For credentials specifically, commands inherit every environment variable the agent process holds — including any `*_API_KEY`. When the model composes the command, restrict what it can read:
 
@@ -183,7 +196,7 @@ async fn execute(&self, params: serde_json::Value, _ctx: ToolContext) -> Result<
 }
 ```
 
-**Exception: BashTool.** The built-in `BashTool` returns `Ok` even on non-zero exit codes, with both stdout and stderr in the result. This is intentional — the LLM needs to see the actual error output (compilation errors, test failures, etc.) to diagnose and fix issues. Only truly exceptional failures (e.g., command not found, cancellation) return `Err`.
+**Exception: BashTool.** The built-in `BashTool` returns `Ok` even on non-zero exit codes, with both stdout and stderr in the result. This is intentional — the LLM needs to see the actual error output (compilation errors, test failures, etc.) to diagnose and fix issues. Only failures outside the command return `Err`: a matched deny pattern, a refused confirmation, a timeout, cancellation, or `bash` failing to start. A command that does not exist is an ordinary non-zero exit (127).
 
 ## Tool Execution Flow
 
@@ -368,8 +381,8 @@ impl AgentTool for DeployTool {
                 });
             }
 
-            // Simulate work
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            // Simulate work (`yoagent::rt::sleep` works on native and wasm32)
+            yoagent::rt::sleep(std::time::Duration::from_secs(2)).await;
         }
 
         // Only this final result is sent to the LLM

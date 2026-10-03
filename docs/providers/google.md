@@ -17,6 +17,7 @@ let agent = Agent::from_config(ModelConfig::google("gemini-3.8-flash", "Gemini 3
 
 - **Endpoint**: `{base_url}/v1beta/models/{model}:streamGenerateContent?alt=sse&key={api_key}`
 - **Auth**: API key as query parameter
+- **API key env**: `GEMINI_API_KEY`, then `GOOGLE_API_KEY` (see [API keys](overview.md#api-keys))
 - **Default base URL**: `https://generativelanguage.googleapis.com`
 - **Default context window**: 1,000,000 tokens
 
@@ -116,6 +117,19 @@ Uses SSE format (`alt=sse`). Each chunk contains `candidates` with `content.part
 
 `GoogleVertexProvider` uses the same message format but with Vertex AI authentication and endpoints.
 
-- **Protocol**: `ApiProtocol::GoogleVertex`
-- **Auth**: OAuth2 / service account credentials
-- **Endpoint pattern**: `https://{region}-aiplatform.googleapis.com/v1/projects/{project}/locations/{region}/publishers/google/models/{model}:streamGenerateContent`
+- **Protocol**: `ApiProtocol::GoogleVertex`. There is no preset; build the config with `ModelConfig::custom`.
+- **Auth**: an OAuth2 access token passed with `with_api_key`, sent as `Authorization: Bearer {token}`. yoagent reads no service-account file, refreshes no token, and resolves no environment variable for `vertex`: mint the token yourself (e.g. `gcloud auth print-access-token`) and rebuild the agent before it expires.
+- **`base_url`**: `https://{region}-aiplatform.googleapis.com/v1/projects/{project}/locations/{region}/publishers/google/models`. Requests go to `{base_url}/{model}:streamGenerateContent?alt=sse`.
+
+```rust
+use yoagent::provider::{ApiProtocol, ModelConfig};
+
+let agent = Agent::from_config(ModelConfig::custom(
+    ApiProtocol::GoogleVertex,
+    "vertex",
+    "https://us-central1-aiplatform.googleapis.com/v1/projects/my-proj/locations/us-central1/publishers/google/models",
+    "gemini-3.8-flash",
+    "Gemini 3.8 Flash",
+))
+.with_api_key(access_token);
+```

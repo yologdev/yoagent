@@ -16,6 +16,10 @@ agent-loop changes**:
 yoagent = { version = "0.23", features = ["gasp"] }
 ```
 
+The `gasp` feature needs the filesystem and git, so it is native-only: it
+is not available on wasm32 (see
+[WebAssembly & Cloudflare Workers](../guides/wasm-workers.md)).
+
 
 ```rust
 use yoagent::gasp::{GaspRecorder, GoalRef};
@@ -27,7 +31,7 @@ let recorder = GaspRecorder::init(
 
 let (tx, record_handle) = recorder.recording_sender("implement the parser", None);
 agent.prompt_with_sender("implement the parser", tx).await;
-let run_id = record_handle.await??;   // events appended + committed
+let run_id = record_handle.await??;   // Option<RunId>: None if no AgentStart arrived
 ```
 
 ## What gets recorded
@@ -35,9 +39,9 @@ let run_id = record_handle.await??;   // events appended + committed
 | Agent activity | GASP events |
 |---|---|
 | loop starts | `run.started` (the goal is stamped in the run commit's `Goal:` trailer) |
-| each assistant turn | `model.called` / `model.finished` paired nodes |
+| each assistant turn | `model.called` / `model.finished` paired nodes (a retried provider attempt — an error `MessageEnd` followed by `ProviderRetry` — is not recorded) |
 | each tool execution | `tool.called` / `tool.finished` (with success flag) |
-| loop ends | `run.finished` with the outcome (`completed` / `error` / `aborted` / ...) |
+| loop ends | `run.finished` with the outcome: `completed` / `truncated` / `error` / `aborted` (a cancelled run) / `refused`, `loop_aborted:<tool>` when loop detection stopped it, `rejected` when an input filter refused the prompt, `interrupted` for a run a crashed process left open |
 
 The semantic log stores bounded one-line summaries — the **task string
 (verbatim)**, model ids, and the **first 200 characters of tool inputs, tool

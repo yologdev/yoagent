@@ -6,8 +6,8 @@ yoagent is organized as three conceptual layers within a single crate. Dependenc
 
 ```
 ┌─────────────────────────────────────────────┐
-│  Layer 3: Orchestration          (planned)   │
-│  Multi-agent, delegation, work modes         │
+│  Layer 3: Orchestration   (partly planned)   │
+│  Delegation today; work modes planned        │
 ├─────────────────────────────────────────────┤
 │  Layer 2: Agent + Providers                  │
 │  Concrete providers, tools, retry, caching,  │
@@ -44,18 +44,20 @@ Batteries-included single-agent layer. Most users interact with this.
 **Modules:** `agent.rs`, `context.rs`, `retry.rs`, `provider/*.rs`, `tools/*.rs`, `mcp/*.rs`
 
 **Adds on top of Layer 1:**
-- Concrete providers — Anthropic, OpenAI-compat, Google, Azure, Bedrock, Vertex
+- Concrete providers — Anthropic, OpenAI-compat, OpenAI Responses, Azure OpenAI, Google Gemini, Vertex, Bedrock (7 protocols)
 - Provider registry — dispatch by API protocol
 - Prompt caching — automatic cache breakpoint placement
 - Retry with backoff — exponential, jitter, respects retry-after
 - Context management — token estimation, smart truncation, execution limits
-- Built-in tools — bash, read_file, write_file, edit_file, list_files, search
-- MCP client — stdio + HTTP transports, tool adapter
+- Built-in tools — bash, read_file, write_file, edit_file, list_files, search (feature `native`)
+- MCP client — stdio (feature `native`) + HTTP transports, tool adapter
+- `ToolSource` — per-run tool sources, consulted at the start of every run
+- `rt` — runtime shims (Tokio on native targets, the host executor on wasm32)
 - `Agent` struct — stateful builder wrapping it all together
 
-### Layer 3: Orchestration (planned)
+### Layer 3: Orchestration (partly planned)
 
-Multi-agent coordination. Not yet implemented — the architecture is designed to support it when needed.
+Delegation exists today as `SubAgentTool` (a tool that runs a child loop with its own model, tools and limits; nestable) with `SharedState` for passing artifacts by reference. A higher-level `Orchestrator` with work modes is not implemented.
 
 **Planned capabilities:**
 - `Orchestrator` struct — spawn, delegate, and coordinate multiple agents
@@ -83,10 +85,19 @@ yoagent/
 │   ├── types.rs                # Message, Content, AgentTool, AgentEvent
 │   ├── agent_loop.rs           # Core loop: prompt → LLM → tools → repeat
 │   │
+│   ├── rt.rs                   # spawn/sleep/timeout/Instant, MaybeSend/MaybeSync
+│   ├── tool_source.rs          # ToolSource (tools resolved per run)
+│   │
 │   │── Layer 2: Agent + Providers ─────────────
 │   ├── agent.rs                # Agent struct (stateful wrapper)
 │   ├── context.rs              # Token estimation, compaction, limits
+│   ├── llm_compaction.rs       # LlmCompaction (background LLM summaries)
 │   ├── retry.rs                # Retry with exponential backoff
+│   ├── sub_agent.rs            # SubAgentTool (delegation to a child loop)
+│   ├── shared_state.rs         # SharedState + backends
+│   ├── session.rs              # Session trees, JSONL persistence
+│   ├── skills.rs               # AgentSkills SKILL.md loading
+│   ├── gasp.rs                 # GASP run recording (feature gasp)
 │   ├── provider/
 │   │   ├── traits.rs           # StreamProvider trait, StreamEvent, ProviderError
 │   │   ├── model.rs            # ModelConfig, ApiProtocol, OpenAiCompat
@@ -94,23 +105,34 @@ yoagent/
 │   │   ├── anthropic.rs        # Anthropic Messages API
 │   │   ├── openai_compat.rs    # OpenAI Chat Completions (15+ providers)
 │   │   ├── openai_responses.rs # OpenAI Responses API
+│   │   ├── azure_openai.rs     # Azure OpenAI
+│   │   ├── responses_stream.rs # SSE parser shared by Responses and Azure
 │   │   ├── google.rs           # Google Generative AI
 │   │   ├── google_vertex.rs    # Google Vertex AI
 │   │   ├── bedrock.rs          # AWS Bedrock ConverseStream
-│   │   ├── azure_openai.rs     # Azure OpenAI
+│   │   ├── eventstream.rs      # AWS binary eventstream decoder
+│   │   ├── sigv4.rs            # SigV4 request signing
+│   │   ├── turn_hook.rs        # TurnHookProvider
+│   │   ├── tool_args.rs        # Tool-argument parsing
+│   │   ├── prices.rs           # PriceTable (+ prices/global.rs, prices/fetch.rs)
+│   │   ├── prices.json         # Built-in price data
 │   │   ├── mock.rs             # Mock provider for testing
 │   │   └── sse.rs              # SSE utilities
 │   ├── tools/
-│   │   ├── bash.rs             # BashTool
-│   │   ├── file.rs             # ReadFileTool, WriteFileTool
-│   │   ├── edit.rs             # EditFileTool
-│   │   ├── list.rs             # ListFilesTool
-│   │   └── search.rs           # SearchTool
-│   └── mcp/
-│       ├── client.rs           # MCP client (stdio + HTTP)
-│       ├── tool_adapter.rs     # McpToolAdapter (MCP tool → AgentTool)
-│       ├── transport.rs        # Transport implementations
-│       └── types.rs            # MCP protocol types
+│   │   ├── bash.rs             # BashTool (native)
+│   │   ├── file.rs             # ReadFileTool, WriteFileTool (native)
+│   │   ├── edit.rs             # EditFileTool (native)
+│   │   ├── list.rs             # ListFilesTool (native)
+│   │   ├── search.rs           # SearchTool (native)
+│   │   ├── sandbox.rs          # PathSandbox
+│   │   └── shared_state_tool.rs # SharedStateTool
+│   ├── mcp/
+│   │   ├── client.rs           # MCP client (stdio on native, HTTP everywhere)
+│   │   ├── tool_adapter.rs     # McpToolAdapter (MCP tool → AgentTool)
+│   │   ├── transport.rs        # Transport implementations
+│   │   └── types.rs            # MCP protocol types
+│   ├── openapi/                # OpenAPI 3.0 → tools (feature openapi)
+│   └── decision/               # Decision models (feature decision)
 ```
 
 ## Data Flow
@@ -164,8 +186,8 @@ Tools receive a `CancellationToken` child token — they should check it for coo
 
 ## Design Principles
 
-- **Layers are conceptual, not physical.** One crate, clean module boundaries, no feature flags needed.
+- **Layers are conceptual, not physical.** One crate, clean module boundaries. Feature flags only gate host capabilities (`native`) and optional integrations (`openapi`, `gasp`, `decision`).
 - **Dependencies flow down.** Layer 1 never imports from Layer 2. Layer 2 never imports from Layer 3.
 - **Layer 1 is stable.** The core loop and traits change rarely. New features are added in Layer 2 or 3.
-- **Build what's needed.** Layer 3 is designed but not implemented. It will be built when a use case demands it, not speculatively.
+- **Build what's needed.** Layer 3's `Orchestrator` is designed but not implemented. It will be built when a use case demands it, not speculatively.
 - **Simple over clever.** A straightforward loop with good defaults beats an elegant abstraction nobody can debug.

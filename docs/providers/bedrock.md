@@ -63,6 +63,13 @@ Two AWS mechanisms are supported:
    keys). One of the pair without the other, or a variable that is not valid
    Unicode, is an error naming the variable.
 
+On wasm32 (Cloudflare Workers) there are no environment variables, so step 3
+never finds credentials: pass them with `with_api_key` (a Bedrock API key, or
+`access:secret[:token]`). The SigV4 region must then come from the endpoint
+host, since `AWS_REGION` / `AWS_DEFAULT_REGION` cannot be set there; a proxy
+`base_url` without a region in its host cannot be SigV4-signed on wasm32 (send
+an `authorization` header and let the proxy sign).
+
 For a `BedrockConverseStream` config, `Agent`, `SubAgentTool` and
 `LlmCompaction` never resolve a key themselves — whatever the config's
 provider string (`"bedrock"`, `"aws-bedrock"`, …), so a generic `API_KEY` or

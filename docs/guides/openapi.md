@@ -3,6 +3,7 @@
 Auto-generate `AgentTool` implementations from OpenAPI 3.0 specs. Point an agent at any API spec and it instantly gets callable tools for every operation.
 
 > **Feature-gated** — add `features = ["openapi"]` to your `Cargo.toml`.
+> Native targets only: not supported on wasm32.
 
 ## Quick Start
 

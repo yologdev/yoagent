@@ -56,7 +56,9 @@ passed through as given.
 - `prompt_structured` runs the loop to completion internally and returns the
   parsed `T` — there is no event receiver for this call.
 - Three error shapes: `Provider { message }` when the API call itself failed
-  (auth, network, a schema-induced 400 — retrying the parse is pointless);
+  (auth, network once retries are exhausted, a schema-induced 400 — retrying
+  the parse is pointless), was cancelled (`"Cancelled"`), or ended as a
+  refusal or content-filter stop (carrying its explanation);
   `Parse { source, raw }` when the model's text didn't deserialize (the raw
   text is preserved so you can retry or salvage); `NoOutput` when the run
   produced no text. Only messages produced by **this call** are considered —

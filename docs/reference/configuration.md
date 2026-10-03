@@ -65,7 +65,7 @@ pub struct ContextConfig {
     pub keep_recent: usize,                                   // Default: 10
     pub keep_first: usize,                                    // Default: 2
     pub tool_output_max_lines: usize,                         // Default: 200
-    pub tool_output_max_lines_overrides: HashMap<String, usize>, // Default: {"read_file": MAX}
+    pub tool_output_max_lines_overrides: HashMap<String, usize>, // Default: {"read_file": MAX, "shared_state": MAX}
     pub compact_target_ratio: f32,                            // Default: 0.7
     pub compact_headroom_turns: Option<usize>,                // Default: Some(30)
     pub truncate_tool_output_on_append: bool,                 // Default: true

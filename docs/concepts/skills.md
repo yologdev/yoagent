@@ -44,10 +44,15 @@ For complex diffs: `bash {baseDir}/scripts/diff_summary.sh`
 ## Loading skills
 
 ```rust
+use std::path::PathBuf;
 use yoagent::SkillSet;
 
+// Paths are used as given: `~` is not expanded.
+let home = PathBuf::from(std::env::var("HOME")?);
+let user_dir = home.join(".yoagent/skills");
+
 // Load from multiple directories (later dirs override earlier on name conflict)
-let skills = SkillSet::load(&["./skills", "~/.yoagent/skills"])?;
+let skills = SkillSet::load(&[user_dir.clone(), PathBuf::from("./skills")])?;
 
 // Or load from a single directory with a label
 let workspace_skills = SkillSet::load_dir("./skills", "workspace")?;
@@ -57,7 +62,7 @@ If skills may be updated independently at runtime, use resilient loading so one
 malformed `SKILL.md` does not discard the rest of the set:
 
 ```rust
-let (skills, errors) = SkillSet::load_resilient(&["./skills", "~/.yoagent/skills"]);
+let (skills, errors) = SkillSet::load_resilient(&[user_dir, PathBuf::from("./skills")]);
 
 for error in errors {
     tracing::warn!(%error, "skipping malformed skill");
@@ -95,15 +100,20 @@ The agent's system prompt will include:
 
 When the agent encounters a task matching a skill, it reads the SKILL.md using the `read_file` tool and follows the instructions. No special infrastructure needed.
 
+Skills are read from disk with `std::fs`, and the agent opens them with the
+`read_file` tool, which needs the default `native` feature. On wasm32 there is
+no filesystem: `SkillSet::load` finds no directories and returns an empty set
+without an error.
+
 ## Precedence
 
-When loading from multiple directories, later directories take precedence. A skill in `./skills/` overrides the same-named skill in `~/.yoagent/skills/`.
+When loading from multiple directories, later directories take precedence. Above, a skill in `./skills/` overrides the same-named skill in `$HOME/.yoagent/skills/`.
 
 You can also merge skill sets explicitly:
 
 ```rust
 let mut base = SkillSet::load_dir("/usr/share/yoagent/skills", "bundled")?;
-let user = SkillSet::load_dir("~/.yoagent/skills", "user")?;
+let user = SkillSet::load_dir(home.join(".yoagent/skills"), "user")?;
 let workspace = SkillSet::load_dir("./skills", "workspace")?;
 
 base.merge(user);
@@ -121,6 +131,6 @@ Skills are deliberately simple:
 - **No trigger engine** — the LLM decides from descriptions
 - **No compile-time registration** — skills use existing tools (read_file, bash)
 - **No plugin API** — skills are just files
-- **No runtime loading** — loaded at startup, that's it
+- **No runtime loading** — loaded at startup, that's it (for *tools* that change while the agent runs, see [`ToolSource`](./tools.md#tools-that-change-at-runtime-toolsource))
 
-If a skill needs a custom tool, it can provide an [MCP](./mcp.md) server.
+If a skill needs a custom tool, it can provide an [MCP](../guides/mcp.md) server.
