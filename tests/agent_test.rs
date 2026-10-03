@@ -1113,6 +1113,38 @@ async fn test_prompt_structured_surfaces_provider_error() {
     }
 }
 
+/// Provider answering 413 with an empty body, as Cerebras and Mistral do on
+/// overflow.
+struct EmptyBodyOverflowProvider;
+
+#[async_trait::async_trait]
+impl yoagent::provider::StreamProvider for EmptyBodyOverflowProvider {
+    async fn stream(
+        &self,
+        _config: yoagent::provider::StreamConfig,
+        _tx: mpsc::UnboundedSender<yoagent::provider::StreamEvent>,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<Message, yoagent::provider::ProviderError> {
+        Err(yoagent::provider::ProviderError::classify(413, ""))
+    }
+}
+
+#[tokio::test]
+async fn test_an_empty_body_overflow_is_detected_on_the_message() {
+    // The error carries no overflow phrase, only the status; the recorded
+    // turn must still report it as an overflow.
+    let mut agent = Agent::from_provider(
+        EmptyBodyOverflowProvider,
+        yoagent::provider::ModelConfig::mock(),
+    );
+    let mut rx = agent.prompt("hi").await;
+    while rx.recv().await.is_some() {}
+    agent.finish().await;
+
+    let last = agent.messages().last().and_then(|m| m.as_llm()).unwrap();
+    assert!(last.is_context_overflow(), "{last:?}");
+}
+
 /// Provider whose call is cancelled from its side.
 struct CancelledProvider;
 
