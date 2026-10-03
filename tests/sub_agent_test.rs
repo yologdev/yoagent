@@ -436,6 +436,82 @@ async fn test_sub_agent_event_forwarding() {
     );
 }
 
+#[tokio::test]
+async fn test_sub_agent_marks_a_retried_attempt_in_updates() {
+    // The child's first attempt streams partial text and fails with a
+    // retryable error. The parent's updates must say where the retry starts,
+    // so the partial text is not read as the start of the answer.
+    struct FlakyOnce {
+        attempts: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl yoagent::provider::StreamProvider for FlakyOnce {
+        async fn stream(
+            &self,
+            config: yoagent::provider::StreamConfig,
+            tx: tokio::sync::mpsc::UnboundedSender<yoagent::provider::StreamEvent>,
+            cancel: CancellationToken,
+        ) -> Result<Message, yoagent::provider::ProviderError> {
+            use std::sync::atomic::Ordering;
+            if self.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                let _ = tx.send(yoagent::provider::StreamEvent::Start);
+                let _ = tx.send(yoagent::provider::StreamEvent::TextDelta {
+                    content_index: 0,
+                    delta: "partial".into(),
+                });
+                return Err(yoagent::provider::ProviderError::Network(
+                    "stream cut".into(),
+                ));
+            }
+            MockProvider::text("recovered")
+                .stream(config, tx, cancel)
+                .await
+        }
+    }
+
+    let sub_agent = SubAgentTool::from_provider(
+        "flaky_agent",
+        Arc::new(FlakyOnce {
+            attempts: Default::default(),
+        }),
+        ModelConfig::mock(),
+    )
+    .with_retry_config(yoagent::RetryConfig {
+        max_retries: 1,
+        initial_delay_ms: 1,
+        backoff_multiplier: 1.0,
+        max_delay_ms: 1,
+    });
+
+    let updates: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let sink = updates.clone();
+    let on_update: ToolUpdateFn = Arc::new(move |result: ToolResult| {
+        if let Some(Content::Text { text }) = result.content.first() {
+            sink.lock().unwrap().push(text.clone());
+        }
+    });
+
+    let result = sub_agent
+        .execute(
+            serde_json::json!({"task": "Do work"}),
+            ToolContext::new("tc-1", "flaky_agent").with_on_update(on_update),
+        )
+        .await
+        .expect("the retry succeeds");
+    assert!(matches!(&result.content[0], Content::Text { text } if text == "recovered"));
+
+    let collected = updates.lock().unwrap().clone();
+    assert_eq!(
+        collected,
+        [
+            "partial",
+            "[sub-agent retrying after: Network error: stream cut]",
+            "recovered"
+        ],
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Invalid parameters
 // ---------------------------------------------------------------------------
