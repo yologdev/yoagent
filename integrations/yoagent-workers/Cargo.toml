@@ -1,0 +1,34 @@
+[package]
+name = "yoagent-workers"
+version = "0.1.0"
+edition = "2021"
+resolver = "3"
+description = "Run yoagent on Cloudflare Workers through the Worker's own bindings: Workers AI decision models (Clef) via env.AI"
+license = "MIT"
+repository = "https://github.com/yologdev/yoagent"
+documentation = "https://docs.rs/yoagent-workers"
+readme = "README.md"
+keywords = ["agent", "cloudflare", "workers", "wasm", "yoagent"]
+categories = ["wasm", "asynchronous"]
+authors = ["Yuanhao <yuanhao@yolog.dev>"]
+# yoagent's MSRV.
+rust-version = "1.86"
+# Not published yet: it needs `decision::parse_systemone_response`, which is
+# unreleased (the release after yoagent 0.23.0).
+publish = false
+
+[package.metadata.docs.rs]
+targets = ["wasm32-unknown-unknown"]
+
+# Everything here exists only on wasm32: a binding is a JavaScript object the
+# Workers runtime hands the Worker. On other targets the crate is empty.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+yoagent = { path = "../..", version = "0.23.0", default-features = false, features = ["decision"] }
+async-trait = "0.1"
+js-sys = "0.3"
+serde_json = "1"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3.76"

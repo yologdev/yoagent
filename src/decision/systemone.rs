@@ -261,7 +261,7 @@ impl SystemOneBackend {
     async fn send_once(&self, request: &Request, body: &[u8]) -> Result<Evaluation, DecisionError> {
         let key = self.key()?;
         let value = post_json(&self.client, &self.endpoint_url(), key.as_deref(), body).await?;
-        parse_evaluation(&unwrap_envelope(value)?, request)
+        parse_systemone_response(value, request)
     }
 }
 
@@ -436,6 +436,23 @@ fn level_text(v: &Value) -> String {
         Value::String(s) => s.clone(),
         other => other.to_string(),
     }
+}
+
+/// Parse a SystemOne response `body` against the `request` that produced it,
+/// for a backend that moves the request itself — such as a Cloudflare
+/// Workers AI binding (`yoagent-workers`), which calls the model without
+/// HTTP. Cloudflare's `{"result": ...}` envelope is unwrapped, and
+/// `"success": false` is a [`DecisionError::BadResponse`].
+///
+/// Parses leniently, like [`SystemOneBackend`]: unknown fields are ignored and
+/// a missing `confidence`, `choice`, `score` or `legend` is computed. It checks
+/// shape only; [`DecisionModel`](super::DecisionModel) validates the values of
+/// every backend's answers.
+pub fn parse_systemone_response(
+    body: Value,
+    request: &Request,
+) -> Result<Evaluation, DecisionError> {
+    parse_evaluation(&unwrap_envelope(body)?, request)
 }
 
 /// Parse a SystemOne response against the request that produced it. Shape

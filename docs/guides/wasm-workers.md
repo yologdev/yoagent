@@ -117,6 +117,11 @@ because `std::time::Instant::now()` and `SystemTime::now()` panic on wasm32.
 - Inside a request, the Worker's clocks (`performance.now()`, which `web-time`
   reads, and `Date.now()`) advance only when the Worker does I/O, so
   `ExecutionLimits::max_duration` is coarse there.
+- For what only a Worker has — its bindings in `env` — see the
+  [`yoagent-workers`](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-workers)
+  crate. It runs Cloudflare's Clef decision models through the Workers AI
+  binding (`env.AI`), so no API token is needed. A binding belongs to one
+  request: build the model and the agent inside the handler.
 - Keep the `target_features` custom section when stripping release builds
   (`strip = "debuginfo"`, not `strip = true`). wasm-bindgen reads it to create
   the externref table that workers-rs panic recovery requires.

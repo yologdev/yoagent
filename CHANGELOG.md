@@ -19,6 +19,16 @@ adheres to [Semantic Versioning](https://semver.org/).
   `SystemOneBackend::with_endpoint_url(url)` (an exact URL, e.g. AI Gateway);
   the backend unwraps Cloudflare's `{"result": ...}` envelope. Tested against
   a mock server only.
+- **`decision::parse_systemone_response(body, request)`**: the SystemOne
+  response parser `SystemOneBackend` uses (lenient, Cloudflare's envelope
+  unwrapped), public for backends that move the request themselves.
+- **`yoagent-workers` (new crate, `integrations/yoagent-workers/`)**: yoagent
+  on Cloudflare Workers through the Worker's own bindings. First,
+  `yoagent_workers::ai::{clef, clef_flash, AiBackend}` run Clef through the
+  Workers AI binding (`env.AI`) as a `DecisionBackend` — no API token, no
+  account id. wasm32 only; tested under Node against fake bindings. Not yet on
+  crates.io (it needs `parse_systemone_response`); yoagent's core does not
+  depend on it.
 
 ### Fixed
 

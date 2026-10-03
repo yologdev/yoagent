@@ -115,7 +115,7 @@ pub use guard::InputGuard;
 pub use logprobs::LogprobBackend;
 pub use mock::MockBackend;
 pub use question::{Question, QuestionKind, Request};
-pub use systemone::SystemOneBackend;
+pub use systemone::{parse_systemone_response, SystemOneBackend};
 
 use crate::provider::CostConfig;
 use serde_json::Value;

@@ -753,7 +753,11 @@ let clef = DecisionModel::from_backend(backend, "clef")
 ```
 
 In a Worker there are no environment variables: pass the token from a secret
-with `.with_api_key(..)`.
+with `.with_api_key(..)`. Or skip the token: the
+[`yoagent-workers`](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-workers)
+crate runs Clef through the Worker's Workers AI binding (`env.AI`), with no
+token, no account id and no trip over the public internet:
+`yoagent_workers::ai::clef(env.ai("AI")?)`.
 
 ## Pricing
 
