@@ -123,12 +123,13 @@ because `std::time::Instant::now()` and `SystemTime::now()` panic on wasm32.
   binding (`env.AI`), so no API token is needed. A binding belongs to one
   request: build the model and the agent inside the handler. Its
   [`clef-worker`](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-workers/examples/clef-worker)
-  example is a complete Worker: an agent whose tool calls Clef gates.
+  example is a complete Worker, managed with the Cloudflare CLI (`cf`): an
+  agent whose tool calls Clef gates.
 - Name the provider: `Agent::from_provider(OpenAiCompatProvider, config)`
   links one provider, where `Agent::from_config` links all seven to choose at
-  runtime. For a Worker with one tool that is about 328 KiB gzipped against
-  about 470 KiB (measured with `worker-build --release`, `opt-level = "s"`,
-  LTO).
+  runtime. For a Worker with one tool and no decision model that is about
+  328 KiB gzipped against about 470 KiB (measured with
+  `worker-build --release`, `opt-level = "s"`, LTO).
 - Keep the `target_features` custom section when stripping release builds
   (`strip = "debuginfo"`, not `strip = true`). wasm-bindgen reads it to create
   the externref table that workers-rs panic recovery requires.

@@ -11,9 +11,12 @@ adheres to [Semantic Versioning](https://semver.org/).
 - **`clef-worker` example** (`integrations/yoagent-workers/examples/clef-worker/`):
   a complete Cloudflare Worker running a yoagent agent whose tool calls are
   gated by Clef through the Workers AI binding (`ToolGate` + `yoagent_workers::ai::clef`).
-  Built and linted for wasm32 in CI; not yet run against a real binding.
+  Managed with the Cloudflare CLI (`cf`, `cloudflare.config.ts`). It reports
+  each tool call's outcome (`ok` / `denied` / `gate_unavailable` / `failed`),
+  a failed model call as a 502 and a turn-limit stop explicitly. Type-checked
+  and linted for wasm32 in CI; not yet run against a real binding.
 - `examples/decision.rs` asks Clef instead of Jev when `CLOUDFLARE_ACCOUNT_ID`
-  is set.
+  is set, says which model it uses, and exits 1 when the request fails.
 
 ## 0.24.0
 

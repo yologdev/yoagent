@@ -143,8 +143,9 @@ jobs:
         run: cargo clippy --manifest-path "$MANIFEST" --target wasm32-unknown-unknown --all-targets
       - name: Documentation
         run: RUSTDOCFLAGS="-Dwarnings" cargo doc --manifest-path "$MANIFEST" --no-deps --target wasm32-unknown-unknown
-      # The example Worker (its own workspace): it must keep building against
-      # the code beside it. Linted only; it is not run (no Cloudflare account).
+      # The example Worker (its own workspace): it must keep compiling against
+      # the code beside it. Type-checked and linted only; it is not built with
+      # worker-build or run (that needs a Cloudflare account).
       - name: Example Worker (clef-worker)
         run: |
           cargo fmt --manifest-path integrations/yoagent-workers/examples/clef-worker/Cargo.toml -- --check

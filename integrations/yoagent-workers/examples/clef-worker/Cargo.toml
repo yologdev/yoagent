@@ -8,7 +8,7 @@ description = "A yoagent agent in a Cloudflare Worker, its tool calls gated by C
 [lib]
 crate-type = ["cdylib"]
 
-# Paths so CI builds this against the code beside it. Outside this repo:
+# Paths so CI checks this against the code beside it. Outside this repo:
 #   yoagent = { version = "0.24", default-features = false, features = ["decision"] }
 #   yoagent-workers = "0.1"
 [dependencies]
@@ -22,8 +22,8 @@ serde_json = "1"
 opt-level = "s"
 lto = true
 codegen-units = 1
-# Not `strip = true`: wasm-bindgen reads the `target_features` section to
-# create the externref table that workers-rs panic recovery needs.
+# Not `strip = true`: keep the `target_features` section, which wasm-bindgen
+# reads.
 strip = "debuginfo"
 
 # Its own workspace: not part of yoagent's or yoagent-workers' build.

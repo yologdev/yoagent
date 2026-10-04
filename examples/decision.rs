@@ -6,8 +6,10 @@
 //! CLOUDFLARE_ACCOUNT_ID=... CLOUDFLARE_API_TOKEN=... cargo run --example decision --features decision
 //! ```
 //!
-//! Asks TypeSafe's Jev — or Cloudflare's Clef, when `CLOUDFLARE_ACCOUNT_ID` is
-//! set — three typed questions about one message in a single request, then
+//! Asks TypeSafe's Jev — or Cloudflare's Clef whenever `CLOUDFLARE_ACCOUNT_ID`
+//! is set (wrangler and cf users often have it exported: unset it to use Jev;
+//! the token comes from `CLOUDFLARE_API_TOKEN` or `CLOUDFLARE_AUTH_TOKEN`) —
+//! three typed questions about one message in a single request, then
 //! shows how an agent attaches the same model. Swap in
 //! `DecisionModel::local("http://localhost:8000")` to keep the state on your
 //! machine (a self-hosted SystemOne server). For Clef inside a Cloudflare
@@ -21,8 +23,14 @@ use yoagent::Agent;
 async fn main() {
     // 1. Choose a model. Nothing is sent until you ask it something.
     let model = match std::env::var("CLOUDFLARE_ACCOUNT_ID") {
-        Ok(account) if !account.trim().is_empty() => DecisionModel::clef(account.trim()),
-        _ => DecisionModel::jev(),
+        Ok(account) if !account.trim().is_empty() => {
+            eprintln!("using Clef on Workers AI (CLOUDFLARE_ACCOUNT_ID is set)");
+            DecisionModel::clef(account.trim())
+        }
+        _ => {
+            eprintln!("using TypeSafe's Jev");
+            DecisionModel::jev()
+        }
     };
 
     // 2. Ask: one batched request, typed answers with probabilities.
@@ -46,7 +54,7 @@ async fn main() {
         Ok(eval) => eval,
         Err(e) => {
             eprintln!("decision request failed: {e}");
-            return;
+            std::process::exit(1);
         }
     };
 
