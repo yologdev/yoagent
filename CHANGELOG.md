@@ -18,6 +18,10 @@ adheres to [Semantic Versioning](https://semver.org/).
   real Workers AI binding: Clef's first real calls (allowed a read and a
   requested delete; no denial was observed, because DeepSeek refused the
   injected instruction itself).
+- The `clef-worker` example reports `timing` (the run and each Clef call, in
+  ms). Measured under `cf dev`: Clef a median 444 ms per gate check (12 calls,
+  one Cloudflare-side failure, `5012`), the whole request 2.55 s; Jev, the same
+  request natively, 267 ms (12 calls, no failures). Details in its README.
 - `examples/decision.rs` asks Clef instead of Jev when `CLOUDFLARE_ACCOUNT_ID`
   is set, says which model it uses, and exits 1 when the request fails.
 
