@@ -3,9 +3,8 @@
 Run [yoagent](https://crates.io/crates/yoagent) on Cloudflare Workers through
 the Worker's own bindings.
 
-**Status:** 0.1.0, not on crates.io; built against yoagent 0.24 (the first
-release with `decision::parse_systemone_response`). Until it is published,
-take both crates from git (below).
+Requires yoagent 0.24 or later (the first release with
+`decision::parse_systemone_response`).
 
 yoagent itself builds for `wasm32-unknown-unknown` (`default-features = false`)
 and reaches every LLM provider over the Worker's `fetch` (see the
@@ -28,13 +27,15 @@ binding = "AI"
 ```
 
 ```toml
-# Cargo.toml — both from the same git source, so there is one `yoagent`
-# crate in the build (a crates.io `yoagent` next to a git `yoagent-workers`
-# would be two, and their types would not match).
+# Cargo.toml
 [dependencies]
-yoagent = { git = "https://github.com/yologdev/yoagent", default-features = false, features = ["decision"] }
-yoagent-workers = { git = "https://github.com/yologdev/yoagent" }
+yoagent = { version = "0.24", default-features = false, features = ["decision"] }
+yoagent-workers = "0.1"
 ```
+
+Take both from the same source: crates.io for both as above, or git for both.
+A crates.io `yoagent` next to a git `yoagent-workers` is two `yoagent` crates
+whose types do not match.
 
 ```rust
 // In a workers-rs fetch handler. `worker::Error` has no conversion from
