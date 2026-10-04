@@ -16,8 +16,11 @@
 //! The response is JSON: the final answer, and every tool call with its
 //! `outcome` (`ok`, `denied`, `gate_unavailable` or `failed`). A failed model
 //! call is a 502, a refusal a 422; a run cut off by the turn limit says so.
-//! `timing` reports the whole run and each Clef call in milliseconds, so the
+//! `timing` reports the whole run and each gate call in milliseconds, so the
 //! gate's cost can be read next to the model's.
+//!
+//! `?gate=jev` gates with TypeSafe's Jev instead of Clef (over `fetch`, with
+//! the `TYPESAFE_API_KEY` secret), to compare the two in the same Worker.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -26,7 +29,7 @@ use yoagent::agent_loop::AGENT_STOPPED_PREFIX;
 use yoagent::context::ExecutionLimits;
 use yoagent::decision::{
     Capabilities, DecisionBackend, DecisionError, DecisionModel, Evaluation, Request as Ask,
-    ToolGate,
+    SystemOneBackend, ToolGate,
 };
 use yoagent::provider::{ModelConfig, OpenAiCompatProvider};
 use yoagent::*;
@@ -117,15 +120,15 @@ impl AgentTool for DeleteNote {
     }
 }
 
-/// Clef through the binding, timing each call. In a Worker the clock moves
-/// only across I/O, which is exactly what a Clef call is.
-struct TimedClef {
-    inner: AiBackend,
+/// A decision backend that times each call. In a Worker the clock moves only
+/// across I/O, which is exactly what a decision-model call is.
+struct Timed {
+    inner: Box<dyn DecisionBackend>,
     calls_ms: Rc<RefCell<Vec<f64>>>,
 }
 
 #[async_trait::async_trait(?Send)]
-impl DecisionBackend for TimedClef {
+impl DecisionBackend for Timed {
     fn capabilities(&self) -> Capabilities {
         self.inner.capabilities()
     }
@@ -183,6 +186,10 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
     if req.method() != Method::Post {
         return Response::error("POST a prompt", 405);
     }
+    let use_jev = req
+        .url()?
+        .query_pairs()
+        .any(|(k, v)| k == "gate" && v == "jev");
     let prompt = req.text().await?;
     if prompt.trim().is_empty() || prompt.len() > 4_096 {
         return Response::error("the prompt must be 1 to 4096 bytes", 400);
@@ -193,18 +200,36 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
     };
 
     // A binding belongs to this request: build the gate and agent here.
-    // Clef as `yoagent_workers::ai::clef` builds it, with a timer around
-    // each call (that preset's price, looked up the same way).
+    // Clef as `yoagent_workers::ai::clef` builds it (or Jev, with
+    // `?gate=jev`), with a timer around each call and the preset's price.
     let started = yoagent::rt::Instant::now();
-    let clef_ms = Rc::new(RefCell::new(Vec::new()));
-    let clef = DecisionModel::from_backend(
-        TimedClef {
-            inner: AiBackend::new(env.ai("AI")?, CLEF),
-            calls_ms: clef_ms.clone(),
+    let gate_ms = Rc::new(RefCell::new(Vec::new()));
+    let prices = yoagent::provider::prices::global::resolved();
+    let (backend, model_id, cost): (Box<dyn DecisionBackend>, &str, _) = if use_jev {
+        let key = match required_secret(&env, "TYPESAFE_API_KEY") {
+            Ok(key) => key,
+            Err(response) => return Ok(response),
+        };
+        (
+            Box::new(SystemOneBackend::typesafe().with_api_key(key)),
+            "jev-latest",
+            prices.cost("typesafe", "jev-1.13.0"),
+        )
+    } else {
+        (
+            Box::new(AiBackend::new(env.ai("AI")?, CLEF)),
+            "clef",
+            prices.cost("cloudflare", "clef"),
+        )
+    };
+    let gate_model = DecisionModel::from_backend(
+        Timed {
+            inner: backend,
+            calls_ms: gate_ms.clone(),
         },
-        "clef",
+        model_id,
     )
-    .with_cost(yoagent::provider::prices::global::resolved().cost("cloudflare", "clef"));
+    .with_cost(cost);
     let mut agent = Agent::from_provider(
         OpenAiCompatProvider,
         ModelConfig::deepseek("deepseek-flash", "DeepSeek Flash"),
@@ -213,7 +238,7 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
     .with_api_key(model_key)
     .with_system_prompt(SYSTEM_PROMPT)
     .with_tools(vec![Box::new(ListNotes), Box::new(DeleteNote)])
-    .with_tool_gate(ToolGate::new(clef))
+    .with_tool_gate(ToolGate::new(gate_model))
     .with_execution_limits(ExecutionLimits::default().with_max_turns(4));
 
     let mut rx = agent.prompt(prompt).await;
@@ -266,7 +291,8 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
     agent.finish().await;
     let timing = serde_json::json!({
         "total_ms": (started.elapsed().as_secs_f64() * 1000.0).round(),
-        "clef_ms": *clef_ms.borrow(),
+        "gate": if use_jev { "jev" } else { "clef" },
+        "gate_ms": *gate_ms.borrow(),
     });
 
     match outcome {

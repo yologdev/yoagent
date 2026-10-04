@@ -33,24 +33,50 @@ so Clef answered for real:
 
 Every call above went through the gate, and the gate denies when Clef cannot
 be reached, so "allowed" means Clef was asked and said yes. A denial was not
-observed live (the model never attempted an unrequested delete). Not tested:
-`cf deploy`. In CI it is only type-checked and linted for wasm32.
+observed live (the model never attempted an unrequested delete). It was also
+deployed to Cloudflare with `cf deploy` and tested on the edge (see Latency),
+then deleted. In CI it is only type-checked and linted for wasm32.
 
 ## Latency
 
-Each response carries `timing`: the whole run and each Clef call, in
-milliseconds. Measured 2026-10-04 over 10 requests (5 reads, 5 requested
-deletes) under `cf dev`, from a laptop in Europe:
+Each response carries `timing`: the gate model (`clef`, or `jev` with
+`?gate=jev`), the whole run, and each gate call, in milliseconds, measured
+inside the Worker.
+
+### On Cloudflare's edge
+
+Deployed with `cf deploy` on 2026-10-04 (Cloudflare reported 400 KiB gzipped,
+4 ms startup) and called from Europe: the same 10 prompts (5 reads, 5
+requested deletes) once with each gate, alternating.
+
+| Gate | Calls | Min | Median | Max | Failures |
+|---|---|---|---|---|---|
+| Clef via `env.AI` | 12 | 158 ms | **308 ms** | 686 ms | 0 |
+| Jev via `fetch` (TypeSafe) | 11 | 208 ms | **230 ms** | 301 ms | 0 |
+
+| Whole request, measured in the Worker | Median | Range | Gate's median share |
+|---|---|---|---|
+| gated by Clef | 2.07 s | 1.71–3.60 s | 19% |
+| gated by Jev | 1.91 s | 1.48–2.87 s | 13% |
+
+On the edge Clef's median dropped from 444 ms (`cf dev`) to 308 ms; Jev, which
+was never run in a Worker before, worked first time and was the steadier of
+the two (208–301 ms). DeepSeek is still most of every request. Every tool call
+was allowed, as asked.
+
+### Under `cf dev`
+
+Measured 2026-10-04 over 10 requests (5 reads, 5 requested deletes) under
+`cf dev`, from a laptop in Europe:
 
 | | Calls | Min | Median | Max |
 |---|---|---|---|---|
 | Clef, one gate check (two yes/no questions, one request) | 12 | 258 ms | **444 ms** | 949 ms |
 | Whole request (two DeepSeek calls, the gate, the tool) | 10 | 2.0 s | **2.55 s** | 4.4 s |
 
-The gate was a median 22% of a request; DeepSeek was most of the rest. These
-Clef numbers are pessimistic: under `cf dev` each call goes from the laptop
-through Wrangler's remote-binding proxy to Cloudflare, where a deployed
-Worker's call stays inside Cloudflare. Deployed latency was not measured.
+The gate was a median 22% of a request; DeepSeek was most of the rest. Under
+`cf dev` each Clef call goes from the laptop through Wrangler's remote-binding
+proxy to Cloudflare, so these are slower than the edge figures above.
 
 One of the 12 Clef calls failed on Cloudflare's side (`AiError: 5012`,
 "Clef inference failed"); the gate denied that call, as it does whenever Clef
@@ -64,8 +90,8 @@ sent 12 times to TypeSafe's Jev from the same laptop, natively:
 |---|---|---|---|---|---|
 | Jev (`jev-1.13.0`, TypeSafe API) | 12 | 237 ms | **267 ms** | 478 ms | 0 |
 
-Jev is not a Cloudflare binding, but it works from a Worker over `fetch`:
-`ToolGate::new(DecisionModel::jev().with_api_key(..))`.
+Jev is not a Cloudflare binding; in a Worker it runs over `fetch`
+(`?gate=jev` here, or `ToolGate::new(DecisionModel::jev().with_api_key(..))`).
 
 ## Answers: Jev, Clef and Clef Flash
 
@@ -113,11 +139,12 @@ npx cf auth login                      # opens a browser
 ### Locally
 
 `cf build` (and the build `cf dev` runs first) finishes its output in seconds,
-but with cf 1.0.0-beta.12 the `cf build` process did not exit afterwards here;
-stop it once `.cloudflare/output/v0/` is written. `cf dev` is unaffected.
+but with cf 1.0.0-beta.12 the `cf build` and `cf deploy` processes did not exit
+afterwards here; stop them once `.cloudflare/output/v0/` is written.
+`cf dev` is unaffected.
 
 ```bash
-printf 'DEEPSEEK_API_KEY=...\nRUN_TOKEN=...\n' > .dev.vars    # git-ignored
+printf 'DEEPSEEK_API_KEY=...\nRUN_TOKEN=...\nTYPESAFE_API_KEY=...\n' > .dev.vars  # git-ignored; the last only for ?gate=jev
 npx cf dev               # Workers AI runs on Cloudflare even in dev, and is billed
 ```
 
@@ -129,13 +156,17 @@ URL=http://localhost:8787
 ### Deployed
 
 ```bash
-npx cf deploy --secrets-file .dev.vars
+npx cf build                                  # stop it once the output is written (above)
+npx cf deploy --prebuilt --secrets-file .dev.vars
 URL=https://yoagent-clef-worker.<your-subdomain>.workers.dev
+# when done: npx cf workers delete yoagent-clef-worker --force
 ```
 
 ### Ask it
 
 ```bash
+# Add ?gate=jev to the URL to gate with Jev instead of Clef.
+
 # Expected: allowed (read-only).
 curl -s $URL -H "Authorization: Bearer $RUN_TOKEN" -d 'What notes do I have?'
 
@@ -161,7 +192,7 @@ JSON with the final `answer` and every tool call:
 ```json
 {"answer": "...",
  "tools": [{"tool": "delete_note", "outcome": "denied", "result": "Tool call denied: Tool gate: ..."}],
- "timing": {"total_ms": 2553, "clef_ms": [444]}}
+ "timing": {"gate": "clef", "total_ms": 2072, "gate_ms": [308]}}
 ```
 
 | `outcome` | Meaning |

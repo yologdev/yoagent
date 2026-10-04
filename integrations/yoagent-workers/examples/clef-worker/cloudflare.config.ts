@@ -17,6 +17,8 @@ export default defineConfig({
 			// Locally from .dev.vars; deployed with `cf deploy --secrets-file`.
 			DEEPSEEK_API_KEY: bindings.secret(),
 			RUN_TOKEN: bindings.secret(),
+			// Only for `?gate=jev` (TypeSafe's Jev instead of Clef).
+			TYPESAFE_API_KEY: bindings.secret(),
 		},
 	},
 });
