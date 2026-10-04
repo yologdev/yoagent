@@ -760,6 +760,8 @@ from a secret with `.with_api_key(..)`. Or skip the token: the
 crate runs Clef through the Worker's Workers AI binding (`env.AI`), with no
 token and no account id (per Cloudflare, bindings are also faster and less
 restricted than the REST API): `yoagent_workers::ai::clef(env.ai("AI")?)`.
+Its [`clef-worker`](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-workers/examples/clef-worker)
+example is a complete Worker in which Clef gates an agent's tool calls.
 
 ## Pricing
 

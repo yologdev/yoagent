@@ -134,13 +134,21 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: integrations/yoagent-workers
+          workspaces: |
+            integrations/yoagent-workers
+            integrations/yoagent-workers/examples/clef-worker
       - name: Format
         run: cargo fmt --manifest-path "$MANIFEST" -- --check
       - name: Clippy
         run: cargo clippy --manifest-path "$MANIFEST" --target wasm32-unknown-unknown --all-targets
       - name: Documentation
         run: RUSTDOCFLAGS="-Dwarnings" cargo doc --manifest-path "$MANIFEST" --no-deps --target wasm32-unknown-unknown
+      # The example Worker (its own workspace): it must keep building against
+      # the code beside it. Linted only; it is not run (no Cloudflare account).
+      - name: Example Worker (clef-worker)
+        run: |
+          cargo fmt --manifest-path integrations/yoagent-workers/examples/clef-worker/Cargo.toml -- --check
+          cargo clippy --manifest-path integrations/yoagent-workers/examples/clef-worker/Cargo.toml --target wasm32-unknown-unknown
       # On other targets the crate is empty; keep that true (no stray
       # un-gated item) and its docs clean.
       - name: Native build and docs

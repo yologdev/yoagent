@@ -1,0 +1,14 @@
+name = "yoagent-clef-worker"
+main = "build/worker/shim.mjs"
+compatibility_date = "2026-10-01"
+
+[build]
+command = "cargo install -q worker-build && worker-build --release"
+
+# Workers AI: Clef runs through this binding, with no API token.
+[ai]
+binding = "AI"
+
+# Secrets (not in this file):
+#   npx wrangler secret put DEEPSEEK_API_KEY
+#   npx wrangler secret put RUN_TOKEN

@@ -1,0 +1,4 @@
+# worker-build output and wrangler state
+build/
+.wrangler/
+node_modules/

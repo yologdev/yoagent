@@ -87,6 +87,14 @@ binding runs. A `.or(..)` fallback applies to every failure.
 Outside a Worker, or with an API token instead of a binding, use yoagent's own
 `DecisionModel::clef(account_id)`, which calls the Workers AI REST API.
 
+## Example
+
+[`examples/clef-worker`](examples/clef-worker/) is a complete Worker: a
+yoagent agent on DeepSeek with two tools over a set of notes, every tool call
+gated by Clef (`ToolGate`) through `env.AI`, so a destructive call nobody asked
+for is denied. About 392 KiB gzipped. It builds and is linted in CI; it has
+not been run against a real binding yet.
+
 ## Testing
 
 Everything here exists only on wasm32. The tests run under Node against fake
