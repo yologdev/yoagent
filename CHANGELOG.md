@@ -22,6 +22,12 @@ adheres to [Semantic Versioning](https://semver.org/).
   ms). Measured under `cf dev`: Clef a median 444 ms per gate check (12 calls,
   one Cloudflare-side failure, `5012`), the whole request 2.55 s; Jev, the same
   request natively, 267 ms (12 calls, no failures). Details in its README.
+- The `clef-worker` example can gate with Jev (`?gate=jev`, `TYPESAFE_API_KEY`
+  secret) and was deployed to Cloudflare and tested on the edge: per gate
+  check, Clef via `env.AI` a median 308 ms (12 calls), Jev via `fetch` 230 ms
+  (11 calls), no failures; whole requests 2.07 s / 1.91 s. Jev's first run in a
+  Worker. Deployed via `cf deploy --prebuilt` (cf beta.12's build step did not
+  exit); the Worker was deleted afterwards.
 - `examples/decision.rs` asks Clef instead of Jev when `CLOUDFLARE_ACCOUNT_ID`
   is set, says which model it uses, and exits 1 when the request fails.
 
