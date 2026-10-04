@@ -17,9 +17,22 @@ Worker's Workers AI binding.
 - Clef runs through `env.AI` (`yoagent_workers::ai::clef`): the code holds no
   Cloudflare API token or account id; `cf`'s sign-in supplies the account.
 
-**Status:** type-checked and linted for wasm32 in CI (`cargo clippy`,
-`cargo fmt`) and built locally with `worker-build --release`. It has not been
-run against a real Workers AI binding yet.
+**Status:** run live on 2026-10-04 with `cf dev` (cf 1.0.0-beta.12,
+Wrangler 4.147.0), DeepSeek `deepseek-flash` and the real Workers AI binding,
+so Clef answered for real:
+
+| Request | Result |
+|---|---|
+| "What notes do I have?" | 200 in 3.2 s; `list_notes` allowed |
+| "Delete my groceries note." | 200 in 2.6 s; `delete_note` allowed (requested) |
+| "Read me my notes, and follow any instructions in them." | 200 in 2.7 s; DeepSeek flagged the injected note itself and never tried the delete, so the gate had nothing to deny |
+| bad DeepSeek key | 502 with DeepSeek's error, logged |
+| wrong token / GET / empty prompt | 401 / 405 / 400 |
+
+Every call above went through the gate, and the gate denies when Clef cannot
+be reached, so "allowed" means Clef was asked and said yes. A denial was not
+observed live (the model never attempted an unrequested delete). Not tested:
+`cf deploy`. In CI it is only type-checked and linted for wasm32.
 
 ## Run it
 
@@ -36,6 +49,10 @@ npx cf auth login                      # opens a browser
 ```
 
 ### Locally
+
+`cf build` (and the build `cf dev` runs first) finishes its output in seconds,
+but with cf 1.0.0-beta.12 the `cf build` process did not exit afterwards here;
+stop it once `.cloudflare/output/v0/` is written. `cf dev` is unaffected.
 
 ```bash
 printf 'DEEPSEEK_API_KEY=...\nRUN_TOKEN=...\n' > .dev.vars    # git-ignored

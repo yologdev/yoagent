@@ -14,7 +14,10 @@ adheres to [Semantic Versioning](https://semver.org/).
   Managed with the Cloudflare CLI (`cf`, `cloudflare.config.ts`). It reports
   each tool call's outcome (`ok` / `denied` / `gate_unavailable` / `failed`),
   a failed model call as a 502 and a turn-limit stop explicitly. Type-checked
-  and linted for wasm32 in CI; not yet run against a real binding.
+  and linted for wasm32 in CI, and run live once with `cf dev` against the
+  real Workers AI binding: Clef's first real calls (allowed a read and a
+  requested delete; no denial was observed, because DeepSeek refused the
+  injected instruction itself).
 - `examples/decision.rs` asks Clef instead of Jev when `CLOUDFLARE_ACCOUNT_ID`
   is set, says which model it uses, and exits 1 when the request fails.
 
