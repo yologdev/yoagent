@@ -1,0 +1,9 @@
+# worker-build output, cf/wrangler state, local secrets, cargo output
+build/
+.cloudflare/
+.wrangler/
+node_modules/
+target/
+.dev.vars*
+.env*
+package-lock.json

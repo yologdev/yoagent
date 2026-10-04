@@ -4,6 +4,23 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Added
+
+- **`clef-worker` example** (`integrations/yoagent-workers/examples/clef-worker/`):
+  a complete Cloudflare Worker running a yoagent agent whose tool calls are
+  gated by Clef through the Workers AI binding (`ToolGate` + `yoagent_workers::ai::clef`).
+  Managed with the Cloudflare CLI (`cf`, `cloudflare.config.ts`). It reports
+  each tool call's outcome (`ok` / `denied` / `gate_unavailable` / `failed`),
+  a failed model call as a 502 and a turn-limit stop explicitly. Type-checked
+  and linted for wasm32 in CI, and run live once with `cf dev` against the
+  real Workers AI binding: Clef's first real calls (allowed a read and a
+  requested delete; no denial was observed, because DeepSeek refused the
+  injected instruction itself).
+- `examples/decision.rs` asks Clef instead of Jev when `CLOUDFLARE_ACCOUNT_ID`
+  is set, says which model it uses, and exits 1 when the request fails.
+
 ## 0.24.0
 
 Cloudflare's Clef decision models, over the REST API and (new crate

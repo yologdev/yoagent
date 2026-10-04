@@ -50,8 +50,9 @@ let urgent = clef
 `clef(..)` and `clef_flash(..)` take the binding as workers-rs's `Ai` or as
 the raw `env.AI` `JsValue`, and return an ordinary `DecisionModel`: batched
 questions and fallbacks (`.or(..)`) work, and it can be handed to an agent's
-advisory hints, tool gate or input guard like any other decision model
-(that use is untested on the binding path). They are priced at the
+advisory hints, tool gate or input guard like any other decision model (the
+tool gate has run live on the binding path, in the `clef-worker` example; the
+advisory hints and input guard have not). They are priced at the
 `prices.json` rate the price table holds when they are built (`cloudflare/clef`
 $0.24, `cloudflare/clef-flash` $0.09 per million input tokens by default; a
 later price override does not reprice them). That is the list price;
@@ -87,6 +88,17 @@ binding runs. A `.or(..)` fallback applies to every failure.
 Outside a Worker, or with an API token instead of a binding, use yoagent's own
 `DecisionModel::clef(account_id)`, which calls the Workers AI REST API.
 
+## Example
+
+[`examples/clef-worker`](examples/clef-worker/) is a complete Worker, managed
+with the Cloudflare CLI (`cf`): a yoagent agent on DeepSeek with two tools over
+a set of notes, every tool call gated by Clef (`ToolGate`) through `env.AI`, so
+a call Clef judges destructive and not requested is denied (a guardrail, not a
+security boundary). About 392 KiB gzipped. It is type-checked and linted in CI,
+and was run live once with `cf dev` against the real Workers AI binding
+(2026-10-04): Clef allowed the read and the requested delete; see its README
+for what was and was not observed.
+
 ## Testing
 
 Everything here exists only on wasm32. The tests run under Node against fake
@@ -99,5 +111,6 @@ CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner \
   cargo test --target wasm32-unknown-unknown   # from this directory
 ```
 
-Not tested against a real Workers AI binding (that needs `wrangler dev` and a
-Cloudflare account).
+Live: `clef(..)` has run against a real Workers AI binding once, through the
+`clef-worker` example under `cf dev` (2026-10-04). `clef_flash(..)` and the
+error-code mapping (3040, 3036) have only run against the fakes above.
