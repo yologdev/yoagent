@@ -16,13 +16,21 @@
 //! The response is JSON: the final answer, and every tool call with its
 //! `outcome` (`ok`, `denied`, `gate_unavailable` or `failed`). A failed model
 //! call is a 502, a refusal a 422; a run cut off by the turn limit says so.
+//! `timing` reports the whole run and each Clef call in milliseconds, so the
+//! gate's cost can be read next to the model's.
 
+use std::cell::RefCell;
+use std::rc::Rc;
 use worker::*;
 use yoagent::agent_loop::AGENT_STOPPED_PREFIX;
 use yoagent::context::ExecutionLimits;
-use yoagent::decision::ToolGate;
+use yoagent::decision::{
+    Capabilities, DecisionBackend, DecisionError, DecisionModel, Evaluation, Request as Ask,
+    ToolGate,
+};
 use yoagent::provider::{ModelConfig, OpenAiCompatProvider};
 use yoagent::*;
+use yoagent_workers::ai::{AiBackend, CLEF};
 
 const NOTES: &[(&str, &str)] = &[
     ("groceries", "milk, eggs, coffee"),
@@ -109,6 +117,27 @@ impl AgentTool for DeleteNote {
     }
 }
 
+/// Clef through the binding, timing each call. In a Worker the clock moves
+/// only across I/O, which is exactly what a Clef call is.
+struct TimedClef {
+    inner: AiBackend,
+    calls_ms: Rc<RefCell<Vec<f64>>>,
+}
+
+#[async_trait::async_trait(?Send)]
+impl DecisionBackend for TimedClef {
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+    async fn evaluate(&self, request: &Ask) -> std::result::Result<Evaluation, DecisionError> {
+        let start = yoagent::rt::Instant::now();
+        let result = self.inner.evaluate(request).await;
+        let ms = start.elapsed().as_secs_f64() * 1000.0;
+        self.calls_ms.borrow_mut().push((ms * 10.0).round() / 10.0);
+        result
+    }
+}
+
 fn text_result(text: String) -> ToolResult {
     ToolResult {
         content: vec![Content::Text { text }],
@@ -164,7 +193,18 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
     };
 
     // A binding belongs to this request: build the gate and agent here.
-    let clef = yoagent_workers::ai::clef(env.ai("AI")?);
+    // Clef as `yoagent_workers::ai::clef` builds it, with a timer around
+    // each call (that preset's price, looked up the same way).
+    let started = yoagent::rt::Instant::now();
+    let clef_ms = Rc::new(RefCell::new(Vec::new()));
+    let clef = DecisionModel::from_backend(
+        TimedClef {
+            inner: AiBackend::new(env.ai("AI")?, CLEF),
+            calls_ms: clef_ms.clone(),
+        },
+        "clef",
+    )
+    .with_cost(yoagent::provider::prices::global::resolved().cost("cloudflare", "clef"));
     let mut agent = Agent::from_provider(
         OpenAiCompatProvider,
         ModelConfig::deepseek("deepseek-flash", "DeepSeek Flash"),
@@ -224,6 +264,10 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
         }
     }
     agent.finish().await;
+    let timing = serde_json::json!({
+        "total_ms": (started.elapsed().as_secs_f64() * 1000.0).round(),
+        "clef_ms": *clef_ms.borrow(),
+    });
 
     match outcome {
         Some(AgentMessage::Llm(Message::Assistant {
@@ -236,6 +280,7 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
             Ok(Response::from_json(&serde_json::json!({
                 "error": format!("model call failed: {error}"),
                 "tools": tools,
+                "timing": timing,
             }))?
             .with_status(502))
         }
@@ -246,6 +291,7 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
             "error": "the model refused, or a content filter stopped the answer",
             "answer": answer,
             "tools": tools,
+            "timing": timing,
         }))?
         .with_status(422)),
         Some(AgentMessage::Llm(Message::User { content, .. }))
@@ -257,9 +303,14 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
                 "answer": answer,
                 "stopped": stopped,
                 "tools": tools,
+                "timing": timing,
             }))
         }
-        Some(_) => Response::from_json(&serde_json::json!({ "answer": answer, "tools": tools })),
+        Some(_) => Response::from_json(&serde_json::json!({
+            "answer": answer,
+            "tools": tools,
+            "timing": timing,
+        })),
         None => {
             console_error!("the agent run ended without AgentEnd");
             Response::error("the agent run did not complete", 500)
