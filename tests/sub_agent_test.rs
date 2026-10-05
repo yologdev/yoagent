@@ -1982,3 +1982,96 @@ async fn test_sub_agent_cancelled_during_a_tool_fails_the_delegation() {
         "{err}"
     );
 }
+
+/// Three tool turns that each report a 400K-token prompt (mostly cached),
+/// then the answer.
+fn heavy_delegation() -> Arc<MockProvider> {
+    let heavy = Usage {
+        input: 20_000,
+        cache_read: 380_000,
+        output: 500,
+        ..Default::default()
+    };
+    let call = || MockToolCall {
+        provider_metadata: None,
+        name: "echo".into(),
+        arguments: serde_json::json!({"text": "x"}),
+    };
+    Arc::new(MockProvider::new(vec![
+        MockResponse::ToolCallsWithUsage(vec![call()], heavy.clone()),
+        MockResponse::ToolCallsWithUsage(vec![call()], heavy.clone()),
+        MockResponse::ToolCallsWithUsage(vec![call()], heavy),
+        MockResponse::Text("final answer".into()),
+    ]))
+}
+
+fn text_of(result: &ToolResult) -> String {
+    match &result.content[0] {
+        Content::Text { text } => text.clone(),
+        other => panic!("expected text, got {other:?}"),
+    }
+}
+
+/// The default caps (1M tokens per delegation) stop a delegation working over
+/// a large context after three turns; `with_execution_limits` lifts them.
+/// They used to be hard-coded, with only `with_max_turns` adjustable.
+#[tokio::test]
+async fn execution_limits_are_configurable_per_delegation() {
+    let echo: Arc<dyn AgentTool> = Arc::new(EchoTool);
+
+    let capped = SubAgentTool::from_provider("worker", heavy_delegation(), ModelConfig::mock())
+        .with_tools(vec![echo.clone()]);
+    let result = capped
+        .execute(
+            serde_json::json!({"task": "go"}),
+            ToolContext::new("t", "worker"),
+        )
+        .await
+        .unwrap();
+    let text = text_of(&result);
+    assert!(!text.contains("final answer"), "{text}");
+    assert!(
+        text.contains("Max tokens"),
+        "stopped by the token cap: {text}"
+    );
+
+    let lifted = SubAgentTool::from_provider("worker", heavy_delegation(), ModelConfig::mock())
+        .with_tools(vec![echo])
+        .with_execution_limits(
+            yoagent::context::ExecutionLimits::default()
+                .with_max_turns(20)
+                .with_max_total_tokens(usize::MAX),
+        );
+    let result = lifted
+        .execute(
+            serde_json::json!({"task": "go"}),
+            ToolContext::new("t", "worker"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(text_of(&result), "final answer");
+}
+
+/// `with_max_turns` after `with_execution_limits` changes only the turns.
+#[tokio::test]
+async fn with_max_turns_keeps_the_other_limits() {
+    let echo: Arc<dyn AgentTool> = Arc::new(EchoTool);
+    let tool = SubAgentTool::from_provider("worker", heavy_delegation(), ModelConfig::mock())
+        .with_tools(vec![echo])
+        .with_execution_limits(
+            yoagent::context::ExecutionLimits::default().with_max_total_tokens(usize::MAX),
+        )
+        .with_max_turns(2);
+    let result = tool
+        .execute(
+            serde_json::json!({"task": "go"}),
+            ToolContext::new("t", "worker"),
+        )
+        .await
+        .unwrap();
+    let text = text_of(&result);
+    assert!(
+        text.contains("Max turns"),
+        "the turn cap, not the token cap: {text}"
+    );
+}
