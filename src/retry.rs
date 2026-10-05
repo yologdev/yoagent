@@ -118,8 +118,10 @@ pub(crate) fn log_retry(attempt: usize, max: usize, delay: &Duration, error: &Pr
 ///   added after this was written.
 ///
 /// The cost is incremental output: an attempt's text arrives all at once when
-/// it finishes, rather than as it is generated. That is the trade — a consumer
-/// that can rewind should keep the live stream instead.
+/// it finishes, rather than as it is generated. That suits non-interactive
+/// output. A consumer that can rewind should keep the live stream, and one a
+/// person watches can instead abort when a retry follows streamed text (see
+/// `docs/concepts/retry.md`, "Interactive terminals").
 ///
 /// ```
 /// use yoagent::retry::RetrySafeEvents;

@@ -244,3 +244,70 @@ async fn the_filter_by_hand_matches_the_receiver_adapter() {
     // Exactly the failed attempt's start, delta and error end are dropped.
     assert_eq!(out.len(), raw.len() - 3);
 }
+
+/// The interactive-terminal pattern from `docs/concepts/retry.md`: abort when
+/// a retry follows streamed text. The turn ends `Aborted` during the backoff,
+/// and the retry request is never sent.
+#[tokio::test]
+async fn aborting_on_a_retry_after_text_sends_no_retry_request() {
+    let provider = FailsAfterText {
+        attempts: AtomicUsize::new(0),
+        fail_first: 1,
+        inner: MockProvider::text("PONG"),
+    };
+    let attempts = std::sync::Arc::new(provider);
+    let mut agent = Agent::from_provider(ArcProvider(attempts.clone()), ModelConfig::mock())
+        .with_retry_config(RetryConfig {
+            max_retries: 2,
+            initial_delay_ms: 200,
+            backoff_multiplier: 1.0,
+            max_delay_ms: 200,
+        });
+    let mut rx = agent.prompt("ping").await;
+    let mut streamed = false;
+    let mut events = Vec::new();
+    while let Some(event) = rx.recv().await {
+        match &event {
+            AgentEvent::MessageStart { .. } => streamed = false,
+            AgentEvent::MessageUpdate {
+                delta: StreamDelta::Text { delta } | StreamDelta::Thinking { delta },
+                ..
+            } => streamed |= !delta.is_empty(),
+            AgentEvent::ProviderRetry { .. } if streamed => agent.abort(),
+            _ => {}
+        }
+        events.push(event);
+    }
+    agent.finish().await;
+
+    assert_eq!(attempts.attempts.load(Ordering::SeqCst), 1, "no retry sent");
+    assert_eq!(streamed_text(&events), "PARTIAL_");
+    // The failed attempt's error end is the only `MessageEnd`: the abort
+    // lands before a new message opens. The turn's result is `Aborted`.
+    assert_eq!(assistant_ends(&events), vec![StopReason::Error]);
+    let Some(AgentEvent::AgentEnd { messages, .. }) = events.last() else {
+        panic!("the run must end with AgentEnd");
+    };
+    assert!(matches!(
+        messages.last(),
+        Some(AgentMessage::Llm(Message::Assistant {
+            stop_reason: StopReason::Aborted,
+            ..
+        }))
+    ));
+}
+
+/// Shares one `FailsAfterText` so the test can read its attempt count.
+struct ArcProvider(std::sync::Arc<FailsAfterText>);
+
+#[async_trait::async_trait]
+impl StreamProvider for ArcProvider {
+    async fn stream(
+        &self,
+        config: StreamConfig,
+        tx: mpsc::UnboundedSender<StreamEvent>,
+        cancel: CancellationToken,
+    ) -> Result<Message, ProviderError> {
+        self.0.stream(config, tx, cancel).await
+    }
+}

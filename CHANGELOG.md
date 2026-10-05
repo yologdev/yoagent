@@ -12,7 +12,10 @@ adheres to [Semantic Versioning](https://semver.org/).
   `retry::RetrySafeEvents` hold back each provider attempt's events until it
   succeeds. A retried attempt's partial text never reaches the consumer, and
   a final failure keeps its start and error end but not its text. This is for
-  append-only sinks such as stdout on a pipe. The loop is unchanged.
+  non-interactive, append-only output such as stdout on a pipe or a log. The
+  loop is unchanged. `docs/concepts/retry.md` also describes the pattern for
+  interactive terminals: abort when a retry follows streamed text, which ends
+  the turn `Aborted` without sending the retry (tested).
 - **`clef-worker` example** (`integrations/yoagent-workers/examples/clef-worker/`):
   a complete Cloudflare Worker running a yoagent agent whose tool calls are
   gated by Clef through the Workers AI binding (`ToolGate` + `yoagent_workers::ai::clef`).

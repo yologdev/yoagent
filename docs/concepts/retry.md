@@ -145,9 +145,48 @@ agent.finish().await;
 - All other events pass through unchanged and in order.
 
 The trade is latency. Text arrives once per attempt rather than token by
-token, so keep the live stream when your UI can rewind. `RetrySafeEvents` is
-the same filter without the spawned task (`push` each event, then `finish`),
-for consumers that already run their own loop over the events.
+token, so use it for **non-interactive** output, where nobody watches the
+tokens arrive. Keep the live stream when your UI can rewind. `RetrySafeEvents`
+is the same filter without the spawned task (`push` each event, then
+`finish`), for consumers that already run their own loop over the events.
+
+### Interactive terminals
+
+A person watching a terminal is better served by live streaming than by
+buffering, and a terminal cannot erase the partial text either. For that case,
+stop the run instead of letting it retry once text has appeared. Watch for
+text or thinking deltas, and call `agent.abort()` when a `ProviderRetry`
+arrives after some:
+
+```rust
+let mut rx = agent.prompt("hello").await;
+let mut streamed = false;
+while let Some(event) = rx.recv().await {
+    match &event {
+        AgentEvent::MessageStart { .. } => streamed = false,
+        AgentEvent::MessageUpdate { delta, .. } => {
+            if let StreamDelta::Text { delta } | StreamDelta::Thinking { delta } = delta {
+                streamed |= !delta.is_empty();
+                print!("{delta}");
+            }
+        }
+        AgentEvent::ProviderRetry { error, .. } if streamed => {
+            eprintln!("\n[stopped: {error}]");
+            agent.abort();
+        }
+        _ => {}
+    }
+}
+agent.finish().await;
+```
+
+The abort lands during the retry's backoff, which races cancellation: the
+turn ends at once and no retry request is sent. The turn's message (in
+`AgentEnd` and in history) carries `StopReason::Aborted`; no second
+`MessageEnd` is sent, because no new message was opened. An
+error that arrives before any text still retries as usual, and those are most
+of them (rate limits, overload, refused connections). The user sees the
+partial answer and the error, and decides whether to try again.
 
 ### Logs
 
