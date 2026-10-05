@@ -4,7 +4,11 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.24.1
+
+Retry-safe event streams for output that cannot take text back, and a loop
+fix for providers that never send `Done`. No breaking changes; everything new
+is additive.
 
 ### Added
 
