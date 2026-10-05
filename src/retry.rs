@@ -233,6 +233,7 @@ impl RetrySafeEvents {
                 }
                 AgentEvent::ProviderRetry { .. } => {
                     // Retried without being closed: drop it, keep the marker.
+                    tracing::warn!("retry-safe events: a retry arrived inside an open attempt; dropping the attempt");
                     out.push(event);
                     return out;
                 }

@@ -200,9 +200,9 @@ turn at once and no retry request is sent. The turn's message (in `AgentEnd`
 and in history) carries `StopReason::Aborted`; no second `MessageEnd` is sent,
 because no new message was opened. That holds when the consumer reacts within
 the backoff, which by default is about a second. A very short backoff (a small
-`Retry-After`, or a tiny `initial_delay_ms`) can let the retry start first; it
-is then cancelled in flight, possibly after the provider began billing, and
-the turn still ends `Aborted`.
+`Retry-After`, or a tiny `initial_delay_ms`) can let the retry start first;
+the abort then cancels it in flight (possibly after the provider began
+billing) and the turn ends `Aborted`, unless the retry already finished.
 
 An error that arrives before any text still retries as usual, for example a
 rate limit or a refused connection. The user sees the partial answer and the

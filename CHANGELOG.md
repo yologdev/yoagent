@@ -49,6 +49,7 @@ adheres to [Semantic Versioning](https://semver.org/).
   leaves its message open: the loop sends the `MessageEnd` with the message
   the provider returned. All built-in providers send `Done`; this affected
   custom ones. A failed event forwarder is now logged instead of ignored.
+
 ## 0.24.0
 
 Cloudflare's Clef decision models, over the REST API and (new crate
