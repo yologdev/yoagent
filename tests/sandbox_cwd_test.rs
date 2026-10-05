@@ -1,6 +1,6 @@
 //! `PathSandbox` with relative paths. This binary changes the process's
 //! working directory, which is global, so it holds a single test.
-#![cfg(feature = "native")]
+#![cfg(all(feature = "native", unix))]
 
 use yoagent::tools::sandbox::PathSandbox;
 use yoagent::tools::*;
@@ -10,7 +10,6 @@ use yoagent::types::*;
 /// Without that, a path whose first component is missing (`a/../link/x`)
 /// was collapsed lexically and never checked for symlinks — escaping through
 /// `link` — and a plain new file (`newdir/a.txt`) was rejected as outside.
-#[cfg(unix)]
 #[tokio::test]
 async fn relative_paths_are_checked_like_absolute_ones() {
     let tmp = tempfile::TempDir::new().unwrap();
