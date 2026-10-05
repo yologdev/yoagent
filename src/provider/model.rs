@@ -1251,9 +1251,17 @@ impl ModelConfig {
     }
 
     /// Create a new Anthropic model config.
+    ///
+    /// The thinking mode and native structured outputs are inferred from the
+    /// id ([`AnthropicCompat::for_claude_id`]); the context window and output
+    /// limit are generic (200K / 16K). For a current model, prefer its preset
+    /// — [`claude_sonnet_5`](Self::claude_sonnet_5) and friends — which also
+    /// sets those.
     pub fn anthropic(id: impl Into<String>, name: impl Into<String>) -> Self {
+        let id = id.into();
+        let compat = AnthropicCompat::for_claude_id(&id);
         Self {
-            id: id.into(),
+            id,
             name: name.into(),
             api: ApiProtocol::AnthropicMessages,
             provider: "anthropic".into(),
@@ -1265,7 +1273,7 @@ impl ModelConfig {
             list_priced: false,
             headers: HashMap::new(),
             google: None,
-            anthropic: None,
+            anthropic: Some(compat),
             compat: None,
         }
         .priced()
@@ -2087,7 +2095,14 @@ mod tests {
         assert_eq!(config.provider, "anthropic");
         assert_eq!(config.base_url, "https://api.anthropic.com/v1");
         assert!(config.compat.is_none());
-        assert!(config.anthropic.is_none());
+        // The Claude options are inferred from the id.
+        let compat = config.anthropic.expect("inferred from the id");
+        assert!(compat.adaptive_thinking && compat.native_structured_output);
+        // Haiku 4.5 rejects adaptive thinking: a bare config must not send it.
+        let haiku = ModelConfig::anthropic("claude-haiku-4-5", "Haiku 4.5")
+            .anthropic
+            .unwrap();
+        assert!(!haiku.adaptive_thinking && haiku.native_structured_output);
     }
 
     #[test]
@@ -2659,7 +2674,9 @@ mod tests {
             );
             assert!(!compat.bearer_auth, "{}", mc.id);
         }
-        assert!(ModelConfig::anthropic("claude-x", "X").anthropic.is_none());
+        // An id with no recognisable version is treated as current generation.
+        let unknown = ModelConfig::anthropic("claude-x", "X").anthropic.unwrap();
+        assert!(unknown.adaptive_thinking && unknown.native_structured_output);
     }
 
     #[test]

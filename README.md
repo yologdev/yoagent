@@ -28,7 +28,8 @@
 
 ```bash
 git clone https://github.com/yologdev/yoagent && cd yoagent
-ollama serve &                                    # any local model works
+ollama serve &
+ollama pull llama3.1:8b                           # or pass --model <any pulled model>
 cargo run --example cli -- --provider ollama
 ```
 
@@ -113,7 +114,7 @@ provider's conventional env var:
 ```rust
 Agent::from_config(ModelConfig::groq("openai/gpt-oss-120b", "GPT-OSS 120B"));    // GROQ_API_KEY
 Agent::from_config(ModelConfig::google("gemini-3.8-flash", "Gemini 3.8 Flash")); // GEMINI_API_KEY
-Agent::from_config(ModelConfig::ollama("http://localhost:11434", "llama3.1:8b")); // no key
+Agent::from_config(ModelConfig::ollama("http://localhost:11434/v1", "llama3.1:8b")); // no key
 ```
 
 ---
@@ -292,9 +293,9 @@ it injects the `shared_state` tool and a state summary into the sub-agent's syst
 - **`LlmCompaction`** — opt-in alternative that summarises the dropped span with a background LLM request instead of discarding it. The request runs off the hot path and is spliced in on a later turn, so the loop never stalls and can never wedge on it — an unfinished or failed summary falls back to the deterministic tiers. Buys retention quality; costs tokens the default never spends, and does *not* reduce prefix-cache breaks. Both paths report their own cost on `AgentEvent::ContextCompacted`
 
   ```rust,ignore
-  let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Sonnet 5"))
+  let agent = Agent::from_config(ModelConfig::claude_sonnet_5())
       .with_compaction_strategy(LlmCompaction::from_config(
-          ModelConfig::anthropic("claude-haiku-4-5", "Haiku 4.5"),  // cheap model for summaries
+          ModelConfig::claude_haiku_4_5(),  // cheap model for summaries
       ));
   ```
 - **`Session`** — history as an id/parent tree with `append`, `seek`, `checkpoint`, `branch_tips`, and JSONL persistence. Appending after a seek forks a branch; it never overwrites
@@ -304,7 +305,7 @@ it injects the `shared_state` tool and a state summary into the sub-agent's syst
 </details>
 
 <details>
-<summary><b>Decision models</b> — typed judgments in ~100 ms (feature <code>decision</code>)</summary>
+<summary><b>Decision models</b> — typed judgments in a few hundred ms (feature <code>decision</code>)</summary>
 
 A decision model answers typed questions — yes/no (**Noul**), one-of-N (**Choice**), a rating (**Score**) — with calibrated probabilities instead of prose. The first backend is TypeSafe's Jev; integrations depend on a `DecisionBackend` trait, not on a vendor. Off by default, no extra dependencies, and nothing is sent until you pick a model:
 
@@ -364,7 +365,7 @@ Eleven of the runnable examples in [`examples/`](examples/) are below; five need
 
 ## Testing & CI
 
-`MockProvider` scripts a whole multi-turn tool-calling conversation with no network:
+`MockProvider` scripts a whole multi-turn tool-calling conversation with no network (guide: [Testing Your Agent](https://yologdev.github.io/yoagent/guides/testing.html)):
 
 ```rust
 use yoagent::provider::mock::{MockProvider, MockResponse, MockToolCall};

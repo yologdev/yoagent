@@ -31,6 +31,7 @@
 - [MCP Integration](guides/mcp.md)
 - [OpenAPI Tools](guides/openapi.md)
 - [WebAssembly & Cloudflare Workers](guides/wasm-workers.md)
+- [Testing Your Agent](guides/testing.md)
 
 # Providers
 

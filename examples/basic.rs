@@ -11,7 +11,7 @@ async fn main() {
     // The Anthropic provider is selected from the config's protocol, and the
     // API key is read from ANTHROPIC_API_KEY. Add `.with_api_key(key)` to
     // pass one explicitly.
-    let mut agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Sonnet 5"))
+    let mut agent = Agent::from_config(ModelConfig::claude_sonnet_5())
         .with_system_prompt("You are a helpful assistant. Be concise.");
 
     println!("Sending prompt...");

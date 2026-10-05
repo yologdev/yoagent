@@ -4,6 +4,22 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Fixed
+
+- **`ModelConfig::anthropic(id, ..)` infers the Claude options from the id** (`AnthropicCompat::for_claude_id`). It used to leave them unset, so `anthropic("claude-haiku-4-5", ..)` got adaptive thinking, which Haiku 4.5 rejects. Every 4.5+ id also went without native structured outputs and fell back to tool-forcing, which Fable 5.1 and Opus 5.5 reject. The context window and output limit stay generic (200K / 16K); use a preset (`claude_sonnet_5()` …) to get the model's own.
+
+### Docs
+
+- New guide: [Testing Your Agent](docs/guides/testing.md), covering `MockProvider`, testing a middleware alone, and abort. Its examples run as `tests/testing_guide_test.rs`.
+- **The `cli` example:**
+  - It no longer reads `ANTHROPIC_API_KEY` for every provider. The README's `--provider groq` command panicked without one, and with one exported the Anthropic key was sent to Groq, OpenAI or a local server.
+  - Each provider now reads its own variable; `API_KEY` overrides any of them.
+- **Quick starts:** the docs.rs front page, `quick-start.md` and `examples/basic.rs` use `ModelConfig::claude_sonnet_5()` instead of a bare `anthropic()` config.
+- **The README's Ollama snippet** gains the `/v1` its base URL needs, and the try-it commands gain `ollama pull llama3.1:8b`.
+- **Decision-model latency:** "~100 ms" is replaced with what we measured, a few hundred ms per request.
+
 ## 0.24.2
 
 Security fixes for the built-in tools and the Gemini provider, found in a
