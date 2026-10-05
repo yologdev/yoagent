@@ -244,6 +244,12 @@ response. A turn that carries tool calls is reported as `ToolUse` unless it
 ended on `length` or `content_filter`. A usage token count sent as explicit
 `null` reads as 0 instead of dropping the chunk.
 
+A failure reported inside the stream is an error, not a finished answer: a
+chunk with an `error` object (OpenRouter and other gateways send one, with a
+string or numeric `code`) and `finish_reason: "error"` both fail the turn. A
+rate limit or overload among them (`rate_limit_exceeded`, a numeric 503/529,
+…) is retried; anything else is final.
+
 ## Auth
 
 Uses `Authorization: Bearer {api_key}` header. Extra headers can be added via `ModelConfig.headers`.

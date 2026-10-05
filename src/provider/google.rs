@@ -104,10 +104,12 @@ impl StreamProvider for GoogleProvider {
 
         if !response.status().is_success() {
             let status = response.status();
+            let retry_after = parse_retry_after(response.headers());
             let body = response.text().await.unwrap_or_default();
-            return Err(ProviderError::classify(
+            return Err(ProviderError::classify_with_retry_after(
                 status.as_u16(),
                 &format!("Google API error {}: {}", status, body),
+                retry_after,
             ));
         }
 
@@ -154,6 +156,12 @@ pub(crate) async fn parse_stream(
                         );
                         warn!("Google stream error: {}", err);
                         return Err(err);
+                    }
+                    // The response was already complete (a finishReason
+                    // arrived): keep it rather than retry and bill it twice.
+                    Some(Err(e)) if finished => {
+                        warn!("Google stream error after finishReason; keeping the response: {}", e);
+                        break;
                     }
                     Some(Err(e)) => {
                         // Match the other providers: a transport failure is an
@@ -274,14 +282,24 @@ pub(crate) async fn parse_stream(
                                         stop_reason = match reason.as_str() {
                                             "STOP" => StopReason::Stop,
                                             "MAX_TOKENS" | "RECITATION" => StopReason::Length,
-                                            "MALFORMED_FUNCTION_CALL" => {
-                                                error_message = Some(
-                                                    "Gemini produced a malformed function call (finishReason: MALFORMED_FUNCTION_CALL)".into(),
-                                                );
+                                            // A tool call Gemini could not produce or
+                                            // was not allowed to make: a failed turn,
+                                            // with Gemini's own explanation when given.
+                                            "MALFORMED_FUNCTION_CALL" | "UNEXPECTED_TOOL_CALL"
+                                            | "TOO_MANY_TOOL_CALLS" => {
+                                                let detail = candidate
+                                                    .finish_message
+                                                    .as_deref()
+                                                    .map(|m| format!(": {m}"))
+                                                    .unwrap_or_default();
+                                                warn!("Gemini tool call failed (finishReason={}){}", reason, detail);
+                                                error_message = Some(format!(
+                                                    "Gemini failed to make a valid tool call (finishReason: {reason}){detail}. Retrying the request usually works."
+                                                ));
                                                 StopReason::Error
                                             }
                                             "SAFETY" | "PROHIBITED_CONTENT" | "BLOCKLIST"
-                                            | "SPII" => {
+                                            | "SPII" | "IMAGE_SAFETY" => {
                                                 warn!(
                                                     "Gemini blocked the response (finishReason={})",
                                                     reason
@@ -292,7 +310,10 @@ pub(crate) async fn parse_stream(
                                                 ));
                                                 StopReason::Refusal
                                             }
-                                            _ => StopReason::Stop,
+                                            other => {
+                                                warn!("Gemini finished with an unhandled finishReason={}", other);
+                                                StopReason::Stop
+                                            }
                                         };
                                     }
                                 }
@@ -733,6 +754,9 @@ struct GoogleCandidate {
     content: Option<GoogleContent>,
     #[serde(default, rename = "finishReason")]
     finish_reason: Option<String>,
+    /// Gemini's explanation for some finish reasons (a malformed call).
+    #[serde(default, rename = "finishMessage")]
+    finish_message: Option<String>,
 }
 
 #[derive(Deserialize)]

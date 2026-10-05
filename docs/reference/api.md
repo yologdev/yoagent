@@ -181,7 +181,7 @@ All return `Self` for chaining (unless noted as `Result`).
 
 | Method | Description |
 |--------|-------------|
-| `abort()` | Cancel the current run via `CancellationToken`; the turn ends with `StopReason::Aborted` |
+| `abort()` | Cancel the current run via `CancellationToken`. During an LLM call (or a retry's backoff) the turn ends with `StopReason::Aborted`; while tools run or between turns, the run ends with a `[Agent stopped: cancelled]` user message |
 | `async reset()` | Cancel any pending loop, recover tools, clear all state (messages, queues, streaming flag) |
 
 ## SubAgentTool

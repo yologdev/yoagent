@@ -1903,11 +1903,14 @@ fn report_delegated_run_without_a_loop_is_a_no_op() {
     ToolContext::new("id", "tool").report_delegated_run(SessionStats::default());
 }
 
-/// A tool that waits until its call is cancelled.
-struct WaitForCancel;
+/// A tool that says when it started and returns when released.
+struct Gated {
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
 
 #[async_trait::async_trait]
-impl AgentTool for WaitForCancel {
+impl AgentTool for Gated {
     fn name(&self) -> &str {
         "wait"
     }
@@ -1915,7 +1918,7 @@ impl AgentTool for WaitForCancel {
         "Wait"
     }
     fn description(&self) -> &str {
-        "Waits until cancelled"
+        "Waits until released"
     }
     fn parameters_schema(&self) -> serde_json::Value {
         serde_json::json!({"type": "object", "properties": {}})
@@ -1923,16 +1926,23 @@ impl AgentTool for WaitForCancel {
     async fn execute(
         &self,
         _params: serde_json::Value,
-        ctx: ToolContext,
+        _ctx: ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        ctx.cancel.cancelled().await;
-        Err(ToolError::Cancelled)
+        self.started.notify_one();
+        self.release.notified().await;
+        Ok(ToolResult {
+            content: vec![Content::Text {
+                text: "done".into(),
+            }],
+            details: serde_json::Value::Null,
+        })
     }
 }
 
 /// Cancelled while its tool ran (between provider calls), the child's run
 /// ends with the cancel marker, so the delegation fails — it used to return
-/// an earlier turn's text, or the "no text output" fallback, as a success.
+/// the "no text output" fallback as a success. Deterministic: the cancel
+/// lands while the tool is known to be running.
 #[tokio::test]
 async fn test_sub_agent_cancelled_during_a_tool_fails_the_delegation() {
     let sub_provider = Arc::new(MockProvider::new(vec![
@@ -1943,22 +1953,32 @@ async fn test_sub_agent_cancelled_during_a_tool_fails_the_delegation() {
         }]),
         MockResponse::Text("never reached".into()),
     ]));
-    let wait: Arc<dyn AgentTool> = Arc::new(WaitForCancel);
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let gated: Arc<dyn AgentTool> = Arc::new(Gated {
+        started: started.clone(),
+        release: release.clone(),
+    });
     let sub_agent = SubAgentTool::from_provider("waiter", sub_provider, ModelConfig::mock())
-        .with_tools(vec![wait]);
+        .with_tools(vec![gated]);
 
     let cancel = CancellationToken::new();
     let trigger = cancel.clone();
     tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        started.notified().await;
         trigger.cancel();
+        release.notify_one();
     });
-    let result = sub_agent
+    let err = sub_agent
         .execute(
             serde_json::json!({"task": "wait"}),
             ToolContext::new("tc-1", "waiter").with_cancel(cancel),
         )
-        .await;
-    let err = result.expect_err("a cancelled delegation is a failure");
-    assert!(err.to_string().contains("cancelled"), "{err}");
+        .await
+        .expect_err("a cancelled delegation is a failure");
+    assert!(
+        err.to_string()
+            .contains(yoagent::agent_loop::CANCELLED_MARKER),
+        "{err}"
+    );
 }

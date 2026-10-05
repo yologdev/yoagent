@@ -257,7 +257,9 @@ pub enum ProviderError {
     Network(String),
     #[error("Auth error: {0}")]
     Auth(String),
-    #[error("Rate limited, retry after {retry_after_ms:?}ms")]
+    /// Out of quota or capacity for now: retried with backoff. Carries no
+    /// message (the body is logged at `warn!` when it is classified).
+    #[error("Rate limited{}", retry_after_suffix(.retry_after_ms))]
     RateLimited { retry_after_ms: Option<u64> },
     #[error("Context overflow: {message}")]
     ContextOverflow { message: String },
@@ -265,6 +267,12 @@ pub enum ProviderError {
     Cancelled,
     #[error("{0}")]
     Other(String),
+}
+
+/// `", retry after 1500ms"`, or nothing when the server named no delay.
+fn retry_after_suffix(ms: &Option<u64>) -> String {
+    ms.map(|ms| format!(", retry after {ms}ms"))
+        .unwrap_or_default()
 }
 
 impl ProviderError {
@@ -283,7 +291,7 @@ impl ProviderError {
         message: &str,
         retry_after_ms: Option<u64>,
     ) -> Self {
-        // 429 first: a rate-limit body can contain an overflow phrase (Azure's
+        // Rate limits and overloads first: a rate-limit body can contain an overflow phrase (Azure's
         // "exceeds the maximum usage size allowed during peak load"), and
         // classifying it as overflow compacts the context instead of backing
         // off.
@@ -293,6 +301,9 @@ impl ProviderError {
         // rate limit. Other 5xx stay `Api` — a server bug that fails the same
         // way every time should not be re-sent.
         if matches!(status, 429 | 503 | 529) {
+            // `RateLimited` has no message: keep the server's explanation
+            // ("Overloaded", "model is loading") in the log.
+            tracing::warn!(status, body = %truncate_body(message), "provider rate-limited or overloaded; will retry");
             Self::RateLimited { retry_after_ms }
         } else if is_context_overflow(status, message) {
             Self::ContextOverflow {
@@ -377,15 +388,17 @@ pub(crate) fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<
 
 /// Classify an SSE-embedded error event message into a [`ProviderError`].
 ///
-/// A structured rate-limit error — an `error` / `response.error` / top-level
-/// `type`, `code` or `status` of `too_many_requests`, `no_capacity`,
-/// `rate_limit_exceeded`, `rate_limit_error` or `rate_limit` — is
-/// [`ProviderError::RateLimited`], checked **before** the overflow phrases —
+/// A structured rate-limit or overload error — an `error` / `response.error`
+/// / top-level `type`, `code` or `status` such as `rate_limit_error`,
+/// `overloaded_error`, `no_capacity` or `unavailable`, or a numeric `code` of
+/// 503 / 529 — is [`ProviderError::RateLimited`], checked
+/// **before** the overflow phrases —
 /// the same order as the HTTP path, for the same reason. Otherwise the text
 /// is checked for known context-overflow patterns. Used by providers that
 /// receive `"error"` events in the SSE stream.
 pub fn classify_sse_error_event(message: &str) -> ProviderError {
     if is_rate_limit_payload(message) {
+        tracing::warn!(payload = %truncate_body(message), "in-stream rate limit or overload; will retry");
         ProviderError::RateLimited {
             retry_after_ms: None,
         }
@@ -407,17 +420,20 @@ pub fn classify_sse_error_event(message: &str) -> ProviderError {
 /// - `rate_limit_exceeded` — OpenAI's error `code`
 /// - `rate_limit_error` — Anthropic's error `type`
 /// - `overloaded_error` — Anthropic's in-stream overload (the HTTP form is 529)
+/// - `unavailable` — Google's in-stream `"status":"UNAVAILABLE"` (503)
 /// - `rate_limit` — generic
 ///
 /// Google's in-stream `{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}`
 /// is deliberately not listed: it stays an [`ProviderError::Api`] carrying the
-/// payload, as `google_stream_test` pins. Numeric codes are not read.
+/// payload, as `google_stream_test` pins. Of numeric codes only the overloads
+/// (503, 529) are read.
 const RATE_LIMIT_CODES: &[&str] = &[
     "too_many_requests",
     "no_capacity",
     "rate_limit_exceeded",
     "rate_limit_error",
     "overloaded_error",
+    "unavailable",
     "rate_limit",
 ];
 
@@ -440,10 +456,26 @@ fn is_rate_limit_payload(message: &str) -> bool {
                 Some(serde_json::Value::String(s)) => {
                     RATE_LIMIT_CODES.contains(&s.to_ascii_lowercase().as_str())
                 }
+                // A numeric overload code (Gemini `{"code":503,…}`, OpenRouter
+                // `{"code":503|529,…}`). 429 is deliberately not read: Gemini's
+                // in-stream 429 (`RESOURCE_EXHAUSTED`) is often an exhausted
+                // quota, kept as `Api` so its message survives.
+                Some(serde_json::Value::Number(n)) if *key == "code" => {
+                    matches!(n.as_u64(), Some(503 | 529))
+                }
                 _ => false,
             })
     });
     limited
+}
+
+/// A response body short enough for one log line.
+fn truncate_body(body: &str) -> String {
+    const MAX: usize = 500;
+    match body.char_indices().nth(MAX) {
+        Some((cut, _)) => format!("{}… ({} bytes)", &body[..cut], body.len()),
+        None => body.to_string(),
+    }
 }
 
 /// Known phrases that indicate context overflow across LLM providers.
@@ -660,6 +692,35 @@ mod tests {
         );
         // Near-miss: the same body at 400 is still an overflow.
         assert!(ProviderError::classify(400, body).is_context_overflow());
+    }
+
+    #[test]
+    fn rate_limited_reads_cleanly_with_or_without_a_delay() {
+        let without = ProviderError::RateLimited {
+            retry_after_ms: None,
+        };
+        assert_eq!(without.to_string(), "Rate limited");
+        let with = ProviderError::RateLimited {
+            retry_after_ms: Some(1500),
+        };
+        assert_eq!(with.to_string(), "Rate limited, retry after 1500ms");
+    }
+
+    #[test]
+    fn numeric_overload_codes_in_sse_errors_are_retried_429_is_not() {
+        for payload in [
+            r#"{"error":{"code":503,"message":"The model is overloaded","status":"UNAVAILABLE"}}"#,
+            r#"{"error":{"code":529,"message":"Overloaded"}}"#,
+        ] {
+            assert!(
+                classify_sse_error_event(payload).is_retryable(),
+                "{payload}"
+            );
+        }
+        let quota = classify_sse_error_event(
+            r#"{"error":{"code":429,"message":"Resource has been exhausted","status":"RESOURCE_EXHAUSTED"}}"#,
+        );
+        assert!(matches!(quota, ProviderError::Api(_)), "{quota:?}");
     }
 
     #[test]

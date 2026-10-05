@@ -83,10 +83,12 @@ impl StreamProvider for GoogleVertexProvider {
 
         if !response.status().is_success() {
             let status = response.status();
+            let retry_after = parse_retry_after(response.headers());
             let body = response.text().await.unwrap_or_default();
-            return Err(ProviderError::classify(
+            return Err(ProviderError::classify_with_retry_after(
                 status.as_u16(),
                 &format!("Vertex AI error {}: {}", status, body),
+                retry_after,
             ));
         }
 

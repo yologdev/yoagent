@@ -1996,6 +1996,10 @@ mod tests {
             exception_error("modelStreamErrorException", "boom"),
             ProviderError::Api(_)
         ));
+        // 503 is a retryable capacity error; other 5xx stay `Api`.
+        assert!(exception_error("serviceUnavailableException", "busy").is_retryable());
+        let internal = exception_error("internalServerException", "oops");
+        assert!(matches!(internal, ProviderError::Api(_)) && !internal.is_retryable());
     }
 
     #[test]

@@ -1590,22 +1590,23 @@ async fn a_panicking_tool_does_not_take_down_a_sibling_call() {
     assert!(ends[1].0 && ends[1].1.contains("panicked"), "{:?}", ends[1]);
 }
 
-/// A cancel that lands while tools run ends the run with the cancel marker,
-/// so the transcript does not end on a `ToolUse` that looks unfinished-but-
-/// fine.
+/// A cancel that lands while tools run ends the run with the cancel marker
+/// (emitted as a message, after the tool's result), so the last assistant
+/// message's `ToolUse` does not read as a normal stop. Deterministic: the
+/// tool returns only once the test has aborted.
 #[tokio::test]
 async fn a_cancel_during_tools_ends_with_the_cancel_marker() {
-    struct Slow;
+    struct Gated(Arc<tokio::sync::Notify>);
     #[async_trait::async_trait]
-    impl AgentTool for Slow {
+    impl AgentTool for Gated {
         fn name(&self) -> &str {
-            "slow"
+            "gated"
         }
         fn label(&self) -> &str {
-            "Slow"
+            "Gated"
         }
         fn description(&self) -> &str {
-            "Takes a while"
+            "Returns when released"
         }
         fn parameters_schema(&self) -> serde_json::Value {
             serde_json::json!({"type": "object", "properties": {}})
@@ -1615,7 +1616,7 @@ async fn a_cancel_during_tools_ends_with_the_cancel_marker() {
             _params: serde_json::Value,
             _ctx: ToolContext,
         ) -> Result<ToolResult, ToolError> {
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            self.0.notified().await;
             Ok(ToolResult {
                 content: vec![Content::Text {
                     text: "done".into(),
@@ -1624,21 +1625,23 @@ async fn a_cancel_during_tools_ends_with_the_cancel_marker() {
             })
         }
     }
+    let release = Arc::new(tokio::sync::Notify::new());
     let provider = MockProvider::new(vec![
         MockResponse::ToolCalls(vec![MockToolCall {
             provider_metadata: None,
-            name: "slow".into(),
+            name: "gated".into(),
             arguments: serde_json::json!({}),
         }]),
         MockResponse::Text("never reached".into()),
     ]);
-    let mut agent =
-        Agent::from_provider(provider, ModelConfig::mock()).with_tools(vec![Box::new(Slow)]);
+    let mut agent = Agent::from_provider(provider, ModelConfig::mock())
+        .with_tools(vec![Box::new(Gated(release.clone()))]);
     let mut rx = agent.prompt("go").await;
     let mut events = Vec::new();
     while let Some(e) = rx.recv().await {
         if matches!(e, AgentEvent::ToolExecutionStart { .. }) {
             agent.abort();
+            release.notify_one();
         }
         events.push(e);
     }
@@ -1647,12 +1650,23 @@ async fn a_cancel_during_tools_ends_with_the_cancel_marker() {
     let Some(AgentEvent::AgentEnd { messages, .. }) = events.last() else {
         panic!("the run must end with AgentEnd")
     };
-    let Some(AgentMessage::Llm(Message::User { content, .. })) = messages.last() else {
-        panic!("expected the cancel marker last: {messages:?}")
-    };
+    let n = messages.len();
     assert!(
-        matches!(content.first(), Some(Content::Text { text }) if text == yoagent::agent_loop::CANCELLED_MARKER)
+        matches!(
+            &messages[n - 2],
+            AgentMessage::Llm(Message::ToolResult { .. })
+        ),
+        "the tool's result comes first: {messages:?}"
     );
+    let is_marker = |m: &AgentMessage| {
+        matches!(m, AgentMessage::Llm(Message::User { content, .. })
+            if matches!(content.first(), Some(Content::Text { text }) if text == yoagent::agent_loop::CANCELLED_MARKER))
+    };
+    assert!(is_marker(&messages[n - 1]), "{messages:?}");
+    // Emitted like any message, for event consumers.
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::MessageEnd { message } if is_marker(message))));
 }
 
 /// `Batched { size: 0 }` (it comes from config) runs the calls instead of
