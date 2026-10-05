@@ -43,6 +43,7 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Docs
 
+- **`max_total_tokens` explained.** Each turn counts its whole prompt (cached tokens included) plus its output. The prompt resends the conversation, so a run's total grows much faster than the conversation itself: the 1M default is reached around turn 16 of a run at a 60K-token context. All limits apply per run (each `prompt` starts at zero). The rustdoc and the context-management guide now say so, with a table, the settings for long agentic runs, and sub-agents' fixed caps. Behaviour is unchanged.
 - New guide: [Testing Your Agent](docs/guides/testing.md), covering `MockProvider`, testing a middleware alone, and abort. Its examples run as `tests/testing_guide_test.rs`.
 - **The `cli` example:**
   - It no longer reads `ANTHROPIC_API_KEY` for every provider. The README's `--provider groq` command panicked without one, and with one exported the Anthropic key was sent to Groq, OpenAI or a local server.
