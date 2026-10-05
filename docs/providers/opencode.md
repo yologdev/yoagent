@@ -49,7 +49,8 @@ use yoagent::provider::{AnthropicCompat, ModelConfig};
 
 let mut config = ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5");
 config.base_url = "https://gateway.example.com/v1".into();
-config.anthropic = Some(AnthropicCompat::default().with_bearer_auth(true));
+// Keep the options inferred from the id; switch only the auth header.
+config.anthropic = Some(AnthropicCompat::for_claude_id("claude-sonnet-5").with_bearer_auth(true));
 ```
 
 Get an API key by signing in at [opencode.ai](https://opencode.ai) (Zen) or subscribing to Go.

@@ -3,10 +3,10 @@
 //! A decision model evaluates a `state` (text or JSON) against typed
 //! questions — **Noul** (yes/no), **Choice** (one of N options), **Score**
 //! (an ordered scale) — and returns typed answers with probabilities, not
-//! prose. They are fast (a few hundred ms per request; we measured 230–440
-//! ms) and cheap, which makes them useful for the small judgments an agent
-//! makes constantly: is this request asking for an action, which skill fits,
-//! does this tool call destroy data.
+//! prose. They are fast (a few hundred ms per request: medians of 230–444 ms
+//! for Jev and Clef in our measurements) and cheap, which makes them useful
+//! for the small judgments an agent makes constantly: is this request asking
+//! for an action, which skill fits, does this tool call destroy data.
 //!
 //! "Noul" is deliberate: it is the SystemOne wire vocabulary (`"type":
 //! "noul"`), shared by TypeSafe's API and self-hosted servers such as JevK5,

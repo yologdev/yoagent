@@ -46,10 +46,13 @@ async fn the_agent_calls_the_tool_then_answers() {
 `Echo` is an ordinary `AgentTool`; the test file has it in full. For a single
 text answer, `MockProvider::text("…")` is enough.
 
-`MockProvider` also checks every request it receives: a transcript a real
-provider would reject (a tool call without its result, say) fails the test
-with an explanation. When a malformed sequence is the point of the test, build
-it with `MockProvider::without_transcript_validation()`.
+`MockProvider` also checks that every request pairs tool calls with their
+results (no unanswered call, no stray result, nothing in between), the shape a
+real provider would reject. On a violation it panics with an explanation;
+under `Agent::prompt` that panic is in the spawned loop task, so the run ends
+early and your assertions on its output fail. When a malformed sequence is
+the point of the test, opt out:
+`MockProvider::new(responses).without_transcript_validation()`.
 
 ## A middleware, without an agent
 
@@ -80,13 +83,17 @@ async fn the_middleware_denies_rm() {
 }
 ```
 
-Add `.with_messages(&history)` when the policy reads the conversation
-(`call.user_request()`).
+When the policy depends on what the user asked, give the request that
+context: `.with_run_prompts(&prompts)` for the run's prompts, or
+`.with_messages(&history)` for the whole conversation. A policy should read
+`call.user_request_parts()`; `user_request()` is prose whose format may
+change.
 
 ## Abort
 
 `abort()` cancels the run; `finish()` waits for it and leaves the agent
-usable:
+usable. This shows the call pattern — with an instant mock the run may well
+finish before the abort lands:
 
 ```rust
 #[tokio::test]
@@ -103,7 +110,8 @@ async fn an_abort_ends_the_run() {
 ## Beyond the mock
 
 - **Streaming and provider quirks** are tested against a local HTTP server
-  (`wiremock`) serving recorded SSE bodies — see `tests/*_stream_test.rs` in
-  the repository for each provider.
+  (`wiremock`) serving hand-built bodies in each provider's wire format (SSE;
+  binary event stream for Bedrock) — see `tests/*_stream_test.rs` in the
+  repository.
 - **Live runs** belong in an example run on demand, not in `cargo test`: the
   repository's `examples/release_smoke.rs` checks a real provider end to end.

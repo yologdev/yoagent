@@ -14,7 +14,8 @@ JSON) and named questions of three kinds:
 TypeSafe's API and by self-hosted servers alike; yoagent keeps the name so the
 types read like the requests they produce.
 
-They are fast (TypeSafe quotes ~100 ms for Jev) and cheap (Jev 1.13 bills
+They are fast (TypeSafe quotes ~100 ms for Jev; our measured medians per gate
+check were 230–444 ms for Jev and Clef) and cheap (Jev 1.13 bills
 $0.042 per million *input* tokens; output is free), which makes them a fit for
 the small judgments an agent makes all the time and an LLM is slow and costly
 at: *does this request need a skill? which one? does this tool call delete

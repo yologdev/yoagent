@@ -1,4 +1,4 @@
-//! Mini coding agent CLI — a baby Claude Code in ~250 lines.
+//! Mini coding agent CLI — a baby Claude Code in a few hundred lines.
 //!
 //! Features:
 //!   - Interactive REPL with multi-turn conversation
@@ -12,8 +12,9 @@
 //!   ANTHROPIC_API_KEY=sk-... cargo run --example cli -- --skills ./skills
 //!
 //! Run with a named provider (zai, qwen, openai, xai, groq, deepseek, mistral, minimax, meta,
-//! ollama, google). Each reads its own key variable (ZAI_API_KEY, DASHSCOPE_API_KEY,
-//! GROQ_API_KEY, …); API_KEY, when set, overrides it for any provider:
+//! ollama, google). Each hosted provider reads its own key variable (ZAI_API_KEY,
+//! DASHSCOPE_API_KEY, GROQ_API_KEY, …); ollama needs none. API_KEY, when set, is sent to
+//! whichever provider is selected, in place of its own:
 //!   ZAI_API_KEY=... cargo run --example cli -- --provider zai --model glm-4.7
 //!   DASHSCOPE_API_KEY=... cargo run --example cli -- --provider qwen --model qwen3.6-plus
 //!   cargo run --example cli -- --provider ollama --model llama3.1:8b
@@ -100,8 +101,9 @@ async fn main() {
         .cloned();
 
     // `from_config` reads each provider's own key variable (ANTHROPIC_API_KEY,
-    // GROQ_API_KEY, DASHSCOPE_API_KEY, …). API_KEY, when set, overrides it —
-    // and nothing else is ever sent to a provider it was not meant for.
+    // GROQ_API_KEY, DASHSCOPE_API_KEY, …). API_KEY, when set, is sent to
+    // whichever provider is selected instead — so set it only for the one
+    // you run.
     let api_key: Option<String> = std::env::var("API_KEY").ok().filter(|k| !k.is_empty());
 
     let default_model = match provider_name.as_deref() {
@@ -314,10 +316,7 @@ async fn main() {
     println!("\n{DIM}  bye 👋{RESET}\n");
 }
 
-/// Select the config for the requested provider/URL and build an agent from
-/// it. A local/OpenAI-compatible URL wins; then a named provider; else
-/// Anthropic. Every branch flows through `from_config`, so the provider,
-/// model id, and context window all come from a single `ModelConfig`.
+/// The agent for these flags, with the `API_KEY` override applied.
 fn build_agent(
     api_url: &Option<String>,
     provider_name: &Option<String>,
@@ -331,6 +330,10 @@ fn build_agent(
     }
 }
 
+/// Select the config for the requested provider/URL and build an agent from
+/// it. A local/OpenAI-compatible URL wins; then a named provider; else
+/// Anthropic. Every branch flows through `from_config`, so the provider,
+/// model id, and context window all come from a single `ModelConfig`.
 fn build_agent_for(api_url: &Option<String>, provider_name: &Option<String>, model: &str) -> Agent {
     if let Some(url) = api_url {
         let config = if provider_name.as_deref() == Some("ollama") {
