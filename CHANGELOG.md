@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- **`SubAgentTool::with_execution_limits(ExecutionLimits)`.** A delegation's token and duration caps were hard-coded (1M tokens, 5 minutes), with only `with_max_turns` adjustable. Because the token count includes every turn's whole prompt, a sub-agent working over a large context reached the cap within a few turns, and nothing could raise it. All limits are now settable; `with_max_turns` still changes only the turns. The defaults are unchanged.
+
 ### Fixed
 
 - **MCP over stdio:**

@@ -43,6 +43,15 @@ use tokio::sync::mpsc;
 /// Default max turns for sub-agents (prevents runaway execution).
 const DEFAULT_MAX_TURNS: usize = 10;
 
+/// The limits a delegation runs under unless [`SubAgentTool::with_execution_limits`]
+/// says otherwise: 10 turns, 1M tokens, 5 minutes, loop detection on.
+fn default_execution_limits() -> ExecutionLimits {
+    ExecutionLimits::default()
+        .with_max_turns(DEFAULT_MAX_TURNS)
+        .with_max_total_tokens(1_000_000)
+        .with_max_duration(std::time::Duration::from_secs(300))
+}
+
 /// A tool that delegates work to a child agent loop.
 ///
 /// When the parent LLM calls this tool, it spawns a fresh `agent_loop()` with
@@ -64,7 +73,7 @@ pub struct SubAgentTool {
     cache_config: CacheConfig,
     tool_execution: ToolExecutionStrategy,
     retry_config: crate::retry::RetryConfig,
-    max_turns: usize,
+    execution_limits: ExecutionLimits,
     shared_state: Option<SharedState>,
     context_config: Option<crate::context::ContextConfig>,
     turn_delay: Option<std::time::Duration>,
@@ -112,7 +121,7 @@ impl SubAgentTool {
             cache_config: CacheConfig::default(),
             tool_execution: ToolExecutionStrategy::default(),
             retry_config: crate::retry::RetryConfig::default(),
-            max_turns: DEFAULT_MAX_TURNS,
+            execution_limits: default_execution_limits(),
             shared_state: None,
             context_config: None,
             turn_delay: None,
@@ -383,8 +392,25 @@ impl SubAgentTool {
         self
     }
 
+    /// Cap on turns per delegation (default 10). Changes only the turn
+    /// count; see [`with_execution_limits`](Self::with_execution_limits) for
+    /// the rest.
     pub fn with_max_turns(mut self, max: usize) -> Self {
-        self.max_turns = max;
+        self.execution_limits = self.execution_limits.with_max_turns(max);
+        self
+    }
+
+    /// The limits each delegation runs under: turns, tokens, wall-clock time
+    /// and loop detection, all per delegation. The default is 10 turns, 1M
+    /// tokens and 5 minutes. The token count includes every turn's whole
+    /// prompt, so a delegation working over a large context reaches 1M in a
+    /// few turns (see
+    /// [`ExecutionLimits::max_total_tokens`](crate::context::ExecutionLimits::max_total_tokens));
+    /// raise it here for long-running sub-agents. Replaces every limit,
+    /// including one set with [`with_max_turns`](Self::with_max_turns)
+    /// earlier.
+    pub fn with_execution_limits(mut self, limits: ExecutionLimits) -> Self {
+        self.execution_limits = limits;
         self
     }
 
@@ -557,13 +583,7 @@ impl AgentTool for SubAgentTool {
             get_follow_up_messages: None,
             context_config: self.context_config.clone(),
             compaction_strategy: None,
-            execution_limits: Some(ExecutionLimits {
-                max_turns: self.max_turns,
-                // Generous token/duration limits — turn limit is the primary guard
-                max_total_tokens: 1_000_000,
-                max_duration: std::time::Duration::from_secs(300),
-                ..Default::default()
-            }),
+            execution_limits: Some(self.execution_limits.clone()),
             cache_config: self.cache_config.clone(),
             tool_output_sink: self.shared_state.clone(),
             tool_execution: self.tool_execution.clone(),

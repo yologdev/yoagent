@@ -295,8 +295,9 @@ let agent = agent.with_execution_limits(
 );
 ```
 
-A `SubAgentTool` delegation has its own fixed caps: 1M tokens and 5 minutes
-per delegation, counted the same way, with `with_max_turns` the only knob.
+A `SubAgentTool` delegation has its own limits, counted the same way: by
+default 10 turns, 1M tokens and 5 minutes per delegation, set with
+`SubAgentTool::with_execution_limits` (see [Sub-Agents](sub-agents.md)).
 
 ## Loop detection
 

@@ -75,6 +75,7 @@ When the parent LLM calls multiple sub-agents in a single response, they run con
 | `with_context_config()` | Compaction budget for the sub-agent's context |
 | `with_model()` / `with_max_tokens()` / `with_temperature()` | Override model id and sampling settings |
 | `with_max_turns(N)` | Turn limit (default: 10). Primary guard against runaway execution. |
+| `with_execution_limits(ExecutionLimits)` | All per-delegation limits: turns, tokens, duration, loop detection (default: 10 / 1M / 300 s / on). |
 | `with_thinking()` | Enable extended thinking for the sub-agent |
 | `with_cache_config()` | Prompt caching settings |
 | `with_turn_delay()` | Inter-turn delay to throttle API calls (useful for rate-limit-sensitive providers) |
@@ -216,7 +217,22 @@ This works with all providers: OpenAI, Groq, DeepSeek, Gemini, Mistral, xAI, and
 - **Context isolation**: Each invocation starts fresh. Sub-agents don't accumulate history across calls.
 - **Nesting supported**: Sub-agents can be given other `SubAgentTool`s for recursive delegation (see [`examples/rlm.rs`](../../examples/rlm.rs)). Use `with_max_turns()` to prevent infinite chains.
 - **Cancellation propagation**: The parent's cancellation token is forwarded. Aborting the parent aborts all sub-agents. A delegation cancelled during one of its LLM calls fails the tool call (`Sub-agent '<name>' failed: Cancelled`); one cancelled while its tools run fails with `Sub-agent '<name>' failed: [Agent stopped: cancelled]`; and waiting on a tool source is abandoned with `ToolError::Cancelled`.
-- **Turn limiting**: The default 10-turn limit prevents runaway execution; each delegation also runs under its own 300-second duration and 1M-token limits. The parent's limits are checked between its own turns and do not interrupt a running delegation.
+- **Limits**: Each delegation runs under its own limits — by default 10 turns, 5 minutes and 1M tokens, with loop detection on. The token count includes every turn's whole prompt, so a delegation working over a large context reaches 1M in a few turns. Change them with `with_execution_limits(ExecutionLimits)` (all of them) or `with_max_turns` (turns only):
+
+  ```rust
+  use std::time::Duration;
+  use yoagent::context::ExecutionLimits;
+
+  let researcher = SubAgentTool::from_config("researcher", ModelConfig::claude_sonnet_5())
+      .with_execution_limits(
+          ExecutionLimits::default()
+              .with_max_turns(40)
+              .with_max_total_tokens(usize::MAX)
+              .with_max_duration(Duration::from_secs(30 * 60)),
+      );
+  ```
+
+  The parent's limits are checked between its own turns and do not interrupt a running delegation.
 
 ## Isolating sub-agents from each other
 
