@@ -45,8 +45,8 @@ passed through as given.
 
 | Protocol | Mechanism |
 |----------|-----------|
-| Anthropic, `native_structured_output` on (every `ModelConfig::claude_*` preset, and `opencode_zen("claude-…")` ids from Claude 4.5 on) | `output_config.format: {type: "json_schema", schema}` — the reply's text block is constrained to the schema; no tool is forced, thinking stays on, and the key shares `output_config` with the thinking `effort` |
-| Anthropic, flag off (default, e.g. a bare `ModelConfig::anthropic(..)`) | Forced tool call — a synthetic tool is built from your schema and `tool_choice` forces it; the loop unwraps the call back into text |
+| Anthropic, `native_structured_output` on (every `ModelConfig::claude_*` preset, and `ModelConfig::anthropic("claude-…")` / `opencode_zen("claude-…")` ids from Claude 4.5 on) | `output_config.format: {type: "json_schema", schema}` — the reply's text block is constrained to the schema; no tool is forced, thinking stays on, and the key shares `output_config` with the thinking `effort` |
+| Anthropic, flag off (Claude ids before 4.5, non-Claude ids behind a Messages-protocol gateway, `AnthropicCompat::default()`) | Forced tool call — a synthetic tool is built from your schema and `tool_choice` forces it; the loop unwraps the call back into text |
 | OpenAI-compatible | `response_format: {type: "json_schema", strict: true}` |
 | Google Gemini | `generationConfig.responseSchema` + JSON mime type (note: Gemini uses an OpenAPI-style schema dialect — your schema is passed through as given) |
 | OpenAI Responses / Azure / Vertex / Bedrock | Not yet wired — a warning is logged and the model replies as free text, which still must parse into `T` |
@@ -76,18 +76,16 @@ passed through as given.
 - **Claude Fable 5.1 and Opus 5.5 reject forced `tool_choice`** (`any`/`tool`)
   with a 400. Their presets (`claude_fable_5_1()`, `claude_opus_5_5()`) set
   `AnthropicCompat::native_structured_output`, so `prompt_structured` works on
-  them. A hand-built `ModelConfig::anthropic("claude-opus-5-5", ..)` does not
-  set it and gets the 400 as `Provider { .. }` — use the preset or turn the
-  flag on:
-
-  ```rust
-  let mut config = ModelConfig::anthropic("claude-opus-5-5", "Opus 5.5");
-  config.anthropic = Some(AnthropicCompat::default().with_native_structured_output(true));
-  ```
+  them, and so does a bare `ModelConfig::anthropic("claude-opus-5-5", ..)`,
+  which infers the flag from the id. If you set `config.anthropic` yourself,
+  start from `AnthropicCompat::for_claude_id(id)` rather than
+  `AnthropicCompat::default()`, or the flag is off again and the call gets
+  the 400 as `Provider { .. }`.
 
   Anthropic lists native JSON outputs for Fable 5/5.1, Opus 4.5 through 5.5,
   Sonnet 4.5/4.6/5 and Haiku 4.5 (on Amazon Bedrock, fewer: see the
-  Anthropic structured-outputs page). The flag is off by default because
+  Anthropic structured-outputs page). `AnthropicCompat::default()` leaves the
+  flag off, and so does `ModelConfig::anthropic` for a non-Claude id, because
   gateways that speak the Messages protocol may not accept
   `output_config.format`.
 - Markdown code fences around the JSON are stripped defensively before

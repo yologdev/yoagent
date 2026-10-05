@@ -22,6 +22,7 @@ drive the loop yourself without adopting our state model.
 ```bash
 git clone https://github.com/yologdev/yoagent && cd yoagent
 ollama serve &
+ollama pull llama3.1:8b    # or pass --model <any pulled model>
 cargo run --example cli -- --provider ollama
 ```
 

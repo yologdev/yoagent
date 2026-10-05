@@ -809,7 +809,8 @@ impl AnthropicCompat {
     }
 
     /// Compat flags inferred from a Claude model id, for configs built from
-    /// a bare id (the OpenCode gateways) rather than a preset.
+    /// a bare id rather than a preset: [`ModelConfig::anthropic`] and the
+    /// OpenCode gateways.
     ///
     /// - Thinking: models before 4.6 (Claude 3.x, 4, 4.1, and Sonnet/Opus/
     ///   Haiku 4.5) accept only budget-based extended thinking and reject
@@ -1251,9 +1252,24 @@ impl ModelConfig {
     }
 
     /// Create a new Anthropic model config.
+    ///
+    /// For a `claude-…` id, the thinking mode and native structured outputs
+    /// are inferred from it ([`AnthropicCompat::for_claude_id`]). Any other
+    /// id (a model behind a Messages-protocol gateway, say) gets no
+    /// `AnthropicCompat`, so the provider's defaults apply: adaptive thinking
+    /// and tool-forced structured outputs, which every gateway accepts. The
+    /// context window and output limit are generic (200K / 16K); for a
+    /// current model prefer its preset — [`claude_sonnet_5`](Self::claude_sonnet_5)
+    /// and friends — which sets those too. Pricing comes from the price table
+    /// either way.
     pub fn anthropic(id: impl Into<String>, name: impl Into<String>) -> Self {
+        let id = id.into();
+        let compat = id
+            .to_ascii_lowercase()
+            .starts_with("claude-")
+            .then(|| AnthropicCompat::for_claude_id(&id));
         Self {
-            id: id.into(),
+            id,
             name: name.into(),
             api: ApiProtocol::AnthropicMessages,
             provider: "anthropic".into(),
@@ -1265,7 +1281,7 @@ impl ModelConfig {
             list_priced: false,
             headers: HashMap::new(),
             google: None,
-            anthropic: None,
+            anthropic: compat,
             compat: None,
         }
         .priced()
@@ -1301,9 +1317,10 @@ impl ModelConfig {
     /// - Forced `tool_choice` (`any` / `tool`) is rejected with a 400. The
     ///   preset sets [`AnthropicCompat::native_structured_output`], so
     ///   [`Agent::prompt_structured`](crate::Agent::prompt_structured) uses
-    ///   `output_config.format` and never forces a tool. A hand-built
-    ///   `ModelConfig::anthropic("claude-fable-5-1", ..)` without that flag
-    ///   still forces one and gets the 400.
+    ///   `output_config.format` and never forces a tool. So does a bare
+    ///   `ModelConfig::anthropic("claude-fable-5-1", ..)`, which infers the
+    ///   flag from the id; a config with an explicit `AnthropicCompat` that
+    ///   leaves it off still forces one and gets the 400.
     /// - Thinking is always on (adaptive); `ThinkingLevel::Off` omits the
     ///   field rather than sending `disabled`, which this model rejects, and
     ///   the model still thinks at its default effort (`high`).
@@ -2087,7 +2104,14 @@ mod tests {
         assert_eq!(config.provider, "anthropic");
         assert_eq!(config.base_url, "https://api.anthropic.com/v1");
         assert!(config.compat.is_none());
-        assert!(config.anthropic.is_none());
+        // The Claude options are inferred from the id.
+        let compat = config.anthropic.expect("inferred from the id");
+        assert!(compat.adaptive_thinking && compat.native_structured_output);
+        // Haiku 4.5 rejects adaptive thinking: a bare config must not send it.
+        let haiku = ModelConfig::anthropic("claude-haiku-4-5", "Haiku 4.5")
+            .anthropic
+            .unwrap();
+        assert!(!haiku.adaptive_thinking && haiku.native_structured_output);
     }
 
     #[test]
@@ -2634,8 +2658,9 @@ mod tests {
     }
 
     /// Every Claude preset names a model that the structured-outputs page
-    /// lists as supporting `output_config.format`, so each opts into it.
-    /// A bare `ModelConfig::anthropic(..)` does not.
+    /// lists as supporting `output_config.format`, so each opts into it. A
+    /// bare `ModelConfig::anthropic(..)` infers it from the id (see
+    /// `test_model_config_anthropic`).
     #[test]
     fn claude_presets_use_native_structured_output() {
         for mc in [
@@ -2659,7 +2684,12 @@ mod tests {
             );
             assert!(!compat.bearer_auth, "{}", mc.id);
         }
-        assert!(ModelConfig::anthropic("claude-x", "X").anthropic.is_none());
+        // A Claude id with no recognisable version is current generation.
+        let unknown = ModelConfig::anthropic("claude-x", "X").anthropic.unwrap();
+        assert!(unknown.adaptive_thinking && unknown.native_structured_output);
+        // A non-Claude id (behind a Messages-protocol gateway) keeps the
+        // provider defaults: no native structured outputs a gateway may reject.
+        assert!(ModelConfig::anthropic("glm-4.7", "GLM").anthropic.is_none());
     }
 
     #[test]

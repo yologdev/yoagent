@@ -63,12 +63,16 @@ thinks whenever the field is absent. The thinking tokens count against
 
 Pre-4.6 models (Sonnet 4.5, Opus 4.5, Haiku 4.5 and earlier Claude 4) accept
 only budget-based thinking and reject `{"type": "adaptive"}` with a 400.
-`ModelConfig::claude_haiku_4_5()` already selects it; for other pre-4.6
-models, opt into legacy budget-based thinking via `AnthropicCompat::legacy()`:
+`ModelConfig::claude_haiku_4_5()` selects it, and so does a bare
+`ModelConfig::anthropic(id, ..)` for any pre-4.6 Claude id: it infers the
+options from the id (`AnthropicCompat::for_claude_id`). If you set
+`config.anthropic` yourself, start from that rather than
+`AnthropicCompat::legacy()`, which also turns native structured outputs off:
 
 ```rust
 let mut config = ModelConfig::anthropic("claude-sonnet-4-5", "Claude Sonnet 4.5");
-config.anthropic = Some(AnthropicCompat::legacy());
+// Already inferred; to change one option, keep the rest:
+config.anthropic = Some(AnthropicCompat::for_claude_id("claude-sonnet-4-5").with_bearer_auth(true));
 ```
 
 Legacy budgets: `Minimal`/`Low` 1,024 (the API minimum), `Medium` 2,048,
@@ -96,20 +100,23 @@ session saved before the protocol was recorded), is skipped with a warning.
 `Agent::prompt_structured` has two paths on this provider, selected by
 `AnthropicCompat::native_structured_output`:
 
-- **Native** (flag on, which every `ModelConfig::claude_*` preset sets): the
+- **Native** (flag on, which every `ModelConfig::claude_*` preset sets, and
+  `ModelConfig::anthropic` infers for Claude ids from 4.5): the
   schema is sent as `output_config.format = {"type": "json_schema", "schema": ...}`,
   in the same `output_config` object as the thinking `effort`. No tool is
   added or forced, thinking stays as requested, and the reply's text block is
   the JSON. Required on Claude Fable 5.1 and Opus 5.5, which reject forced
   `tool_choice` (`any` / `tool`) with a 400.
-- **Tool-forcing** (flag off, the default for `ModelConfig::anthropic(..)`): a
+- **Tool-forcing** (flag off: Claude ids before 4.5, non-Claude ids, and
+  `AnthropicCompat::default()`): a
   synthetic tool built from the schema is appended and forced with
   `tool_choice`, thinking is dropped for that request, and the agent loop
   unwraps the forced call into text. On the native path nothing is unwrapped:
   a call to a tool named after the schema is a real tool call and executes.
 
-The flag is off by default because gateways that speak the Messages protocol
-may not accept `output_config.format`. See
+`AnthropicCompat::default()` leaves the flag off, as does
+`ModelConfig::anthropic` for a non-Claude id, because gateways that speak the
+Messages protocol may not accept `output_config.format`. See
 [Structured Outputs](../concepts/structured-outputs.md) for the schema rules.
 
 ### Claude Opus 5.5

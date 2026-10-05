@@ -21,6 +21,21 @@ adheres to [Semantic Versioning](https://semver.org/).
   - **Vertex AI** now uses Gemini's stream parser instead of an old copy (215 lines removed). It gains every Gemini fix: transport errors, in-stream errors, safety refusals and `ToolUse` being kept. Synthesized tool-call ids change from `vertex-fc-N` to `google-fc-N`, and a server-sent `functionCall.id` is used when present.
 - **A cancel while tools run is marked.** The run used to end with the last assistant message still `ToolUse`, indistinguishable from a normal stop. A cancelled sub-agent's delegation was therefore reported as a success. The run now appends `[Agent stopped: cancelled]` (`agent_loop::CANCELLED_MARKER`), and `SubAgentTool` reports it as a failure. A run cancelled before its first assistant message gets no marker (a sub-agent cancelled that early still returns its "no text output" fallback).
 - **`ToolExecutionStrategy::Batched { size: 0 }`** panicked in `chunks(0)`; it now runs as size 1.
+- **`ModelConfig::anthropic(id, ..)` infers the Claude options from a `claude-…` id** (`AnthropicCompat::for_claude_id`). It used to leave them unset:
+  - `anthropic("claude-haiku-4-5", ..)` got adaptive thinking, which Haiku 4.5 rejects.
+  - Every 4.5+ id went without native structured outputs and fell back to tool-forcing, which Fable 5.1 and Opus 5.5 reject.
+
+  A non-Claude id (a model behind a Messages-protocol gateway) is unchanged. The context window and output limit stay generic (200K / 16K); use a preset (`claude_sonnet_5()` …) to get the model's own. The provider docs' snippets that set `config.anthropic` now start from `for_claude_id`, so they no longer switch native structured outputs off.
+
+### Docs
+
+- New guide: [Testing Your Agent](docs/guides/testing.md), covering `MockProvider`, testing a middleware alone, and abort. Its examples run as `tests/testing_guide_test.rs`.
+- **The `cli` example:**
+  - It no longer reads `ANTHROPIC_API_KEY` for every provider. The README's `--provider groq` command panicked without one, and with one exported the Anthropic key was sent to Groq, OpenAI or a local server.
+  - Each provider now reads its own variable; `API_KEY`, when set, is sent to whichever provider is selected.
+- **Quick starts:** the docs.rs front page, `quick-start.md` and `examples/basic.rs` use `ModelConfig::claude_sonnet_5()` instead of a bare `anthropic()` config.
+- **The README's Ollama snippet** gains the `/v1` its base URL needs, and the try-it commands gain `ollama pull llama3.1:8b`.
+- **Decision-model latency:** "~100 ms" is replaced with what we measured, a few hundred ms per request.
 
 ## 0.24.2
 

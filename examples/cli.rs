@@ -1,4 +1,4 @@
-//! Mini coding agent CLI — a baby Claude Code in ~250 lines.
+//! Mini coding agent CLI — a baby Claude Code in a few hundred lines.
 //!
 //! Features:
 //!   - Interactive REPL with multi-turn conversation
@@ -11,8 +11,11 @@
 //!   ANTHROPIC_API_KEY=sk-... cargo run --example cli -- --model claude-sonnet-5
 //!   ANTHROPIC_API_KEY=sk-... cargo run --example cli -- --skills ./skills
 //!
-//! Run with a named provider (zai, qwen, openai, xai, groq, deepseek, mistral, minimax, ollama, google):
-//!   API_KEY=... cargo run --example cli -- --provider zai --model glm-4.7
+//! Run with a named provider (zai, qwen, openai, xai, groq, deepseek, mistral, minimax, meta,
+//! ollama, google). Each hosted provider reads its own key variable (ZAI_API_KEY,
+//! DASHSCOPE_API_KEY, GROQ_API_KEY, …); ollama needs none. API_KEY, when set, is sent to
+//! whichever provider is selected, in place of its own:
+//!   ZAI_API_KEY=... cargo run --example cli -- --provider zai --model glm-4.7
 //!   DASHSCOPE_API_KEY=... cargo run --example cli -- --provider qwen --model qwen3.6-plus
 //!   cargo run --example cli -- --provider ollama --model llama3.1:8b
 //!
@@ -97,24 +100,11 @@ async fn main() {
         .and_then(|i| args.get(i + 1))
         .cloned();
 
-    let api_key_optional = api_url.is_some() || provider_name.as_deref() == Some("ollama");
-    let api_key = if provider_name.as_deref() == Some("qwen") {
-        std::env::var("DASHSCOPE_API_KEY")
-            .or_else(|_| std::env::var("API_KEY"))
-            .expect("Set DASHSCOPE_API_KEY or API_KEY")
-    } else if provider_name.as_deref() == Some("meta") {
-        std::env::var("META_API_KEY")
-            .or_else(|_| std::env::var("MODEL_API_KEY"))
-            .expect("Set META_API_KEY or MODEL_API_KEY")
-    } else if api_key_optional {
-        std::env::var("ANTHROPIC_API_KEY")
-            .or_else(|_| std::env::var("API_KEY"))
-            .unwrap_or_default() // empty string OK for local/Ollama
-    } else {
-        std::env::var("ANTHROPIC_API_KEY")
-            .or_else(|_| std::env::var("API_KEY"))
-            .expect("Set ANTHROPIC_API_KEY or API_KEY")
-    };
+    // `from_config` reads each provider's own key variable (ANTHROPIC_API_KEY,
+    // GROQ_API_KEY, DASHSCOPE_API_KEY, …). API_KEY, when set, is sent to
+    // whichever provider is selected instead — so set it only for the one
+    // you run.
+    let api_key: Option<String> = std::env::var("API_KEY").ok().filter(|k| !k.is_empty());
 
     let default_model = match provider_name.as_deref() {
         Some("zai") => "glm-4.7",
@@ -152,11 +142,8 @@ async fn main() {
         SkillSet::load(&skill_dirs).expect("Failed to load skills")
     };
 
-    let mut agent = build_agent(&api_url, &provider_name, &model)
+    let mut agent = build_agent(&api_url, &provider_name, &model, api_key.as_deref())
         .with_system_prompt(SYSTEM_PROMPT)
-        // from_config already resolves the provider-conventional env key; this
-        // override preserves the CLI's API_KEY fallback (empty = leave to env).
-        .with_api_key(&api_key)
         .with_skills(skills.clone())
         .with_tools(default_tools());
 
@@ -205,9 +192,8 @@ async fn main() {
             }
             s if s.starts_with("/model ") => {
                 let new_model = s.trim_start_matches("/model ").trim();
-                agent = build_agent(&api_url, &provider_name, new_model)
+                agent = build_agent(&api_url, &provider_name, new_model, api_key.as_deref())
                     .with_system_prompt(SYSTEM_PROMPT)
-                    .with_api_key(&api_key)
                     .with_skills(skills.clone())
                     .with_tools(default_tools());
                 println!("{DIM}  (switched to {new_model}, conversation cleared){RESET}\n");
@@ -330,11 +316,25 @@ async fn main() {
     println!("\n{DIM}  bye 👋{RESET}\n");
 }
 
+/// The agent for these flags, with the `API_KEY` override applied.
+fn build_agent(
+    api_url: &Option<String>,
+    provider_name: &Option<String>,
+    model: &str,
+    api_key: Option<&str>,
+) -> Agent {
+    let agent = build_agent_for(api_url, provider_name, model);
+    match api_key {
+        Some(key) => agent.with_api_key(key),
+        None => agent,
+    }
+}
+
 /// Select the config for the requested provider/URL and build an agent from
 /// it. A local/OpenAI-compatible URL wins; then a named provider; else
 /// Anthropic. Every branch flows through `from_config`, so the provider,
 /// model id, and context window all come from a single `ModelConfig`.
-fn build_agent(api_url: &Option<String>, provider_name: &Option<String>, model: &str) -> Agent {
+fn build_agent_for(api_url: &Option<String>, provider_name: &Option<String>, model: &str) -> Agent {
     if let Some(url) = api_url {
         let config = if provider_name.as_deref() == Some("ollama") {
             ModelConfig::ollama(url, model)
@@ -344,6 +344,9 @@ fn build_agent(api_url: &Option<String>, provider_name: &Option<String>, model: 
         Agent::from_config(config)
     } else if let Some(prov) = provider_name {
         make_provider_agent(prov, model)
+    } else if model == "claude-sonnet-5" {
+        // The preset carries Sonnet 5's real context window and output limit.
+        Agent::from_config(ModelConfig::claude_sonnet_5())
     } else {
         Agent::from_config(ModelConfig::anthropic(model, model))
     }

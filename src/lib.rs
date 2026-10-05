@@ -21,7 +21,7 @@
 //! # async fn main() {
 //! // Provider is selected from the config's protocol; the API key is read
 //! // from ANTHROPIC_API_KEY. Call `.with_api_key(...)` to override.
-//! let mut agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Sonnet 5"))
+//! let mut agent = Agent::from_config(ModelConfig::claude_sonnet_5())
 //!     .with_system_prompt("You are a helpful coding assistant.")
 //!     .with_tools(tools::default_tools());
 //!
