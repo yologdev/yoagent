@@ -656,9 +656,18 @@ async fn e2e_handshake_over_streamable_http() {
         .mount(&server)
         .await;
 
+    // `initialized` is a notification: sent once, with the session, and
+    // without an id (it used to be a request awaiting a reply).
     Mock::given(method("POST"))
         .and(body_string_contains("notifications/initialized"))
+        .and(header("mcp-session-id", "sess-e2e"))
+        .and(|req: &wiremock::Request| {
+            serde_json::from_slice::<serde_json::Value>(&req.body)
+                .map(|v| v.get("id").is_none())
+                .unwrap_or(false)
+        })
         .respond_with(ResponseTemplate::new(202))
+        .expect(1)
         .mount(&server)
         .await;
 
@@ -682,4 +691,35 @@ async fn e2e_handshake_over_streamable_http() {
 
     let tools = client.list_tools().await.expect("tools/list over SSE");
     assert_eq!(tools[0].name, "web_search");
+}
+
+/// A server that rejects `notifications/initialized` has not finished the
+/// handshake: the connect fails, quoting the server, instead of failing later
+/// at `tools/list`.
+#[tokio::test]
+async fn a_rejected_initialized_notification_fails_the_connect() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("\"method\":\"initialize\""))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            r#"{"jsonrpc":"2.0","result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"strict","version":"1"}}}"#,
+            "application/json",
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("notifications/initialized"))
+        .respond_with(ResponseTemplate::new(400).set_body_string("bad notification"))
+        .mount(&server)
+        .await;
+
+    let err = McpClient::connect_http(&server.uri())
+        .await
+        .err()
+        .expect("the handshake did not complete")
+        .to_string();
+    assert!(
+        err.contains("400") && err.contains("bad notification"),
+        "{err}"
+    );
 }

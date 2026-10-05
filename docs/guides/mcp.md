@@ -51,6 +51,27 @@ let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude
     .await?;
 ```
 
+How the stdio transport behaves:
+
+- Each request waits for the response carrying its own id. Messages the server
+  sends in between are handled: notifications (`notifications/message`,
+  progress, `list_changed`) are skipped, a `ping` is answered, and any other
+  server request (sampling, roots) is declined with "method not found" (logged
+  at `WARN`) so the server does not wait. A response for another id (a call
+  that timed out earlier) is dropped. Server messages are only read while a
+  call is in progress, so a `ping` sent between calls is answered with the
+  next call.
+- A line on stdout that is not JSON (a banner, a debug print) is skipped and
+  logged at `WARN`; if the server then closes, the error mentions it.
+- `notifications/initialized` is sent as a notification, without an id, and not
+  awaited. If it cannot be delivered the connect fails. The whole handshake is
+  bounded at 60 seconds.
+- The server's stderr is read continuously, whatever its encoding, and logged
+  at `DEBUG` (target `yoagent::mcp::stderr`), so a server that logs heavily
+  cannot block. The last few KB are kept: when the server exits, the error
+  carries its exit status and that stderr, which is usually where it says why.
+- Dropping the client ends the server process.
+
 ### HTTP Transport
 
 For remote MCP servers exposed over HTTP. This works on every target,
@@ -120,6 +141,37 @@ When you call `with_mcp_server_stdio()` or `with_mcp_server_http()`, yoagent:
 
 MCP tools appear alongside built-in tools. The LLM sees them with their original names, descriptions, and JSON Schema parameters — it can call them just like any other tool.
 
+Each call ends when the run is cancelled. Over **stdio** it is also bounded at
+five minutes (`McpToolAdapter::DEFAULT_CALL_TIMEOUT`), counted from when the
+call is sent, not while it waits behind another call to the same server. Over
+**HTTP** there is no whole-call bound — the transport's idle timeout already
+ends a stalled call, and a long one that keeps streaming must not be cut off.
+For a different bound, build the client yourself:
+
+```rust
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::Mutex;
+use yoagent::mcp::{McpClient, McpToolAdapter};
+use yoagent::tools::default_tools;
+use yoagent::AgentTool;
+
+let client = McpClient::connect_stdio("my-server", &[], None)
+    .await?
+    .with_call_timeout(Some(Duration::from_secs(30 * 60)));
+let mcp_tools = McpToolAdapter::from_client(Arc::new(Mutex::new(client))).await?;
+
+// `with_tools` replaces the agent's tools, so pass everything it should have.
+let mut tools = default_tools();
+tools.extend(mcp_tools.into_iter().map(|t| Box::new(t) as Box<dyn AgentTool>));
+let agent = agent.with_tools(tools);
+```
+
+A call that times out may still be carried out by the server; the error says
+so. Content kinds this crate does not model reach the model as text: a text
+`resource` as its own text, anything else (`audio`, a `blob` resource, …) as
+its JSON with large base64 payloads replaced by their size.
+
 ## Mixing Built-in and MCP Tools
 
 ```rust
@@ -165,6 +217,8 @@ MCP operations return `McpError`:
 - `McpError::JsonRpc` — server returned a JSON-RPC error
 - `McpError::Serialization` — a message could not be (de)serialized as JSON
 - `McpError::Io` — an I/O error, e.g. on the stdio pipes
-- `McpError::ConnectionClosed` — server process exited
+- `McpError::ConnectionClosed` — the connection ended (the stdio transport
+  now reports a server that exited as `McpError::Transport("Connection closed:
+  MCP server '…' exited with …; last stderr: …")`, carrying the reason)
 
 When an MCP tool returns `isError: true`, the adapter converts it to a `ToolError::Failed`, which the agent loop sends back to the LLM with `is_error: true` so it can self-correct.
