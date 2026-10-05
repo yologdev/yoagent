@@ -181,6 +181,9 @@ impl AgentTool for BashTool {
             cmd.current_dir(cwd);
         }
 
+        // No stdin: a command that reads input gets EOF at once instead of
+        // the agent's terminal (`spawn` inherits stdin; `output` did not).
+        cmd.stdin(std::process::Stdio::null());
         // Capture output
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());

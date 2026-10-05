@@ -126,6 +126,8 @@ impl AgentTool for SearchTool {
 
         let mut cmd = Command::new(&cmd_name);
         cmd.args(&args);
+        // `spawn` inherits stdin; the search never needs it.
+        cmd.stdin(std::process::Stdio::null());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
         // A timeout or cancel drops the run; take the search with it.

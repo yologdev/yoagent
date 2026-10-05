@@ -214,6 +214,25 @@ async fn test_bash_already_cancelled_does_not_run() {
     assert!(!marker.exists());
 }
 
+/// A command that reads stdin gets EOF at once, never the agent's own input
+/// (the tool spawns the child, and `spawn` would inherit stdin). Run from a
+/// terminal, a regression hangs here until the timeout.
+#[tokio::test]
+async fn test_bash_stdin_is_empty() {
+    let result = BashTool::new()
+        .with_timeout(std::time::Duration::from_secs(5))
+        .execute(
+            serde_json::json!({"command": "cat; read line; echo \"got:[$line]\""}),
+            ctx("bash"),
+        )
+        .await
+        .unwrap();
+    let Content::Text { text } = &result.content[0] else {
+        panic!("expected text")
+    };
+    assert_eq!(text, "Exit code: 0\ngot:[]\n");
+}
+
 #[tokio::test]
 async fn test_bash_cancel() {
     let tool = BashTool::new();
