@@ -287,7 +287,12 @@ impl ProviderError {
         // "exceeds the maximum usage size allowed during peak load"), and
         // classifying it as overflow compacts the context instead of backing
         // off.
-        if status == 429 {
+        //
+        // 529 (Anthropic "overloaded") and 503 ("service unavailable") mean
+        // the provider is out of capacity for now: back off and retry, like a
+        // rate limit. Other 5xx stay `Api` — a server bug that fails the same
+        // way every time should not be re-sent.
+        if matches!(status, 429 | 503 | 529) {
             Self::RateLimited { retry_after_ms }
         } else if is_context_overflow(status, message) {
             Self::ContextOverflow {
@@ -401,6 +406,7 @@ pub fn classify_sse_error_event(message: &str) -> ProviderError {
 ///   "message":"… exceeds the maximum usage size allowed during peak load …"}}`)
 /// - `rate_limit_exceeded` — OpenAI's error `code`
 /// - `rate_limit_error` — Anthropic's error `type`
+/// - `overloaded_error` — Anthropic's in-stream overload (the HTTP form is 529)
 /// - `rate_limit` — generic
 ///
 /// Google's in-stream `{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}`
@@ -411,6 +417,7 @@ const RATE_LIMIT_CODES: &[&str] = &[
     "no_capacity",
     "rate_limit_exceeded",
     "rate_limit_error",
+    "overloaded_error",
     "rate_limit",
 ];
 
@@ -656,6 +663,28 @@ mod tests {
     }
 
     #[test]
+    fn overloaded_and_unavailable_are_retried_other_5xx_are_not() {
+        for status in [529, 503] {
+            let err = ProviderError::classify_with_retry_after(status, "Overloaded", Some(1500));
+            assert!(
+                matches!(
+                    err,
+                    ProviderError::RateLimited {
+                        retry_after_ms: Some(1500)
+                    }
+                ),
+                "{status}: {err:?}"
+            );
+            assert!(err.is_retryable());
+        }
+        for status in [500, 502, 504] {
+            let err = ProviderError::classify(status, "Internal server error");
+            assert!(matches!(err, ProviderError::Api(_)), "{status}: {err:?}");
+            assert!(!err.is_retryable());
+        }
+    }
+
+    #[test]
     fn structured_rate_limit_codes_in_sse_errors() {
         for payload in [
             // OpenAI Responses `error` event: code at the top level.
@@ -664,6 +693,8 @@ mod tests {
             r#"{"type":"response.failed","response":{"status":"failed","error":{"code":"rate_limit_exceeded","message":"slow down"}}}"#,
             // Anthropic mid-stream.
             r#"{"type":"error","error":{"type":"rate_limit_error","message":"Number of request tokens has exceeded your rate limit"}}"#,
+            // Anthropic overload mid-stream (529 over HTTP).
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
         ] {
             let err = classify_sse_error_event(payload);
             assert!(

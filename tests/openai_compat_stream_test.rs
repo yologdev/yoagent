@@ -511,3 +511,71 @@ async fn delta_content_is_not_a_refusal() {
     assert!(matches!(&content[0], Content::Text { text } if text == "Sure, here it is."));
     assert_eq!(*error_message, None);
 }
+
+async fn serve(body: String) -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_raw(body, "text/event-stream"),
+        )
+        .mount(&server)
+        .await;
+    server
+}
+
+/// A gateway's mid-stream failure (OpenRouter's shape: an `error` object
+/// plus `finish_reason: "error"`) is an error, not a finished answer — it
+/// used to parse as an empty chunk and end as `Ok` with the partial text.
+#[tokio::test]
+async fn a_mid_stream_error_object_is_an_error() {
+    let server = serve(
+        [
+            chunk(r#"{"choices":[{"delta":{"content":"Partial"},"index":0}]}"#),
+            chunk(
+                r#"{"error":{"code":502,"message":"Provider disconnected"},"choices":[{"delta":{"content":""},"finish_reason":"error","index":0}]}"#,
+            ),
+            "data: [DONE]\n\n".into(),
+        ]
+        .concat(),
+    )
+    .await;
+    let err = run_stream(stream_config(&server.uri()))
+        .await
+        .expect_err("a mid-stream error must not end as a finished answer");
+    assert!(err.to_string().contains("Provider disconnected"), "{err}");
+    assert!(!err.is_retryable());
+}
+
+/// A structured rate limit inside the stream is retryable.
+#[tokio::test]
+async fn a_mid_stream_rate_limit_is_retryable() {
+    let server = serve(
+        [
+            chunk(r#"{"error":{"code":"rate_limit_exceeded","message":"slow down"}}"#),
+            "data: [DONE]\n\n".into(),
+        ]
+        .concat(),
+    )
+    .await;
+    let err = run_stream(stream_config(&server.uri())).await.unwrap_err();
+    assert!(err.is_retryable(), "{err:?}");
+}
+
+/// `finish_reason: "error"` without an error object still fails the turn.
+#[tokio::test]
+async fn finish_reason_error_alone_is_an_error() {
+    let server = serve(
+        [
+            chunk(r#"{"choices":[{"delta":{"content":"Part"},"index":0}]}"#),
+            chunk(r#"{"choices":[{"delta":{},"finish_reason":"error","index":0}]}"#),
+            "data: [DONE]\n\n".into(),
+        ]
+        .concat(),
+    )
+    .await;
+    let err = run_stream(stream_config(&server.uri())).await.unwrap_err();
+    assert!(err.to_string().contains("finish_reason"), "{err}");
+}

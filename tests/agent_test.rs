@@ -1589,3 +1589,85 @@ async fn a_panicking_tool_does_not_take_down_a_sibling_call() {
     assert_eq!(ends[0], (false, "ok".to_string()));
     assert!(ends[1].0 && ends[1].1.contains("panicked"), "{:?}", ends[1]);
 }
+
+/// A cancel that lands while tools run ends the run with the cancel marker,
+/// so the transcript does not end on a `ToolUse` that looks unfinished-but-
+/// fine.
+#[tokio::test]
+async fn a_cancel_during_tools_ends_with_the_cancel_marker() {
+    struct Slow;
+    #[async_trait::async_trait]
+    impl AgentTool for Slow {
+        fn name(&self) -> &str {
+            "slow"
+        }
+        fn label(&self) -> &str {
+            "Slow"
+        }
+        fn description(&self) -> &str {
+            "Takes a while"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _ctx: ToolContext,
+        ) -> Result<ToolResult, ToolError> {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            Ok(ToolResult {
+                content: vec![Content::Text {
+                    text: "done".into(),
+                }],
+                details: serde_json::Value::Null,
+            })
+        }
+    }
+    let provider = MockProvider::new(vec![
+        MockResponse::ToolCalls(vec![MockToolCall {
+            provider_metadata: None,
+            name: "slow".into(),
+            arguments: serde_json::json!({}),
+        }]),
+        MockResponse::Text("never reached".into()),
+    ]);
+    let mut agent =
+        Agent::from_provider(provider, ModelConfig::mock()).with_tools(vec![Box::new(Slow)]);
+    let mut rx = agent.prompt("go").await;
+    let mut events = Vec::new();
+    while let Some(e) = rx.recv().await {
+        if matches!(e, AgentEvent::ToolExecutionStart { .. }) {
+            agent.abort();
+        }
+        events.push(e);
+    }
+    agent.finish().await;
+
+    let Some(AgentEvent::AgentEnd { messages, .. }) = events.last() else {
+        panic!("the run must end with AgentEnd")
+    };
+    let Some(AgentMessage::Llm(Message::User { content, .. })) = messages.last() else {
+        panic!("expected the cancel marker last: {messages:?}")
+    };
+    assert!(
+        matches!(content.first(), Some(Content::Text { text }) if text == yoagent::agent_loop::CANCELLED_MARKER)
+    );
+}
+
+/// `Batched { size: 0 }` (it comes from config) runs the calls instead of
+/// panicking in `chunks(0)`.
+#[tokio::test]
+async fn batched_with_size_zero_does_not_panic() {
+    let provider = MockProvider::new(vec![panicky_call(false), MockResponse::Text("done".into())]);
+    let mut agent = Agent::from_provider(provider, ModelConfig::mock())
+        .with_tools(vec![Box::new(PanickyTool)])
+        .with_tool_execution(ToolExecutionStrategy::Batched { size: 0 });
+    let mut rx = agent.prompt("go").await;
+    let mut events = Vec::new();
+    while let Some(e) = rx.recv().await {
+        events.push(e);
+    }
+    agent.finish().await;
+    assert_eq!(tool_ends(&events), vec![(false, "ok".to_string())]);
+}

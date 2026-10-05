@@ -181,8 +181,11 @@ attempt that failed before streaming anything has no `messageStart`, so it
 gets only the `providerRetry`. A final failure is closed with the error the
 turn returns and is never followed by `providerRetry`. A run cancelled during
 an LLM call ends with `stopReason: "aborted"`, including one cancelled during
-a retry's backoff; cancelling between turns or while tools run ends the run
-without a new assistant message.
+a retry's backoff. Cancelling between turns or while tools run ends the run
+without a new assistant message: since 0.24.3 it appends a user message
+`[Agent stopped: cancelled]` (`agent_loop::CANCELLED_MARKER`) when the run had
+produced anything, so the transcript does not end on a `ToolUse` that looks
+unfinished. A sub-agent cancelled that way fails its delegation.
 
 A Rust consumer that cannot discard text it already wrote (stdout, a log) can
 wrap its receiver in `retry::retry_safe_events`, which removes retried

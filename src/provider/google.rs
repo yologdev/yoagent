@@ -111,181 +111,227 @@ impl StreamProvider for GoogleProvider {
             ));
         }
 
-        let mut content: Vec<Content> = Vec::new();
-        let mut usage = Usage::default();
-        let mut stop_reason = StopReason::Stop;
-        let mut error_message: Option<String> = None;
+        parse_stream(response, &config.model, &model_config.provider, tx, cancel).await
+    }
+}
 
-        let _ = tx.send(StreamEvent::Start);
+/// Parse a Gemini `streamGenerateContent?alt=sse` response into the turn's
+/// message. Shared with Vertex AI, which streams the same format.
+pub(crate) async fn parse_stream(
+    response: reqwest::Response,
+    model: &str,
+    provider: &str,
+    tx: mpsc::UnboundedSender<StreamEvent>,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Result<Message, ProviderError> {
+    let mut content: Vec<Content> = Vec::new();
+    let mut usage = Usage::default();
+    let mut stop_reason = StopReason::Stop;
+    let mut error_message: Option<String> = None;
+    // Every complete Gemini response ends with a `finishReason` (or a
+    // `promptFeedback.blockReason` when the prompt itself was blocked). A
+    // stream that ends without one was cut off: an error, never a finished
+    // (empty or truncated) answer.
+    let mut finished = false;
 
-        // Parse SSE stream
-        let mut stream = response.bytes_stream();
-        let mut buffer = String::new();
+    let _ = tx.send(StreamEvent::Start);
 
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => {
-                    return Err(ProviderError::Cancelled);
-                }
-                chunk = stream.next() => {
-                    match chunk {
-                        None => break,
-                        Some(Err(e)) => {
-                            // Match the other providers: a transport failure is an
-                            // error (and retryable), not a silently truncated turn.
-                            let provider_err = ProviderError::Network(e.to_string());
-                            warn!("Google stream error: {}", provider_err);
-                            return Err(provider_err);
-                        }
-                        Some(Ok(bytes)) => {
-                            buffer.push_str(&String::from_utf8_lossy(&bytes));
+    // Parse SSE stream
+    let mut stream = response.bytes_stream();
+    let mut buffer = String::new();
 
-                            // Process complete SSE events (handle both \n\n and \r\n\r\n)
-                            while let Some(data) = next_sse_data(&mut buffer) {
-                                if data.is_empty() {
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                return Err(ProviderError::Cancelled);
+            }
+            chunk = stream.next() => {
+                match chunk {
+                    None if finished => break,
+                    None => {
+                        let err = ProviderError::Network(
+                            "Gemini stream ended without a finishReason".into(),
+                        );
+                        warn!("Google stream error: {}", err);
+                        return Err(err);
+                    }
+                    Some(Err(e)) => {
+                        // Match the other providers: a transport failure is an
+                        // error (and retryable), not a silently truncated turn.
+                        let provider_err = ProviderError::Network(e.to_string());
+                        warn!("Google stream error: {}", provider_err);
+                        return Err(provider_err);
+                    }
+                    Some(Ok(bytes)) => {
+                        buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+                        // Process complete SSE events (handle both \n\n and \r\n\r\n)
+                        while let Some(data) = next_sse_data(&mut buffer) {
+                            if data.is_empty() {
+                                continue;
+                            }
+
+                            // Google reports mid-stream failures as
+                            // {"error": {...}} payloads, which would otherwise
+                            // deserialize into an empty chunk and vanish.
+                            if is_error_payload(&data) {
+                                let provider_err = classify_sse_error_event(&data);
+                                warn!("Google in-stream error: {}", provider_err);
+                                return Err(provider_err);
+                            }
+
+                            let chunk: GoogleChunk = match serde_json::from_str(&data) {
+                                Ok(c) => c,
+                                Err(e) => {
+                                    warn!("Failed to parse Google chunk: {}", e);
                                     continue;
                                 }
+                            };
 
-                                // Google reports mid-stream failures as
-                                // {"error": {...}} payloads, which would otherwise
-                                // deserialize into an empty chunk and vanish.
-                                if is_error_payload(&data) {
-                                    let provider_err = classify_sse_error_event(&data);
-                                    warn!("Google in-stream error: {}", provider_err);
-                                    return Err(provider_err);
-                                }
+                            // The prompt itself was blocked: no candidates follow.
+                            if let Some(reason) = chunk
+                                .prompt_feedback
+                                .as_ref()
+                                .and_then(|f| f.block_reason.as_deref())
+                            {
+                                finished = true;
+                                warn!("Gemini blocked the prompt (blockReason={})", reason);
+                                error_message = Some(format!(
+                                    "Prompt blocked by Gemini (blockReason: {})",
+                                    reason
+                                ));
+                                stop_reason = StopReason::Refusal;
+                            }
 
-                                let chunk: GoogleChunk = match serde_json::from_str(&data) {
-                                    Ok(c) => c,
-                                    Err(e) => {
-                                        warn!("Failed to parse Google chunk: {}", e);
-                                        continue;
-                                    }
-                                };
-
-                                // Process candidates
-                                for candidate in &chunk.candidates.unwrap_or_default() {
-                                    if let Some(c) = &candidate.content {
-                                        for part in &c.parts {
-                                            if let Some(text) = part_text(part) {
-                                                if part.thought.unwrap_or(false) {
-                                                    // Thought summary part → Thinking content.
-                                                    let think_idx = content.iter().position(|c| matches!(c, Content::Thinking { .. }));
-                                                    let idx = match think_idx {
-                                                        Some(i) => i,
-                                                        None => {
-                                                            content.push(Content::thinking(String::new()));
-                                                            content.len() - 1
-                                                        }
-                                                    };
-                                                    if let Some(Content::Thinking { thinking, .. }) = content.get_mut(idx) {
-                                                        thinking.push_str(text);
-                                                    }
-                                                    let _ = tx.send(StreamEvent::ThinkingDelta {
-                                                        content_index: idx,
-                                                        delta: text.to_string(),
-                                                    });
-                                                    continue;
-                                                }
-                                                let text_idx = content.iter().position(|c| matches!(c, Content::Text { .. }));
-                                                let idx = match text_idx {
+                            // Process candidates
+                            for candidate in &chunk.candidates.unwrap_or_default() {
+                                if let Some(c) = &candidate.content {
+                                    for part in &c.parts {
+                                        if let Some(text) = part_text(part) {
+                                            if part.thought.unwrap_or(false) {
+                                                // Thought summary part → Thinking content.
+                                                let think_idx = content.iter().position(|c| matches!(c, Content::Thinking { .. }));
+                                                let idx = match think_idx {
                                                     Some(i) => i,
                                                     None => {
-                                                        content.push(Content::Text { text: String::new() });
+                                                        content.push(Content::thinking(String::new()));
                                                         content.len() - 1
                                                     }
                                                 };
-                                                if let Some(Content::Text { text: t }) = content.get_mut(idx) {
-                                                    t.push_str(text);
+                                                if let Some(Content::Thinking { thinking, .. }) = content.get_mut(idx) {
+                                                    thinking.push_str(text);
                                                 }
-                                                let _ = tx.send(StreamEvent::TextDelta {
+                                                let _ = tx.send(StreamEvent::ThinkingDelta {
                                                     content_index: idx,
                                                     delta: text.to_string(),
                                                 });
+                                                continue;
                                             }
-                                            if let Some(fc) = &part.function_call {
-                                                let id = fc.id.clone().unwrap_or_else(|| format!("google-fc-{}", content.len()));
-                                                let args = fc.args.clone().unwrap_or(serde_json::Value::Object(Default::default()));
-                                                let metadata = part.thought_signature.as_ref().map(|sig| {
-                                                    serde_json::json!({"thought_signature": sig})
-                                                });
-                                                let idx = content.len();
-                                                content.push(Content::ToolCall {
-                                                    id: id.clone(),
-                                                    name: fc.name.clone(),
-                                                    arguments: args,
-                                                    provider_metadata: metadata,
-                                                });
-                                                let _ = tx.send(StreamEvent::ToolCallStart {
-                                                    content_index: idx,
-                                                    id,
-                                                    name: fc.name.clone(),
-                                                });
-                                                let _ = tx.send(StreamEvent::ToolCallEnd { content_index: idx });
-                                                stop_reason = StopReason::ToolUse;
-                                            }
-                                        }
-                                    }
-                                    if let Some(reason) = &candidate.finish_reason {
-                                        // Don't override ToolUse -- Gemini returns "STOP"
-                                        // even when it emits function calls
-                                        if stop_reason != StopReason::ToolUse {
-                                            stop_reason = match reason.as_str() {
-                                                "STOP" => StopReason::Stop,
-                                                "MAX_TOKENS" | "RECITATION" => StopReason::Length,
-                                                "SAFETY" | "PROHIBITED_CONTENT" | "BLOCKLIST"
-                                                | "SPII" => {
-                                                    warn!(
-                                                        "Gemini blocked the response (finishReason={})",
-                                                        reason
-                                                    );
-                                                    error_message = Some(format!(
-                                                        "Response blocked by Gemini safety filters (finishReason: {})",
-                                                        reason
-                                                    ));
-                                                    StopReason::Refusal
+                                            let text_idx = content.iter().position(|c| matches!(c, Content::Text { .. }));
+                                            let idx = match text_idx {
+                                                Some(i) => i,
+                                                None => {
+                                                    content.push(Content::Text { text: String::new() });
+                                                    content.len() - 1
                                                 }
-                                                _ => StopReason::Stop,
                                             };
+                                            if let Some(Content::Text { text: t }) = content.get_mut(idx) {
+                                                t.push_str(text);
+                                            }
+                                            let _ = tx.send(StreamEvent::TextDelta {
+                                                content_index: idx,
+                                                delta: text.to_string(),
+                                            });
+                                        }
+                                        if let Some(fc) = &part.function_call {
+                                            let id = fc.id.clone().unwrap_or_else(|| format!("google-fc-{}", content.len()));
+                                            let args = fc.args.clone().unwrap_or(serde_json::Value::Object(Default::default()));
+                                            let metadata = part.thought_signature.as_ref().map(|sig| {
+                                                serde_json::json!({"thought_signature": sig})
+                                            });
+                                            let idx = content.len();
+                                            content.push(Content::ToolCall {
+                                                id: id.clone(),
+                                                name: fc.name.clone(),
+                                                arguments: args,
+                                                provider_metadata: metadata,
+                                            });
+                                            let _ = tx.send(StreamEvent::ToolCallStart {
+                                                content_index: idx,
+                                                id,
+                                                name: fc.name.clone(),
+                                            });
+                                            let _ = tx.send(StreamEvent::ToolCallEnd { content_index: idx });
+                                            stop_reason = StopReason::ToolUse;
                                         }
                                     }
                                 }
-
-                                // Process usage
-                                if let Some(u) = &chunk.usage_metadata {
-                                    // promptTokenCount includes cached tokens;
-                                    // keep `input` as the uncached remainder so
-                                    // downstream sums don't double-count.
-                                    usage.input = u
-                                        .prompt_token_count
-                                        .unwrap_or(0)
-                                        .saturating_sub(u.cached_content_token_count.unwrap_or(0));
-                                    usage.output = u.candidates_token_count.unwrap_or(0);
-                                    usage.total_tokens = u.total_token_count.unwrap_or(0);
-                                    usage.cache_read = u.cached_content_token_count.unwrap_or(0);
+                                if let Some(reason) = &candidate.finish_reason {
+                                    finished = true;
+                                    // Don't override ToolUse -- Gemini returns "STOP"
+                                    // even when it emits function calls
+                                    if stop_reason != StopReason::ToolUse {
+                                        stop_reason = match reason.as_str() {
+                                            "STOP" => StopReason::Stop,
+                                            "MAX_TOKENS" | "RECITATION" => StopReason::Length,
+                                            "MALFORMED_FUNCTION_CALL" => {
+                                                error_message = Some(
+                                                    "Gemini produced a malformed function call (finishReason: MALFORMED_FUNCTION_CALL)".into(),
+                                                );
+                                                StopReason::Error
+                                            }
+                                            "SAFETY" | "PROHIBITED_CONTENT" | "BLOCKLIST"
+                                            | "SPII" => {
+                                                warn!(
+                                                    "Gemini blocked the response (finishReason={})",
+                                                    reason
+                                                );
+                                                error_message = Some(format!(
+                                                    "Response blocked by Gemini safety filters (finishReason: {})",
+                                                    reason
+                                                ));
+                                                StopReason::Refusal
+                                            }
+                                            _ => StopReason::Stop,
+                                        };
+                                    }
                                 }
+                            }
+
+                            // Process usage
+                            if let Some(u) = &chunk.usage_metadata {
+                                // promptTokenCount includes cached tokens;
+                                // keep `input` as the uncached remainder so
+                                // downstream sums don't double-count.
+                                usage.input = u
+                                    .prompt_token_count
+                                    .unwrap_or(0)
+                                    .saturating_sub(u.cached_content_token_count.unwrap_or(0));
+                                usage.output = u.candidates_token_count.unwrap_or(0);
+                                usage.total_tokens = u.total_token_count.unwrap_or(0);
+                                usage.cache_read = u.cached_content_token_count.unwrap_or(0);
                             }
                         }
                     }
                 }
             }
         }
-
-        let message = Message::Assistant {
-            content,
-            stop_reason,
-            model: config.model.clone(),
-            provider: model_config.provider.clone(),
-            usage,
-            timestamp: now_ms(),
-            error_message,
-        };
-
-        let _ = tx.send(StreamEvent::Done {
-            message: message.clone(),
-        });
-        Ok(message)
     }
+
+    let message = Message::Assistant {
+        content,
+        stop_reason,
+        model: model.to_string(),
+        provider: provider.to_string(),
+        usage,
+        timestamp: now_ms(),
+        error_message,
+    };
+
+    let _ = tx.send(StreamEvent::Done {
+        message: message.clone(),
+    });
+    Ok(message)
 }
 
 /// Pop the next complete SSE event from `buffer` and return its `data:`
@@ -669,8 +715,16 @@ fn content_to_google_parts(content: &[Content]) -> Vec<serde_json::Value> {
 struct GoogleChunk {
     #[serde(default)]
     candidates: Option<Vec<GoogleCandidate>>,
+    #[serde(default, rename = "promptFeedback")]
+    prompt_feedback: Option<GooglePromptFeedback>,
     #[serde(default, rename = "usageMetadata")]
     usage_metadata: Option<GoogleUsageMetadata>,
+}
+
+#[derive(Deserialize)]
+struct GooglePromptFeedback {
+    #[serde(default, rename = "blockReason")]
+    block_reason: Option<String>,
 }
 
 #[derive(Deserialize)]

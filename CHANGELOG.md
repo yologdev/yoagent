@@ -4,6 +4,23 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Fixed
+
+- **Overloaded providers are retried.** HTTP 529 (Anthropic "overloaded") and 503 ("service unavailable") were `Api` errors that ended the turn at once. They are now `RateLimited`: backed off and retried, honouring `Retry-After`. Anthropic's in-stream `overloaded_error` and Bedrock's `serviceUnavailableException` are retried the same way. Other 5xx responses still are not.
+- **A failed stream is no longer returned as a finished answer:**
+  - **OpenAI-compatible:** a mid-stream `{"error": …}` chunk (OpenRouter and other gateways) parsed as an empty chunk, and `finish_reason: "error"` read as a normal stop. The turn ended as `Ok` with the partial text. Both are now errors; a structured rate limit is retried.
+  - **Gemini:**
+    - A stream that ends without a `finishReason` is a retryable `Network` error.
+    - A prompt blocked via `promptFeedback.blockReason` is a `Refusal` with a message.
+    - `MALFORMED_FUNCTION_CALL` is an `Error` with a message.
+
+    Each of these used to come back as an empty or truncated `Ok`.
+  - **Vertex AI** now uses Gemini's stream parser instead of an old copy (about 220 lines removed). It gains every Gemini fix: transport errors, in-stream errors, safety refusals and `ToolUse` being kept.
+- **A cancel while tools run is marked.** The run used to end with the last assistant message still `ToolUse`, indistinguishable from a normal stop. A cancelled sub-agent's delegation was therefore reported as a success. The run now appends `[Agent stopped: cancelled]` (`agent_loop::CANCELLED_MARKER`), and `SubAgentTool` reports it as a failure. A run cancelled before it produced anything is left as it was.
+- **`ToolExecutionStrategy::Batched { size: 0 }`** panicked in `chunks(0)`; it now runs as size 1.
+
 ## 0.24.2
 
 Security fixes for the built-in tools and the Gemini provider, found in a

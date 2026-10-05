@@ -604,18 +604,18 @@ fn error_message_of(payload: &[u8]) -> String {
 /// Map an in-stream exception (`:message-type: exception`) onto a
 /// [`ProviderError`] through the HTTP status AWS documents for it in
 /// `ConverseStreamOutput`, so it classifies exactly like the same error
-/// returned as an HTTP response: `throttlingException` (429) is a retryable
-/// rate limit, `validationException` (400) carrying an overflow phrase is a
-/// context overflow, the rest are API errors.
+/// returned as an HTTP response: `throttlingException` (429) and
+/// `serviceUnavailableException` (503) are retryable, `validationException`
+/// (400) carrying an overflow phrase is a context overflow, the rest are API
+/// errors.
 fn exception_error(kind: &str, message: &str) -> ProviderError {
     let status = match kind.to_ascii_lowercase().as_str() {
         "throttlingexception" => 429,
         "validationexception" => 400,
         "accessdeniedexception" => 403,
         "modelstreamerrorexception" | "modelerrorexception" => 424,
-        // The 5xx exceptions stay `Api` (not retried), as an HTTP 5xx does
-        // everywhere else in this crate: only `RateLimited` and `Network`
-        // are retryable.
+        // As everywhere in this crate: 503 is a retryable capacity error,
+        // other 5xx stay `Api` (not retried).
         "internalserverexception" => 500,
         "serviceunavailableexception" => 503,
         _ => 0,

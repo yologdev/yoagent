@@ -523,3 +523,115 @@ async fn an_authorization_header_keeps_the_key() {
     }
     run_stream(config).await;
 }
+
+async fn gemini_result(body: String) -> Result<Message, yoagent::provider::ProviderError> {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
+        .mount(&server)
+        .await;
+    let (tx, _rx) = mpsc::unbounded_channel();
+    GoogleProvider
+        .stream(
+            stream_config(&server.uri(), vec![Message::user("hi")]),
+            tx,
+            CancellationToken::new(),
+        )
+        .await
+}
+
+/// A stream cut off before any `finishReason` is a retryable error, never an
+/// `Ok` with whatever text arrived.
+#[tokio::test]
+async fn a_stream_without_a_finish_reason_is_a_retryable_error() {
+    let err = gemini_result(sse(&[
+        r#"{"candidates":[{"content":{"parts":[{"text":"Partial"}],"role":"model"},"index":0}]}"#,
+    ]))
+    .await
+    .expect_err("a cut-off stream is not a finished answer");
+    assert!(
+        matches!(err, yoagent::provider::ProviderError::Network(_)),
+        "{err:?}"
+    );
+}
+
+/// A blocked prompt (`promptFeedback.blockReason`, no candidates) is a
+/// refusal that says why — it used to be an empty `Ok`/`Stop`.
+#[tokio::test]
+async fn a_blocked_prompt_is_a_refusal() {
+    let msg = gemini_result(sse(&[
+        r#"{"promptFeedback":{"blockReason":"PROHIBITED_CONTENT"},"usageMetadata":{"promptTokenCount":5,"totalTokenCount":5}}"#,
+    ]))
+    .await
+    .unwrap();
+    let Message::Assistant {
+        stop_reason,
+        error_message,
+        ..
+    } = &msg
+    else {
+        panic!("expected assistant message")
+    };
+    assert_eq!(*stop_reason, StopReason::Refusal);
+    assert!(
+        error_message
+            .as_deref()
+            .is_some_and(|m| m.contains("PROHIBITED_CONTENT")),
+        "{error_message:?}"
+    );
+}
+
+/// `MALFORMED_FUNCTION_CALL` is an error with a message, not a normal stop.
+#[tokio::test]
+async fn a_malformed_function_call_is_an_error() {
+    let msg = gemini_result(sse(&[
+        r#"{"candidates":[{"content":{"role":"model"},"finishReason":"MALFORMED_FUNCTION_CALL","index":0}]}"#,
+    ]))
+    .await
+    .unwrap();
+    let Message::Assistant {
+        stop_reason,
+        error_message,
+        ..
+    } = &msg
+    else {
+        panic!("expected assistant message")
+    };
+    assert_eq!(*stop_reason, StopReason::Error);
+    assert!(error_message.is_some());
+}
+
+/// Vertex shares Gemini's parser: a cut-off stream and an in-stream error
+/// are errors there too (its old copy returned both as `Ok`).
+#[tokio::test]
+async fn vertex_uses_the_gemini_parser() {
+    use yoagent::provider::GoogleVertexProvider;
+    for (body, what) in [
+        (
+            sse(&[
+                r#"{"candidates":[{"content":{"parts":[{"text":"Part"}],"role":"model"},"index":0}]}"#,
+            ]),
+            "cut off",
+        ),
+        (
+            sse(&[r#"{"error":{"code":500,"message":"backend error","status":"INTERNAL"}}"#]),
+            "in-stream error",
+        ),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
+            .mount(&server)
+            .await;
+        let mut mc = ModelConfig::google(MODEL, "Gemini");
+        mc.base_url = server.uri();
+        let mut config = StreamConfig::new(MODEL, "token");
+        config.messages = vec![Message::user("hi")];
+        config.model_config = Some(mc);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let result = GoogleVertexProvider
+            .stream(config, tx, CancellationToken::new())
+            .await;
+        assert!(result.is_err(), "{what}: {result:?}");
+    }
+}
