@@ -106,7 +106,7 @@ Behind the `openapi` Cargo feature. `OpenApiToolAdapter` parses an OpenAPI 3.0 s
 
 ### MCP Integration (`mcp/`)
 
-`McpClient` communicates via `McpTransport` trait (stdio or HTTP). `McpToolAdapter` wraps MCP tools to implement `AgentTool`, making them transparent to the agent loop. Added via `Agent::with_mcp_server_stdio()` / `with_mcp_server_http()`.
+`McpClient` communicates via `McpTransport` trait (stdio or HTTP; `notify` sends a `JsonRpcNotification`, default = old request-and-wait for custom transports). Stdio: reads until the response with the request's id, skips server notifications, answers server requests (`ping` → `{}`, others → -32601), drops stale ids and non-JSON lines; stderr drained to `debug!` (target `yoagent::mcp::stderr`); `kill_on_drop`; tested against a bash-scripted server in `tests/mcp_stdio_test.rs`. `McpToolAdapter` races `ctx.cancel` and `call_timeout` (default 300 s). `McpToolCallResult.content` is lenient: an unmodelled block becomes `McpContent::Text` of its JSON. `McpToolAdapter` wraps MCP tools to implement `AgentTool`, making them transparent to the agent loop. Added via `Agent::with_mcp_server_stdio()` / `with_mcp_server_http()`.
 
 ### GASP Bridge (`gasp.rs`, feature-gated)
 

@@ -4,6 +4,7 @@ use super::client::McpClient;
 use super::types::{McpContent, McpError, McpToolInfo};
 use crate::types::{AgentTool, Content, ToolContext, ToolError, ToolResult};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 
 /// Wraps an MCP server tool as an `AgentTool` so it can be used by the agent.
@@ -12,16 +13,30 @@ pub struct McpToolAdapter {
     tool: McpToolInfo,
     /// Prefix to avoid name collisions (e.g., "server_name__tool_name").
     prefix: Option<String>,
+    call_timeout: Option<Duration>,
 }
 
 impl McpToolAdapter {
+    /// How long one call may take by default, waiting for the server
+    /// included: five minutes. A stalled server fails the call instead of
+    /// hanging the agent.
+    pub const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(300);
+
     /// Create a new adapter.
     pub fn new(client: Arc<Mutex<McpClient>>, tool: McpToolInfo) -> Self {
         Self {
             client,
             tool,
             prefix: None,
+            call_timeout: Some(Self::DEFAULT_CALL_TIMEOUT),
         }
+    }
+
+    /// Bound each call (`None`: no bound). The run's cancellation ends a call
+    /// either way.
+    pub fn with_call_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.call_timeout = timeout;
+        self
     }
 
     /// Create with a name prefix for disambiguation.
@@ -84,13 +99,30 @@ impl AgentTool for McpToolAdapter {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _ctx: ToolContext,
+        ctx: ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        let client = self.client.lock().await;
-        let result = client
-            .call_tool(&self.tool.name, params)
-            .await
-            .map_err(|e| ToolError::Failed(format!("MCP call failed: {}", e)))?;
+        // Waiting for the client (another call may hold it) counts too.
+        let call = async {
+            let client = self.client.lock().await;
+            client.call_tool(&self.tool.name, params).await
+        };
+        let bounded = async {
+            match self.call_timeout {
+                Some(limit) => crate::rt::timeout(limit, call).await.map_err(|_| {
+                    ToolError::Failed(format!(
+                        "MCP call '{}' timed out after {}s",
+                        self.tool.name,
+                        limit.as_secs()
+                    ))
+                }),
+                None => Ok(call.await),
+            }
+        };
+        let result = tokio::select! {
+            _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+            outcome = bounded => outcome?,
+        }
+        .map_err(|e| ToolError::Failed(format!("MCP call failed: {}", e)))?;
 
         if result.is_error {
             let error_text = result

@@ -51,6 +51,20 @@ let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude
     .await?;
 ```
 
+How the stdio transport behaves:
+
+- Each request waits for the response carrying its own id. Messages the server
+  sends in between are handled: notifications (`notifications/message`,
+  progress, `list_changed`) are skipped, a `ping` is answered, and any other
+  server request (sampling, roots) is declined with "method not found" so the
+  server does not wait. A response for another id (a call that timed out
+  earlier) is dropped.
+- `notifications/initialized` is sent as a notification, without an id, and not
+  awaited.
+- The server's stderr is read continuously and logged at `DEBUG` (target
+  `yoagent::mcp::stderr`), so a server that logs heavily cannot block.
+- Dropping the client ends the server process.
+
 ### HTTP Transport
 
 For remote MCP servers exposed over HTTP. This works on every target,
@@ -119,6 +133,12 @@ When you call `with_mcp_server_stdio()` or `with_mcp_server_http()`, yoagent:
 4. Adds them to the agent's tool list
 
 MCP tools appear alongside built-in tools. The LLM sees them with their original names, descriptions, and JSON Schema parameters — it can call them just like any other tool.
+
+Each call is bounded: the run's cancellation ends it, and so does a timeout of
+five minutes (`McpToolAdapter::DEFAULT_CALL_TIMEOUT`; change it with
+`with_call_timeout` when you build adapters yourself). Content kinds this crate
+does not model (`resource`, `resource_link`, `audio`, …) reach the model as
+their JSON text rather than failing the call.
 
 ## Mixing Built-in and MCP Tools
 

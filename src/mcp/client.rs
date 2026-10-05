@@ -71,11 +71,13 @@ impl McpClient {
         self.server_info = Some(result.server_info.clone());
         self.capabilities = Some(result.capabilities);
 
-        // Send initialized notification (no response expected, but we send it as a request
-        // since our transport is request/response. Some servers ignore the id on notifications.)
-        let notify = JsonRpcRequest::new("notifications/initialized", None);
-        // Best-effort: ignore errors on the notification
-        let _ = self.send_request(notify).await;
+        // The handshake ends with a notification, which gets no response.
+        // (It used to be sent as a request and awaited: a spec-compliant
+        // server never answers it, so connecting over stdio could hang.)
+        let initialized = JsonRpcNotification::new("notifications/initialized", None);
+        if let Err(e) = self.transport.lock().await.notify(initialized).await {
+            tracing::warn!("MCP: sending notifications/initialized failed: {e}");
+        }
 
         Ok(result.server_info)
     }

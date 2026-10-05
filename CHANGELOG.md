@@ -8,6 +8,14 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **MCP over stdio:**
+  - **Response matching:** a request now waits for the response with its own id. The transport used to read exactly one line as the answer, so a logging or progress notification the server sent first failed the call and left every later call off by one.
+  - **Server messages:** server notifications are skipped. Server requests are answered: `ping` succeeds and anything else is declined, so the server does not wait. Stale responses are dropped.
+  - **Handshake:** `notifications/initialized` is sent as a notification (`JsonRpcNotification`, `McpTransport::notify`). It used to be a request awaiting a reply that a spec-compliant server never sends, so connecting could hang.
+  - **stderr** is drained into the log; a server that logged more than a pipe holds used to block.
+  - **The server process** is killed when the transport is dropped.
+- **MCP tool calls** honour the run's cancellation and a timeout, five minutes by default (`McpToolAdapter::with_call_timeout`). A hung server used to hang the agent, with the client lock held so every tool from that server waited too.
+- **MCP content** kinds this crate does not model (`resource`, `resource_link`, `audio`, …) reach the model as JSON text. They used to make the whole call fail to parse.
 - **Overloaded providers are retried.** HTTP 529 (Anthropic "overloaded") and 503 ("service unavailable") were `Api` errors that ended the turn at once. They are now `RateLimited`: backed off and retried, honouring `Retry-After`. Anthropic's in-stream `overloaded_error` and Bedrock's `serviceUnavailableException` are retried the same way. Other 5xx responses still are not. `RateLimited` carries no message, so the server's explanation is logged at `WARN`, and its text now reads "Rate limited" (or "…, retry after 1500ms") instead of "retry after Nonems".
 - **A failed stream is no longer returned as a finished answer:**
   - **OpenAI-compatible:** a mid-stream `{"error": …}` chunk (OpenRouter and other gateways) parsed as an empty chunk, and `finish_reason: "error"` read as a normal stop. The turn ended as `Ok` with the partial text. Both are now errors; a rate limit or overload among them (a string code such as `rate_limit_exceeded`, or a numeric 503/529) is retried.

@@ -34,6 +34,25 @@ impl JsonRpcRequest {
     }
 }
 
+/// A JSON-RPC notification: no `id`, and no response is expected (or sent).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsonRpcNotification {
+    pub jsonrpc: String,
+    pub method: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub params: Option<serde_json::Value>,
+}
+
+impl JsonRpcNotification {
+    pub fn new(method: impl Into<String>, params: Option<serde_json::Value>) -> Self {
+        Self {
+            jsonrpc: "2.0".into(),
+            method: method.into(),
+            params,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcResponse {
     pub jsonrpc: String,
@@ -136,9 +155,32 @@ pub enum McpContent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpToolCallResult {
+    /// Content kinds this crate does not model (`resource`, `resource_link`,
+    /// `audio`, anything newer) arrive as [`McpContent::Text`] holding the
+    /// block's JSON, rather than failing the whole call.
+    #[serde(deserialize_with = "lenient_content")]
     pub content: Vec<McpContent>,
     #[serde(default)]
     pub is_error: bool,
+}
+
+/// Read each content block, keeping one this crate does not model as its JSON
+/// text: the model still sees what the tool returned.
+fn lenient_content<'de, D>(deserializer: D) -> Result<Vec<McpContent>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let blocks = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(blocks
+        .into_iter()
+        .map(|block| {
+            serde_json::from_value::<McpContent>(block.clone()).unwrap_or_else(|_| {
+                McpContent::Text {
+                    text: block.to_string(),
+                }
+            })
+        })
+        .collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -223,6 +265,33 @@ mod tests {
         let result: McpToolCallResult = serde_json::from_str(json).unwrap();
         assert_eq!(result.content.len(), 1);
         assert!(!result.is_error);
+    }
+
+    #[test]
+    fn unknown_content_blocks_are_kept_as_json_text() {
+        let json = r#"{"content":[
+            {"type":"text","text":"hi"},
+            {"type":"resource","resource":{"uri":"file:///a.txt","text":"body"}},
+            {"type":"audio","data":"AAAA","mimeType":"audio/wav"}
+        ]}"#;
+        let result: McpToolCallResult = serde_json::from_str(json).unwrap();
+        assert_eq!(result.content.len(), 3);
+        assert!(matches!(&result.content[0], McpContent::Text { text } if text == "hi"));
+        assert!(
+            matches!(&result.content[1], McpContent::Text { text } if text.contains("file:///a.txt"))
+        );
+        assert!(matches!(&result.content[2], McpContent::Text { text } if text.contains("audio")));
+    }
+
+    #[test]
+    fn a_notification_has_no_id() {
+        let json =
+            serde_json::to_string(&JsonRpcNotification::new("notifications/initialized", None))
+                .unwrap();
+        assert_eq!(
+            json,
+            r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#
+        );
     }
 
     #[test]

@@ -22,6 +22,21 @@ use tracing::{debug, warn};
 pub trait McpTransport: crate::rt::MaybeSend + crate::rt::MaybeSync {
     /// Send a JSON-RPC request and receive the response.
     async fn send(&self, request: JsonRpcRequest) -> Result<JsonRpcResponse, McpError>;
+    /// Send a JSON-RPC notification, which gets no response.
+    ///
+    /// The default sends it through [`send`](Self::send) as a request and
+    /// waits for an answer — what this crate did before notifications had
+    /// their own path. A spec-compliant server never answers a notification,
+    /// so a transport should override this (the built-in ones do) to write it
+    /// and return.
+    async fn notify(&self, notification: JsonRpcNotification) -> Result<(), McpError> {
+        self.send(JsonRpcRequest::new(
+            notification.method,
+            notification.params,
+        ))
+        .await
+        .map(|_| ())
+    }
     /// Close the transport.
     async fn close(&self) -> Result<(), McpError>;
 }
@@ -52,7 +67,9 @@ impl StdioTransport {
         cmd.args(args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+            .stderr(std::process::Stdio::piped())
+            // Dropping the transport (or the client) ends the server.
+            .kill_on_drop(true);
 
         if let Some(env_vars) = env {
             for (k, v) in env_vars {
@@ -73,6 +90,18 @@ impl StdioTransport {
             .take()
             .ok_or_else(|| McpError::Transport("Failed to capture stdout".into()))?;
 
+        // Drain stderr into the log. A piped stderr nobody reads fills up, and
+        // a server that logs to it then blocks mid-call.
+        if let Some(stderr) = child.stderr.take() {
+            let server = command.to_string();
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    debug!(target: "yoagent::mcp::stderr", server = %server, "{line}");
+                }
+            });
+        }
+
         Ok(Self {
             stdin: Arc::new(Mutex::new(stdin)),
             stdout: Arc::new(Mutex::new(BufReader::new(stdout))),
@@ -82,40 +111,97 @@ impl StdioTransport {
 }
 
 #[cfg(feature = "native")]
+impl StdioTransport {
+    /// Write one newline-terminated message to the server.
+    async fn write_message(&self, json: &str) -> Result<(), McpError> {
+        let mut stdin = self.stdin.lock().await;
+        stdin
+            .write_all(format!("{json}\n").as_bytes())
+            .await
+            .map_err(|e| McpError::Transport(format!("Write error: {}", e)))?;
+        stdin
+            .flush()
+            .await
+            .map_err(|e| McpError::Transport(format!("Flush error: {}", e)))
+    }
+}
+
+/// The reply to a request the *server* sent: `ping` succeeds; anything else
+/// (sampling, roots, elicitation — capabilities this client does not declare)
+/// is "method not found", so the server does not wait forever.
+#[cfg(feature = "native")]
+fn server_request_reply(method: &str, id: serde_json::Value) -> serde_json::Value {
+    if method == "ping" {
+        serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {}})
+    } else {
+        debug!("MCP stdio: declining server request '{method}'");
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {"code": -32601, "message": format!("method not supported by this client: {method}")}
+        })
+    }
+}
+
+#[cfg(feature = "native")]
 #[async_trait]
 impl McpTransport for StdioTransport {
     async fn send(&self, request: JsonRpcRequest) -> Result<JsonRpcResponse, McpError> {
-        let mut line = serde_json::to_string(&request)?;
-        line.push('\n');
+        let request_id = request.id;
+        let method = request.method.clone();
+        self.write_message(&serde_json::to_string(&request)?)
+            .await?;
 
-        // Write request
-        {
-            let mut stdin = self.stdin.lock().await;
-            stdin
-                .write_all(line.as_bytes())
-                .await
-                .map_err(|e| McpError::Transport(format!("Write error: {}", e)))?;
-            stdin
-                .flush()
-                .await
-                .map_err(|e| McpError::Transport(format!("Flush error: {}", e)))?;
-        }
-
-        // Read response
-        let mut response_line = String::new();
-        {
-            let mut stdout = self.stdout.lock().await;
+        // Read until this request's response. The server may interleave its
+        // own messages: notifications (logging, progress, list_changed) are
+        // skipped, requests (ping, sampling, roots) are answered, and a
+        // response for another id — one whose caller timed out — is dropped.
+        let mut stdout = self.stdout.lock().await;
+        loop {
+            let mut line = String::new();
             let bytes_read = stdout
-                .read_line(&mut response_line)
+                .read_line(&mut line)
                 .await
                 .map_err(|e| McpError::Transport(format!("Read error: {}", e)))?;
             if bytes_read == 0 {
                 return Err(McpError::ConnectionClosed);
             }
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let value: serde_json::Value = match serde_json::from_str(line) {
+                Ok(v) => v,
+                Err(e) => {
+                    // Not a message: stray output, or the rest of a line a
+                    // cancelled call left half-read.
+                    debug!("MCP stdio: skipping a non-JSON line on '{method}': {e}");
+                    continue;
+                }
+            };
+            if let Some(server_method) = value.get("method").and_then(|m| m.as_str()) {
+                match value.get("id").cloned() {
+                    Some(id) => {
+                        let reply = server_request_reply(server_method, id);
+                        self.write_message(&reply.to_string()).await?;
+                    }
+                    None => debug!("MCP stdio: server notification '{server_method}'"),
+                }
+                continue;
+            }
+            match value.get("id").and_then(|i| i.as_u64()) {
+                Some(id) if id == request_id => return Ok(serde_json::from_value(value)?),
+                // JSON-RPC allows a null id on an error the server could not
+                // attribute to a request; it can only be ours.
+                None if value.get("error").is_some() => return Ok(serde_json::from_value(value)?),
+                other => debug!("MCP stdio: dropping a response for id {other:?} on '{method}'"),
+            }
         }
+    }
 
-        let response: JsonRpcResponse = serde_json::from_str(response_line.trim())?;
-        Ok(response)
+    async fn notify(&self, notification: JsonRpcNotification) -> Result<(), McpError> {
+        self.write_message(&serde_json::to_string(&notification)?)
+            .await
     }
 
     async fn close(&self) -> Result<(), McpError> {
@@ -562,6 +648,32 @@ impl McpTransport for HttpTransport {
         }
 
         Self::read_response(resp, request_id, &method, status).await
+    }
+
+    async fn notify(&self, notification: JsonRpcNotification) -> Result<(), McpError> {
+        let method = notification.method.clone();
+        let mut builder = self
+            .client
+            .post(&self.base_url)
+            .header("Accept", "application/json, text/event-stream")
+            .json(&notification);
+        if let Some(session) = self.session_id.lock().await.as_ref() {
+            builder = builder.header("Mcp-Session-Id", session);
+        }
+        // A notification is acknowledged with 202 and no body; nothing waits
+        // for anything after the status.
+        let resp = builder
+            .send()
+            .await
+            .map_err(|e| McpError::Transport(format!("HTTP error on '{method}': {e}")))?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            Err(McpError::Transport(format!(
+                "HTTP {} from server on notification '{method}'",
+                resp.status()
+            )))
+        }
     }
 
     async fn close(&self) -> Result<(), McpError> {
