@@ -46,7 +46,9 @@ impl PathSandbox {
     /// [`check`](Self::check) for a tool about to touch `path`: the path to do
     /// the I/O on. Unrestricted, that is `path` as given, so output keeps the
     /// caller's spelling. Restricted, it is the resolved path that was
-    /// checked, so the OS cannot reach anything the check did not see.
+    /// checked, so the I/O targets exactly what was checked (as of the check:
+    /// something changing the tree in between, such as a parallel `bash`
+    /// call, is not covered).
     pub fn io_path(&self, path: &str) -> Result<PathBuf, ToolError> {
         let resolved = self.check(path)?;
         Ok(if self.is_unrestricted() {
@@ -68,10 +70,15 @@ impl PathSandbox {
     /// and the remainder appended — so a write through a symlinked parent is
     /// still checked against the symlink's target.
     pub fn check(&self, path: &str) -> Result<PathBuf, ToolError> {
-        let resolved = resolve(Path::new(path));
+        let resolved = resolve(Path::new(path), 0);
         if self.is_unrestricted() {
-            return Ok(resolved);
+            return Ok(resolved.unwrap_or_else(|| PathBuf::from(path)));
         }
+        let Some(resolved) = resolved else {
+            return Err(ToolError::Failed(format!(
+                "path '{path}' could not be resolved (symlink loop?)"
+            )));
+        };
         if self.roots.iter().any(|root| resolved.starts_with(root)) {
             Ok(resolved)
         } else {
@@ -84,11 +91,16 @@ impl PathSandbox {
     }
 }
 
+/// How many symlinks [`resolve`] follows by hand before giving up (the OS
+/// limit is similar; past it the path is refused, not guessed).
+const MAX_SYMLINK_HOPS: u8 = 40;
+
 /// Resolve a path against the filesystem, falling back to lexical
-/// normalization for the part that does not exist yet.
-fn resolve(path: &Path) -> PathBuf {
+/// normalization for the part that does not exist yet. `None` when it cannot
+/// be resolved safely (a symlink loop, or an unreadable link).
+fn resolve(path: &Path, hops: u8) -> Option<PathBuf> {
     if let Ok(c) = std::fs::canonicalize(path) {
-        return c;
+        return Some(c);
     }
     // Walk up to the nearest existing ancestor, canonicalize that, and
     // re-append the trailing components. This is what makes a not-yet-created
@@ -97,6 +109,23 @@ fn resolve(path: &Path) -> PathBuf {
     let mut climbs = false;
     let mut current = path;
     loop {
+        // `current` could not be canonicalized. If it exists anyway, it is a
+        // dangling (or looping) symlink: writing through it creates the
+        // target, so follow it rather than treat its name as a plain file.
+        if std::fs::symlink_metadata(current).is_ok_and(|m| m.file_type().is_symlink()) {
+            if hops >= MAX_SYMLINK_HOPS {
+                return None;
+            }
+            let target = std::fs::read_link(current).ok()?;
+            let mut next = match current.parent() {
+                Some(parent) if target.is_relative() => parent.join(target),
+                _ => target,
+            };
+            for part in trailing.iter().rev() {
+                next.push(part);
+            }
+            return resolve(&next, hops + 1);
+        }
         match current.parent() {
             Some(parent) => {
                 // Keep every component, `..` included: `file_name()` is `None`
@@ -112,23 +141,27 @@ fn resolve(path: &Path) -> PathBuf {
                     for part in trailing.iter().rev() {
                         out.push(part);
                     }
+                    // Collapse the trailing `..` lexically. Sandboxed tools do
+                    // their I/O on this collapsed path (`io_path`), so the
+                    // check and the I/O agree. A component left after
+                    // collapsing may be an existing symlink
+                    // (`root/new/../link/x`), so resolve once more; there is
+                    // no `..` left, so this ends.
                     let out = normalize_lexically(&out);
-                    // The missing components will be created as real
-                    // directories, so collapsing their `..` lexically matches
-                    // what the OS does. What follows may name an existing
-                    // symlink (`root/new/../link/x`), so resolve the collapsed
-                    // path again; it has no `..` left, so this ends.
-                    return if climbs { resolve(&out) } else { out };
+                    return if climbs {
+                        resolve(&out, hops + 1)
+                    } else {
+                        Some(out)
+                    };
                 }
                 current = parent;
             }
-            None => return normalize_lexically(path),
+            None => return Some(normalize_lexically(path)),
         }
     }
 }
 
-/// Collapse `.` and `..` textually. Only used when the filesystem cannot
-/// resolve the path at all.
+/// Collapse `.` and `..` textually, without touching the filesystem.
 fn normalize_lexically(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for component in path.components() {
@@ -227,6 +260,54 @@ mod tests {
             s.check(p.to_str().unwrap()).is_err(),
             "a `..` that lands on a symlink out of the root must be rejected"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_symlink_out_of_the_root_is_rejected() {
+        // `link` points at a file that does not exist yet, outside the root.
+        // canonicalize fails, so the name used to pass as a plain new file —
+        // and a write through it created the target outside.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("workspace");
+        std::fs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink(tmp.path().join("pwned.txt"), root.join("link")).unwrap();
+        std::os::unix::fs::symlink("../elsewhere/x", root.join("rel")).unwrap();
+        let s = PathSandbox::new(vec![root.to_string_lossy().to_string()]);
+
+        for name in ["link", "rel", "rel/deeper.txt"] {
+            assert!(
+                s.check(root.join(name).to_str().unwrap()).is_err(),
+                "{name} must not reach outside the root"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_symlink_inside_the_root_resolves_to_its_target() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("workspace");
+        std::fs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink("later.txt", root.join("link")).unwrap();
+        let s = PathSandbox::new(vec![root.to_string_lossy().to_string()]);
+
+        let io = s.io_path(root.join("link").to_str().unwrap()).unwrap();
+        assert_eq!(io, std::fs::canonicalize(&root).unwrap().join("later.txt"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_loop_is_refused() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("workspace");
+        std::fs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink("b", root.join("a")).unwrap();
+        std::os::unix::fs::symlink("a", root.join("b")).unwrap();
+        let s = PathSandbox::new(vec![root.to_string_lossy().to_string()]);
+
+        let err = s.check(root.join("a").to_str().unwrap()).unwrap_err();
+        assert!(err.to_string().contains("could not be resolved"), "{err}");
     }
 
     #[test]

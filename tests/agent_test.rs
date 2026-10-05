@@ -1554,3 +1554,38 @@ async fn a_panicking_tool_fails_the_call_not_the_agent() {
     agent.finish().await;
     assert_eq!(tool_ends(&second), vec![(false, "ok".to_string())]);
 }
+
+/// Under the default parallel strategy, a panicking call does not take its
+/// sibling down: both calls end, one as an error, one with its result.
+#[tokio::test]
+async fn a_panicking_tool_does_not_take_down_a_sibling_call() {
+    let provider = MockProvider::new(vec![
+        MockResponse::ToolCalls(vec![
+            MockToolCall {
+                provider_metadata: None,
+                name: "panicky".into(),
+                arguments: serde_json::json!({ "boom": true }),
+            },
+            MockToolCall {
+                provider_metadata: None,
+                name: "panicky".into(),
+                arguments: serde_json::json!({ "boom": false }),
+            },
+        ]),
+        MockResponse::Text("done".into()),
+    ]);
+    let mut agent =
+        Agent::from_provider(provider, ModelConfig::mock()).with_tools(vec![Box::new(PanickyTool)]);
+    let mut rx = agent.prompt("go").await;
+    let mut events = Vec::new();
+    while let Some(e) = rx.recv().await {
+        events.push(e);
+    }
+    agent.finish().await;
+
+    let mut ends = tool_ends(&events);
+    ends.sort();
+    assert_eq!(ends.len(), 2);
+    assert_eq!(ends[0], (false, "ok".to_string()));
+    assert!(ends[1].0 && ends[1].1.contains("panicked"), "{:?}", ends[1]);
+}

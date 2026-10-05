@@ -160,7 +160,7 @@ let tools: Vec<Box<dyn AgentTool>> = vec![
 ];
 ```
 
-Enforcement is against the **resolved** path, not the string, so neither `..` nor a symlink pointing outside can escape — and a file that does not exist yet still resolves through its real parent, so writes are checked too. The rejection message deliberately does not echo the allowed roots, since tool results reach the model's transcript.
+Enforcement is against the **resolved** path, not the string, so neither `..` nor a symlink pointing outside can escape. That includes a dangling symlink, which a write would follow to create its target; a symlink loop is refused. A file that does not exist yet still resolves through its real parent, so writes are checked too, and the tool then does its I/O on the path it checked. Before 0.24.2, a `..` after a not-yet-existing directory, or a dangling symlink, could get past the check. Something changing the tree between the check and the I/O, such as a parallel `bash` call, is not covered. The rejection message deliberately does not echo the allowed roots, since tool results reach the model's transcript.
 
 ## `BashTool` is not a sandbox
 
@@ -196,7 +196,9 @@ async fn execute(&self, params: serde_json::Value, _ctx: ToolContext) -> Result<
 }
 ```
 
-**Exception: BashTool.** The built-in `BashTool` returns `Ok` even on non-zero exit codes, with both stdout and stderr in the result. This is intentional — the LLM needs to see the actual error output (compilation errors, test failures, etc.) to diagnose and fix issues. Only failures outside the command return `Err`: a matched deny pattern, a refused confirmation, a timeout, cancellation, or `bash` failing to start. A command that does not exist is an ordinary non-zero exit (127).
+**Exception: BashTool.** The built-in `BashTool` returns `Ok` even on non-zero exit codes, with both stdout and stderr in the result. This is intentional — the LLM needs to see the actual error output (compilation errors, test failures, etc.) to diagnose and fix issues. Only failures outside the command return `Err`: a matched deny pattern, a refused confirmation, a timeout (its message carries the output printed so far), cancellation, or `bash` failing to start. A command that does not exist is an ordinary non-zero exit (127). A timeout or cancel kills the `bash` process; what it started (pipeline stages, commands in a `&&` list, background jobs) can keep running.
+
+**A panicking tool** is contained by the loop, the same as a panicking middleware. The call ends as an error result (`tool '<name>' panicked: …`) that the model sees, and the run continues.
 
 ## Tool Execution Flow
 

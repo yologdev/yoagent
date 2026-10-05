@@ -185,8 +185,10 @@ impl AgentTool for BashTool {
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
         // A timeout or cancel must not leave the command running. This kills
-        // `bash` itself; background jobs it started (`server &`) can outlive
-        // it — run the agent in a container if that matters.
+        // the `bash` process only: what it started — pipeline stages,
+        // commands in a `;` / `&&` list, background jobs — is not in that
+        // kill and can keep running. Run the agent in a container if that
+        // matters.
         cmd.kill_on_drop(true);
 
         let timeout = self.timeout;
@@ -202,46 +204,40 @@ impl AgentTool for BashTool {
             return Err(ToolError::Failed("Failed to capture output".into()));
         };
 
-        // The buffers live outside the race, so a timeout still has what the
-        // command printed before it.
-        let mut out_buf = Vec::new();
-        let mut err_buf = Vec::new();
+        // The captures live outside the race, so a timeout still has what the
+        // command printed before it, and whether it was cut.
+        let mut out = Capture::default();
+        let mut err = Capture::default();
         let outcome = {
             let run = async {
-                let (out_cut, err_cut) = tokio::join!(
-                    read_capped(child_out, &mut out_buf, max_bytes),
-                    read_capped(child_err, &mut err_buf, max_bytes),
+                tokio::join!(
+                    out.read(child_out, max_bytes),
+                    err.read(child_err, max_bytes),
                 );
-                (child.wait().await, out_cut, err_cut)
+                child.wait().await
             };
             tokio::select! {
                 _ = cancel.cancelled() => None,
                 _ = tokio::time::sleep(timeout) => Some(Err(())),
-                done = run => Some(Ok(done)),
+                status = run => Some(Ok(status)),
             }
         };
-        let (status, out_cut, err_cut) = match outcome {
+        let status = match outcome {
             None => return Err(ToolError::Cancelled),
             Some(Err(())) => {
                 let _ = child.start_kill();
                 return Err(ToolError::Failed(format!(
                     "Command timed out after {}s. Output so far:\n{}",
                     timeout.as_secs(),
-                    render_output(&out_buf, &err_buf, false, false)
+                    render_output(&out, &err)
                 )));
             }
-            Some(Ok((status, out_cut, err_cut))) => (
-                status.map_err(|e| ToolError::Failed(format!("Failed to execute: {}", e)))?,
-                out_cut,
-                err_cut,
-            ),
+            Some(Ok(status)) => {
+                status.map_err(|e| ToolError::Failed(format!("Failed to execute: {}", e)))?
+            }
         };
         let exit_code = status.code().unwrap_or(-1);
-        let output = format!(
-            "Exit code: {}\n{}",
-            exit_code,
-            render_output(&out_buf, &err_buf, out_cut, err_cut)
-        );
+        let output = format!("Exit code: {}\n{}", exit_code, render_output(&out, &err));
 
         // Return output even on failure — LLMs need error output to self-correct
         Ok(ToolResult {
@@ -251,45 +247,64 @@ impl AgentTool for BashTool {
     }
 }
 
-/// Read `from` to the end, keeping at most `cap` bytes in `into`; the rest is
-/// drained and discarded so the child never blocks on a full pipe. Returns
-/// whether anything was discarded.
-async fn read_capped<R>(mut from: R, into: &mut Vec<u8>, cap: usize) -> bool
-where
-    R: tokio::io::AsyncRead + Unpin,
-{
-    use tokio::io::AsyncReadExt;
-    let mut chunk = [0u8; 8192];
-    let mut cut = false;
-    loop {
-        match from.read(&mut chunk).await {
-            Ok(0) | Err(_) => return cut,
-            Ok(n) => {
-                let room = cap.saturating_sub(into.len());
-                into.extend_from_slice(&chunk[..n.min(room)]);
-                cut |= n > room;
+/// One output stream: the bytes kept, whether more were discarded, and a
+/// read error if the stream ended on one.
+#[derive(Default)]
+struct Capture {
+    bytes: Vec<u8>,
+    cut: bool,
+    read_error: Option<String>,
+}
+
+impl Capture {
+    /// Read `from` to the end, keeping at most `cap` bytes; the rest is
+    /// drained and discarded so the child never blocks on a full pipe.
+    async fn read<R>(&mut self, mut from: R, cap: usize)
+    where
+        R: tokio::io::AsyncRead + Unpin,
+    {
+        use tokio::io::AsyncReadExt;
+        let mut chunk = [0u8; 8192];
+        loop {
+            match from.read(&mut chunk).await {
+                Ok(0) => return,
+                Err(e) => {
+                    self.read_error = Some(e.to_string());
+                    return;
+                }
+                Ok(n) => {
+                    let room = cap.saturating_sub(self.bytes.len());
+                    self.bytes.extend_from_slice(&chunk[..n.min(room)]);
+                    self.cut |= n > room;
+                }
             }
         }
     }
-}
 
-/// Stdout alone, or both streams labelled. Bytes are cut before decoding, so
-/// a multi-byte character split by the cap becomes U+FFFD, never a panic.
-fn render_output(stdout: &[u8], stderr: &[u8], out_cut: bool, err_cut: bool) -> String {
-    let text = |bytes: &[u8], cut: bool| {
-        let mut s = String::from_utf8_lossy(bytes).into_owned();
-        if cut {
+    /// The text, with a note when bytes were discarded or reading failed.
+    /// Bytes are cut before decoding, so a multi-byte character split by the
+    /// cap becomes U+FFFD, never a panic.
+    fn text(&self) -> String {
+        let mut s = String::from_utf8_lossy(&self.bytes).into_owned();
+        if self.cut {
             s.push_str("\n... (output truncated)");
         }
+        if let Some(e) = &self.read_error {
+            s.push_str(&format!("\n... (output incomplete: read error: {e})"));
+        }
         s
-    };
-    if stderr.is_empty() && !err_cut {
-        text(stdout, out_cut)
+    }
+
+    fn is_empty(&self) -> bool {
+        self.bytes.is_empty() && !self.cut && self.read_error.is_none()
+    }
+}
+
+/// Stdout alone, or both streams labelled.
+fn render_output(out: &Capture, err: &Capture) -> String {
+    if err.is_empty() {
+        out.text()
     } else {
-        format!(
-            "STDOUT:\n{}\nSTDERR:\n{}",
-            text(stdout, out_cut),
-            text(stderr, err_cut)
-        )
+        format!("STDOUT:\n{}\nSTDERR:\n{}", out.text(), err.text())
     }
 }

@@ -115,6 +115,8 @@ impl AgentTool for ListFilesTool {
         cmd.arg("-type").arg("f");
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
+        // A timeout or cancel drops the output future; take `find` with it.
+        cmd.kill_on_drop(true);
 
         let timeout = self.timeout;
 
@@ -162,5 +164,19 @@ pub(crate) fn not_an_option(path: std::path::PathBuf) -> std::path::PathBuf {
         std::path::Path::new(".").join(path)
     } else {
         path
+    }
+}
+
+#[cfg(test)]
+mod option_guard {
+    use super::not_an_option;
+    use std::path::PathBuf;
+
+    #[test]
+    fn only_a_leading_dash_is_rewritten() {
+        assert_eq!(not_an_option("-delete".into()), PathBuf::from("./-delete"));
+        assert_eq!(not_an_option("a/-b".into()), PathBuf::from("a/-b"));
+        assert_eq!(not_an_option("/abs".into()), PathBuf::from("/abs"));
+        assert_eq!(not_an_option(".".into()), PathBuf::from("."));
     }
 }

@@ -94,7 +94,8 @@ async fn test_bash_truncation_inside_a_multibyte_character() {
 /// Output beyond the cap is drained, not kept, and the command completes.
 #[tokio::test]
 async fn test_bash_large_output_is_capped() {
-    let mut tool = BashTool::new();
+    // A short timeout: a regression that stops draining would deadlock.
+    let mut tool = BashTool::new().with_timeout(std::time::Duration::from_secs(10));
     tool.max_output_bytes = 1000;
     let result = tool
         .execute(
@@ -128,6 +129,89 @@ async fn test_bash_timeout_keeps_output_and_kills_the_command() {
     // Well past when the command would have touched the marker.
     tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
     assert!(!marker.exists(), "the timed-out command kept running");
+}
+
+/// Stderr is drained concurrently with stdout: a flood on stderr must not
+/// block the command, and it is capped like stdout.
+#[tokio::test]
+async fn test_bash_stderr_flood_is_drained_and_capped() {
+    let mut tool = BashTool::new().with_timeout(std::time::Duration::from_secs(10));
+    tool.max_output_bytes = 1000;
+    let result = tool
+        .execute(
+            serde_json::json!({"command": "head -c 300000 /dev/zero >&2; echo done"}),
+            ctx("bash"),
+        )
+        .await
+        .unwrap();
+    let Content::Text { text } = &result.content[0] else {
+        panic!("expected text")
+    };
+    assert!(
+        text.contains("STDOUT:\ndone"),
+        "{}",
+        &text[..text.len().min(200)]
+    );
+    assert!(text.ends_with("(output truncated)"), "stderr is cut");
+}
+
+/// A timeout that hit the cap still says the output was cut.
+#[tokio::test]
+async fn test_bash_timeout_keeps_the_truncation_note() {
+    let mut tool = BashTool::new().with_timeout(std::time::Duration::from_millis(1500));
+    tool.max_output_bytes = 100;
+    let err = tool
+        .execute(
+            serde_json::json!({"command": "head -c 100000 /dev/zero | tr '\\0' a; sleep 10"}),
+            ctx("bash"),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("timed out"), "{err}");
+    assert!(err.contains("(output truncated)"), "{err}");
+}
+
+/// Cancelling mid-run kills the command.
+#[tokio::test]
+async fn test_bash_cancel_mid_run_kills_the_command() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let marker = tmp.path().join("still-running");
+    let cancel = CancellationToken::new();
+    let trigger = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        trigger.cancel();
+    });
+    let command = format!("sleep 1.5; touch '{}'", marker.display());
+    let result = BashTool::new()
+        .execute(
+            serde_json::json!({ "command": command }),
+            ctx_with_cancel("bash", cancel),
+        )
+        .await;
+    assert!(matches!(result, Err(ToolError::Cancelled)), "{result:?}");
+    tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+    assert!(!marker.exists(), "the cancelled command kept running");
+}
+
+/// An already-cancelled call never starts the command.
+#[tokio::test]
+async fn test_bash_already_cancelled_does_not_run() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let marker = tmp.path().join("ran");
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let command = format!("touch '{}'", marker.display());
+    let result = BashTool::new()
+        .execute(
+            serde_json::json!({ "command": command }),
+            ctx_with_cancel("bash", cancel),
+        )
+        .await;
+    assert!(result.is_err());
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(!marker.exists());
 }
 
 #[tokio::test]
@@ -335,7 +419,29 @@ async fn test_search_caps_the_total_number_of_matches() {
         4,
         "{text}"
     );
-    assert!(text.contains("showing first 4 of"), "{text}");
+    assert!(
+        text.contains("showing the first 4 matches; there are more"),
+        "{text}"
+    );
+    assert_eq!(result.details["truncated"], true);
+}
+
+/// Exactly `max_results` matches is the whole result: no "more" note.
+#[tokio::test]
+async fn test_search_exactly_max_results_is_not_truncated() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("a.txt"), "hit\nhit\nhit\nhit\n").unwrap();
+    let mut tool = SearchTool::new().with_root(tmp.path().to_str().unwrap());
+    tool.max_results = 4;
+    let result = tool
+        .execute(serde_json::json!({"pattern": "hit"}), ctx("search"))
+        .await
+        .unwrap();
+    let Content::Text { text } = &result.content[0] else {
+        panic!("expected text")
+    };
+    assert!(text.ends_with("(4 matches)"), "{text}");
+    assert_eq!(result.details["truncated"], false);
 }
 
 // --- Edit tool tests ---
@@ -673,6 +779,61 @@ async fn read_tool_rejects_paths_outside_allowed_roots() {
     );
 
     let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// The `..`-after-a-missing-directory escape, through the tool: it must fail,
+/// leave the outside untouched and create nothing. The twin that climbs back
+/// inside must write the right file without creating `x` — which only holds
+/// while the tool does its I/O on the checked path.
+#[tokio::test]
+async fn write_file_cannot_climb_out_through_a_missing_directory() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let ws = tmp.path().join("workspace");
+    std::fs::create_dir_all(&ws).unwrap();
+    let write = WriteFileTool::new().with_allowed_paths(vec![ws.to_string_lossy().to_string()]);
+
+    let escape = ws.join("x/../../victim.txt");
+    assert!(write
+        .execute(
+            serde_json::json!({"path": escape.to_str().unwrap(), "content": "pwned"}),
+            ctx("write_file")
+        )
+        .await
+        .is_err());
+    assert!(!tmp.path().join("victim.txt").exists());
+    assert!(!ws.join("x").exists());
+
+    let inside = ws.join("x/../ok.txt");
+    write
+        .execute(
+            serde_json::json!({"path": inside.to_str().unwrap(), "content": "ok"}),
+            ctx("write_file"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(ws.join("ok.txt")).unwrap(), "ok");
+    assert!(!ws.join("x").exists(), "the checked path has no `x` in it");
+}
+
+/// A dangling symlink to a file outside the root: writing through it would
+/// create the target outside.
+#[cfg(unix)]
+#[tokio::test]
+async fn write_file_cannot_write_through_a_dangling_symlink_out_of_the_root() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let ws = tmp.path().join("workspace");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::os::unix::fs::symlink(tmp.path().join("pwned.txt"), ws.join("link")).unwrap();
+    let write = WriteFileTool::new().with_allowed_paths(vec![ws.to_string_lossy().to_string()]);
+
+    assert!(write
+        .execute(
+            serde_json::json!({"path": ws.join("link").to_str().unwrap(), "content": "pwned"}),
+            ctx("write_file")
+        )
+        .await
+        .is_err());
+    assert!(!tmp.path().join("pwned.txt").exists());
 }
 
 #[tokio::test]

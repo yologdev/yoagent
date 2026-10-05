@@ -57,19 +57,36 @@ impl StreamProvider for GoogleProvider {
             "{}/v1beta/models/{}:streamGenerateContent?alt=sse",
             base_url, config.model
         );
-        let mut key = reqwest::header::HeaderValue::from_str(&config.api_key).map_err(|_| {
-            ProviderError::Auth("the Gemini API key is not a valid header value".into())
-        })?;
-        key.set_sensitive(true);
+        // Trimmed: the URL parser used to strip a trailing CR/LF (a key read
+        // from a CRLF `.env`), and a header value rejects it. Skipped when the
+        // caller authenticates through `ModelConfig.headers` (a header is
+        // appended, not replaced, so it would be sent twice) or has no key.
+        let key = config.api_key.trim();
+        let user_auth = model_config.headers.keys().any(|k| {
+            k.eq_ignore_ascii_case("x-goog-api-key") || k.eq_ignore_ascii_case("authorization")
+        });
+        let key = if key.is_empty() || user_auth {
+            None
+        } else {
+            let mut value = reqwest::header::HeaderValue::from_str(key).map_err(|_| {
+                ProviderError::Auth(
+                    "the Gemini API key contains a character not allowed in an HTTP header \
+                     (check GEMINI_API_KEY / GOOGLE_API_KEY, or the configured key)"
+                        .into(),
+                )
+            })?;
+            value.set_sensitive(true);
+            Some(value)
+        };
 
         let body = build_request_body(&config);
         debug!("Google GenAI request: model={}", config.model);
 
         let client = reqwest::Client::new();
-        let mut request = client
-            .post(&url)
-            .header("content-type", "application/json")
-            .header("x-goog-api-key", key);
+        let mut request = client.post(&url).header("content-type", "application/json");
+        if let Some(key) = key {
+            request = request.header("x-goog-api-key", key);
+        }
 
         for (k, v) in &model_config.headers {
             request = request.header(k, v);
