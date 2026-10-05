@@ -225,10 +225,10 @@ warning with `usage_missing = true` is logged inside the `llm_stream` span.
 Errors are never an empty successful turn:
 
 - An exception frame (`:message-type: exception`) is classified by the HTTP
-  status AWS documents for it: `throttlingException` is a retryable rate
-  limit, a `validationException` whose message reports an over-long input is
-  a context overflow, and the rest (`modelStreamErrorException`,
-  `internalServerException`, `serviceUnavailableException`, …) are API
+  status AWS documents for it: `throttlingException` (429) and
+  `serviceUnavailableException` (503) are retryable, a `validationException`
+  whose message reports an over-long input is a context overflow, and the
+  rest (`modelStreamErrorException`, `internalServerException`, …) are API
   errors.
 - A checksum mismatch or malformed frame is an error.
 - A dropped connection, a body that ends inside a frame, or a stream that ends

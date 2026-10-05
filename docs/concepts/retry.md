@@ -1,6 +1,6 @@
 # Retry with Backoff
 
-When an LLM provider returns a transient error — rate limit (HTTP 429) or network failure — yoagent automatically retries with exponential backoff and jitter. No configuration required; it works out of the box.
+When an LLM provider returns a transient error — a rate limit (HTTP 429), an overload (503, 529) or a network failure — yoagent automatically retries with exponential backoff and jitter. No configuration required; it works out of the box.
 
 ## How it works
 
@@ -21,11 +21,19 @@ Request → Error? → Retryable? → Wait (backoff + jitter) → Retry → ...
 
 | Error Type | Retried? | Why |
 |------------|----------|-----|
-| `RateLimited` (429) | ✅ Yes | Temporary — provider will accept requests again soon |
+| `RateLimited` (429, and 503 / 529 overloaded) | ✅ Yes | Temporary — provider will accept requests again soon |
 | `Network` | ✅ Yes | Transient — connection resets, timeouts, DNS failures |
 | `Auth` (401/403) | ❌ No | Permanent — wrong API key won't fix itself |
-| `Api` (400, etc.) | ❌ No | Permanent — bad request won't change on retry |
+| `Api` (400, 500, 502, …) | ❌ No | Permanent — a bad request or a server bug fails the same way again |
 | `Cancelled` | ❌ No | User-initiated — respect the cancellation |
+
+HTTP 503 ("service unavailable") and 529 (Anthropic's "overloaded") are
+`RateLimited` too: the provider is out of capacity for now, and any
+`Retry-After` it sends is honoured. An in-stream overload is retried the same
+way: Anthropic's `overloaded_error`, a `status` of `UNAVAILABLE`, or a numeric
+`code` of 503 / 529. Other 5xx responses stay `Api`. `RateLimited` carries no
+message, so the server's explanation is logged at `WARN` when the error is
+classified.
 
 HTTP 429 is always `RateLimited`, even when the body contains a phrase that
 would otherwise read as a context overflow. A mid-stream error event is

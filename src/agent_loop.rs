@@ -136,6 +136,52 @@ fn default_convert_to_llm(messages: &[AgentMessage]) -> Vec<Message> {
 /// bland success.
 pub const AGENT_STOPPED_PREFIX: &str = "[Agent stopped:";
 
+/// The stop marker for a run cancelled between provider calls — while tools
+/// ran, or between turns. (A cancel during a provider call ends that turn's
+/// message as `StopReason::Aborted` instead.) Unlike a limit, which leaves
+/// real partial work, a cancelled run did not finish: `SubAgentTool` reports
+/// it as a failure.
+pub const CANCELLED_MARKER: &str = "[Agent stopped: cancelled]";
+
+/// Append a stop marker as a user message: emitted, kept in context and in
+/// the run's new messages.
+fn push_stop_marker(
+    text: String,
+    tx: &mpsc::UnboundedSender<AgentEvent>,
+    context: &mut AgentContext,
+    new_messages: &mut Vec<AgentMessage>,
+) {
+    let marker = AgentMessage::Llm(Message::User {
+        content: vec![Content::Text { text }],
+        timestamp: now_ms(),
+    });
+    tx.send(AgentEvent::MessageStart {
+        message: marker.clone(),
+    })
+    .ok();
+    tx.send(AgentEvent::MessageEnd {
+        message: marker.clone(),
+    })
+    .ok();
+    context.messages.push(marker.clone());
+    new_messages.push(marker);
+}
+
+/// Mark a run cancelled between provider calls — only when it did something,
+/// so a run cancelled before it started leaves no trace.
+fn mark_cancelled(
+    tx: &mpsc::UnboundedSender<AgentEvent>,
+    context: &mut AgentContext,
+    new_messages: &mut Vec<AgentMessage>,
+) {
+    if new_messages
+        .iter()
+        .any(|m| matches!(m, AgentMessage::Llm(Message::Assistant { .. })))
+    {
+        push_stop_marker(CANCELLED_MARKER.to_string(), tx, context, new_messages);
+    }
+}
+
 /// The stop marker for a run halted by loop detection specifically.
 ///
 /// Distinct from the limit stops because the two mean opposite things to a
@@ -488,6 +534,7 @@ async fn run_loop(
     // Outer loop: follow-ups after agent would stop
     loop {
         if cancel.is_cancelled() {
+            mark_cancelled(tx, context, new_messages);
             return stats;
         }
 
@@ -496,6 +543,7 @@ async fn run_loop(
         // Inner loop: runs at least once, then continues if tool calls or pending messages
         loop {
             if cancel.is_cancelled() {
+                mark_cancelled(tx, context, new_messages);
                 return stats;
             }
 
@@ -526,22 +574,12 @@ async fn run_loop(
             if let Some(ref tracker) = tracker {
                 if let Some(reason) = tracker.check_limits() {
                     warn!("Execution limit reached: {}", reason);
-                    let limit_msg = AgentMessage::Llm(Message::User {
-                        content: vec![Content::Text {
-                            text: format!("{AGENT_STOPPED_PREFIX} {}]", reason),
-                        }],
-                        timestamp: now_ms(),
-                    });
-                    tx.send(AgentEvent::MessageStart {
-                        message: limit_msg.clone(),
-                    })
-                    .ok();
-                    tx.send(AgentEvent::MessageEnd {
-                        message: limit_msg.clone(),
-                    })
-                    .ok();
-                    context.messages.push(limit_msg.clone());
-                    new_messages.push(limit_msg);
+                    push_stop_marker(
+                        format!("{AGENT_STOPPED_PREFIX} {}]", reason),
+                        tx,
+                        context,
+                        new_messages,
+                    );
                     return stats;
                 }
             }
@@ -1594,7 +1632,8 @@ async fn execute_tool_calls(
             let mut steering_messages: Option<Vec<AgentMessage>> = None;
             let mut sub_agent_stats: Vec<SessionStats> = Vec::new();
 
-            for (batch_idx, batch) in tool_calls.chunks(*size).enumerate() {
+            // `chunks(0)` panics, and `size` comes from config: treat 0 as 1.
+            for (batch_idx, batch) in tool_calls.chunks((*size).max(1)).enumerate() {
                 let batch_result = execute_batch(tools, batch, tx, cancel, None, gate).await;
                 results.extend(batch_result.tool_results);
                 sub_agent_stats.extend(batch_result.sub_agent_stats);

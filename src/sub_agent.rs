@@ -711,13 +711,16 @@ fn extract_error(messages: &[AgentMessage]) -> Option<String> {
     // text output)". A sub-agent that burned its entire budget looping looked
     // like one that simply had nothing to say.
     //
-    // Only loop aborts. Hitting `max_turns` is a bound, not a failure — the
+    // Only loop aborts and cancels. Hitting `max_turns` is a bound, not a failure — the
     // work was cut short but what it produced is real, so it is returned, with
     // the stop notice appended by `extract_final_text` so the parent's model
     // knows the answer is partial.
     if let Some(AgentMessage::Llm(Message::User { content, .. })) = messages.last() {
         if let Some(Content::Text { text }) = content.first() {
-            if text.starts_with(crate::agent_loop::LOOP_ABORT_PREFIX) {
+            // A cancel between provider calls did not finish either.
+            if text.starts_with(crate::agent_loop::LOOP_ABORT_PREFIX)
+                || text == crate::agent_loop::CANCELLED_MARKER
+            {
                 return Some(text.clone());
             }
         }

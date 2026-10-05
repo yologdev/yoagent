@@ -111,11 +111,18 @@ sends nothing.
 
 ### Streaming
 
-Uses SSE format (`alt=sse`). Each chunk contains `candidates` with `content.parts` and optional `usageMetadata`.
+Uses SSE format (`alt=sse`). Each chunk contains `candidates` with `content.parts` and optional `usageMetadata`. The API key goes in the `x-goog-api-key` header.
+
+A turn is never an empty or truncated success:
+
+- A stream that ends (or drops) before any `finishReason` is a retryable network error. A drop *after* it keeps the response, so it is not billed twice.
+- An in-stream `{"error": …}` is an error. A 503 / `UNAVAILABLE` overload is retried, honouring `Retry-After` on an HTTP error; a 429 `RESOURCE_EXHAUSTED` (often an exhausted quota) is not.
+- `SAFETY`, `PROHIBITED_CONTENT`, `BLOCKLIST`, `SPII`, `IMAGE_SAFETY` and a prompt blocked via `promptFeedback.blockReason` end as `StopReason::Refusal` with the reason in `error_message`.
+- `MALFORMED_FUNCTION_CALL`, `UNEXPECTED_TOOL_CALL` and `TOO_MANY_TOOL_CALLS` end as `StopReason::Error`, with Gemini's `finishMessage` when it sends one.
 
 ## Google Vertex AI
 
-`GoogleVertexProvider` uses the same message format but with Vertex AI authentication and endpoints.
+`GoogleVertexProvider` uses the same message format but with Vertex AI authentication and endpoints. It shares Gemini's stream parser, so everything under [Streaming](#streaming) applies to it too.
 
 - **Protocol**: `ApiProtocol::GoogleVertex`. There is no preset; build the config with `ModelConfig::custom`.
 - **Auth**: an OAuth2 access token passed with `with_api_key`, sent as `Authorization: Bearer {token}`. yoagent reads no service-account file, refreshes no token, and resolves no environment variable for `vertex`: mint the token yourself (e.g. `gcloud auth print-access-token`) and rebuild the agent before it expires.
