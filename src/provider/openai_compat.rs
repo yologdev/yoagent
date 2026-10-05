@@ -89,6 +89,14 @@ impl StreamProvider for OpenAiCompatProvider {
                                 }
                             };
 
+                            // A failure reported inside the stream: never a
+                            // finished (truncated) answer.
+                            if chunk.error.is_some() {
+                                let err = classify_sse_error_event(&msg.data);
+                                warn!("OpenAI-compatible stream error: {}", err);
+                                return Err(err);
+                            }
+
                             // Process usage
                             if let Some(u) = &chunk.usage {
                                 usage = usage_from_openai(u);
@@ -188,6 +196,14 @@ impl StreamProvider for OpenAiCompatProvider {
                                         // A safety cut, not a size limit or a
                                         // normal end: report it as such.
                                         "content_filter" => StopReason::Refusal,
+                                        // The stream failed; without an error
+                                        // object there is nothing more to say.
+                                        "error" => {
+                                            return Err(ProviderError::Api(format!(
+                                                "stream ended with finish_reason \"error\": {}",
+                                                msg.data
+                                            )))
+                                        }
                                         _ => StopReason::Stop,
                                     };
                                 }
@@ -565,6 +581,10 @@ fn content_to_openai(content: &[Content]) -> serde_json::Value {
 // OpenAI streaming response types
 #[derive(Deserialize)]
 struct OpenAiChunk {
+    /// A mid-stream failure (OpenRouter and other gateways send
+    /// `{"error":{…}}`, sometimes alongside `finish_reason: "error"`).
+    #[serde(default)]
+    error: Option<serde_json::Value>,
     #[serde(default)]
     choices: Vec<OpenAiChoice>,
     #[serde(default)]

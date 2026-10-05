@@ -215,7 +215,7 @@ This works with all providers: OpenAI, Groq, DeepSeek, Gemini, Mistral, xAI, and
 
 - **Context isolation**: Each invocation starts fresh. Sub-agents don't accumulate history across calls.
 - **Nesting supported**: Sub-agents can be given other `SubAgentTool`s for recursive delegation (see [`examples/rlm.rs`](../../examples/rlm.rs)). Use `with_max_turns()` to prevent infinite chains.
-- **Cancellation propagation**: The parent's cancellation token is forwarded. Aborting the parent aborts all sub-agents. A delegation cancelled during one of its LLM calls fails the tool call (`Sub-agent '<name>' failed: Cancelled`), and waiting on a tool source is abandoned with `ToolError::Cancelled`.
+- **Cancellation propagation**: The parent's cancellation token is forwarded. Aborting the parent aborts all sub-agents. A delegation cancelled during one of its LLM calls fails the tool call (`Sub-agent '<name>' failed: Cancelled`); one cancelled while its tools run fails with `Sub-agent '<name>' failed: [Agent stopped: cancelled]`; and waiting on a tool source is abandoned with `ToolError::Cancelled`.
 - **Turn limiting**: The default 10-turn limit prevents runaway execution; each delegation also runs under its own 300-second duration and 1M-token limits. The parent's limits are checked between its own turns and do not interrupt a running delegation.
 
 ## Isolating sub-agents from each other

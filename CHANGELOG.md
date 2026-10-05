@@ -4,6 +4,24 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Fixed
+
+- **Overloaded providers are retried.** HTTP 529 (Anthropic "overloaded") and 503 ("service unavailable") were `Api` errors that ended the turn at once. They are now `RateLimited`: backed off and retried, honouring `Retry-After`. Anthropic's in-stream `overloaded_error` and Bedrock's `serviceUnavailableException` are retried the same way. Other 5xx responses still are not. `RateLimited` carries no message, so the server's explanation is logged at `WARN`, and its text now reads "Rate limited" (or "…, retry after 1500ms") instead of "retry after Nonems".
+- **A failed stream is no longer returned as a finished answer:**
+  - **OpenAI-compatible:** a mid-stream `{"error": …}` chunk (OpenRouter and other gateways) parsed as an empty chunk, and `finish_reason: "error"` read as a normal stop. The turn ended as `Ok` with the partial text. Both are now errors; a rate limit or overload among them (a string code such as `rate_limit_exceeded`, or a numeric 503/529) is retried.
+  - **Gemini:**
+    - A stream that ends without a `finishReason` is a retryable `Network` error. A drop after it keeps the response, so it is not billed twice.
+    - A prompt blocked via `promptFeedback.blockReason`, and `IMAGE_SAFETY`, are a `Refusal` with a message.
+    - `MALFORMED_FUNCTION_CALL`, `UNEXPECTED_TOOL_CALL` and `TOO_MANY_TOOL_CALLS` are an `Error` carrying Gemini's `finishMessage`. Any other unhandled finish reason is logged.
+    - An HTTP 503 honours `Retry-After`, and an in-stream overload (`UNAVAILABLE`, numeric 503) is retried.
+
+    Each of these used to come back as an empty or truncated `Ok`.
+  - **Vertex AI** now uses Gemini's stream parser instead of an old copy (215 lines removed). It gains every Gemini fix: transport errors, in-stream errors, safety refusals and `ToolUse` being kept. Synthesized tool-call ids change from `vertex-fc-N` to `google-fc-N`, and a server-sent `functionCall.id` is used when present.
+- **A cancel while tools run is marked.** The run used to end with the last assistant message still `ToolUse`, indistinguishable from a normal stop. A cancelled sub-agent's delegation was therefore reported as a success. The run now appends `[Agent stopped: cancelled]` (`agent_loop::CANCELLED_MARKER`), and `SubAgentTool` reports it as a failure. A run cancelled before its first assistant message gets no marker (a sub-agent cancelled that early still returns its "no text output" fallback).
+- **`ToolExecutionStrategy::Batched { size: 0 }`** panicked in `chunks(0)`; it now runs as size 1.
+
 ## 0.24.2
 
 Security fixes for the built-in tools and the Gemini provider, found in a

@@ -1902,3 +1902,83 @@ async fn two_delegations_in_one_call_attach_combined_stats() {
 fn report_delegated_run_without_a_loop_is_a_no_op() {
     ToolContext::new("id", "tool").report_delegated_run(SessionStats::default());
 }
+
+/// A tool that says when it started and returns when released.
+struct Gated {
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl AgentTool for Gated {
+    fn name(&self) -> &str {
+        "wait"
+    }
+    fn label(&self) -> &str {
+        "Wait"
+    }
+    fn description(&self) -> &str {
+        "Waits until released"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object", "properties": {}})
+    }
+    async fn execute(
+        &self,
+        _params: serde_json::Value,
+        _ctx: ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        self.started.notify_one();
+        self.release.notified().await;
+        Ok(ToolResult {
+            content: vec![Content::Text {
+                text: "done".into(),
+            }],
+            details: serde_json::Value::Null,
+        })
+    }
+}
+
+/// Cancelled while its tool ran (between provider calls), the child's run
+/// ends with the cancel marker, so the delegation fails — it used to return
+/// the "no text output" fallback as a success. Deterministic: the cancel
+/// lands while the tool is known to be running.
+#[tokio::test]
+async fn test_sub_agent_cancelled_during_a_tool_fails_the_delegation() {
+    let sub_provider = Arc::new(MockProvider::new(vec![
+        MockResponse::ToolCalls(vec![MockToolCall {
+            provider_metadata: None,
+            name: "wait".into(),
+            arguments: serde_json::json!({}),
+        }]),
+        MockResponse::Text("never reached".into()),
+    ]));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let gated: Arc<dyn AgentTool> = Arc::new(Gated {
+        started: started.clone(),
+        release: release.clone(),
+    });
+    let sub_agent = SubAgentTool::from_provider("waiter", sub_provider, ModelConfig::mock())
+        .with_tools(vec![gated]);
+
+    let cancel = CancellationToken::new();
+    let trigger = cancel.clone();
+    tokio::spawn(async move {
+        started.notified().await;
+        trigger.cancel();
+        release.notify_one();
+    });
+    let err = sub_agent
+        .execute(
+            serde_json::json!({"task": "wait"}),
+            ToolContext::new("tc-1", "waiter").with_cancel(cancel),
+        )
+        .await
+        .expect_err("a cancelled delegation is a failure");
+    assert!(
+        err.to_string()
+            .contains(yoagent::agent_loop::CANCELLED_MARKER),
+        "{err}"
+    );
+}

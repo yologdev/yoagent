@@ -216,9 +216,10 @@ async fn test_abort_cancels_loop() {
 
     let new_messages = agent_loop(vec![prompt], &mut context, &config, tx, cancel).await;
 
-    // Should have user message but loop should exit early
-    // The prompt is added before the loop checks cancellation
-    assert!(new_messages.len() <= 2); // user + possibly error
+    // The prompt is added before the loop checks cancellation; nothing ran,
+    // so no cancel marker follows it.
+    assert_eq!(new_messages.len(), 1, "{new_messages:?}");
+    assert_eq!(new_messages[0].role(), "user");
 }
 
 #[tokio::test]
