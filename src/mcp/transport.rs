@@ -191,7 +191,10 @@ impl StdioTransport {
     async fn closed_error(&self, skipped: &str) -> McpError {
         // Stdout closing can be seen before the drain has read the last of
         // stderr; give it a moment to reach the end.
-        if let Some(drain) = self.stderr_drain.lock().await.as_mut() {
+        // Taken, not borrowed: a finished JoinHandle must not be polled again
+        // by a later call that also finds the connection closed.
+        let drain = self.stderr_drain.lock().await.take();
+        if let Some(drain) = drain {
             let _ = tokio::time::timeout(std::time::Duration::from_millis(500), drain).await;
         }
         let status = match self.child.lock().await.try_wait() {

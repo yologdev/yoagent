@@ -184,3 +184,32 @@ while :; do sleep 1; done"#,
     }
     panic!("the server outlived its client");
 }
+
+/// Calls after the server has gone keep failing, cleanly and at once: only
+/// the first close error waits (briefly) for the stderr drain.
+#[tokio::test]
+async fn calls_after_the_server_exits_keep_failing_cleanly() {
+    let client = connect(
+        r#"read -r line; id=$(id_of "$line")
+echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"serverInfo\":{\"name\":\"brief\",\"version\":\"1\"}}}"
+read -r note
+echo "bye" >&2
+exit 0"#,
+    )
+    .await
+    .expect("connects");
+    let _ = client.list_tools().await.unwrap_err();
+    let started = std::time::Instant::now();
+    for _ in 0..3 {
+        let err = client.list_tools().await.unwrap_err().to_string();
+        assert!(
+            err.contains("Connection closed") || err.contains("Write error"),
+            "{err}"
+        );
+    }
+    assert!(
+        started.elapsed() < Duration::from_millis(400),
+        "later errors waited on the drain again: {:?}",
+        started.elapsed()
+    );
+}
