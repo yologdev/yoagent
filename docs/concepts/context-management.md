@@ -257,6 +257,38 @@ pub struct ExecutionLimits {
 
 When a limit is reached, the agent stops with a message like `"[Agent stopped: Max turns reached (50/50)]"`.
 
+### What `max_total_tokens` counts
+
+Every turn adds its **whole prompt** — cached tokens included
+(`input + cache_read + cache_write`) — plus its output. The prompt resends the
+conversation each turn, so the total grows roughly with the *square* of the
+run's length, not with the size of the conversation:
+
+| Context per turn | Turns until the 1M default is reached |
+|---|---|
+| 10K tokens | about 100 |
+| 60K tokens | about 16 |
+| 200K tokens | about 5 |
+
+Caching does not change this: cached tokens are cheaper, but they are counted.
+That makes the cap a strict ceiling on the work a run does, which is what you
+want for an unattended agent. For a long interactive session it stops the run
+much sooner than "1M tokens" suggests. Raise it — or set it to `usize::MAX`
+and let `max_turns` bound the run — and raise `max_duration` (10 minutes by
+default) too:
+
+```rust
+use std::time::Duration;
+use yoagent::context::ExecutionLimits;
+
+let agent = agent.with_execution_limits(
+    ExecutionLimits::default()
+        .with_max_turns(200)
+        .with_max_total_tokens(usize::MAX)
+        .with_max_duration(Duration::from_secs(4 * 3600)),
+);
+```
+
 ## Loop detection
 
 The cheapest catastrophic failure is a model calling one tool with the same

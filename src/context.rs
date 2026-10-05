@@ -970,9 +970,17 @@ fn keep_within_budget(messages: &[AgentMessage], budget: usize) -> Vec<AgentMess
 pub struct ExecutionLimits {
     /// Maximum number of turns (LLM calls)
     pub max_turns: usize,
-    /// Maximum total tokens consumed
+    /// Maximum tokens the model processes over the run: every turn adds its
+    /// whole prompt (`input + cache_read + cache_write`) plus its output.
+    ///
+    /// The prompt resends the conversation each turn, so this grows roughly
+    /// with the *square* of the run's length, not with the conversation: at a
+    /// 60K-token context the 1M default is reached around turn 16, cached or
+    /// not. That makes it a strict ceiling on work done; for long sessions
+    /// raise it (or set `usize::MAX` and rely on `max_turns`).
     pub max_total_tokens: usize,
-    /// Maximum wall-clock time
+    /// Maximum wall-clock time (default 10 minutes, which also ends long
+    /// interactive sessions; raise it for those).
     pub max_duration: std::time::Duration,
     /// Consecutive identical tool calls tolerated before intervening.
     ///
@@ -1014,7 +1022,9 @@ impl ExecutionLimits {
         self
     }
 
-    /// Cap on total tokens across the run.
+    /// Cap on tokens processed across the run — every turn's whole prompt
+    /// plus its output, so it grows much faster than the conversation. See
+    /// [`max_total_tokens`](Self::max_total_tokens).
     pub fn with_max_total_tokens(mut self, tokens: usize) -> Self {
         self.max_total_tokens = tokens;
         self
