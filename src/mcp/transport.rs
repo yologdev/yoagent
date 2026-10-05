@@ -47,12 +47,59 @@ pub trait McpTransport: crate::rt::MaybeSend + crate::rt::MaybeSync {
 
 /// Communicates with an MCP server via stdin/stdout of a child process.
 /// One JSON-RPC message per line (newline-delimited JSON). Native hosts only.
+///
+/// Each request waits for the response carrying its own id; the server's own
+/// messages in between are handled (notifications skipped, `ping` answered,
+/// other server requests declined). The server's stderr is drained
+/// continuously — the last few KB are kept, so an error from a server that
+/// exited can say why — and the process is killed when the transport is
+/// dropped.
 #[cfg(feature = "native")]
 #[cfg_attr(docsrs, doc(cfg(feature = "native")))]
 pub struct StdioTransport {
-    stdin: Arc<Mutex<tokio::process::ChildStdin>>,
+    stdin: Arc<Mutex<StdinWriter>>,
     stdout: Arc<Mutex<BufReader<tokio::process::ChildStdout>>>,
     child: Arc<Mutex<Child>>,
+    stderr_tail: Arc<std::sync::Mutex<StderrTail>>,
+    /// The stderr drain; awaited briefly when the server exits, so its last
+    /// words are in the tail before the error is built.
+    stderr_drain: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    command: String,
+}
+
+/// The server's stdin, and whether a write was cut off mid-message (a call
+/// cancelled or timed out while the server was not reading).
+#[cfg(feature = "native")]
+struct StdinWriter {
+    stdin: tokio::process::ChildStdin,
+    interrupted: bool,
+}
+
+/// The last lines the server wrote to stderr, at most [`StderrTail::MAX_BYTES`].
+#[cfg(feature = "native")]
+#[derive(Default)]
+struct StderrTail {
+    lines: std::collections::VecDeque<String>,
+    bytes: usize,
+}
+
+#[cfg(feature = "native")]
+impl StderrTail {
+    const MAX_BYTES: usize = 4096;
+
+    fn push(&mut self, line: String) {
+        self.bytes += line.len();
+        self.lines.push_back(line);
+        while self.bytes > Self::MAX_BYTES && self.lines.len() > 1 {
+            if let Some(old) = self.lines.pop_front() {
+                self.bytes -= old.len();
+            }
+        }
+    }
+
+    fn render(&self) -> String {
+        self.lines.iter().cloned().collect::<Vec<_>>().join("\n")
+    }
 }
 
 #[cfg(feature = "native")]
@@ -90,39 +137,116 @@ impl StdioTransport {
             .take()
             .ok_or_else(|| McpError::Transport("Failed to capture stdout".into()))?;
 
-        // Drain stderr into the log. A piped stderr nobody reads fills up, and
-        // a server that logs to it then blocks mid-call.
-        if let Some(stderr) = child.stderr.take() {
-            let server = command.to_string();
-            tokio::spawn(async move {
-                let mut lines = BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    debug!(target: "yoagent::mcp::stderr", server = %server, "{line}");
-                }
-            });
-        }
+        let stderr_tail = Arc::new(std::sync::Mutex::new(StderrTail::default()));
+        let stderr_drain = child.stderr.take().map(|stderr| {
+            tokio::spawn(drain_stderr(
+                stderr,
+                command.to_string(),
+                stderr_tail.clone(),
+            ))
+        });
 
         Ok(Self {
-            stdin: Arc::new(Mutex::new(stdin)),
+            stdin: Arc::new(Mutex::new(StdinWriter {
+                stdin,
+                interrupted: false,
+            })),
             stdout: Arc::new(Mutex::new(BufReader::new(stdout))),
             child: Arc::new(Mutex::new(child)),
+            stderr_tail,
+            stderr_drain: Mutex::new(stderr_drain),
+            command: command.to_string(),
         })
+    }
+
+    /// Write one newline-terminated message to the server.
+    async fn write_message(&self, json: &str) -> Result<(), McpError> {
+        let mut writer = self.stdin.lock().await;
+        // A message cut off by a cancelled call is still on the line: start
+        // this one on a fresh line, so the server sees one bad line (which it
+        // answers with a parse error, or ignores) rather than two.
+        let message = if writer.interrupted {
+            format!("\n{json}\n")
+        } else {
+            format!("{json}\n")
+        };
+        writer.interrupted = true; // until the write completes
+        writer
+            .stdin
+            .write_all(message.as_bytes())
+            .await
+            .map_err(|e| McpError::Transport(format!("Write error: {}", e)))?;
+        writer
+            .stdin
+            .flush()
+            .await
+            .map_err(|e| McpError::Transport(format!("Flush error: {}", e)))?;
+        writer.interrupted = false;
+        Ok(())
+    }
+
+    /// The error for a server that closed its stdout: its exit status (when
+    /// it has exited) and the last of its stderr, which is where servers say
+    /// why they failed (a missing package, a missing API key, a traceback).
+    async fn closed_error(&self, skipped: &str) -> McpError {
+        // Stdout closing can be seen before the drain has read the last of
+        // stderr; give it a moment to reach the end.
+        if let Some(drain) = self.stderr_drain.lock().await.as_mut() {
+            let _ = tokio::time::timeout(std::time::Duration::from_millis(500), drain).await;
+        }
+        let status = match self.child.lock().await.try_wait() {
+            Ok(Some(status)) => format!("exited with {status}"),
+            _ => "closed its output".to_string(),
+        };
+        let tail = self
+            .stderr_tail
+            .lock()
+            .map(|t| t.render())
+            .unwrap_or_default();
+        let tail = if tail.trim().is_empty() {
+            String::new()
+        } else {
+            format!("; last stderr:\n{tail}")
+        };
+        McpError::Transport(format!(
+            "Connection closed: MCP server '{}' {status}{skipped}{tail}",
+            self.command
+        ))
     }
 }
 
+/// Read the server's stderr to the end, logging each line and keeping the
+/// last few KB. Bytes are decoded lossily and lines are read in bounded
+/// chunks, so neither binary output nor a huge line stops the draining — a
+/// piped stderr nobody reads fills up and blocks the server.
 #[cfg(feature = "native")]
-impl StdioTransport {
-    /// Write one newline-terminated message to the server.
-    async fn write_message(&self, json: &str) -> Result<(), McpError> {
-        let mut stdin = self.stdin.lock().await;
-        stdin
-            .write_all(format!("{json}\n").as_bytes())
-            .await
-            .map_err(|e| McpError::Transport(format!("Write error: {}", e)))?;
-        stdin
-            .flush()
-            .await
-            .map_err(|e| McpError::Transport(format!("Flush error: {}", e)))
+async fn drain_stderr(
+    stderr: tokio::process::ChildStderr,
+    server: String,
+    tail: Arc<std::sync::Mutex<StderrTail>>,
+) {
+    use tokio::io::AsyncReadExt;
+    let mut reader = BufReader::new(stderr);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match (&mut reader).take(8192).read_until(b'\n', &mut buf).await {
+            Ok(0) => return,
+            Ok(_) => {
+                let line = String::from_utf8_lossy(&buf).trim_end().to_string();
+                if line.is_empty() {
+                    continue;
+                }
+                debug!(target: "yoagent::mcp::stderr", server = %server, "{line}");
+                if let Ok(mut tail) = tail.lock() {
+                    tail.push(line);
+                }
+            }
+            Err(e) => {
+                warn!("MCP server '{server}': reading its stderr failed ({e}); it may block if it keeps writing");
+                return;
+            }
+        }
     }
 }
 
@@ -134,12 +258,23 @@ fn server_request_reply(method: &str, id: serde_json::Value) -> serde_json::Valu
     if method == "ping" {
         serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {}})
     } else {
-        debug!("MCP stdio: declining server request '{method}'");
+        warn!("MCP server asked for '{method}', which this client does not support; declining");
         serde_json::json!({
             "jsonrpc": "2.0",
             "id": id,
             "error": {"code": -32601, "message": format!("method not supported by this client: {method}")}
         })
+    }
+}
+
+/// The id of a response, numeric or the string form of one (a server may
+/// echo the id back as a string).
+#[cfg(feature = "native")]
+fn response_id(value: &serde_json::Value) -> Option<u64> {
+    match value.get("id")? {
+        serde_json::Value::Number(n) => n.as_u64(),
+        serde_json::Value::String(s) => s.parse().ok(),
+        _ => None,
     }
 }
 
@@ -157,6 +292,8 @@ impl McpTransport for StdioTransport {
         // skipped, requests (ping, sampling, roots) are answered, and a
         // response for another id — one whose caller timed out — is dropped.
         let mut stdout = self.stdout.lock().await;
+        let mut non_json = 0usize;
+        let mut last_non_json = String::new();
         loop {
             let mut line = String::new();
             let bytes_read = stdout
@@ -164,7 +301,14 @@ impl McpTransport for StdioTransport {
                 .await
                 .map_err(|e| McpError::Transport(format!("Read error: {}", e)))?;
             if bytes_read == 0 {
-                return Err(McpError::ConnectionClosed);
+                let skipped = if non_json > 0 {
+                    format!(
+                        " ({non_json} non-JSON line(s) on stdout skipped; the last began: {last_non_json:?})"
+                    )
+                } else {
+                    String::new()
+                };
+                return Err(self.closed_error(&skipped).await);
             }
             let line = line.trim();
             if line.is_empty() {
@@ -173,9 +317,17 @@ impl McpTransport for StdioTransport {
             let value: serde_json::Value = match serde_json::from_str(line) {
                 Ok(v) => v,
                 Err(e) => {
-                    // Not a message: stray output, or the rest of a line a
-                    // cancelled call left half-read.
-                    debug!("MCP stdio: skipping a non-JSON line on '{method}': {e}");
+                    // Stray output (a banner, a debug print), the rest of a
+                    // line a cancelled call left half-read — or the server's
+                    // real answer, written broken. Say so: skipping it
+                    // silently turns a broken answer into a timeout.
+                    non_json += 1;
+                    last_non_json = line.chars().take(80).collect();
+                    warn!(
+                        "MCP server '{}': skipping a non-JSON line on stdout during '{method}' ({} bytes, {e}): {last_non_json:?}",
+                        self.command,
+                        line.len()
+                    );
                     continue;
                 }
             };
@@ -189,11 +341,19 @@ impl McpTransport for StdioTransport {
                 }
                 continue;
             }
-            match value.get("id").and_then(|i| i.as_u64()) {
+            match response_id(&value) {
                 Some(id) if id == request_id => return Ok(serde_json::from_value(value)?),
                 // JSON-RPC allows a null id on an error the server could not
-                // attribute to a request; it can only be ours.
-                None if value.get("error").is_some() => return Ok(serde_json::from_value(value)?),
+                // attribute to a request — usually a line it could not parse.
+                // Calls are one at a time, so it is taken as this one's;
+                // logged, since an interrupted earlier write can cause it.
+                None if value.get("error").is_some() => {
+                    warn!(
+                        "MCP server '{}': an error without an id arrived during '{method}'; reporting it for this call",
+                        self.command
+                    );
+                    return Ok(serde_json::from_value(value)?);
+                }
                 other => debug!("MCP stdio: dropping a response for id {other:?} on '{method}'"),
             }
         }
@@ -205,9 +365,12 @@ impl McpTransport for StdioTransport {
     }
 
     async fn close(&self) -> Result<(), McpError> {
-        // Drop stdin to signal EOF, then kill the child
+        // Kill the server and reap it. An error here means it had already
+        // exited, which is what close wants anyway: logged, not returned.
         let mut child = self.child.lock().await;
-        let _ = child.kill().await;
+        if let Err(e) = child.kill().await {
+            debug!("MCP server '{}': kill on close: {e}", self.command);
+        }
         Ok(())
     }
 }
@@ -666,13 +829,20 @@ impl McpTransport for HttpTransport {
             .send()
             .await
             .map_err(|e| McpError::Transport(format!("HTTP error on '{method}': {e}")))?;
-        if resp.status().is_success() {
+        let status = resp.status();
+        if status.is_success() {
             Ok(())
         } else {
-            Err(McpError::Transport(format!(
-                "HTTP {} from server on notification '{method}'",
-                resp.status()
-            )))
+            let body = resp.text().await.unwrap_or_default();
+            let detail = body.trim();
+            Err(McpError::Transport(if detail.is_empty() {
+                format!("HTTP {status} from server on notification '{method}'")
+            } else {
+                format!(
+                    "HTTP {status} from server on notification '{method}': {}",
+                    detail.chars().take(200).collect::<String>()
+                )
+            }))
         }
     }
 
@@ -728,9 +898,9 @@ mod tests {
         line.push('\n');
 
         {
-            let mut stdin = transport.stdin.lock().await;
-            stdin.write_all(line.as_bytes()).await.unwrap();
-            stdin.flush().await.unwrap();
+            let mut writer = transport.stdin.lock().await;
+            writer.stdin.write_all(line.as_bytes()).await.unwrap();
+            writer.stdin.flush().await.unwrap();
         }
 
         let mut response_line = String::new();

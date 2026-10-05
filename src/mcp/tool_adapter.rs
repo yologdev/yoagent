@@ -22,18 +22,21 @@ impl McpToolAdapter {
     /// hanging the agent.
     pub const DEFAULT_CALL_TIMEOUT: Duration = Duration::from_secs(300);
 
-    /// Create a new adapter.
+    /// Create a new adapter, with no call timeout (the run's cancellation
+    /// still ends a call). [`from_client`](Self::from_client) applies the
+    /// client's default instead.
     pub fn new(client: Arc<Mutex<McpClient>>, tool: McpToolInfo) -> Self {
         Self {
             client,
             tool,
             prefix: None,
-            call_timeout: Some(Self::DEFAULT_CALL_TIMEOUT),
+            call_timeout: None,
         }
     }
 
-    /// Bound each call (`None`: no bound). The run's cancellation ends a call
-    /// either way.
+    /// Bound each call (`None`: no bound). The clock starts once the call is
+    /// sent, not while it waits behind another call to the same server. The
+    /// run's cancellation ends a call either way.
     pub fn with_call_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.call_timeout = timeout;
         self
@@ -46,11 +49,17 @@ impl McpToolAdapter {
     }
 
     /// Create adapters for all tools from an MCP client.
+    ///
+    /// Each adapter gets the client's call timeout
+    /// ([`McpClient::call_timeout`]).
     pub async fn from_client(client: Arc<Mutex<McpClient>>) -> Result<Vec<Self>, McpError> {
-        let tools = client.lock().await.list_tools().await?;
+        let (tools, timeout) = {
+            let c = client.lock().await;
+            (c.list_tools().await?, c.call_timeout())
+        };
         Ok(tools
             .into_iter()
-            .map(|tool| McpToolAdapter::new(client.clone(), tool))
+            .map(|tool| McpToolAdapter::new(client.clone(), tool).with_call_timeout(timeout))
             .collect())
     }
 
@@ -60,10 +69,17 @@ impl McpToolAdapter {
         prefix: impl Into<String>,
     ) -> Result<Vec<Self>, McpError> {
         let prefix = prefix.into();
-        let tools = client.lock().await.list_tools().await?;
+        let (tools, timeout) = {
+            let c = client.lock().await;
+            (c.list_tools().await?, c.call_timeout())
+        };
         Ok(tools
             .into_iter()
-            .map(|tool| McpToolAdapter::new(client.clone(), tool).with_prefix(prefix.clone()))
+            .map(|tool| {
+                McpToolAdapter::new(client.clone(), tool)
+                    .with_prefix(prefix.clone())
+                    .with_call_timeout(timeout)
+            })
             .collect())
     }
 }
@@ -101,18 +117,19 @@ impl AgentTool for McpToolAdapter {
         params: serde_json::Value,
         ctx: ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        // Waiting for the client (another call may hold it) counts too.
-        let call = async {
-            let client = self.client.lock().await;
-            client.call_tool(&self.tool.name, params).await
+        // Wait for the client (another call to this server may hold it): only
+        // cancellation ends the wait, the call timeout has not started.
+        let client = tokio::select! {
+            _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+            client = self.client.lock() => client,
         };
+        let call = client.call_tool(&self.tool.name, params);
         let bounded = async {
             match self.call_timeout {
                 Some(limit) => crate::rt::timeout(limit, call).await.map_err(|_| {
                     ToolError::Failed(format!(
-                        "MCP call '{}' timed out after {}s",
-                        self.tool.name,
-                        limit.as_secs()
+                        "MCP call '{}' got no answer within {limit:?}. The request was sent, so the server may still carry it out: check before retrying anything that is not safe to repeat.",
+                        self.tool.name
                     ))
                 }),
                 None => Ok(call.await),

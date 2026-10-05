@@ -164,8 +164,10 @@ pub struct McpToolCallResult {
     pub is_error: bool,
 }
 
-/// Read each content block, keeping one this crate does not model as its JSON
-/// text: the model still sees what the tool returned.
+/// Read each content block, keeping one this crate does not model as text
+/// the model can use: a `resource`'s own text, or the block's JSON with any
+/// large `data` / `blob` payload replaced by its size (base64 audio would
+/// otherwise go into the context verbatim).
 fn lenient_content<'de, D>(deserializer: D) -> Result<Vec<McpContent>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -173,14 +175,77 @@ where
     let blocks = Vec::<serde_json::Value>::deserialize(deserializer)?;
     Ok(blocks
         .into_iter()
-        .map(|block| {
-            serde_json::from_value::<McpContent>(block.clone()).unwrap_or_else(|_| {
-                McpContent::Text {
-                    text: block.to_string(),
+        .map(
+            |block| match serde_json::from_value::<McpContent>(block.clone()) {
+                Ok(content) => content,
+                Err(e) => {
+                    let kind = block
+                        .get("type")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("(none)")
+                        .to_string();
+                    warn_unmodelled(&kind, &e);
+                    McpContent::Text {
+                        text: unmodelled_text(block),
+                    }
                 }
-            })
-        })
+            },
+        )
         .collect())
+}
+
+/// Warn once per content type that had to be passed through as text.
+fn warn_unmodelled(kind: &str, error: &serde_json::Error) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let first = SEEN
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .map(|mut seen| seen.insert(kind.to_string()))
+        .unwrap_or(true);
+    if first {
+        tracing::warn!(
+            "MCP content of type '{kind}' is not modelled ({error}); passing it to the model as text"
+        );
+    }
+}
+
+/// Payloads longer than this are replaced by a note of their size.
+const MAX_INLINE_PAYLOAD: usize = 1024;
+
+fn unmodelled_text(mut block: serde_json::Value) -> String {
+    // A text resource: its own text is what the model wants.
+    if let Some(resource) = block.get("resource") {
+        if let Some(text) = resource.get("text").and_then(|t| t.as_str()) {
+            let uri = resource.get("uri").and_then(|u| u.as_str()).unwrap_or("");
+            return format!("[resource {uri}]\n{text}");
+        }
+    }
+    shrink_payloads(&mut block);
+    block.to_string()
+}
+
+fn shrink_payloads(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, v) in map.iter_mut() {
+                match v {
+                    serde_json::Value::String(s)
+                        if (key == "data" || key == "blob") && s.len() > MAX_INLINE_PAYLOAD =>
+                    {
+                        *v = serde_json::Value::String(format!(
+                            "[{} bytes of base64 omitted]",
+                            s.len()
+                        ));
+                    }
+                    other => shrink_payloads(other),
+                }
+            }
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(shrink_payloads),
+        _ => {}
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -278,9 +343,25 @@ mod tests {
         assert_eq!(result.content.len(), 3);
         assert!(matches!(&result.content[0], McpContent::Text { text } if text == "hi"));
         assert!(
-            matches!(&result.content[1], McpContent::Text { text } if text.contains("file:///a.txt"))
+            matches!(&result.content[1], McpContent::Text { text } if text == "[resource file:///a.txt]\nbody")
         );
         assert!(matches!(&result.content[2], McpContent::Text { text } if text.contains("audio")));
+    }
+
+    #[test]
+    fn large_unmodelled_payloads_are_replaced_by_their_size() {
+        let blob = "A".repeat(5000);
+        let json = format!(
+            r#"{{"content":[{{"type":"audio","data":"{blob}","mimeType":"audio/wav"}},{{"type":"resource","resource":{{"uri":"file:///b.bin","blob":"{blob}"}}}}]}}"#
+        );
+        let result: McpToolCallResult = serde_json::from_str(&json).unwrap();
+        for content in &result.content {
+            let McpContent::Text { text } = content else {
+                panic!("expected text")
+            };
+            assert!(text.contains("[5000 bytes of base64 omitted]"), "{text}");
+            assert!(text.len() < 500, "{} bytes kept", text.len());
+        }
     }
 
     #[test]
