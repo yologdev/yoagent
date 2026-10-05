@@ -490,8 +490,15 @@ async fn test_search_returns_matches_despite_unreadable_files() {
         panic!("expected text")
     };
     assert!(text.contains("needle here"), "{text}");
-    assert!(text.contains("Warnings"), "{text}");
-    assert_eq!(result.details["warnings"], true);
+    assert!(text.contains("Warnings:"), "{text}");
+    // The warning text itself, not a flag.
+    assert!(
+        result.details["warnings"]
+            .as_str()
+            .is_some_and(|w| w.contains("locked.txt")),
+        "{}",
+        result.details
+    );
 }
 
 /// With no matches at all, an error is still an error.

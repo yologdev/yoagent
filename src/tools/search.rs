@@ -205,7 +205,9 @@ impl AgentTool for SearchTool {
         if errored && lines.is_empty() {
             return Err(ToolError::Failed(format!("Search error: {}", stderr)));
         }
-        let warnings = (!more && !stderr.trim().is_empty()).then(|| {
+        // Kept on the early-stop path too: only the exit status is
+        // meaningless after the kill, not what was written to stderr.
+        let warnings = (!stderr.trim().is_empty()).then(|| {
             let text = stderr.trim();
             match text.char_indices().nth(2000) {
                 Some((cut, _)) => format!("{}\n... (more warnings not shown)", &text[..cut]),
@@ -233,9 +235,7 @@ impl AgentTool for SearchTool {
             format!("{}\n({} matches)", lines.join("\n"), shown)
         };
         if let Some(w) = &warnings {
-            text.push_str(&format!(
-                "\nWarnings (some files could not be searched):\n{w}"
-            ));
+            text.push_str(&format!("\nWarnings:\n{w}"));
         }
 
         Ok(ToolResult {
@@ -243,7 +243,7 @@ impl AgentTool for SearchTool {
             details: serde_json::json!({
                 "matches": shown,
                 "truncated": more,
-                "warnings": warnings.is_some(),
+                "warnings": warnings,
             }),
         })
     }
