@@ -196,10 +196,22 @@ impl AgentTool for SearchTool {
 
         // grep returns exit code 1 for "no matches" — that's not an error. A
         // search stopped early (more matches than shown) was killed: its
-        // status says nothing.
-        if !more && (status.code() == Some(2) || (!stderr.is_empty() && status.code() != Some(1))) {
+        // status says nothing. rg and grep exit 2 when *any* file errors
+        // (permission denied, a broken symlink, a file removed mid-walk), even
+        // with matches found: those matches are the answer, with the errors
+        // as warnings. Only a search with nothing to show is a failure.
+        let errored =
+            !more && (status.code() == Some(2) || (!stderr.is_empty() && status.code() != Some(1)));
+        if errored && lines.is_empty() {
             return Err(ToolError::Failed(format!("Search error: {}", stderr)));
         }
+        let warnings = (!more && !stderr.trim().is_empty()).then(|| {
+            let text = stderr.trim();
+            match text.char_indices().nth(2000) {
+                Some((cut, _)) => format!("{}\n... (more warnings not shown)", &text[..cut]),
+                None => text.to_string(),
+            }
+        });
 
         if lines.is_empty() {
             return Ok(ToolResult {
@@ -211,7 +223,7 @@ impl AgentTool for SearchTool {
         }
 
         let shown = lines.len();
-        let text = if more {
+        let mut text = if more {
             format!(
                 "{}\n... (showing the first {} matches; there are more. Narrow the pattern, path or include.)",
                 lines.join("\n"),
@@ -220,10 +232,19 @@ impl AgentTool for SearchTool {
         } else {
             format!("{}\n({} matches)", lines.join("\n"), shown)
         };
+        if let Some(w) = &warnings {
+            text.push_str(&format!(
+                "\nWarnings (some files could not be searched):\n{w}"
+            ));
+        }
 
         Ok(ToolResult {
             content: vec![Content::Text { text }],
-            details: serde_json::json!({ "matches": shown, "truncated": more }),
+            details: serde_json::json!({
+                "matches": shown,
+                "truncated": more,
+                "warnings": warnings.is_some(),
+            }),
         })
     }
 }

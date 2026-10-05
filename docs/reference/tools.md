@@ -129,7 +129,9 @@ pub struct SearchTool {
 
 Returns matching lines with file paths and line numbers. Past `max_results` the search is stopped
 and the result says there are more (`details.truncated`). The pattern and path are passed so they
-can never be read as flags.
+can never be read as flags. When some files cannot be searched (unreadable, removed mid-walk), the
+matches found elsewhere are still returned, followed by the errors as warnings
+(`details.warnings`); only a search that found nothing and hit an error fails.
 
 ## SharedStateTool
 

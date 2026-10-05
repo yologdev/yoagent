@@ -463,6 +463,51 @@ async fn test_search_exactly_max_results_is_not_truncated() {
     assert_eq!(result.details["truncated"], false);
 }
 
+/// When some files cannot be searched (here: unreadable), rg and grep exit 2
+/// even though they found matches elsewhere. Those matches are the answer;
+/// the errors come back as warnings, not as a failed search.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_search_returns_matches_despite_unreadable_files() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("ok.txt"), "needle here\n").unwrap();
+    let locked = tmp.path().join("locked.txt");
+    std::fs::write(&locked, "needle too\n").unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read(&locked).is_ok() {
+        // Running as root: nothing is unreadable, so there is nothing to test.
+        return;
+    }
+
+    let tool = SearchTool::new().with_root(tmp.path().to_str().unwrap());
+    let result = tool
+        .execute(serde_json::json!({"pattern": "needle"}), ctx("search"))
+        .await;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let result = result.expect("matches are returned, not a search error");
+    let Content::Text { text } = &result.content[0] else {
+        panic!("expected text")
+    };
+    assert!(text.contains("needle here"), "{text}");
+    assert!(text.contains("Warnings"), "{text}");
+    assert_eq!(result.details["warnings"], true);
+}
+
+/// With no matches at all, an error is still an error.
+#[tokio::test]
+async fn test_search_error_without_matches_is_an_error() {
+    let tool = SearchTool::new();
+    let err = tool
+        .execute(
+            serde_json::json!({"pattern": "x", "path": "/definitely/not/a/dir"}),
+            ctx("search"),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("Search error"), "{err}");
+}
+
 // --- Edit tool tests ---
 
 #[tokio::test]
