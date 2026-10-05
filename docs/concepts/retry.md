@@ -139,16 +139,30 @@ agent.finish().await;
 
 - A successful attempt arrives whole: its `MessageStart`, every
   `MessageUpdate` and its `MessageEnd`, all at once when it finishes.
-- A retried attempt disappears; only its `ProviderRetry` remains.
-- An attempt that fails for good (or is `Aborted`) arrives as its
-  `MessageStart` and error `MessageEnd`, without the partial text.
-- All other events pass through unchanged and in order.
+- A retried attempt disappears; only its `ProviderRetry` remains. That
+  includes the last one when the run is aborted during the retry's backoff:
+  the turn's result is then only in `TurnEnd` / `AgentEnd`.
+- An attempt that fails for good arrives as its `MessageStart` and its
+  `Error` or `Aborted` `MessageEnd`, without its deltas. The `MessageEnd`'s
+  `content` still holds what the attempt produced, so print it from there if
+  you want it. (An attempt that failed before streaming anything sent no
+  message events, and none arrive.)
+- An attempt that is left open (the stream ends, or a retry or another
+  attempt starts before it ends) is dropped, never released, and logged.
+- Every other event passes through at once, so it can overtake an attempt
+  being held. Use one filter per agent's stream; a sender shared by several
+  agents would mix their attempts.
+
+It covers this agent's own assistant messages. A sub-agent's text reaches the
+parent as `ToolExecutionUpdate`s, which pass through unfiltered, retried text
+included.
 
 The trade is latency. Text arrives once per attempt rather than token by
 token, so use it for **non-interactive** output, where nobody watches the
 tokens arrive. Keep the live stream when your UI can rewind. `RetrySafeEvents`
 is the same filter without the spawned task (`push` each event, then
-`finish`), for consumers that already run their own loop over the events.
+`finish`, which also resets it for another stream), for consumers that
+already run their own loop over the events.
 
 ### Interactive terminals
 
@@ -163,7 +177,8 @@ let mut rx = agent.prompt("hello").await;
 let mut streamed = false;
 while let Some(event) = rx.recv().await {
     match &event {
-        AgentEvent::MessageStart { .. } => streamed = false,
+        // Only text from the current attempt counts.
+        AgentEvent::TurnStart | AgentEvent::MessageStart { .. } => streamed = false,
         AgentEvent::MessageUpdate { delta, .. } => {
             if let StreamDelta::Text { delta } | StreamDelta::Thinking { delta } = delta {
                 streamed |= !delta.is_empty();
@@ -180,13 +195,18 @@ while let Some(event) = rx.recv().await {
 agent.finish().await;
 ```
 
-The abort lands during the retry's backoff, which races cancellation: the
-turn ends at once and no retry request is sent. The turn's message (in
-`AgentEnd` and in history) carries `StopReason::Aborted`; no second
-`MessageEnd` is sent, because no new message was opened. An
-error that arrives before any text still retries as usual, and those are most
-of them (rate limits, overload, refused connections). The user sees the
-partial answer and the error, and decides whether to try again.
+The backoff races cancellation, so an abort that lands during it ends the
+turn at once and no retry request is sent. The turn's message (in `AgentEnd`
+and in history) carries `StopReason::Aborted`; no second `MessageEnd` is sent,
+because no new message was opened. That holds when the consumer reacts within
+the backoff, which by default is about a second. A very short backoff (a small
+`Retry-After`, or a tiny `initial_delay_ms`) can let the retry start first; it
+is then cancelled in flight, possibly after the provider began billing, and
+the turn still ends `Aborted`.
+
+An error that arrives before any text still retries as usual, for example a
+rate limit or a refused connection. The user sees the partial answer and the
+error, and decides whether to try again.
 
 ### Logs
 
