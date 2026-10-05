@@ -4,7 +4,11 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.24.2
+
+Security fixes for the built-in tools and the Gemini provider, found in a
+codebase review. Upgrade if you use the file tools with `allowed_paths`, the
+`search` tool, or Gemini. No breaking changes.
 
 ### Security
 
