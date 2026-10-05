@@ -25,17 +25,23 @@ pub trait McpTransport: crate::rt::MaybeSend + crate::rt::MaybeSync {
     /// Send a JSON-RPC notification, which gets no response.
     ///
     /// The default sends it through [`send`](Self::send) as a request and
-    /// waits for an answer — what this crate did before notifications had
-    /// their own path. A spec-compliant server never answers a notification,
-    /// so a transport should override this (the built-in ones do) to write it
-    /// and return.
+    /// waits for an answer, best-effort (an error is logged, not returned) —
+    /// what this crate did before notifications had their own path. A
+    /// spec-compliant server never answers a notification, so a transport
+    /// should override this (the built-in ones do) to write it and return;
+    /// an override's error fails the handshake.
     async fn notify(&self, notification: JsonRpcNotification) -> Result<(), McpError> {
-        self.send(JsonRpcRequest::new(
-            notification.method,
-            notification.params,
-        ))
-        .await
-        .map(|_| ())
+        let method = notification.method.clone();
+        if let Err(e) = self
+            .send(JsonRpcRequest::new(
+                notification.method,
+                notification.params,
+            ))
+            .await
+        {
+            warn!("MCP notification '{method}' through send() failed: {e}");
+        }
+        Ok(())
     }
     /// Close the transport.
     async fn close(&self) -> Result<(), McpError>;

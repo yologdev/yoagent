@@ -149,14 +149,22 @@ ends a stalled call, and a long one that keeps streaming must not be cut off.
 For a different bound, build the client yourself:
 
 ```rust
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex;
 use yoagent::mcp::{McpClient, McpToolAdapter};
+use yoagent::tools::default_tools;
+use yoagent::AgentTool;
 
 let client = McpClient::connect_stdio("my-server", &[], None)
     .await?
     .with_call_timeout(Some(Duration::from_secs(30 * 60)));
-let tools = McpToolAdapter::from_client(Arc::new(Mutex::new(client))).await?;
-let agent = agent.with_tools(tools.into_iter().map(|t| Box::new(t) as _).collect());
+let mcp_tools = McpToolAdapter::from_client(Arc::new(Mutex::new(client))).await?;
+
+// `with_tools` replaces the agent's tools, so pass everything it should have.
+let mut tools = default_tools();
+tools.extend(mcp_tools.into_iter().map(|t| Box::new(t) as Box<dyn AgentTool>));
+let agent = agent.with_tools(tools);
 ```
 
 A call that times out may still be carried out by the server; the error says

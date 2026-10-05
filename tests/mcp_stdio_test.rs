@@ -213,3 +213,24 @@ exit 0"#,
         started.elapsed()
     );
 }
+
+/// A server that closes its output but keeps reading: every later call reaches
+/// the close error (not a write error). The first one waits for the stderr
+/// drain and consumes it; later ones must not poll that finished task again
+/// (which panicked).
+#[tokio::test]
+async fn repeated_close_errors_do_not_panic() {
+    let client = connect(
+        r#"read -r line; id=$(id_of "$line")
+echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"serverInfo\":{\"name\":\"mute\",\"version\":\"1\"}}}"
+read -r note
+exec 1>&- 2>&-
+while read -r line; do :; done"#,
+    )
+    .await
+    .expect("connects");
+    for _ in 0..3 {
+        let err = client.list_tools().await.unwrap_err().to_string();
+        assert!(err.contains("Connection closed"), "{err}");
+    }
+}
