@@ -99,6 +99,16 @@ const MAX_SYMLINK_HOPS: u8 = 40;
 /// normalization for the part that does not exist yet. `None` when it cannot
 /// be resolved safely (a symlink loop, or an unreadable link).
 fn resolve(path: &Path, hops: u8) -> Option<PathBuf> {
+    // Anchor a relative path at the working directory first. Otherwise a walk
+    // that finds no existing prefix (`a/../link/x`, `a` missing) ends at ""
+    // and falls back to lexical normalization, skipping the symlink checks.
+    let anchored;
+    let path = if path.is_relative() {
+        anchored = std::env::current_dir().ok()?.join(path);
+        anchored.as_path()
+    } else {
+        path
+    };
     if let Ok(c) = std::fs::canonicalize(path) {
         return Some(c);
     }

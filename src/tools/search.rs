@@ -167,10 +167,17 @@ impl AgentTool for SearchTool {
                 let _ = tokio::io::copy(&mut err, &mut tokio::io::sink()).await;
                 String::from_utf8_lossy(&buf).into_owned()
             };
-            let ((lines, more), stderr) = tokio::join!(read_matches, read_errors);
-            if more {
-                let _ = child.start_kill();
-            }
+            // Kill as soon as there are more matches than shown: a search
+            // walking a large tree writes nothing for a while, so it would not
+            // notice the closed pipe. Stderr keeps draining meanwhile.
+            let read_and_stop = async {
+                let found = read_matches.await;
+                if found.1 {
+                    let _ = child.start_kill();
+                }
+                found
+            };
+            let ((lines, more), stderr) = tokio::join!(read_and_stop, read_errors);
             (lines, more, stderr, child.wait().await)
         };
 

@@ -59,13 +59,15 @@ impl StreamProvider for GoogleProvider {
         );
         // Trimmed: the URL parser used to strip a trailing CR/LF (a key read
         // from a CRLF `.env`), and a header value rejects it. Skipped when the
-        // caller authenticates through `ModelConfig.headers` (a header is
+        // caller sets `x-goog-api-key` in `ModelConfig.headers` (a header is
         // appended, not replaced, so it would be sent twice) or has no key.
+        // An `Authorization` header is left alone: it may be a proxy's own.
         let key = config.api_key.trim();
-        let user_auth = model_config.headers.keys().any(|k| {
-            k.eq_ignore_ascii_case("x-goog-api-key") || k.eq_ignore_ascii_case("authorization")
-        });
-        let key = if key.is_empty() || user_auth {
+        let user_key = model_config
+            .headers
+            .keys()
+            .any(|k| k.eq_ignore_ascii_case("x-goog-api-key"));
+        let key = if key.is_empty() || user_key {
             None
         } else {
             let mut value = reqwest::header::HeaderValue::from_str(key).map_err(|_| {

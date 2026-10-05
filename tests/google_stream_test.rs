@@ -502,3 +502,24 @@ async fn an_invalid_key_is_an_auth_error_and_nothing_is_sent() {
     assert!(err.to_string().contains("GEMINI_API_KEY"), "{err}");
     assert!(!err.to_string().contains("bad"), "{err}");
 }
+
+/// An `Authorization` header (a proxy's own, say) does not stop the key from
+/// being sent: only a caller-supplied `x-goog-api-key` replaces it.
+#[tokio::test]
+async fn an_authorization_header_keeps_the_key() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(header("x-goog-api-key", "test-key"))
+        .and(header("authorization", "Bearer proxy"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(ok_body(), "text/event-stream"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut config = stream_config(&server.uri(), vec![Message::user("hi")]);
+    if let Some(mc) = config.model_config.as_mut() {
+        mc.headers
+            .insert("Authorization".into(), "Bearer proxy".into());
+    }
+    run_stream(config).await;
+}
