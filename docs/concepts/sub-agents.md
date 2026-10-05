@@ -75,6 +75,7 @@ When the parent LLM calls multiple sub-agents in a single response, they run con
 | `with_context_config()` | Compaction budget for the sub-agent's context |
 | `with_model()` / `with_max_tokens()` / `with_temperature()` | Override model id and sampling settings |
 | `with_max_turns(N)` | Turn limit (default: 10). Primary guard against runaway execution. |
+| `with_execution_limits(ExecutionLimits)` | All per-delegation limits: turns, tokens, duration, loop detection (default: 10 / 1M / 300 s / on). |
 | `with_thinking()` | Enable extended thinking for the sub-agent |
 | `with_cache_config()` | Prompt caching settings |
 | `with_turn_delay()` | Inter-turn delay to throttle API calls (useful for rate-limit-sensitive providers) |

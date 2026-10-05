@@ -2052,7 +2052,10 @@ async fn execution_limits_are_configurable_per_delegation() {
     assert_eq!(text_of(&result), "final answer");
 }
 
-/// `with_max_turns` after `with_execution_limits` changes only the turns.
+/// `with_max_turns` after `with_execution_limits` changes only the turns: the
+/// lifted token cap survives, so the three heavy turns (1.2M tokens) and the
+/// answer all fit under a 5-turn cap. Had it reset the limits, the default 1M
+/// cap would stop the run after turn 3.
 #[tokio::test]
 async fn with_max_turns_keeps_the_other_limits() {
     let echo: Arc<dyn AgentTool> = Arc::new(EchoTool);
@@ -2061,7 +2064,7 @@ async fn with_max_turns_keeps_the_other_limits() {
         .with_execution_limits(
             yoagent::context::ExecutionLimits::default().with_max_total_tokens(usize::MAX),
         )
-        .with_max_turns(2);
+        .with_max_turns(5);
     let result = tool
         .execute(
             serde_json::json!({"task": "go"}),
@@ -2069,9 +2072,5 @@ async fn with_max_turns_keeps_the_other_limits() {
         )
         .await
         .unwrap();
-    let text = text_of(&result);
-    assert!(
-        text.contains("Max turns"),
-        "the turn cap, not the token cap: {text}"
-    );
+    assert_eq!(text_of(&result), "final answer");
 }
