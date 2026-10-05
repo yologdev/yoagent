@@ -8,6 +8,18 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Retry-safe event streams** (#218): `retry::retry_safe_events(rx)` and
+  `retry::RetrySafeEvents` hold back each provider attempt's events until it
+  succeeds. A retried attempt's partial text never reaches the consumer; a
+  final failure keeps its start and end (its `content` included) but not its
+  deltas; an attempt left open is dropped, never released. For
+  non-interactive, append-only output such as stdout on a pipe or a log. It
+  covers the agent's own messages, not a sub-agent's `ToolExecutionUpdate`s.
+  `docs/concepts/retry.md` also describes the pattern for interactive
+  terminals: abort when a retry follows streamed text. When the abort lands
+  in the backoff (by default about a second), the turn ends `Aborted` without
+  sending the retry (tested).
+
 - **`clef-worker` example** (`integrations/yoagent-workers/examples/clef-worker/`):
   a complete Cloudflare Worker running a yoagent agent whose tool calls are
   gated by Clef through the Workers AI binding (`ToolGate` + `yoagent_workers::ai::clef`).
@@ -30,6 +42,13 @@ adheres to [Semantic Versioning](https://semver.org/).
   exit); the Worker was deleted afterwards.
 - `examples/decision.rs` asks Clef instead of Jev when `CLOUDFLARE_ACCOUNT_ID`
   is set, says which model it uses, and exits 1 when the request fails.
+
+### Fixed
+
+- A provider that returns `Ok` without sending `StreamEvent::Done` no longer
+  leaves its message open: the loop sends the `MessageEnd` with the message
+  the provider returned. All built-in providers send `Done`; this affected
+  custom ones. A failed event forwarder is now logged instead of ignored.
 
 ## 0.24.0
 

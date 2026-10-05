@@ -116,6 +116,98 @@ failure is never followed by `ProviderRetry`, and only the successful answer
 [Messages & Events](messages-events.md#wire-format) for how a client should
 read the sequence.
 
+### Append-only consumers
+
+A retried attempt may already have streamed part of its answer before it
+failed. A UI can take that text back when it sees the error `MessageEnd` and
+the `ProviderRetry` after it. A consumer writing to an **append-only sink**
+(stdout on a pipe, a log file, a stream to a client) cannot: without help it
+prints the partial text and then the full answer from the retry.
+
+`yoagent::retry::retry_safe_events` wraps the receiver so that each provider
+attempt's events are held back until the attempt succeeds:
+
+```rust
+use yoagent::retry::retry_safe_events;
+
+let mut rx = retry_safe_events(agent.prompt("hello").await);
+while let Some(event) = rx.recv().await {
+    // Only the text of attempts that succeeded arrives here.
+}
+agent.finish().await;
+```
+
+- A successful attempt arrives whole: its `MessageStart`, every
+  `MessageUpdate` and its `MessageEnd`, all at once when it finishes.
+- A retried attempt disappears; only its `ProviderRetry` remains. That
+  includes the last one when the run is aborted during the retry's backoff:
+  the turn's result is then only in `TurnEnd` / `AgentEnd`.
+- An attempt that fails for good arrives as its `MessageStart` and its
+  `Error` or `Aborted` `MessageEnd`, without its deltas. The `MessageEnd`'s
+  `content` still holds what the attempt produced, so print it from there if
+  you want it. (An attempt that failed before streaming anything sent no
+  message events, and none arrive.)
+- An attempt that is left open (the stream ends, or a retry or another
+  attempt starts before it ends) is dropped, never released, and logged.
+- Every other event passes through at once, so it can overtake an attempt
+  being held. Use one filter per agent's stream; a sender shared by several
+  agents would mix their attempts.
+
+It covers this agent's own assistant messages. A sub-agent's text reaches the
+parent as `ToolExecutionUpdate`s, which pass through unfiltered, retried text
+included.
+
+The trade is latency. Text arrives once per attempt rather than token by
+token, so use it for **non-interactive** output, where nobody watches the
+tokens arrive. Keep the live stream when your UI can rewind. `RetrySafeEvents`
+is the same filter without the spawned task (`push` each event, then
+`finish`, which also resets it for another stream), for consumers that
+already run their own loop over the events.
+
+### Interactive terminals
+
+A person watching a terminal is better served by live streaming than by
+buffering, and a terminal cannot erase the partial text either. For that case,
+stop the run instead of letting it retry once text has appeared. Watch for
+text or thinking deltas, and call `agent.abort()` when a `ProviderRetry`
+arrives after some:
+
+```rust
+let mut rx = agent.prompt("hello").await;
+let mut streamed = false;
+while let Some(event) = rx.recv().await {
+    match &event {
+        // Only text from the current attempt counts.
+        AgentEvent::TurnStart | AgentEvent::MessageStart { .. } => streamed = false,
+        AgentEvent::MessageUpdate { delta, .. } => {
+            if let StreamDelta::Text { delta } | StreamDelta::Thinking { delta } = delta {
+                streamed |= !delta.is_empty();
+                print!("{delta}");
+            }
+        }
+        AgentEvent::ProviderRetry { error, .. } if streamed => {
+            eprintln!("\n[stopped: {error}]");
+            agent.abort();
+        }
+        _ => {}
+    }
+}
+agent.finish().await;
+```
+
+The backoff races cancellation, so an abort that lands during it ends the
+turn at once and no retry request is sent. The turn's message (in `AgentEnd`
+and in history) carries `StopReason::Aborted`; no second `MessageEnd` is sent,
+because no new message was opened. That holds when the consumer reacts within
+the backoff, which by default is about a second. A very short backoff (a small
+`Retry-After`, or a tiny `initial_delay_ms`) can let the retry start first;
+the abort then cancels it in flight (possibly after the provider began
+billing) and the turn ends `Aborted`, unless the retry already finished.
+
+An error that arrives before any text still retries as usual, for example a
+rate limit or a refused connection. The user sees the partial answer and the
+error, and decides whether to try again.
+
 ### Logs
 
 Retry attempts are also logged via `tracing` at the `WARN` level:

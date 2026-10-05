@@ -1345,7 +1345,13 @@ async fn stream_assistant_response(
         // ends once it has forwarded what the attempt produced. Draining it
         // (rather than aborting it) makes what consumers see deterministic:
         // every event of every attempt, never a timing-dependent subset.
-        let attempt_events = forward_handle.await.unwrap_or_default();
+        let attempt_events = match forward_handle.await {
+            Ok(events) => events,
+            Err(e) => {
+                warn!("event forwarder failed; this attempt's events may be incomplete: {e}");
+                AttemptEvents::default()
+            }
+        };
 
         match &result {
             Err(e) if e.is_retryable() && attempt < retry.max_retries && !cancel.is_cancelled() => {
@@ -1398,7 +1404,17 @@ async fn stream_assistant_response(
 
     let (result, attempt_events) = result;
     match result {
-        Ok(msg) => msg,
+        Ok(msg) => {
+            // A provider that returns without sending `Done` would leave its
+            // message open; close it with the message it returned.
+            if attempt_events.needs_end() {
+                tx.send(AgentEvent::MessageEnd {
+                    message: msg.clone().into(),
+                })
+                .ok();
+            }
+            msg
+        }
         Err(e) => {
             warn!("Provider error: {}", e);
             let mut failed = error_message(&config.model, e.to_string());

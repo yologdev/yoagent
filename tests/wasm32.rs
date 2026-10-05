@@ -263,3 +263,36 @@ async fn a_failed_attempt_is_retried_on_the_host_timer() {
         started.elapsed()
     );
 }
+
+/// `retry_safe_events` runs its filter on a task spawned on the host
+/// executor: the retried attempt's "partial" never reaches the consumer.
+#[wasm_bindgen_test]
+async fn retry_safe_events_drops_the_retried_text_on_the_host() {
+    let provider = FlakyOnce {
+        attempts: AtomicUsize::new(0),
+        inner: MockProvider::text("recovered"),
+    };
+    let mut agent =
+        Agent::from_provider(provider, ModelConfig::mock()).with_retry_config(RetryConfig {
+            max_retries: 2,
+            initial_delay_ms: 20,
+            backoff_multiplier: 1.0,
+            max_delay_ms: 20,
+        });
+    let events = drain(yoagent::retry::retry_safe_events(agent.prompt("hi").await)).await;
+    agent.finish().await;
+
+    let streamed: String = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::MessageUpdate {
+                delta: StreamDelta::Text { delta },
+                ..
+            } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(streamed, "recovered");
+    assert_eq!(final_text(&events), "recovered");
+    assert!(matches!(events.last(), Some(AgentEvent::AgentEnd { .. })));
+}
