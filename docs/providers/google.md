@@ -15,8 +15,8 @@ let agent = Agent::from_config(ModelConfig::google("gemini-3.8-flash", "Gemini 3
 
 ### API Details
 
-- **Endpoint**: `{base_url}/v1beta/models/{model}:streamGenerateContent?alt=sse&key={api_key}`
-- **Auth**: API key as query parameter
+- **Endpoint**: `{base_url}/v1beta/models/{model}:streamGenerateContent?alt=sse`
+- **Auth**: API key in the `x-goog-api-key` header (since 0.24.2; earlier versions put it in the URL, where transport errors could echo it)
 - **API key env**: `GEMINI_API_KEY`, then `GOOGLE_API_KEY` (see [API keys](overview.md#api-keys))
 - **Default base URL**: `https://generativelanguage.googleapis.com`
 - **Default context window**: 1,000,000 tokens

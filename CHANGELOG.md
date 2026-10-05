@@ -4,6 +4,42 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Security
+
+- **File-tool sandbox escapes (`write_file` / `edit_file` / `read_file` with `allowed_paths`):**
+  - **A `..` after a missing directory.** `PathSandbox` dropped every `..` that came after a directory that did not exist yet. `root/new/../../x` was checked as `root/new/x` (inside the root), while `write_file` created `root/new` and wrote `x` one level *above* the root.
+  - **A dangling symlink.** `root/link`, pointing at a missing file outside the root (a cloned repository can ship one), passed as a plain new file, and the write followed it to create the target outside.
+  - **A relative path whose first component is missing** (`a/../link/x`) was collapsed lexically and never checked for symlinks, so it could escape through `link`. The same gap rejected a plain new file such as `newdir/a.txt` as "outside the allowed directories".
+  - **What changed:**
+    - Relative paths are anchored at the working directory before resolving.
+    - `..` components are kept, and a path that climbs through a missing directory is resolved again.
+    - A dangling symlink is followed and checked; a symlink loop is refused.
+    - Sandboxed tools do their I/O on the path that was checked (`PathSandbox::io_path`).
+  - Without `allowed_paths`, paths are still used as given.
+- **`search` flag injection.** The model's pattern went to `rg` / `grep` as a bare argument, so a pattern starting with `-` was parsed as a flag. `--pre=<cmd>` makes ripgrep run a command on every file it searches.
+  - The pattern is now passed as `--regexp=` (`-e` for grep), with `--` before the path.
+  - `list_files` prefixes a path starting with `-`, so `find` cannot read it as an expression.
+- **Gemini API key in error text.** The key travelled in the URL (`?key=`), and reqwest includes the URL in its error messages. Any transport failure therefore put the key into logs, `ProviderRetry` events, the turn's `error_message` and GASP recordings.
+  - It is now sent in the `x-goog-api-key` header, marked sensitive.
+  - The key is trimmed, so one with a trailing CR/LF keeps working, as it did in the URL.
+  - The header is not added when `ModelConfig.headers` already sets `x-goog-api-key`, or when there is no key. An `Authorization` header (a proxy's, say) does not affect it.
+  - A proxy that forwards the `key` query parameter but drops unknown headers would need updating.
+
+### Fixed
+
+- **A panicking tool no longer kills the run.** Tool `execute` is now contained the way middleware already was, including a panic while the call's future is created. The panic becomes an error tool result (`tool '<name>' panicked: …`, logged with the `tool_call_id`) and the loop continues; a sibling call in the same batch is unaffected. Before, the loop task died and the run's messages were lost. The agent also silently lost all its tools for every later run.
+- **`bash`:**
+  - Output is cut as bytes and then decoded, so a cap that falls inside a multi-byte character no longer panics (it did on large CJK output).
+  - Each stream is read with a byte cap (`max_output_bytes` per stream), so memory stays bounded however much a command prints. The cap used to apply only after everything was buffered.
+  - A timeout or cancel kills the `bash` process (`kill_on_drop`); it used to keep running. What it started (pipeline stages, commands in a `&&` list, background jobs) can still outlive it.
+  - A timeout now returns the output printed so far, with the truncation note when the cap was hit. A read error on a stream is reported instead of looking like the end of the output.
+  - An already-cancelled call no longer starts the command.
+- **`search` / `list_files`:**
+  - `max_results` capped matches per file (`--max-count`), so a search could return far more than asked, all of it buffered. The tool now reads matches as they arrive, keeps the first `max_results` and stops the search at the next one, saying there are more (`details.truncated`).
+  - Both tools kill `rg` / `grep` / `find` on timeout or cancel.
+
 ## 0.24.1
 
 Retry-safe event streams for output that cannot take text back, and a loop

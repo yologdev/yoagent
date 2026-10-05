@@ -1759,7 +1759,11 @@ async fn execute_single_tool(
                 .catch_unwind()
                 .await
                 .unwrap_or_else(|_| {
-                    tracing::warn!(tool = name, "tool middleware panicked; denying the call");
+                    tracing::warn!(
+                        tool = name,
+                        tool_call_id = id,
+                        "tool middleware panicked; denying the call"
+                    );
                     ToolDecision::Deny("tool middleware panicked".into())
                 })
         };
@@ -1832,10 +1836,23 @@ async fn execute_single_tool(
     use tracing::Instrument;
     let (result, is_error) = match tool {
         Some(tool) => {
-            let execution = tool
-                .execute(args.clone(), ctx)
-                .instrument(tool_span.clone())
-                .await;
+            // A panicking tool must not kill the loop task (which would strip
+            // the agent of its tools and lose the run) — contain it and report
+            // it to the model as a failed call.
+            // The call is built inside the guarded block, so a panic while
+            // creating the future (a hand-written `execute`) is caught too.
+            let execution = {
+                use futures::FutureExt;
+                std::panic::AssertUnwindSafe(async { tool.execute(args.clone(), ctx).await })
+                    .catch_unwind()
+                    .instrument(tool_span.clone())
+                    .await
+                    .unwrap_or_else(|payload| {
+                        let why = crate::tool_source::panic_message(&*payload);
+                        tracing::error!(tool = name, tool_call_id = id, panic = %why, "tool panicked");
+                        Err(ToolError::Failed(format!("tool '{name}' panicked: {why}")))
+                    })
+            };
             match execution {
                 Ok(r) => (r, false),
                 Err(e) => (

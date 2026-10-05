@@ -20,7 +20,7 @@ Execute shell commands with timeout and output capture.
 pub struct BashTool {
     pub cwd: Option<String>,           // Working directory
     pub timeout: Duration,             // Default: 120s
-    pub max_output_bytes: usize,       // Default: 256KB
+    pub max_output_bytes: usize,       // Default: 256KB, per stream (stdout and stderr each)
     pub deny_patterns: Vec<String>,    // Blocked commands
     pub env_allowlist: Option<Vec<String>>, // Default: None (inherit the whole environment)
     pub confirm_fn: Option<ConfirmFn>, // Confirmation callback
@@ -32,6 +32,10 @@ guardrails against typos, not a security control.
 
 By default a command inherits the agent's whole environment, including any `*_API_KEY`. Set
 `env_allowlist` to pass only the listed variables (plus `PATH`, `HOME`, `PWD` if present).
+
+Output beyond `max_output_bytes` is drained and discarded, so memory stays bounded. A timeout
+returns an error carrying the output so far. A timeout or cancel kills the `bash` process, but not
+what it started (pipeline stages, `&&` lists, background jobs).
 
 ### Example
 
@@ -64,7 +68,9 @@ pub struct ReadFileTool {
 
 Every file tool (`read_file`, `write_file`, `edit_file`, `list_files`, `search`) has
 `allowed_paths` and a `with_allowed_paths(..)` builder. The check runs against the *resolved*
-path, so `..` and symlinks cannot escape (see `PathSandbox`).
+path, so `..` and symlinks (dangling ones included) cannot escape, and the tool does its I/O on
+the checked path (see `PathSandbox`). Before 0.24.2 a `..` after a missing directory, or a
+dangling symlink, could get past the check.
 
 ## WriteFileTool
 
@@ -115,13 +121,15 @@ Search files using ripgrep, falling back to grep.
 ```rust
 pub struct SearchTool {
     pub root: Option<String>,      // Root directory
-    pub max_results: usize,        // Default: 50
+    pub max_results: usize,        // Default: 50, in total
     pub timeout: Duration,         // Default: 30s
     pub allowed_paths: Vec<String>,
 }
 ```
 
-Returns matching lines with file paths and line numbers.
+Returns matching lines with file paths and line numbers. Past `max_results` the search is stopped
+and the result says there are more (`details.truncated`). The pattern and path are passed so they
+can never be read as flags.
 
 ## SharedStateTool
 

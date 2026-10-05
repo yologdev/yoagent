@@ -1465,3 +1465,127 @@ async fn test_drop_aborts_in_flight_tool_and_closes_channel() {
         "dropping the Agent must close the event channel; it stayed open"
     );
 }
+
+/// A tool that panics when asked to.
+struct PanickyTool;
+
+#[async_trait::async_trait]
+impl AgentTool for PanickyTool {
+    fn name(&self) -> &str {
+        "panicky"
+    }
+    fn label(&self) -> &str {
+        "Panicky"
+    }
+    fn description(&self) -> &str {
+        "Panics on request"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object", "properties": {"boom": {"type": "boolean"}}})
+    }
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        _ctx: ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if params["boom"].as_bool().unwrap_or(false) {
+            panic!("kaboom");
+        }
+        Ok(ToolResult {
+            content: vec![Content::Text { text: "ok".into() }],
+            details: serde_json::Value::Null,
+        })
+    }
+}
+
+fn panicky_call(boom: bool) -> MockResponse {
+    MockResponse::ToolCalls(vec![MockToolCall {
+        provider_metadata: None,
+        name: "panicky".into(),
+        arguments: serde_json::json!({ "boom": boom }),
+    }])
+}
+
+fn tool_ends(events: &[AgentEvent]) -> Vec<(bool, String)> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::ToolExecutionEnd {
+                result, is_error, ..
+            } => match result.content.first() {
+                Some(Content::Text { text }) => Some((*is_error, text.clone())),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+/// A panicking tool fails its call, not the run — and the agent keeps its
+/// tools for the next run (a dead loop task used to take them with it).
+#[tokio::test]
+async fn a_panicking_tool_fails_the_call_not_the_agent() {
+    let provider = MockProvider::new(vec![
+        panicky_call(true),
+        MockResponse::Text("recovered".into()),
+        panicky_call(false),
+        MockResponse::Text("done".into()),
+    ]);
+    let mut agent =
+        Agent::from_provider(provider, ModelConfig::mock()).with_tools(vec![Box::new(PanickyTool)]);
+
+    let mut rx = agent.prompt("first").await;
+    let mut first = Vec::new();
+    while let Some(e) = rx.recv().await {
+        first.push(e);
+    }
+    agent.finish().await;
+    let ends = tool_ends(&first);
+    assert_eq!(ends.len(), 1);
+    assert!(ends[0].0, "the panic is an error result");
+    assert!(ends[0].1.contains("panicked: kaboom"), "{}", ends[0].1);
+    assert!(matches!(first.last(), Some(AgentEvent::AgentEnd { .. })));
+
+    let mut rx = agent.prompt("second").await;
+    let mut second = Vec::new();
+    while let Some(e) = rx.recv().await {
+        second.push(e);
+    }
+    agent.finish().await;
+    assert_eq!(tool_ends(&second), vec![(false, "ok".to_string())]);
+}
+
+/// Under the default parallel strategy, a panicking call does not take its
+/// sibling down: both calls end, one as an error, one with its result.
+#[tokio::test]
+async fn a_panicking_tool_does_not_take_down_a_sibling_call() {
+    let provider = MockProvider::new(vec![
+        MockResponse::ToolCalls(vec![
+            MockToolCall {
+                provider_metadata: None,
+                name: "panicky".into(),
+                arguments: serde_json::json!({ "boom": true }),
+            },
+            MockToolCall {
+                provider_metadata: None,
+                name: "panicky".into(),
+                arguments: serde_json::json!({ "boom": false }),
+            },
+        ]),
+        MockResponse::Text("done".into()),
+    ]);
+    let mut agent =
+        Agent::from_provider(provider, ModelConfig::mock()).with_tools(vec![Box::new(PanickyTool)]);
+    let mut rx = agent.prompt("go").await;
+    let mut events = Vec::new();
+    while let Some(e) = rx.recv().await {
+        events.push(e);
+    }
+    agent.finish().await;
+
+    let mut ends = tool_ends(&events);
+    ends.sort();
+    assert_eq!(ends.len(), 2);
+    assert_eq!(ends[0], (false, "ok".to_string()));
+    assert!(ends[1].0 && ends[1].1.contains("panicked"), "{:?}", ends[1]);
+}

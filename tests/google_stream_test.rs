@@ -7,7 +7,7 @@
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{header, method, path, query_param_is_missing};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 use yoagent::provider::{GoogleProvider, ModelConfig, StreamConfig, StreamProvider};
 use yoagent::types::*;
@@ -381,4 +381,145 @@ async fn thought_parts_map_to_thinking_content() {
         })
         .expect("answer text");
     assert_eq!(text, "The answer is 4.");
+}
+
+/// The API key travels in `x-goog-api-key`, never in the URL, where reqwest's
+/// error text (logs, retry events, transcripts) would carry it.
+#[tokio::test]
+async fn the_api_key_is_sent_as_a_header_not_in_the_url() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/v1beta/models/{}:streamGenerateContent",
+            MODEL
+        )))
+        .and(header("x-goog-api-key", "test-key"))
+        .and(query_param_is_missing("key"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            sse(&[
+                r#"{"candidates":[{"content":{"parts":[{"text":"hi"}],"role":"model"},"finishReason":"STOP","index":0}]}"#,
+            ]),
+            "text/event-stream",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    run_stream(stream_config(&server.uri(), vec![Message::user("hi")])).await;
+}
+
+/// A transport failure's error text does not contain the key.
+#[tokio::test]
+async fn a_network_error_does_not_leak_the_key() {
+    // Bind a port and release it, so nothing listens there: the connection
+    // is refused.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let config = stream_config(
+        &format!("http://127.0.0.1:{port}"),
+        vec![Message::user("hi")],
+    );
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let err = GoogleProvider
+        .stream(config, tx, CancellationToken::new())
+        .await
+        .expect_err("nothing is listening");
+    assert!(!err.to_string().contains("test-key"), "{err}");
+}
+
+fn ok_body() -> String {
+    sse(&[
+        r#"{"candidates":[{"content":{"parts":[{"text":"hi"}],"role":"model"},"finishReason":"STOP","index":0}]}"#,
+    ])
+}
+
+/// A key read from a CRLF `.env` keeps working: it is trimmed before it
+/// becomes a header (the URL parser used to strip the CR/LF).
+#[tokio::test]
+async fn a_key_with_a_trailing_newline_is_trimmed() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(header("x-goog-api-key", "test-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(ok_body(), "text/event-stream"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut config = stream_config(&server.uri(), vec![Message::user("hi")]);
+    config.api_key = "test-key\r\n".into();
+    run_stream(config).await;
+}
+
+/// A caller that authenticates through `ModelConfig.headers` gets exactly
+/// its own header — the built-in one is not appended next to it.
+#[tokio::test]
+async fn a_key_in_the_custom_headers_is_sent_once() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(|req: &wiremock::Request| {
+            let values: Vec<_> = req.headers.get_all("x-goog-api-key").iter().collect();
+            values.len() == 1 && values[0] == "from-headers"
+        })
+        .respond_with(ResponseTemplate::new(200).set_body_raw(ok_body(), "text/event-stream"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut config = stream_config(&server.uri(), vec![Message::user("hi")]);
+    config.api_key = "from-config".into();
+    if let Some(mc) = config.model_config.as_mut() {
+        mc.headers
+            .insert("X-Goog-Api-Key".into(), "from-headers".into());
+    }
+    run_stream(config).await;
+}
+
+/// A key that cannot be a header value fails before sending, and says so
+/// without echoing the key.
+#[tokio::test]
+async fn an_invalid_key_is_an_auth_error_and_nothing_is_sent() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let mut config = stream_config(&server.uri(), vec![Message::user("hi")]);
+    config.api_key = "bad\u{1}key".into();
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let err = GoogleProvider
+        .stream(config, tx, CancellationToken::new())
+        .await
+        .expect_err("an invalid header value must be refused");
+    assert!(
+        matches!(err, yoagent::provider::ProviderError::Auth(_)),
+        "{err:?}"
+    );
+    assert!(err.to_string().contains("GEMINI_API_KEY"), "{err}");
+    assert!(!err.to_string().contains("bad"), "{err}");
+}
+
+/// An `Authorization` header (a proxy's own, say) does not stop the key from
+/// being sent: only a caller-supplied `x-goog-api-key` replaces it.
+#[tokio::test]
+async fn an_authorization_header_keeps_the_key() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(header("x-goog-api-key", "test-key"))
+        .and(header("authorization", "Bearer proxy"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(ok_body(), "text/event-stream"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut config = stream_config(&server.uri(), vec![Message::user("hi")]);
+    if let Some(mc) = config.model_config.as_mut() {
+        mc.headers
+            .insert("Authorization".into(), "Bearer proxy".into());
+    }
+    run_stream(config).await;
 }

@@ -51,16 +51,44 @@ impl StreamProvider for GoogleProvider {
             .ok_or_else(|| ProviderError::Other("ModelConfig required".into()))?;
 
         let base_url = &model_config.base_url;
+        // The key goes in a header, never the URL: reqwest puts the URL in
+        // its error text, which reaches logs, retry events and transcripts.
         let url = format!(
-            "{}/v1beta/models/{}:streamGenerateContent?alt=sse&key={}",
-            base_url, config.model, config.api_key
+            "{}/v1beta/models/{}:streamGenerateContent?alt=sse",
+            base_url, config.model
         );
+        // Trimmed: the URL parser used to strip a trailing CR/LF (a key read
+        // from a CRLF `.env`), and a header value rejects it. Skipped when the
+        // caller sets `x-goog-api-key` in `ModelConfig.headers` (a header is
+        // appended, not replaced, so it would be sent twice) or has no key.
+        // An `Authorization` header is left alone: it may be a proxy's own.
+        let key = config.api_key.trim();
+        let user_key = model_config
+            .headers
+            .keys()
+            .any(|k| k.eq_ignore_ascii_case("x-goog-api-key"));
+        let key = if key.is_empty() || user_key {
+            None
+        } else {
+            let mut value = reqwest::header::HeaderValue::from_str(key).map_err(|_| {
+                ProviderError::Auth(
+                    "the Gemini API key contains a character not allowed in an HTTP header \
+                     (check GEMINI_API_KEY / GOOGLE_API_KEY, or the configured key)"
+                        .into(),
+                )
+            })?;
+            value.set_sensitive(true);
+            Some(value)
+        };
 
         let body = build_request_body(&config);
         debug!("Google GenAI request: model={}", config.model);
 
         let client = reqwest::Client::new();
         let mut request = client.post(&url).header("content-type", "application/json");
+        if let Some(key) = key {
+            request = request.header("x-goog-api-key", key);
+        }
 
         for (k, v) in &model_config.headers {
             request = request.header(k, v);

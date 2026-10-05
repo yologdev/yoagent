@@ -141,10 +141,10 @@ impl AgentTool for ReadFileTool {
             return Err(ToolError::Cancelled);
         }
 
-        crate::tools::PathSandbox::new(self.allowed_paths.clone()).check(path)?;
+        let io_path = crate::tools::PathSandbox::new(self.allowed_paths.clone()).io_path(path)?;
 
         // Check file exists and size
-        let metadata = tokio::fs::metadata(path)
+        let metadata = tokio::fs::metadata(&io_path)
             .await
             .map_err(|e| ToolError::Failed(format!("Cannot access {}: {}", path, e)))?;
 
@@ -159,7 +159,7 @@ impl AgentTool for ReadFileTool {
             }
             let mime_type = get_image_mime_type(file_path)
                 .ok_or_else(|| ToolError::Failed("Unknown image format".into()))?;
-            let bytes = tokio::fs::read(path)
+            let bytes = tokio::fs::read(&io_path)
                 .await
                 .map_err(|e| ToolError::Failed(format!("Cannot read {}: {}", path, e)))?;
             let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
@@ -181,7 +181,7 @@ impl AgentTool for ReadFileTool {
             )));
         }
 
-        let content = tokio::fs::read_to_string(path)
+        let content = tokio::fs::read_to_string(&io_path)
             .await
             .map_err(|e| ToolError::Failed(format!("Cannot read {}: {}", path, e)))?;
 
@@ -308,10 +308,10 @@ impl AgentTool for WriteFileTool {
             return Err(ToolError::Cancelled);
         }
 
-        crate::tools::PathSandbox::new(self.allowed_paths.clone()).check(path)?;
+        let io_path = crate::tools::PathSandbox::new(self.allowed_paths.clone()).io_path(path)?;
 
         // Create parent directories
-        if let Some(parent) = std::path::Path::new(path).parent() {
+        if let Some(parent) = io_path.parent() {
             if !parent.exists() {
                 tokio::fs::create_dir_all(parent)
                     .await
@@ -319,7 +319,7 @@ impl AgentTool for WriteFileTool {
             }
         }
 
-        tokio::fs::write(path, content)
+        tokio::fs::write(&io_path, content)
             .await
             .map_err(|e| ToolError::Failed(format!("Cannot write {}: {}", path, e)))?;
 

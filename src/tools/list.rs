@@ -88,10 +88,10 @@ impl AgentTool for ListFilesTool {
             return Err(ToolError::Cancelled);
         }
 
-        crate::tools::PathSandbox::new(self.allowed_paths.clone()).check(path)?;
+        let io_path = crate::tools::PathSandbox::new(self.allowed_paths.clone()).io_path(path)?;
 
         // Check path exists
-        if !std::path::Path::new(path).exists() {
+        if !io_path.exists() {
             return Err(ToolError::Failed(format!(
                 "Directory not found: {}. Check the path and try again.",
                 path
@@ -99,7 +99,8 @@ impl AgentTool for ListFilesTool {
         }
 
         let mut cmd = Command::new("find");
-        cmd.arg(path);
+        // A path starting with `-` would be read as a `find` expression.
+        cmd.arg(not_an_option(io_path));
         cmd.args(["-maxdepth", &max_depth.to_string()]);
 
         if let Some(pat) = pattern {
@@ -114,6 +115,8 @@ impl AgentTool for ListFilesTool {
         cmd.arg("-type").arg("f");
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
+        // A timeout or cancel drops the output future; take `find` with it.
+        cmd.kill_on_drop(true);
 
         let timeout = self.timeout;
 
@@ -152,5 +155,28 @@ impl AgentTool for ListFilesTool {
             content: vec![Content::Text { text }],
             details: serde_json::json!({ "total": total, "truncated": truncated }),
         })
+    }
+}
+
+/// Make a path unmistakable as an operand: `-x` becomes `./-x`.
+pub(crate) fn not_an_option(path: std::path::PathBuf) -> std::path::PathBuf {
+    if path.as_os_str().to_string_lossy().starts_with('-') {
+        std::path::Path::new(".").join(path)
+    } else {
+        path
+    }
+}
+
+#[cfg(test)]
+mod option_guard {
+    use super::not_an_option;
+    use std::path::PathBuf;
+
+    #[test]
+    fn only_a_leading_dash_is_rewritten() {
+        assert_eq!(not_an_option("-delete".into()), PathBuf::from("./-delete"));
+        assert_eq!(not_an_option("a/-b".into()), PathBuf::from("a/-b"));
+        assert_eq!(not_an_option("/abs".into()), PathBuf::from("/abs"));
+        assert_eq!(not_an_option(".".into()), PathBuf::from("."));
     }
 }

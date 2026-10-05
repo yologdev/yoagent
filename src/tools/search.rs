@@ -112,57 +112,96 @@ impl AgentTool for SearchTool {
             return Err(ToolError::Cancelled);
         }
 
-        crate::tools::PathSandbox::new(self.allowed_paths.clone()).check(&search_path)?;
+        let io_path = crate::tools::PathSandbox::new(self.allowed_paths.clone())
+            .io_path(&search_path)?
+            .to_string_lossy()
+            .into_owned();
 
         // Try ripgrep first, fall back to grep
         let (cmd_name, args) = if which_exists("rg") {
-            build_rg_args(
-                pattern,
-                &search_path,
-                include,
-                case_sensitive,
-                self.max_results,
-            )
+            build_rg_args(pattern, &io_path, include, case_sensitive)
         } else {
-            build_grep_args(
-                pattern,
-                &search_path,
-                include,
-                case_sensitive,
-                self.max_results,
-            )
+            build_grep_args(pattern, &io_path, include, case_sensitive)
         };
 
         let mut cmd = Command::new(&cmd_name);
         cmd.args(&args);
+        // `spawn` inherits stdin; the search never needs it.
+        cmd.stdin(std::process::Stdio::null());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
+        // A timeout or cancel drops the run; take the search with it.
+        cmd.kill_on_drop(true);
 
         let timeout = self.timeout;
+        let max = self.max_results;
 
-        let result = tokio::select! {
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| ToolError::Failed(format!("Search failed: {}", e)))?;
+        let (Some(child_out), Some(child_err)) = (child.stdout.take(), child.stderr.take()) else {
+            return Err(ToolError::Failed("Search failed: no output pipes".into()));
+        };
+
+        // Keep the first `max` match lines and stop the search at the next
+        // one: memory stays bounded and a huge result set costs nothing more.
+        let run = async {
+            use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+            let read_matches = async {
+                let mut reader = tokio::io::BufReader::new(child_out);
+                let mut lines = Vec::new();
+                let mut more = false;
+                let mut line = Vec::new();
+                while matches!(reader.read_until(b'\n', &mut line).await, Ok(n) if n > 0) {
+                    if lines.len() == max {
+                        more = true;
+                        break;
+                    }
+                    lines.push(String::from_utf8_lossy(&line).trim_end().to_string());
+                    line.clear();
+                }
+                (lines, more)
+            };
+            let read_errors = async {
+                let mut buf = Vec::new();
+                let mut err = child_err;
+                let _ = (&mut err).take(16 * 1024).read_to_end(&mut buf).await;
+                let _ = tokio::io::copy(&mut err, &mut tokio::io::sink()).await;
+                String::from_utf8_lossy(&buf).into_owned()
+            };
+            // Kill as soon as there are more matches than shown: a search
+            // walking a large tree writes nothing for a while, so it would not
+            // notice the closed pipe. Stderr keeps draining meanwhile.
+            let read_and_stop = async {
+                let found = read_matches.await;
+                if found.1 {
+                    let _ = child.start_kill();
+                }
+                found
+            };
+            let ((lines, more), stderr) = tokio::join!(read_and_stop, read_errors);
+            (lines, more, stderr, child.wait().await)
+        };
+
+        let (lines, more, stderr, status) = tokio::select! {
             _ = cancel.cancelled() => {
                 return Err(ToolError::Cancelled);
             }
             _ = tokio::time::sleep(timeout) => {
                 return Err(ToolError::Failed("Search timed out".into()));
             }
-            result = cmd.output() => {
-                result.map_err(|e| ToolError::Failed(format!("Search failed: {}", e)))?
-            }
+            done = run => done,
         };
+        let status = status.map_err(|e| ToolError::Failed(format!("Search failed: {}", e)))?;
 
-        let stdout = String::from_utf8_lossy(&result.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&result.stderr).to_string();
-
-        // grep returns exit code 1 for "no matches" — that's not an error
-        if result.status.code() == Some(2)
-            || (!stderr.is_empty() && result.status.code() != Some(1))
-        {
+        // grep returns exit code 1 for "no matches" — that's not an error. A
+        // search stopped early (more matches than shown) was killed: its
+        // status says nothing.
+        if !more && (status.code() == Some(2) || (!stderr.is_empty() && status.code() != Some(1))) {
             return Err(ToolError::Failed(format!("Search error: {}", stderr)));
         }
 
-        if stdout.trim().is_empty() {
+        if lines.is_empty() {
             return Ok(ToolResult {
                 content: vec![Content::Text {
                     text: format!("No matches found for '{}'", pattern),
@@ -171,20 +210,20 @@ impl AgentTool for SearchTool {
             });
         }
 
-        let match_count = stdout.lines().count();
-        let text = if match_count >= self.max_results {
+        let shown = lines.len();
+        let text = if more {
             format!(
-                "{}\n... (showing first {} matches)",
-                stdout.trim(),
-                self.max_results
+                "{}\n... (showing the first {} matches; there are more. Narrow the pattern, path or include.)",
+                lines.join("\n"),
+                shown
             )
         } else {
-            format!("{}\n({} matches)", stdout.trim(), match_count)
+            format!("{}\n({} matches)", lines.join("\n"), shown)
         };
 
         Ok(ToolResult {
             content: vec![Content::Text { text }],
-            details: serde_json::json!({ "matches": match_count }),
+            details: serde_json::json!({ "matches": shown, "truncated": more }),
         })
     }
 }
@@ -202,13 +241,8 @@ fn build_rg_args(
     path: &str,
     include: Option<&str>,
     case_sensitive: bool,
-    max_results: usize,
 ) -> (String, Vec<String>) {
-    let mut args = vec![
-        "--line-number".into(),
-        "--no-heading".into(),
-        format!("--max-count={}", max_results),
-    ];
+    let mut args = vec!["--line-number".into(), "--no-heading".into()];
 
     if !case_sensitive {
         args.push("--ignore-case".into());
@@ -218,7 +252,10 @@ fn build_rg_args(
         args.push(format!("--glob={}", glob));
     }
 
-    args.push(pattern.into());
+    // `--regexp=` and `--` keep a pattern or path that starts with `-` from
+    // being read as a flag (`--pre=<cmd>` would run a command).
+    args.push(format!("--regexp={pattern}"));
+    args.push("--".into());
     args.push(path.into());
 
     ("rg".into(), args)
@@ -229,9 +266,8 @@ fn build_grep_args(
     path: &str,
     include: Option<&str>,
     case_sensitive: bool,
-    max_results: usize,
 ) -> (String, Vec<String>) {
-    let mut args = vec!["-r".into(), "-n".into(), format!("-m{}", max_results)];
+    let mut args = vec!["-r".into(), "-n".into()];
 
     if !case_sensitive {
         args.push("-i".into());
@@ -241,8 +277,28 @@ fn build_grep_args(
         args.push(format!("--include={}", glob));
     }
 
+    args.push("-e".into());
     args.push(pattern.into());
+    args.push("--".into());
     args.push(path.into());
 
     ("grep".into(), args)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The pattern and the path can never be read as flags, whichever
+    /// backend runs: `--pre=<cmd>` would make ripgrep run a command.
+    #[test]
+    fn pattern_and_path_are_never_flags() {
+        let (_, rg) = build_rg_args("--pre=sh", "-x", Some("*.rs"), false);
+        assert_eq!(rg[rg.len() - 3..], ["--regexp=--pre=sh", "--", "-x"]);
+        assert!(rg.contains(&"--glob=*.rs".to_string()));
+
+        let (_, grep) = build_grep_args("--pre=sh", "-x", Some("*.rs"), false);
+        assert_eq!(grep[grep.len() - 4..], ["-e", "--pre=sh", "--", "-x"]);
+        assert!(grep.contains(&"--include=*.rs".to_string()));
+    }
 }

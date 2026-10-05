@@ -51,15 +51,13 @@ impl StreamProvider for GoogleVertexProvider {
             .as_ref()
             .ok_or_else(|| ProviderError::Other("ModelConfig required".into()))?;
 
-        // Override the base_url to use Vertex format.
-        // The GoogleProvider's stream will use model_config.base_url, but we need
-        // a different URL pattern. We delegate to GoogleProvider with a modified config.
+        // Vertex's URL pattern differs from the Gemini API's.
         let vertex_url = Self::vertex_url(model_config, &config.model);
 
         // Create a modified model config with the Vertex URL pattern
         let mut vertex_model = model_config.clone();
-        // For Vertex, auth is via Bearer token (OAuth2), not API key in query param.
-        // We need to add the Authorization header.
+        // Vertex authenticates with an OAuth2 Bearer token, not a Gemini API
+        // key.
         vertex_model.headers.insert(
             "authorization".to_string(),
             format!("Bearer {}", config.api_key),
@@ -92,19 +90,8 @@ impl StreamProvider for GoogleVertexProvider {
             ));
         }
 
-        // Delegate SSE parsing to the Google provider's streaming logic.
-        // Since the response format is identical, we reuse GoogleProvider.
-        // However, we already have the response, so we'll parse it inline.
-        // For simplicity, delegate fully to GoogleProvider with modified config.
-        let mut modified_config = config.clone();
-        modified_config.model_config = Some(vertex_model);
-
-        // Actually, let's just delegate to GoogleProvider. The key difference
-        // is auth (Bearer vs API key in URL). We handle that by using a modified
-        // model config. But GoogleProvider builds its own URL... so let's just
-        // use GoogleProvider with a trick: empty api_key and auth in headers.
-        // We can't easily reuse GoogleProvider because it constructs its own URL.
-        // Instead, parse the SSE response directly (same format as Google GenAI).
+        // Same SSE format as the Gemini API, parsed here because the URL and
+        // auth differ (sharing the parser with `google.rs` is #222).
         parse_google_sse_response(response, &config, &model_config.provider, tx, cancel).await
     }
 }
