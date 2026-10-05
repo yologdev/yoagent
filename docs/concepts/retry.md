@@ -116,6 +116,39 @@ failure is never followed by `ProviderRetry`, and only the successful answer
 [Messages & Events](messages-events.md#wire-format) for how a client should
 read the sequence.
 
+### Append-only consumers
+
+A retried attempt may already have streamed part of its answer before it
+failed. A UI can take that text back when it sees the error `MessageEnd` and
+the `ProviderRetry` after it. A consumer writing to an **append-only sink**
+(stdout on a pipe, a log file, a stream to a client) cannot: without help it
+prints the partial text and then the full answer from the retry.
+
+`yoagent::retry::retry_safe_events` wraps the receiver so that each provider
+attempt's events are held back until the attempt succeeds:
+
+```rust
+use yoagent::retry::retry_safe_events;
+
+let mut rx = retry_safe_events(agent.prompt("hello").await);
+while let Some(event) = rx.recv().await {
+    // Only the text of attempts that succeeded arrives here.
+}
+agent.finish().await;
+```
+
+- A successful attempt arrives whole: its `MessageStart`, every
+  `MessageUpdate` and its `MessageEnd`, all at once when it finishes.
+- A retried attempt disappears; only its `ProviderRetry` remains.
+- An attempt that fails for good (or is `Aborted`) arrives as its
+  `MessageStart` and error `MessageEnd`, without the partial text.
+- All other events pass through unchanged and in order.
+
+The trade is latency. Text arrives once per attempt rather than token by
+token, so keep the live stream when your UI can rewind. `RetrySafeEvents` is
+the same filter without the spawned task (`push` each event, then `finish`),
+for consumers that already run their own loop over the events.
+
 ### Logs
 
 Retry attempts are also logged via `tracing` at the `WARN` level:

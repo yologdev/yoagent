@@ -92,6 +92,279 @@ pub(crate) fn log_retry(attempt: usize, max: usize, delay: &Duration, error: &Pr
     );
 }
 
+// ---------------------------------------------------------------------------
+// Retry-safe event streams
+// ---------------------------------------------------------------------------
+
+/// Holds back each provider attempt's streamed output until the attempt
+/// succeeds, so a consumer never sees the text of an attempt that was retried.
+///
+/// The loop retries a provider attempt that fails with a retryable error
+/// (`RateLimited`, `Network`), and by then that attempt may already have
+/// streamed part of its answer. A consumer that can rewind handles this with
+/// the events it gets: the failed attempt ends with an error `MessageEnd`,
+/// followed by [`AgentEvent::ProviderRetry`](crate::AgentEvent::ProviderRetry). A consumer writing to an
+/// **append-only sink** — stdout on a pipe, a log, a stream to a client — cannot
+/// take text back. Feed its events through this filter instead:
+///
+/// - An assistant attempt's `MessageStart` and `MessageUpdate`s are held and
+///   released together with its `MessageEnd` when it succeeds (any stop reason
+///   but `Error` or `Aborted`).
+/// - An attempt that is retried disappears: only its `ProviderRetry` passes.
+/// - An attempt that fails for good passes as its `MessageStart` and error
+///   `MessageEnd`, without the partial text it streamed. The same goes for an
+///   `Aborted` one.
+/// - Everything else passes straight through, in order, including event kinds
+///   added after this was written.
+///
+/// The cost is incremental output: an attempt's text arrives all at once when
+/// it finishes, rather than as it is generated. That is the trade — a consumer
+/// that can rewind should keep the live stream instead.
+///
+/// ```
+/// use yoagent::retry::RetrySafeEvents;
+/// # fn forward(_: yoagent::AgentEvent) {}
+/// # fn run(events: Vec<yoagent::AgentEvent>) {
+/// let mut filter = RetrySafeEvents::new();
+/// for event in events {
+///     for ready in filter.push(event) {
+///         forward(ready);
+///     }
+/// }
+/// for ready in filter.finish() {
+///     forward(ready);
+/// }
+/// # }
+/// ```
+///
+/// For a receiver from [`Agent::prompt`](crate::Agent::prompt), see
+/// [`retry_safe_events`].
+#[derive(Debug, Default)]
+pub struct RetrySafeEvents {
+    /// The open assistant attempt: its `MessageStart` and `MessageUpdate`s.
+    attempt: Vec<crate::AgentEvent>,
+    /// An attempt that ended with an error, waiting on the next event: a
+    /// `ProviderRetry` means it was retried, anything else that it was final.
+    failed: Option<(Option<crate::AgentEvent>, crate::AgentEvent)>,
+}
+
+impl RetrySafeEvents {
+    /// An empty filter.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Take one event; returns the events to forward now, in order.
+    pub fn push(&mut self, event: crate::AgentEvent) -> Vec<crate::AgentEvent> {
+        use crate::AgentEvent;
+        let mut out = Vec::new();
+        if let Some((start, end)) = self.failed.take() {
+            if matches!(event, AgentEvent::ProviderRetry { .. }) {
+                // Retried: the failed attempt never happened, as far as the
+                // consumer is concerned.
+                out.push(event);
+                return out;
+            }
+            out.extend(start);
+            out.push(end);
+        }
+        match event {
+            AgentEvent::MessageStart { ref message } if is_assistant(message) => {
+                // A new attempt while one is open should not happen; release
+                // the open one rather than lose it.
+                out.append(&mut self.attempt);
+                self.attempt.push(event);
+            }
+            AgentEvent::MessageUpdate { .. } if !self.attempt.is_empty() => {
+                self.attempt.push(event);
+            }
+            AgentEvent::MessageEnd { ref message } if is_assistant(message) => {
+                let start = (!self.attempt.is_empty()).then(|| self.attempt.remove(0));
+                if ended_without_answer(message) {
+                    // Drop what it streamed; hold its start and end until we
+                    // know whether it is retried.
+                    self.attempt.clear();
+                    self.failed = Some((start, event));
+                } else {
+                    out.extend(start);
+                    out.append(&mut self.attempt);
+                    out.push(event);
+                }
+            }
+            other => out.push(other),
+        }
+        out
+    }
+
+    /// The stream ended: returns whatever is still held. A failed attempt
+    /// with nothing after it was final, so its start and end are released; an
+    /// attempt the stream ended inside is dropped.
+    pub fn finish(&mut self) -> Vec<crate::AgentEvent> {
+        self.attempt.clear();
+        match self.failed.take() {
+            Some((start, end)) => start.into_iter().chain([end]).collect(),
+            None => Vec::new(),
+        }
+    }
+}
+
+fn is_assistant(message: &crate::AgentMessage) -> bool {
+    matches!(
+        message,
+        crate::AgentMessage::Llm(crate::Message::Assistant { .. })
+    )
+}
+
+fn ended_without_answer(message: &crate::AgentMessage) -> bool {
+    matches!(
+        message,
+        crate::AgentMessage::Llm(crate::Message::Assistant {
+            stop_reason: crate::StopReason::Error | crate::StopReason::Aborted,
+            ..
+        })
+    )
+}
+
+/// [`RetrySafeEvents`] over a receiver: returns a receiver that yields the
+/// same events with each provider attempt held back until it succeeds.
+///
+/// ```no_run
+/// # async fn demo(mut agent: yoagent::Agent) {
+/// let mut rx = yoagent::retry::retry_safe_events(agent.prompt("hi").await);
+/// while let Some(event) = rx.recv().await {
+///     // Only successful attempts' text reaches here.
+/// }
+/// agent.finish().await;
+/// # }
+/// ```
+///
+/// The filtering runs on a task spawned with [`crate::rt::spawn`], so this
+/// needs a runtime (Tokio natively; the host's executor on wasm32).
+pub fn retry_safe_events(
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<crate::AgentEvent>,
+) -> tokio::sync::mpsc::UnboundedReceiver<crate::AgentEvent> {
+    let (tx, out) = tokio::sync::mpsc::unbounded_channel();
+    crate::rt::spawn(async move {
+        let mut filter = RetrySafeEvents::new();
+        while let Some(event) = rx.recv().await {
+            for ready in filter.push(event) {
+                if tx.send(ready).is_err() {
+                    return;
+                }
+            }
+        }
+        for ready in filter.finish() {
+            let _ = tx.send(ready);
+        }
+    });
+    out
+}
+
+#[cfg(test)]
+mod retry_safe {
+    use super::RetrySafeEvents;
+    use crate::{AgentEvent, AgentMessage, Message, StopReason, StreamDelta, Usage};
+
+    fn assistant(stop: StopReason) -> AgentMessage {
+        AgentMessage::Llm(Message::assistant(vec![], stop, "m", "p", Usage::default()))
+    }
+    fn start() -> AgentEvent {
+        AgentEvent::MessageStart {
+            message: assistant(StopReason::Stop),
+        }
+    }
+    fn delta(text: &str) -> AgentEvent {
+        AgentEvent::MessageUpdate {
+            message: assistant(StopReason::Stop),
+            delta: StreamDelta::Text { delta: text.into() },
+        }
+    }
+    fn end(stop: StopReason) -> AgentEvent {
+        AgentEvent::MessageEnd {
+            message: assistant(stop),
+        }
+    }
+    fn retry() -> AgentEvent {
+        AgentEvent::ProviderRetry {
+            attempt: 1,
+            max_attempts: 3,
+            error: "cut".into(),
+            delay_ms: 1,
+        }
+    }
+    fn feed(events: Vec<AgentEvent>) -> Vec<AgentEvent> {
+        let mut filter = RetrySafeEvents::new();
+        let mut out: Vec<AgentEvent> = events.into_iter().flat_map(|e| filter.push(e)).collect();
+        out.extend(filter.finish());
+        out
+    }
+
+    #[test]
+    fn a_successful_attempt_is_released_whole_at_its_end() {
+        let mut filter = RetrySafeEvents::new();
+        assert!(filter.push(start()).is_empty());
+        assert!(filter.push(delta("a")).is_empty());
+        assert_eq!(
+            filter.push(end(StopReason::Stop)),
+            vec![start(), delta("a"), end(StopReason::Stop)]
+        );
+    }
+
+    #[test]
+    fn a_retried_attempt_leaves_only_its_marker() {
+        let out = feed(vec![
+            start(),
+            delta("PARTIAL_"),
+            end(StopReason::Error),
+            retry(),
+            start(),
+            delta("PONG"),
+            end(StopReason::Stop),
+        ]);
+        assert_eq!(
+            out,
+            vec![retry(), start(), delta("PONG"), end(StopReason::Stop)]
+        );
+    }
+
+    #[test]
+    fn a_final_failure_is_released_without_its_text() {
+        // Followed by another event…
+        let out = feed(vec![
+            start(),
+            delta("x"),
+            end(StopReason::Error),
+            AgentEvent::TurnStart,
+        ]);
+        assert_eq!(
+            out,
+            vec![start(), end(StopReason::Error), AgentEvent::TurnStart]
+        );
+        // …or by the end of the stream.
+        let out = feed(vec![start(), delta("x"), end(StopReason::Aborted)]);
+        assert_eq!(out, vec![start(), end(StopReason::Aborted)]);
+    }
+
+    #[test]
+    fn an_attempt_the_stream_ends_inside_is_dropped() {
+        assert!(feed(vec![start(), delta("x")]).is_empty());
+    }
+
+    #[test]
+    fn a_second_start_releases_the_open_attempt() {
+        let out = feed(vec![start(), delta("a"), start(), end(StopReason::Stop)]);
+        assert_eq!(
+            out,
+            vec![start(), delta("a"), start(), end(StopReason::Stop)]
+        );
+    }
+
+    #[test]
+    fn updates_outside_an_attempt_pass_through() {
+        assert_eq!(feed(vec![delta("x")]), vec![delta("x")]);
+    }
+}
+
 #[cfg(test)]
 mod attempt_indexing {
     use super::RetryConfig;

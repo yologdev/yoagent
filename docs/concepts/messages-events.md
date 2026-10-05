@@ -184,6 +184,11 @@ an LLM call ends with `stopReason: "aborted"`, including one cancelled during
 a retry's backoff; cancelling between turns or while tools run ends the run
 without a new assistant message.
 
+A Rust consumer that cannot discard text it already wrote (stdout, a log) can
+wrap its receiver in `retry::retry_safe_events`, which removes retried
+attempts before they reach it. See
+[Retry: append-only consumers](retry.md#append-only-consumers).
+
 A client that misses events entirely (e.g. a lagged websocket subscriber)
 resyncs from the next `MessageEnd` without replay.
 

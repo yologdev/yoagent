@@ -8,6 +8,11 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Retry-safe event streams** (#218): `retry::retry_safe_events(rx)` and
+  `retry::RetrySafeEvents` hold back each provider attempt's events until it
+  succeeds. A retried attempt's partial text never reaches the consumer, and
+  a final failure keeps its start and error end but not its text. This is for
+  append-only sinks such as stdout on a pipe. The loop is unchanged.
 - **`clef-worker` example** (`integrations/yoagent-workers/examples/clef-worker/`):
   a complete Cloudflare Worker running a yoagent agent whose tool calls are
   gated by Clef through the Workers AI binding (`ToolGate` + `yoagent_workers::ai::clef`).
