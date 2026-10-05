@@ -51,16 +51,25 @@ impl StreamProvider for GoogleProvider {
             .ok_or_else(|| ProviderError::Other("ModelConfig required".into()))?;
 
         let base_url = &model_config.base_url;
+        // The key goes in a header, never the URL: reqwest puts the URL in
+        // its error text, which reaches logs, retry events and transcripts.
         let url = format!(
-            "{}/v1beta/models/{}:streamGenerateContent?alt=sse&key={}",
-            base_url, config.model, config.api_key
+            "{}/v1beta/models/{}:streamGenerateContent?alt=sse",
+            base_url, config.model
         );
+        let mut key = reqwest::header::HeaderValue::from_str(&config.api_key).map_err(|_| {
+            ProviderError::Auth("the Gemini API key is not a valid header value".into())
+        })?;
+        key.set_sensitive(true);
 
         let body = build_request_body(&config);
         debug!("Google GenAI request: model={}", config.model);
 
         let client = reqwest::Client::new();
-        let mut request = client.post(&url).header("content-type", "application/json");
+        let mut request = client
+            .post(&url)
+            .header("content-type", "application/json")
+            .header("x-goog-api-key", key);
 
         for (k, v) in &model_config.headers {
             request = request.header(k, v);

@@ -7,7 +7,7 @@
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{header, method, path, query_param_is_missing};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 use yoagent::provider::{GoogleProvider, ModelConfig, StreamConfig, StreamProvider};
 use yoagent::types::*;
@@ -381,4 +381,42 @@ async fn thought_parts_map_to_thinking_content() {
         })
         .expect("answer text");
     assert_eq!(text, "The answer is 4.");
+}
+
+/// The API key travels in `x-goog-api-key`, never in the URL, where reqwest's
+/// error text (logs, retry events, transcripts) would carry it.
+#[tokio::test]
+async fn the_api_key_is_sent_as_a_header_not_in_the_url() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/v1beta/models/{}:streamGenerateContent",
+            MODEL
+        )))
+        .and(header("x-goog-api-key", "test-key"))
+        .and(query_param_is_missing("key"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            sse(&[
+                r#"{"candidates":[{"content":{"parts":[{"text":"hi"}],"role":"model"},"finishReason":"STOP","index":0}]}"#,
+            ]),
+            "text/event-stream",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    run_stream(stream_config(&server.uri(), vec![Message::user("hi")])).await;
+}
+
+/// A transport failure's error text does not contain the key.
+#[tokio::test]
+async fn a_network_error_does_not_leak_the_key() {
+    // Nothing listens on port 9 (discard) here: the connection is refused.
+    let config = stream_config("http://127.0.0.1:9", vec![Message::user("hi")]);
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let err = GoogleProvider
+        .stream(config, tx, CancellationToken::new())
+        .await
+        .expect_err("nothing is listening");
+    assert!(!err.to_string().contains("test-key"), "{err}");
 }

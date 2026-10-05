@@ -88,10 +88,10 @@ impl AgentTool for ListFilesTool {
             return Err(ToolError::Cancelled);
         }
 
-        crate::tools::PathSandbox::new(self.allowed_paths.clone()).check(path)?;
+        let io_path = crate::tools::PathSandbox::new(self.allowed_paths.clone()).io_path(path)?;
 
         // Check path exists
-        if !std::path::Path::new(path).exists() {
+        if !io_path.exists() {
             return Err(ToolError::Failed(format!(
                 "Directory not found: {}. Check the path and try again.",
                 path
@@ -99,7 +99,8 @@ impl AgentTool for ListFilesTool {
         }
 
         let mut cmd = Command::new("find");
-        cmd.arg(path);
+        // A path starting with `-` would be read as a `find` expression.
+        cmd.arg(not_an_option(io_path));
         cmd.args(["-maxdepth", &max_depth.to_string()]);
 
         if let Some(pat) = pattern {
@@ -152,5 +153,14 @@ impl AgentTool for ListFilesTool {
             content: vec![Content::Text { text }],
             details: serde_json::json!({ "total": total, "truncated": truncated }),
         })
+    }
+}
+
+/// Make a path unmistakable as an operand: `-x` becomes `./-x`.
+pub(crate) fn not_an_option(path: std::path::PathBuf) -> std::path::PathBuf {
+    if path.as_os_str().to_string_lossy().starts_with('-') {
+        std::path::Path::new(".").join(path)
+    } else {
+        path
     }
 }

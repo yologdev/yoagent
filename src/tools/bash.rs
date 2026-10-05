@@ -31,7 +31,9 @@ pub struct BashTool {
     pub cwd: Option<String>,
     /// Max execution time per command
     pub timeout: Duration,
-    /// Max output bytes to capture (prevents OOM on huge outputs)
+    /// Max bytes captured from each of stdout and stderr. Reading stops
+    /// keeping bytes past this (the rest is drained and discarded), so memory
+    /// stays bounded however much a command prints.
     pub max_output_bytes: usize,
     /// Substrings that block a command outright.
     ///
@@ -182,54 +184,112 @@ impl AgentTool for BashTool {
         // Capture output
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
+        // A timeout or cancel must not leave the command running. This kills
+        // `bash` itself; background jobs it started (`server &`) can outlive
+        // it — run the agent in a container if that matters.
+        cmd.kill_on_drop(true);
 
         let timeout = self.timeout;
         let max_bytes = self.max_output_bytes;
 
-        // Run with timeout and cancellation
-        let result = tokio::select! {
-            _ = cancel.cancelled() => {
-                return Err(ToolError::Cancelled);
+        if cancel.is_cancelled() {
+            return Err(ToolError::Cancelled);
+        }
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| ToolError::Failed(format!("Failed to execute: {}", e)))?;
+        let (Some(child_out), Some(child_err)) = (child.stdout.take(), child.stderr.take()) else {
+            return Err(ToolError::Failed("Failed to capture output".into()));
+        };
+
+        // The buffers live outside the race, so a timeout still has what the
+        // command printed before it.
+        let mut out_buf = Vec::new();
+        let mut err_buf = Vec::new();
+        let outcome = {
+            let run = async {
+                let (out_cut, err_cut) = tokio::join!(
+                    read_capped(child_out, &mut out_buf, max_bytes),
+                    read_capped(child_err, &mut err_buf, max_bytes),
+                );
+                (child.wait().await, out_cut, err_cut)
+            };
+            tokio::select! {
+                _ = cancel.cancelled() => None,
+                _ = tokio::time::sleep(timeout) => Some(Err(())),
+                done = run => Some(Ok(done)),
             }
-            _ = tokio::time::sleep(timeout) => {
+        };
+        let (status, out_cut, err_cut) = match outcome {
+            None => return Err(ToolError::Cancelled),
+            Some(Err(())) => {
+                let _ = child.start_kill();
                 return Err(ToolError::Failed(format!(
-                    "Command timed out after {}s",
-                    timeout.as_secs()
+                    "Command timed out after {}s. Output so far:\n{}",
+                    timeout.as_secs(),
+                    render_output(&out_buf, &err_buf, false, false)
                 )));
             }
-            result = cmd.output() => {
-                result.map_err(|e| ToolError::Failed(format!("Failed to execute: {}", e)))?
-            }
+            Some(Ok((status, out_cut, err_cut))) => (
+                status.map_err(|e| ToolError::Failed(format!("Failed to execute: {}", e)))?,
+                out_cut,
+                err_cut,
+            ),
         };
-
-        let mut stdout = String::from_utf8_lossy(&result.stdout).to_string();
-        let mut stderr = String::from_utf8_lossy(&result.stderr).to_string();
-
-        // Truncate if too large
-        if stdout.len() > max_bytes {
-            stdout.truncate(max_bytes);
-            stdout.push_str("\n... (output truncated)");
-        }
-        if stderr.len() > max_bytes {
-            stderr.truncate(max_bytes);
-            stderr.push_str("\n... (output truncated)");
-        }
-
-        let exit_code = result.status.code().unwrap_or(-1);
-
-        let output = if stderr.is_empty() {
-            format!("Exit code: {}\n{}", exit_code, stdout)
-        } else {
-            format!(
-                "Exit code: {}\nSTDOUT:\n{}\nSTDERR:\n{}",
-                exit_code, stdout, stderr
-            )
-        };
+        let exit_code = status.code().unwrap_or(-1);
+        let output = format!(
+            "Exit code: {}\n{}",
+            exit_code,
+            render_output(&out_buf, &err_buf, out_cut, err_cut)
+        );
 
         // Return output even on failure — LLMs need error output to self-correct
         Ok(ToolResult {
             content: vec![Content::Text { text: output }],
             details: serde_json::json!({ "exit_code": exit_code, "success": exit_code == 0 }),
         })
+    }
+}
+
+/// Read `from` to the end, keeping at most `cap` bytes in `into`; the rest is
+/// drained and discarded so the child never blocks on a full pipe. Returns
+/// whether anything was discarded.
+async fn read_capped<R>(mut from: R, into: &mut Vec<u8>, cap: usize) -> bool
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+    let mut chunk = [0u8; 8192];
+    let mut cut = false;
+    loop {
+        match from.read(&mut chunk).await {
+            Ok(0) | Err(_) => return cut,
+            Ok(n) => {
+                let room = cap.saturating_sub(into.len());
+                into.extend_from_slice(&chunk[..n.min(room)]);
+                cut |= n > room;
+            }
+        }
+    }
+}
+
+/// Stdout alone, or both streams labelled. Bytes are cut before decoding, so
+/// a multi-byte character split by the cap becomes U+FFFD, never a panic.
+fn render_output(stdout: &[u8], stderr: &[u8], out_cut: bool, err_cut: bool) -> String {
+    let text = |bytes: &[u8], cut: bool| {
+        let mut s = String::from_utf8_lossy(bytes).into_owned();
+        if cut {
+            s.push_str("\n... (output truncated)");
+        }
+        s
+    };
+    if stderr.is_empty() && !err_cut {
+        text(stdout, out_cut)
+    } else {
+        format!(
+            "STDOUT:\n{}\nSTDERR:\n{}",
+            text(stdout, out_cut),
+            text(stderr, err_cut)
+        )
     }
 }

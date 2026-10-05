@@ -43,6 +43,19 @@ impl PathSandbox {
         Self { roots }
     }
 
+    /// [`check`](Self::check) for a tool about to touch `path`: the path to do
+    /// the I/O on. Unrestricted, that is `path` as given, so output keeps the
+    /// caller's spelling. Restricted, it is the resolved path that was
+    /// checked, so the OS cannot reach anything the check did not see.
+    pub fn io_path(&self, path: &str) -> Result<PathBuf, ToolError> {
+        let resolved = self.check(path)?;
+        Ok(if self.is_unrestricted() {
+            PathBuf::from(path)
+        } else {
+            resolved
+        })
+    }
+
     /// Whether any restriction applies.
     pub fn is_unrestricted(&self) -> bool {
         self.roots.is_empty()
@@ -80,20 +93,32 @@ fn resolve(path: &Path) -> PathBuf {
     // Walk up to the nearest existing ancestor, canonicalize that, and
     // re-append the trailing components. This is what makes a not-yet-created
     // file under a symlinked directory resolve to its real location.
-    let mut trailing = Vec::new();
+    let mut trailing: Vec<std::ffi::OsString> = Vec::new();
+    let mut climbs = false;
     let mut current = path;
     loop {
         match current.parent() {
             Some(parent) => {
-                if let Some(name) = current.file_name() {
-                    trailing.push(name.to_owned());
+                // Keep every component, `..` included: `file_name()` is `None`
+                // for `..`, and dropping it made `root/new/../../x` resolve to
+                // `root/new/x` — inside the root — while the OS wrote `x` one
+                // level above it.
+                if let Some(last) = current.components().next_back() {
+                    climbs |= last == Component::ParentDir;
+                    trailing.push(last.as_os_str().to_owned());
                 }
                 if let Ok(base) = std::fs::canonicalize(parent) {
                     let mut out = base;
                     for part in trailing.iter().rev() {
                         out.push(part);
                     }
-                    return normalize_lexically(&out);
+                    let out = normalize_lexically(&out);
+                    // The missing components will be created as real
+                    // directories, so collapsing their `..` lexically matches
+                    // what the OS does. What follows may name an existing
+                    // symlink (`root/new/../link/x`), so resolve the collapsed
+                    // path again; it has no `..` left, so this ends.
+                    return if climbs { resolve(&out) } else { out };
                 }
                 current = parent;
             }
@@ -162,6 +187,60 @@ mod tests {
         assert!(
             s.check(escape.to_str().unwrap()).is_err(),
             "`..` must not escape the sandbox"
+        );
+    }
+
+    #[test]
+    fn traversal_through_a_missing_directory_is_rejected() {
+        // `x` does not exist: the walk-up used to drop the `..` components
+        // and resolve this to `root/x/escaped.txt`.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("workspace");
+        std::fs::create_dir_all(&root).unwrap();
+        let s = PathSandbox::new(vec![root.to_string_lossy().to_string()]);
+
+        for escape in ["x/../../escaped.txt", "x/y/../../../escaped.txt"] {
+            let p = root.join(escape);
+            assert!(
+                s.check(p.to_str().unwrap()).is_err(),
+                "{escape} must not escape the sandbox"
+            );
+        }
+        // Climbing back inside the root is fine.
+        let inside = root.join("x/../ok.txt");
+        assert!(s.check(inside.to_str().unwrap()).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn traversal_through_a_missing_directory_into_a_symlink_is_rejected() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("workspace");
+        std::fs::create_dir_all(&root).unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+        let s = PathSandbox::new(vec![root.to_string_lossy().to_string()]);
+
+        let p = root.join("new/../link/x.txt");
+        assert!(
+            s.check(p.to_str().unwrap()).is_err(),
+            "a `..` that lands on a symlink out of the root must be rejected"
+        );
+    }
+
+    #[test]
+    fn io_path_is_the_checked_path_only_when_restricted() {
+        assert_eq!(
+            PathSandbox::default().io_path("rel/a.txt").unwrap(),
+            PathBuf::from("rel/a.txt")
+        );
+        let tmp = TempDir::new().unwrap();
+        let s = PathSandbox::new(vec![tmp.path().to_string_lossy().to_string()]);
+        let p = tmp.path().join("a/../b.txt");
+        assert_eq!(
+            s.io_path(p.to_str().unwrap()).unwrap(),
+            std::fs::canonicalize(tmp.path()).unwrap().join("b.txt")
         );
     }
 

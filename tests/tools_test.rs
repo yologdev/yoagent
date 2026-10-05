@@ -71,6 +71,65 @@ async fn test_bash_timeout() {
     assert!(err.contains("timed out"));
 }
 
+/// Cutting output inside a multi-byte character must not panic (it used to:
+/// `String::truncate` off a char boundary).
+#[tokio::test]
+async fn test_bash_truncation_inside_a_multibyte_character() {
+    let mut tool = BashTool::new();
+    tool.max_output_bytes = 4; // "日" is 3 bytes: the cut lands inside "本"
+    let result = tool
+        .execute(
+            serde_json::json!({"command": "printf '日本語'"}),
+            ctx("bash"),
+        )
+        .await
+        .unwrap();
+    let Content::Text { text } = &result.content[0] else {
+        panic!("expected text")
+    };
+    assert!(text.starts_with("Exit code: 0\n日"), "{text}");
+    assert!(text.contains("(output truncated)"), "{text}");
+}
+
+/// Output beyond the cap is drained, not kept, and the command completes.
+#[tokio::test]
+async fn test_bash_large_output_is_capped() {
+    let mut tool = BashTool::new();
+    tool.max_output_bytes = 1000;
+    let result = tool
+        .execute(
+            serde_json::json!({"command": "head -c 5000000 /dev/zero | tr '\\0' a"}),
+            ctx("bash"),
+        )
+        .await
+        .unwrap();
+    let Content::Text { text } = &result.content[0] else {
+        panic!("expected text")
+    };
+    assert!(text.len() < 1100, "{} bytes kept", text.len());
+    assert!(text.contains("(output truncated)"));
+}
+
+/// A timeout returns what the command printed so far, and kills it.
+#[tokio::test]
+async fn test_bash_timeout_keeps_output_and_kills_the_command() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let marker = tmp.path().join("still-running");
+    let tool = BashTool::new().with_timeout(std::time::Duration::from_millis(1000));
+    let command = format!("echo started; sleep 2; touch '{}'", marker.display());
+    let err = tool
+        .execute(serde_json::json!({ "command": command }), ctx("bash"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("timed out"), "{err}");
+    assert!(err.contains("started"), "{err}");
+
+    // Well past when the command would have touched the marker.
+    tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+    assert!(!marker.exists(), "the timed-out command kept running");
+}
+
 #[tokio::test]
 async fn test_bash_cancel() {
     let tool = BashTool::new();
@@ -234,6 +293,49 @@ async fn test_search_no_matches() {
     assert!(text.contains("No matches"));
 
     let _ = std::fs::remove_dir_all(tmp_dir);
+}
+
+/// A pattern that looks like a flag is searched for, never parsed as one.
+/// (`--pre=<cmd>` would make ripgrep run a command on every file.)
+#[tokio::test]
+async fn test_search_pattern_that_looks_like_a_flag_is_literal() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("a.txt"), "use --files here\nnothing\n").unwrap();
+
+    let tool = SearchTool::new().with_root(tmp.path().to_str().unwrap());
+    let result = tool
+        .execute(serde_json::json!({"pattern": "--files"}), ctx("search"))
+        .await
+        .unwrap();
+    let Content::Text { text } = &result.content[0] else {
+        panic!("expected text")
+    };
+    assert!(text.contains("use --files here"), "{text}");
+    assert!(text.contains("(1 matches)"), "{text}");
+}
+
+/// `max_results` caps the total, not the matches per file.
+#[tokio::test]
+async fn test_search_caps_the_total_number_of_matches() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    for f in ["a.txt", "b.txt", "c.txt"] {
+        std::fs::write(tmp.path().join(f), "hit\nhit\nhit\n").unwrap();
+    }
+    let mut tool = SearchTool::new().with_root(tmp.path().to_str().unwrap());
+    tool.max_results = 4;
+    let result = tool
+        .execute(serde_json::json!({"pattern": "hit"}), ctx("search"))
+        .await
+        .unwrap();
+    let Content::Text { text } = &result.content[0] else {
+        panic!("expected text")
+    };
+    assert_eq!(
+        text.lines().filter(|l| l.contains("hit")).count(),
+        4,
+        "{text}"
+    );
+    assert!(text.contains("showing first 4 of"), "{text}");
 }
 
 // --- Edit tool tests ---

@@ -112,31 +112,24 @@ impl AgentTool for SearchTool {
             return Err(ToolError::Cancelled);
         }
 
-        crate::tools::PathSandbox::new(self.allowed_paths.clone()).check(&search_path)?;
+        let io_path = crate::tools::PathSandbox::new(self.allowed_paths.clone())
+            .io_path(&search_path)?
+            .to_string_lossy()
+            .into_owned();
 
         // Try ripgrep first, fall back to grep
         let (cmd_name, args) = if which_exists("rg") {
-            build_rg_args(
-                pattern,
-                &search_path,
-                include,
-                case_sensitive,
-                self.max_results,
-            )
+            build_rg_args(pattern, &io_path, include, case_sensitive, self.max_results)
         } else {
-            build_grep_args(
-                pattern,
-                &search_path,
-                include,
-                case_sensitive,
-                self.max_results,
-            )
+            build_grep_args(pattern, &io_path, include, case_sensitive, self.max_results)
         };
 
         let mut cmd = Command::new(&cmd_name);
         cmd.args(&args);
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
+        // A timeout or cancel drops the output future; take the search with it.
+        cmd.kill_on_drop(true);
 
         let timeout = self.timeout;
 
@@ -171,12 +164,15 @@ impl AgentTool for SearchTool {
             });
         }
 
+        // `--max-count` / `-m` limit matches per file, so cap the total here.
         let match_count = stdout.lines().count();
-        let text = if match_count >= self.max_results {
+        let shown: Vec<&str> = stdout.lines().take(self.max_results).collect();
+        let text = if match_count > self.max_results {
             format!(
-                "{}\n... (showing first {} matches)",
-                stdout.trim(),
-                self.max_results
+                "{}\n... (showing first {} of {} matches)",
+                shown.join("\n").trim_end(),
+                self.max_results,
+                match_count
             )
         } else {
             format!("{}\n({} matches)", stdout.trim(), match_count)
@@ -218,7 +214,10 @@ fn build_rg_args(
         args.push(format!("--glob={}", glob));
     }
 
-    args.push(pattern.into());
+    // `--regexp=` and `--` keep a pattern or path that starts with `-` from
+    // being read as a flag (`--pre=<cmd>` would run a command).
+    args.push(format!("--regexp={pattern}"));
+    args.push("--".into());
     args.push(path.into());
 
     ("rg".into(), args)
@@ -241,7 +240,9 @@ fn build_grep_args(
         args.push(format!("--include={}", glob));
     }
 
+    args.push("-e".into());
     args.push(pattern.into());
+    args.push("--".into());
     args.push(path.into());
 
     ("grep".into(), args)

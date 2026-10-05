@@ -4,6 +4,30 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Security
+
+- **`write_file` / `edit_file` / `read_file` sandbox escape.** With `allowed_paths` set, `PathSandbox` dropped every `..` that came after a directory that did not exist yet. `root/new/../../x` was checked as `root/new/x` (inside the root), while `write_file` created `root/new` and wrote `x` one level *above* the root.
+  - `..` components are now kept.
+  - A path that climbs through a missing directory is resolved again, so it cannot land on a symlink out of the root.
+  - Sandboxed tools now do their I/O on the path that was checked (`PathSandbox::io_path`).
+  - Unsandboxed tools are unchanged.
+- **`search` flag injection.** The model's pattern went to `rg` / `grep` as a bare argument, so a pattern starting with `-` was parsed as a flag. `--pre=<cmd>` makes ripgrep run a command on every file it searches.
+  - The pattern is now passed as `--regexp=` (`-e` for grep), with `--` before the path.
+  - `list_files` prefixes a path starting with `-`, so `find` cannot read it as an expression.
+- **Gemini API key in error text.** The key travelled in the URL (`?key=`), and reqwest includes the URL in its error messages. Any transport failure therefore put the key into logs, `ProviderRetry` events, the turn's `error_message` and GASP recordings. It is now sent in the `x-goog-api-key` header, marked sensitive.
+
+### Fixed
+
+- **A panicking tool no longer kills the run.** Tool `execute` is now contained the way middleware already was: the panic becomes an error tool result (`tool '<name>' panicked: …`) and the loop continues. Before, the loop task died and the run's messages were lost. The agent also silently lost all its tools for every later run.
+- **`bash`:**
+  - Output is cut as bytes and then decoded, so a cap that falls inside a multi-byte character no longer panics (it did on large CJK output).
+  - Each stream is read with a byte cap, so memory stays bounded however much a command prints. `max_output_bytes` used to apply only after everything was buffered.
+  - A timeout or cancel kills the command (`kill_on_drop`); it used to keep running. Background jobs it started can still outlive it.
+  - A timeout now returns the output printed so far.
+- **`search`:** `max_results` capped matches per file, not in total. It now caps the total, and the note says how many there were.
+
 ## 0.24.1
 
 Retry-safe event streams for output that cannot take text back, and a loop

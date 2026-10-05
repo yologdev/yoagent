@@ -91,10 +91,10 @@ impl AgentTool for EditFileTool {
             return Err(ToolError::Cancelled);
         }
 
-        crate::tools::PathSandbox::new(self.allowed_paths.clone()).check(path)?;
+        let io_path = crate::tools::PathSandbox::new(self.allowed_paths.clone()).io_path(path)?;
 
         // Read existing file
-        let content = tokio::fs::read_to_string(path).await.map_err(|e| {
+        let content = tokio::fs::read_to_string(&io_path).await.map_err(|e| {
             ToolError::Failed(format!(
                 "Cannot read {}: {}. Use write_file to create new files.",
                 path, e
@@ -132,7 +132,7 @@ impl AgentTool for EditFileTool {
         // Perform the replacement
         let new_content = content.replacen(old_text, new_text, 1);
 
-        tokio::fs::write(path, &new_content)
+        tokio::fs::write(&io_path, &new_content)
             .await
             .map_err(|e| ToolError::Failed(format!("Cannot write {}: {}", path, e)))?;
 
