@@ -203,9 +203,14 @@ impl StdioTransport {
         if let Some(drain) = drain {
             let _ = tokio::time::timeout(std::time::Duration::from_millis(500), drain).await;
         }
-        let status = match self.child.lock().await.try_wait() {
-            Ok(Some(status)) => format!("exited with {status}"),
-            _ => "closed its output".to_string(),
+        // Stdout can close a moment before the process is reaped; wait
+        // briefly for its exit status rather than report it as still running.
+        let status = {
+            let mut child = self.child.lock().await;
+            match tokio::time::timeout(std::time::Duration::from_millis(500), child.wait()).await {
+                Ok(Ok(status)) => format!("exited with {status}"),
+                _ => "closed its output".to_string(),
+            }
         };
         let tail = self
             .stderr_tail
