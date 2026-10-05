@@ -4,7 +4,12 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.24.3
+
+Reliability fixes from the October codebase review: overloaded providers are retried, failed streams are errors rather than truncated answers, MCP over stdio is robust, `search` keeps partial results, sub-agent limits are configurable, and the onboarding paths work as written. No breaking changes. Two behaviours to know about:
+
+- A run cancelled while tools run now ends with an `[Agent stopped: cancelled]` user message in its history.
+- A bare `ModelConfig::anthropic("claude-…")` now infers its thinking mode and native structured outputs from the id.
 
 ### Added
 
