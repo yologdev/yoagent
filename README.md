@@ -184,7 +184,7 @@ Built something on yoagent? [Open a PR](CONTRIBUTING.md) and add it here — we'
 - **`InputFilter`** — rewrite or reject user input before it reaches the model (PII redaction, prompt-injection guards); `AsyncInputFilter` for filters that await
 - **`TurnHook`** — an async hook before every LLM request that may add one transient note to the latest user turn (the cached prefix is untouched); middleware can read the conversation (`ToolCallRequest::messages`, `user_request()`)
 - Execution limits (max turns, max tokens, wall-clock timeout), `abort()`, and lifecycle callbacks (`before_turn`, `after_turn`, `on_error`)
-- Automatic retry with exponential backoff and ±20% jitter, for rate-limit and network errors only
+- Automatic retry with exponential backoff and ±20% jitter, for rate-limit and network errors only; `retry::retry_safe_events` holds each attempt's output back until it succeeds, for output that cannot take text back (a pipe, a log)
 
 </details>
 
@@ -407,7 +407,7 @@ testable too.
 | [`context`](src/context.rs) | Token tracking, tiered compaction, execution limits |
 | [`llm_compaction`](src/llm_compaction.rs) | `LlmCompaction` — summarise the dropped span with a background LLM request |
 | [`skills`](src/skills.rs) | AgentSkills `SKILL.md` loading |
-| [`retry`](src/retry.rs) | Backoff with jitter |
+| [`retry`](src/retry.rs) | Backoff with jitter; `retry_safe_events` filter for append-only consumers |
 | [`mcp/`](src/mcp/) | MCP client, stdio (native) + HTTP transports, tool adapter |
 | [`openapi/`](src/openapi/) | OpenAPI 3.0 → tools (feature `openapi`) |
 | [`gasp`](src/gasp.rs) | Run recording into a GASP repo (feature `gasp`) |

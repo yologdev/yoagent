@@ -281,6 +281,16 @@ pub trait SharedStateBackend: yoagent::rt::MaybeSend + yoagent::rt::MaybeSync {
 
 `MaybeSend + MaybeSync` is exactly `Send + Sync` on native targets, so a native-only implementation can keep plain `#[async_trait]`. See [WebAssembly & Cloudflare Workers](../guides/wasm-workers.md).
 
+## Retry
+
+`yoagent::retry` — see [Retry](../concepts/retry.md).
+
+| Item | Description |
+|------|-------------|
+| `RetryConfig` | Retry count and backoff (`max_retries`, `initial_delay_ms`, `backoff_multiplier`, `max_delay_ms`); `RetryConfig::none()` disables retries |
+| `retry_safe_events(rx) -> rx` | Wraps an event receiver so each provider attempt's events are held until it succeeds; a retried attempt leaves only its `ProviderRetry` |
+| `RetrySafeEvents` | The same filter for your own event loop: `new()`, `push(event) -> Vec<AgentEvent>`, `finish() -> Vec<AgentEvent>` (also resets it) |
+
 ## Re-exports
 
 The crate re-exports key types from `lib.rs`:

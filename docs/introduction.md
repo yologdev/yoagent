@@ -36,7 +36,7 @@ output, and skills.
 - [Messages and events](concepts/messages-events.md) — the full `AgentEvent` stream for text deltas, thinking, and tool execution
 - [Tool middleware](concepts/tools.md#permissions-tool-middleware) — async allow / modify / deny hooks gating every tool call
 - [Lifecycle callbacks](concepts/callbacks.md) plus execution limits (max turns, tokens, wall-clock) and `CancellationToken` abort
-- [Retry](concepts/retry.md) with exponential backoff and jitter, for rate-limit and network errors only; each retry is announced with `AgentEvent::ProviderRetry`
+- [Retry](concepts/retry.md) with exponential backoff and jitter, for rate-limit and network errors only; each retry is announced with `AgentEvent::ProviderRetry`, and `retry::retry_safe_events` keeps a retried attempt's partial text away from output that cannot take it back
 
 **Models and tools**
 
