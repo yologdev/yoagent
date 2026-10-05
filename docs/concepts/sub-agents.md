@@ -87,7 +87,7 @@ When the parent provides an `on_update` callback (standard for all tools), sub-a
 
 - Text deltas from the sub-agent's LLM responses
 - Tool call notifications from the sub-agent's tool usage (`[sub-agent calling tool: <name>]`)
-- Retry notices: a provider attempt that fails with a retryable error has its text deltas forwarded like any other, followed by `[sub-agent retrying after: <error>]`, so discard the partial text before that marker
+- Retry notices: a provider attempt that fails with a retryable error has its text deltas forwarded like any other, followed by `[sub-agent retrying after: <error>]`, so discard the partial text before that marker. `retry::retry_safe_events` on the parent's stream does not filter these: they arrive as `ToolExecutionUpdate`s
 
 The sub-agent's `ProgressMessage` events go to the parent's `on_progress` callback.
 
