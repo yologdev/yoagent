@@ -11,7 +11,7 @@ struct NoRm;
 
 #[async_trait::async_trait]
 impl RunHooks for NoRm {
-    async fn before_tool(&mut self, call: &ToolCallRequest<'_>) -> ToolDecision {
+    async fn before_tool(&self, call: &ToolCallRequest<'_>) -> ToolDecision {
         if call.tool_name == "bash" && call.args.to_string().contains("rm -rf") {
             ToolDecision::Deny("rm -rf is not allowed".into())
         } else {
@@ -54,7 +54,7 @@ impl RunHooks for BudgetRun {
 
 ## Runs and state
 
-A **run** is one `prompt*` / `continue_loop*` call, or one delegation for a `SubAgentTool`. `start_run` is called at the start of every run and returns that run's hooks, so state for one run (a run's spend, a verifier's attempts) starts fresh each time and is isolated between concurrent runs and between agents sharing an extension. State that spans runs (a session budget) belongs in the `Extension` itself, behind its own lock or atomics.
+A **run** is one `prompt*` / `continue_loop*` call, or one delegation for a `SubAgentTool`. `start_run` is called at the start of every run and returns that run's hooks, so state for one run (a run's spend, a verifier's attempts) starts fresh each time and is isolated between concurrent runs and between agents sharing an extension. State that spans runs (a session budget) belongs in the `Extension` itself, behind its own lock or atomics. The per-call hooks `before_tool` and `after_tool` take `&self`, because the calls of one response may be judged concurrently: state they change needs interior mutability (a `Mutex` or atomics) even within one run.
 
 `RunContext` gives each run a unique `run_id`, the host's `label` (`Agent::with_run_label`, for example a session id), the run's prompts, its delegation `depth`, and its cancel token.
 
@@ -67,7 +67,7 @@ Every `RunHooks` method has a no-op default; implement only what you need.
 | `tools` | Once per run, at its start | The agent's own tools win a name clash, then the earlier extension; sorted by name |
 | `on_input` | On a prompted run's input, after the input filters (`continue_loop` has no input) | First `Reject` wins |
 | `before_model` | Before each model request (a retried attempt is not judged again) | Notes appended in order to the latest user turn, never stored; first `Stop` or `Fail` ends the run |
-| `before_tool` | Before each tool call, after any `ToolMiddleware` | `Deny` wins, `Modify` feeds the next |
+| `before_tool` | Before each tool call, after any `ToolMiddleware`. Takes `&self`: the calls of one response are judged concurrently under parallel execution | `Deny` wins, `Modify` feeds the next |
 | `after_tool` | After each call that ran, errors and panics included, before truncation and `ToolExecutionEnd`. Gets a `ToolOutput` (`result`, `is_error`) to edit | In order, each sees the previous edit |
 | `on_stop` | When the model ends with `StopReason::Stop` and nothing is queued | First `Fail` wins, else first `Continue` |
 | `finish` | When the run ends, however it ends (not if the run's future is dropped) | All |
@@ -111,6 +111,25 @@ Where you install an extension decides what child runs see:
 | `with_tree_extension` | This agent's runs **and every run they delegate to**, at any depth, ahead of the child's own extensions. A child cannot remove it. Its `tools` are not offered to child runs |
 
 Use tree extensions for host policy: permissions, deny rules, redaction, audit, and a budget across the whole tree (keep the total in the `Extension`, which every run shares). A child run keeps the parent's run label. A custom delegation tool honours all of this through `ToolContext::tree_extensions()`, `ToolContext::delegation_depth()` and `ToolContext::run_label()`.
+
+## Budget
+
+`extension::Budget` checks a dollar limit before each model request and stops the run once spend has reached it, with `[Agent stopped: budget of $… spent …]`:
+
+```rust
+use yoagent::extension::Budget;
+
+let model = ModelConfig::claude_sonnet_5();
+// `None` for an unpriced model: a budget without a price is no limit.
+let budget = Budget::for_model(2.0, &model).expect("a priced model");
+let agent = Agent::from_config(model).with_extension(budget);
+```
+
+The limit is per run by default. `.across_runs()` makes it one total for every run the extension serves: all of a session's runs, or, with `with_tree_extension`, a whole delegation tree. Every message is priced at the one rate given (`Budget::usd(max, CostConfig)` to choose it), so sub-agents on other models are priced approximately. The check is before each request, so the request that crosses the limit still completes. A provider attempt that fails mid-stream reports no usage, so its billed input tokens are not counted. `spent_usd()` gives an across-runs budget's total.
+
+## Built on extensions
+
+The decision features are extensions themselves: `with_tool_gate` (`before_tool`), `with_input_guard` (`on_input`) and `with_decision_model` (a `before_model` note). They are appended after the agent's own extensions, so the gate judges the final arguments.
 
 ## Order with the older hooks
 

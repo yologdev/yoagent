@@ -302,3 +302,37 @@ impl ToolMiddleware for ToolGate {
         self.decide(call).await
     }
 }
+
+/// The gate as an [`Extension`](crate::Extension): what
+/// [`Agent::with_tool_gate`](crate::Agent::with_tool_gate) installs. Its
+/// `before_tool` is the same decision as the middleware's.
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl crate::Extension for ToolGate {
+    fn name(&self) -> &str {
+        "tool-gate"
+    }
+
+    /// A gate judges the arguments that will run, also when it is installed
+    /// ahead of an extension that rewrites them (as a tree extension is).
+    fn rechecks_modified_calls(&self) -> bool {
+        true
+    }
+
+    async fn start_run(
+        &self,
+        _run: &crate::extension::RunContext<'_>,
+    ) -> Result<Box<dyn crate::RunHooks>, crate::extension::ExtensionError> {
+        Ok(Box::new(GateHooks(self.clone())))
+    }
+}
+
+struct GateHooks(ToolGate);
+
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl crate::RunHooks for GateHooks {
+    async fn before_tool(&self, call: &ToolCallRequest<'_>) -> ToolDecision {
+        self.0.decide(call).await
+    }
+}

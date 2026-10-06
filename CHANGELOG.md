@@ -24,6 +24,15 @@ adheres to [Semantic Versioning](https://semver.org/).
 
   **`with_tree_extension`** applies an extension to every delegated run at any depth, so host policy reaches sub-agents. A parent's `ToolMiddleware` never did; the existing hooks are unchanged. `Agent::with_run_label` and `with_max_stop_continues`. Guide: `docs/concepts/extensions.md`.
 
+- **`extension::Budget`**: a dollar limit, checked before each model request: once spend reaches it, the run stops (the request that goes past it still completes). Per run, or `.across_runs()` (a session, or a whole delegation tree with `with_tree_extension`). `Budget::for_model` returns `None` for an unpriced model.
+
+### Changed
+
+- **The decision features run as extensions** (#241 dogfooding). `with_tool_gate`, `with_input_guard` and `with_decision_model` install a `ToolGate` (`before_tool`), an `InputGuard` (`on_input`) and the advisor (a `before_model` note); each keeps its old trait impl for installing by hand. Three ordering effects:
+  - the gate runs after every middleware **and extension**, so it also judges arguments an extension rewrote;
+  - the guard screens after all input filters, not in their list;
+  - the advisor's hint comes before turn-hook notes and is judged once per turn rather than once per provider attempt (it was memoized per request, so the same request is sent).
+
 ### Changed (breaking)
 
 - **`AgentLoopConfig` is `#[non_exhaustive]`; build it with `AgentLoopConfig::new(provider, model)`.** `new` sets every other field to the default the struct-literal examples used (no API key, thinking off, no context management, no hooks, parallel tools, the default retry policy). Fields stay public, so set what you need afterwards: `config.max_tokens = Some(1024);`. A struct literal no longer compiles outside the crate. Every field added so far was a breaking change for code calling `agent_loop` directly, which is why recent features went through task-locals; new fields (such as `#241`'s extensions) no longer break anyone. `Agent` and `SubAgentTool` users are unaffected.

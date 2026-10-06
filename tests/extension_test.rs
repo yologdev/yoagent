@@ -246,7 +246,7 @@ impl RunHooks for Hooks {
             None => TurnDecision::Continue,
         }
     }
-    async fn before_tool(&mut self, call: &ToolCallRequest<'_>) -> ToolDecision {
+    async fn before_tool(&self, call: &ToolCallRequest<'_>) -> ToolDecision {
         self.maybe_panic("before_tool");
         self.record(format!("before_tool {} {}", call.tool_name, call.args));
         if let Some(forbidden) = self.deny {
@@ -260,7 +260,7 @@ impl RunHooks for Hooks {
         }
     }
     async fn after_tool(
-        &mut self,
+        &self,
         _call: &ToolCallRequest<'_>,
         output: &mut ToolOutput,
     ) -> Result<(), ExtensionError> {
@@ -1182,7 +1182,7 @@ impl RunHooks for DepthHooks {
     async fn tools(&mut self, _: &RunContext<'_>) -> Vec<Arc<dyn AgentTool>> {
         vec![Arc::new(Named("policy_tool"))]
     }
-    async fn before_tool(&mut self, call: &ToolCallRequest<'_>) -> ToolDecision {
+    async fn before_tool(&self, call: &ToolCallRequest<'_>) -> ToolDecision {
         self.seen
             .lock()
             .unwrap()
@@ -1451,7 +1451,7 @@ struct OutcomeHooks {
 
 #[async_trait::async_trait]
 impl RunHooks for OutcomeHooks {
-    async fn before_tool(&mut self, _: &ToolCallRequest<'_>) -> ToolDecision {
+    async fn before_tool(&self, _: &ToolCallRequest<'_>) -> ToolDecision {
         if let Some(cancel) = &self.cancel {
             cancel.cancel();
         }
@@ -1847,7 +1847,7 @@ async fn after_tool_sees_whether_the_call_failed() {
     #[async_trait::async_trait]
     impl RunHooks for SeesErrors {
         async fn after_tool(
-            &mut self,
+            &self,
             _: &ToolCallRequest<'_>,
             output: &mut ToolOutput,
         ) -> Result<(), ExtensionError> {
@@ -1942,4 +1942,42 @@ async fn every_extension_that_continues_is_heard() {
             p = EXTENSION_MESSAGE_PREFIX
         )
     );
+}
+
+/// Parallel tool calls are judged concurrently: each `before_tool` waits for
+/// the other, which deadlocks (and times out) if they ran one at a time.
+#[tokio::test]
+async fn parallel_calls_are_judged_concurrently() {
+    #[derive(Clone)]
+    struct Slow(Arc<tokio::sync::Barrier>);
+    #[async_trait::async_trait]
+    impl RunHooks for Slow {
+        async fn before_tool(&self, _: &ToolCallRequest<'_>) -> ToolDecision {
+            self.0.wait().await;
+            ToolDecision::Allow
+        }
+    }
+    let (agent, _) = scripted(vec![
+        MockResponse::ToolCalls(vec![
+            MockToolCall {
+                name: "echo".into(),
+                arguments: serde_json::json!({"text": "a"}),
+                provider_metadata: None,
+            },
+            MockToolCall {
+                name: "echo".into(),
+                arguments: serde_json::json!({"text": "b"}),
+                provider_metadata: None,
+            },
+        ]),
+        text("done"),
+    ]);
+    let mut agent = agent.with_extension(Stateless::new(
+        "slow-policy",
+        Slow(Arc::new(tokio::sync::Barrier::new(2))),
+    ));
+    let events = tokio::time::timeout(std::time::Duration::from_secs(5), run(&mut agent, "go"))
+        .await
+        .expect("both calls were judged at once");
+    assert_eq!(tool_results(&events).len(), 2);
 }

@@ -309,3 +309,39 @@ impl AsyncInputFilter for InputGuard {
         self.screen(text).await
     }
 }
+
+/// The guard as an [`Extension`](crate::Extension): what
+/// [`Agent::with_input_guard`](crate::Agent::with_input_guard) installs. Its
+/// `on_input` is the same screening as the input filter's.
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl crate::Extension for InputGuard {
+    fn name(&self) -> &str {
+        "input-guard"
+    }
+
+    async fn start_run(
+        &self,
+        _run: &crate::extension::RunContext<'_>,
+    ) -> Result<Box<dyn crate::RunHooks>, crate::extension::ExtensionError> {
+        Ok(Box::new(GuardHooks(self.clone())))
+    }
+}
+
+struct GuardHooks(InputGuard);
+
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl crate::RunHooks for GuardHooks {
+    async fn on_input(
+        &mut self,
+        input: &crate::extension::InputContext<'_>,
+    ) -> crate::extension::InputDecision {
+        use crate::extension::InputDecision;
+        match self.0.screen(input.text).await {
+            FilterResult::Reject(reason) => InputDecision::Reject(reason),
+            // The guard never warns; a pass is a pass.
+            FilterResult::Pass | FilterResult::Warn(_) => InputDecision::Pass,
+        }
+    }
+}

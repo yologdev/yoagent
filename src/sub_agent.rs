@@ -334,7 +334,7 @@ impl SubAgentTool {
     #[cfg_attr(docsrs, doc(cfg(feature = "decision")))]
     pub fn with_input_guard(self, guard: crate::decision::InputGuard) -> Self {
         guard.assert_has_checks();
-        self.with_async_input_filter(guard)
+        self.with_extension(guard)
     }
 
     /// Attach a decision model for the sub-agent's own turns: advisory skill
@@ -579,17 +579,11 @@ impl AgentTool for SubAgentTool {
         };
 
         #[cfg(feature = "decision")]
-        let (provider, tool_middleware) = {
-            let (hooks, middleware) = crate::decision::wire(
-                self.decision.as_ref(),
-                self.tool_gate.as_ref(),
-                &self.skills,
-                self.turn_hooks.clone(),
-                self.tool_middleware.clone(),
-            );
-            (with_turn_hooks(&self.provider, hooks), middleware)
-        };
-        #[cfg(not(feature = "decision"))]
+        let decision_extensions = crate::decision::wire(
+            self.decision.as_ref(),
+            self.tool_gate.as_ref(),
+            &self.skills,
+        );
         let (provider, tool_middleware) = (
             with_turn_hooks(&self.provider, self.turn_hooks.clone()),
             self.tool_middleware.clone(),
@@ -616,6 +610,8 @@ impl AgentTool for SubAgentTool {
         config.tool_middleware = tool_middleware;
         config.turn_delay = self.turn_delay;
         config.extensions = self.extensions.clone();
+        #[cfg(feature = "decision")]
+        config.extensions.extend(decision_extensions);
         config.tree_extensions = self.tree_extensions.clone();
         config.max_stop_continues = self.max_stop_continues;
         // The caller's tree extensions (host policy) apply here too, ahead of

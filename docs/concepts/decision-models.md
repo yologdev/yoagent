@@ -464,7 +464,7 @@ use yoagent::decision::ToolGate;
 let agent = agent.with_tool_gate(ToolGate::new(DecisionModel::jev()));
 ```
 
-The tool gate is a `ToolMiddleware` and a **separate, explicit opt-in**,
+The tool gate is an [extension](extensions.md) (and still a `ToolMiddleware`, for installing by hand) and a **separate, explicit opt-in**,
 because it blocks. For every tool call it sends one request whose state is
 `{"user_request": .., "tool_call": {"tool": .., "arguments": ..}}`, with two
 Nouls:
@@ -537,10 +537,14 @@ denied without asking.
 
 **Scope.**
 
-- `Agent::with_tool_gate` always runs the gate **last**, after every other
-  middleware, so it judges the arguments that will actually run. A `ToolGate`
-  installed by hand with `with_tool_middleware` must be added last yourself —
-  a middleware after it could modify arguments after approval.
+- `Agent::with_tool_gate` installs the gate as an extension after the agent's
+  own, so it runs **last**, after every middleware and extension, and judges
+  the arguments that will actually run. A `ToolGate` installed by hand with
+  `with_tool_middleware` must be added last yourself, and runs before any
+  extension: an extension after it could modify arguments after approval.
+  Install it with `with_tree_extension` to cover sub-agents too. A tree
+  extension runs *first*, so the gate then judges a call again (a second
+  decision request) whenever a later extension rewrote its arguments.
 - A gate covers the agent it is installed on. Calls made **inside a
   `SubAgentTool` are not covered** by the parent's gate; give the sub-agent
   its own (`SubAgentTool::with_tool_gate`). There, `user_request` is the task
@@ -642,8 +646,9 @@ mistake. (Used directly as a filter, such a guard rejects.)
   a run's prompts only; `Agent::steer` and `Agent::follow_up` messages enter
   the loop without them. This is a limitation of the filter hook, unchanged
   here.
-- It runs in the input-filter list in installation order, alongside
-  `with_input_filter` / `with_async_input_filter` filters.
+- `with_input_guard` installs it as an extension: it screens after every
+  `with_input_filter` / `with_async_input_filter` filter. (It is still an
+  `AsyncInputFilter`, to place in the filter list by hand.)
 - `SubAgentTool::with_input_guard` screens the task the parent model hands a
   sub-agent; a rejected task fails the tool call with the reason.
 - The thresholds are starting points, not calibrated constants — calibrate

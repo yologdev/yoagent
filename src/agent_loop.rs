@@ -1408,6 +1408,10 @@ async fn run_loop(
             let mut tool_results: Vec<Message> = Vec::new();
 
             if has_tool_calls {
+                // Extensions observe this turn's response before its tools
+                // run, so a sub-agent started by one sees the spend so far
+                // (a tree budget).
+                exts.sync_events().await;
                 let execution = execute_tool_calls(
                     &context.tools,
                     &tool_calls,
