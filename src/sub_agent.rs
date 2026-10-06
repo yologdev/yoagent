@@ -674,6 +674,7 @@ impl AgentTool for SubAgentTool {
 
         // Run the sub-agent loop
         let prompt = AgentMessage::Llm(Message::user(task));
+        let run_cancel = cancel.clone();
         let (new_messages, run_stats) =
             agent_loop_with_stats(vec![prompt], &mut context, &config, tx, cancel).await;
 
@@ -713,6 +714,14 @@ impl AgentTool for SubAgentTool {
                 "Sub-agent '{}' rejected its task: {}",
                 self.tool_name, reason
             )));
+        }
+
+        // Cancelled before the model answered at all: not an empty success.
+        let answered = new_messages
+            .iter()
+            .any(|m| matches!(m, AgentMessage::Llm(Message::Assistant { .. })));
+        if run_cancel.is_cancelled() && !answered {
+            return Err(ToolError::Cancelled);
         }
 
         // Check if the last message was an error

@@ -41,6 +41,8 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 These change what consumers see: a run can now send more events (a `MessageStart`/`MessageEnd` pair, a `TurnEnd`) and run fewer tools than before. A consumer that counts events, or relied on tools running after a cancel, should check them.
 
+- **A sub-agent cancelled before it answered fails its delegation** with `ToolError::Cancelled`. It used to return "(sub-agent produced no text output)" as a success.
+
 
 - **A cancelled run no longer executes the tool calls it had not started** (#243). If the run was cancelled while the model's response arrived, its tool calls used to run anyway, and the cancel was only seen at the next turn: after a user pressed cancel, the agent could still run a command or write a file. Such a call is now answered with an error result ("Tool call not run: the run was cancelled.") and never runs, and the run ends with `[Agent stopped: cancelled]` as before. A tool already running still gets the cancel through its `ToolContext`.
 - **Every message in the history has its events** (#243). A final failure or a cancel before the provider sent any output appended its assistant message without a `MessageStart`/`MessageEnd`, so transcripts rebuilt from events missed it. It is now announced with both. This includes a run aborted during a retry's backoff: after the `ProviderRetry`, its `Aborted` message arrives as a `MessageStart` and `MessageEnd` with no text, also through `retry_safe_events`. A retried attempt that failed before any output still gets only its `ProviderRetry`.

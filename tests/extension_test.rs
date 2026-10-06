@@ -2809,12 +2809,13 @@ async fn on_event_sees_each_event_before_the_consumer_has_it() {
     impl RunHooks for Strict {
         fn on_event(&self, _: &AgentEvent) {
             let index = self.observed.fetch_add(1, Ordering::SeqCst);
+            // Give the consumer every chance to overtake: were the event
+            // forwarded before this call, the consumer would have it by now.
+            std::thread::sleep(std::time::Duration::from_millis(2));
             // The consumer must not have this event (index) yet.
             if self.received.load(Ordering::SeqCst) > index {
                 self.violations.fetch_add(1, Ordering::SeqCst);
             }
-            // Give the consumer every chance to overtake.
-            std::thread::sleep(std::time::Duration::from_micros(200));
         }
     }
     let hooks = Strict {
@@ -2834,4 +2835,23 @@ async fn on_event_sees_each_event_before_the_consumer_has_it() {
     agent.finish().await;
     assert!(hooks.received.load(Ordering::SeqCst) > 0);
     assert_eq!(hooks.violations.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn a_sub_agent_cancelled_before_it_answers_is_a_cancelled_delegation() {
+    let child = SubAgentTool::from_provider(
+        "child",
+        Arc::new(MockProvider::new(vec![text("never")])),
+        ModelConfig::mock(),
+    )
+    .with_extension(CancelBeforeInput(Arc::default()));
+    let (agent, _) = scripted(vec![delegate("child", "go"), text("parent done")]);
+    let mut agent = agent.with_tools(vec![Box::new(child)]);
+    let events = run(&mut agent, "start").await;
+    let results = tool_results(&events);
+    assert!(results[0].1, "the delegation failed: {results:?}");
+    assert!(
+        results[0].0.to_lowercase().contains("cancel"),
+        "{results:?}"
+    );
 }

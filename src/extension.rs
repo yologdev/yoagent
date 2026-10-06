@@ -171,6 +171,10 @@ pub struct RunContext<'a> {
     /// For a delegated run whose caller has extensions: the caller's
     /// `run_id`. With `delegated_by`, it names the delegation uniquely.
     pub parent_run_id: Option<&'a str>,
+    /// In `start_run`: this extension came from the calling run's tree
+    /// ([`Agent::with_tree_extension`](crate::Agent::with_tree_extension)),
+    /// so the calling run has it too.
+    pub inherited: bool,
     /// The run's cancellation token.
     pub cancel: &'a CancellationToken,
 }
@@ -185,6 +189,7 @@ impl<'a> RunContext<'a> {
             depth: 0,
             delegated_by: None,
             parent_run_id: None,
+            inherited: false,
             cancel,
         }
     }
@@ -674,6 +679,7 @@ impl ActiveExtensions {
             depth: self.depth,
             delegated_by: self.delegated_by.as_deref(),
             parent_run_id: self.parent_run_id.as_deref(),
+            inherited: false,
             cancel: &self.cancel,
         }
     }
@@ -734,7 +740,11 @@ impl ActiveExtensions {
                 });
                 continue;
             };
-            let reason = match exts.hook(ext.start_run(&exts.run_context())).await {
+            let run = RunContext {
+                inherited,
+                ..exts.run_context()
+            };
+            let reason = match exts.hook(ext.start_run(&run)).await {
                 Hooked::Done(Ok(hooks)) => {
                     exts.filters_output |= filters;
                     exts.active.push(Active {
@@ -858,8 +868,9 @@ impl ActiveExtensions {
         tools
     }
 
-    /// `Err(reason)` if an extension rejects the input. A failing or
-    /// cancelled hook rejects (fail closed).
+    /// `Err(reason)` if an extension rejects the input. A failing hook
+    /// rejects (fail closed); a cancelled one lets the run start, and it ends
+    /// cancelled before any model request.
     pub(crate) async fn on_input(&self, input: &InputContext<'_>) -> Result<(), String> {
         for a in &self.active {
             let mut hooks = a.hooks.write().await;
@@ -1235,7 +1246,12 @@ impl Extension for Budget {
     }
 
     async fn start_run(&self, run: &RunContext<'_>) -> Result<Box<dyn RunHooks>, ExtensionError> {
-        if let (Some(parent), Some(call_id)) = (run.parent_run_id, run.delegated_by) {
+        // Only a budget inherited from the calling run's tree is also there to
+        // skip the child's reported spend; any other key would never be
+        // removed.
+        if let (true, Some(parent), Some(call_id)) =
+            (run.inherited, run.parent_run_id, run.delegated_by)
+        {
             self.children
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
