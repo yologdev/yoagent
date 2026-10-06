@@ -5115,11 +5115,21 @@ async fn cancelling_during_the_backoff_aborts_the_turn_without_retrying() {
         started.elapsed() < std::time::Duration::from_secs(10),
         "the 60 s backoff was not interrupted"
     );
+    // No second attempt after the cancel. The aborted message that ends the
+    // turn was never streamed, so it is announced on its own (#243): a
+    // consumer rebuilding the transcript from events sees what the history
+    // holds.
     let lifecycle = assistant_lifecycle(&events_rx.await.unwrap());
     assert_eq!(
         lifecycle,
-        ["start", "delta:partial-0", &closing(1, 4), "retry:1/4"],
-        "no second attempt after the cancel"
+        [
+            "start",
+            "delta:partial-0",
+            &closing(1, 4),
+            "retry:1/4",
+            "start",
+            "end:Aborted:Cancelled",
+        ],
     );
     let last = new_messages.iter().rev().find_map(|m| match m {
         AgentMessage::Llm(Message::Assistant { stop_reason, .. }) => Some(stop_reason.clone()),

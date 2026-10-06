@@ -302,9 +302,12 @@ async fn aborting_on_a_retry_after_text_sends_no_retry_request() {
 
     assert_eq!(provider.attempts.load(Ordering::SeqCst), 1, "no retry sent");
     assert_eq!(streamed_text(&events), "PARTIAL_");
-    // The failed attempt's error end is the only `MessageEnd`: the abort
-    // lands before a new message opens. The turn's result is `Aborted`.
-    assert_eq!(assistant_ends(&events), vec![StopReason::Error]);
+    // The failed attempt's error end, then the turn's aborted message: no new
+    // attempt streamed it, so it is announced on its own (#243).
+    assert_eq!(
+        assistant_ends(&events),
+        vec![StopReason::Error, StopReason::Aborted]
+    );
     assert!(ends_aborted(&events));
 }
 
@@ -384,11 +387,11 @@ async fn the_terminal_pattern_lets_an_early_failure_retry() {
     assert_eq!(streamed_text(&events), "Let me echo.done");
 }
 
-/// With the filter, an abort during the backoff leaves no message events for
-/// the turn: the failed attempt goes with its `ProviderRetry`, and no new
-/// attempt starts. The turn's result is only in `AgentEnd`.
+/// With the filter, an abort during the backoff releases only the turn's
+/// aborted message: the failed attempt goes with its `ProviderRetry`, no new
+/// attempt starts, and the aborted message is announced on its own (#243).
 #[tokio::test]
-async fn the_filter_and_an_abort_leave_the_result_to_agent_end() {
+async fn the_filter_and_an_abort_release_only_the_aborted_message() {
     let mut agent = Agent::from_provider(
         FailsAfterText {
             attempts: AtomicUsize::new(0),
@@ -414,8 +417,8 @@ async fn the_filter_and_an_abort_leave_the_result_to_agent_end() {
     agent.finish().await;
 
     assert_eq!(streamed_text(&events), "");
-    assert_eq!(count_starts(&events), 0);
-    assert!(assistant_ends(&events).is_empty());
+    assert_eq!(count_starts(&events), 1);
+    assert_eq!(assistant_ends(&events), vec![StopReason::Aborted]);
     assert!(ends_aborted(&events));
 }
 

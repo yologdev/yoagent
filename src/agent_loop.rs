@@ -143,6 +143,21 @@ pub const AGENT_STOPPED_PREFIX: &str = "[Agent stopped:";
 /// it as a failure.
 pub const CANCELLED_MARKER: &str = "[Agent stopped: cancelled]";
 
+/// End a turn that stops before its model request, so its `TurnStart` is
+/// paired. It made no assistant message and ran no tools: `TurnEnd` carries
+/// the last message of the history (the stop marker, when there is one).
+/// With an empty history (a run given no prompts at all) there is no message
+/// to carry, and the turn is left open.
+fn close_turn(tx: &mpsc::UnboundedSender<AgentEvent>, context: &AgentContext) {
+    if let Some(last) = context.messages.last() {
+        tx.send(AgentEvent::TurnEnd {
+            message: last.clone(),
+            tool_results: Vec::new(),
+        })
+        .ok();
+    }
+}
+
 /// Append a stop marker as a user message: emitted, kept in context and in
 /// the run's new messages.
 fn push_stop_marker(
@@ -271,6 +286,10 @@ async fn with_loop_scope<T>(
 /// the response. The call is never executed.
 const REFUSAL_TOOL_RESULT_TEXT: &str = "Tool call not run: the response was stopped as a refusal \
      (declined by the model or stopped by the content filter).";
+
+/// The error tool result given to a tool call whose run was already
+/// cancelled when the call was reached. The call is never executed.
+const CANCELLED_TOOL_RESULT_TEXT: &str = "Tool call not run: the run was cancelled.";
 
 pub async fn agent_loop(
     prompts: Vec<AgentMessage>,
@@ -580,6 +599,7 @@ async fn run_loop(
                         context,
                         new_messages,
                     );
+                    close_turn(tx, context);
                     return stats;
                 }
             }
@@ -587,6 +607,7 @@ async fn run_loop(
             // before_turn callback — abort if it returns false
             if let Some(ref before_turn) = config.before_turn {
                 if !before_turn(&context.messages, turn_number) {
+                    close_turn(tx, context);
                     return stats;
                 }
             }
@@ -1346,6 +1367,15 @@ async fn stream_assistant_response(
                     }
                     StreamEvent::Done { message } => {
                         let am: AgentMessage = message.clone().into();
+                        // A provider that sends `Done` without `Start` still
+                        // gets its message announced, as `Error` below does.
+                        if partial_message.is_none() {
+                            event_tx
+                                .send(AgentEvent::MessageStart {
+                                    message: am.clone(),
+                                })
+                                .ok();
+                        }
                         partial_message = Some(am.clone());
                         ended = true;
                         event_tx.send(AgentEvent::MessageEnd { message: am }).ok();
@@ -1387,6 +1417,10 @@ async fn stream_assistant_response(
             Ok(events) => events,
             Err(e) => {
                 warn!("event forwarder failed; this attempt's events may be incomplete: {e}");
+                // Read as "sent nothing", so the turn's message is announced
+                // again. That could repeat a `MessageStart` the forwarder sent
+                // before failing; it only forwards, so this is not expected
+                // in practice.
                 AttemptEvents::default()
             }
         };
@@ -1444,8 +1478,11 @@ async fn stream_assistant_response(
     match result {
         Ok(msg) => {
             // A provider that returns without sending `Done` would leave its
-            // message open; close it with the message it returned.
-            if attempt_events.needs_end() {
+            // message open; close it with the message it returned. One that
+            // sent nothing at all gets the whole pair.
+            if attempt_events.is_silent() {
+                announce(tx, &msg);
+            } else if attempt_events.needs_end() {
                 tx.send(AgentEvent::MessageEnd {
                     message: msg.clone().into(),
                 })
@@ -1464,8 +1501,13 @@ async fn stream_assistant_response(
                 }
             }
             // Close the message the final attempt opened, with the same
-            // error message this turn returns.
-            if attempt_events.needs_end() {
+            // error message this turn returns. An attempt that failed before
+            // any output opened nothing: announce the message anyway, since it
+            // is appended to the history and consumers that rebuild the
+            // transcript from events must see it.
+            if attempt_events.is_silent() {
+                announce(tx, &failed);
+            } else if attempt_events.needs_end() {
                 tx.send(AgentEvent::MessageEnd {
                     message: failed.clone().into(),
                 })
@@ -1474,6 +1516,18 @@ async fn stream_assistant_response(
             failed
         }
     }
+}
+
+/// Send `MessageStart` and `MessageEnd` for a message no stream announced.
+fn announce(tx: &mpsc::UnboundedSender<AgentEvent>, message: &Message) {
+    tx.send(AgentEvent::MessageStart {
+        message: message.clone().into(),
+    })
+    .ok();
+    tx.send(AgentEvent::MessageEnd {
+        message: message.clone().into(),
+    })
+    .ok();
 }
 
 /// What one provider attempt's forwarder emitted.
@@ -1489,6 +1543,11 @@ impl AttemptEvents {
     /// The attempt opened a message that nothing closed.
     fn needs_end(self) -> bool {
         self.started && !self.ended
+    }
+
+    /// The attempt sent no message event at all.
+    fn is_silent(self) -> bool {
+        !self.started && !self.ended
     }
 }
 
@@ -1773,6 +1832,15 @@ async fn execute_single_tool(
         return (msg, Vec::new());
     }
 
+    // A cancelled run starts no new tool calls: the user stopped it, and a
+    // call the model asked for before the cancel must not still act. The call
+    // is answered (the transcript stays valid) and the run ends at the top of
+    // the next turn with the cancel marker. A tool already running sees the
+    // cancel through its `ToolContext` token instead.
+    if cancel.is_cancelled() {
+        return (cancelled_tool_call(id, name, args, tx), Vec::new());
+    }
+
     // Middleware chain runs next: each hook may rewrite the args seen by
     // later hooks; the first Deny short-circuits into an error tool result
     // (the LLM sees the reason and can adapt — the loop continues).
@@ -1816,6 +1884,12 @@ async fn execute_single_tool(
         }
     }
     let args = &effective_args;
+
+    // Middleware may await (an approval, a classifier), so the run can be
+    // cancelled while it decides.
+    if cancel.is_cancelled() {
+        return (cancelled_tool_call(id, name, args, tx), Vec::new());
+    }
 
     let tool = tools.iter().find(|t| t.name() == name);
 
@@ -2072,6 +2146,21 @@ fn unparsed_arguments_tool_call(
         }
     };
     unexecuted_tool_call(id, name, args, text, tx)
+}
+
+/// A tool call not executed because its run was cancelled.
+fn cancelled_tool_call(
+    id: &str,
+    name: &str,
+    args: &serde_json::Value,
+    tx: &mpsc::UnboundedSender<AgentEvent>,
+) -> Message {
+    tracing::debug!(
+        tool = name,
+        tool_call_id = id,
+        "tool call not executed: the run was cancelled"
+    );
+    unexecuted_tool_call(id, name, args, CANCELLED_TOOL_RESULT_TEXT.to_string(), tx).0
 }
 
 /// Emit events and build an error tool result for a call that was not run.
