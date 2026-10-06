@@ -239,7 +239,8 @@ impl<'a> StopContext<'a> {
 pub enum StopDecision {
     Accept,
     /// Keep going: append this as a user message (prefixed with
-    /// [`EXTENSION_MESSAGE_PREFIX`]) and run another turn. Capped per run.
+    /// [`EXTENSION_MESSAGE_PREFIX`]; when several extensions continue, each
+    /// gets a line) and run another turn. Capped per run.
     Continue(String),
     /// The answer is not acceptable.
     Fail(String),
@@ -436,6 +437,8 @@ pub(crate) struct ActiveExtensions {
     failure: std::sync::Mutex<Option<Failure>>,
     /// The event observer's flush channel, set when one is running.
     flush: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<FlushRequest>>,
+    /// The run has been failed: later failures are only logged.
+    failed_run: std::sync::atomic::AtomicBool,
 }
 
 /// Await `fut`, containing a panic as `Err(payload text)`.
@@ -457,10 +460,9 @@ pub(crate) enum ModelHalt {
 pub(crate) enum StopGate {
     Accept,
     Continue {
-        /// The first extension that asked, and its message.
-        name: String,
-        message: String,
-        /// A required extension asked to continue (did not accept).
+        /// Every extension that asked, with its message, in order.
+        messages: Vec<(String, String)>,
+        /// The first required extension that asked (did not accept).
         required: Option<String>,
     },
     Fail(Failure),
@@ -475,6 +477,7 @@ impl ActiveExtensions {
             filters_output: false,
             failure: std::sync::Mutex::new(None),
             flush: std::sync::OnceLock::new(),
+            failed_run: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -537,13 +540,24 @@ impl ActiveExtensions {
             filters_output,
             failure: std::sync::Mutex::new(None),
             flush: std::sync::OnceLock::new(),
+            failed_run: std::sync::atomic::AtomicBool::new(false),
         };
         (exts, failure)
+    }
+
+    /// The run is being failed: from now on, failures are only logged.
+    pub(crate) fn latch_failed(&self) {
+        self.failed_run
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Record a hook failure: a required extension's fails the run (at the
     /// next boundary), an advisory one's is logged.
     fn failed(&self, a: &Active, hook: &str, reason: String) {
+        if self.failed_run.load(std::sync::atomic::Ordering::SeqCst) {
+            tracing::error!(extension = %a.name, hook, "extension failed after the run failed: {reason}");
+            return;
+        }
         if a.mode == ExtensionMode::Required {
             tracing::error!(extension = %a.name, hook, "required extension failed: {reason}");
             let mut slot = self.failure.lock().unwrap_or_else(|e| e.into_inner());
@@ -750,7 +764,7 @@ impl ActiveExtensions {
     }
 
     pub(crate) async fn on_stop(&self, stop: &StopContext<'_>) -> StopGate {
-        let mut first: Option<(String, String)> = None;
+        let mut messages: Vec<(String, String)> = Vec::new();
         let mut required: Option<String> = None;
         for a in &self.active {
             let decision = {
@@ -763,7 +777,7 @@ impl ActiveExtensions {
                     if a.mode == ExtensionMode::Required {
                         required.get_or_insert_with(|| a.name.clone());
                     }
-                    first.get_or_insert((a.name.clone(), message));
+                    messages.push((a.name.clone(), message));
                 }
                 Ok(StopDecision::Fail(reason)) | Err(reason) => match a.mode {
                     ExtensionMode::Required => {
@@ -779,13 +793,10 @@ impl ActiveExtensions {
                 },
             }
         }
-        match first {
-            None => StopGate::Accept,
-            Some((name, message)) => StopGate::Continue {
-                name,
-                message,
-                required,
-            },
+        if messages.is_empty() {
+            StopGate::Accept
+        } else {
+            StopGate::Continue { messages, required }
         }
     }
 

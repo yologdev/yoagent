@@ -1867,3 +1867,79 @@ async fn after_tool_sees_whether_the_call_failed() {
     let _ = run(&mut agent, "go").await;
     assert_eq!(*seen.lock().unwrap(), vec![true, false]);
 }
+
+/// Panics observing every `MessageEnd`: including the events of the failure
+/// report itself.
+struct BrokenSink;
+
+#[async_trait::async_trait]
+impl Extension for BrokenSink {
+    fn name(&self) -> &str {
+        "sink"
+    }
+    fn mode(&self) -> ExtensionMode {
+        ExtensionMode::Required
+    }
+    async fn start_run(&self, _: &RunContext<'_>) -> Result<Box<dyn RunHooks>, ExtensionError> {
+        Ok(Box::new(Hooks::default()))
+    }
+    fn on_event(&self, _: &str, event: &AgentEvent) {
+        if matches!(event, AgentEvent::MessageEnd { .. }) {
+            panic!("sink down");
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_run_fails_once_even_when_its_failure_report_fails_again() {
+    let errors = Arc::new(Mutex::new(Vec::new()));
+    let seen = errors.clone();
+    let (agent, _) = scripted(vec![text("done")]);
+    let mut agent = agent
+        .with_extension(BrokenSink)
+        .on_error(move |e| seen.lock().unwrap().push(e.to_string()));
+    let events = run(&mut agent, "go").await;
+    assert_failed_by(&events, "sink", "on_event failed");
+    let failures = end_messages(&events)
+        .iter()
+        .filter(|m| {
+            matches!(m, AgentMessage::Llm(Message::Assistant { error_message: Some(e), .. })
+                if e.starts_with(EXTENSION_FAILED_PREFIX))
+        })
+        .count();
+    assert_eq!(failures, 1, "one failure message");
+    assert_eq!(errors.lock().unwrap().len(), 1, "one on_error");
+}
+
+#[tokio::test]
+async fn every_extension_that_continues_is_heard() {
+    let (agent, requests) = scripted(vec![text("a"), text("b")]);
+    let mut agent = agent
+        .with_max_stop_continues(1)
+        .with_extension(ext(
+            "nudge",
+            Hooks {
+                continue_with: Some("try harder"),
+                ..Default::default()
+            },
+        ))
+        .with_extension(
+            ext(
+                "verify",
+                Hooks {
+                    continue_with: Some("tests still fail"),
+                    ..Default::default()
+                },
+            )
+            .required(),
+        );
+    let _ = run(&mut agent, "go").await;
+    let injected = last_user_text(&requests.lock().unwrap()[1]);
+    assert_eq!(
+        injected,
+        format!(
+            "{p}nudge] try harder\n{p}verify] tests still fail",
+            p = EXTENSION_MESSAGE_PREFIX
+        )
+    );
+}

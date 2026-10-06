@@ -75,7 +75,7 @@ Every `RunHooks` method has a no-op default; implement only what you need.
 `Extension::on_event` observes every `AgentEvent` of the run, in order, before the event reaches the consumer. Before each turn and before `finish`, the loop waits until every event sent so far has been observed, so what `on_event` recorded is current when the hooks run. A failure on the run's last events (`AgentEnd` itself) comes too late to change its outcome and is only logged.
 
 - **`TurnDecision::Stop(reason)`** ends the run like an execution limit: an `[Agent stopped: <reason>]` marker, partial success.
-- **`StopDecision::Continue(message)`** appends `[Extension <name>] <message>` as a user message and runs another turn, at most `max_stop_continues` times per run (default 3, `Agent::with_max_stop_continues`). That message is recognized by `is_loop_injected`, so it is never taken for the user's own request (the tool gate and `user_request()` skip it).
+- **`StopDecision::Continue(message)`** appends `[Extension <name>] <message>` as a user message (one line per extension when several continue) and runs another turn, at most `max_stop_continues` times per run (default 3, `Agent::with_max_stop_continues`). That message is recognized by `is_loop_injected`, so it is never taken for the user's own request (the tool gate and `user_request()` skip it).
 - **A policy whose judgement must survive later rewrites** returns `true` from `Extension::rechecks_modified_calls`. When a later extension modifies a call's arguments, it judges the final arguments again, and a `Deny` there wins (a `Modify` on the recheck is ignored, and `before_tool` may run twice for one call).
 
 ## Failures: advisory and required
@@ -89,9 +89,9 @@ Every `RunHooks` method has a no-op default; implement only what you need.
 | `on_input` fails | The input is rejected | Rejected |
 | `before_tool` fails | The call is denied | Denied |
 | `after_tool` fails | The result is replaced by an error naming the extension | Same, and the run fails |
-| `on_stop` keeps asking to continue past the cap | The answer is accepted without its approval, with a warning | The run fails, even when another extension's message was the one sent |
+| `on_stop` keeps asking to continue past the cap | The answer is accepted without its approval, with a warning | The run fails |
 
-An extension that **filters tool output** and cannot start fails the run whatever its mode: running without it would let unfiltered output through. A required failure is never lost: however the run ends (a limit, a cancel, a stop, a provider error), a failure the loop has not acted on yet fails it.
+An extension that **filters tool output** and cannot start fails the run whatever its mode: running without it would let unfiltered output through. A required failure is never lost: however the run ends (a limit, a cancel, a stop, a provider error), a failure the loop has not acted on yet fails it. And a run fails once: a failure recorded while the first is being reported is only logged.
 
 A failed run ends with an assistant message whose stop reason is `Error` and whose `error_message` starts with `EXTENSION_FAILED_PREFIX` (`[Extension failed: <name>] <reason>`). `on_error` is called, and a sub-agent's delegation reports it as a failure.
 

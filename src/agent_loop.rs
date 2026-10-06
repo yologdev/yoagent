@@ -547,7 +547,7 @@ async fn run_with_extensions(
     prompts: &[Message],
 ) -> SessionStats {
     if let Some(failure) = start_failure {
-        fail_run(&failure, config, tx, context, new_messages, true);
+        fail_run(&failure, exts, config, tx, context, new_messages, true);
         return SessionStats::default();
     }
     let base_tools = context.tools.len();
@@ -575,7 +575,7 @@ async fn run_with_extensions(
     // However the loop ended (a limit, a cancel, a stop, a provider error), a
     // required extension's failure it did not act on still fails the run.
     if let Some(failure) = exts.settle().await {
-        fail_run(&failure, config, tx, context, new_messages, false);
+        fail_run(&failure, exts, config, tx, context, new_messages, false);
     }
     stats
 }
@@ -586,12 +586,16 @@ async fn run_with_extensions(
 /// its own, so every message stays between a `TurnStart` and a `TurnEnd`.
 fn fail_run(
     failure: &crate::extension::Failure,
+    exts: &crate::extension::ActiveExtensions,
     config: &AgentLoopConfig,
     tx: &mpsc::UnboundedSender<AgentEvent>,
     context: &mut AgentContext,
     new_messages: &mut Vec<AgentMessage>,
     in_turn: bool,
 ) {
+    // The run fails once: a failure recorded while this one is reported
+    // (an `on_event` that fails on these very events) is only logged.
+    exts.latch_failed();
     let text = failure.message();
     tracing::error!("{text}");
     if !in_turn {
@@ -965,7 +969,7 @@ async fn run_loop(
             // ahead of a limit or `on_before_turn` that would otherwise end
             // it as a partial success.
             if let Some(failure) = exts.settle().await {
-                fail_run(&failure, config, tx, context, new_messages, true);
+                fail_run(&failure, exts, config, tx, context, new_messages, true);
                 return stats;
             }
 
@@ -1136,7 +1140,7 @@ async fn run_loop(
                     return stats;
                 }
                 Err(crate::extension::ModelHalt::Fail(failure)) => {
-                    fail_run(&failure, config, tx, context, new_messages, true);
+                    fail_run(&failure, exts, config, tx, context, new_messages, true);
                     return stats;
                 }
             };
@@ -1648,7 +1652,7 @@ async fn run_loop(
 
         if !exts.is_empty() {
             if let Some(failure) = exts.settle().await {
-                fail_run(&failure, config, tx, context, new_messages, false);
+                fail_run(&failure, exts, config, tx, context, new_messages, false);
                 return stats;
             }
             if let Some(message) =
@@ -1692,14 +1696,10 @@ async fn check_stop(
     match exts.on_stop(&stop).await {
         StopGate::Accept => None,
         StopGate::Fail(failure) => {
-            fail_run(&failure, config, tx, context, new_messages, false);
+            fail_run(&failure, exts, config, tx, context, new_messages, false);
             None
         }
-        StopGate::Continue {
-            name,
-            message,
-            required,
-        } => {
+        StopGate::Continue { messages, required } => {
             if *stop_continues >= config.max_stop_continues {
                 // A required extension that still has not accepted fails the
                 // run, whichever extension's message would have been sent.
@@ -1711,22 +1711,26 @@ async fn check_stop(
                             config.max_stop_continues
                         ),
                     };
-                    fail_run(&failure, config, tx, context, new_messages, false);
+                    fail_run(&failure, exts, config, tx, context, new_messages, false);
                 } else {
+                    let names: Vec<&str> = messages.iter().map(|(n, _)| n.as_str()).collect();
                     warn!(
-                        extension = %name,
-                        pending = %message,
-                        "extension still asks to continue after max_stop_continues ({}); \
-                         accepting the answer without its approval",
+                        extensions = ?names,
+                        "extensions still ask to continue after max_stop_continues ({}); \
+                         accepting the answer without their approval",
                         config.max_stop_continues
                     );
                 }
                 return None;
             }
             *stop_continues += 1;
-            Some(AgentMessage::Llm(Message::user(format!(
-                "{EXTENSION_MESSAGE_PREFIX}{name}] {message}"
-            ))))
+            // Every extension that asked is heard: one line each.
+            let text = messages
+                .iter()
+                .map(|(name, message)| format!("{EXTENSION_MESSAGE_PREFIX}{name}] {message}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            Some(AgentMessage::Llm(Message::user(text)))
         }
     }
 }
