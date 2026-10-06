@@ -11,7 +11,7 @@ struct NoRm;
 
 #[async_trait::async_trait]
 impl RunHooks for NoRm {
-    async fn before_tool(&mut self, call: &ToolCallRequest<'_>) -> ToolDecision {
+    async fn before_tool(&self, call: &ToolCallRequest<'_>) -> ToolDecision {
         if call.tool_name == "bash" && call.args.to_string().contains("rm -rf") {
             ToolDecision::Deny("rm -rf is not allowed".into())
         } else {
@@ -54,7 +54,7 @@ impl RunHooks for BudgetRun {
 
 ## Runs and state
 
-A **run** is one `prompt*` / `continue_loop*` call, or one delegation for a `SubAgentTool`. `start_run` is called at the start of every run and returns that run's hooks, so state for one run (a run's spend, a verifier's attempts) starts fresh each time and is isolated between concurrent runs and between agents sharing an extension. State that spans runs (a session budget) belongs in the `Extension` itself, behind its own lock or atomics.
+A **run** is one `prompt*` / `continue_loop*` call, or one delegation for a `SubAgentTool`. `start_run` is called at the start of every run and returns that run's hooks, so state for one run (a run's spend, a verifier's attempts) starts fresh each time and is isolated between concurrent runs and between agents sharing an extension. State that spans runs (a session budget) belongs in the `Extension` itself, behind its own lock or atomics. The per-call hooks `before_tool` and `after_tool` take `&self`, because the calls of one response may be judged concurrently: state they change needs interior mutability (a `Mutex` or atomics) even within one run.
 
 `RunContext` gives each run a unique `run_id`, the host's `label` (`Agent::with_run_label`, for example a session id), the run's prompts, its delegation `depth`, and its cancel token.
 

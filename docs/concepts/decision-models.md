@@ -542,7 +542,9 @@ denied without asking.
   the arguments that will actually run. A `ToolGate` installed by hand with
   `with_tool_middleware` must be added last yourself, and runs before any
   extension: an extension after it could modify arguments after approval.
-  Install it with `with_tree_extension` to cover sub-agents too.
+  Install it with `with_tree_extension` to cover sub-agents too. A tree
+  extension runs *first*, so the gate then judges a call again (a second
+  decision request) whenever a later extension rewrote its arguments.
 - A gate covers the agent it is installed on. Calls made **inside a
   `SubAgentTool` are not covered** by the parent's gate; give the sub-agent
   its own (`SubAgentTool::with_tool_gate`). There, `user_request` is the task
