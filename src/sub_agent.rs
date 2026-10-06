@@ -615,10 +615,8 @@ impl AgentTool for SubAgentTool {
         config.tree_extensions = self.tree_extensions.clone();
         config.max_stop_continues = self.max_stop_continues;
         // The caller's tree extensions (host policy) apply here too, ahead of
-        // this sub-agent's own, and at this delegation's depth.
-        config.inherited_extensions = ctx.tree_extensions().to_vec();
-        config.depth = ctx.delegation_depth();
-        config.run_label = ctx.run_label().map(String::from);
+        // this sub-agent's own, at this delegation's depth and label.
+        config.delegated_from(&ctx);
 
         // Channel for sub-agent events
         let (tx, rx) = mpsc::unbounded_channel();
@@ -679,9 +677,15 @@ impl AgentTool for SubAgentTool {
         let (new_messages, run_stats) =
             agent_loop_with_stats(vec![prompt], &mut context, &config, tx, cancel).await;
 
-        // Wait for event forwarding to complete
+        // Wait for event forwarding to complete. A forwarder that failed may
+        // have missed a rejection: the delegation then fails rather than
+        // passing for an empty success.
+        let mut forward_failed = None;
         if let Some(handle) = forward_handle {
-            let _ = handle.await;
+            if let Err(e) = handle.await {
+                tracing::error!(tool = %self.tool_name, "sub-agent event forwarder failed: {e}");
+                forward_failed = Some(e.to_string());
+            }
         } else if let Some(mut rx) = unforwarded {
             while let Ok(event) = rx.try_recv() {
                 if let AgentEvent::InputRejected { reason } = event {
@@ -695,6 +699,12 @@ impl AgentTool for SubAgentTool {
         // `run_stats` covers this run's own turns and, recursively, whatever
         // its own sub-agents reported to it.
         ctx.report_delegated_run(run_stats.clone());
+        if let Some(e) = forward_failed {
+            return Err(ToolError::Failed(format!(
+                "sub-agent '{}' could not be followed: its event forwarder failed ({e})",
+                self.tool_name
+            )));
+        }
 
         // An input filter rejected the task: nothing ran.
         let rejection = rejected.lock().unwrap_or_else(|e| e.into_inner()).take();

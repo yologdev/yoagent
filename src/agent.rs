@@ -81,6 +81,8 @@ pub struct Agent {
     tree_extensions: Vec<Arc<dyn crate::Extension>>,
     max_stop_continues: usize,
     run_label: Option<String>,
+    inherited_extensions: Vec<Arc<dyn crate::Extension>>,
+    depth: usize,
 
     // Per-turn hooks (transient notes on the latest user turn)
     turn_hooks: Vec<Arc<dyn TurnHook>>,
@@ -332,6 +334,8 @@ impl Agent {
             tree_extensions: Vec::new(),
             max_stop_continues: crate::extension::DEFAULT_MAX_STOP_CONTINUES,
             run_label: None,
+            inherited_extensions: Vec::new(),
+            depth: 0,
             turn_hooks: Vec::new(),
             #[cfg(feature = "decision")]
             skills: crate::skills::SkillSet::empty(),
@@ -701,10 +705,25 @@ impl Agent {
         self
     }
 
-    /// The host's label for this agent's runs (yo puts its session id here),
-    /// passed to extensions as [`RunContext::label`](crate::extension::RunContext::label).
+    /// The host's label for this agent's runs (a session id, say), passed to
+    /// extensions as [`RunContext::label`](crate::extension::RunContext::label).
     pub fn with_run_label(mut self, label: impl Into<String>) -> Self {
         self.run_label = Some(label.into());
+        self
+    }
+
+    /// Make this agent's runs delegated runs of the tool call `ctx` belongs
+    /// to: the calling run's tree extensions apply (ahead of this agent's
+    /// own, their tools not offered), at the delegation's depth and under the
+    /// calling run's label unless this agent has one. What a custom
+    /// delegation tool that runs an `Agent` calls; see
+    /// [`AgentLoopConfig::delegated_from`].
+    pub fn delegated_from(mut self, ctx: &ToolContext) -> Self {
+        self.inherited_extensions = ctx.tree_extensions().to_vec();
+        self.depth = ctx.delegation_depth();
+        if self.run_label.is_none() {
+            self.run_label = ctx.run_label().map(String::from);
+        }
         self
     }
 
@@ -1568,6 +1587,8 @@ impl Agent {
         config.tree_extensions = self.tree_extensions.clone();
         config.max_stop_continues = self.max_stop_continues;
         config.run_label = self.run_label.clone();
+        config.inherited_extensions = self.inherited_extensions.clone();
+        config.depth = self.depth;
         config
     }
 }

@@ -200,6 +200,10 @@ struct Hooks {
     fail_stop: Option<&'static str>,
     panic_in: Option<&'static str>,
     log: Option<Arc<Mutex<Vec<String>>>>,
+    /// Every event `on_event` sees, as Debug text.
+    audit: Option<Arc<Mutex<Vec<String>>>>,
+    /// `on_event` panics on events this matches.
+    panic_on_event: Option<fn(&AgentEvent) -> bool>,
 }
 
 impl Hooks {
@@ -288,10 +292,19 @@ impl RunHooks for Hooks {
             None => StopDecision::Accept,
         }
     }
+    fn on_event(&self, event: &AgentEvent) {
+        if let Some(audit) = &self.audit {
+            audit.lock().unwrap().push(format!("{event:?}"));
+        }
+        if self.panic_on_event.is_some_and(|matches| matches(event)) {
+            panic!("event sink down");
+        }
+    }
     async fn finish(&mut self, outcome: &RunOutcome) {
         self.record(format!(
-            "finish stop={:?} rejected={} cancelled={}",
-            outcome.stop_reason, outcome.rejected, outcome.cancelled
+            "finish {:?} stop={:?}",
+            outcome.end(),
+            outcome.stop_reason()
         ));
     }
 }
@@ -323,8 +336,8 @@ impl AgentTool for Named {
     }
 }
 
-fn ext(name: &str, hooks: Hooks) -> Stateless<Hooks> {
-    Stateless::new(name, hooks)
+fn ext(name: &str, hooks: Hooks) -> ClonedHooks<Hooks> {
+    ClonedHooks::new(name, hooks)
 }
 
 // ---------------------------------------------------------------------------
@@ -457,7 +470,7 @@ async fn on_input_rejects_and_finish_reports_it() {
         *log.lock().unwrap(),
         vec![
             "on_input hello".to_string(),
-            "finish stop=None rejected=true cancelled=false".to_string()
+            r#"finish Rejected { reason: "not today" } stop=None"#.to_string()
         ]
     );
 }
@@ -889,25 +902,18 @@ async fn on_stop_fail_fails_a_required_run() {
 
 #[tokio::test]
 async fn on_event_sees_every_event_before_the_consumer() {
-    struct Audit(Arc<Mutex<Vec<String>>>);
-    #[async_trait::async_trait]
-    impl Extension for Audit {
-        fn name(&self) -> &str {
-            "audit"
-        }
-        async fn start_run(&self, _: &RunContext<'_>) -> Result<Box<dyn RunHooks>, ExtensionError> {
-            Ok(Box::new(Hooks::default()))
-        }
-        fn on_event(&self, _run_id: &str, event: &AgentEvent) {
-            self.0.lock().unwrap().push(format!("{event:?}"));
-        }
-    }
     let seen = Arc::new(Mutex::new(Vec::new()));
     let (agent, _) = scripted(vec![
         call("echo", serde_json::json!({"text": "x"})),
         text("done"),
     ]);
-    let mut agent = agent.with_extension(Audit(seen.clone()));
+    let mut agent = agent.with_extension(ext(
+        "audit",
+        Hooks {
+            audit: Some(seen.clone()),
+            ..Default::default()
+        },
+    ));
     let events = run(&mut agent, "go").await;
     let consumer: Vec<String> = events.iter().map(|e| format!("{e:?}")).collect();
     assert_eq!(*seen.lock().unwrap(), consumer);
@@ -1351,32 +1357,25 @@ async fn a_required_failure_is_not_lost_when_a_limit_ends_the_run() {
     assert_failed_by(&events, "post", "after_tool failed");
 }
 
-/// Panics observing `AgentStart`, the run's first event.
-struct PanickyAudit;
-
-#[async_trait::async_trait]
-impl Extension for PanickyAudit {
-    fn name(&self) -> &str {
-        "audit"
-    }
-    fn mode(&self) -> ExtensionMode {
-        ExtensionMode::Required
-    }
-    async fn start_run(&self, _: &RunContext<'_>) -> Result<Box<dyn RunHooks>, ExtensionError> {
-        Ok(Box::new(Hooks::default()))
-    }
-    fn on_event(&self, _: &str, event: &AgentEvent) {
-        if matches!(event, AgentEvent::AgentStart) {
-            panic!("audit log unavailable");
-        }
-    }
+/// A required audit that panics observing `AgentStart`, the run's first
+/// event.
+#[allow(non_snake_case)]
+fn PanickyAudit() -> ClonedHooks<Hooks> {
+    ext(
+        "audit",
+        Hooks {
+            panic_on_event: Some(|e| matches!(e, AgentEvent::AgentStart)),
+            ..Default::default()
+        },
+    )
+    .required()
 }
 
 #[tokio::test]
 async fn a_required_on_event_failure_fails_the_run_deterministically() {
     for _ in 0..20 {
         let (agent, requests) = scripted(vec![text("never")]);
-        let mut agent = agent.with_extension(PanickyAudit);
+        let mut agent = agent.with_extension(PanickyAudit());
         let events = run(&mut agent, "go").await;
         assert_failed_by(&events, "audit", "on_event failed");
         assert!(
@@ -1458,16 +1457,15 @@ impl RunHooks for OutcomeHooks {
         ToolDecision::Allow
     }
     async fn finish(&mut self, outcome: &RunOutcome) {
-        self.seen.lock().unwrap().push(format!(
-            "stop={:?} rejected={} cancelled={} error={}",
-            outcome.stop_reason,
-            outcome.rejected,
-            outcome.cancelled,
-            outcome
-                .error
-                .as_deref()
-                .is_some_and(|e| e.starts_with(EXTENSION_FAILED_PREFIX))
-        ));
+        let end = match outcome.end() {
+            RunEnd::Failed { extension, .. } => format!("Failed by {extension:?}"),
+            RunEnd::Stopped { reason } => format!("Stopped {reason:?}"),
+            other => format!("{other:?}"),
+        };
+        self.seen
+            .lock()
+            .unwrap()
+            .push(format!("{end} stop={:?}", outcome.stop_reason()));
     }
 }
 
@@ -1500,7 +1498,7 @@ async fn finish_reports_each_ending_once() {
     let (a, _) = scripted(vec![text("done")]);
     assert_eq!(
         finished(a, false, "go").await,
-        vec!["stop=Some(Stop) rejected=false cancelled=false error=false"]
+        vec!["Completed stop=Some(Stop)"]
     );
     // Stopped by another extension's before_model.
     let (a, _) = scripted(vec![text("never")]);
@@ -1513,7 +1511,7 @@ async fn finish_reports_each_ending_once() {
     ));
     assert_eq!(
         finished(a, false, "go").await,
-        vec!["stop=None rejected=false cancelled=false error=false"]
+        vec![r#"Stopped "[Agent stopped: spent]" stop=None"#]
     );
     // Failed by a required extension.
     let (a, _) = scripted(vec![text("never")]);
@@ -1529,7 +1527,7 @@ async fn finish_reports_each_ending_once() {
     );
     assert_eq!(
         finished(a, false, "go").await,
-        vec!["stop=Some(Error) rejected=false cancelled=false error=true"]
+        vec![r#"Failed by Some("verify") stop=Some(Error)"#]
     );
     // Cancelled while its tool call was being judged: the call does not run.
     let (a, _) = scripted(vec![
@@ -1538,7 +1536,7 @@ async fn finish_reports_each_ending_once() {
     ]);
     assert_eq!(
         finished(a, true, "go").await,
-        vec!["stop=Some(ToolUse) rejected=false cancelled=true error=false"]
+        vec!["Cancelled stop=Some(ToolUse)"]
     );
     // Stopped by a turn limit.
     let (a, _) = scripted(vec![
@@ -1548,7 +1546,7 @@ async fn finish_reports_each_ending_once() {
     let a = a.with_execution_limits(yoagent::context::ExecutionLimits::default().with_max_turns(1));
     assert_eq!(
         finished(a, false, "go").await,
-        vec!["stop=Some(ToolUse) rejected=false cancelled=false error=false"]
+        vec![r#"Stopped "[Agent stopped: Max turns reached (1/1)]" stop=Some(ToolUse)"#]
     );
 }
 
@@ -1863,31 +1861,23 @@ async fn after_tool_sees_whether_the_call_failed() {
     ]);
     let mut agent = agent
         .with_tools(vec![Box::new(Echo), Box::new(Failing)])
-        .with_extension(Stateless::new("errors", SeesErrors(seen.clone())));
+        .with_extension(ClonedHooks::new("errors", SeesErrors(seen.clone())));
     let _ = run(&mut agent, "go").await;
     assert_eq!(*seen.lock().unwrap(), vec![true, false]);
 }
 
-/// Panics observing every `MessageEnd`: including the events of the failure
-/// report itself.
-struct BrokenSink;
-
-#[async_trait::async_trait]
-impl Extension for BrokenSink {
-    fn name(&self) -> &str {
-        "sink"
-    }
-    fn mode(&self) -> ExtensionMode {
-        ExtensionMode::Required
-    }
-    async fn start_run(&self, _: &RunContext<'_>) -> Result<Box<dyn RunHooks>, ExtensionError> {
-        Ok(Box::new(Hooks::default()))
-    }
-    fn on_event(&self, _: &str, event: &AgentEvent) {
-        if matches!(event, AgentEvent::MessageEnd { .. }) {
-            panic!("sink down");
-        }
-    }
+/// A required sink that panics observing every `MessageEnd`: including the
+/// events of the failure report itself.
+#[allow(non_snake_case)]
+fn BrokenSink() -> ClonedHooks<Hooks> {
+    ext(
+        "sink",
+        Hooks {
+            panic_on_event: Some(|e| matches!(e, AgentEvent::MessageEnd { .. })),
+            ..Default::default()
+        },
+    )
+    .required()
 }
 
 #[tokio::test]
@@ -1896,7 +1886,7 @@ async fn a_run_fails_once_even_when_its_failure_report_fails_again() {
     let seen = errors.clone();
     let (agent, _) = scripted(vec![text("done")]);
     let mut agent = agent
-        .with_extension(BrokenSink)
+        .with_extension(BrokenSink())
         .on_error(move |e| seen.lock().unwrap().push(e.to_string()));
     let events = run(&mut agent, "go").await;
     assert_failed_by(&events, "sink", "on_event failed");
@@ -1972,7 +1962,7 @@ async fn parallel_calls_are_judged_concurrently() {
         ]),
         text("done"),
     ]);
-    let mut agent = agent.with_extension(Stateless::new(
+    let mut agent = agent.with_extension(ClonedHooks::new(
         "slow-policy",
         Slow(Arc::new(tokio::sync::Barrier::new(2))),
     ));

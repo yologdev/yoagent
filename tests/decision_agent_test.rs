@@ -1676,7 +1676,7 @@ async fn gate_judges_the_arguments_an_extension_rewrote() {
     let (tools, ran) = make_tools(1);
     let agent = Agent::from_provider(calls_rm(), ModelConfig::mock())
         .with_tools(tools)
-        .with_extension(yoagent::extension::Stateless::new("rewrite", Rewrite))
+        .with_extension(yoagent::extension::ClonedHooks::new("rewrite", Rewrite))
         .with_tool_gate(ToolGate::new(model(&mock)));
     run(agent, "tidy up").await;
     assert!(ran.lock().unwrap().is_empty(), "denied");
