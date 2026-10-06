@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 ///
 /// ```ignore
 /// let provider = Arc::new(TurnHookProvider::new(provider, vec![Arc::new(my_hook)]));
-/// let config = AgentLoopConfig { provider, /* ... */ };
+/// let mut config = AgentLoopConfig::new(provider, "model");
 /// ```
 ///
 /// The system prompt and every earlier message are never touched. With no

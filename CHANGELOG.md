@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Changed (breaking)
+
+- **`AgentLoopConfig` is `#[non_exhaustive]`; build it with `AgentLoopConfig::new(provider, model)`.** `new` sets every other field to the default the struct-literal examples used (no API key, thinking off, no context management, no hooks, parallel tools, the default retry policy). Fields stay public, so set what you need afterwards: `config.max_tokens = Some(1024);`. A struct literal no longer compiles outside the crate. Every field added so far was a breaking change for code calling `agent_loop` directly, which is why recent features went through task-locals; new fields (such as `#241`'s extensions) no longer break anyone. `Agent` and `SubAgentTool` users are unaffected.
+
 ### Fixed
 
 - **A cancelled run no longer executes the tool calls it had not started** (#243). If the run was cancelled while the model's response arrived, its tool calls used to run anyway, and the cancel was only seen at the next turn: after a user pressed cancel, the agent could still run a command or write a file. Such a call is now answered with an error result ("Tool call not run: the run was cancelled.") and never runs, and the run ends with `[Agent stopped: cancelled]` as before. A tool already running still gets the cancel through its `ToolContext`.

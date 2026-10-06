@@ -17,33 +17,11 @@ fn make_config(
     provider: std::sync::Arc<dyn StreamProvider>,
     model_config: ModelConfig,
 ) -> AgentLoopConfig {
-    AgentLoopConfig {
-        provider,
-        model: model_config.id.clone(),
-        api_key: api_key(),
-        thinking_level: ThinkingLevel::Off,
-        max_tokens: Some(1024),
-        temperature: None,
-        model_config: Some(model_config),
-        convert_to_llm: None,
-        transform_context: None,
-        get_steering_messages: None,
-        get_follow_up_messages: None,
-        context_config: None,
-        compaction_strategy: None,
-        execution_limits: None,
-        cache_config: CacheConfig::default(),
-        tool_output_sink: None,
-        output_schema: None,
-        tool_execution: ToolExecutionStrategy::default(),
-        retry_config: yoagent::RetryConfig::default(),
-        before_turn: None,
-        after_turn: None,
-        on_error: None,
-        input_filters: vec![],
-        tool_middleware: vec![],
-        turn_delay: None,
-    }
+    let mut config = AgentLoopConfig::new(provider, model_config.id.clone());
+    config.api_key = api_key();
+    config.max_tokens = Some(1024);
+    config.model_config = Some(model_config);
+    config
 }
 
 fn extract_assistant_text(messages: &[AgentMessage]) -> String {

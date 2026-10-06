@@ -11,33 +11,9 @@ use yoagent::sub_agent::SubAgentTool;
 use yoagent::*;
 
 fn make_config(provider: MockProvider) -> AgentLoopConfig {
-    AgentLoopConfig {
-        provider: std::sync::Arc::new(provider),
-        model: "mock".into(),
-        api_key: "test".into(),
-        thinking_level: ThinkingLevel::Off,
-        max_tokens: None,
-        temperature: None,
-        model_config: None,
-        convert_to_llm: None,
-        transform_context: None,
-        get_steering_messages: None,
-        get_follow_up_messages: None,
-        context_config: None,
-        compaction_strategy: None,
-        execution_limits: None,
-        cache_config: CacheConfig::default(),
-        tool_output_sink: None,
-        output_schema: None,
-        tool_execution: ToolExecutionStrategy::default(),
-        retry_config: yoagent::RetryConfig::default(),
-        before_turn: None,
-        after_turn: None,
-        on_error: None,
-        input_filters: vec![],
-        tool_middleware: vec![],
-        turn_delay: None,
-    }
+    let mut config = AgentLoopConfig::new(std::sync::Arc::new(provider), "mock");
+    config.api_key = "test".into();
+    config
 }
 
 fn collect_events(mut rx: mpsc::UnboundedReceiver<AgentEvent>) -> Vec<AgentEvent> {

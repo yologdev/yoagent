@@ -565,37 +565,25 @@ impl AgentTool for SubAgentTool {
         );
 
         // Config with Arc'd provider
-        let config = AgentLoopConfig {
-            provider,
-            model: self.model.clone(),
-            api_key: if self.api_key.is_empty() {
-                crate::provider::resolve_api_key_or_warn(self.model_config.as_ref())
-            } else {
-                self.api_key.clone()
-            },
-            thinking_level: self.thinking_level,
-            max_tokens: self.max_tokens,
-            temperature: self.temperature,
-            model_config: self.model_config.clone(),
-            convert_to_llm: None,
-            transform_context: None,
-            get_steering_messages: None,
-            get_follow_up_messages: None,
-            context_config: self.context_config.clone(),
-            compaction_strategy: None,
-            execution_limits: Some(self.execution_limits.clone()),
-            cache_config: self.cache_config.clone(),
-            tool_output_sink: self.shared_state.clone(),
-            tool_execution: self.tool_execution.clone(),
-            retry_config: self.retry_config.clone(),
-            before_turn: None,
-            after_turn: None,
-            on_error: None,
-            input_filters: self.input_filters.clone(),
-            tool_middleware,
-            output_schema: None,
-            turn_delay: self.turn_delay,
+        let mut config = AgentLoopConfig::new(provider, self.model.clone());
+        config.api_key = if self.api_key.is_empty() {
+            crate::provider::resolve_api_key_or_warn(self.model_config.as_ref())
+        } else {
+            self.api_key.clone()
         };
+        config.thinking_level = self.thinking_level;
+        config.max_tokens = self.max_tokens;
+        config.temperature = self.temperature;
+        config.model_config = self.model_config.clone();
+        config.context_config = self.context_config.clone();
+        config.execution_limits = Some(self.execution_limits.clone());
+        config.cache_config = self.cache_config.clone();
+        config.tool_output_sink = self.shared_state.clone();
+        config.tool_execution = self.tool_execution.clone();
+        config.retry_config = self.retry_config.clone();
+        config.input_filters = self.input_filters.clone();
+        config.tool_middleware = tool_middleware;
+        config.turn_delay = self.turn_delay;
 
         // Channel for sub-agent events
         let (tx, rx) = mpsc::unbounded_channel();

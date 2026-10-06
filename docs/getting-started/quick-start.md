@@ -137,33 +137,11 @@ async fn main() {
         tools: yoagent::tools::default_tools(),
     };
 
-    let config = AgentLoopConfig {
-        provider: std::sync::Arc::new(AnthropicProvider),
-        model: "claude-sonnet-5".into(),
-        api_key: std::env::var("ANTHROPIC_API_KEY").unwrap(),
-        thinking_level: ThinkingLevel::Off,
-        max_tokens: None,
-        temperature: None,
-        model_config: None,
-        convert_to_llm: None,
-        transform_context: None,
-        get_steering_messages: None,
-        get_follow_up_messages: None,
-        context_config: None,
-        compaction_strategy: None,
-        execution_limits: None,
-        cache_config: CacheConfig::default(),
-        tool_output_sink: None,
-        tool_execution: ToolExecutionStrategy::default(),
-        tool_middleware: vec![],
-        output_schema: None,
-        retry_config: yoagent::RetryConfig::default(),
-        before_turn: None,
-        after_turn: None,
-        on_error: None,
-        input_filters: vec![],
-        turn_delay: None,
-    };
+    let mut config = AgentLoopConfig::new(
+        std::sync::Arc::new(AnthropicProvider),
+        "claude-sonnet-5",
+    );
+    config.api_key = std::env::var("ANTHROPIC_API_KEY").unwrap();
 
     let prompts = vec![AgentMessage::Llm(Message::user("Hello!"))];
     let new_messages = agent_loop(prompts, &mut context, &config, tx, cancel).await;
