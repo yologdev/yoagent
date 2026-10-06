@@ -150,6 +150,8 @@ enum Step {
     StartThenCancel,
     /// Cancel the run, then return a tool call: the cancel lands before tools start.
     CancelThenTool,
+    /// Return an answer without streaming any event.
+    Silent,
 }
 
 struct Scripted {
@@ -222,6 +224,17 @@ impl StreamProvider for Scripted {
             }
             Step::Fail => return Err(ProviderError::Api("bad request".into())),
             Step::Retryable => return Err(ProviderError::Network("connection reset".into())),
+            Step::Silent => {
+                return Ok(Message::assistant(
+                    vec![Content::Text {
+                        text: "done".into(),
+                    }],
+                    StopReason::Stop,
+                    "mock",
+                    "mock",
+                    Usage::default(),
+                ))
+            }
             _ => {}
         }
         let _ = tx.send(StreamEvent::Start);
@@ -266,7 +279,7 @@ impl StreamProvider for Scripted {
                 cancel.cancel();
                 tool_call_message("probe", StopReason::ToolUse)
             }
-            Step::Cancel | Step::Fail | Step::Retryable => unreachable!(),
+            Step::Cancel | Step::Fail | Step::Retryable | Step::Silent => unreachable!(),
         };
         let _ = tx.send(StreamEvent::Done {
             message: message.clone(),
@@ -411,6 +424,8 @@ struct Rig {
     show_last_user: bool,
     /// Continue from a history holding this user message, instead of prompting.
     continue_from: Option<&'static str>,
+    /// `on_before_turn` returns `false` on this turn.
+    stop_at_turn: Option<usize>,
 }
 
 fn rig(steps: &[Step]) -> Rig {
@@ -423,6 +438,7 @@ fn rig(steps: &[Step]) -> Rig {
         note: None,
         show_last_user: false,
         continue_from: None,
+        stop_at_turn: None,
     }
 }
 
@@ -435,6 +451,7 @@ impl Rig {
             show_last_user: self.show_last_user,
         };
         let (r1, r2, r3) = (rec.clone(), rec.clone(), rec.clone());
+        let stop_at_turn = self.stop_at_turn;
         let mut agent = Agent::from_provider(provider, ModelConfig::mock())
             .with_tools(vec![Box::new(Probe {
                 name: "probe",
@@ -450,7 +467,7 @@ impl Rig {
             })
             .on_before_turn(move |_, turn| {
                 r1.hook(format!("on_before_turn {turn}"));
-                true
+                stop_at_turn != Some(turn)
             })
             .on_after_turn(move |_, _| r2.hook("on_after_turn"))
             .on_error(move |e| r3.hook(format!("on_error {e:?}")));
@@ -621,8 +638,8 @@ async fn provider_error_in_the_response() {
 
 #[tokio::test]
 async fn provider_error_before_any_output() {
-    // Current behaviour, kept as is here: the failed assistant message is in
-    // the final history, but no `MessageStart` / `MessageEnd` is sent for it.
+    // Nothing had streamed, but the failed message is appended to the
+    // history, so it is announced (#243).
     assert_timeline(
         rig(&[Step::Fail]).run().await,
         r#"
@@ -636,6 +653,8 @@ async fn provider_error_before_any_output() {
         on_before_turn 0
         turn_hook
         provider.stream
+        event:MessageStart assistant/Error
+        event:MessageEnd assistant/Error
         on_error "API error: bad request"
         on_after_turn
         event:TurnEnd tool_results=0
@@ -676,9 +695,8 @@ async fn retried_request() {
 
 #[tokio::test]
 async fn cancelled_before_any_output() {
-    // Current behaviour, kept as is here: the aborted assistant message is
-    // in the final history, but no `MessageStart` / `MessageEnd` is sent for
-    // it (nothing had streamed; compare `cancelled_while_streaming`).
+    // Nothing had streamed, but the aborted message is appended to the
+    // history, so it is announced (#243).
     assert_timeline(
         rig(&[Step::Cancel]).run().await,
         r#"
@@ -692,6 +710,8 @@ async fn cancelled_before_any_output() {
         on_before_turn 0
         turn_hook
         provider.stream
+        event:MessageStart assistant/Aborted
+        event:MessageEnd assistant/Aborted
         on_after_turn
         event:TurnEnd tool_results=0
         event:AgentEnd [user, assistant/Aborted]
@@ -726,9 +746,9 @@ async fn cancelled_while_streaming() {
 
 #[tokio::test]
 async fn cancelled_before_tools_start() {
-    // Current behaviour, kept as is here: the run was cancelled before its
-    // tools started, and the tool still ran. The cancel is seen at the next
-    // turn.
+    // The run was cancelled before its tools started: the call is answered
+    // with an error and never runs, and the run ends with the cancel marker
+    // (#243).
     assert_timeline(
         rig(&[Step::CancelThenTool, Step::Text]).run().await,
         r#"
@@ -744,26 +764,24 @@ async fn cancelled_before_tools_start() {
         provider.stream
         event:MessageStart assistant/Stop
         event:MessageEnd assistant/ToolUse
-        middleware0 probe args={}
         event:ToolExecutionStart probe
-        tool.execute probe args={}
-        event:ToolExecutionEnd probe error=false
-        event:MessageStart toolResult/error=false
-        event:MessageEnd toolResult/error=false
+        event:ToolExecutionEnd probe error=true
+        event:MessageStart toolResult/error=true
+        event:MessageEnd toolResult/error=true
         on_after_turn
         event:TurnEnd tool_results=1
         event:MessageStart user "[Agent stopped: cancelled]"
         event:MessageEnd user "[Agent stopped: cancelled]"
-        event:AgentEnd [user, assistant/ToolUse, toolResult/error=false, user "[Agent stopped: cancelled]"]
+        event:AgentEnd [user, assistant/ToolUse, toolResult/error=true, user "[Agent stopped: cancelled]"]
         "#,
     );
 }
 
 #[tokio::test]
 async fn turn_limit() {
-    // Current behaviour, kept as is here: the limit is checked after
-    // `TurnStart`, so that turn has no `TurnEnd`, and it runs neither
-    // `on_before_turn` nor `on_after_turn`.
+    // The limit stops the turn before its model request: the turn runs
+    // neither `on_before_turn` nor `on_after_turn`, but its `TurnStart` is
+    // still paired with a `TurnEnd` (#243).
     let mut r = rig(&[Step::Tool("probe"), Step::Text]);
     r.limits = Some(ExecutionLimits::default().with_max_turns(1));
     assert_timeline(
@@ -792,6 +810,7 @@ async fn turn_limit() {
         event:TurnStart
         event:MessageStart user "[Agent stopped: Max turns reached (1/1)]"
         event:MessageEnd user "[Agent stopped: Max turns reached (1/1)]"
+        event:TurnEnd tool_results=0
         event:AgentEnd [user, assistant/ToolUse, toolResult/error=false, user "[Agent stopped: Max turns reached (1/1)]"]
         "#,
     );
@@ -1036,6 +1055,69 @@ async fn continue_loop_path() {
         on_after_turn
         event:TurnEnd tool_results=0
         event:AgentEnd [assistant/Stop]
+        "#,
+    );
+}
+
+/// `on_before_turn` returning `false` ends the run; its turn is still closed
+/// (#243).
+#[tokio::test]
+async fn stopped_by_on_before_turn() {
+    let mut r = rig(&[Step::Tool("probe"), Step::Text]);
+    r.stop_at_turn = Some(1);
+    assert_timeline(
+        r.run().await,
+        r#"
+        tool_source
+        event:AgentStart
+        input_filter.sync
+        input_filter.async
+        event:TurnStart
+        event:MessageStart user
+        event:MessageEnd user
+        on_before_turn 0
+        turn_hook
+        provider.stream
+        event:MessageStart assistant/Stop
+        event:MessageEnd assistant/ToolUse
+        middleware0 probe args={}
+        event:ToolExecutionStart probe
+        tool.execute probe args={}
+        event:ToolExecutionEnd probe error=false
+        event:MessageStart toolResult/error=false
+        event:MessageEnd toolResult/error=false
+        on_after_turn
+        event:TurnEnd tool_results=1
+        event:TurnStart
+        on_before_turn 1
+        event:TurnEnd tool_results=0
+        event:AgentEnd [user, assistant/ToolUse, toolResult/error=false]
+        "#,
+    );
+}
+
+/// A provider that returns its message without streaming anything: the
+/// message is announced anyway (#243).
+#[tokio::test]
+async fn provider_streams_nothing() {
+    assert_timeline(
+        rig(&[Step::Silent]).run().await,
+        r#"
+        tool_source
+        event:AgentStart
+        input_filter.sync
+        input_filter.async
+        event:TurnStart
+        event:MessageStart user
+        event:MessageEnd user
+        on_before_turn 0
+        turn_hook
+        provider.stream
+        event:MessageStart assistant/Stop
+        event:MessageEnd assistant/Stop
+        on_after_turn
+        event:TurnEnd tool_results=0
+        event:AgentEnd [user, assistant/Stop]
         "#,
     );
 }

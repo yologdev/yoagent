@@ -149,12 +149,13 @@ agent.finish().await;
   `MessageUpdate` and its `MessageEnd`, all at once when it finishes.
 - A retried attempt disappears; only its `ProviderRetry` remains. That
   includes the last one when the run is aborted during the retry's backoff:
-  the turn's result is then only in `TurnEnd` / `AgentEnd`.
+  the turn's `Aborted` message then arrives on its own, as a `MessageStart`
+  and `MessageEnd` with no deltas.
 - An attempt that fails for good arrives as its `MessageStart` and its
   `Error` or `Aborted` `MessageEnd`, without its deltas. The `MessageEnd`'s
   `content` still holds what the attempt produced, so print it from there if
-  you want it. (An attempt that failed before streaming anything sent no
-  message events, and none arrive.)
+  you want it. (A final failure that streamed nothing is still announced with
+  a `MessageStart` and `MessageEnd`, so it arrives the same way.)
 - An attempt that is left open (the stream ends, or a retry or another
   attempt starts before it ends) is dropped, never released, and logged.
 - Every other event passes through at once, so it can overtake an attempt
@@ -205,8 +206,9 @@ agent.finish().await;
 
 The backoff races cancellation, so an abort that lands during it ends the
 turn at once and no retry request is sent. The turn's message (in `AgentEnd`
-and in history) carries `StopReason::Aborted`; no second `MessageEnd` is sent,
-because no new message was opened. That holds when the consumer reacts within
+and in history) carries `StopReason::Aborted`. No attempt streamed it, so it
+arrives on its own after the `ProviderRetry`, as a `MessageStart` and an
+`Aborted` `MessageEnd` with no text. That holds when the consumer reacts within
 the backoff, which by default is about a second. A very short backoff (a small
 `Retry-After`, or a tiny `initial_delay_ms`) can let the retry start first;
 the abort then cancels it in flight (possibly after the provider began
