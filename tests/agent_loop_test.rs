@@ -1104,7 +1104,7 @@ async fn test_no_retry_on_auth_error() {
             inner: MockProvider::text("never reached"),
         });
 
-    // 3 retries, but auth is not retryable
+    // default RetryConfig (3 retries); auth errors are not retried
     let mut config = AgentLoopConfig::new(provider.clone(), "mock");
     config.api_key = "test".into();
 
@@ -2149,7 +2149,7 @@ async fn test_none_compaction_strategy_uses_default() {
     // Provider returns a simple text response
     let provider = MockProvider::text("Got it.");
 
-    // Should fall back to DefaultCompaction
+    // no compaction_strategy: falls back to DefaultCompaction
     let mut config = AgentLoopConfig::new(std::sync::Arc::new(provider), "test");
     config.api_key = "test".into();
     config.context_config = Some(ContextConfig {
