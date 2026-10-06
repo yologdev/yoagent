@@ -1,7 +1,8 @@
 //! Pins the order in which the existing hooks fire, interleaved with the
-//! events, on every path through a run: a plain answer, a tool call, a
-//! refusal, a provider error, a cancellation during streaming, a cancellation
-//! while tools run, and a turn limit.
+//! events, on the `prompt` and `continue_loop` paths: a plain answer, a tool
+//! call, a refusal, provider errors (in the response, and before any output),
+//! a retried request, cancellations, a turn limit, a rejected input, hook
+//! chains, a sourced tool and a turn hook's note.
 //!
 //! The `Extension` contract (#241) re-routes the trait hooks (input filters,
 //! turn hooks, tool middleware, tool sources) through one dispatch path and
@@ -12,6 +13,10 @@
 //! Each hook records how many events had been sent when it fired, so the
 //! timeline below is exact, not a race between the hook log and a consumer
 //! draining the channel.
+//!
+//! In the timelines, the `MessageStart` of an assistant message shows
+//! `assistant/Stop`: that is the placeholder the stream starts with, before
+//! the real stop reason is known at `MessageEnd`.
 
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -122,33 +127,41 @@ fn describe(event: &AgentEvent) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Scripted provider and hooks
+// Scripted provider, tools and hooks
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy)]
 enum Step {
     /// A plain answer.
     Text,
-    /// One call to the `probe` tool.
-    Tool,
+    /// One call to the named tool.
+    Tool(&'static str),
     /// A refused response carrying a tool call.
     RefuseWithTool,
     /// A failed response (`StopReason::Error`), as an SSE-embedded error arrives.
     Error,
-    /// Cancel the run while streaming.
+    /// A non-retryable provider error before any output.
+    Fail,
+    /// A retryable provider error before any output.
+    Retryable,
+    /// Cancel the run before any output.
     Cancel,
-    /// Cancel the run, then return a tool call (cancelled while tools run).
+    /// Start streaming text, then cancel the run.
+    StartThenCancel,
+    /// Cancel the run, then return a tool call: the cancel lands before tools start.
     CancelThenTool,
 }
 
 struct Scripted {
     steps: Mutex<Vec<Step>>,
     rec: Arc<Recorder>,
+    /// Record the text of the latest user message each request carries.
+    show_last_user: bool,
 }
 
-fn tool_call_message(stop_reason: StopReason) -> Message {
+fn tool_call_message(name: &str, stop_reason: StopReason) -> Message {
     Message::assistant(
-        vec![Content::tool_call("call-1", "probe", serde_json::json!({}))],
+        vec![Content::tool_call("call-1", name, serde_json::json!({}))],
         stop_reason,
         "mock",
         "mock",
@@ -156,28 +169,60 @@ fn tool_call_message(stop_reason: StopReason) -> Message {
     )
 }
 
-fn send_tool_call(tx: &mpsc::UnboundedSender<StreamEvent>) {
+fn send_tool_call(tx: &mpsc::UnboundedSender<StreamEvent>, name: &str) {
     let _ = tx.send(StreamEvent::ToolCallStart {
         content_index: 0,
         id: "call-1".into(),
-        name: "probe".into(),
+        name: name.into(),
     });
     let _ = tx.send(StreamEvent::ToolCallEnd { content_index: 0 });
+}
+
+fn last_user_text(messages: &[Message]) -> String {
+    messages
+        .iter()
+        .rev()
+        .find_map(|m| match m {
+            Message::User { content, .. } => Some(
+                content
+                    .iter()
+                    .filter_map(|c| match c {
+                        Content::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" | "),
+            ),
+            _ => None,
+        })
+        .unwrap_or_default()
 }
 
 #[async_trait::async_trait]
 impl StreamProvider for Scripted {
     async fn stream(
         &self,
-        _config: StreamConfig,
+        config: StreamConfig,
         tx: mpsc::UnboundedSender<StreamEvent>,
         cancel: CancellationToken,
     ) -> Result<Message, ProviderError> {
-        self.rec.hook("provider.stream");
+        if self.show_last_user {
+            self.rec.hook(format!(
+                "provider.stream last_user={:?}",
+                last_user_text(&config.messages)
+            ));
+        } else {
+            self.rec.hook("provider.stream");
+        }
         let step = self.steps.lock().unwrap().remove(0);
-        if let Step::Cancel = step {
-            cancel.cancel();
-            return Err(ProviderError::Cancelled);
+        match step {
+            Step::Cancel => {
+                cancel.cancel();
+                return Err(ProviderError::Cancelled);
+            }
+            Step::Fail => return Err(ProviderError::Api("bad request".into())),
+            Step::Retryable => return Err(ProviderError::Network("connection reset".into())),
+            _ => {}
         }
         let _ = tx.send(StreamEvent::Start);
         let message = match step {
@@ -196,24 +241,32 @@ impl StreamProvider for Scripted {
                     Usage::default(),
                 )
             }
-            Step::Tool => {
-                send_tool_call(&tx);
-                tool_call_message(StopReason::ToolUse)
+            Step::Tool(name) => {
+                send_tool_call(&tx, name);
+                tool_call_message(name, StopReason::ToolUse)
             }
             Step::RefuseWithTool => {
-                send_tool_call(&tx);
-                tool_call_message(StopReason::Refusal)
+                send_tool_call(&tx, "probe");
+                tool_call_message("probe", StopReason::Refusal)
             }
             Step::Error => {
                 Message::assistant(vec![], StopReason::Error, "mock", "mock", Usage::default())
                     .with_error_message("upstream failed")
             }
-            Step::CancelThenTool => {
-                send_tool_call(&tx);
+            Step::StartThenCancel => {
+                let _ = tx.send(StreamEvent::TextDelta {
+                    content_index: 0,
+                    delta: "partial".into(),
+                });
                 cancel.cancel();
-                tool_call_message(StopReason::ToolUse)
+                return Err(ProviderError::Cancelled);
             }
-            Step::Cancel => unreachable!(),
+            Step::CancelThenTool => {
+                send_tool_call(&tx, "probe");
+                cancel.cancel();
+                tool_call_message("probe", StopReason::ToolUse)
+            }
+            Step::Cancel | Step::Fail | Step::Retryable => unreachable!(),
         };
         let _ = tx.send(StreamEvent::Done {
             message: message.clone(),
@@ -222,15 +275,18 @@ impl StreamProvider for Scripted {
     }
 }
 
-struct Probe(Arc<Recorder>);
+struct Probe {
+    name: &'static str,
+    rec: Arc<Recorder>,
+}
 
 #[async_trait::async_trait]
 impl AgentTool for Probe {
     fn name(&self) -> &str {
-        "probe"
+        self.name
     }
     fn label(&self) -> &str {
-        "Probe"
+        self.name
     }
     fn description(&self) -> &str {
         "Records that it ran"
@@ -240,10 +296,11 @@ impl AgentTool for Probe {
     }
     async fn execute(
         &self,
-        _params: serde_json::Value,
+        params: serde_json::Value,
         _ctx: ToolContext,
     ) -> Result<ToolResult, ToolError> {
-        self.0.hook("tool.execute probe");
+        self.rec
+            .hook(format!("tool.execute {} args={params}", self.name));
         Ok(ToolResult {
             content: vec![Content::Text { text: "ok".into() }],
             details: serde_json::Value::Null,
@@ -251,86 +308,175 @@ impl AgentTool for Probe {
     }
 }
 
-struct SyncFilter(Arc<Recorder>, bool);
-impl InputFilter for SyncFilter {
-    fn filter(&self, _text: &str) -> FilterResult {
-        self.0.hook("input_filter.sync");
-        if self.1 {
-            FilterResult::Reject("no".into())
-        } else {
-            FilterResult::Pass
+/// What an input filter returns.
+#[derive(Clone, Copy)]
+enum Outcome {
+    Pass,
+    Warn,
+    Reject,
+}
+
+impl Outcome {
+    fn result(self) -> FilterResult {
+        match self {
+            Outcome::Pass => FilterResult::Pass,
+            Outcome::Warn => FilterResult::Warn("careful".into()),
+            Outcome::Reject => FilterResult::Reject("no".into()),
         }
     }
 }
 
-struct AsyncFilterHook(Arc<Recorder>);
+/// An input filter, sync or async, in installation order.
+#[derive(Clone, Copy)]
+enum Filter {
+    Sync(Outcome),
+    Async(Outcome),
+}
+
+struct SyncFilter(Arc<Recorder>, Outcome);
+impl InputFilter for SyncFilter {
+    fn filter(&self, _text: &str) -> FilterResult {
+        self.0.hook("input_filter.sync");
+        self.1.result()
+    }
+}
+
+struct AsyncFilterHook(Arc<Recorder>, Outcome);
 #[async_trait::async_trait]
 impl AsyncInputFilter for AsyncFilterHook {
     async fn filter(&self, _text: &str) -> FilterResult {
         self.0.hook("input_filter.async");
-        FilterResult::Pass
+        self.1.result()
     }
 }
 
-struct Hook(Arc<Recorder>);
+struct Hook(Arc<Recorder>, Option<&'static str>);
 #[async_trait::async_trait]
 impl TurnHook for Hook {
     async fn before_turn(&self, _turn: &TurnContext<'_>) -> Option<String> {
         self.0.hook("turn_hook");
-        None
+        self.1.map(String::from)
     }
 }
 
-struct Middleware(Arc<Recorder>);
+/// What a middleware decides.
+#[derive(Clone)]
+enum Verdict {
+    Allow,
+    Modify(serde_json::Value),
+    Deny,
+}
+
+struct Middleware(Arc<Recorder>, usize, Verdict);
 #[async_trait::async_trait]
 impl ToolMiddleware for Middleware {
     async fn before_tool(&self, call: &ToolCallRequest<'_>) -> ToolDecision {
-        self.0.hook(format!("middleware {}", call.tool_name));
-        ToolDecision::Allow
+        self.0.hook(format!(
+            "middleware{} {} args={}",
+            self.1, call.tool_name, call.args
+        ));
+        match &self.2 {
+            Verdict::Allow => ToolDecision::Allow,
+            Verdict::Modify(args) => ToolDecision::Modify(args.clone()),
+            Verdict::Deny => ToolDecision::Deny("not allowed".into()),
+        }
     }
 }
 
-struct Source(Arc<Recorder>);
+/// A tool source; with `Some(name)` it offers a tool of that name.
+struct Source(Arc<Recorder>, Option<&'static str>);
 #[async_trait::async_trait]
 impl ToolSource for Source {
     async fn tools(&self) -> Vec<Arc<dyn AgentTool>> {
         self.0.hook("tool_source");
-        vec![]
+        match self.1 {
+            Some(name) => vec![Arc::new(Probe {
+                name,
+                rec: self.0.clone(),
+            })],
+            None => vec![],
+        }
     }
 }
 
-/// Run one prompt with every hook installed, and return the timeline.
-async fn run(steps: &[Step], limits: Option<ExecutionLimits>) -> Vec<String> {
-    run_with(steps, limits, false).await
+/// One run with every hook installed. The defaults are the common case; each
+/// test changes what it is about.
+struct Rig {
+    steps: Vec<Step>,
+    limits: Option<ExecutionLimits>,
+    filters: Vec<Filter>,
+    middlewares: Vec<Verdict>,
+    sourced_tool: Option<&'static str>,
+    note: Option<&'static str>,
+    show_last_user: bool,
+    /// Continue from a history holding this user message, instead of prompting.
+    continue_from: Option<&'static str>,
 }
 
-async fn run_with(steps: &[Step], limits: Option<ExecutionLimits>, reject: bool) -> Vec<String> {
-    let rec = Arc::new(Recorder::default());
-    let provider = Scripted {
-        steps: Mutex::new(steps.to_vec()),
-        rec: rec.clone(),
-    };
-    let (r1, r2, r3) = (rec.clone(), rec.clone(), rec.clone());
-    let mut agent = Agent::from_provider(provider, ModelConfig::mock())
-        .with_tools(vec![Box::new(Probe(rec.clone()))])
-        .with_tool_source(Source(rec.clone()))
-        .with_input_filter(SyncFilter(rec.clone(), reject))
-        .with_async_input_filter(AsyncFilterHook(rec.clone()))
-        .with_turn_hook(Hook(rec.clone()))
-        .with_tool_middleware(Middleware(rec.clone()))
-        .on_before_turn(move |_, turn| {
-            r1.hook(format!("on_before_turn {turn}"));
-            true
-        })
-        .on_after_turn(move |_, _| r2.hook("on_after_turn"))
-        .on_error(move |e| r3.hook(format!("on_error {e:?}")));
-    if let Some(limits) = limits {
-        agent = agent.with_execution_limits(limits);
+fn rig(steps: &[Step]) -> Rig {
+    Rig {
+        steps: steps.to_vec(),
+        limits: None,
+        filters: vec![Filter::Sync(Outcome::Pass), Filter::Async(Outcome::Pass)],
+        middlewares: vec![Verdict::Allow],
+        sourced_tool: None,
+        note: None,
+        show_last_user: false,
+        continue_from: None,
     }
-    let (tx, rx) = mpsc::unbounded_channel();
-    *rec.rx.lock().unwrap() = Some(rx);
-    agent.prompt_with_sender("go", tx).await;
-    rec.timeline()
+}
+
+impl Rig {
+    async fn run(self) -> Vec<String> {
+        let rec = Arc::new(Recorder::default());
+        let provider = Scripted {
+            steps: Mutex::new(self.steps),
+            rec: rec.clone(),
+            show_last_user: self.show_last_user,
+        };
+        let (r1, r2, r3) = (rec.clone(), rec.clone(), rec.clone());
+        let mut agent = Agent::from_provider(provider, ModelConfig::mock())
+            .with_tools(vec![Box::new(Probe {
+                name: "probe",
+                rec: rec.clone(),
+            })])
+            .with_tool_source(Source(rec.clone(), self.sourced_tool))
+            .with_turn_hook(Hook(rec.clone(), self.note))
+            .with_retry_config(yoagent::RetryConfig {
+                max_retries: 2,
+                initial_delay_ms: 1,
+                backoff_multiplier: 1.0,
+                max_delay_ms: 1,
+            })
+            .on_before_turn(move |_, turn| {
+                r1.hook(format!("on_before_turn {turn}"));
+                true
+            })
+            .on_after_turn(move |_, _| r2.hook("on_after_turn"))
+            .on_error(move |e| r3.hook(format!("on_error {e:?}")));
+        for filter in self.filters {
+            agent = match filter {
+                Filter::Sync(o) => agent.with_input_filter(SyncFilter(rec.clone(), o)),
+                Filter::Async(o) => agent.with_async_input_filter(AsyncFilterHook(rec.clone(), o)),
+            };
+        }
+        for (i, verdict) in self.middlewares.into_iter().enumerate() {
+            agent = agent.with_tool_middleware(Middleware(rec.clone(), i, verdict));
+        }
+        if let Some(limits) = self.limits {
+            agent = agent.with_execution_limits(limits);
+        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        *rec.rx.lock().unwrap() = Some(rx);
+        match self.continue_from {
+            Some(text) => {
+                agent = agent.with_messages(vec![AgentMessage::Llm(Message::user(text))]);
+                agent.continue_loop_with_sender(tx).await;
+            }
+            None => agent.prompt_with_sender("go", tx).await,
+        }
+        rec.timeline()
+    }
 }
 
 fn lines(expected: &str) -> Vec<String> {
@@ -359,7 +505,7 @@ fn assert_timeline(actual: Vec<String>, expected: &str) {
 #[tokio::test]
 async fn plain_answer() {
     assert_timeline(
-        run(&[Step::Text], None).await,
+        rig(&[Step::Text]).run().await,
         r#"
         tool_source
         event:AgentStart
@@ -384,7 +530,7 @@ async fn plain_answer() {
 #[tokio::test]
 async fn tool_call_then_answer() {
     assert_timeline(
-        run(&[Step::Tool, Step::Text], None).await,
+        rig(&[Step::Tool("probe"), Step::Text]).run().await,
         r#"
         tool_source
         event:AgentStart
@@ -398,9 +544,9 @@ async fn tool_call_then_answer() {
         provider.stream
         event:MessageStart assistant/Stop
         event:MessageEnd assistant/ToolUse
-        middleware probe
+        middleware0 probe args={}
         event:ToolExecutionStart probe
-        tool.execute probe
+        tool.execute probe args={}
         event:ToolExecutionEnd probe error=false
         event:MessageStart toolResult/error=false
         event:MessageEnd toolResult/error=false
@@ -423,7 +569,7 @@ async fn tool_call_then_answer() {
 #[tokio::test]
 async fn refusal_with_a_tool_call() {
     assert_timeline(
-        run(&[Step::RefuseWithTool], None).await,
+        rig(&[Step::RefuseWithTool]).run().await,
         r#"
         tool_source
         event:AgentStart
@@ -449,9 +595,9 @@ async fn refusal_with_a_tool_call() {
 }
 
 #[tokio::test]
-async fn provider_error() {
+async fn provider_error_in_the_response() {
     assert_timeline(
-        run(&[Step::Error], None).await,
+        rig(&[Step::Error]).run().await,
         r#"
         tool_source
         event:AgentStart
@@ -474,11 +620,67 @@ async fn provider_error() {
 }
 
 #[tokio::test]
-async fn cancelled_while_streaming() {
-    // Current behaviour, kept as is here: the aborted assistant message is
-    // in the final history but gets no `MessageStart` / `MessageEnd`.
+async fn provider_error_before_any_output() {
+    // Current behaviour, kept as is here: the failed assistant message is in
+    // the final history, but no `MessageStart` / `MessageEnd` is sent for it.
     assert_timeline(
-        run(&[Step::Cancel], None).await,
+        rig(&[Step::Fail]).run().await,
+        r#"
+        tool_source
+        event:AgentStart
+        input_filter.sync
+        input_filter.async
+        event:TurnStart
+        event:MessageStart user
+        event:MessageEnd user
+        on_before_turn 0
+        turn_hook
+        provider.stream
+        on_error "API error: bad request"
+        on_after_turn
+        event:TurnEnd tool_results=0
+        event:AgentEnd [user, assistant/Error]
+        "#,
+    );
+}
+
+/// The turn hook wraps the provider inside the retry loop, so it runs once
+/// per attempt, not once per turn.
+#[tokio::test]
+async fn retried_request() {
+    assert_timeline(
+        rig(&[Step::Retryable, Step::Text]).run().await,
+        r#"
+        tool_source
+        event:AgentStart
+        input_filter.sync
+        input_filter.async
+        event:TurnStart
+        event:MessageStart user
+        event:MessageEnd user
+        on_before_turn 0
+        turn_hook
+        provider.stream
+        event:ProviderRetry
+        turn_hook
+        provider.stream
+        event:MessageStart assistant/Stop
+        event:MessageUpdate
+        event:MessageEnd assistant/Stop
+        on_after_turn
+        event:TurnEnd tool_results=0
+        event:AgentEnd [user, assistant/Stop]
+        "#,
+    );
+}
+
+#[tokio::test]
+async fn cancelled_before_any_output() {
+    // Current behaviour, kept as is here: the aborted assistant message is
+    // in the final history, but no `MessageStart` / `MessageEnd` is sent for
+    // it (nothing had streamed; compare `cancelled_while_streaming`).
+    assert_timeline(
+        rig(&[Step::Cancel]).run().await,
         r#"
         tool_source
         event:AgentStart
@@ -498,11 +700,37 @@ async fn cancelled_while_streaming() {
 }
 
 #[tokio::test]
-async fn cancelled_while_tools_run() {
-    // Current behaviour, kept as is here: the run was cancelled before its
-    // tools started, and the tool still ran.
+async fn cancelled_while_streaming() {
     assert_timeline(
-        run(&[Step::CancelThenTool, Step::Text], None).await,
+        rig(&[Step::StartThenCancel]).run().await,
+        r#"
+        tool_source
+        event:AgentStart
+        input_filter.sync
+        input_filter.async
+        event:TurnStart
+        event:MessageStart user
+        event:MessageEnd user
+        on_before_turn 0
+        turn_hook
+        provider.stream
+        event:MessageStart assistant/Stop
+        event:MessageUpdate
+        event:MessageEnd assistant/Aborted
+        on_after_turn
+        event:TurnEnd tool_results=0
+        event:AgentEnd [user, assistant/Aborted]
+        "#,
+    );
+}
+
+#[tokio::test]
+async fn cancelled_before_tools_start() {
+    // Current behaviour, kept as is here: the run was cancelled before its
+    // tools started, and the tool still ran. The cancel is seen at the next
+    // turn.
+    assert_timeline(
+        rig(&[Step::CancelThenTool, Step::Text]).run().await,
         r#"
         tool_source
         event:AgentStart
@@ -516,9 +744,9 @@ async fn cancelled_while_tools_run() {
         provider.stream
         event:MessageStart assistant/Stop
         event:MessageEnd assistant/ToolUse
-        middleware probe
+        middleware0 probe args={}
         event:ToolExecutionStart probe
-        tool.execute probe
+        tool.execute probe args={}
         event:ToolExecutionEnd probe error=false
         event:MessageStart toolResult/error=false
         event:MessageEnd toolResult/error=false
@@ -534,10 +762,12 @@ async fn cancelled_while_tools_run() {
 #[tokio::test]
 async fn turn_limit() {
     // Current behaviour, kept as is here: the limit is checked after
-    // `TurnStart`, so that `TurnStart` has no `TurnEnd`.
-    let limits = ExecutionLimits::default().with_max_turns(1);
+    // `TurnStart`, so that turn has no `TurnEnd`, and it runs neither
+    // `on_before_turn` nor `on_after_turn`.
+    let mut r = rig(&[Step::Tool("probe"), Step::Text]);
+    r.limits = Some(ExecutionLimits::default().with_max_turns(1));
     assert_timeline(
-        run(&[Step::Tool, Step::Text], Some(limits)).await,
+        r.run().await,
         r#"
         tool_source
         event:AgentStart
@@ -551,9 +781,9 @@ async fn turn_limit() {
         provider.stream
         event:MessageStart assistant/Stop
         event:MessageEnd assistant/ToolUse
-        middleware probe
+        middleware0 probe args={}
         event:ToolExecutionStart probe
-        tool.execute probe
+        tool.execute probe args={}
         event:ToolExecutionEnd probe error=false
         event:MessageStart toolResult/error=false
         event:MessageEnd toolResult/error=false
@@ -569,14 +799,243 @@ async fn turn_limit() {
 
 #[tokio::test]
 async fn input_rejected() {
+    let mut r = rig(&[Step::Text]);
+    r.filters = vec![Filter::Sync(Outcome::Reject), Filter::Async(Outcome::Pass)];
     assert_timeline(
-        run_with(&[Step::Text], None, true).await,
+        r.run().await,
         r#"
         tool_source
         event:AgentStart
         input_filter.sync
         event:InputRejected
         event:AgentEnd []
+        "#,
+    );
+}
+
+/// Filters run in installation order (one list, sync and async mixed), and a
+/// `Warn` lets the prompt through.
+#[tokio::test]
+async fn input_filter_chain() {
+    let mut r = rig(&[Step::Text]);
+    r.filters = vec![Filter::Async(Outcome::Warn), Filter::Sync(Outcome::Pass)];
+    r.show_last_user = true;
+    assert_timeline(
+        r.run().await,
+        r#"
+        tool_source
+        event:AgentStart
+        input_filter.async
+        input_filter.sync
+        event:TurnStart
+        event:MessageStart user
+        event:MessageEnd user
+        on_before_turn 0
+        turn_hook
+        provider.stream last_user="go | [Warning: careful]"
+        event:MessageStart assistant/Stop
+        event:MessageUpdate
+        event:MessageEnd assistant/Stop
+        on_after_turn
+        event:TurnEnd tool_results=0
+        event:AgentEnd [user, assistant/Stop]
+        "#,
+    );
+}
+
+/// Middleware runs in installation order; a `Modify` is what the next one and
+/// the tool see.
+#[tokio::test]
+async fn middleware_chain_modify() {
+    let mut r = rig(&[Step::Tool("probe"), Step::Text]);
+    r.middlewares = vec![
+        Verdict::Modify(serde_json::json!({"path": "safe"})),
+        Verdict::Allow,
+    ];
+    assert_timeline(
+        r.run().await,
+        r#"
+        tool_source
+        event:AgentStart
+        input_filter.sync
+        input_filter.async
+        event:TurnStart
+        event:MessageStart user
+        event:MessageEnd user
+        on_before_turn 0
+        turn_hook
+        provider.stream
+        event:MessageStart assistant/Stop
+        event:MessageEnd assistant/ToolUse
+        middleware0 probe args={}
+        middleware1 probe args={"path":"safe"}
+        event:ToolExecutionStart probe
+        tool.execute probe args={"path":"safe"}
+        event:ToolExecutionEnd probe error=false
+        event:MessageStart toolResult/error=false
+        event:MessageEnd toolResult/error=false
+        on_after_turn
+        event:TurnEnd tool_results=1
+        event:TurnStart
+        on_before_turn 1
+        turn_hook
+        provider.stream
+        event:MessageStart assistant/Stop
+        event:MessageUpdate
+        event:MessageEnd assistant/Stop
+        on_after_turn
+        event:TurnEnd tool_results=0
+        event:AgentEnd [user, assistant/ToolUse, toolResult/error=false, assistant/Stop]
+        "#,
+    );
+}
+
+/// A denial stops the chain and the tool.
+#[tokio::test]
+async fn middleware_deny() {
+    let mut r = rig(&[Step::Tool("probe"), Step::Text]);
+    r.middlewares = vec![Verdict::Deny, Verdict::Allow];
+    assert_timeline(
+        r.run().await,
+        r#"
+        tool_source
+        event:AgentStart
+        input_filter.sync
+        input_filter.async
+        event:TurnStart
+        event:MessageStart user
+        event:MessageEnd user
+        on_before_turn 0
+        turn_hook
+        provider.stream
+        event:MessageStart assistant/Stop
+        event:MessageEnd assistant/ToolUse
+        middleware0 probe args={}
+        event:ToolExecutionStart probe
+        event:ToolExecutionEnd probe error=true
+        event:MessageStart toolResult/error=true
+        event:MessageEnd toolResult/error=true
+        on_after_turn
+        event:TurnEnd tool_results=1
+        event:TurnStart
+        on_before_turn 1
+        turn_hook
+        provider.stream
+        event:MessageStart assistant/Stop
+        event:MessageUpdate
+        event:MessageEnd assistant/Stop
+        on_after_turn
+        event:TurnEnd tool_results=0
+        event:AgentEnd [user, assistant/ToolUse, toolResult/error=true, assistant/Stop]
+        "#,
+    );
+}
+
+/// A tool from a tool source goes through middleware and runs like a static one.
+#[tokio::test]
+async fn sourced_tool() {
+    let mut r = rig(&[Step::Tool("sourced"), Step::Text]);
+    r.sourced_tool = Some("sourced");
+    assert_timeline(
+        r.run().await,
+        r#"
+        tool_source
+        event:AgentStart
+        input_filter.sync
+        input_filter.async
+        event:TurnStart
+        event:MessageStart user
+        event:MessageEnd user
+        on_before_turn 0
+        turn_hook
+        provider.stream
+        event:MessageStart assistant/Stop
+        event:MessageEnd assistant/ToolUse
+        middleware0 sourced args={}
+        event:ToolExecutionStart sourced
+        tool.execute sourced args={}
+        event:ToolExecutionEnd sourced error=false
+        event:MessageStart toolResult/error=false
+        event:MessageEnd toolResult/error=false
+        on_after_turn
+        event:TurnEnd tool_results=1
+        event:TurnStart
+        on_before_turn 1
+        turn_hook
+        provider.stream
+        event:MessageStart assistant/Stop
+        event:MessageUpdate
+        event:MessageEnd assistant/Stop
+        on_after_turn
+        event:TurnEnd tool_results=0
+        event:AgentEnd [user, assistant/ToolUse, toolResult/error=false, assistant/Stop]
+        "#,
+    );
+}
+
+/// A turn hook's note is appended to the latest user message of the request.
+#[tokio::test]
+async fn turn_hook_note() {
+    let mut r = rig(&[Step::Tool("probe"), Step::Text]);
+    r.note = Some("a note");
+    r.show_last_user = true;
+    assert_timeline(
+        r.run().await,
+        r#"
+        tool_source
+        event:AgentStart
+        input_filter.sync
+        input_filter.async
+        event:TurnStart
+        event:MessageStart user
+        event:MessageEnd user
+        on_before_turn 0
+        turn_hook
+        provider.stream last_user="go | a note"
+        event:MessageStart assistant/Stop
+        event:MessageEnd assistant/ToolUse
+        middleware0 probe args={}
+        event:ToolExecutionStart probe
+        tool.execute probe args={}
+        event:ToolExecutionEnd probe error=false
+        event:MessageStart toolResult/error=false
+        event:MessageEnd toolResult/error=false
+        on_after_turn
+        event:TurnEnd tool_results=1
+        event:TurnStart
+        on_before_turn 1
+        turn_hook
+        provider.stream last_user="go | a note"
+        event:MessageStart assistant/Stop
+        event:MessageUpdate
+        event:MessageEnd assistant/Stop
+        on_after_turn
+        event:TurnEnd tool_results=0
+        event:AgentEnd [user, assistant/ToolUse, toolResult/error=false, assistant/Stop]
+        "#,
+    );
+}
+
+/// `continue_loop` runs no input filters.
+#[tokio::test]
+async fn continue_loop_path() {
+    let mut r = rig(&[Step::Text]);
+    r.continue_from = Some("seeded");
+    assert_timeline(
+        r.run().await,
+        r#"
+        tool_source
+        event:AgentStart
+        event:TurnStart
+        on_before_turn 0
+        turn_hook
+        provider.stream
+        event:MessageStart assistant/Stop
+        event:MessageUpdate
+        event:MessageEnd assistant/Stop
+        on_after_turn
+        event:TurnEnd tool_results=0
+        event:AgentEnd [assistant/Stop]
         "#,
     );
 }
