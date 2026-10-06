@@ -320,33 +320,8 @@ async fn raw_loop_callers_wrap_the_provider() {
         Arc::new(provider),
         vec![Arc::new(Line(Some("Hint."), calls.clone()))],
     );
-    let config = AgentLoopConfig {
-        provider: Arc::new(hooked),
-        model: "mock".into(),
-        api_key: String::new(),
-        thinking_level: ThinkingLevel::Off,
-        max_tokens: None,
-        temperature: None,
-        model_config: None,
-        convert_to_llm: None,
-        transform_context: None,
-        get_steering_messages: None,
-        get_follow_up_messages: None,
-        context_config: None,
-        compaction_strategy: None,
-        execution_limits: None,
-        cache_config: CacheConfig::default(),
-        tool_output_sink: None,
-        tool_execution: ToolExecutionStrategy::default(),
-        tool_middleware: vec![],
-        output_schema: None,
-        retry_config: yoagent::RetryConfig::default(),
-        before_turn: None,
-        after_turn: None,
-        on_error: None,
-        input_filters: vec![Arc::new(AsyncFilter::new(SlowModeration))],
-        turn_delay: None,
-    };
+    let mut config = AgentLoopConfig::new(Arc::new(hooked), "mock");
+    config.input_filters = vec![Arc::new(AsyncFilter::new(SlowModeration))];
     let mut context = AgentContext {
         system_prompt: String::new(),
         messages: vec![],

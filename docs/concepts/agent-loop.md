@@ -67,6 +67,8 @@ Requires that the last message in context is **not** an assistant message.
 
 ## AgentLoopConfig
 
+Build it with `AgentLoopConfig::new(provider, model)`, which sets every other field to its default, then set the fields you need. The struct is `#[non_exhaustive]`: it cannot be built as a struct literal outside the crate, so new fields can be added without breaking callers.
+
 ```rust
 pub struct AgentLoopConfig {
     pub provider: Arc<dyn StreamProvider>,
@@ -218,17 +220,15 @@ Only the drain is atomic — the edit round trip is not:
 When using `agent_loop()` directly, steering and follow-ups are provided via callback functions:
 
 ```rust
-let config = AgentLoopConfig {
-    get_steering_messages: Some(Box::new(|| {
-        // Return Vec<AgentMessage> — checked between tool calls
-        vec![]
-    })),
-    get_follow_up_messages: Some(Box::new(|| {
-        // Return Vec<AgentMessage> — checked when agent would stop
-        vec![]
-    })),
-    // ...
-};
+let mut config = AgentLoopConfig::new(provider, "model");
+config.get_steering_messages = Some(Box::new(|| {
+    // Return Vec<AgentMessage> — checked between tool calls
+    vec![]
+}));
+config.get_follow_up_messages = Some(Box::new(|| {
+    // Return Vec<AgentMessage> — checked when agent would stop
+    vec![]
+}));
 ```
 
 ## Custom Compaction

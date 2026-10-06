@@ -160,12 +160,10 @@ For direct loop usage without the `Agent` wrapper:
 use std::sync::Arc;
 use yoagent::agent_loop::AgentLoopConfig;
 
-let config = AgentLoopConfig {
-    before_turn: Some(Arc::new(|_msgs, turn| turn < 5)),
-    after_turn: Some(Arc::new(|_msgs, _usage| { /* log */ })),
-    on_error: Some(Arc::new(|err| eprintln!("{}", err))),
-    // ... other fields
-};
+let mut config = AgentLoopConfig::new(provider, "model");
+config.before_turn = Some(Arc::new(|_msgs, turn| turn < 5));
+config.after_turn = Some(Arc::new(|_msgs, _usage| { /* log */ }));
+config.on_error = Some(Arc::new(|err| eprintln!("{}", err)));
 ```
 
 ## Callback Timing

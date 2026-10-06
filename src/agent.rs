@@ -1470,66 +1470,60 @@ impl Agent {
             ))
         };
 
-        AgentLoopConfig {
-            provider,
-            model: self.model.clone(),
-            api_key: self.resolved_api_key(),
-            thinking_level: self.thinking_level,
-            max_tokens: self.max_tokens,
-            temperature: self.temperature,
-            model_config: self.model_config.clone(),
-            convert_to_llm: None,
-            transform_context: None,
-            get_steering_messages: Some(Box::new(move || {
-                let mut queue = steering_queue.lock().unwrap();
-                match steering_mode {
-                    QueueMode::OneAtATime => {
-                        if queue.is_empty() {
-                            vec![]
-                        } else {
-                            vec![queue.remove(0)]
-                        }
+        let mut config = AgentLoopConfig::new(provider, self.model.clone());
+        config.api_key = self.resolved_api_key();
+        config.thinking_level = self.thinking_level;
+        config.max_tokens = self.max_tokens;
+        config.temperature = self.temperature;
+        config.model_config = self.model_config.clone();
+        config.get_steering_messages = Some(Box::new(move || {
+            let mut queue = steering_queue.lock().unwrap();
+            match steering_mode {
+                QueueMode::OneAtATime => {
+                    if queue.is_empty() {
+                        vec![]
+                    } else {
+                        vec![queue.remove(0)]
                     }
-                    QueueMode::All => queue.drain(..).collect(),
                 }
-            })),
-            context_config: if self.context_management_disabled {
-                None
-            } else {
-                Some(self.context_config.clone().unwrap_or_else(|| {
-                    self.model_config
-                        .as_ref()
-                        .map(|m| ContextConfig::from_context_window(m.context_window))
-                        .unwrap_or_default()
-                }))
-            },
-            compaction_strategy: self.compaction_strategy.clone(),
-            execution_limits: self.execution_limits.clone(),
-            cache_config: self.cache_config.clone(),
-            tool_output_sink: self.shared_state.clone(),
-            tool_execution: self.tool_execution.clone(),
-            retry_config: self.retry_config.clone(),
-            get_follow_up_messages: Some(Box::new(move || {
-                let mut queue = follow_up_queue.lock().unwrap();
-                match follow_up_mode {
-                    QueueMode::OneAtATime => {
-                        if queue.is_empty() {
-                            vec![]
-                        } else {
-                            vec![queue.remove(0)]
-                        }
+                QueueMode::All => queue.drain(..).collect(),
+            }
+        }));
+        config.context_config = if self.context_management_disabled {
+            None
+        } else {
+            Some(self.context_config.clone().unwrap_or_else(|| {
+                self.model_config
+                    .as_ref()
+                    .map(|m| ContextConfig::from_context_window(m.context_window))
+                    .unwrap_or_default()
+            }))
+        };
+        config.compaction_strategy = self.compaction_strategy.clone();
+        config.execution_limits = self.execution_limits.clone();
+        config.cache_config = self.cache_config.clone();
+        config.tool_output_sink = self.shared_state.clone();
+        config.tool_execution = self.tool_execution.clone();
+        config.retry_config = self.retry_config.clone();
+        config.get_follow_up_messages = Some(Box::new(move || {
+            let mut queue = follow_up_queue.lock().unwrap();
+            match follow_up_mode {
+                QueueMode::OneAtATime => {
+                    if queue.is_empty() {
+                        vec![]
+                    } else {
+                        vec![queue.remove(0)]
                     }
-                    QueueMode::All => queue.drain(..).collect(),
                 }
-            })),
-            before_turn: self.before_turn.clone(),
-            after_turn: self.after_turn.clone(),
-            on_error: self.on_error.clone(),
-            input_filters: self.input_filters.clone(),
-            tool_middleware,
-            output_schema: None,
-            turn_delay: None,
-        }
+                QueueMode::All => queue.drain(..).collect(),
+            }
+        }));
+        config.before_turn = self.before_turn.clone();
+        config.after_turn = self.after_turn.clone();
+        config.on_error = self.on_error.clone();
+        config.input_filters = self.input_filters.clone();
+        config.tool_middleware = tool_middleware;
+        config
     }
 }
 

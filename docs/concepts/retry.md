@@ -92,14 +92,12 @@ let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude
 use yoagent::agent_loop::AgentLoopConfig;
 use yoagent::retry::RetryConfig;
 
-let config = AgentLoopConfig {
-    // ...other fields...
-    retry_config: RetryConfig {
-        max_retries: 3,
-        initial_delay_ms: 1000,
-        backoff_multiplier: 2.0,
-        max_delay_ms: 30_000,
-    },
+let mut config = AgentLoopConfig::new(provider, "model");
+config.retry_config = RetryConfig {
+    max_retries: 3,
+    initial_delay_ms: 1000,
+    backoff_multiplier: 2.0,
+    max_delay_ms: 30_000,
 };
 ```
 

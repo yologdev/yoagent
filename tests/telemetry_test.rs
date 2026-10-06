@@ -62,32 +62,12 @@ impl AgentTool for EchoTool {
 }
 
 fn loop_config(provider: MockProvider) -> yoagent::agent_loop::AgentLoopConfig {
-    yoagent::agent_loop::AgentLoopConfig {
-        provider: std::sync::Arc::new(provider),
-        model: "mock".into(),
-        api_key: "test".into(),
-        thinking_level: ThinkingLevel::Off,
-        max_tokens: None,
-        temperature: None,
-        model_config: None,
-        convert_to_llm: None,
-        transform_context: None,
-        get_steering_messages: None,
-        get_follow_up_messages: None,
-        context_config: None,
-        compaction_strategy: None,
-        execution_limits: None,
-        cache_config: CacheConfig::default(),
-        tool_output_sink: None,
-        tool_execution: ToolExecutionStrategy::default(),
-        tool_middleware: vec![],
-        output_schema: None,
-        retry_config: yoagent::RetryConfig::none(),
-        before_turn: None,
-        after_turn: None,
-        on_error: None,
-        input_filters: vec![],
-        turn_delay: None,
+    {
+        let mut config =
+            yoagent::agent_loop::AgentLoopConfig::new(std::sync::Arc::new(provider), "mock");
+        config.api_key = "test".into();
+        config.retry_config = yoagent::RetryConfig::none();
+        config
     }
 }
 
