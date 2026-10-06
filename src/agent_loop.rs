@@ -143,11 +143,11 @@ pub const AGENT_STOPPED_PREFIX: &str = "[Agent stopped:";
 /// it as a failure.
 pub const CANCELLED_MARKER: &str = "[Agent stopped: cancelled]";
 
-/// Append a stop marker as a user message: emitted, kept in context and in
-/// the run's new messages.
 /// End a turn that stops before its model request, so its `TurnStart` is
 /// paired. It made no assistant message and ran no tools: `TurnEnd` carries
 /// the last message of the history (the stop marker, when there is one).
+/// With an empty history (a run given no prompts at all) there is no message
+/// to carry, and the turn is left open.
 fn close_turn(tx: &mpsc::UnboundedSender<AgentEvent>, context: &AgentContext) {
     if let Some(last) = context.messages.last() {
         tx.send(AgentEvent::TurnEnd {
@@ -158,6 +158,8 @@ fn close_turn(tx: &mpsc::UnboundedSender<AgentEvent>, context: &AgentContext) {
     }
 }
 
+/// Append a stop marker as a user message: emitted, kept in context and in
+/// the run's new messages.
 fn push_stop_marker(
     text: String,
     tx: &mpsc::UnboundedSender<AgentEvent>,
@@ -1365,6 +1367,15 @@ async fn stream_assistant_response(
                     }
                     StreamEvent::Done { message } => {
                         let am: AgentMessage = message.clone().into();
+                        // A provider that sends `Done` without `Start` still
+                        // gets its message announced, as `Error` below does.
+                        if partial_message.is_none() {
+                            event_tx
+                                .send(AgentEvent::MessageStart {
+                                    message: am.clone(),
+                                })
+                                .ok();
+                        }
                         partial_message = Some(am.clone());
                         ended = true;
                         event_tx.send(AgentEvent::MessageEnd { message: am }).ok();
@@ -1406,6 +1417,10 @@ async fn stream_assistant_response(
             Ok(events) => events,
             Err(e) => {
                 warn!("event forwarder failed; this attempt's events may be incomplete: {e}");
+                // Read as "sent nothing", so the turn's message is announced
+                // again. That could repeat a `MessageStart` the forwarder sent
+                // before failing; it only forwards, so this is not expected
+                // in practice.
                 AttemptEvents::default()
             }
         };
@@ -2133,8 +2148,6 @@ fn unparsed_arguments_tool_call(
     unexecuted_tool_call(id, name, args, text, tx)
 }
 
-/// Emit events and build an error tool result for a call that was not run.
-/// Start/End are both emitted so UI event pairing stays intact.
 /// A tool call not executed because its run was cancelled.
 fn cancelled_tool_call(
     id: &str,
@@ -2150,6 +2163,8 @@ fn cancelled_tool_call(
     unexecuted_tool_call(id, name, args, CANCELLED_TOOL_RESULT_TEXT.to_string(), tx).0
 }
 
+/// Emit events and build an error tool result for a call that was not run.
+/// Start/End are both emitted so UI event pairing stays intact.
 fn unexecuted_tool_call(
     id: &str,
     name: &str,

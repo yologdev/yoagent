@@ -36,9 +36,21 @@ struct Recorder {
     /// The run's event channel, left undrained until the run ends so its
     /// length is the number of events sent.
     rx: Mutex<Option<mpsc::UnboundedReceiver<AgentEvent>>>,
+    /// The run's cancel token, as the provider receives it, so a hook or a
+    /// tool can cancel the run.
+    cancel: Mutex<Option<CancellationToken>>,
 }
 
 impl Recorder {
+    fn cancel_run(&self) {
+        self.cancel
+            .lock()
+            .unwrap()
+            .as_ref()
+            .expect("a provider call happened")
+            .cancel();
+    }
+
     fn hook(&self, name: impl Into<String>) {
         let sent = self.rx.lock().unwrap().as_ref().map_or(0, |rx| rx.len());
         self.hooks.lock().unwrap().push((sent, name.into()));
@@ -152,6 +164,10 @@ enum Step {
     CancelThenTool,
     /// Return an answer without streaming any event.
     Silent,
+    /// Stream `Done` without `Start`.
+    DoneOnly,
+    /// Call these tools, in this order, in one response.
+    Tools(&'static [&'static str]),
 }
 
 struct Scripted {
@@ -162,8 +178,18 @@ struct Scripted {
 }
 
 fn tool_call_message(name: &str, stop_reason: StopReason) -> Message {
+    tool_calls_message(&[name], stop_reason)
+}
+
+fn tool_calls_message(names: &[&str], stop_reason: StopReason) -> Message {
     Message::assistant(
-        vec![Content::tool_call("call-1", name, serde_json::json!({}))],
+        names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                Content::tool_call(format!("call-{}", i + 1), *name, serde_json::json!({}))
+            })
+            .collect(),
         stop_reason,
         "mock",
         "mock",
@@ -172,12 +198,18 @@ fn tool_call_message(name: &str, stop_reason: StopReason) -> Message {
 }
 
 fn send_tool_call(tx: &mpsc::UnboundedSender<StreamEvent>, name: &str) {
-    let _ = tx.send(StreamEvent::ToolCallStart {
-        content_index: 0,
-        id: "call-1".into(),
-        name: name.into(),
-    });
-    let _ = tx.send(StreamEvent::ToolCallEnd { content_index: 0 });
+    send_tool_calls(tx, &[name]);
+}
+
+fn send_tool_calls(tx: &mpsc::UnboundedSender<StreamEvent>, names: &[&str]) {
+    for (i, name) in names.iter().enumerate() {
+        let _ = tx.send(StreamEvent::ToolCallStart {
+            content_index: i,
+            id: format!("call-{}", i + 1),
+            name: (*name).into(),
+        });
+        let _ = tx.send(StreamEvent::ToolCallEnd { content_index: i });
+    }
 }
 
 fn last_user_text(messages: &[Message]) -> String {
@@ -216,6 +248,7 @@ impl StreamProvider for Scripted {
         } else {
             self.rec.hook("provider.stream");
         }
+        *self.rec.cancel.lock().unwrap() = Some(cancel.clone());
         let step = self.steps.lock().unwrap().remove(0);
         match step {
             Step::Cancel => {
@@ -224,6 +257,21 @@ impl StreamProvider for Scripted {
             }
             Step::Fail => return Err(ProviderError::Api("bad request".into())),
             Step::Retryable => return Err(ProviderError::Network("connection reset".into())),
+            Step::DoneOnly => {
+                let message = Message::assistant(
+                    vec![Content::Text {
+                        text: "done".into(),
+                    }],
+                    StopReason::Stop,
+                    "mock",
+                    "mock",
+                    Usage::default(),
+                );
+                let _ = tx.send(StreamEvent::Done {
+                    message: message.clone(),
+                });
+                return Ok(message);
+            }
             Step::Silent => {
                 return Ok(Message::assistant(
                     vec![Content::Text {
@@ -258,6 +306,10 @@ impl StreamProvider for Scripted {
                 send_tool_call(&tx, name);
                 tool_call_message(name, StopReason::ToolUse)
             }
+            Step::Tools(names) => {
+                send_tool_calls(&tx, names);
+                tool_calls_message(names, StopReason::ToolUse)
+            }
             Step::RefuseWithTool => {
                 send_tool_call(&tx, "probe");
                 tool_call_message("probe", StopReason::Refusal)
@@ -279,7 +331,9 @@ impl StreamProvider for Scripted {
                 cancel.cancel();
                 tool_call_message("probe", StopReason::ToolUse)
             }
-            Step::Cancel | Step::Fail | Step::Retryable | Step::Silent => unreachable!(),
+            Step::Cancel | Step::Fail | Step::Retryable | Step::Silent | Step::DoneOnly => {
+                unreachable!()
+            }
         };
         let _ = tx.send(StreamEvent::Done {
             message: message.clone(),
@@ -291,6 +345,8 @@ impl StreamProvider for Scripted {
 struct Probe {
     name: &'static str,
     rec: Arc<Recorder>,
+    /// Cancel the run while executing.
+    cancels: bool,
 }
 
 #[async_trait::async_trait]
@@ -314,6 +370,9 @@ impl AgentTool for Probe {
     ) -> Result<ToolResult, ToolError> {
         self.rec
             .hook(format!("tool.execute {} args={params}", self.name));
+        if self.cancels {
+            self.rec.cancel_run();
+        }
         Ok(ToolResult {
             content: vec![Content::Text { text: "ok".into() }],
             details: serde_json::Value::Null,
@@ -378,6 +437,9 @@ enum Verdict {
     Allow,
     Modify(serde_json::Value),
     Deny,
+    /// Cancel the run, then allow: the run is cancelled while middleware
+    /// decides.
+    CancelThenAllow,
 }
 
 struct Middleware(Arc<Recorder>, usize, Verdict);
@@ -392,6 +454,10 @@ impl ToolMiddleware for Middleware {
             Verdict::Allow => ToolDecision::Allow,
             Verdict::Modify(args) => ToolDecision::Modify(args.clone()),
             Verdict::Deny => ToolDecision::Deny("not allowed".into()),
+            Verdict::CancelThenAllow => {
+                self.0.cancel_run();
+                ToolDecision::Allow
+            }
         }
     }
 }
@@ -406,6 +472,7 @@ impl ToolSource for Source {
             Some(name) => vec![Arc::new(Probe {
                 name,
                 rec: self.0.clone(),
+                cancels: false,
             })],
             None => vec![],
         }
@@ -426,6 +493,7 @@ struct Rig {
     continue_from: Option<&'static str>,
     /// `on_before_turn` returns `false` on this turn.
     stop_at_turn: Option<usize>,
+    strategy: Option<ToolExecutionStrategy>,
 }
 
 fn rig(steps: &[Step]) -> Rig {
@@ -439,6 +507,7 @@ fn rig(steps: &[Step]) -> Rig {
         show_last_user: false,
         continue_from: None,
         stop_at_turn: None,
+        strategy: None,
     }
 }
 
@@ -453,10 +522,18 @@ impl Rig {
         let (r1, r2, r3) = (rec.clone(), rec.clone(), rec.clone());
         let stop_at_turn = self.stop_at_turn;
         let mut agent = Agent::from_provider(provider, ModelConfig::mock())
-            .with_tools(vec![Box::new(Probe {
-                name: "probe",
-                rec: rec.clone(),
-            })])
+            .with_tools(vec![
+                Box::new(Probe {
+                    name: "probe",
+                    rec: rec.clone(),
+                    cancels: false,
+                }),
+                Box::new(Probe {
+                    name: "canceller",
+                    rec: rec.clone(),
+                    cancels: true,
+                }),
+            ])
             .with_tool_source(Source(rec.clone(), self.sourced_tool))
             .with_turn_hook(Hook(rec.clone(), self.note))
             .with_retry_config(yoagent::RetryConfig {
@@ -482,6 +559,9 @@ impl Rig {
         }
         if let Some(limits) = self.limits {
             agent = agent.with_execution_limits(limits);
+        }
+        if let Some(strategy) = self.strategy {
+            agent = agent.with_tool_execution(strategy);
         }
         let (tx, rx) = mpsc::unbounded_channel();
         *rec.rx.lock().unwrap() = Some(rx);
@@ -1102,6 +1182,147 @@ async fn stopped_by_on_before_turn() {
 async fn provider_streams_nothing() {
     assert_timeline(
         rig(&[Step::Silent]).run().await,
+        r#"
+        tool_source
+        event:AgentStart
+        input_filter.sync
+        input_filter.async
+        event:TurnStart
+        event:MessageStart user
+        event:MessageEnd user
+        on_before_turn 0
+        turn_hook
+        provider.stream
+        event:MessageStart assistant/Stop
+        event:MessageEnd assistant/Stop
+        on_after_turn
+        event:TurnEnd tool_results=0
+        event:AgentEnd [user, assistant/Stop]
+        "#,
+    );
+}
+
+/// The run is cancelled while middleware decides: the call that middleware
+/// then allows is still not run (#243).
+#[tokio::test]
+async fn cancelled_while_middleware_decides() {
+    let mut r = rig(&[Step::Tool("probe"), Step::Text]);
+    r.middlewares = vec![Verdict::CancelThenAllow, Verdict::Allow];
+    assert_timeline(
+        r.run().await,
+        r#"
+        tool_source
+        event:AgentStart
+        input_filter.sync
+        input_filter.async
+        event:TurnStart
+        event:MessageStart user
+        event:MessageEnd user
+        on_before_turn 0
+        turn_hook
+        provider.stream
+        event:MessageStart assistant/Stop
+        event:MessageEnd assistant/ToolUse
+        middleware0 probe args={}
+        middleware1 probe args={}
+        event:ToolExecutionStart probe
+        event:ToolExecutionEnd probe error=true
+        event:MessageStart toolResult/error=true
+        event:MessageEnd toolResult/error=true
+        on_after_turn
+        event:TurnEnd tool_results=1
+        event:MessageStart user "[Agent stopped: cancelled]"
+        event:MessageEnd user "[Agent stopped: cancelled]"
+        event:AgentEnd [user, assistant/ToolUse, toolResult/error=true, user "[Agent stopped: cancelled]"]
+        "#,
+    );
+}
+
+/// Sequential tools: the first cancels the run, the second is not run, and
+/// the run ends with the cancel marker once (#243).
+#[tokio::test]
+async fn sequential_tools_after_a_cancel() {
+    let mut r = rig(&[Step::Tools(&["canceller", "probe"]), Step::Text]);
+    r.strategy = Some(ToolExecutionStrategy::Sequential);
+    assert_timeline(
+        r.run().await,
+        r#"
+        tool_source
+        event:AgentStart
+        input_filter.sync
+        input_filter.async
+        event:TurnStart
+        event:MessageStart user
+        event:MessageEnd user
+        on_before_turn 0
+        turn_hook
+        provider.stream
+        event:MessageStart assistant/Stop
+        event:MessageEnd assistant/ToolUse
+        middleware0 canceller args={}
+        event:ToolExecutionStart canceller
+        tool.execute canceller args={}
+        event:ToolExecutionEnd canceller error=false
+        event:MessageStart toolResult/error=false
+        event:MessageEnd toolResult/error=false
+        event:ToolExecutionStart probe
+        event:ToolExecutionEnd probe error=true
+        event:MessageStart toolResult/error=true
+        event:MessageEnd toolResult/error=true
+        on_after_turn
+        event:TurnEnd tool_results=2
+        event:MessageStart user "[Agent stopped: cancelled]"
+        event:MessageEnd user "[Agent stopped: cancelled]"
+        event:AgentEnd [user, assistant/ToolUse, toolResult/error=false, toolResult/error=true, user "[Agent stopped: cancelled]"]
+        "#,
+    );
+}
+
+/// Batches of one: the cancel in the first batch stops the second (#243).
+#[tokio::test]
+async fn batched_tools_after_a_cancel() {
+    let mut r = rig(&[Step::Tools(&["canceller", "probe"]), Step::Text]);
+    r.strategy = Some(ToolExecutionStrategy::Batched { size: 1 });
+    assert_timeline(
+        r.run().await,
+        r#"
+        tool_source
+        event:AgentStart
+        input_filter.sync
+        input_filter.async
+        event:TurnStart
+        event:MessageStart user
+        event:MessageEnd user
+        on_before_turn 0
+        turn_hook
+        provider.stream
+        event:MessageStart assistant/Stop
+        event:MessageEnd assistant/ToolUse
+        middleware0 canceller args={}
+        event:ToolExecutionStart canceller
+        tool.execute canceller args={}
+        event:ToolExecutionEnd canceller error=false
+        event:MessageStart toolResult/error=false
+        event:MessageEnd toolResult/error=false
+        event:ToolExecutionStart probe
+        event:ToolExecutionEnd probe error=true
+        event:MessageStart toolResult/error=true
+        event:MessageEnd toolResult/error=true
+        on_after_turn
+        event:TurnEnd tool_results=2
+        event:MessageStart user "[Agent stopped: cancelled]"
+        event:MessageEnd user "[Agent stopped: cancelled]"
+        event:AgentEnd [user, assistant/ToolUse, toolResult/error=false, toolResult/error=true, user "[Agent stopped: cancelled]"]
+        "#,
+    );
+}
+
+/// A provider that sends `Done` without `Start`: the message is announced
+/// with both events (#243).
+#[tokio::test]
+async fn provider_sends_done_without_start() {
+    assert_timeline(
+        rig(&[Step::DoneOnly]).run().await,
         r#"
         tool_source
         event:AgentStart
