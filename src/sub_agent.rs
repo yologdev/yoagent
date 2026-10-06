@@ -79,6 +79,9 @@ pub struct SubAgentTool {
     turn_delay: Option<std::time::Duration>,
     model_config: Option<ModelConfig>,
     tool_middleware: Vec<Arc<dyn ToolMiddleware>>,
+    extensions: Vec<Arc<dyn crate::Extension>>,
+    tree_extensions: Vec<Arc<dyn crate::Extension>>,
+    max_stop_continues: usize,
     turn_hooks: Vec<Arc<dyn TurnHook>>,
     input_filters: Vec<Arc<dyn InputFilter>>,
     #[cfg(feature = "decision")]
@@ -127,6 +130,9 @@ impl SubAgentTool {
             turn_delay: None,
             model_config: None,
             tool_middleware: Vec::new(),
+            extensions: Vec::new(),
+            tree_extensions: Vec::new(),
+            max_stop_continues: crate::extension::DEFAULT_MAX_STOP_CONTINUES,
             turn_hooks: Vec::new(),
             input_filters: Vec::new(),
             #[cfg(feature = "decision")]
@@ -269,6 +275,31 @@ impl SubAgentTool {
     /// [`Agent::with_tool_middleware`](crate::Agent::with_tool_middleware).
     pub fn with_tool_middleware(mut self, middleware: impl ToolMiddleware + 'static) -> Self {
         self.tool_middleware.push(Arc::new(middleware));
+        self
+    }
+
+    /// Add an [`Extension`](crate::Extension) for the sub-agent's runs (see
+    /// [`crate::extension`]). Extensions run in installation order, after the
+    /// tree extensions and after the older hooks (middleware, filters).
+    pub fn with_extension(mut self, extension: impl crate::Extension + 'static) -> Self {
+        self.extensions.push(Arc::new(extension));
+        self
+    }
+
+    /// Add an [`Extension`](crate::Extension) for the sub-agent's runs **and
+    /// every run they delegate to**, at any depth: host policy (permissions,
+    /// deny rules, redaction, audit, a budget across the tree). A child runs
+    /// it ahead of its own extensions and cannot remove it. Its tools are not
+    /// offered to child runs.
+    pub fn with_tree_extension(mut self, extension: impl crate::Extension + 'static) -> Self {
+        self.tree_extensions.push(Arc::new(extension));
+        self
+    }
+
+    /// How many times per run an extension's `on_stop` may continue it
+    /// (default [`DEFAULT_MAX_STOP_CONTINUES`](crate::extension::DEFAULT_MAX_STOP_CONTINUES)).
+    pub fn with_max_stop_continues(mut self, max: usize) -> Self {
+        self.max_stop_continues = max;
         self
     }
 
@@ -584,6 +615,13 @@ impl AgentTool for SubAgentTool {
         config.input_filters = self.input_filters.clone();
         config.tool_middleware = tool_middleware;
         config.turn_delay = self.turn_delay;
+        config.extensions = self.extensions.clone();
+        config.tree_extensions = self.tree_extensions.clone();
+        config.max_stop_continues = self.max_stop_continues;
+        // The caller's tree extensions (host policy) apply here too, ahead of
+        // this sub-agent's own, and at this delegation's depth.
+        config.inherited_extensions = ctx.tree_extensions().to_vec();
+        config.depth = ctx.delegation_depth();
 
         // Channel for sub-agent events
         let (tx, rx) = mpsc::unbounded_channel();

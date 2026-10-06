@@ -809,6 +809,17 @@ pub struct ToolContext {
     /// [`report_delegated_run`](Self::report_delegated_run), so they survive a
     /// failed delegation.
     pub(crate) sub_agent_report: Option<SubAgentReport>,
+    /// Set by the loop: the tree extensions a delegated run must apply, and
+    /// its depth.
+    pub(crate) delegation: Delegation,
+}
+
+/// What a run hands down to the runs it delegates to.
+#[derive(Clone, Default)]
+pub(crate) struct Delegation {
+    pub(crate) tree: Vec<Arc<dyn crate::extension::Extension>>,
+    /// The depth a delegated run has (the calling run's depth + 1).
+    pub(crate) depth: usize,
 }
 
 impl ToolContext {
@@ -826,6 +837,7 @@ impl ToolContext {
             on_update: None,
             on_progress: None,
             sub_agent_report: None,
+            delegation: Delegation::default(),
         }
     }
 
@@ -872,6 +884,19 @@ impl ToolContext {
             report.lock().unwrap_or_else(|e| e.into_inner()).push(stats);
         }
     }
+
+    /// The tree extensions ([`Agent::with_tree_extension`](crate::Agent::with_tree_extension))
+    /// a run this tool delegates to must apply, ahead of its own. A custom
+    /// delegation tool honours them by installing them on the run it starts.
+    pub fn tree_extensions(&self) -> &[Arc<dyn crate::extension::Extension>] {
+        &self.delegation.tree
+    }
+
+    /// The depth of a run this tool delegates to: 1 when called by a
+    /// top-level run.
+    pub fn delegation_depth(&self) -> usize {
+        self.delegation.depth.max(1)
+    }
 }
 
 impl Clone for ToolContext {
@@ -883,6 +908,7 @@ impl Clone for ToolContext {
             on_update: self.on_update.clone(),
             on_progress: self.on_progress.clone(),
             sub_agent_report: self.sub_agent_report.clone(),
+            delegation: self.delegation.clone(),
         }
     }
 }
@@ -1868,6 +1894,7 @@ pub fn is_loop_injected(text: &str) -> bool {
         crate::agent_loop::AGENT_STOPPED_PREFIX,
         crate::agent_loop::LOOP_ABORT_PREFIX,
         crate::agent_loop::LOOP_NUDGE_PREFIX,
+        crate::extension::EXTENSION_MESSAGE_PREFIX,
     ]
     .iter()
     .any(|prefix| text.starts_with(prefix))

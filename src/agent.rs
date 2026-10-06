@@ -77,6 +77,10 @@ pub struct Agent {
 
     // Tool middleware (permissions/policy hooks)
     tool_middleware: Vec<Arc<dyn ToolMiddleware>>,
+    extensions: Vec<Arc<dyn crate::Extension>>,
+    tree_extensions: Vec<Arc<dyn crate::Extension>>,
+    max_stop_continues: usize,
+    run_label: Option<String>,
 
     // Per-turn hooks (transient notes on the latest user turn)
     turn_hooks: Vec<Arc<dyn TurnHook>>,
@@ -324,6 +328,10 @@ impl Agent {
             on_error: None,
             input_filters: Vec::new(),
             tool_middleware: Vec::new(),
+            extensions: Vec::new(),
+            tree_extensions: Vec::new(),
+            max_stop_continues: crate::extension::DEFAULT_MAX_STOP_CONTINUES,
+            run_label: None,
             turn_hooks: Vec::new(),
             #[cfg(feature = "decision")]
             skills: crate::skills::SkillSet::empty(),
@@ -666,6 +674,38 @@ impl Agent {
     pub fn with_input_guard(self, guard: crate::decision::InputGuard) -> Self {
         guard.assert_has_checks();
         self.with_async_input_filter(guard)
+    }
+
+    /// Add an [`Extension`](crate::Extension) for this agent's runs (see
+    /// [`crate::extension`]). Extensions run in installation order, after the
+    /// tree extensions and after the older hooks (middleware, filters).
+    pub fn with_extension(mut self, extension: impl crate::Extension + 'static) -> Self {
+        self.extensions.push(Arc::new(extension));
+        self
+    }
+
+    /// Add an [`Extension`](crate::Extension) for this agent's runs **and
+    /// every run they delegate to**, at any depth: host policy (permissions,
+    /// deny rules, redaction, audit, a budget across the tree). A child runs
+    /// it ahead of its own extensions and cannot remove it. Its tools are not
+    /// offered to child runs.
+    pub fn with_tree_extension(mut self, extension: impl crate::Extension + 'static) -> Self {
+        self.tree_extensions.push(Arc::new(extension));
+        self
+    }
+
+    /// How many times per run an extension's `on_stop` may continue it
+    /// (default [`DEFAULT_MAX_STOP_CONTINUES`](crate::extension::DEFAULT_MAX_STOP_CONTINUES)).
+    pub fn with_max_stop_continues(mut self, max: usize) -> Self {
+        self.max_stop_continues = max;
+        self
+    }
+
+    /// The host's label for this agent's runs (yo puts its session id here),
+    /// passed to extensions as [`RunContext::label`](crate::extension::RunContext::label).
+    pub fn with_run_label(mut self, label: impl Into<String>) -> Self {
+        self.run_label = Some(label.into());
+        self
     }
 
     /// Add a tool middleware — an async approve/deny/modify hook that gates
@@ -1523,6 +1563,10 @@ impl Agent {
         config.on_error = self.on_error.clone();
         config.input_filters = self.input_filters.clone();
         config.tool_middleware = tool_middleware;
+        config.extensions = self.extensions.clone();
+        config.tree_extensions = self.tree_extensions.clone();
+        config.max_stop_continues = self.max_stop_continues;
+        config.run_label = self.run_label.clone();
         config
     }
 }
