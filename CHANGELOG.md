@@ -24,7 +24,7 @@ adheres to [Semantic Versioning](https://semver.org/).
 
   **`with_tree_extension`** applies an extension to every delegated run at any depth, so host policy reaches sub-agents. A parent's `ToolMiddleware` never did; the existing hooks are unchanged. `Agent::with_run_label` and `with_max_stop_continues`. Guide: `docs/concepts/extensions.md`.
 
-- **`extension::Budget`**: a dollar limit that stops a run before the request that would exceed it. Per run, or `.across_runs()` (a session, or a whole delegation tree with `with_tree_extension`). `Budget::for_model` returns `None` for an unpriced model.
+- **`extension::Budget`**: a dollar limit, checked before each model request: once spend reaches it, the run stops (the request that goes past it still completes). Per run, or `.across_runs()` (a session, or a whole delegation tree with `with_tree_extension`). `Budget::for_model` returns `None` for an unpriced model.
 
 ### Changed
 

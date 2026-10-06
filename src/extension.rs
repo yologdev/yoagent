@@ -332,14 +332,18 @@ pub trait RunHooks: MaybeSend + MaybeSync {
         TurnDecision::Continue
     }
 
-    /// Before a tool call runs.
-    async fn before_tool(&mut self, _call: &ToolCallRequest<'_>) -> ToolDecision {
+    /// Before a tool call runs. Takes `&self`: under parallel tool
+    /// execution, the calls of one response are judged concurrently (a slow
+    /// policy must not serialize them), so state it changes needs interior
+    /// mutability.
+    async fn before_tool(&self, _call: &ToolCallRequest<'_>) -> ToolDecision {
         ToolDecision::Allow
     }
 
-    /// After a tool call ran; may edit its output.
+    /// After a tool call ran; may edit its output. Takes `&self` and may run
+    /// concurrently for parallel calls, like [`before_tool`](Self::before_tool).
     async fn after_tool(
-        &mut self,
+        &self,
         _call: &ToolCallRequest<'_>,
         _output: &mut ToolOutput,
     ) -> Result<(), ExtensionError> {
@@ -419,7 +423,10 @@ struct Active {
     rechecks: bool,
     /// Installed by a parent (a tree extension): its tools are not offered.
     inherited: bool,
-    hooks: tokio::sync::Mutex<Box<dyn RunHooks>>,
+    /// Read-locked for the per-call hooks (`before_tool`, `after_tool`,
+    /// which take `&self` and may run concurrently), write-locked for the
+    /// rest.
+    hooks: tokio::sync::RwLock<Box<dyn RunHooks>>,
 }
 
 /// A request to the event observer: acknowledge once every event sent before
@@ -516,7 +523,7 @@ impl ActiveExtensions {
                         mode,
                         rechecks: ext.rechecks_modified_calls(),
                         inherited,
-                        hooks: tokio::sync::Mutex::new(hooks),
+                        hooks: tokio::sync::RwLock::new(hooks),
                     });
                     continue;
                 }
@@ -612,7 +619,7 @@ impl ActiveExtensions {
     pub(crate) async fn tools(&self, run: &RunContext<'_>) -> Vec<Arc<dyn AgentTool>> {
         let mut tools = Vec::new();
         for a in self.active.iter().filter(|a| !a.inherited) {
-            let mut hooks = a.hooks.lock().await;
+            let mut hooks = a.hooks.write().await;
             match guarded(hooks.tools(run)).await {
                 Ok(t) => tools.extend(t),
                 Err(panic) => self.failed(a, "tools", panic),
@@ -625,7 +632,7 @@ impl ActiveExtensions {
     /// rejects (fail closed).
     pub(crate) async fn on_input(&self, input: &InputContext<'_>) -> Result<(), String> {
         for a in &self.active {
-            let mut hooks = a.hooks.lock().await;
+            let mut hooks = a.hooks.write().await;
             match guarded(hooks.on_input(input)).await {
                 Ok(InputDecision::Pass) => {}
                 Ok(InputDecision::Reject(reason)) => return Err(reason),
@@ -645,7 +652,7 @@ impl ActiveExtensions {
     ) -> Result<Vec<String>, ModelHalt> {
         let mut notes = Vec::new();
         for a in &self.active {
-            let mut hooks = a.hooks.lock().await;
+            let mut hooks = a.hooks.write().await;
             let decision = match guarded(hooks.before_model(turn)).await {
                 Ok(d) => d,
                 Err(panic) => TurnDecision::Fail(panic),
@@ -690,7 +697,7 @@ impl ActiveExtensions {
                 ..call
             };
             let decision = {
-                let mut hooks = a.hooks.lock().await;
+                let hooks = a.hooks.read().await;
                 guarded(hooks.before_tool(&request)).await
             };
             match decision {
@@ -715,7 +722,7 @@ impl ActiveExtensions {
                     ..call
                 };
                 let decision = {
-                    let mut hooks = a.hooks.lock().await;
+                    let hooks = a.hooks.read().await;
                     guarded(hooks.before_tool(&request)).await
                 };
                 match decision {
@@ -741,7 +748,7 @@ impl ActiveExtensions {
     pub(crate) async fn after_tool(&self, call: &ToolCallRequest<'_>, output: &mut ToolOutput) {
         for a in &self.active {
             let outcome = {
-                let mut hooks = a.hooks.lock().await;
+                let hooks = a.hooks.read().await;
                 guarded(hooks.after_tool(call, output)).await
             };
             let reason = match outcome {
@@ -768,7 +775,7 @@ impl ActiveExtensions {
         let mut required: Option<String> = None;
         for a in &self.active {
             let decision = {
-                let mut hooks = a.hooks.lock().await;
+                let mut hooks = a.hooks.write().await;
                 guarded(hooks.on_stop(stop)).await
             };
             match decision {
@@ -816,7 +823,7 @@ impl ActiveExtensions {
         // Every event sent so far is observed before the hooks see the end.
         self.sync_events().await;
         for a in &self.active {
-            let mut hooks = a.hooks.lock().await;
+            let mut hooks = a.hooks.write().await;
             if let Err(panic) = guarded(hooks.finish(outcome)).await {
                 match a.mode {
                     // Too late to change the outcome: log it loudly.
@@ -860,7 +867,9 @@ pub(crate) fn tool_definitions(tools: &[Box<dyn AgentTool>]) -> Vec<ToolDefiniti
 /// installed with
 /// [`Agent::with_tree_extension`](crate::Agent::with_tree_extension), every
 /// run of a delegation tree. Every message is priced at the one rate given,
-/// so a tree whose sub-agents use other models is priced approximately.
+/// so a tree whose sub-agents use other models is priced approximately. A
+/// provider attempt that fails mid-stream reports no usage, so input tokens a
+/// provider billed for it are not counted.
 ///
 /// ```
 /// # use yoagent::extension::Budget;
@@ -900,16 +909,17 @@ impl Budget {
         self
     }
 
-    /// Dollars spent so far: by the run `run_id`, or in total when
-    /// `across_runs`.
-    pub fn spent_usd(&self, run_id: &str) -> f64 {
-        let key = self.key(run_id);
-        self.spent
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&key)
-            .copied()
-            .unwrap_or(0.0)
+    /// Dollars spent so far across runs: `None` for a per-run budget, whose
+    /// totals end with their runs.
+    pub fn spent_usd(&self) -> Option<f64> {
+        self.across_runs.then(|| {
+            self.spent
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get("")
+                .copied()
+                .unwrap_or(0.0)
+        })
     }
 
     fn key(&self, run_id: &str) -> String {

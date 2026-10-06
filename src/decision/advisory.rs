@@ -350,8 +350,9 @@ impl TurnHook for Advisor {
 }
 
 /// The advisor as an [`Extension`](crate::Extension): its hint is a
-/// `before_model` note. One advisor serves every run of the agent it was
-/// built for, so its memo (one request per user request) is shared.
+/// `before_model` note. A fresh advisor is built for each run (by
+/// `decision::wire`), so its memo (one request per user request) spans that
+/// run's turns.
 pub(crate) struct AdvisorExtension(Arc<Advisor>);
 
 impl AdvisorExtension {

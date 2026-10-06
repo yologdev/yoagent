@@ -1668,7 +1668,7 @@ async fn gate_judges_the_arguments_an_extension_rewrote() {
     struct Rewrite;
     #[async_trait::async_trait]
     impl yoagent::RunHooks for Rewrite {
-        async fn before_tool(&mut self, _call: &ToolCallRequest<'_>) -> ToolDecision {
+        async fn before_tool(&self, _call: &ToolCallRequest<'_>) -> ToolDecision {
             ToolDecision::Modify(json!({"path": "/srv/data"}))
         }
     }

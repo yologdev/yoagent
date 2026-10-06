@@ -313,6 +313,12 @@ impl crate::Extension for ToolGate {
         "tool-gate"
     }
 
+    /// A gate judges the arguments that will run, also when it is installed
+    /// ahead of an extension that rewrites them (as a tree extension is).
+    fn rechecks_modified_calls(&self) -> bool {
+        true
+    }
+
     async fn start_run(
         &self,
         _run: &crate::extension::RunContext<'_>,
@@ -326,7 +332,7 @@ struct GateHooks(ToolGate);
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl crate::RunHooks for GateHooks {
-    async fn before_tool(&mut self, call: &ToolCallRequest<'_>) -> ToolDecision {
+    async fn before_tool(&self, call: &ToolCallRequest<'_>) -> ToolDecision {
         self.0.decide(call).await
     }
 }

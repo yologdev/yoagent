@@ -78,7 +78,7 @@ fn stopped_on_budget(messages: &[AgentMessage]) -> bool {
 }
 
 #[tokio::test]
-async fn a_run_stops_before_the_request_that_would_exceed_the_limit() {
+async fn a_run_stops_once_its_spend_reaches_the_limit() {
     // Three 4-cent turns with a 10-cent limit: after two (8 cents) the
     // third request is still sent (8 < 10), after it (12) the run stops.
     let provider = MockProvider::new(vec![tool_call(4), tool_call(4), tool_call(4), answer(4)]);
@@ -115,13 +115,29 @@ async fn a_per_run_budget_starts_over_each_run_and_across_runs_does_not() {
 
 #[tokio::test]
 async fn a_tree_budget_counts_a_sub_agent_s_spend() {
+    // Parent 6, then the child at 3 per turn, limit 10. Shared: 6 + 3 + 3 =
+    // 12 after the child's second turn, so its third request is never sent.
+    // Not shared, the child alone would run all four of its turns.
+    let child_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    struct Counted(MockProvider, Arc<std::sync::atomic::AtomicUsize>);
+    #[async_trait::async_trait]
+    impl yoagent::provider::StreamProvider for Counted {
+        async fn stream(
+            &self,
+            config: yoagent::provider::StreamConfig,
+            tx: mpsc::UnboundedSender<yoagent::provider::StreamEvent>,
+            cancel: tokio_util::sync::CancellationToken,
+        ) -> Result<Message, yoagent::provider::ProviderError> {
+            self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.0.stream(config, tx, cancel).await
+        }
+    }
     let child = SubAgentTool::from_provider(
         "child",
-        Arc::new(MockProvider::new(vec![
-            tool_call(6),
-            tool_call(6),
-            answer(0),
-        ])),
+        Arc::new(Counted(
+            MockProvider::new(vec![tool_call(3), tool_call(3), tool_call(3), answer(3)]),
+            child_requests.clone(),
+        )),
         ModelConfig::mock(),
     )
     .with_tools(vec![Arc::new(Noop)]);
@@ -132,17 +148,32 @@ async fn a_tree_budget_counts_a_sub_agent_s_spend() {
                 arguments: serde_json::json!({"task": "work"}),
                 provider_metadata: None,
             }],
-            usage(2),
+            usage(6),
         ),
         answer(1),
     ]);
+    let budget = Budget::usd(0.10, dollar_per_million()).across_runs();
     let mut agent = Agent::from_provider(parent, ModelConfig::mock())
         .with_tools(vec![Box::new(child)])
-        .with_tree_extension(Budget::usd(0.10, dollar_per_million()).across_runs());
+        .with_tree_extension(budget);
     let messages = run(&mut agent, "go").await;
-    // Parent 2 + child 6 = 8: the child's second turn runs (8 < 10), then
-    // 14 stops the child; the parent's next request stops too.
+    assert_eq!(
+        child_requests.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "the child stopped on the shared total"
+    );
     assert!(stopped_on_budget(&messages), "{:?}", messages.last());
+}
+
+#[test]
+fn spent_usd_is_the_across_runs_total() {
+    assert_eq!(Budget::usd(1.0, dollar_per_million()).spent_usd(), None);
+    assert_eq!(
+        Budget::usd(1.0, dollar_per_million())
+            .across_runs()
+            .spent_usd(),
+        Some(0.0)
+    );
 }
 
 #[test]

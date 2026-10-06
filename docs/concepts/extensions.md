@@ -67,7 +67,7 @@ Every `RunHooks` method has a no-op default; implement only what you need.
 | `tools` | Once per run, at its start | The agent's own tools win a name clash, then the earlier extension; sorted by name |
 | `on_input` | On a prompted run's input, after the input filters (`continue_loop` has no input) | First `Reject` wins |
 | `before_model` | Before each model request (a retried attempt is not judged again) | Notes appended in order to the latest user turn, never stored; first `Stop` or `Fail` ends the run |
-| `before_tool` | Before each tool call, after any `ToolMiddleware` | `Deny` wins, `Modify` feeds the next |
+| `before_tool` | Before each tool call, after any `ToolMiddleware`. Takes `&self`: the calls of one response are judged concurrently under parallel execution | `Deny` wins, `Modify` feeds the next |
 | `after_tool` | After each call that ran, errors and panics included, before truncation and `ToolExecutionEnd`. Gets a `ToolOutput` (`result`, `is_error`) to edit | In order, each sees the previous edit |
 | `on_stop` | When the model ends with `StopReason::Stop` and nothing is queued | First `Fail` wins, else first `Continue` |
 | `finish` | When the run ends, however it ends (not if the run's future is dropped) | All |
@@ -114,7 +114,7 @@ Use tree extensions for host policy: permissions, deny rules, redaction, audit, 
 
 ## Budget
 
-`extension::Budget` stops a run before the model request that would go past a dollar limit, with `[Agent stopped: budget of $… spent …]`:
+`extension::Budget` checks a dollar limit before each model request and stops the run once spend has reached it, with `[Agent stopped: budget of $… spent …]`:
 
 ```rust
 use yoagent::extension::Budget;
@@ -125,7 +125,7 @@ let budget = Budget::for_model(2.0, &model).expect("a priced model");
 let agent = Agent::from_config(model).with_extension(budget);
 ```
 
-The limit is per run by default. `.across_runs()` makes it one total for every run the extension serves: all of a session's runs, or, with `with_tree_extension`, a whole delegation tree. Every message is priced at the one rate given (`Budget::usd(max, CostConfig)` to choose it), so sub-agents on other models are priced approximately. The check is before each request, so the request that crosses the limit still completes.
+The limit is per run by default. `.across_runs()` makes it one total for every run the extension serves: all of a session's runs, or, with `with_tree_extension`, a whole delegation tree. Every message is priced at the one rate given (`Budget::usd(max, CostConfig)` to choose it), so sub-agents on other models are priced approximately. The check is before each request, so the request that crosses the limit still completes. A provider attempt that fails mid-stream reports no usage, so its billed input tokens are not counted. `spent_usd()` gives an across-runs budget's total.
 
 ## Built on extensions
 
