@@ -1051,26 +1051,26 @@ impl Ask<'_> {
     }
 }
 
-type Hooks = Vec<Arc<dyn crate::TurnHook>>;
-type Middleware = Vec<Arc<dyn crate::ToolMiddleware>>;
-
-/// Add the decision integrations to a run's hooks and middleware: the
-/// advisory hook when a model is set, and the tool gate — last in the chain,
-/// so it judges the arguments every other middleware produced.
+/// The decision features an agent enabled, as extensions (#241): the
+/// advisor (if advisory is enabled), then the gate. They are appended after
+/// the agent's own extensions, so the gate judges the final, possibly
+/// modified call, after every middleware and extension; a fail-closed gate
+/// can only deny, never allow what an earlier hook denied.
 pub(crate) fn wire(
     advisory: Option<&Advisory>,
     gate: Option<&ToolGate>,
     skills: &crate::skills::SkillSet,
-    mut hooks: Hooks,
-    mut middleware: Middleware,
-) -> (Hooks, Middleware) {
+) -> Vec<Arc<dyn crate::Extension>> {
+    let mut extensions: Vec<Arc<dyn crate::Extension>> = Vec::new();
     if let Some(a) = advisory {
-        hooks.push(Arc::new(advisory::Advisor::new(a.clone(), skills)));
+        extensions.push(Arc::new(advisory::AdvisorExtension::new(
+            advisory::Advisor::new(a.clone(), skills),
+        )));
     }
     if let Some(g) = gate {
-        middleware.push(Arc::new(g.clone()));
+        extensions.push(Arc::new(g.clone()));
     }
-    (hooks, middleware)
+    extensions
 }
 
 #[cfg(test)]

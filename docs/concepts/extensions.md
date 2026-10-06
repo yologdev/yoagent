@@ -112,6 +112,25 @@ Where you install an extension decides what child runs see:
 
 Use tree extensions for host policy: permissions, deny rules, redaction, audit, and a budget across the whole tree (keep the total in the `Extension`, which every run shares). A child run keeps the parent's run label. A custom delegation tool honours all of this through `ToolContext::tree_extensions()`, `ToolContext::delegation_depth()` and `ToolContext::run_label()`.
 
+## Budget
+
+`extension::Budget` stops a run before the model request that would go past a dollar limit, with `[Agent stopped: budget of $… spent …]`:
+
+```rust
+use yoagent::extension::Budget;
+
+let model = ModelConfig::claude_sonnet_5();
+// `None` for an unpriced model: a budget without a price is no limit.
+let budget = Budget::for_model(2.0, &model).expect("a priced model");
+let agent = Agent::from_config(model).with_extension(budget);
+```
+
+The limit is per run by default. `.across_runs()` makes it one total for every run the extension serves: all of a session's runs, or, with `with_tree_extension`, a whole delegation tree. Every message is priced at the one rate given (`Budget::usd(max, CostConfig)` to choose it), so sub-agents on other models are priced approximately. The check is before each request, so the request that crosses the limit still completes.
+
+## Built on extensions
+
+The decision features are extensions themselves: `with_tool_gate` (`before_tool`), `with_input_guard` (`on_input`) and `with_decision_model` (a `before_model` note). They are appended after the agent's own extensions, so the gate judges the final arguments.
+
 ## Order with the older hooks
 
 `ToolMiddleware`, `InputFilter`, `TurnHook`, `ToolSource` and the `on_*` closures keep working unchanged. At each point the older hook runs first: input filters before `on_input`, middleware before `before_tool`. Notes from `before_model` are appended before a `TurnHook`'s (turn hooks run inside the provider call, once per attempt).

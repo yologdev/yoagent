@@ -1659,3 +1659,27 @@ async fn a_timed_out_partial_request_records_what_was_billed() {
     assert_eq!(d.usage.input, 10, "the answered half was billed");
     assert!((d.cost_usd.unwrap() - 0.00001).abs() < 1e-15);
 }
+
+/// The gate is an extension (#241) appended after the agent's own, so it
+/// judges the arguments another extension rewrote, not the model's.
+#[tokio::test]
+async fn gate_judges_the_arguments_an_extension_rewrote() {
+    #[derive(Clone)]
+    struct Rewrite;
+    #[async_trait::async_trait]
+    impl yoagent::RunHooks for Rewrite {
+        async fn before_tool(&mut self, _call: &ToolCallRequest<'_>) -> ToolDecision {
+            ToolDecision::Modify(json!({"path": "/srv/data"}))
+        }
+    }
+    let mock = gate_answers(0.95, 0.1);
+    let (tools, ran) = make_tools(1);
+    let agent = Agent::from_provider(calls_rm(), ModelConfig::mock())
+        .with_tools(tools)
+        .with_extension(yoagent::extension::Stateless::new("rewrite", Rewrite))
+        .with_tool_gate(ToolGate::new(model(&mock)));
+    run(agent, "tidy up").await;
+    assert!(ran.lock().unwrap().is_empty(), "denied");
+    let reqs = mock.requests();
+    assert_eq!(reqs[0].state["tool_call"]["arguments"]["path"], "/srv/data");
+}

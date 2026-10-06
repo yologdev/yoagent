@@ -673,7 +673,7 @@ impl Agent {
     #[cfg_attr(docsrs, doc(cfg(feature = "decision")))]
     pub fn with_input_guard(self, guard: crate::decision::InputGuard) -> Self {
         guard.assert_has_checks();
-        self.with_async_input_filter(guard)
+        self.with_extension(guard)
     }
 
     /// Add an [`Extension`](crate::Extension) for this agent's runs (see
@@ -1489,17 +1489,14 @@ impl Agent {
         let follow_up_queue = self.follow_up_queue.clone();
         let follow_up_mode = self.follow_up_mode;
 
-        // The decision integration appends its advisor hook and tool gate
-        // last, so the gate sees arguments after every user middleware.
+        // The decision integration (advisor, tool gate) runs as extensions,
+        // appended after the agent's own below.
         #[cfg(feature = "decision")]
-        let (turn_hooks, tool_middleware) = crate::decision::wire(
+        let decision_extensions = crate::decision::wire(
             self.decision.as_ref(),
             self.tool_gate.as_ref(),
             &self.skills,
-            self.turn_hooks.clone(),
-            self.tool_middleware.clone(),
         );
-        #[cfg(not(feature = "decision"))]
         let (turn_hooks, tool_middleware) = (self.turn_hooks.clone(), self.tool_middleware.clone());
         let provider: Arc<dyn StreamProvider> = if turn_hooks.is_empty() {
             self.provider.clone()
@@ -1564,6 +1561,10 @@ impl Agent {
         config.input_filters = self.input_filters.clone();
         config.tool_middleware = tool_middleware;
         config.extensions = self.extensions.clone();
+        // The decision features (advisor, gate) run after the agent's own
+        // extensions, so the gate judges the final call.
+        #[cfg(feature = "decision")]
+        config.extensions.extend(decision_extensions);
         config.tree_extensions = self.tree_extensions.clone();
         config.max_stop_continues = self.max_stop_continues;
         config.run_label = self.run_label.clone();

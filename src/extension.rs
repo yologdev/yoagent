@@ -843,3 +843,153 @@ pub(crate) fn tool_definitions(tools: &[Box<dyn AgentTool>]) -> Vec<ToolDefiniti
         })
         .collect()
 }
+
+// ---------------------------------------------------------------------------
+// Budget
+// ---------------------------------------------------------------------------
+
+/// A spending limit in dollars: an [`Extension`] that ends a run with
+/// `[Agent stopped: budget …]` before a model request once the limit is
+/// reached. A request already sent can take spend past the limit; the check
+/// is before each request, not during one.
+///
+/// Spend is each assistant message's usage priced with the given
+/// [`CostConfig`](crate::provider::CostConfig), as the message is observed.
+/// By default the limit is per run. With [`across_runs`](Self::across_runs)
+/// it is one total for every run the extension serves: a session's runs, or,
+/// installed with
+/// [`Agent::with_tree_extension`](crate::Agent::with_tree_extension), every
+/// run of a delegation tree. Every message is priced at the one rate given,
+/// so a tree whose sub-agents use other models is priced approximately.
+///
+/// ```
+/// # use yoagent::extension::Budget;
+/// # use yoagent::provider::ModelConfig;
+/// let model = ModelConfig::claude_sonnet_5();
+/// // `None` when the model has no price: an unpriced budget would be no limit.
+/// let budget = Budget::for_model(2.0, &model).expect("a priced model");
+/// ```
+pub struct Budget {
+    max_usd: f64,
+    cost: crate::provider::CostConfig,
+    across_runs: bool,
+    /// Spend per run id, or under one key when `across_runs`.
+    spent: Arc<std::sync::Mutex<std::collections::HashMap<String, f64>>>,
+}
+
+impl Budget {
+    /// At most `max_usd` per run, priced with `cost`.
+    pub fn usd(max_usd: f64, cost: crate::provider::CostConfig) -> Self {
+        Self {
+            max_usd,
+            cost,
+            across_runs: false,
+            spent: Arc::default(),
+        }
+    }
+
+    /// At most `max_usd` per run, priced at `model`'s rates; `None` when the
+    /// model has no price.
+    pub fn for_model(max_usd: f64, model: &crate::provider::ModelConfig) -> Option<Self> {
+        model.cost.clone().map(|cost| Self::usd(max_usd, cost))
+    }
+
+    /// One total for every run this extension serves, instead of one per run.
+    pub fn across_runs(mut self) -> Self {
+        self.across_runs = true;
+        self
+    }
+
+    /// Dollars spent so far: by the run `run_id`, or in total when
+    /// `across_runs`.
+    pub fn spent_usd(&self, run_id: &str) -> f64 {
+        let key = self.key(run_id);
+        self.spent
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .copied()
+            .unwrap_or(0.0)
+    }
+
+    fn key(&self, run_id: &str) -> String {
+        if self.across_runs {
+            String::new()
+        } else {
+            run_id.to_string()
+        }
+    }
+}
+
+struct BudgetRun {
+    key: String,
+    max_usd: f64,
+    per_run: bool,
+    spent: Arc<std::sync::Mutex<std::collections::HashMap<String, f64>>>,
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl Extension for Budget {
+    fn name(&self) -> &str {
+        "budget"
+    }
+
+    async fn start_run(&self, run: &RunContext<'_>) -> Result<Box<dyn RunHooks>, ExtensionError> {
+        Ok(Box::new(BudgetRun {
+            key: self.key(run.run_id),
+            max_usd: self.max_usd,
+            per_run: !self.across_runs,
+            spent: self.spent.clone(),
+        }))
+    }
+
+    fn on_event(&self, run_id: &str, event: &AgentEvent) {
+        if let AgentEvent::MessageEnd {
+            message: AgentMessage::Llm(Message::Assistant { usage, .. }),
+        } = event
+        {
+            let cost = self.cost.cost_usd(usage);
+            if cost > 0.0 {
+                *self
+                    .spent
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .entry(self.key(run_id))
+                    .or_insert(0.0) += cost;
+            }
+        }
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl RunHooks for BudgetRun {
+    async fn before_model(&mut self, _turn: &TurnContext<'_>) -> TurnDecision {
+        let spent = self
+            .spent
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&self.key)
+            .copied()
+            .unwrap_or(0.0);
+        if spent >= self.max_usd {
+            TurnDecision::Stop(format!(
+                "budget of ${:.2} spent (${spent:.4})",
+                self.max_usd
+            ))
+        } else {
+            TurnDecision::Continue
+        }
+    }
+
+    async fn finish(&mut self, _outcome: &RunOutcome) {
+        // A per-run total is not needed once the run is over.
+        if self.per_run {
+            self.spent
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&self.key);
+        }
+    }
+}
