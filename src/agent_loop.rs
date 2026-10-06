@@ -212,6 +212,42 @@ impl AgentLoopConfig {
     }
 }
 
+impl AgentLoopConfig {
+    /// A configuration for `model` on `provider`, with every other field at
+    /// its default: no API key, thinking off, no limits beyond the provider's,
+    /// no context management, no hooks, parallel tool execution and the
+    /// default retry policy.
+    pub fn new(provider: Arc<dyn StreamProvider>, model: impl Into<String>) -> Self {
+        Self {
+            provider,
+            model: model.into(),
+            api_key: String::new(),
+            thinking_level: ThinkingLevel::Off,
+            max_tokens: None,
+            temperature: None,
+            model_config: None,
+            convert_to_llm: None,
+            transform_context: None,
+            get_steering_messages: None,
+            get_follow_up_messages: None,
+            context_config: None,
+            compaction_strategy: None,
+            execution_limits: None,
+            cache_config: CacheConfig::default(),
+            tool_output_sink: None,
+            tool_execution: ToolExecutionStrategy::default(),
+            tool_middleware: Vec::new(),
+            output_schema: None,
+            retry_config: crate::retry::RetryConfig::default(),
+            before_turn: None,
+            after_turn: None,
+            on_error: None,
+            input_filters: Vec::new(),
+            turn_delay: None,
+        }
+    }
+}
+
 /// Default convert_to_llm: keep only user/assistant/toolResult messages.
 fn default_convert_to_llm(messages: &[AgentMessage]) -> Vec<Message> {
     messages
