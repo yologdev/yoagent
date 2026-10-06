@@ -20,7 +20,7 @@
 //! [`AgentPlugin`](crate::AgentPlugin)) follow the rules above by
 //! construction. A raw `WaterfallListener<ToolCallEvent>` receives the same
 //! event and `next`, and could try to break them; the bridge checks what
-//! rutis 0.5 lets it observe:
+//! rutis (0.5 and 0.6) lets it observe:
 //!
 //! - **Allow without `next`** (which, in rutis, skips every later listener):
 //!   the chain never reached its terminal, so the call is denied.
@@ -35,7 +35,7 @@
 //!   returns. **Not covered:** an objection a raw listener produces *after*
 //!   calling `next` — a plain [`ToolVerdict::deny`], an `Err`, or a panic
 //!   another listener catches — that an earlier raw listener turns into
-//!   `Allow`. rutis 0.5 passes results between listeners only as return
+//!   `Allow`. rutis (0.5 and 0.6) passes results between listeners only as return
 //!   values, with no hook in between, so such an objection is invisible to
 //!   the bridge. Raw listeners must object through [`ToolCallEvent::deny`]
 //!   (record it before returning an `Err`, too).

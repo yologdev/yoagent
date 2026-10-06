@@ -19,7 +19,7 @@ can contribute to a live agent:
 | observing agent events | `emit` of `AgentEventEmitted` | the `*_with_sender` event channel |
 
 yoagent does not depend on rutis; this crate uses only yoagent's public
-API. It depends on `rutis = "0.5"` (0.x caret: any 0.5.x, never 0.6). rutis
+API. It depends on `rutis = "0.6"` (0.x caret: any 0.6.x, never 0.7). rutis
 types are part of this crate's API, so every rutis minor bump is a
 yoagent-rutis minor bump.
 
@@ -106,7 +106,7 @@ calls per tool).
   call. The tool runs with the arguments approved when the chain reached its
   end.
 - **Raw `WaterfallListener`s** get the same event and `next`, so the bridge
-  checks what rutis 0.5 lets it see: an `Allow` that skipped `next` is denied;
+  checks what rutis (0.5 and 0.6) lets it see: an `Allow` that skipped `next` is denied;
   `set_args` after approval is refused and denies the call (it returns
   `false`); a denial made by a bridge listener or with `ToolCallEvent::deny`
   is recorded and wins even if an earlier listener returns `Allow`. **Not

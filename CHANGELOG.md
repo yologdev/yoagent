@@ -4,6 +4,12 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Changed
+
+- **`yoagent-rutis` (unpublished) moves to rutis 0.6** (`rutis = "0.6"`, built against 0.6.1). 0.6 only made rutis's public types `#[non_exhaustive]`, and 0.6.1 adds optional APIs; the bridge needed no source change. One test now builds `EventOptions` with `EventOptions::default().prepend(true)`. rutis's dispatch is unchanged in 0.6.1, so the bridge's liveness checks before and after dispatch still apply.
+
 ## 0.24.3
 
 Reliability fixes from the October codebase review: overloaded providers are retried, failed streams are errors rather than truncated answers, MCP over stdio is robust, `search` keeps partial results, sub-agent limits are configurable, and the onboarding paths work as written. No breaking changes. Two behaviours to know about:

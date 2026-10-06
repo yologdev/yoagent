@@ -119,7 +119,7 @@ pub use policy::{
 pub use tools::{PluginToolSource, ToolRegistry};
 pub use turn::{RutisTurnHook, TurnEvent, DEFAULT_TURN_TIMEOUT};
 
-/// The rutis this bridge is built against (`0.5`). Its types are part of this
-/// crate's API, so any rutis minor bump (0.5 → 0.6) is a yoagent-rutis minor
+/// The rutis this bridge is built against (`0.6`). Its types are part of this
+/// crate's API, so any rutis minor bump (0.6 → 0.7) is a yoagent-rutis minor
 /// bump.
 pub use rutis;
