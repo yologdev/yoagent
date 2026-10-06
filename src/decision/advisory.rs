@@ -1,5 +1,6 @@
-//! Advisory integration: a [`TurnHook`] that adds at most a skill hint and a
-//! tool hint to a turn's latest user message. Advisory only — it never
+//! Advisory integration: an extension's `before_model` note (installed by
+//! `with_decision_model`) that adds at most a skill hint and a tool hint to a
+//! turn's latest user message. The advisor is also a [`TurnHook`]. Advisory only — it never
 //! blocks, never removes a tool, and on any failure adds nothing.
 
 use super::question::{Question, QuestionKind};

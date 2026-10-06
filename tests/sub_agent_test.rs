@@ -133,9 +133,10 @@ async fn test_sub_agent_with_tools() {
 // Cancellation propagation
 // ---------------------------------------------------------------------------
 
+/// Cancelled before it ran: a cancelled delegation, not an empty success
+/// (as a cancel mid-call is, below).
 #[tokio::test]
 async fn test_sub_agent_cancellation() {
-    // Sub-agent provider returns text, but we cancel before execution
     let sub_provider = Arc::new(MockProvider::text("Should not appear"));
 
     let sub_agent =
@@ -151,18 +152,10 @@ async fn test_sub_agent_cancellation() {
             params,
             ToolContext::new("tc-1", "cancelled_agent").with_cancel(cancel),
         )
-        .await
-        .expect("should return a result even when cancelled");
-
-    // When cancelled before the loop runs, we get the fallback message
-    let text = match &result.content[0] {
-        Content::Text { text } => text.as_str(),
-        _ => panic!("Expected text content"),
-    };
-    // The loop exits early on cancellation, so the mock response should not appear
-    assert_ne!(
-        text, "Should not appear",
-        "Sub-agent ran despite cancellation"
+        .await;
+    assert!(
+        matches!(result, Err(ToolError::Cancelled)),
+        "a cancelled delegation: {result:?}"
     );
 }
 

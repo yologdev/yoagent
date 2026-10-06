@@ -809,8 +809,8 @@ pub struct ToolContext {
     /// [`report_delegated_run`](Self::report_delegated_run), so they survive a
     /// failed delegation.
     pub(crate) sub_agent_report: Option<SubAgentReport>,
-    /// Set by the loop: the tree extensions a delegated run must apply, and
-    /// its depth.
+    /// Set by the loop: the tree extensions a delegated run must apply, its
+    /// depth, and the calling run's label.
     pub(crate) delegation: Delegation,
 }
 
@@ -822,6 +822,11 @@ pub(crate) struct Delegation {
     pub(crate) depth: usize,
     /// The calling run's label, which a delegated run keeps.
     pub(crate) label: Option<String>,
+    /// The tool call this context belongs to: what a run it delegates to
+    /// was started by.
+    pub(crate) call_id: Option<String>,
+    /// The id the calling run gave its extensions (when it has any).
+    pub(crate) parent_run_id: Option<String>,
 }
 
 impl ToolContext {
@@ -889,7 +894,9 @@ impl ToolContext {
 
     /// The tree extensions ([`Agent::with_tree_extension`](crate::Agent::with_tree_extension))
     /// a run this tool delegates to must apply, ahead of its own. A custom
-    /// delegation tool honours them by installing them on the run it starts.
+    /// delegation tool passes them on, with the depth and label, through
+    /// [`Agent::delegated_from`](crate::Agent::delegated_from) or
+    /// [`AgentLoopConfig::delegated_from`](crate::agent_loop::AgentLoopConfig::delegated_from).
     pub fn tree_extensions(&self) -> &[Arc<dyn crate::extension::Extension>] {
         &self.delegation.tree
     }
@@ -1888,7 +1895,8 @@ impl<F: AsyncInputFilter> InputFilter for AsyncFilter<F> {
 
 /// Whether a user-role text was written by the loop or by compaction rather
 /// than by the user: compaction summaries and markers, execution-limit and
-/// loop-abort notes, and the loop-detection nudge.
+/// loop-abort notes, the loop-detection nudge, and extension continue
+/// messages.
 ///
 /// Use it to skip those messages when reading "what the user said" out of
 /// [`ToolCallRequest::messages`] or [`TurnContext::messages`]. The one list,

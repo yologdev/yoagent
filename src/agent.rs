@@ -81,6 +81,10 @@ pub struct Agent {
     tree_extensions: Vec<Arc<dyn crate::Extension>>,
     max_stop_continues: usize,
     run_label: Option<String>,
+    inherited_extensions: Vec<Arc<dyn crate::Extension>>,
+    depth: usize,
+    delegated_by: Option<String>,
+    parent_run_id: Option<String>,
 
     // Per-turn hooks (transient notes on the latest user turn)
     turn_hooks: Vec<Arc<dyn TurnHook>>,
@@ -332,6 +336,10 @@ impl Agent {
             tree_extensions: Vec::new(),
             max_stop_continues: crate::extension::DEFAULT_MAX_STOP_CONTINUES,
             run_label: None,
+            inherited_extensions: Vec::new(),
+            depth: 0,
+            delegated_by: None,
+            parent_run_id: None,
             turn_hooks: Vec::new(),
             #[cfg(feature = "decision")]
             skills: crate::skills::SkillSet::empty(),
@@ -621,13 +629,17 @@ impl Agent {
     ///
     /// - **Fails closed:** a decision-model error, timeout, or malformed
     ///   answer denies the call.
-    /// - **Runs last**, after every other middleware, whenever you add them,
-    ///   so it judges the arguments that will actually run. (A `ToolGate`
-    ///   installed by hand with [`with_tool_middleware`](Self::with_tool_middleware)
-    ///   must be added last yourself.)
+    /// - **Runs last**, after every middleware and extension, whenever you
+    ///   add them, so it judges the arguments that will actually run. (A
+    ///   `ToolGate` installed by hand with
+    ///   [`with_tool_middleware`](Self::with_tool_middleware) must be added
+    ///   last yourself, and runs before any extension.)
     /// - **This agent only:** calls made inside a
     ///   [`SubAgentTool`](crate::SubAgentTool) are not covered; give it its
-    ///   own gate, where the "user request" is the task text this agent wrote.
+    ///   own gate, where the "user request" is the task text this agent
+    ///   wrote, or install the gate with
+    ///   [`with_tree_extension`](Self::with_tree_extension) to cover every
+    ///   delegated run.
     /// - Requests and spend are reported in [`SessionStats::decision`].
     ///
     /// Defence in depth, not a security boundary — injected content can
@@ -654,7 +666,7 @@ impl Agent {
     ///
     /// - **Fails closed:** a decision-model error or timeout (3 s) rejects
     ///   the input; `InputGuard::with_fail_open` opts out.
-    /// - Installed as an async input filter, in order with the others
+    /// - Installed as an extension: it screens after every input filter
     ///   ([`with_input_filter`](Self::with_input_filter),
     ///   [`with_async_input_filter`](Self::with_async_input_filter)).
     /// - Input with no text (an image-only prompt) passes unscreened;
@@ -701,10 +713,27 @@ impl Agent {
         self
     }
 
-    /// The host's label for this agent's runs (yo puts its session id here),
-    /// passed to extensions as [`RunContext::label`](crate::extension::RunContext::label).
+    /// The host's label for this agent's runs (a session id, say), passed to
+    /// extensions as [`RunContext::label`](crate::extension::RunContext::label).
     pub fn with_run_label(mut self, label: impl Into<String>) -> Self {
         self.run_label = Some(label.into());
+        self
+    }
+
+    /// Make this agent's runs delegated runs of the tool call `ctx` belongs
+    /// to: the calling run's tree extensions apply (ahead of this agent's
+    /// own, their tools not offered), at the delegation's depth and under the
+    /// calling run's label unless this agent has one. What a custom
+    /// delegation tool that runs an `Agent` calls; see
+    /// [`AgentLoopConfig::delegated_from`].
+    pub fn delegated_from(mut self, ctx: &ToolContext) -> Self {
+        self.inherited_extensions = ctx.tree_extensions().to_vec();
+        self.depth = ctx.delegation_depth();
+        self.delegated_by = ctx.delegation.call_id.clone();
+        self.parent_run_id = ctx.delegation.parent_run_id.clone();
+        if self.run_label.is_none() {
+            self.run_label = ctx.run_label().map(String::from);
+        }
         self
     }
 
@@ -1568,6 +1597,10 @@ impl Agent {
         config.tree_extensions = self.tree_extensions.clone();
         config.max_stop_continues = self.max_stop_continues;
         config.run_label = self.run_label.clone();
+        config.inherited_extensions = self.inherited_extensions.clone();
+        config.depth = self.depth;
+        config.delegated_by = self.delegated_by.clone();
+        config.parent_run_id = self.parent_run_id.clone();
         config
     }
 }

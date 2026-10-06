@@ -151,6 +151,11 @@ pub struct AgentLoopConfig {
 
     /// 0 for a top-level run; a delegated run's depth.
     pub(crate) depth: usize,
+
+    /// The tool call that started this run, for a delegated run.
+    pub(crate) delegated_by: Option<String>,
+    /// The calling run's extension run id, for a delegated run.
+    pub(crate) parent_run_id: Option<String>,
 }
 
 impl AgentLoopConfig {
@@ -191,6 +196,8 @@ impl AgentLoopConfig {
             run_label: None,
             inherited_extensions: Vec::new(),
             depth: 0,
+            delegated_by: None,
+            parent_run_id: None,
         }
     }
 
@@ -199,6 +206,22 @@ impl AgentLoopConfig {
         !(self.extensions.is_empty()
             && self.tree_extensions.is_empty()
             && self.inherited_extensions.is_empty())
+    }
+
+    /// Make this the configuration of a run delegated by the tool call
+    /// `ctx` belongs to: the calling run's tree extensions apply here (ahead
+    /// of this run's own, their tools not offered), at the delegation's
+    /// depth, under the calling run's label. What a custom delegation tool
+    /// calls before running its child; `SubAgentTool` does it itself.
+    pub fn delegated_from(&mut self, ctx: &ToolContext) -> &mut Self {
+        self.inherited_extensions = ctx.tree_extensions().to_vec();
+        self.depth = ctx.delegation_depth();
+        self.delegated_by = ctx.delegation.call_id.clone();
+        self.parent_run_id = ctx.delegation.parent_run_id.clone();
+        if self.run_label.is_none() {
+            self.run_label = ctx.run_label().map(String::from);
+        }
+        self
     }
 
     /// The tree extensions a delegated run inherits: this run's inherited
@@ -419,9 +442,14 @@ pub(crate) async fn agent_loop_with_stats(
     // One scope for the whole run, input filters included, so decision
     // spend in an async filter is counted — also when it rejects.
     let (outcome, decision) = with_loop_scope(Vec::new(), async {
+        // What the filters see, without the warnings they append.
+        let text = if exts.is_empty() {
+            String::new()
+        } else {
+            prompt_text(&prompts)
+        };
         let prompts = apply_input_filters(prompts, config).await?;
         if !exts.is_empty() {
-            let text = prompt_text(&prompts);
             exts.on_input(&crate::extension::InputContext::new(&text, &prompts))
                 .await?;
         }
@@ -456,7 +484,6 @@ pub(crate) async fn agent_loop_with_stats(
             &cancel,
             &exts,
             start_failure,
-            &prompt_messages,
         )
         .await;
         Ok::<_, String>((new_messages, stats))
@@ -466,11 +493,16 @@ pub(crate) async fn agent_loop_with_stats(
     let (new_messages, mut stats) = match outcome {
         Ok(done) => done,
         Err(reason) => {
-            tx.send(AgentEvent::InputRejected { reason }).ok();
-            exts.finish(&crate::extension::RunOutcome {
-                rejected: true,
-                ..Default::default()
+            tx.send(AgentEvent::InputRejected {
+                reason: reason.clone(),
             })
+            .ok();
+            exts.finish(&crate::extension::RunOutcome::new(
+                crate::extension::RunEnd::Rejected {
+                    reason: reason.clone(),
+                },
+                None,
+            ))
             .await;
             let stats = SessionStats {
                 decision,
@@ -511,16 +543,16 @@ async fn start_extensions(
     Arc<crate::extension::ActiveExtensions>,
     Option<crate::extension::Failure>,
 ) {
-    use crate::extension::{ActiveExtensions, RunContext};
+    use crate::extension::{ActiveExtensions, RunInfo};
     if !config.has_extensions() {
         return (Arc::new(ActiveExtensions::none()), None);
     }
-    let run_id = uuid::Uuid::new_v4().to_string();
-    let run = RunContext {
-        run_id: &run_id,
+    let info = RunInfo {
         label: config.run_label.as_deref(),
         prompts,
         depth: config.depth,
+        delegated_by: config.delegated_by.as_deref(),
+        parent_run_id: config.parent_run_id.as_deref(),
         cancel,
     };
     let own: Vec<_> = config
@@ -529,7 +561,7 @@ async fn start_extensions(
         .chain(&config.extensions)
         .cloned()
         .collect();
-    let (exts, failure) = ActiveExtensions::start(&config.inherited_extensions, &own, &run).await;
+    let (exts, failure) = ActiveExtensions::start(&config.inherited_extensions, &own, info).await;
     (Arc::new(exts), failure)
 }
 
@@ -544,7 +576,6 @@ async fn run_with_extensions(
     cancel: &tokio_util::sync::CancellationToken,
     exts: &crate::extension::ActiveExtensions,
     start_failure: Option<crate::extension::Failure>,
-    prompts: &[Message],
 ) -> SessionStats {
     if let Some(failure) = start_failure {
         fail_run(&failure, exts, config, tx, context, new_messages, true);
@@ -552,14 +583,7 @@ async fn run_with_extensions(
     }
     let base_tools = context.tools.len();
     if !exts.is_empty() {
-        let run = crate::extension::RunContext {
-            run_id: exts.run_id(),
-            label: config.run_label.as_deref(),
-            prompts,
-            depth: config.depth,
-            cancel,
-        };
-        let tools = exts.tools(&run).await;
+        let tools = exts.tools().await;
         if !tools.is_empty() {
             crate::tool_source::merge(&mut context.tools, tools);
         }
@@ -621,20 +645,49 @@ fn run_outcome(
     new_messages: &[AgentMessage],
     cancel: &tokio_util::sync::CancellationToken,
 ) -> crate::extension::RunOutcome {
-    let last = new_messages.iter().rev().find_map(|m| match m {
-        AgentMessage::Llm(Message::Assistant {
-            stop_reason,
-            error_message,
-            ..
-        }) => Some((stop_reason.clone(), error_message.clone())),
+    use crate::extension::{failed_extension, RunEnd, RunOutcome};
+    let stop_reason = new_messages.iter().rev().find_map(|m| match m {
+        AgentMessage::Llm(Message::Assistant { stop_reason, .. }) => Some(stop_reason.clone()),
         _ => None,
     });
-    crate::extension::RunOutcome {
-        stop_reason: last.as_ref().map(|(r, _)| r.clone()),
-        error: last.and_then(|(_, e)| e),
-        cancelled: cancel.is_cancelled(),
-        rejected: false,
-    }
+    let end = match new_messages.last() {
+        // A stop marker ends the run: a limit, loop detection, a cancel
+        // between turns, `on_before_turn`, an extension's `Stop`.
+        Some(AgentMessage::Llm(Message::User { content, .. })) => match content.first() {
+            Some(Content::Text { text }) if text == CANCELLED_MARKER => RunEnd::Cancelled,
+            Some(Content::Text { text }) if text.starts_with(AGENT_STOPPED_PREFIX) => {
+                RunEnd::Stopped {
+                    reason: text.clone(),
+                }
+            }
+            _ if cancel.is_cancelled() => RunEnd::Cancelled,
+            _ => RunEnd::Completed,
+        },
+        Some(AgentMessage::Llm(Message::Assistant {
+            stop_reason: StopReason::Aborted,
+            ..
+        })) => RunEnd::Cancelled,
+        // The model finished (or stopped on its own): a cancel after that
+        // changes nothing.
+        Some(AgentMessage::Llm(Message::Assistant {
+            stop_reason: StopReason::Stop | StopReason::Length | StopReason::Refusal,
+            ..
+        })) => RunEnd::Completed,
+        Some(AgentMessage::Llm(Message::Assistant {
+            stop_reason: StopReason::Error,
+            error_message,
+            ..
+        })) => {
+            let error = error_message.clone().unwrap_or_default();
+            RunEnd::Failed {
+                extension: failed_extension(&error),
+                error,
+            }
+        }
+        _ if cancel.is_cancelled() => RunEnd::Cancelled,
+        _ => RunEnd::Completed,
+    };
+    RunOutcome::new(end, stop_reason)
 }
 
 /// Every event of a run with extensions passes through their `on_event`
@@ -668,21 +721,21 @@ impl EventObserver {
         let (done_tx, mut done_rx) = tokio::sync::oneshot::channel::<()>();
         let observed = exts.clone();
         let task = crate::rt::spawn(async move {
-            let deliver = |event: AgentEvent| {
-                observed.on_event(&event);
-                out.send(event).ok();
-            };
             loop {
                 tokio::select! {
                     biased;
                     event = rx.recv() => match event {
-                        Some(event) => deliver(event),
+                        Some(event) => {
+                            observed.on_event(&event).await;
+                            out.send(event).ok();
+                        }
                         None => break,
                     },
                     Some(ack) = flush_rx.recv() => {
                         // Every event sent before the request is queued.
                         while let Ok(event) = rx.try_recv() {
-                            deliver(event);
+                            observed.on_event(&event).await;
+                            out.send(event).ok();
                         }
                         let _ = ack.send(());
                     }
@@ -690,7 +743,8 @@ impl EventObserver {
                         // The run is over: deliver what is queued and stop,
                         // even if a stray sender clone is still alive.
                         while let Ok(event) = rx.try_recv() {
-                            deliver(event);
+                            observed.on_event(&event).await;
+                            out.send(event).ok();
                         }
                         break;
                     }
@@ -715,7 +769,7 @@ impl EventObserver {
         if let Some((done, task)) = task {
             let _ = done.send(());
             if let Err(e) = task.await {
-                warn!("extension event observer failed: {e}");
+                tracing::error!("extension event observer failed: {e}");
             }
         }
         if let Some(failure) = exts.take_failure() {
@@ -866,7 +920,6 @@ pub(crate) async fn agent_loop_continue_with_stats(
                 &cancel,
                 &exts,
                 start_failure,
-                &[],
             ),
         )
         .await;
@@ -906,6 +959,8 @@ async fn run_loop(
         tree: config.tree_for_children(),
         depth: config.depth + 1,
         label: config.run_label.clone(),
+        call_id: None,
+        parent_run_id: (!exts.is_empty()).then(|| exts.run_id().to_string()),
     };
     // Rolling growth measurement feeding `compact_headroom_turns`.
     let mut last_context_tokens: Option<usize> = None;
@@ -929,6 +984,10 @@ async fn run_loop(
     loop {
         if cancel.is_cancelled() {
             mark_cancelled(tx, context, new_messages);
+            // The caller opened the first turn; nothing has closed it.
+            if first_turn {
+                close_turn(tx, context);
+            }
             return stats;
         }
 
@@ -938,6 +997,9 @@ async fn run_loop(
         loop {
             if cancel.is_cancelled() {
                 mark_cancelled(tx, context, new_messages);
+                if first_turn {
+                    close_turn(tx, context);
+                }
                 return stats;
             }
 
@@ -2359,6 +2421,11 @@ async fn execute_single_tool(
     if cancel.is_cancelled() {
         return (cancelled_tool_call(id, name, args, tx), Vec::new());
     }
+    // Nor does a run a required extension has failed: it ends at the next
+    // turn boundary.
+    if gate.extensions.has_failure() {
+        return (failed_run_tool_call(id, name, args, tx), Vec::new());
+    }
 
     // Middleware chain runs next: each hook may rewrite the args seen by
     // later hooks; the first Deny short-circuits into an error tool result
@@ -2423,9 +2490,12 @@ async fn execute_single_tool(
     let args = &effective_args;
 
     // Middleware may await (an approval, a classifier), so the run can be
-    // cancelled while it decides.
+    // cancelled, or failed, while it decides.
     if cancel.is_cancelled() {
         return (cancelled_tool_call(id, name, args, tx), Vec::new());
+    }
+    if gate.extensions.has_failure() {
+        return (failed_run_tool_call(id, name, args, tx), Vec::new());
     }
 
     let tool = tools.iter().find(|t| t.name() == name);
@@ -2482,7 +2552,10 @@ async fn execute_single_tool(
         on_update,
         on_progress,
         sub_agent_report: Some(sub_agent_report.clone()),
-        delegation: gate.delegation.clone(),
+        delegation: Delegation {
+            call_id: Some(id.to_string()),
+            ..gate.delegation.clone()
+        },
     };
 
     let tool_span = tracing::info_span!(
@@ -2707,6 +2780,28 @@ fn unparsed_arguments_tool_call(
         }
     };
     unexecuted_tool_call(id, name, args, text, tx)
+}
+
+/// A tool call not executed because a required extension failed the run.
+fn failed_run_tool_call(
+    id: &str,
+    name: &str,
+    args: &serde_json::Value,
+    tx: &mpsc::UnboundedSender<AgentEvent>,
+) -> Message {
+    tracing::debug!(
+        tool = name,
+        tool_call_id = id,
+        "tool call not executed: a required extension failed the run"
+    );
+    unexecuted_tool_call(
+        id,
+        name,
+        args,
+        "Tool call not run: a required extension failed the run.".to_string(),
+        tx,
+    )
+    .0
 }
 
 /// A tool call not executed because its run was cancelled.

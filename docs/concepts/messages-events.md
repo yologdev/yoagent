@@ -133,7 +133,7 @@ Events emitted during the agent loop for real-time UI updates:
 | `AgentStart` | Loop begins |
 | `AgentEnd { messages, stats }` | Loop finishes: all new messages plus the run's `SessionStats` |
 | `TurnStart` | New LLM call starting |
-| `TurnEnd { message, tool_results }` | LLM call + tool execution complete. Every `TurnStart` gets one: a turn stopped before its LLM call (an execution limit, or `on_before_turn` returning `false`) ends with the history's last message and no tool results |
+| `TurnEnd { message, tool_results }` | LLM call + tool execution complete. Every `TurnStart` gets one: a turn stopped before its LLM call (an execution limit, `on_before_turn` returning `false`, an extension's `Stop`, a required extension's failure, or a cancel before the first request) ends with the history's last message and no tool results |
 | `MessageStart { message }` | A message is available |
 | `MessageUpdate { message, delta }` | Streaming delta arrived |
 | `MessageEnd { message }` | Message finalized |

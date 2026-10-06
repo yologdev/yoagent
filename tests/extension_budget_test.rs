@@ -182,3 +182,125 @@ fn an_unpriced_model_gets_no_budget() {
     let priced = ModelConfig::claude_sonnet_5();
     assert!(Budget::for_model(1.0, &priced).is_some());
 }
+
+#[tokio::test]
+async fn an_installed_budget_can_be_read_through_an_arc() {
+    let budget = Arc::new(Budget::usd(1.0, dollar_per_million()).across_runs());
+    let provider = MockProvider::new(vec![tool_call(3), answer(5)]);
+    let mut agent = Agent::from_provider(provider, ModelConfig::mock())
+        .with_tools(vec![Box::new(Noop)])
+        .with_extension(budget.clone());
+    let _ = run(&mut agent, "go").await;
+    let spent = budget.spent_usd().unwrap();
+    assert!((spent - 0.08).abs() < 1e-9, "{spent}");
+}
+
+#[tokio::test]
+async fn a_per_run_budget_counts_a_sub_agent_s_reported_spend() {
+    // Installed on the parent only: the child (12 cents) reports its spend,
+    // which counts toward the parent's 10-cent run.
+    let child = SubAgentTool::from_provider(
+        "child",
+        Arc::new(MockProvider::new(vec![
+            tool_call(6),
+            tool_call(6),
+            answer(0),
+        ])),
+        ModelConfig::mock(),
+    )
+    .with_tools(vec![Arc::new(Noop)]);
+    let parent = MockProvider::new(vec![
+        MockResponse::ToolCallsWithUsage(
+            vec![MockToolCall {
+                name: "child".into(),
+                arguments: serde_json::json!({"task": "work"}),
+                provider_metadata: None,
+            }],
+            usage(0),
+        ),
+        answer(1),
+    ]);
+    let mut agent = Agent::from_provider(parent, ModelConfig::mock())
+        .with_tools(vec![Box::new(child)])
+        .with_extension(Budget::usd(0.10, dollar_per_million()));
+    let messages = run(&mut agent, "go").await;
+    assert!(stopped_on_budget(&messages), "{:?}", messages.last());
+}
+
+#[tokio::test]
+async fn spend_exactly_at_the_limit_stops() {
+    let provider = MockProvider::new(vec![tool_call(5), tool_call(5), answer(0)]);
+    let mut agent = Agent::from_provider(provider, ModelConfig::mock())
+        .with_tools(vec![Box::new(Noop)])
+        .with_extension(Budget::usd(0.10, dollar_per_million()));
+    let messages = run(&mut agent, "go").await;
+    assert!(stopped_on_budget(&messages), "{:?}", messages.last());
+}
+
+#[tokio::test]
+async fn a_named_budget_says_its_name_when_it_stops() {
+    let provider = MockProvider::new(vec![tool_call(20), answer(0)]);
+    let mut agent = Agent::from_provider(provider, ModelConfig::mock())
+        .with_tools(vec![Box::new(Noop)])
+        .with_extension(Budget::usd(0.10, dollar_per_million()).with_name("session cap"));
+    let messages = run(&mut agent, "go").await;
+    let last = format!("{:?}", messages.last());
+    assert!(
+        last.contains("[Agent stopped: session cap of $0.10 spent"),
+        "{last}"
+    );
+}
+
+#[test]
+#[should_panic(expected = "the limit must be zero or more")]
+fn a_negative_limit_is_refused() {
+    let _ = Budget::usd(-1.0, dollar_per_million());
+}
+
+#[test]
+#[should_panic(expected = "the limit must be zero or more")]
+fn a_nan_limit_is_refused() {
+    let _ = Budget::usd(f64::NAN, dollar_per_million());
+}
+
+#[tokio::test]
+async fn a_shared_budget_counts_each_agent_s_sub_agents_correctly() {
+    // One across-runs budget: a tree extension on X (its child's messages
+    // are counted in the child run) and a plain extension on Y (its child
+    // runs without the budget, so the child's reported spend counts).
+    let budget = Arc::new(Budget::usd(10.0, dollar_per_million()).across_runs());
+    let child = |cents| {
+        SubAgentTool::from_provider(
+            "child",
+            Arc::new(MockProvider::new(vec![tool_call(cents), answer(0)])),
+            ModelConfig::mock(),
+        )
+        .with_tools(vec![Arc::new(Noop)])
+    };
+    let parent = || {
+        MockProvider::new(vec![
+            MockResponse::ToolCallsWithUsage(
+                vec![MockToolCall {
+                    name: "child".into(),
+                    arguments: serde_json::json!({"task": "work"}),
+                    provider_metadata: None,
+                }],
+                usage(0),
+            ),
+            answer(0),
+        ])
+    };
+    let mut x = Agent::from_provider(parent(), ModelConfig::mock())
+        .with_tools(vec![Box::new(child(6))])
+        .with_tree_extension(budget.clone());
+    let mut y = Agent::from_provider(parent(), ModelConfig::mock())
+        .with_tools(vec![Box::new(child(5))])
+        .with_extension(budget.clone());
+    let _ = run(&mut x, "go").await;
+    let _ = run(&mut y, "go").await;
+    let spent = budget.spent_usd().unwrap();
+    assert!(
+        (spent - 0.11).abs() < 1e-9,
+        "6 cents counted once + 5 cents: {spent}"
+    );
+}

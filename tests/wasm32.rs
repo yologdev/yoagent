@@ -296,3 +296,65 @@ async fn retry_safe_events_drops_the_retried_text_on_the_host() {
     assert_eq!(final_text(&events), "recovered");
     assert!(matches!(events.last(), Some(AgentEvent::AgentEnd { .. })));
 }
+
+// ---------------------------------------------------------------------------
+// Extensions on the host executor
+// ---------------------------------------------------------------------------
+
+/// Denies every tool call, counts the events it observes and when it
+/// finishes.
+#[derive(Clone)]
+struct DenyAndCount {
+    events: Arc<AtomicUsize>,
+    finished: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait(?Send)]
+impl yoagent::RunHooks for DenyAndCount {
+    async fn before_tool(&self, _call: &ToolCallRequest<'_>) -> ToolDecision {
+        ToolDecision::Deny("not on the edge".into())
+    }
+    fn on_event(&self, _event: &AgentEvent) {
+        self.events.fetch_add(1, Ordering::SeqCst);
+    }
+    async fn finish(&mut self, _outcome: &yoagent::extension::RunOutcome) {
+        self.finished.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+/// An extension gates and observes a whole run on the host: the event
+/// observer task, its flushes and `finish` all run on the host executor.
+#[wasm_bindgen_test]
+async fn an_extension_gates_and_observes_a_run_on_the_host() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let hooks = DenyAndCount {
+        events: Arc::default(),
+        finished: Arc::default(),
+    };
+    let provider = MockProvider::new(vec![
+        MockResponse::ToolCalls(vec![MockToolCall {
+            name: "echo".into(),
+            arguments: serde_json::json!({"text": "x"}),
+            provider_metadata: None,
+        }]),
+        MockResponse::Text("done".into()),
+    ]);
+    let mut agent = Agent::from_provider(provider, ModelConfig::mock())
+        .with_tools(vec![Box::new(Echo {
+            calls: calls.clone(),
+        })])
+        .with_extension(yoagent::extension::ClonedHooks::new(
+            "edge-policy",
+            hooks.clone(),
+        ));
+    let events = drain(agent.prompt("use the tool").await).await;
+    agent.finish().await;
+
+    assert_eq!(calls.load(Ordering::SeqCst), 0, "the call was denied");
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::ToolExecutionEnd { is_error: true, .. })));
+    assert!(matches!(events.last(), Some(AgentEvent::AgentEnd { .. })));
+    assert_eq!(hooks.events.load(Ordering::SeqCst), events.len());
+    assert_eq!(hooks.finished.load(Ordering::SeqCst), 1);
+}
