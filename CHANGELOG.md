@@ -6,6 +6,24 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- **Extensions** (`yoagent::extension`, #241): one plug-in contract for the agent lifecycle. An `Extension` is installed with `Agent::with_extension` / `SubAgentTool::with_extension`, and each run gets fresh `RunHooks` from `start_run`, so state for one run is isolated. The hooks:
+  - `tools` (once per run);
+  - `on_input`;
+  - `before_model` (note, stop or fail);
+  - `before_tool` (allow, modify or deny);
+  - `after_tool` (edit the result);
+  - `on_stop` (accept, continue or fail the final answer);
+  - `finish`;
+  - `Extension::on_event`.
+
+  **Advisory or required:** a required extension's failure fails the run, which ends with an `Error` message prefixed `EXTENSION_FAILED_PREFIX`.
+
+  **Partial tool output** is withheld while an extension filters tool output. **A rechecking policy** judges rewritten arguments again.
+
+  **`with_tree_extension`** applies an extension to every delegated run at any depth, so host policy reaches sub-agents. A parent's `ToolMiddleware` never did; the existing hooks are unchanged. `Agent::with_run_label` and `with_max_stop_continues`. Guide: `docs/concepts/extensions.md`.
+
 ### Changed (breaking)
 
 - **`AgentLoopConfig` is `#[non_exhaustive]`; build it with `AgentLoopConfig::new(provider, model)`.** `new` sets every other field to the default the struct-literal examples used (no API key, thinking off, no context management, no hooks, parallel tools, the default retry policy). Fields stay public, so set what you need afterwards: `config.max_tokens = Some(1024);`. A struct literal no longer compiles outside the crate. Every field added so far was a breaking change for code calling `agent_loop` directly, which is why recent features went through task-locals; new fields (such as `#241`'s extensions) no longer break anyone. `Agent` and `SubAgentTool` users are unaffected.
