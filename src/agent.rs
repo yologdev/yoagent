@@ -625,13 +625,17 @@ impl Agent {
     ///
     /// - **Fails closed:** a decision-model error, timeout, or malformed
     ///   answer denies the call.
-    /// - **Runs last**, after every other middleware, whenever you add them,
-    ///   so it judges the arguments that will actually run. (A `ToolGate`
-    ///   installed by hand with [`with_tool_middleware`](Self::with_tool_middleware)
-    ///   must be added last yourself.)
+    /// - **Runs last**, after every middleware and extension, whenever you
+    ///   add them, so it judges the arguments that will actually run. (A
+    ///   `ToolGate` installed by hand with
+    ///   [`with_tool_middleware`](Self::with_tool_middleware) must be added
+    ///   last yourself, and runs before any extension.)
     /// - **This agent only:** calls made inside a
     ///   [`SubAgentTool`](crate::SubAgentTool) are not covered; give it its
-    ///   own gate, where the "user request" is the task text this agent wrote.
+    ///   own gate, where the "user request" is the task text this agent
+    ///   wrote, or install the gate with
+    ///   [`with_tree_extension`](Self::with_tree_extension) to cover every
+    ///   delegated run.
     /// - Requests and spend are reported in [`SessionStats::decision`].
     ///
     /// Defence in depth, not a security boundary — injected content can
@@ -658,7 +662,7 @@ impl Agent {
     ///
     /// - **Fails closed:** a decision-model error or timeout (3 s) rejects
     ///   the input; `InputGuard::with_fail_open` opts out.
-    /// - Installed as an async input filter, in order with the others
+    /// - Installed as an extension: it screens after every input filter
     ///   ([`with_input_filter`](Self::with_input_filter),
     ///   [`with_async_input_filter`](Self::with_async_input_filter)).
     /// - Input with no text (an image-only prompt) passes unscreened;

@@ -1683,3 +1683,32 @@ async fn gate_judges_the_arguments_an_extension_rewrote() {
     let reqs = mock.requests();
     assert_eq!(reqs[0].state["tool_call"]["arguments"]["path"], "/srv/data");
 }
+
+/// Installed as a tree extension, the gate runs first, so it rechecks a call
+/// a later extension rewrote: a second decision request, on the final
+/// arguments.
+#[tokio::test]
+async fn a_tree_gate_rechecks_a_rewritten_call() {
+    #[derive(Clone)]
+    struct Rewrite;
+    #[async_trait::async_trait]
+    impl yoagent::RunHooks for Rewrite {
+        async fn before_tool(&self, _call: &ToolCallRequest<'_>) -> ToolDecision {
+            ToolDecision::Modify(json!({"path": "/srv/data"}))
+        }
+    }
+    let mock = gate_answers(0.1, 0.9);
+    let (tools, _ran) = make_tools(1);
+    let agent = Agent::from_provider(calls_rm(), ModelConfig::mock())
+        .with_tools(tools)
+        .with_tree_extension(ToolGate::new(model(&mock)))
+        .with_extension(yoagent::extension::ClonedHooks::new("rewrite", Rewrite));
+    run(agent, "tidy up").await;
+    let reqs = mock.requests();
+    assert_eq!(reqs.len(), 2, "judged, then rechecked");
+    assert_eq!(
+        reqs[0].state["tool_call"]["arguments"]["path"],
+        "/tmp/scratch.txt"
+    );
+    assert_eq!(reqs[1].state["tool_call"]["arguments"]["path"], "/srv/data");
+}

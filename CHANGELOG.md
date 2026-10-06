@@ -8,23 +8,23 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- **Extensions** (`yoagent::extension`, #241): one plug-in contract for the agent lifecycle. An `Extension` is installed with `Agent::with_extension` / `SubAgentTool::with_extension`, and each run gets fresh `RunHooks` from `start_run`, so state for one run is isolated. The hooks:
+- **Extensions** (`yoagent::extension`, #241): one plug-in contract for the agent lifecycle. An `Extension` is installed with `Agent::with_extension` / `SubAgentTool::with_extension` (an `Arc<E>` is one too), and each run gets fresh `RunHooks` from `start_run`, so state for one run is isolated. The hooks:
   - `tools` (once per run);
   - `on_input`;
   - `before_model` (note, stop or fail);
-  - `before_tool` (allow, modify or deny);
-  - `after_tool` (edit the result);
+  - `before_tool` (allow, modify or deny; `&self`, so parallel calls are judged concurrently);
+  - `after_tool` (edit the `ToolOutput`);
   - `on_stop` (accept, continue or fail the final answer);
-  - `finish`;
-  - `Extension::on_event`.
+  - `on_event` (every event, in order);
+  - `finish` (with a `RunOutcome` whose `end()` is a `RunEnd`).
 
-  **Advisory or required:** a required extension's failure fails the run, which ends with an `Error` message prefixed `EXTENSION_FAILED_PREFIX`.
+  **Advisory or required:** a required extension's failure fails the run, which ends with an `Error` message prefixed `EXTENSION_FAILED_PREFIX`; tool calls not started yet are not run.
 
-  **Partial tool output** is withheld while an extension filters tool output. **A rechecking policy** judges rewritten arguments again.
+  **Every hook watches the run's cancellation**, and `finish` is bounded. **Partial tool output** is withheld while an extension filters tool output. **A rechecking policy** judges rewritten arguments again. `ClonedHooks` wraps hooks cloned per run.
 
-  **`with_tree_extension`** applies an extension to every delegated run at any depth, so host policy reaches sub-agents. A parent's `ToolMiddleware` never did; the existing hooks are unchanged. `Agent::with_run_label` and `with_max_stop_continues`. Guide: `docs/concepts/extensions.md`.
+  **`with_tree_extension`** applies an extension to every delegated run at any depth, so host policy reaches sub-agents (a parent's `ToolMiddleware` never did); a custom delegation tool passes the tree on with `Agent::delegated_from` / `AgentLoopConfig::delegated_from`, reading `ToolContext::{tree_extensions, delegation_depth, run_label}`. Also new: `Agent::with_run_label` and `Agent::with_max_stop_continues`. Guide: `docs/concepts/extensions.md`.
 
-- **`extension::Budget`**: a dollar limit, checked before each model request: once spend reaches it, the run stops (the request that goes past it still completes). Per run, or `.across_runs()` (a session, or a whole delegation tree with `with_tree_extension`). `Budget::for_model` returns `None` for an unpriced model.
+- **`extension::Budget`**: a dollar limit, checked before each model request: once spend reaches it, the run stops (the request that goes past it still completes). Per run (a sub-agent's reported spend included), or `.across_runs()` (a session, or a whole delegation tree with `with_tree_extension`; `spent_usd()` reads the total). `Budget::for_model` returns `None` for an unpriced model; a negative or NaN limit panics.
 
 ### Changed
 
@@ -38,6 +38,9 @@ adheres to [Semantic Versioning](https://semver.org/).
 - **`AgentLoopConfig` is `#[non_exhaustive]`; build it with `AgentLoopConfig::new(provider, model)`.** `new` sets every other field to the default the struct-literal examples used (no API key, thinking off, no context management, no hooks, parallel tools, the default retry policy). Fields stay public, so set what you need afterwards: `config.max_tokens = Some(1024);`. A struct literal no longer compiles outside the crate. Every field added so far was a breaking change for code calling `agent_loop` directly, which is why recent features went through task-locals; new fields (such as `#241`'s extensions) no longer break anyone. `Agent` and `SubAgentTool` users are unaffected.
 
 ### Fixed
+
+These change what consumers see: a run can now send more events (a `MessageStart`/`MessageEnd` pair, a `TurnEnd`) and run fewer tools than before. A consumer that counts events, or relied on tools running after a cancel, should check them.
+
 
 - **A cancelled run no longer executes the tool calls it had not started** (#243). If the run was cancelled while the model's response arrived, its tool calls used to run anyway, and the cancel was only seen at the next turn: after a user pressed cancel, the agent could still run a command or write a file. Such a call is now answered with an error result ("Tool call not run: the run was cancelled.") and never runs, and the run ends with `[Agent stopped: cancelled]` as before. A tool already running still gets the cancel through its `ToolContext`.
 - **Every message in the history has its events** (#243). A final failure or a cancel before the provider sent any output appended its assistant message without a `MessageStart`/`MessageEnd`, so transcripts rebuilt from events missed it. It is now announced with both. This includes a run aborted during a retry's backoff: after the `ProviderRetry`, its `Aborted` message arrives as a `MessageStart` and `MessageEnd` with no text, also through `retry_safe_events`. A retried attempt that failed before any output still gets only its `ProviderRetry`.

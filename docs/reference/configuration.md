@@ -32,6 +32,10 @@ pub struct AgentLoopConfig {
     pub on_error: Option<OnErrorFn>,
     pub input_filters: Vec<Arc<dyn InputFilter>>,
     pub turn_delay: Option<Duration>,
+    pub extensions: Vec<Arc<dyn Extension>>,
+    pub tree_extensions: Vec<Arc<dyn Extension>>,
+    pub max_stop_continues: usize,
+    pub run_label: Option<String>,
 }
 ```
 
