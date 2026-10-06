@@ -83,6 +83,8 @@ pub struct Agent {
     run_label: Option<String>,
     inherited_extensions: Vec<Arc<dyn crate::Extension>>,
     depth: usize,
+    delegated_by: Option<String>,
+    parent_run_id: Option<String>,
 
     // Per-turn hooks (transient notes on the latest user turn)
     turn_hooks: Vec<Arc<dyn TurnHook>>,
@@ -336,6 +338,8 @@ impl Agent {
             run_label: None,
             inherited_extensions: Vec::new(),
             depth: 0,
+            delegated_by: None,
+            parent_run_id: None,
             turn_hooks: Vec::new(),
             #[cfg(feature = "decision")]
             skills: crate::skills::SkillSet::empty(),
@@ -725,6 +729,8 @@ impl Agent {
     pub fn delegated_from(mut self, ctx: &ToolContext) -> Self {
         self.inherited_extensions = ctx.tree_extensions().to_vec();
         self.depth = ctx.delegation_depth();
+        self.delegated_by = ctx.delegation.call_id.clone();
+        self.parent_run_id = ctx.delegation.parent_run_id.clone();
         if self.run_label.is_none() {
             self.run_label = ctx.run_label().map(String::from);
         }
@@ -1593,6 +1599,8 @@ impl Agent {
         config.run_label = self.run_label.clone();
         config.inherited_extensions = self.inherited_extensions.clone();
         config.depth = self.depth;
+        config.delegated_by = self.delegated_by.clone();
+        config.parent_run_id = self.parent_run_id.clone();
         config
     }
 }

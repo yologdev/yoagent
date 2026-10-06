@@ -2755,3 +2755,83 @@ async fn multi_thread_a_required_on_event_failure_fails_the_run() {
         assert!(requests.lock().unwrap().is_empty());
     }
 }
+
+/// Cancels its run from `start_run`, so the input stage sees a cancelled
+/// run; records how the run ended.
+struct CancelBeforeInput(Arc<Mutex<Vec<String>>>);
+
+struct CancelBeforeInputHooks(Arc<Mutex<Vec<String>>>);
+
+#[async_trait::async_trait]
+impl RunHooks for CancelBeforeInputHooks {
+    async fn finish(&mut self, outcome: &RunOutcome) {
+        self.0.lock().unwrap().push(format!("{:?}", outcome.end()));
+    }
+}
+
+#[async_trait::async_trait]
+impl Extension for CancelBeforeInput {
+    fn name(&self) -> &str {
+        "cancel-before-input"
+    }
+    async fn start_run(&self, run: &RunContext<'_>) -> Result<Box<dyn RunHooks>, ExtensionError> {
+        run.cancel.cancel();
+        Ok(Box::new(CancelBeforeInputHooks(self.0.clone())))
+    }
+}
+
+#[tokio::test]
+async fn a_cancel_before_the_input_check_ends_the_run_cancelled_not_rejected() {
+    let ends = Arc::new(Mutex::new(Vec::new()));
+    let (agent, requests) = scripted(vec![text("never")]);
+    let mut agent = agent.with_extension(CancelBeforeInput(ends.clone()));
+    let events = run(&mut agent, "go").await;
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::InputRejected { .. })),
+        "a cancel is not a rejection"
+    );
+    assert!(requests.lock().unwrap().is_empty());
+    assert!(turns_paired(&events));
+    assert_eq!(*ends.lock().unwrap(), vec!["Cancelled"]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn on_event_sees_each_event_before_the_consumer_has_it() {
+    #[derive(Clone)]
+    struct Strict {
+        observed: Arc<std::sync::atomic::AtomicUsize>,
+        received: Arc<std::sync::atomic::AtomicUsize>,
+        violations: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    #[async_trait::async_trait]
+    impl RunHooks for Strict {
+        fn on_event(&self, _: &AgentEvent) {
+            let index = self.observed.fetch_add(1, Ordering::SeqCst);
+            // The consumer must not have this event (index) yet.
+            if self.received.load(Ordering::SeqCst) > index {
+                self.violations.fetch_add(1, Ordering::SeqCst);
+            }
+            // Give the consumer every chance to overtake.
+            std::thread::sleep(std::time::Duration::from_micros(200));
+        }
+    }
+    let hooks = Strict {
+        observed: Arc::default(),
+        received: Arc::default(),
+        violations: Arc::default(),
+    };
+    let (agent, _) = scripted(vec![
+        call("echo", serde_json::json!({"text": "x"})),
+        text("done"),
+    ]);
+    let mut agent = agent.with_extension(ClonedHooks::new("strict", hooks.clone()));
+    let mut rx = agent.prompt("go").await;
+    while rx.recv().await.is_some() {
+        hooks.received.fetch_add(1, Ordering::SeqCst);
+    }
+    agent.finish().await;
+    assert!(hooks.received.load(Ordering::SeqCst) > 0);
+    assert_eq!(hooks.violations.load(Ordering::SeqCst), 0);
+}

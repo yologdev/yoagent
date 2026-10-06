@@ -262,3 +262,45 @@ fn a_negative_limit_is_refused() {
 fn a_nan_limit_is_refused() {
     let _ = Budget::usd(f64::NAN, dollar_per_million());
 }
+
+#[tokio::test]
+async fn a_shared_budget_counts_each_agent_s_sub_agents_correctly() {
+    // One across-runs budget: a tree extension on X (its child's messages
+    // are counted in the child run) and a plain extension on Y (its child
+    // runs without the budget, so the child's reported spend counts).
+    let budget = Arc::new(Budget::usd(10.0, dollar_per_million()).across_runs());
+    let child = |cents| {
+        SubAgentTool::from_provider(
+            "child",
+            Arc::new(MockProvider::new(vec![tool_call(cents), answer(0)])),
+            ModelConfig::mock(),
+        )
+        .with_tools(vec![Arc::new(Noop)])
+    };
+    let parent = || {
+        MockProvider::new(vec![
+            MockResponse::ToolCallsWithUsage(
+                vec![MockToolCall {
+                    name: "child".into(),
+                    arguments: serde_json::json!({"task": "work"}),
+                    provider_metadata: None,
+                }],
+                usage(0),
+            ),
+            answer(0),
+        ])
+    };
+    let mut x = Agent::from_provider(parent(), ModelConfig::mock())
+        .with_tools(vec![Box::new(child(6))])
+        .with_tree_extension(budget.clone());
+    let mut y = Agent::from_provider(parent(), ModelConfig::mock())
+        .with_tools(vec![Box::new(child(5))])
+        .with_extension(budget.clone());
+    let _ = run(&mut x, "go").await;
+    let _ = run(&mut y, "go").await;
+    let spent = budget.spent_usd().unwrap();
+    assert!(
+        (spent - 0.11).abs() < 1e-9,
+        "6 cents counted once + 5 cents: {spent}"
+    );
+}

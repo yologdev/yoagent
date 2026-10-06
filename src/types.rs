@@ -822,6 +822,11 @@ pub(crate) struct Delegation {
     pub(crate) depth: usize,
     /// The calling run's label, which a delegated run keeps.
     pub(crate) label: Option<String>,
+    /// The tool call this context belongs to: what a run it delegates to
+    /// was started by.
+    pub(crate) call_id: Option<String>,
+    /// The id the calling run gave its extensions (when it has any).
+    pub(crate) parent_run_id: Option<String>,
 }
 
 impl ToolContext {

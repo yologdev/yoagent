@@ -33,9 +33,13 @@
 //! concurrently, so state they change needs interior mutability.
 //!
 //! Every hook watches the run's cancellation: a hook still awaiting when the
-//! run is cancelled is abandoned (a pending input check rejects, a pending
-//! `before_tool` denies, a pending `after_tool` withholds the result).
-//! `finish` gets [`FINISH_TIMEOUT`].
+//! run is cancelled is abandoned (the run then ends cancelled before any
+//! model request; a pending `before_tool` denies, a pending `after_tool`
+//! withholds the result). `finish` gets [`FINISH_TIMEOUT`].
+//!
+//! `on_event` is called from the run's event observer, which waits for any
+//! `&mut self` hook of the same extension that is running: a slow
+//! `before_model` delays the events behind it (it never reorders them).
 //!
 //! # Failures
 //!
@@ -161,6 +165,12 @@ pub struct RunContext<'a> {
     pub prompts: &'a [Message],
     /// 0 for a top-level run, 1 for a sub-agent's run, and so on.
     pub depth: usize,
+    /// For a delegated run: the id of the tool call that started it (in the
+    /// calling run).
+    pub delegated_by: Option<&'a str>,
+    /// For a delegated run whose caller has extensions: the caller's
+    /// `run_id`. With `delegated_by`, it names the delegation uniquely.
+    pub parent_run_id: Option<&'a str>,
     /// The run's cancellation token.
     pub cancel: &'a CancellationToken,
 }
@@ -173,6 +183,8 @@ impl<'a> RunContext<'a> {
             label: None,
             prompts,
             depth: 0,
+            delegated_by: None,
+            parent_run_id: None,
             cancel,
         }
     }
@@ -186,6 +198,13 @@ impl<'a> RunContext<'a> {
     /// At this delegation depth.
     pub fn with_depth(mut self, depth: usize) -> Self {
         self.depth = depth;
+        self
+    }
+
+    /// Started by this tool call of the calling run `parent_run_id`.
+    pub fn with_delegated_by(mut self, parent_run_id: &'a str, call_id: &'a str) -> Self {
+        self.parent_run_id = Some(parent_run_id);
+        self.delegated_by = Some(call_id);
         self
     }
 
@@ -567,6 +586,8 @@ pub(crate) struct ActiveExtensions {
     label: Option<String>,
     prompts: Vec<Message>,
     depth: usize,
+    delegated_by: Option<String>,
+    parent_run_id: Option<String>,
     cancel: CancellationToken,
     active: Vec<Active>,
     filters_output: bool,
@@ -612,6 +633,8 @@ pub(crate) struct RunInfo<'a> {
     pub(crate) label: Option<&'a str>,
     pub(crate) prompts: &'a [Message],
     pub(crate) depth: usize,
+    pub(crate) delegated_by: Option<&'a str>,
+    pub(crate) parent_run_id: Option<&'a str>,
     pub(crate) cancel: &'a CancellationToken,
 }
 
@@ -623,6 +646,8 @@ impl ActiveExtensions {
             label: None,
             prompts: Vec::new(),
             depth: 0,
+            delegated_by: None,
+            parent_run_id: None,
             cancel: CancellationToken::new(),
             active: Vec::new(),
             filters_output: false,
@@ -636,6 +661,10 @@ impl ActiveExtensions {
         self.active.is_empty()
     }
 
+    pub(crate) fn run_id(&self) -> &str {
+        &self.run_id
+    }
+
     /// The run's context, for hooks.
     pub(crate) fn run_context(&self) -> RunContext<'_> {
         RunContext {
@@ -643,6 +672,8 @@ impl ActiveExtensions {
             label: self.label.as_deref(),
             prompts: &self.prompts,
             depth: self.depth,
+            delegated_by: self.delegated_by.as_deref(),
+            parent_run_id: self.parent_run_id.as_deref(),
             cancel: &self.cancel,
         }
     }
@@ -674,6 +705,8 @@ impl ActiveExtensions {
             label: info.label.map(String::from),
             prompts: info.prompts.to_vec(),
             depth: info.depth,
+            delegated_by: info.delegated_by.map(String::from),
+            parent_run_id: info.parent_run_id.map(String::from),
             cancel: info.cancel.clone(),
             ..Self::none()
         };
@@ -833,7 +866,9 @@ impl ActiveExtensions {
             match self.hook(hooks.on_input(input)).await {
                 Hooked::Done(InputDecision::Pass) => {}
                 Hooked::Done(InputDecision::Reject(reason)) => return Err(reason),
-                Hooked::Cancelled => return Err("the run was cancelled".into()),
+                // Not a rejection: the run starts and ends cancelled at its
+                // first check, before any model request.
+                Hooked::Cancelled => return Ok(()),
                 Hooked::Panicked(panic) => {
                     if a.mode == ExtensionMode::Required {
                         tracing::error!(run_id = %self.run_id, extension = %a.name, "on_input failed; rejecting the input: {panic}");
@@ -1118,10 +1153,10 @@ pub struct Budget {
     across_runs: bool,
     /// The total when `across_runs`.
     total: Arc<std::sync::Mutex<f64>>,
-    /// This budget has run in a delegated run (it is a tree extension): a
-    /// child's spend is then counted by the child's own run, not again from
-    /// the parent's tool result.
-    in_children: Arc<AtomicBool>,
+    /// The tool calls whose delegated run this budget served (as a tree
+    /// extension): that child's spend is counted by the child's own run, not
+    /// again from the parent's tool result.
+    children: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 impl Budget {
@@ -1142,7 +1177,7 @@ impl Budget {
             cost,
             across_runs: false,
             total: Arc::default(),
-            in_children: Arc::default(),
+            children: Arc::default(),
         }
     }
 
@@ -1175,12 +1210,13 @@ impl Budget {
 }
 
 struct BudgetRun {
+    run_id: String,
     name: String,
     max_usd: f64,
     cost: crate::provider::CostConfig,
     /// The run's own spend, or the shared total when `across_runs`.
     spent: Arc<std::sync::Mutex<f64>>,
-    in_children: Arc<AtomicBool>,
+    children: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 impl BudgetRun {
@@ -1199,10 +1235,14 @@ impl Extension for Budget {
     }
 
     async fn start_run(&self, run: &RunContext<'_>) -> Result<Box<dyn RunHooks>, ExtensionError> {
-        if run.is_delegation() {
-            self.in_children.store(true, Ordering::SeqCst);
+        if let (Some(parent), Some(call_id)) = (run.parent_run_id, run.delegated_by) {
+            self.children
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(format!("{parent}/{call_id}"));
         }
         Ok(Box::new(BudgetRun {
+            run_id: run.run_id.to_string(),
             name: self.name.clone(),
             max_usd: self.max_usd,
             cost: self.cost.clone(),
@@ -1211,7 +1251,7 @@ impl Extension for Budget {
             } else {
                 Arc::default()
             },
-            in_children: self.in_children.clone(),
+            children: self.children.clone(),
         }))
     }
 }
@@ -1236,11 +1276,21 @@ impl RunHooks for BudgetRun {
             AgentEvent::MessageEnd {
                 message: AgentMessage::Llm(Message::Assistant { usage, .. }),
             } => self.add(self.cost.cost_usd(usage)),
-            // A sub-agent's spend, unless this budget runs in the child too
-            // (a tree budget counts the child's messages there).
-            AgentEvent::ToolExecutionEnd { result, .. }
-                if !self.in_children.load(Ordering::SeqCst) =>
-            {
+            // A sub-agent's spend, unless this budget served that child run
+            // too (a tree budget counts the child's messages there).
+            AgentEvent::ToolExecutionEnd {
+                tool_call_id,
+                result,
+                ..
+            } => {
+                let served = self
+                    .children
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&format!("{}/{tool_call_id}", self.run_id));
+                if served {
+                    return;
+                }
                 if let Some(child) = SessionStats::from_sub_agent_result(result) {
                     let usd = child
                         .total_cost_usd()

@@ -151,6 +151,11 @@ pub struct AgentLoopConfig {
 
     /// 0 for a top-level run; a delegated run's depth.
     pub(crate) depth: usize,
+
+    /// The tool call that started this run, for a delegated run.
+    pub(crate) delegated_by: Option<String>,
+    /// The calling run's extension run id, for a delegated run.
+    pub(crate) parent_run_id: Option<String>,
 }
 
 impl AgentLoopConfig {
@@ -191,6 +196,8 @@ impl AgentLoopConfig {
             run_label: None,
             inherited_extensions: Vec::new(),
             depth: 0,
+            delegated_by: None,
+            parent_run_id: None,
         }
     }
 
@@ -209,6 +216,8 @@ impl AgentLoopConfig {
     pub fn delegated_from(&mut self, ctx: &ToolContext) -> &mut Self {
         self.inherited_extensions = ctx.tree_extensions().to_vec();
         self.depth = ctx.delegation_depth();
+        self.delegated_by = ctx.delegation.call_id.clone();
+        self.parent_run_id = ctx.delegation.parent_run_id.clone();
         if self.run_label.is_none() {
             self.run_label = ctx.run_label().map(String::from);
         }
@@ -542,6 +551,8 @@ async fn start_extensions(
         label: config.run_label.as_deref(),
         prompts,
         depth: config.depth,
+        delegated_by: config.delegated_by.as_deref(),
+        parent_run_id: config.parent_run_id.as_deref(),
         cancel,
     };
     let own: Vec<_> = config
@@ -656,6 +667,12 @@ fn run_outcome(
             stop_reason: StopReason::Aborted,
             ..
         })) => RunEnd::Cancelled,
+        // The model finished (or stopped on its own): a cancel after that
+        // changes nothing.
+        Some(AgentMessage::Llm(Message::Assistant {
+            stop_reason: StopReason::Stop | StopReason::Length | StopReason::Refusal,
+            ..
+        })) => RunEnd::Completed,
         Some(AgentMessage::Llm(Message::Assistant {
             stop_reason: StopReason::Error,
             error_message,
@@ -942,6 +959,8 @@ async fn run_loop(
         tree: config.tree_for_children(),
         depth: config.depth + 1,
         label: config.run_label.clone(),
+        call_id: None,
+        parent_run_id: (!exts.is_empty()).then(|| exts.run_id().to_string()),
     };
     // Rolling growth measurement feeding `compact_headroom_turns`.
     let mut last_context_tokens: Option<usize> = None;
@@ -2533,7 +2552,10 @@ async fn execute_single_tool(
         on_update,
         on_progress,
         sub_agent_report: Some(sub_agent_report.clone()),
-        delegation: gate.delegation.clone(),
+        delegation: Delegation {
+            call_id: Some(id.to_string()),
+            ..gate.delegation.clone()
+        },
     };
 
     let tool_span = tracing::info_span!(

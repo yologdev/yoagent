@@ -61,7 +61,7 @@ A **run** is one `prompt*` / `continue_loop*` call, or one delegation for a `Sub
 
 `tools`, `on_input`, `before_model`, `on_stop` and `finish` take `&mut self` and run one at a time. `before_tool`, `after_tool` and `on_event` take `&self`: the calls of one response may be judged concurrently, so state they change needs interior mutability (a `Mutex` or atomics) even within one run.
 
-`RunContext` gives each run a unique `run_id`, the host's `label` (`Agent::with_run_label`, a session id say; delegated runs keep their parent's), the run's prompts, its delegation `depth`, and its cancel token.
+`RunContext` gives each run a unique `run_id`, the host's `label` (`Agent::with_run_label`, a session id say; delegated runs keep their parent's), the run's prompts, its delegation `depth`, for a delegated run the calling run's `parent_run_id` and the `delegated_by` tool call, and its cancel token.
 
 ## The hooks
 
@@ -84,7 +84,8 @@ Every `RunHooks` method has a no-op default; implement only what you need.
 - **`StopDecision::Continue(message)`** appends `[Extension message: <name>] <message>` as a user message (one line per extension when several continue) and runs another turn, at most `max_stop_continues` times per run (default 3, `Agent::with_max_stop_continues`). Continues also count against the execution limits. That message is recognized by `is_loop_injected`, so it is never taken for the user's own request (the tool gate and `user_request()` skip it).
 - **A policy whose judgement must survive later rewrites** returns `true` from `Extension::rechecks_modified_calls`. When a later extension modifies a call's arguments, it judges the final arguments again, and a `Deny` there wins (a `Modify` on the recheck is ignored, and `before_tool` may run twice for one call).
 - **`on_event` stays current.** Before each turn, before a response's tools run, and before `finish`, the loop waits until every event sent so far has been observed. A failure on the run's last events (`AgentEnd` itself) comes too late to change its outcome and is only logged. An `on_event` that panics is not called again for the rest of the run.
-- **Hooks watch cancellation.** A hook still awaiting when the run is cancelled is abandoned: a pending input check rejects, a pending `before_tool` denies, a pending `after_tool` withholds the result, `before_model` lets the request go (it then ends aborted).
+- **Hooks watch cancellation.** A hook still awaiting when the run is cancelled is abandoned: a pending input check lets the run start (it ends cancelled before any request; a cancel is not a rejection), a pending `before_tool` denies, a pending `after_tool` withholds the result, `before_model` lets the request go (it then ends aborted).
+- **`on_event` can wait behind a running hook.** The observer calls `on_event` once any `&mut self` hook of the same extension has returned, so a slow `before_model` delays the events behind it (never reorders them).
 
 ## Failures: advisory and required
 
