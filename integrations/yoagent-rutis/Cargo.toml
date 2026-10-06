@@ -13,7 +13,7 @@ categories = ["asynchronous", "development-tools"]
 authors = ["Yuanhao <yuanhao@yolog.dev>"]
 # yoagent's MSRV; rutis 0.6.1 declares 1.85.
 rust-version = "1.86"
-# Not published yet. It needs yoagent 0.23 or later (`ToolSource`).
+# Not published yet. It needs yoagent 0.24 or later.
 publish = false
 
 [dependencies]

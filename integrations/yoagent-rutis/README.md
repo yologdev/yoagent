@@ -106,7 +106,7 @@ calls per tool).
   call. The tool runs with the arguments approved when the chain reached its
   end.
 - **Raw `WaterfallListener`s** get the same event and `next`, so the bridge
-  checks what rutis (0.5 and 0.6) lets it see: an `Allow` that skipped `next` is denied;
+  checks what rutis 0.6 lets it see: an `Allow` that skipped `next` is denied;
   `set_args` after approval is refused and denies the call (it returns
   `false`); a denial made by a bridge listener or with `ToolCallEvent::deny`
   is recorded and wins even if an earlier listener returns `Allow`. **Not
@@ -162,9 +162,9 @@ calls per tool).
 
 ## Publishing
 
-Not yet on crates.io (`publish = false`). It requires yoagent 0.23 or later
-(the first release with `ToolSource`), which is published, so the remaining
-step is flipping `publish`. Until then, depend on it by git, and take yoagent
+Not yet on crates.io (`publish = false`). It requires yoagent 0.24 or later,
+which is published, so the remaining step is flipping `publish`. yoagent types
+are in its API too, so a yoagent minor bump is a yoagent-rutis minor bump. Until then, depend on it by git, and take yoagent
 from the same git source: a crates.io `yoagent` next to a git `yoagent-rutis`
 is two `yoagent` crates whose types do not match.
 
