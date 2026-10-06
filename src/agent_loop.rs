@@ -499,9 +499,10 @@ pub(crate) async fn agent_loop_with_stats(
     (new_messages, stats)
 }
 
-/// Start the run's extensions. A required extension that cannot start makes
-/// the run fail once it has begun (the failure is returned with no
-/// extensions).
+/// Start the run's extensions. A required extension (or one that filters
+/// tool output) that cannot start makes the run fail once it has begun; the
+/// extensions that did start are returned with the failure, so they still
+/// get `finish`.
 async fn start_extensions(
     config: &AgentLoopConfig,
     prompts: &[Message],
@@ -528,10 +529,8 @@ async fn start_extensions(
         .chain(&config.extensions)
         .cloned()
         .collect();
-    match ActiveExtensions::start(&config.inherited_extensions, &own, &run).await {
-        Ok(exts) => (Arc::new(exts), None),
-        Err(failure) => (Arc::new(ActiveExtensions::none()), Some(failure)),
-    }
+    let (exts, failure) = ActiveExtensions::start(&config.inherited_extensions, &own, &run).await;
+    (Arc::new(exts), failure)
 }
 
 /// Run the loop with the run's extensions: offer their tools for this run
@@ -573,22 +572,31 @@ async fn run_with_extensions(
     };
     // Extension tools belong to this run only.
     context.tools.truncate(base_tools);
+    // However the loop ended (a limit, a cancel, a stop, a provider error), a
+    // required extension's failure it did not act on still fails the run.
+    if let Some(failure) = exts.settle().await {
+        fail_run(&failure, config, tx, context, new_messages, false);
+    }
     stats
 }
 
 /// End the run because a required extension failed: an assistant error
-/// message naming it, announced and appended, `on_error`, and (when a turn is
-/// open) its `TurnEnd`.
+/// message naming it, announced and appended, `on_error`, inside a turn. With
+/// `in_turn`, the current turn is closed with it; otherwise it gets a turn of
+/// its own, so every message stays between a `TurnStart` and a `TurnEnd`.
 fn fail_run(
     failure: &crate::extension::Failure,
     config: &AgentLoopConfig,
     tx: &mpsc::UnboundedSender<AgentEvent>,
     context: &mut AgentContext,
     new_messages: &mut Vec<AgentMessage>,
-    close: bool,
+    in_turn: bool,
 ) {
     let text = failure.message();
-    warn!("{text}");
+    tracing::error!("{text}");
+    if !in_turn {
+        tx.send(AgentEvent::TurnStart).ok();
+    }
     let message = error_message(&config.model, text.clone());
     announce(tx, &message);
     let am: AgentMessage = message.into();
@@ -597,13 +605,11 @@ fn fail_run(
     if let Some(ref on_error) = config.on_error {
         on_error(&text);
     }
-    if close {
-        tx.send(AgentEvent::TurnEnd {
-            message: am,
-            tool_results: Vec::new(),
-        })
-        .ok();
-    }
+    tx.send(AgentEvent::TurnEnd {
+        message: am,
+        tool_results: Vec::new(),
+    })
+    .ok();
 }
 
 /// How a run ended, from its new messages.
@@ -629,9 +635,14 @@ fn run_outcome(
 
 /// Every event of a run with extensions passes through their `on_event`
 /// before it reaches the run's consumer. Without extensions, the consumer's
-/// sender is used as is.
+/// sender is used as is. The loop waits on a flush before each failure check
+/// and before `finish`, so what `on_event` recorded is current there.
+/// Failures on the run's last events (`AgentEnd` itself) come too late to
+/// change its outcome and are only logged. Events a stray sender clone sends
+/// after the run ended are dropped.
 struct EventObserver {
     tx: mpsc::UnboundedSender<AgentEvent>,
+    exts: Arc<crate::extension::ActiveExtensions>,
     task: Option<(tokio::sync::oneshot::Sender<()>, crate::rt::JoinHandle<()>)>,
 }
 
@@ -643,29 +654,39 @@ impl EventObserver {
         if exts.is_empty() {
             return Self {
                 tx: out,
+                exts: exts.clone(),
                 task: None,
             };
         }
         let (tx, mut rx) = mpsc::unbounded_channel::<AgentEvent>();
+        let (flush_tx, mut flush_rx) = mpsc::unbounded_channel::<crate::extension::FlushRequest>();
+        exts.connect_observer(flush_tx);
         let (done_tx, mut done_rx) = tokio::sync::oneshot::channel::<()>();
-        let exts = exts.clone();
+        let observed = exts.clone();
         let task = crate::rt::spawn(async move {
+            let deliver = |event: AgentEvent| {
+                observed.on_event(&event);
+                out.send(event).ok();
+            };
             loop {
                 tokio::select! {
                     biased;
                     event = rx.recv() => match event {
-                        Some(event) => {
-                            exts.on_event(&event);
-                            out.send(event).ok();
-                        }
+                        Some(event) => deliver(event),
                         None => break,
                     },
+                    Some(ack) = flush_rx.recv() => {
+                        // Every event sent before the request is queued.
+                        while let Ok(event) = rx.try_recv() {
+                            deliver(event);
+                        }
+                        let _ = ack.send(());
+                    }
                     _ = &mut done_rx => {
                         // The run is over: deliver what is queued and stop,
                         // even if a stray sender clone is still alive.
                         while let Ok(event) = rx.try_recv() {
-                            exts.on_event(&event);
-                            out.send(event).ok();
+                            deliver(event);
                         }
                         break;
                     }
@@ -674,6 +695,7 @@ impl EventObserver {
         });
         Self {
             tx,
+            exts: exts.clone(),
             task: Some((done_tx, task)),
         }
     }
@@ -684,13 +706,19 @@ impl EventObserver {
 
     /// Deliver every event sent so far, then stop observing.
     async fn finish(self) {
-        let Self { tx, task } = self;
+        let Self { tx, exts, task } = self;
         drop(tx);
         if let Some((done, task)) = task {
             let _ = done.send(());
             if let Err(e) = task.await {
                 warn!("extension event observer failed: {e}");
             }
+        }
+        if let Some(failure) = exts.take_failure() {
+            tracing::error!(
+                "{} (on the run's last events: too late to change its outcome)",
+                failure.message()
+            );
         }
     }
 }
@@ -873,6 +901,7 @@ async fn run_loop(
     let delegation = Delegation {
         tree: config.tree_for_children(),
         depth: config.depth + 1,
+        label: config.run_label.clone(),
     };
     // Rolling growth measurement feeding `compact_headroom_turns`.
     let mut last_context_tokens: Option<usize> = None;
@@ -931,6 +960,15 @@ async fn run_loop(
                 }
             }
 
+            // A required extension that failed where it could not end the
+            // run (its tools, after a tool, observing an event) ends it here,
+            // ahead of a limit or `on_before_turn` that would otherwise end
+            // it as a partial success.
+            if let Some(failure) = exts.settle().await {
+                fail_run(&failure, config, tx, context, new_messages, true);
+                return stats;
+            }
+
             // Check execution limits
             if let Some(ref tracker) = tracker {
                 if let Some(reason) = tracker.check_limits() {
@@ -952,13 +990,6 @@ async fn run_loop(
                     close_turn(tx, context);
                     return stats;
                 }
-            }
-
-            // A required extension that failed where it could not end the
-            // run (after a tool, observing an event) ends it here.
-            if let Some(failure) = exts.take_failure() {
-                fail_run(&failure, config, tx, context, new_messages, true);
-                return stats;
             }
 
             // Inter-turn delay — throttle API calls to stay under rate limits.
@@ -1094,7 +1125,7 @@ async fn run_loop(
                 Ok(message) => message,
                 // An extension's `before_model` ended the run before the
                 // request was sent.
-                Err(crate::extension::ModelGate::Stop(reason)) => {
+                Err(crate::extension::ModelHalt::Stop(reason)) => {
                     push_stop_marker(
                         format!("{AGENT_STOPPED_PREFIX} {reason}]"),
                         tx,
@@ -1104,12 +1135,9 @@ async fn run_loop(
                     close_turn(tx, context);
                     return stats;
                 }
-                Err(crate::extension::ModelGate::Fail(failure)) => {
+                Err(crate::extension::ModelHalt::Fail(failure)) => {
                     fail_run(&failure, config, tx, context, new_messages, true);
                     return stats;
-                }
-                Err(crate::extension::ModelGate::Proceed(_)) => {
-                    unreachable!("stream_assistant_response returns notes as a request")
                 }
             };
             if let Message::Assistant {
@@ -1619,7 +1647,7 @@ async fn run_loop(
         }
 
         if !exts.is_empty() {
-            if let Some(failure) = exts.take_failure() {
+            if let Some(failure) = exts.settle().await {
                 fail_run(&failure, config, tx, context, new_messages, false);
                 return stats;
             }
@@ -1667,11 +1695,17 @@ async fn check_stop(
             fail_run(&failure, config, tx, context, new_messages, false);
             None
         }
-        StopGate::Continue { name, message } => {
+        StopGate::Continue {
+            name,
+            message,
+            required,
+        } => {
             if *stop_continues >= config.max_stop_continues {
-                if exts.is_required(&name) {
+                // A required extension that still has not accepted fails the
+                // run, whichever extension's message would have been sent.
+                if let Some(required) = required {
                     let failure = Failure {
-                        name,
+                        name: required,
                         reason: format!(
                             "the answer was still not accepted after {} continues",
                             config.max_stop_continues
@@ -1681,7 +1715,9 @@ async fn check_stop(
                 } else {
                     warn!(
                         extension = %name,
-                        "extension asked to continue the run past max_stop_continues ({}); ending it",
+                        pending = %message,
+                        "extension still asks to continue after max_stop_continues ({}); \
+                         accepting the answer without its approval",
                         config.max_stop_continues
                     );
                 }
@@ -1702,7 +1738,7 @@ async fn stream_assistant_response(
     tx: &mpsc::UnboundedSender<AgentEvent>,
     cancel: &tokio_util::sync::CancellationToken,
     exts: &crate::extension::ActiveExtensions,
-) -> Result<Message, crate::extension::ModelGate> {
+) -> Result<Message, crate::extension::ModelHalt> {
     // Apply context transform
     let messages = if let Some(transform) = &config.transform_context {
         transform(context.messages.clone())
@@ -1734,7 +1770,7 @@ async fn stream_assistant_response(
         )
         .with_run_prompts(&prompts);
         match exts.before_model(&turn).await {
-            crate::extension::ModelGate::Proceed(notes) => {
+            Ok(notes) => {
                 if !notes.is_empty() {
                     let latest_user = llm_messages.iter_mut().rev().find_map(|m| match m {
                         Message::User { content, .. } => Some(content),
@@ -1750,7 +1786,7 @@ async fn stream_assistant_response(
                     }
                 }
             }
-            gate => return Err(gate),
+            Err(halt) => return Err(halt),
         }
     }
 
@@ -2514,9 +2550,10 @@ async fn execute_single_tool(
             messages: gate.history,
             run_prompts: &prompts,
         };
-        gate.extensions
-            .after_tool(&call, &mut result, &mut is_error)
-            .await;
+        let mut output = crate::extension::ToolOutput::new(result, is_error);
+        gate.extensions.after_tool(&call, &mut output).await;
+        result = output.result;
+        is_error = output.is_error;
     }
     if let Some((first, rest)) = delegated.split_first() {
         let mut combined = first.clone();

@@ -622,6 +622,7 @@ impl AgentTool for SubAgentTool {
         // this sub-agent's own, and at this delegation's depth.
         config.inherited_extensions = ctx.tree_extensions().to_vec();
         config.depth = ctx.delegation_depth();
+        config.run_label = ctx.run_label().map(String::from);
 
         // Channel for sub-agent events
         let (tx, rx) = mpsc::unbounded_channel();

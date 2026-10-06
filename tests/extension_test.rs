@@ -262,14 +262,14 @@ impl RunHooks for Hooks {
     async fn after_tool(
         &mut self,
         _call: &ToolCallRequest<'_>,
-        result: &mut ToolResult,
+        output: &mut ToolOutput,
     ) -> Result<(), ExtensionError> {
         self.maybe_panic("after_tool");
         if self.fail_after_tool {
             return Err("cannot process".into());
         }
         if let Some((secret, mask)) = self.redact {
-            for c in &mut result.content {
+            for c in &mut output.result.content {
                 if let Content::Text { text } = c {
                     *text = text.replace(secret, mask);
                 }
@@ -823,7 +823,10 @@ async fn on_stop_continues_with_a_loop_injected_message_up_to_the_cap() {
     assert_eq!(requests.lock().unwrap().len(), 3);
     let second = &requests.lock().unwrap()[1];
     let injected = last_user_text(second);
-    assert_eq!(injected, "[Extension verify] check again");
+    assert_eq!(
+        injected,
+        format!("{EXTENSION_MESSAGE_PREFIX}verify] check again")
+    );
     assert!(is_loop_injected(&injected));
     assert_eq!(final_assistant(&events).0, StopReason::Stop);
     let stops: Vec<_> = log
@@ -1054,12 +1057,12 @@ async fn run_context_carries_the_label_prompts_and_depth() {
             run: &RunContext<'_>,
         ) -> Result<Box<dyn RunHooks>, ExtensionError> {
             self.0.lock().unwrap().push(format!(
-                "label={:?} prompts={} depth={} delegation={} id_len={}",
+                "label={:?} prompts={} depth={} delegation={} has_id={}",
                 run.label,
                 run.prompts.len(),
                 run.depth,
                 run.is_delegation(),
-                run.run_id.len()
+                !run.run_id.is_empty()
             ));
             Ok(Box::new(Hooks::default()))
         }
@@ -1072,7 +1075,7 @@ async fn run_context_carries_the_label_prompts_and_depth() {
     let _ = run(&mut agent, "go").await;
     assert_eq!(
         *seen.lock().unwrap(),
-        vec!["label=Some(\"session-7\") prompts=1 depth=0 delegation=false id_len=36"]
+        vec!["label=Some(\"session-7\") prompts=1 depth=0 delegation=false has_id=true"]
     );
 }
 
@@ -1309,4 +1312,558 @@ async fn a_tree_budget_stops_a_child_whose_spend_crosses_the_total() {
     );
     let last = end_messages(&events).last().cloned().unwrap();
     assert!(format!("{last:?}").contains("[Agent stopped: tree budget spent]"));
+}
+
+// ---------------------------------------------------------------------------
+// Review follow-ups: failures are never lost, finish, transcripts, children
+// ---------------------------------------------------------------------------
+
+fn assert_failed_by(events: &[AgentEvent], name: &str, reason: &str) {
+    let (stop, error) = final_assistant(events);
+    assert_eq!(stop, StopReason::Error);
+    let error = error.unwrap();
+    assert!(
+        error.starts_with(&format!("{EXTENSION_FAILED_PREFIX} {name}]")) && error.contains(reason),
+        "{error}"
+    );
+    assert!(turns_paired(events));
+}
+
+#[tokio::test]
+async fn a_required_failure_is_not_lost_when_a_limit_ends_the_run() {
+    let (agent, _) = scripted(vec![
+        call("echo", serde_json::json!({"text": "x"})),
+        text("done"),
+    ]);
+    let mut agent = agent
+        .with_execution_limits(yoagent::context::ExecutionLimits::default().with_max_turns(1))
+        .with_extension(
+            ext(
+                "post",
+                Hooks {
+                    fail_after_tool: true,
+                    ..Default::default()
+                },
+            )
+            .required(),
+        );
+    let events = run(&mut agent, "go").await;
+    assert_failed_by(&events, "post", "after_tool failed");
+}
+
+/// Panics observing `AgentStart`, the run's first event.
+struct PanickyAudit;
+
+#[async_trait::async_trait]
+impl Extension for PanickyAudit {
+    fn name(&self) -> &str {
+        "audit"
+    }
+    fn mode(&self) -> ExtensionMode {
+        ExtensionMode::Required
+    }
+    async fn start_run(&self, _: &RunContext<'_>) -> Result<Box<dyn RunHooks>, ExtensionError> {
+        Ok(Box::new(Hooks::default()))
+    }
+    fn on_event(&self, _: &str, event: &AgentEvent) {
+        if matches!(event, AgentEvent::AgentStart) {
+            panic!("audit log unavailable");
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_required_on_event_failure_fails_the_run_deterministically() {
+    for _ in 0..20 {
+        let (agent, requests) = scripted(vec![text("never")]);
+        let mut agent = agent.with_extension(PanickyAudit);
+        let events = run(&mut agent, "go").await;
+        assert_failed_by(&events, "audit", "on_event failed");
+        assert!(
+            requests.lock().unwrap().is_empty(),
+            "no request after the failure"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_required_verifier_is_not_outvoted_by_an_advisory_continue() {
+    let (agent, _) = scripted(vec![text("a"), text("b")]);
+    let mut agent = agent
+        .with_max_stop_continues(1)
+        .with_extension(ext(
+            "nudge",
+            Hooks {
+                continue_with: Some("try harder"),
+                ..Default::default()
+            },
+        ))
+        .with_extension(
+            ext(
+                "verify",
+                Hooks {
+                    continue_with: Some("not verified"),
+                    ..Default::default()
+                },
+            )
+            .required(),
+        );
+    let events = run(&mut agent, "go").await;
+    assert_failed_by(&events, "verify", "still not accepted");
+}
+
+#[tokio::test]
+async fn a_redactor_that_cannot_start_fails_the_run_whatever_its_mode() {
+    struct BrokenRedactor;
+    #[async_trait::async_trait]
+    impl Extension for BrokenRedactor {
+        fn name(&self) -> &str {
+            "redact"
+        }
+        fn filters_tool_output(&self) -> bool {
+            true
+        }
+        async fn start_run(&self, _: &RunContext<'_>) -> Result<Box<dyn RunHooks>, ExtensionError> {
+            Err("no key".into())
+        }
+    }
+    let (agent, requests) = scripted(vec![
+        call("echo", serde_json::json!({"text": "hunter2"})),
+        text("done"),
+    ]);
+    let mut agent = agent.with_extension(BrokenRedactor);
+    let events = run(&mut agent, "go").await;
+    assert_failed_by(&events, "redact", "could not start: no key");
+    assert!(requests.lock().unwrap().is_empty());
+}
+
+/// Records each `finish` outcome, and can cancel the run from `before_tool`.
+#[derive(Clone)]
+struct Outcomes {
+    seen: Arc<Mutex<Vec<String>>>,
+    cancel_in_before_tool: bool,
+}
+
+struct OutcomeHooks {
+    seen: Arc<Mutex<Vec<String>>>,
+    cancel: Option<CancellationToken>,
+}
+
+#[async_trait::async_trait]
+impl RunHooks for OutcomeHooks {
+    async fn before_tool(&mut self, _: &ToolCallRequest<'_>) -> ToolDecision {
+        if let Some(cancel) = &self.cancel {
+            cancel.cancel();
+        }
+        ToolDecision::Allow
+    }
+    async fn finish(&mut self, outcome: &RunOutcome) {
+        self.seen.lock().unwrap().push(format!(
+            "stop={:?} rejected={} cancelled={} error={}",
+            outcome.stop_reason,
+            outcome.rejected,
+            outcome.cancelled,
+            outcome
+                .error
+                .as_deref()
+                .is_some_and(|e| e.starts_with(EXTENSION_FAILED_PREFIX))
+        ));
+    }
+}
+
+#[async_trait::async_trait]
+impl Extension for Outcomes {
+    fn name(&self) -> &str {
+        "outcomes"
+    }
+    async fn start_run(&self, run: &RunContext<'_>) -> Result<Box<dyn RunHooks>, ExtensionError> {
+        Ok(Box::new(OutcomeHooks {
+            seen: self.seen.clone(),
+            cancel: self.cancel_in_before_tool.then(|| run.cancel.clone()),
+        }))
+    }
+}
+
+#[tokio::test]
+async fn finish_reports_each_ending_once() {
+    async fn finished(agent: Agent, cancel: bool, prompt: &str) -> Vec<String> {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut agent = agent.with_extension(Outcomes {
+            seen: seen.clone(),
+            cancel_in_before_tool: cancel,
+        });
+        let _ = run(&mut agent, prompt).await;
+        let seen = seen.lock().unwrap().clone();
+        seen
+    }
+    // Completed.
+    let (a, _) = scripted(vec![text("done")]);
+    assert_eq!(
+        finished(a, false, "go").await,
+        vec!["stop=Some(Stop) rejected=false cancelled=false error=false"]
+    );
+    // Stopped by another extension's before_model.
+    let (a, _) = scripted(vec![text("never")]);
+    let a = a.with_extension(ext(
+        "budget",
+        Hooks {
+            stop: Some("spent"),
+            ..Default::default()
+        },
+    ));
+    assert_eq!(
+        finished(a, false, "go").await,
+        vec!["stop=None rejected=false cancelled=false error=false"]
+    );
+    // Failed by a required extension.
+    let (a, _) = scripted(vec![text("never")]);
+    let a = a.with_extension(
+        ext(
+            "verify",
+            Hooks {
+                fail_model: Some("broken"),
+                ..Default::default()
+            },
+        )
+        .required(),
+    );
+    assert_eq!(
+        finished(a, false, "go").await,
+        vec!["stop=Some(Error) rejected=false cancelled=false error=true"]
+    );
+    // Cancelled while its tool call was being judged: the call does not run.
+    let (a, _) = scripted(vec![
+        call("echo", serde_json::json!({"text": "x"})),
+        text("never"),
+    ]);
+    assert_eq!(
+        finished(a, true, "go").await,
+        vec!["stop=Some(ToolUse) rejected=false cancelled=true error=false"]
+    );
+    // Stopped by a turn limit.
+    let (a, _) = scripted(vec![
+        call("echo", serde_json::json!({"text": "x"})),
+        text("never"),
+    ]);
+    let a = a.with_execution_limits(yoagent::context::ExecutionLimits::default().with_max_turns(1));
+    assert_eq!(
+        finished(a, false, "go").await,
+        vec!["stop=Some(ToolUse) rejected=false cancelled=false error=false"]
+    );
+}
+
+/// Stops the first run's second turn; later runs are left alone.
+struct StopOnce(AtomicUsize);
+
+struct StopOnceHooks {
+    run: usize,
+    turns: usize,
+}
+
+#[async_trait::async_trait]
+impl RunHooks for StopOnceHooks {
+    async fn before_model(&mut self, _: &TurnContext<'_>) -> TurnDecision {
+        self.turns += 1;
+        if self.run == 0 && self.turns == 2 {
+            TurnDecision::Stop("budget spent".into())
+        } else {
+            TurnDecision::Continue
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Extension for StopOnce {
+    fn name(&self) -> &str {
+        "stop-once"
+    }
+    async fn start_run(&self, _: &RunContext<'_>) -> Result<Box<dyn RunHooks>, ExtensionError> {
+        Ok(Box::new(StopOnceHooks {
+            run: self.0.fetch_add(1, Ordering::SeqCst),
+            turns: 0,
+        }))
+    }
+}
+
+#[tokio::test]
+async fn a_stop_after_a_tool_turn_keeps_the_transcript_valid_for_the_next_prompt() {
+    // MockProvider rejects (panics on) a transcript a real provider would.
+    let (agent, requests) = scripted(vec![
+        call("echo", serde_json::json!({"text": "x"})),
+        text("second prompt answered"),
+    ]);
+    let mut agent = agent.with_extension(StopOnce(AtomicUsize::new(0)));
+    let first = run(&mut agent, "one").await;
+    assert!(turns_paired(&first));
+    let second = run(&mut agent, "two").await;
+    assert_eq!(final_assistant(&second).0, StopReason::Stop);
+    assert_eq!(requests.lock().unwrap().len(), 2);
+}
+
+type Seen<T> = Arc<Mutex<Vec<T>>>;
+
+/// A sub-agent on a recording provider.
+fn recorded_sub_agent(
+    name: &str,
+    script: Vec<MockResponse>,
+    tools: Vec<Arc<dyn AgentTool>>,
+) -> (SubAgentTool, Seen<Vec<String>>, Seen<Vec<Message>>) {
+    struct Both {
+        inner: MockProvider,
+        tools: Arc<Mutex<Vec<Vec<String>>>>,
+        requests: Arc<Mutex<Vec<Vec<Message>>>>,
+    }
+    #[async_trait::async_trait]
+    impl StreamProvider for Both {
+        async fn stream(
+            &self,
+            config: StreamConfig,
+            tx: mpsc::UnboundedSender<StreamEvent>,
+            cancel: CancellationToken,
+        ) -> Result<Message, ProviderError> {
+            self.tools
+                .lock()
+                .unwrap()
+                .push(config.tools.iter().map(|t| t.name.clone()).collect());
+            self.requests.lock().unwrap().push(config.messages.clone());
+            self.inner.stream(config, tx, cancel).await
+        }
+    }
+    let seen_tools = Arc::new(Mutex::new(Vec::new()));
+    let seen_requests = Arc::new(Mutex::new(Vec::new()));
+    let provider = Both {
+        inner: MockProvider::new(script),
+        tools: seen_tools.clone(),
+        requests: seen_requests.clone(),
+    };
+    let tool = SubAgentTool::from_provider(name, Arc::new(provider), ModelConfig::mock())
+        .with_tools(tools);
+    (tool, seen_tools, seen_requests)
+}
+
+#[tokio::test]
+async fn a_tree_policy_denial_is_honoured_in_the_child_and_its_tools_stay_with_the_parent() {
+    let (child, child_tools, child_requests) = recorded_sub_agent(
+        "child",
+        vec![
+            call("echo", serde_json::json!({"text": "secret"})),
+            text("child done"),
+        ],
+        vec![Arc::new(Echo)],
+    );
+    let (agent, parent_requests) = scripted(vec![delegate("child", "go"), text("parent done")]);
+    let mut agent = agent
+        .with_tools(vec![Box::new(Echo), Box::new(child)])
+        .with_tree_extension(DepthPolicy(Arc::default()));
+    let _ = run(&mut agent, "start").await;
+
+    // The child's call was denied: its next request carries the denial.
+    let child_requests = child_requests.lock().unwrap();
+    let after_call = format!("{:?}", child_requests[1]);
+    assert!(after_call.contains("secret is not allowed"), "{after_call}");
+    // The policy's own tool was offered to the parent, never to the child.
+    drop(parent_requests);
+    for tools in child_tools.lock().unwrap().iter() {
+        assert!(!tools.contains(&"policy_tool".to_string()), "{tools:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_required_failure_in_a_child_fails_the_delegation() {
+    let (child, _, _) = recorded_sub_agent("child", vec![text("never")], vec![]);
+    let child = child.with_extension(
+        ext(
+            "verify",
+            Hooks {
+                fail_model: Some("cannot verify"),
+                ..Default::default()
+            },
+        )
+        .required(),
+    );
+    let (agent, _) = scripted(vec![delegate("child", "go"), text("parent done")]);
+    let mut agent = agent.with_tools(vec![Box::new(child)]);
+    let events = run(&mut agent, "start").await;
+    let results = tool_results(&events);
+    assert!(results[0].1, "the delegation failed: {results:?}");
+    assert!(
+        results[0].0.contains(EXTENSION_FAILED_PREFIX),
+        "{results:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_custom_delegation_tool_sees_the_tree_extensions_depth_and_label() {
+    struct Delegator(Arc<Mutex<Vec<String>>>);
+    #[async_trait::async_trait]
+    impl AgentTool for Delegator {
+        fn name(&self) -> &str {
+            "delegate"
+        }
+        fn label(&self) -> &str {
+            "delegate"
+        }
+        fn description(&self) -> &str {
+            "delegate"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        async fn execute(
+            &self,
+            _: serde_json::Value,
+            ctx: ToolContext,
+        ) -> Result<ToolResult, ToolError> {
+            self.0.lock().unwrap().push(format!(
+                "tree={} depth={} label={:?}",
+                ctx.tree_extensions()
+                    .iter()
+                    .map(|e| e.name().to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+                ctx.delegation_depth(),
+                ctx.run_label()
+            ));
+            Ok(ToolResult {
+                content: vec![Content::Text { text: "ok".into() }],
+                details: serde_json::Value::Null,
+            })
+        }
+    }
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let (agent, _) = scripted(vec![call("delegate", serde_json::json!({})), text("done")]);
+    let mut agent = agent
+        .with_tools(vec![Box::new(Delegator(seen.clone()))])
+        .with_run_label("session-9")
+        .with_tree_extension(ext("policy", Hooks::default()))
+        .with_extension(ext("local", Hooks::default()));
+    let _ = run(&mut agent, "go").await;
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![r#"tree=policy depth=1 label=Some("session-9")"#]
+    );
+}
+
+#[tokio::test]
+async fn runs_sharing_an_extension_really_run_concurrently_and_stay_isolated() {
+    // Each run's first `before_model` waits for the other run to get there:
+    // this deadlocks (and times out) unless both runs are in flight at once.
+    struct Rendezvous {
+        barrier: Arc<tokio::sync::Barrier>,
+        runs: Arc<Mutex<Vec<usize>>>,
+    }
+    struct RendezvousHooks {
+        barrier: Option<Arc<tokio::sync::Barrier>>,
+        turns: usize,
+        runs: Arc<Mutex<Vec<usize>>>,
+    }
+    #[async_trait::async_trait]
+    impl RunHooks for RendezvousHooks {
+        async fn before_model(&mut self, _: &TurnContext<'_>) -> TurnDecision {
+            if let Some(barrier) = self.barrier.take() {
+                barrier.wait().await;
+            }
+            self.turns += 1;
+            TurnDecision::Continue
+        }
+        async fn finish(&mut self, _: &RunOutcome) {
+            self.runs.lock().unwrap().push(self.turns);
+        }
+    }
+    #[async_trait::async_trait]
+    impl Extension for Rendezvous {
+        fn name(&self) -> &str {
+            "rendezvous"
+        }
+        async fn start_run(&self, _: &RunContext<'_>) -> Result<Box<dyn RunHooks>, ExtensionError> {
+            Ok(Box::new(RendezvousHooks {
+                barrier: Some(self.barrier.clone()),
+                turns: 0,
+                runs: self.runs.clone(),
+            }))
+        }
+    }
+    let shared = Arc::new(Rendezvous {
+        barrier: Arc::new(tokio::sync::Barrier::new(2)),
+        runs: Arc::default(),
+    });
+    struct ByRef(Arc<Rendezvous>);
+    #[async_trait::async_trait]
+    impl Extension for ByRef {
+        fn name(&self) -> &str {
+            "rendezvous"
+        }
+        async fn start_run(
+            &self,
+            run: &RunContext<'_>,
+        ) -> Result<Box<dyn RunHooks>, ExtensionError> {
+            self.0.start_run(run).await
+        }
+    }
+    let (a, _) = scripted(vec![
+        call("echo", serde_json::json!({"text": "x"})),
+        text("done"),
+    ]);
+    let (b, _) = scripted(vec![text("done")]);
+    let mut a = a.with_extension(ByRef(shared.clone()));
+    let mut b = b.with_extension(ByRef(shared.clone()));
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        tokio::join!(run(&mut a, "one"), run(&mut b, "two"))
+    })
+    .await
+    .expect("both runs were in flight together");
+    let mut runs = shared.runs.lock().unwrap().clone();
+    runs.sort();
+    assert_eq!(runs, vec![1, 2]);
+}
+
+#[tokio::test]
+async fn after_tool_sees_whether_the_call_failed() {
+    struct Failing;
+    #[async_trait::async_trait]
+    impl AgentTool for Failing {
+        fn name(&self) -> &str {
+            "failing"
+        }
+        fn label(&self) -> &str {
+            "failing"
+        }
+        fn description(&self) -> &str {
+            "fails"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        async fn execute(
+            &self,
+            _: serde_json::Value,
+            _: ToolContext,
+        ) -> Result<ToolResult, ToolError> {
+            Err(ToolError::Failed("disk full".into()))
+        }
+    }
+    #[derive(Clone)]
+    struct SeesErrors(Arc<Mutex<Vec<bool>>>);
+    #[async_trait::async_trait]
+    impl RunHooks for SeesErrors {
+        async fn after_tool(
+            &mut self,
+            _: &ToolCallRequest<'_>,
+            output: &mut ToolOutput,
+        ) -> Result<(), ExtensionError> {
+            self.0.lock().unwrap().push(output.is_error);
+            Ok(())
+        }
+    }
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let (agent, _) = scripted(vec![
+        call("failing", serde_json::json!({})),
+        call("echo", serde_json::json!({"text": "x"})),
+        text("done"),
+    ]);
+    let mut agent = agent
+        .with_tools(vec![Box::new(Echo), Box::new(Failing)])
+        .with_extension(Stateless::new("errors", SeesErrors(seen.clone())));
+    let _ = run(&mut agent, "go").await;
+    assert_eq!(*seen.lock().unwrap(), vec![true, false]);
 }

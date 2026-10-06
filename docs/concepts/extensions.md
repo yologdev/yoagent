@@ -68,15 +68,15 @@ Every `RunHooks` method has a no-op default; implement only what you need.
 | `on_input` | On a prompted run's input, after the input filters (`continue_loop` has no input) | First `Reject` wins |
 | `before_model` | Before each model request (a retried attempt is not judged again) | Notes appended in order to the latest user turn, never stored; first `Stop` or `Fail` ends the run |
 | `before_tool` | Before each tool call, after any `ToolMiddleware` | `Deny` wins, `Modify` feeds the next |
-| `after_tool` | After each call that ran, errors and panics included, before truncation and `ToolExecutionEnd` | In order, each sees the previous edit |
+| `after_tool` | After each call that ran, errors and panics included, before truncation and `ToolExecutionEnd`. Gets a `ToolOutput` (`result`, `is_error`) to edit | In order, each sees the previous edit |
 | `on_stop` | When the model ends with `StopReason::Stop` and nothing is queued | First `Fail` wins, else first `Continue` |
 | `finish` | When the run ends, however it ends (not if the run's future is dropped) | All |
 
-`Extension::on_event` observes every `AgentEvent` of the run, in order, before the event reaches the consumer.
+`Extension::on_event` observes every `AgentEvent` of the run, in order, before the event reaches the consumer. Before each turn and before `finish`, the loop waits until every event sent so far has been observed, so what `on_event` recorded is current when the hooks run. A failure on the run's last events (`AgentEnd` itself) comes too late to change its outcome and is only logged.
 
 - **`TurnDecision::Stop(reason)`** ends the run like an execution limit: an `[Agent stopped: <reason>]` marker, partial success.
 - **`StopDecision::Continue(message)`** appends `[Extension <name>] <message>` as a user message and runs another turn, at most `max_stop_continues` times per run (default 3, `Agent::with_max_stop_continues`). That message is recognized by `is_loop_injected`, so it is never taken for the user's own request (the tool gate and `user_request()` skip it).
-- **A policy whose judgement must survive later rewrites** returns `true` from `Extension::rechecks_modified_calls`. When a later extension modifies a call's arguments, it judges the final arguments again, and a `Deny` there wins.
+- **A policy whose judgement must survive later rewrites** returns `true` from `Extension::rechecks_modified_calls`. When a later extension modifies a call's arguments, it judges the final arguments again, and a `Deny` there wins (a `Modify` on the recheck is ignored, and `before_tool` may run twice for one call).
 
 ## Failures: advisory and required
 
@@ -89,7 +89,9 @@ Every `RunHooks` method has a no-op default; implement only what you need.
 | `on_input` fails | The input is rejected | Rejected |
 | `before_tool` fails | The call is denied | Denied |
 | `after_tool` fails | The result is replaced by an error naming the extension | Same, and the run fails |
-| `on_stop` keeps asking to continue past the cap | The run ends normally, with a warning | The run fails |
+| `on_stop` keeps asking to continue past the cap | The answer is accepted without its approval, with a warning | The run fails, even when another extension's message was the one sent |
+
+An extension that **filters tool output** and cannot start fails the run whatever its mode: running without it would let unfiltered output through. A required failure is never lost: however the run ends (a limit, a cancel, a stop, a provider error), a failure the loop has not acted on yet fails it.
 
 A failed run ends with an assistant message whose stop reason is `Error` and whose `error_message` starts with `EXTENSION_FAILED_PREFIX` (`[Extension failed: <name>] <reason>`). `on_error` is called, and a sub-agent's delegation reports it as a failure.
 
@@ -108,7 +110,7 @@ Where you install an extension decides what child runs see:
 | `with_extension` | This agent's runs only |
 | `with_tree_extension` | This agent's runs **and every run they delegate to**, at any depth, ahead of the child's own extensions. A child cannot remove it. Its `tools` are not offered to child runs |
 
-Use tree extensions for host policy: permissions, deny rules, redaction, audit, and a budget across the whole tree (keep the total in the `Extension`, which every run shares). A custom delegation tool honours them through `ToolContext::tree_extensions()` and `ToolContext::delegation_depth()`.
+Use tree extensions for host policy: permissions, deny rules, redaction, audit, and a budget across the whole tree (keep the total in the `Extension`, which every run shares). A child run keeps the parent's run label. A custom delegation tool honours all of this through `ToolContext::tree_extensions()`, `ToolContext::delegation_depth()` and `ToolContext::run_label()`.
 
 ## Order with the older hooks
 

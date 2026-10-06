@@ -820,6 +820,8 @@ pub(crate) struct Delegation {
     pub(crate) tree: Vec<Arc<dyn crate::extension::Extension>>,
     /// The depth a delegated run has (the calling run's depth + 1).
     pub(crate) depth: usize,
+    /// The calling run's label, which a delegated run keeps.
+    pub(crate) label: Option<String>,
 }
 
 impl ToolContext {
@@ -896,6 +898,12 @@ impl ToolContext {
     /// top-level run.
     pub fn delegation_depth(&self) -> usize {
         self.delegation.depth.max(1)
+    }
+
+    /// The calling run's label ([`Agent::with_run_label`](crate::Agent::with_run_label)),
+    /// for a run this tool delegates to.
+    pub fn run_label(&self) -> Option<&str> {
+        self.delegation.label.as_deref()
     }
 }
 

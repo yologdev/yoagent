@@ -85,6 +85,7 @@ pub const DEFAULT_MAX_STOP_CONTINUES: usize = 3;
 
 /// What a failure inside an extension means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum ExtensionMode {
     /// A failure is logged and the hook is skipped.
     #[default]
@@ -244,6 +245,22 @@ pub enum StopDecision {
     Fail(String),
 }
 
+/// A tool call's output, as [`RunHooks::after_tool`] sees and may edit it.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct ToolOutput {
+    /// What the model will see.
+    pub result: ToolResult,
+    /// Whether the call failed (the tool returned an error or panicked).
+    pub is_error: bool,
+}
+
+impl ToolOutput {
+    pub fn new(result: ToolResult, is_error: bool) -> Self {
+        Self { result, is_error }
+    }
+}
+
 /// How a run ended, for [`RunHooks::finish`].
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
@@ -272,13 +289,17 @@ pub trait Extension: MaybeSend + MaybeSync {
 
     /// Whether this extension filters tool output (redaction). While any
     /// installed extension returns `true`, partial tool output is withheld.
+    /// Such an extension that cannot start fails the run whatever its mode:
+    /// running without it would let unfiltered output through.
     fn filters_tool_output(&self) -> bool {
         false
     }
 
     /// Whether this extension's `before_tool` must judge a call again when a
     /// later extension rewrote its arguments (a policy). The second verdict
-    /// sees the final arguments, and a `Deny` there wins.
+    /// sees the final arguments, and a `Deny` there wins; a `Modify` returned
+    /// on the recheck is ignored. So `before_tool` may be called twice for one
+    /// call: a hook that counts calls should not rely on once.
     fn rechecks_modified_calls(&self) -> bool {
         false
     }
@@ -315,11 +336,11 @@ pub trait RunHooks: MaybeSend + MaybeSync {
         ToolDecision::Allow
     }
 
-    /// After a tool call ran; may edit its result.
+    /// After a tool call ran; may edit its output.
     async fn after_tool(
         &mut self,
         _call: &ToolCallRequest<'_>,
-        _result: &mut ToolResult,
+        _output: &mut ToolOutput,
     ) -> Result<(), ExtensionError> {
         Ok(())
     }
@@ -400,14 +421,21 @@ struct Active {
     hooks: tokio::sync::Mutex<Box<dyn RunHooks>>,
 }
 
+/// A request to the event observer: acknowledge once every event sent before
+/// it has been observed.
+pub(crate) type FlushRequest = tokio::sync::oneshot::Sender<()>;
+
 /// The extensions of one run, started, in dispatch order.
 pub(crate) struct ActiveExtensions {
     run_id: String,
     active: Vec<Active>,
     filters_output: bool,
     /// A required extension's failure that could not end the run where it
-    /// happened (in `after_tool`, `on_event`); checked at the next boundary.
+    /// happened (in `tools`, `after_tool`, `on_event`); acted on at the next
+    /// boundary.
     failure: std::sync::Mutex<Option<Failure>>,
+    /// The event observer's flush channel, set when one is running.
+    flush: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<FlushRequest>>,
 }
 
 /// Await `fut`, containing a panic as `Err(payload text)`.
@@ -419,9 +447,8 @@ async fn guarded<T>(fut: impl std::future::Future<Output = T>) -> Result<T, Stri
         .map_err(|payload| format!("panicked: {}", crate::tool_source::panic_message(&*payload)))
 }
 
-/// What `before_model` decided across the extensions.
-pub(crate) enum ModelGate {
-    Proceed(Vec<String>),
+/// Why `before_model` ended the run before the request.
+pub(crate) enum ModelHalt {
     Stop(String),
     Fail(Failure),
 }
@@ -429,7 +456,13 @@ pub(crate) enum ModelGate {
 /// What `on_stop` decided across the extensions.
 pub(crate) enum StopGate {
     Accept,
-    Continue { name: String, message: String },
+    Continue {
+        /// The first extension that asked, and its message.
+        name: String,
+        message: String,
+        /// A required extension asked to continue (did not accept).
+        required: Option<String>,
+    },
     Fail(Failure),
 }
 
@@ -441,6 +474,7 @@ impl ActiveExtensions {
             active: Vec::new(),
             filters_output: false,
             failure: std::sync::Mutex::new(None),
+            flush: std::sync::OnceLock::new(),
         }
     }
 
@@ -453,13 +487,17 @@ impl ActiveExtensions {
     }
 
     /// Start every extension for a run: `inherited` first (from a parent's
-    /// tree), then `own`.
+    /// tree), then `own`. Returns the extensions that started, and the
+    /// failure that must end the run, if any: a required extension, or one
+    /// that filters tool output, could not start. The started ones are kept
+    /// either way, so they still get `finish`.
     pub(crate) async fn start(
         inherited: &[Arc<dyn Extension>],
         own: &[Arc<dyn Extension>],
         run: &RunContext<'_>,
-    ) -> Result<Self, Failure> {
+    ) -> (Self, Option<Failure>) {
         let mut active = Vec::new();
+        let mut failure = None;
         let all = inherited
             .iter()
             .map(|e| (e, true))
@@ -467,60 +505,84 @@ impl ActiveExtensions {
         for (ext, inherited) in all {
             let name = ext.name().to_string();
             let mode = ext.mode();
-            match guarded(async { ext.start_run(run).await }).await {
-                Ok(Ok(hooks)) => active.push(Active {
-                    ext: ext.clone(),
+            let reason = match guarded(async { ext.start_run(run).await }).await {
+                Ok(Ok(hooks)) => {
+                    active.push(Active {
+                        ext: ext.clone(),
+                        name,
+                        mode,
+                        rechecks: ext.rechecks_modified_calls(),
+                        inherited,
+                        hooks: tokio::sync::Mutex::new(hooks),
+                    });
+                    continue;
+                }
+                Ok(Err(e)) => e.to_string(),
+                Err(panic) => panic,
+            };
+            if mode == ExtensionMode::Required || ext.filters_tool_output() {
+                tracing::error!(extension = %name, "extension could not start; failing the run: {reason}");
+                failure.get_or_insert(Failure {
                     name,
-                    mode,
-                    rechecks: ext.rechecks_modified_calls(),
-                    inherited,
-                    hooks: tokio::sync::Mutex::new(hooks),
-                }),
-                Ok(Err(e)) => Self::sit_out(&name, mode, e.to_string())?,
-                Err(panic) => Self::sit_out(&name, mode, panic)?,
+                    reason: format!("could not start: {reason}"),
+                });
+            } else {
+                tracing::warn!(extension = %name, "extension could not start; it sits this run out: {reason}");
             }
         }
         let filters_output = active.iter().any(|a| a.ext.filters_tool_output());
-        Ok(Self {
+        let exts = Self {
             run_id: run.run_id.to_string(),
             active,
             filters_output,
             failure: std::sync::Mutex::new(None),
-        })
-    }
-
-    /// A `start_run` failure: an advisory extension sits the run out, a
-    /// required one fails it.
-    fn sit_out(name: &str, mode: ExtensionMode, reason: String) -> Result<(), Failure> {
-        match mode {
-            ExtensionMode::Required => Err(Failure {
-                name: name.to_string(),
-                reason: format!("could not start: {reason}"),
-            }),
-            ExtensionMode::Advisory => {
-                tracing::warn!(
-                    extension = name,
-                    "extension could not start; it sits this run out: {reason}"
-                );
-                Ok(())
-            }
-        }
+            flush: std::sync::OnceLock::new(),
+        };
+        (exts, failure)
     }
 
     /// Record a hook failure: a required extension's fails the run (at the
     /// next boundary), an advisory one's is logged.
     fn failed(&self, a: &Active, hook: &str, reason: String) {
-        tracing::warn!(extension = %a.name, hook, "extension hook failed: {reason}");
         if a.mode == ExtensionMode::Required {
+            tracing::error!(extension = %a.name, hook, "required extension failed: {reason}");
             let mut slot = self.failure.lock().unwrap_or_else(|e| e.into_inner());
             slot.get_or_insert(Failure {
                 name: a.name.clone(),
                 reason: format!("{hook} failed: {reason}"),
             });
+        } else {
+            tracing::warn!(extension = %a.name, hook, "extension hook failed: {reason}");
         }
     }
 
-    /// The failure recorded since the last check, if any.
+    /// Connect the event observer's flush channel.
+    pub(crate) fn connect_observer(&self, flush: tokio::sync::mpsc::UnboundedSender<FlushRequest>) {
+        let _ = self.flush.set(flush);
+    }
+
+    /// Wait until every event sent so far has been observed, so `on_event`
+    /// state and failures are current.
+    pub(crate) async fn sync_events(&self) {
+        if let Some(flush) = self.flush.get() {
+            let (ack, done) = tokio::sync::oneshot::channel();
+            if flush.send(ack).is_ok() {
+                let _ = done.await;
+            }
+        }
+    }
+
+    /// The failure recorded so far, if any, once every sent event has been
+    /// observed. Each failure is returned once.
+    pub(crate) async fn settle(&self) -> Option<Failure> {
+        if self.is_empty() {
+            return None;
+        }
+        self.sync_events().await;
+        self.take_failure()
+    }
+
+    /// The failure recorded so far, without waiting for events.
     pub(crate) fn take_failure(&self) -> Option<Failure> {
         self.failure
             .lock()
@@ -562,7 +624,11 @@ impl ActiveExtensions {
         Ok(())
     }
 
-    pub(crate) async fn before_model(&self, turn: &TurnContext<'_>) -> ModelGate {
+    /// The notes for the request, or why the run ends before it.
+    pub(crate) async fn before_model(
+        &self,
+        turn: &TurnContext<'_>,
+    ) -> Result<Vec<String>, ModelHalt> {
         let mut notes = Vec::new();
         for a in &self.active {
             let mut hooks = a.hooks.lock().await;
@@ -577,13 +643,14 @@ impl ActiveExtensions {
                         notes.push(note);
                     }
                 }
-                TurnDecision::Stop(reason) => return ModelGate::Stop(reason),
+                TurnDecision::Stop(reason) => return Err(ModelHalt::Stop(reason)),
                 TurnDecision::Fail(reason) => match a.mode {
                     ExtensionMode::Required => {
-                        return ModelGate::Fail(Failure {
+                        tracing::error!(extension = %a.name, "required extension failed in before_model: {reason}");
+                        return Err(ModelHalt::Fail(Failure {
                             name: a.name.clone(),
                             reason: format!("before_model failed: {reason}"),
-                        })
+                        }));
                     }
                     ExtensionMode::Advisory => {
                         tracing::warn!(extension = %a.name, "before_model failed: {reason}")
@@ -591,7 +658,7 @@ impl ActiveExtensions {
                 },
             }
         }
-        ModelGate::Proceed(notes)
+        Ok(notes)
     }
 
     /// The final arguments, or `Err(reason)` if the call is denied. A failing
@@ -639,7 +706,11 @@ impl ActiveExtensions {
                 };
                 match decision {
                     Ok(ToolDecision::Deny(reason)) => return Err(reason),
-                    Ok(_) => {}
+                    Ok(ToolDecision::Allow) => {}
+                    Ok(ToolDecision::Modify(_)) => tracing::debug!(
+                        extension = %a.name,
+                        "a Modify on a recheck is ignored; the call runs with the arguments it approved"
+                    ),
                     Err(panic) => {
                         tracing::warn!(extension = %a.name, "before_tool failed; denying the call: {panic}");
                         return Err(format!("extension '{}' failed to check the call", a.name));
@@ -650,26 +721,21 @@ impl ActiveExtensions {
         Ok(args)
     }
 
-    /// Run `after_tool` over a result. A failing hook replaces the result
-    /// with an error naming the extension (fail closed) and, for a required
-    /// extension, fails the run.
-    pub(crate) async fn after_tool(
-        &self,
-        call: &ToolCallRequest<'_>,
-        result: &mut ToolResult,
-        is_error: &mut bool,
-    ) {
+    /// Run `after_tool` over a call's output. A failing hook replaces the
+    /// result with an error naming the extension (fail closed) and, for a
+    /// required extension, fails the run.
+    pub(crate) async fn after_tool(&self, call: &ToolCallRequest<'_>, output: &mut ToolOutput) {
         for a in &self.active {
             let outcome = {
                 let mut hooks = a.hooks.lock().await;
-                guarded(hooks.after_tool(call, result)).await
+                guarded(hooks.after_tool(call, output)).await
             };
             let reason = match outcome {
                 Ok(Ok(())) => continue,
                 Ok(Err(e)) => e.to_string(),
                 Err(panic) => panic,
             };
-            *result = ToolResult {
+            output.result = ToolResult {
                 content: vec![Content::Text {
                     text: format!(
                         "Tool result withheld: extension '{}' failed to process it.",
@@ -678,13 +744,14 @@ impl ActiveExtensions {
                 }],
                 details: serde_json::Value::Null,
             };
-            *is_error = true;
+            output.is_error = true;
             self.failed(a, "after_tool", reason);
         }
     }
 
     pub(crate) async fn on_stop(&self, stop: &StopContext<'_>) -> StopGate {
-        let mut verdict = StopGate::Accept;
+        let mut first: Option<(String, String)> = None;
+        let mut required: Option<String> = None;
         for a in &self.active {
             let decision = {
                 let mut hooks = a.hooks.lock().await;
@@ -693,19 +760,18 @@ impl ActiveExtensions {
             match decision {
                 Ok(StopDecision::Accept) => {}
                 Ok(StopDecision::Continue(message)) => {
-                    if matches!(verdict, StopGate::Accept) {
-                        verdict = StopGate::Continue {
-                            name: a.name.clone(),
-                            message,
-                        };
+                    if a.mode == ExtensionMode::Required {
+                        required.get_or_insert_with(|| a.name.clone());
                     }
+                    first.get_or_insert((a.name.clone(), message));
                 }
                 Ok(StopDecision::Fail(reason)) | Err(reason) => match a.mode {
                     ExtensionMode::Required => {
+                        tracing::error!(extension = %a.name, "required extension failed in on_stop: {reason}");
                         return StopGate::Fail(Failure {
                             name: a.name.clone(),
-                            reason,
-                        })
+                            reason: format!("on_stop failed: {reason}"),
+                        });
                     }
                     ExtensionMode::Advisory => {
                         tracing::warn!(extension = %a.name, "on_stop failed: {reason}")
@@ -713,15 +779,14 @@ impl ActiveExtensions {
                 },
             }
         }
-        verdict
-    }
-
-    /// The required extensions whose `on_stop` continued the run: when the
-    /// continue cap is reached, the run fails if any of them asked.
-    pub(crate) fn is_required(&self, name: &str) -> bool {
-        self.active
-            .iter()
-            .any(|a| a.name == name && a.mode == ExtensionMode::Required)
+        match first {
+            None => StopGate::Accept,
+            Some((name, message)) => StopGate::Continue {
+                name,
+                message,
+                required,
+            },
+        }
     }
 
     pub(crate) fn on_event(&self, event: &AgentEvent) {
@@ -737,10 +802,20 @@ impl ActiveExtensions {
     }
 
     pub(crate) async fn finish(&self, outcome: &RunOutcome) {
+        // Every event sent so far is observed before the hooks see the end.
+        self.sync_events().await;
         for a in &self.active {
             let mut hooks = a.hooks.lock().await;
             if let Err(panic) = guarded(hooks.finish(outcome)).await {
-                tracing::warn!(extension = %a.name, "finish failed: {panic}");
+                match a.mode {
+                    // Too late to change the outcome: log it loudly.
+                    ExtensionMode::Required => {
+                        tracing::error!(extension = %a.name, "required extension's finish failed: {panic}")
+                    }
+                    ExtensionMode::Advisory => {
+                        tracing::warn!(extension = %a.name, "finish failed: {panic}")
+                    }
+                }
             }
         }
     }
