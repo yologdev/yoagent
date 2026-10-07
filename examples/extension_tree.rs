@@ -158,6 +158,8 @@ impl AgentTool for AskReviewer {
         // `prompt` runs the child on its own task, so this tool can watch the
         // parent's cancel token meanwhile and pass a cancel down with
         // `abort()`; the child then ends `Aborted` and still sends `AgentEnd`.
+        // (This offline demo never cancels; `SubAgentTool`'s tests cover that
+        // path for the built-in delegation tool.)
         let mut rx = reviewer.prompt(question).await;
         let mut events = Vec::new();
         let mut cancelled = false;
@@ -175,15 +177,45 @@ impl AgentTool for AskReviewer {
         }
         reviewer.finish().await;
 
-        // Report the child's stats before returning, on every path (a
-        // cancelled or failed delegation still spent money): this is how its
-        // spend reaches the parent's `SessionStats::sub_agents`, and any
-        // `Budget` the parent runs. `SubAgentTool` does the same.
-        if let Some(AgentEvent::AgentEnd { stats, .. }) = events.last() {
+        // Report the child's stats before returning, whenever the run ended
+        // (a cancelled or failed delegation still spent money): this is how
+        // its spend reaches the parent's `SessionStats::sub_agents`, and any
+        // `Budget` the parent runs. `SubAgentTool` does the same. (A child
+        // task that panicked sends no `AgentEnd`, so there is nothing to
+        // report; `finish` logs the panic.)
+        let end = events.iter().rev().find_map(|e| match e {
+            AgentEvent::AgentEnd {
+                messages, stats, ..
+            } => Some((messages, stats)),
+            _ => None,
+        });
+        if let Some((_, stats)) = end {
             ctx.report_delegated_run(stats.clone());
         }
         if cancelled {
             return Err(ToolError::Cancelled);
+        }
+        // A child that ended in an error (a provider failure, or a required
+        // extension failing it) is a failed delegation, not an answer.
+        let failure = end.and_then(|(messages, _)| {
+            messages.iter().rev().find_map(|m| match m {
+                AgentMessage::Llm(Message::Assistant {
+                    stop_reason,
+                    error_message,
+                    ..
+                }) => match stop_reason {
+                    StopReason::Error | StopReason::Aborted => Some(
+                        error_message
+                            .clone()
+                            .unwrap_or_else(|| format!("reviewer ended {stop_reason:?}")),
+                    ),
+                    _ => None,
+                },
+                _ => None,
+            })
+        });
+        if let Some(error) = failure {
+            return Err(ToolError::Failed(error));
         }
         Ok(ToolResult {
             content: vec![Content::Text {
