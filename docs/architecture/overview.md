@@ -87,6 +87,7 @@ yoagent/
 │   │
 │   ├── rt.rs                   # spawn/sleep/timeout/Instant, MaybeSend/MaybeSync
 │   ├── tool_source.rs          # ToolSource (tools resolved per run)
+│   ├── extension.rs            # Extension / RunHooks, Budget (the plug-in contract)
 │   │
 │   │── Layer 2: Agent + Providers ─────────────
 │   ├── agent.rs                # Agent struct (stateful wrapper)
