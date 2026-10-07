@@ -55,7 +55,7 @@ let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude
 | `Agent::from_provider(provider: impl StreamProvider + 'static, config: ModelConfig) -> Self` | Build from an explicit provider plus its `ModelConfig` (custom providers and test doubles — pair with `ModelConfig::mock()`) |
 | `Agent::from_config_with(registry: &ProviderRegistry, config: ModelConfig) -> Result<Self, AgentBuildError>` | Like `from_config`, but resolves the provider from a caller-supplied registry |
 
-`Agent::new(provider)` with `with_model` / `with_model_config` still works but is deprecated since 0.10.0.
+`Agent::new(provider)` with `with_model` / `with_model_config` (and the same on `SubAgentTool`) still compiles but is deprecated since 0.10.0 and hidden from the docs since 0.25; it will be removed in 1.0.
 
 ### Builder Methods
 

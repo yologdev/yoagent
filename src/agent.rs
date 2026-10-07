@@ -168,6 +168,7 @@ impl Agent {
     /// from one `ModelConfig`) or [`from_provider`](Self::from_provider) for a
     /// custom provider; both avoid the provider↔config mismatch this
     /// constructor allows.
+    #[doc(hidden)]
     #[deprecated(
         since = "0.10.0",
         note = "use Agent::from_config(config) — provider + env key resolved \
@@ -362,6 +363,7 @@ impl Agent {
         self
     }
 
+    #[doc(hidden)]
     #[deprecated(
         since = "0.10.0",
         note = "the model id now comes from the ModelConfig passed to \
@@ -405,6 +407,7 @@ impl Agent {
         self
     }
 
+    #[doc(hidden)]
     #[deprecated(
         since = "0.10.0",
         note = "pass the ModelConfig to Agent::from_config(config) or \

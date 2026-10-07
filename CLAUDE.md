@@ -69,7 +69,7 @@ Bedrock is the one non-SSE provider: ConverseStream answers with binary `applica
 
 - **`Content`** — enum: `Text`, `Image`, `Thinking` (`thinking`, `signature`, `redacted` + `redacted_protocol: Option<ApiProtocol>` — provider-encrypted reasoning and the API that produced it; replayed only to that protocol (`Content::redacted_for`, crate-private), `None` = pre-field data, sent nowhere; `#[non_exhaustive]`, build with `Content::thinking*`, `thinking_redacted(protocol, data)`), `ToolCall`
 - **`Message`** — enum: `User`, `Assistant`, `ToolResult` — each variant carries its own fields
-- **`AgentMessage`** — `Llm(Message)` | `Extension(ExtensionMessage)` — extension messages (`role`, `kind`, `data`) don't enter LLM context
+- **`AgentMessage`** — `Llm(Message)` | `Custom(CustomMessage)` (renamed from `Extension(ExtensionMessage)` in 0.25; `ExtensionMessage` is a deprecated alias; untagged, so stored data is unchanged) — custom messages (`role` = `"extension"`, `kind`, `data`) don't enter LLM context
 - **`AgentEvent`** — full event stream emitted to callers: `AgentStart`, `TurnStart`, `MessageStart/Update/End`, `ToolExecutionStart/Update/End`, `ProgressMessage`, `InputRejected`, `TurnEnd`, `AgentEnd`
 - **`StopReason`** — `Stop`, `Length`, `ToolUse`, `Error`, `Aborted`, `Refusal`
 
@@ -157,7 +157,7 @@ Other constructors:
 - `Agent::from_provider(provider, config)` — explicit provider (custom impls, test doubles). Pair with `ModelConfig::mock()` in tests.
 - `Agent::from_config_with(&registry, config) -> Result<_, AgentBuildError>` — resolve against a custom `ProviderRegistry`.
 - `Agent::set_model(config)` — switch model mid-session (re-resolves the env key; re-selects the provider only when it was registry-resolved, never clobbering an explicit one; explicit keys preserved).
-- `Agent::new(provider)` + `with_model`/`with_model_config` — the original builder, still supported.
+- `Agent::new(provider)` + `with_model`/`with_model_config` — the original builder, deprecated since 0.10 and `#[doc(hidden)]` since 0.25 (same on `SubAgentTool`); removal promised for 1.0.
 
 `SubAgentTool` mirrors these: `from_config`, `from_config_with`, `from_provider`. Its limits are a stored `ExecutionLimits` (default 10 turns / 1M tokens / 300 s, loop detection on): `with_execution_limits` replaces them, `with_max_turns` changes only the turns.
 

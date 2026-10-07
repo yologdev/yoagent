@@ -39,29 +39,31 @@ let msg = Message::user("Hello, world!");
 
 ### `AgentMessage`
 
-Wraps `Message` with support for extension messages (UI-only, notifications, etc.):
+Wraps `Message` with support for custom messages (UI-only, notifications, etc.) that stay in the history but never reach the model:
 
 ```rust
 pub enum AgentMessage {
     Llm(Message),
-    Extension(ExtensionMessage),
+    Custom(CustomMessage),
 }
 
-pub struct ExtensionMessage {
+pub struct CustomMessage {
     pub role: String,
     pub kind: String,
     pub data: serde_json::Value,
 }
 ```
 
-Create extension messages with the convenience constructor:
+Create custom messages with the convenience constructor:
 
 ```rust
-let ext = ExtensionMessage::new("status_update", serde_json::json!({"status": "running"}));
-let msg = AgentMessage::Extension(ext);
+let custom = CustomMessage::new("status_update", serde_json::json!({"status": "running"}));
+let msg = AgentMessage::Custom(custom);
 ```
 
-The `kind` field categorizes the extension (e.g., `"status_update"`, `"ui_event"`, `"notification"`). Use `as_llm()` to extract the `Message` if it's an LLM message. The default `convert_to_llm` function filters out `Extension` messages before sending to the provider.
+The `kind` field categorizes the message (e.g., `"status_update"`, `"ui_event"`, `"notification"`). Use `as_llm()` to extract the `Message` if it's an LLM message. The default `convert_to_llm` function filters out `Custom` messages before sending to the provider. Their `role` is `"extension"`.
+
+Before 0.25 these were `AgentMessage::Extension(ExtensionMessage)`, renamed so they aren't confused with [extensions](extensions.md), the plug-in contract. `ExtensionMessage` remains as a deprecated alias; saved sessions load unchanged, because the variant name is never serialized.
 
 All core message types implement `Serialize`, `Deserialize`, `Clone`, and `PartialEq`, enabling state persistence and test assertions.
 

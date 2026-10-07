@@ -36,10 +36,13 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed (breaking)
 
+- **`AgentMessage::Extension(ExtensionMessage)` is now `AgentMessage::Custom(CustomMessage)`** (#228), so it isn't confused with `Extension`, the plug-in contract. Match arms and constructors need the new names; `ExtensionMessage` remains as a deprecated alias of `CustomMessage` (a variant can't have an alias). **Saved data is unchanged:** `AgentMessage` is untagged, so the variant name is never serialized, and `CustomMessage::new` still writes `role: "extension"`. For example, yoyo-evolve matches `AgentMessage::Extension` in five places.
+
 - **`AgentLoopConfig` is `#[non_exhaustive]`; build it with `AgentLoopConfig::new(provider, model)`.** `new` sets every other field to the default the struct-literal examples used (no API key, thinking off, no context management, no hooks, parallel tools, the default retry policy). Fields stay public, so set what you need afterwards: `config.max_tokens = Some(1024);`. A struct literal no longer compiles outside the crate. Every field added so far was a breaking change for code calling `agent_loop` directly, which is why recent features went through task-locals; new fields (such as `#241`'s extensions) no longer break anyone. `Agent` and `SubAgentTool` users are unaffected.
 
 ### Deprecated
 
+- **The 0.10-deprecated constructors are hidden from the docs** (#228): `Agent::new` / `with_model` / `with_model_config` and the same on `SubAgentTool` still compile (with a deprecation warning) but no longer appear on docs.rs. They will be removed in 1.0, as their notes say.
 - **`ToolGate` as a `ToolMiddleware` and `InputGuard` as an `AsyncInputFilter`.** Install them with `with_tool_gate` / `with_input_guard` (or as extensions), and drive them outside the loop with the new `ToolGate::decide(&call)` and `InputGuard::screen(text)`. Rust cannot mark a trait impl `#[deprecated]`, so the first use of each in a process logs a warning; both impls will be removed in a later release. A gate installed as a middleware runs before every extension and before any middleware added after it, so it does not judge arguments those rewrite.
 
 ### Fixed

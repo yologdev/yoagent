@@ -94,6 +94,7 @@ pub struct SubAgentTool {
 
 impl SubAgentTool {
     /// Create a new sub-agent tool with a name and provider.
+    #[doc(hidden)]
     #[deprecated(
         since = "0.10.0",
         note = "use SubAgentTool::from_config(name, config) — provider + env key \
@@ -242,6 +243,7 @@ impl SubAgentTool {
         self
     }
 
+    #[doc(hidden)]
     #[deprecated(
         since = "0.10.0",
         note = "the model id now comes from the ModelConfig passed to \
@@ -479,6 +481,7 @@ impl SubAgentTool {
     /// Set the model configuration for multi-provider support.
     /// Required for non-Anthropic providers (OpenAI-compat, Google, etc.)
     /// to specify base URL, compat flags, and other provider-specific settings.
+    #[doc(hidden)]
     #[deprecated(
         since = "0.10.0",
         note = "pass the ModelConfig to SubAgentTool::from_config(name, config) or \

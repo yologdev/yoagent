@@ -2356,7 +2356,7 @@ mod losing_race_warning {
                 })
                 .collect::<Vec<_>>()
                 .join("\n"),
-            AgentMessage::Extension(_) => String::new(),
+            AgentMessage::Custom(_) => String::new(),
         }
     }
 

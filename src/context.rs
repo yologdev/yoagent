@@ -32,7 +32,7 @@ pub fn message_tokens(msg: &AgentMessage) -> usize {
                 content, tool_name, ..
             } => content_tokens(content) + estimate_tokens(tool_name) + 8,
         },
-        AgentMessage::Extension(ext) => estimate_tokens(&ext.data.to_string()) + 4,
+        AgentMessage::Custom(ext) => estimate_tokens(&ext.data.to_string()) + 4,
     }
 }
 
@@ -820,7 +820,7 @@ pub(crate) fn message_timestamp(msg: &AgentMessage) -> u64 {
             | Message::Assistant { timestamp, .. }
             | Message::ToolResult { timestamp, .. },
         ) => *timestamp,
-        AgentMessage::Extension(_) => 0,
+        AgentMessage::Custom(_) => 0,
     }
 }
 
@@ -1251,12 +1251,9 @@ mod tests {
 
     #[test]
     fn extension_message_token_estimate_includes_message_overhead() {
-        let extension = ExtensionMessage::new("status", serde_json::json!({"state": "ready"}));
+        let extension = CustomMessage::new("status", serde_json::json!({"state": "ready"}));
         let expected = estimate_tokens(&extension.data.to_string()) + 4;
-        assert_eq!(
-            message_tokens(&AgentMessage::Extension(extension)),
-            expected
-        );
+        assert_eq!(message_tokens(&AgentMessage::Custom(extension)), expected);
     }
 
     #[test]

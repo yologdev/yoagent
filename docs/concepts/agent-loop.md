@@ -314,8 +314,8 @@ impl CompactionStrategy for SemanticPointerCompaction {
         // Insert a marker after the first kept messages
         let mut result = compacted;
         let insert_at = config.keep_first.min(result.len());
-        result.insert(insert_at, AgentMessage::Extension(
-            ExtensionMessage::new("compaction_marker", serde_json::json!({
+        result.insert(insert_at, AgentMessage::Custom(
+            CustomMessage::new("compaction_marker", serde_json::json!({
                 "dropped": dropped_count,
                 "note": format!("{} earlier messages were compacted", dropped_count),
             }))

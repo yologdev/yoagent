@@ -81,7 +81,7 @@ Extension messages use a nested structure:
 | `Content` | Yes | Yes | Yes |
 | `Message` | Yes | Yes | Yes |
 | `AgentMessage` | Yes | Yes | Yes |
-| `ExtensionMessage` | Yes | Yes | Yes |
+| `CustomMessage` | Yes | Yes | Yes |
 | `Usage` | Yes | Yes | Yes |
 | `StopReason` | Yes | Yes | Yes |
 | `ToolResult` | Yes | Yes | Yes |

@@ -322,14 +322,20 @@ impl Message {
 // AgentMessage — LLM messages + extensible custom types
 // ---------------------------------------------------------------------------
 
+/// An app-specific message kept in the history but never sent to the model:
+/// UI-only notes, notifications, bookkeeping. Named `ExtensionMessage`
+/// before 0.25 (renamed so it isn't confused with
+/// [`Extension`](crate::Extension), the plug-in contract).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ExtensionMessage {
+pub struct CustomMessage {
     pub role: String,
     pub kind: String,
     pub data: serde_json::Value,
 }
 
-impl ExtensionMessage {
+impl CustomMessage {
+    /// A message of `kind` carrying `data`. Its `role` is `"extension"`, the
+    /// value stored sessions already hold, so saved data reads back the same.
     pub fn new(kind: impl Into<String>, data: impl Serialize) -> Self {
         Self {
             role: "extension".into(),
@@ -344,22 +350,28 @@ impl ExtensionMessage {
 pub enum AgentMessage {
     /// Standard LLM message
     Llm(Message),
-    /// App-specific message (UI-only, notifications, etc.)
-    Extension(ExtensionMessage),
+    /// App-specific message (UI-only, notifications, etc.). Called
+    /// `Extension` before 0.25; the variant name is never serialized
+    /// (`untagged`), so stored sessions are unaffected.
+    Custom(CustomMessage),
 }
+
+/// The pre-0.25 name of [`CustomMessage`].
+#[deprecated(since = "0.25.0", note = "renamed to CustomMessage")]
+pub type ExtensionMessage = CustomMessage;
 
 impl AgentMessage {
     pub fn role(&self) -> &str {
         match self {
             Self::Llm(m) => m.role(),
-            Self::Extension(ext) => &ext.role,
+            Self::Custom(custom) => &custom.role,
         }
     }
 
     pub fn as_llm(&self) -> Option<&Message> {
         match self {
             Self::Llm(m) => Some(m),
-            Self::Extension(_) => None,
+            Self::Custom(_) => None,
         }
     }
 }
