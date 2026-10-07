@@ -31,10 +31,12 @@
 //!
 //! A required extension's `tools` or `on_event` failure is recorded, not
 //! raised: from then on the run's tool calls are denied and their results
-//! withheld, and the next `before_model` or `on_stop` fails the run. A
-//! failure in the events after the run's last decision point (the final
-//! `TurnEnd` and `AgentEnd`) can no longer change the outcome: it is logged
-//! at `error` level when the run finishes.
+//! withheld, and the next `after_tool`, `before_model` or `on_stop` fails
+//! the run. When the run ends before any of those come, the failure cannot
+//! change the outcome and is only logged at `error` level in `finish`: a
+//! turn ended by an execution limit, `on_before_turn` or loop detection; a
+//! final answer that is not a plain stop (`Length`, `Refusal`, `Error`); a
+//! cancel; or a failure on the run's last events (`AgentEnd`).
 //!
 //! Required or not is the host's choice ([`RutisExtension::required`]), not
 //! a plugin's. Each hook call is bounded by a timeout (see
@@ -57,8 +59,8 @@ use std::time::Duration;
 
 use futures::FutureExt;
 use yoagent::extension::{
-    ExtensionError, InputContext, InputDecision, RunContext, RunOutcome, StopContext, StopDecision,
-    ToolOutput, TurnDecision,
+    ExtensionError, InputContext, InputDecision, RunContext, RunEnd, RunOutcome, StopContext,
+    StopDecision, ToolOutput, TurnDecision,
 };
 use yoagent::{
     AgentEvent, AgentTool, Content, Extension, ExtensionMode, Message, RunHooks, ToolCallRequest,
@@ -136,8 +138,8 @@ impl RutisExtension {
     /// Make plugin failures fail the run: a handler whose `tools`,
     /// `before_model`, `after_tool`, `on_stop` or `on_event` fails ends the
     /// run with yoagent's `[Extension failed: ...]` error (a `tools` or
-    /// `on_event` failure at the run's next decision point; one in the
-    /// run's last events is only logged). By default they are logged and the
+    /// `on_event` failure at the run's next decision point; when the run
+    /// ends before one comes, it is only logged — see the module docs). By default they are logged and the
     /// handler is skipped. A failing `before_tool` denies the call and a
     /// failing `on_input` rejects the input either way. A handler whose
     /// plugin unloaded mid-run never fails the run.
@@ -723,10 +725,20 @@ impl RunHooks for RunState {
         futures::future::join_all(closing).await;
         // After the flush, so a language plugin's late delivery failure counts.
         if let Some(why) = this.take_failure() {
-            // Recorded after the run's last decision point (a handler failing
-            // on the final `TurnEnd`, say): too late to fail the run. One on
+            // Handed over through `after_tool` (an `Err`), the run already
+            // failed on it. Otherwise no later decision point came (see the
+            // module docs): too late to fail the run, so it is logged. One on
             // `AgentEnd`, sent after `finish`, is logged where it happens.
-            tracing::error!(run_id = %this.run.run_id, "a required plugin handler failed after the run's last decision point: {why}");
+            let failed = matches!(
+                outcome.end(),
+                RunEnd::Failed {
+                    extension: Some(_),
+                    ..
+                }
+            );
+            if !failed {
+                tracing::error!(run_id = %this.run.run_id, "a required plugin handler failed with no later point to fail the run: {why}");
+            }
         }
         let finishing = this.with(|h| h.hooks.finish).map(|h| async move {
             let done = call(
