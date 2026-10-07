@@ -98,7 +98,7 @@ What the summaries cost is in the run's `SessionStats::compaction` (priced at th
 summarization model's own `cost`) and in `total_cost_usd()` / `total_usage()`; a
 request still in flight when a run ends is counted by the next run. Per
 compaction, `LlmCompaction::with_event_sender` reports each request on
-`AgentEvent::ContextCompacted` — the same spend, so do not add the two.
+`AgentEvent::ContextCompacted` — largely the same spend, so do not add the two. (They can differ: events report each spliced summary, while the stats count every request when it finishes, including discarded ones.)
 `replace_messages()` and `compact_messages()` remain available for manual
 control.
 

@@ -1478,6 +1478,10 @@ impl Agent {
     /// Only the compaction part, already included in
     /// [`total_cost_usd`](Self::total_cost_usd) /
     /// [`total_usage`](Self::total_usage), which cover the same window.
+    ///
+    /// A summary request is counted by the run that drains it, so one that
+    /// finishes after the last run (or is in flight at [`reset`](Self::reset))
+    /// lands in the next run's figures, after a reset.
     pub fn compaction_spend(&self) -> &CompactionSpend {
         &self.spend.compaction
     }
