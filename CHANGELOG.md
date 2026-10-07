@@ -28,10 +28,14 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- **The decision features run as extensions** (#241 dogfooding). `with_tool_gate`, `with_input_guard` and `with_decision_model` install a `ToolGate` (`before_tool`), an `InputGuard` (`on_input`) and the advisor (a `before_model` note); each keeps its old trait impl for installing by hand. Three ordering effects:
+- **The decision features run as extensions** (#241 dogfooding). `with_tool_gate`, `with_input_guard` and `with_decision_model` install a `ToolGate` (`before_tool`), an `InputGuard` (`on_input`) and the advisor (a `before_model` note); the gate and guard keep their old trait impls, now deprecated (below). Three ordering effects:
   - the gate runs after every middleware **and extension**, so it also judges arguments an extension rewrote;
   - the guard screens after all input filters, not in their list;
   - the advisor's hint comes before turn-hook notes and is judged once per turn rather than once per provider attempt (it was memoized per request, so the same request is sent).
+
+### Deprecated
+
+- **`ToolGate` as a `ToolMiddleware` and `InputGuard` as an `AsyncInputFilter`.** Install them with `with_tool_gate` / `with_input_guard` (or as extensions), and drive them outside the loop with the new `ToolGate::check(&call)` and `InputGuard::screen(text)`. Rust cannot mark a trait impl `#[deprecated]`, so the first use of each logs a warning; both impls will be removed in a later release. A gate installed as a middleware runs before every extension, so it does not judge arguments an extension rewrites.
 
 ### Changed (breaking)
 

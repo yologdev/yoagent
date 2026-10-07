@@ -630,10 +630,10 @@ impl Agent {
     /// - **Fails closed:** a decision-model error, timeout, or malformed
     ///   answer denies the call.
     /// - **Runs last**, after every middleware and extension, whenever you
-    ///   add them, so it judges the arguments that will actually run. (A
-    ///   `ToolGate` installed by hand with
-    ///   [`with_tool_middleware`](Self::with_tool_middleware) must be added
-    ///   last yourself, and runs before any extension.)
+    ///   add them, so it judges the arguments that will actually run.
+    ///   (Installing a `ToolGate` with
+    ///   [`with_tool_middleware`](Self::with_tool_middleware) is deprecated:
+    ///   it then runs before every extension.)
     /// - **This agent only:** calls made inside a
     ///   [`SubAgentTool`](crate::SubAgentTool) are not covered; give it its
     ///   own gate, where the "user request" is the task text this agent
