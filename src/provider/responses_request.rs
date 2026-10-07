@@ -249,7 +249,8 @@ fn assistant_items(content: &[Content], replay: Option<ApiProtocol>, input: &mut
             }
             Content::Text { text } if text.is_empty() => {}
             Content::Text { text } => {
-                input.append(&mut pending_reasoning);
+                let paired = message_id.is_some();
+                release_reasoning(&mut pending_reasoning, paired, input);
                 let mut item = json!({
                     "type": "message",
                     "role": "assistant",
@@ -266,7 +267,8 @@ fn assistant_items(content: &[Content], replay: Option<ApiProtocol>, input: &mut
                 arguments,
                 ..
             } => {
-                input.append(&mut pending_reasoning);
+                let paired = call_ids.contains_key(id);
+                release_reasoning(&mut pending_reasoning, paired, input);
                 let mut item = json!({
                     "type": "function_call",
                     "call_id": id,
@@ -288,6 +290,28 @@ fn assistant_items(content: &[Content], replay: Option<ApiProtocol>, input: &mut
             "Responses: {} trailing reasoning item(s) with no output after them; not replayed",
             pending_reasoning.len()
         );
+    }
+}
+
+/// Send the reasoning items waiting for their following output item —
+/// unless that item has no recorded id (`paired` false): the API pairs a
+/// reasoning item with the item that follows it by id and rejects one
+/// without, on this request and every later one. Such reasoning is dropped
+/// with a warning; the stream side already drops it for new responses, so
+/// this catches history stored before it did.
+fn release_reasoning(pending: &mut Vec<Value>, paired: bool, input: &mut Vec<Value>) {
+    if pending.is_empty() {
+        return;
+    }
+    if paired {
+        input.append(pending);
+    } else {
+        warn!(
+            "Responses: {} reasoning item(s) whose following output item has no recorded id; \
+             not replayed",
+            pending.len()
+        );
+        pending.clear();
     }
 }
 

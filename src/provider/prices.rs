@@ -192,6 +192,7 @@ pub fn enable_bundled() -> Vec<PriceChange> {
 #[cfg_attr(docsrs, doc(cfg(feature = "native")))]
 #[derive(Debug, Clone)]
 #[non_exhaustive]
+#[must_use = "a fetch that failed falls back to the bundled snapshot; check `fell_back()` or `origin`"]
 pub struct LivePrices {
     /// Where the prices came from. [`PriceOrigin::Builtin`] means the fetch
     /// failed (see [`PriceOrigin::fetch_error`]) and only the bundled

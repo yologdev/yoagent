@@ -593,8 +593,39 @@ pub fn load_env_override() -> Result<Option<PriceTable>, PriceError> {
 }
 
 /// The rates a first-party constructor gets for `(provider, id)`.
+///
+/// A miss while some prices are in effect but the bundled snapshot is not
+/// (only `YOAGENT_PRICES`, [`install_override`] or [`install_fetched`]) is
+/// warned about once per `(provider, id)`: the process asked for prices, so
+/// a model silently left unpriced is more likely a gap in the caller's table
+/// than an intent. With the snapshot on, a miss is a model the snapshot does
+/// not list either, as before — not warned.
 pub(crate) fn resolved_cost(provider: &str, id: &str) -> Option<CostConfig> {
-    read_layers().resolved.cost(provider, id)
+    let (cost, warn) = {
+        let layers = read_layers();
+        let cost = layers.resolved.cost(provider, id);
+        let warn = cost.is_none() && !layers.bundled && !layers.resolved.is_empty();
+        (cost, warn)
+    };
+    if warn && first_miss(provider, id) {
+        tracing::warn!(
+            provider,
+            model = id,
+            "yoagent prices: {provider}/{id} is not in the prices in effect (a user or              fetched table, without the bundled snapshot), so it is unpriced; add it to              that table, or enable the snapshot under it with prices::enable_bundled"
+        );
+    }
+    cost
+}
+
+/// Whether this is the first unpriced lookup of `(provider, id)` warned
+/// about by [`resolved_cost`].
+fn first_miss(provider: &str, id: &str) -> bool {
+    static SEEN: OnceLock<std::sync::Mutex<std::collections::HashSet<(String, String)>>> =
+        OnceLock::new();
+    SEEN.get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert((provider.to_string(), id.to_string()))
 }
 
 #[cfg(test)]
