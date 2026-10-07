@@ -20,7 +20,8 @@
 //!   available"*, one **in flight** is abandoned with *"plugin unloaded
 //!   during the call"*;
 //! - its `before_tool` denies every call, its `on_input` rejects, its
-//!   `after_tool` withholds the result (fail closed);
+//!   `after_tool` withholds the result (fail closed — but an unload is not a
+//!   failure, so a [`required`](crate::RutisExtension::required) run goes on);
 //! - its `before_model`, `on_stop`, `on_event` and `finish` are skipped.
 //!
 //! The same holds for a restart or config update: the run keeps the old

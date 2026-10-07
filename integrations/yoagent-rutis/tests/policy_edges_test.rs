@@ -479,6 +479,76 @@ async fn a_required_on_event_failure_stops_pending_tool_calls_and_fails_the_run(
     root.shutdown().await.unwrap();
 }
 
+fn event_kind(e: &AgentEvent) -> String {
+    serde_json::to_value(e).unwrap()["type"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_required_on_event_failure_keeps_the_bus_and_other_observers_going() {
+    let (root, bridge) = setup();
+    let fragile = root.plugin(plugin(panics_on_tool_use("fragile-observer")));
+    wait_active(&fragile).await;
+    let handled = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let steady = root.plugin(plugin(handler("steady-observer").with_on_event({
+        let handled = handled.clone();
+        move |_run, event| handled.lock().unwrap().push(event_kind(event))
+    })));
+    wait_active(&steady).await;
+    let bus = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let listener = root.plugin(Setup::new("bus-listener", {
+        let bus = bus.clone();
+        move |ctx| {
+            let bus = bus.clone();
+            ctx.on_agent_event(move |e| bus.lock().unwrap().push(event_kind(e.event())))
+                .map(drop)
+        }
+    }));
+    wait_active(&listener).await;
+
+    let (agent, _) = agent(vec![call("act", serde_json::json!({})), text("done")]);
+    let tool = Reply::new("act", "acted");
+    let runs = tool.runs();
+    let mut agent = agent
+        .with_tools(vec![Box::new(tool)])
+        .with_extension(bridge.extension().required());
+    run(&mut agent, "go").await;
+
+    assert_eq!(
+        runs.load(Ordering::SeqCst),
+        0,
+        "the pending call was denied"
+    );
+    let error = run_error(&agent).expect("the run failed");
+    assert!(
+        error.contains("fragile-observer") && error.contains("observer bug"),
+        "{error}"
+    );
+    // The other handler saw the whole run, to its end...
+    let handled = handled.lock().unwrap().clone();
+    assert_eq!(
+        handled.last().map(String::as_str),
+        Some("agentEnd"),
+        "{handled:?}"
+    );
+    assert!(
+        handled.iter().any(|k| k == "toolExecutionEnd"),
+        "{handled:?}"
+    );
+    // ...and so did the bus (delivered asynchronously).
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !bus.lock().unwrap().iter().any(|k| k == "agentEnd") {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the bus never saw agentEnd: {:?}", bus.lock().unwrap()));
+    assert_eq!(*bus.lock().unwrap(), handled, "the bus saw every event too");
+    root.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_restarted_root_reads_as_stopped_for_the_bridge_installed_before() {
     let (root, bridge) = setup();
@@ -534,9 +604,74 @@ async fn an_unavailable_handler_rejects_input_and_withholds_output() {
     let filtered = hooks
         .after_tool(&ToolCallRequest::new("c1", "read", &args), &mut output)
         .await;
+    // Withheld, without failing the run (not even a required one): an
+    // unloaded plugin is not a failing one.
+    assert!(filtered.is_ok(), "{filtered:?}");
+    assert!(output.is_error);
+    let text = match &output.result.content[..] {
+        [yoagent::Content::Text { text }] => text.clone(),
+        other => panic!("{other:?}"),
+    };
     assert!(
-        filtered.is_err_and(|e| e.to_string().contains("no longer available")),
-        "an unavailable filter withholds"
+        text.contains("withheld") && text.contains("no longer available"),
+        "{text}"
     );
+    assert!(!text.contains("secret"));
+    root.shutdown().await.unwrap();
+}
+
+/// Unloads a plugin while it runs, then returns a secret.
+struct UnloadsThenReplies(std::sync::Mutex<Option<rutis::FiberView>>);
+
+#[async_trait::async_trait]
+impl yoagent::AgentTool for UnloadsThenReplies {
+    fn name(&self) -> &str {
+        "read"
+    }
+    fn label(&self) -> &str {
+        "read"
+    }
+    fn description(&self) -> &str {
+        "unloads a plugin, then replies"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object", "properties": {}})
+    }
+    async fn execute(
+        &self,
+        _params: serde_json::Value,
+        _ctx: yoagent::ToolContext,
+    ) -> Result<yoagent::ToolResult, yoagent::ToolError> {
+        let view = self.0.lock().unwrap().take();
+        if let Some(view) = view {
+            view.dispose().await.unwrap();
+        }
+        Ok(yoagent::ToolResult {
+            content: vec![yoagent::Content::Text {
+                text: "secret".into(),
+            }],
+            details: serde_json::Value::Null,
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_redactor_unloading_mid_run_withholds_without_failing_a_required_run() {
+    let (root, bridge) = setup();
+    let redactor = root.plugin(plugin(handler("redactor").with_after_tool(|_, _| Ok(()))));
+    wait_active(&redactor).await;
+    let (agent, seen) = agent(vec![call("read", serde_json::json!({})), text("done")]);
+    let mut agent = agent
+        .with_tools(vec![Box::new(UnloadsThenReplies(std::sync::Mutex::new(
+            Some(redactor),
+        )))])
+        .with_extension(bridge.extension().required());
+    let (_, results) = run(&mut agent, "go").await;
+    assert_eq!(results.len(), 1, "{results:?}");
+    let (_, text, is_error) = &results[0];
+    assert!(*is_error && text.contains("withheld"), "{text}");
+    assert!(!text.contains("secret"), "{text}");
+    assert_eq!(seen.lock().unwrap().len(), 2, "the run went on");
+    assert_eq!(run_error(&agent), None);
     root.shutdown().await.unwrap();
 }

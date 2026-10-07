@@ -21,8 +21,20 @@
 //! | `before_tool` | A `Deny` wins; a `Modify` feeds the next handler | Denies the call |
 //! | `after_tool` | Each sees the previous handler's edit | Withholds the result (a required extension fails the run) |
 //! | `on_stop` | Every `Continue` message is sent, joined | Skipped (a required extension fails the run) |
-//! | `on_event` | All, in order, synchronously | Switched off for the run (a required extension fails the run) |
+//! | `on_event` | All, in order, synchronously | That handler is switched off for the run; the others and bus publishing go on (a required extension fails the run, see below) |
 //! | `finish` | All, concurrently | Logged |
+//!
+//! A handler whose plugin unloaded is not a failure: it is skipped where the
+//! table says "skipped", and a hook that must not pass unjudged still fails
+//! closed — `before_tool` denies, `on_input` rejects, `after_tool` withholds
+//! the result (without failing a required run).
+//!
+//! A required extension's `tools` or `on_event` failure is recorded, not
+//! raised: from then on the run's tool calls are denied and their results
+//! withheld, and the next `before_model` or `on_stop` fails the run. A
+//! failure in the events after the run's last decision point (the final
+//! `TurnEnd` and `AgentEnd`) can no longer change the outcome: it is logged
+//! at `error` level when the run finishes.
 //!
 //! Required or not is the host's choice ([`RutisExtension::required`]), not
 //! a plugin's. Each hook call is bounded by a timeout (see
@@ -123,9 +135,12 @@ impl RutisExtension {
 
     /// Make plugin failures fail the run: a handler whose `tools`,
     /// `before_model`, `after_tool`, `on_stop` or `on_event` fails ends the
-    /// run with yoagent's `[Extension failed: ...]` error. By default they
-    /// are logged and the handler is skipped. A failing `before_tool` denies
-    /// the call and a failing `on_input` rejects the input either way.
+    /// run with yoagent's `[Extension failed: ...]` error (a `tools` or
+    /// `on_event` failure at the run's next decision point; one in the
+    /// run's last events is only logged). By default they are logged and the
+    /// handler is skipped. A failing `before_tool` denies the call and a
+    /// failing `on_input` rejects the input either way. A handler whose
+    /// plugin unloaded mid-run never fails the run.
     pub fn required(mut self) -> Self {
         self.mode = ExtensionMode::Required;
         self
@@ -264,10 +279,11 @@ struct RunState {
     timeouts: Timeouts,
     handlers: Vec<Registered>,
     events: Vec<Observer>,
-    /// A required failure recorded where it could not end the run: one in
-    /// `before_model` / `on_stop` (returned as `Fail` right away), or, in a
-    /// build where panics abort, one in `tools` / `on_event` (see
-    /// [`RunState::escalate`]). Tool calls are denied while it is pending.
+    /// A required failure not yet handed to yoagent: one in `before_model` /
+    /// `on_stop` (returned as `Fail` right away), or one in `tools` /
+    /// `on_event`, which have no way to fail the run themselves. While it is
+    /// pending, tool calls are denied and results withheld; the next
+    /// `before_model` or `on_stop` returns it as `Fail`.
     failure: Mutex<Option<String>>,
 }
 
@@ -363,25 +379,6 @@ impl RunState {
         }
     }
 
-    /// A handler of `tools` or `on_event` failed. yoagent learns of a failure
-    /// there only from a panic, so a required one is handed over as one (a
-    /// `resume_unwind`, which does not run the panic hook): yoagent then
-    /// stops tool calls not started yet and fails the run at its next
-    /// boundary, whatever that is. Where panics abort, it is recorded
-    /// instead and acted on at the next tool call, model request or stop.
-    fn escalate(&self, missed: Missed) {
-        match missed {
-            Missed::Failed(why) if self.required => {
-                tracing::error!(run_id = %self.run.run_id, "{why}");
-                #[cfg(panic = "unwind")]
-                std::panic::resume_unwind(Box::new(why));
-                #[cfg(not(panic = "unwind"))]
-                self.record(why);
-            }
-            other => self.skipped(&other),
-        }
-    }
-
     /// The pending required failure, without taking it.
     fn pending(&self) -> Option<String> {
         self.failure
@@ -465,7 +462,9 @@ impl RunHooks for RunState {
                             offer(tool, h, &mut tools);
                         }
                     }
-                    Err(missed) => self.escalate(missed),
+                    // Not raised as a panic: recorded, and handed to yoagent
+                    // at the next decision point (`before_model` comes next).
+                    Err(missed) => self.skipped(&missed),
                 }
             }
         }
@@ -594,8 +593,24 @@ impl RunHooks for RunState {
             .await;
             match edited {
                 Ok(edited) => *output = edited,
+                // The plugin went (a reload, say): not a failure, so a
+                // required run goes on, but the result is not let through
+                // unfiltered either.
+                Err(Missed::Unavailable(why)) => {
+                    tracing::warn!(run_id = %self.run.run_id, tool = request.tool_name, "withholding the result: {why}");
+                    *output = ToolOutput::new(
+                        yoagent::ToolResult {
+                            content: vec![Content::Text {
+                                text: format!("Tool result withheld: {why}."),
+                            }],
+                            details: serde_json::Value::Null,
+                        },
+                        true,
+                    );
+                    return Ok(());
+                }
                 // yoagent withholds the result (and fails a required run).
-                Err(missed) => return Err(ExtensionError::new(missed.reason())),
+                Err(Missed::Failed(why)) => return Err(ExtensionError::new(why)),
             }
         }
         Ok(())
@@ -643,6 +658,9 @@ impl RunHooks for RunState {
         }
     }
 
+    /// Never unwinds: yoagent would switch the whole extension's `on_event`
+    /// off for the run, silencing bus publishing and every other handler. A
+    /// failing handler is switched off alone and its failure recorded.
     fn on_event(&self, event: &AgentEvent) {
         if !self.closed {
             crate::events::publish(&self.host, &self.run, event);
@@ -654,19 +672,19 @@ impl RunHooks for RunState {
             let sent = std::panic::catch_unwind(AssertUnwindSafe(|| observer.sink.send(event)));
             if let Err(payload) = sent {
                 observer.off.store(true, Ordering::Relaxed);
-                let missed = Missed::Failed(format!(
+                self.skipped(&Missed::Failed(format!(
                     "plugin handler `{}` panicked in `on_event`: {} (not called again this run)",
                     observer.handler.name,
                     panic_text(&*payload)
-                ));
-                self.escalate(missed);
+                )));
             }
         }
     }
 
     async fn finish(&mut self, outcome: &RunOutcome) {
         if let Some(why) = self.take_failure() {
-            // Only where panics abort: yoagent could not be told in time.
+            // Recorded after the run's last decision point (a handler failing
+            // on the final `TurnEnd` / `AgentEnd`, say): too late to fail it.
             tracing::error!(run_id = %self.run.run_id, "a required plugin handler failed after the run's last decision point: {why}");
         }
         let this = &*self;
