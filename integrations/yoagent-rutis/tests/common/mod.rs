@@ -266,7 +266,7 @@ impl Setup {
     ) -> Self {
         Self {
             name: name.into(),
-            injects: vec![rutis::TypeKey::of::<yoagent_rutis::ToolRegistry>()],
+            injects: vec![rutis::TypeKey::of::<yoagent_rutis::Registry>()],
             apply: Arc::new(apply),
         }
     }
@@ -308,12 +308,52 @@ impl rutis::PluginFactory<String> for GreeterFactory {
     }
     fn injects(&self) -> &[rutis::TypeKey] {
         static KEYS: std::sync::OnceLock<Vec<rutis::TypeKey>> = std::sync::OnceLock::new();
-        KEYS.get_or_init(|| vec![rutis::TypeKey::of::<yoagent_rutis::ToolRegistry>()])
+        KEYS.get_or_init(|| vec![rutis::TypeKey::of::<yoagent_rutis::Registry>()])
     }
     fn build(&self, greeting: &String) -> Result<Box<dyn rutis::Plugin>, rutis::CordisError> {
-        Ok(Box::new(
-            yoagent_rutis::AgentPlugin::new("configurable-greeter")
+        Ok(Box::new(yoagent_rutis::AgentPlugin::new(
+            yoagent_rutis::Handler::new("configurable-greeter")
                 .with_tool(Reply::new("greet", greeting)),
-        ))
+        )))
     }
+}
+
+/// A plugin registering `handler`.
+pub fn plugin(handler: yoagent_rutis::Handler) -> yoagent_rutis::AgentPlugin {
+    yoagent_rutis::AgentPlugin::new(handler)
+}
+
+/// A handler named `name` (shorthand).
+pub fn handler(name: &str) -> yoagent_rutis::Handler {
+    yoagent_rutis::Handler::new(name)
+}
+
+/// A handler denying every call with `reason`.
+pub fn deny_all(name: &str, reason: &str) -> yoagent_rutis::Handler {
+    let reason = reason.to_string();
+    handler(name).with_before_tool(move |_| ToolDecision::Deny(reason.clone()))
+}
+
+/// Text blocks of a tool result, joined.
+pub fn result_text(result: &ToolResult) -> String {
+    result
+        .content
+        .iter()
+        .filter_map(|c| match c {
+            Content::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The final assistant message's error, if the run failed.
+pub fn run_error(agent: &Agent) -> Option<String> {
+    agent.messages().iter().rev().find_map(|m| match m {
+        AgentMessage::Llm(Message::Assistant {
+            stop_reason: StopReason::Error,
+            error_message,
+            ..
+        }) => error_message.clone(),
+        _ => None,
+    })
 }

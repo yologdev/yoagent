@@ -1,16 +1,18 @@
 //! Plugin tools: they appear and disappear with the plugin that provides
-//! them, at run boundaries.
+//! them, at run boundaries; sub-agents get plugin hooks through the
+//! extension.
 
 mod common;
 
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use common::*;
 use rutis::{Ctx, FiberState, FiberView, TypeKey};
-use yoagent::provider::mock::MockResponse;
-use yoagent::{AgentTool, SubAgentTool, ToolContext, ToolError, ToolResult};
-use yoagent_rutis::{AgentPlugin, AgentRutisExt, PluginCtxExt, RutisBridge, ToolVerdict};
+use yoagent::extension::InputDecision;
+use yoagent::provider::mock::{MockResponse, MockToolCall};
+use yoagent::{AgentTool, SubAgentTool, ToolContext, ToolDecision, ToolError, ToolResult};
+use yoagent_rutis::{PluginCtxExt, RutisBridge};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_plugin_tool_is_offered_while_the_plugin_is_loaded() {
@@ -21,11 +23,11 @@ async fn a_plugin_tool_is_offered_while_the_plugin_is_loaded() {
         call("greet", serde_json::json!({})),
         text("done"),
     ]);
-    let mut agent = agent.with_rutis(&bridge);
+    let mut agent = agent.with_extension(bridge.extension());
 
     let greet = Reply::new("greet", "hello from the plugin");
     let runs = greet.runs();
-    let view = root.plugin(AgentPlugin::new("greeter").with_tool(greet));
+    let view = root.plugin(plugin(handler("greeter").with_tool(greet)));
     wait_active(&view).await;
 
     let (_, results) = run(&mut agent, "first").await;
@@ -37,7 +39,11 @@ async fn a_plugin_tool_is_offered_while_the_plugin_is_loaded() {
     assert_eq!(seen.lock().unwrap()[0].tools, vec!["greet".to_string()]);
 
     view.dispose().await.unwrap();
-    assert!(bridge.registry().names().is_empty(), "unload removed it");
+    assert!(
+        bridge.registry().tool_names().is_empty(),
+        "unload removed it"
+    );
+    assert!(bridge.registry().handlers().is_empty());
 
     let (_, results) = run(&mut agent, "second").await;
     let requests = seen.lock().unwrap().clone();
@@ -90,7 +96,7 @@ async fn a_tool_whose_plugin_unloads_mid_run_fails_cleanly() {
     let (root, bridge) = setup();
     let greet = Reply::new("greet", "hello");
     let runs = greet.runs();
-    let view = root.plugin(AgentPlugin::new("greeter").with_tool(greet));
+    let view = root.plugin(plugin(handler("greeter").with_tool(greet)));
     wait_active(&view).await;
 
     let (agent, seen) = agent(vec![
@@ -100,7 +106,7 @@ async fn a_tool_whose_plugin_unloads_mid_run_fails_cleanly() {
     ]);
     let mut agent = agent
         .with_tools(vec![Box::new(Unload(view.clone()))])
-        .with_rutis(&bridge);
+        .with_extension(bridge.extension());
 
     let (_, results) = run(&mut agent, "go").await;
     // Per run: still offered on the turn after the unload...
@@ -113,47 +119,45 @@ async fn a_tool_whose_plugin_unloads_mid_run_fails_cleanly() {
     root.shutdown().await.unwrap();
 }
 
+fn calls(names: &[&str]) -> MockResponse {
+    MockResponse::ToolCalls(
+        names
+            .iter()
+            .map(|name| MockToolCall {
+                provider_metadata: None,
+                name: (*name).into(),
+                arguments: serde_json::json!({}),
+            })
+            .collect(),
+    )
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn two_plugins_contribute_and_a_taken_name_is_refused() {
     let (root, bridge) = setup();
-    let a = root.plugin(AgentPlugin::new("a").with_tool(Reply::new("alpha", "from a")));
+    let a = root.plugin(plugin(
+        handler("a").with_tool(Reply::new("alpha", "from a")),
+    ));
     wait_active(&a).await;
-    let b = root.plugin(AgentPlugin::new("b").with_tool(Reply::new("beta", "from b")));
+    let b = root.plugin(plugin(handler("b").with_tool(Reply::new("beta", "from b"))));
     wait_active(&b).await;
-    // A third plugin wants a name `a` holds: refused, so it fails to load.
-    let c = root.plugin(AgentPlugin::new("c").with_tool(Reply::new("alpha", "from c")));
+    // A third plugin wants a tool name `a` holds: refused, so it fails to load.
+    let c = root.plugin(plugin(
+        handler("c").with_tool(Reply::new("alpha", "from c")),
+    ));
     wait_state(&c, FiberState::Failed).await;
     let failure = c.state().error.expect("failed with an error").to_string();
     assert!(failure.contains("alpha"), "{failure}");
 
-    let (agent, seen) = agent(vec![
-        MockResponse::ToolCalls(vec![
-            yoagent::provider::mock::MockToolCall {
-                provider_metadata: None,
-                name: "alpha".into(),
-                arguments: serde_json::json!({}),
-            },
-            yoagent::provider::mock::MockToolCall {
-                provider_metadata: None,
-                name: "beta".into(),
-                arguments: serde_json::json!({}),
-            },
-            yoagent::provider::mock::MockToolCall {
-                provider_metadata: None,
-                name: "own".into(),
-                arguments: serde_json::json!({}),
-            },
-        ]),
-        text("done"),
-    ]);
+    let (agent, seen) = agent(vec![calls(&["alpha", "beta", "own"]), text("done")]);
     // Plugin `d` offers a tool named like the agent's own `own`: the registry
     // accepts it (no other plugin holds the name), and at run time the
     // agent's own tool wins.
-    let d = root.plugin(AgentPlugin::new("d").with_tool(Reply::new("own", "from d")));
+    let d = root.plugin(plugin(handler("d").with_tool(Reply::new("own", "from d"))));
     wait_active(&d).await;
     let mut agent = agent
         .with_tools(vec![Box::new(Reply::new("own", "static wins"))])
-        .with_rutis(&bridge);
+        .with_extension(bridge.extension());
 
     let (_, results) = run(&mut agent, "go").await;
     assert_eq!(
@@ -168,6 +172,64 @@ async fn two_plugins_contribute_and_a_taken_name_is_refused() {
             ("own".into(), "static wins".into(), false),
         ]
     );
+    root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_taken_handler_name_is_refused() {
+    let (root, bridge) = setup();
+    let first = root.plugin(Setup::new("first", |ctx| {
+        ctx.register_handler(handler("policy")).map(drop)
+    }));
+    wait_active(&first).await;
+    let second = root.plugin(Setup::new("second", |ctx| {
+        ctx.register_handler(handler("policy")).map(drop)
+    }));
+    wait_state(&second, FiberState::Failed).await;
+    let failure = second.state().error.unwrap().to_string();
+    assert!(
+        failure.contains("policy") && failure.contains("first"),
+        "names the handler and its holder: {failure}"
+    );
+    let handlers = bridge.registry().handlers();
+    assert_eq!(handlers.len(), 1);
+    assert_eq!(handlers[0].owner(), "first");
+    root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tools_hook_offers_tools_per_run_and_earlier_handlers_win_a_clash() {
+    let (root, bridge) = setup();
+    let generation = Arc::new(Mutex::new("v1".to_string()));
+    let dynamic = root.plugin(plugin(handler("dynamic").with_tools({
+        let generation = generation.clone();
+        move |_run| {
+            let reply = generation.lock().unwrap().clone();
+            vec![Arc::new(Reply::new("probe", &reply)) as Arc<dyn AgentTool>]
+        }
+    })));
+    wait_active(&dynamic).await;
+    // A later handler offering the same name loses (no registration check
+    // for per-run tools).
+    let later = root.plugin(plugin(
+        handler("later").with_tools(|_| vec![Arc::new(Reply::new("probe", "later")) as _]),
+    ));
+    wait_active(&later).await;
+
+    let (agent, seen) = agent(vec![
+        call("probe", serde_json::json!({})),
+        text("done"),
+        call("probe", serde_json::json!({})),
+        text("done"),
+    ]);
+    let mut agent = agent.with_extension(bridge.extension());
+    let (_, results) = run(&mut agent, "first").await;
+    assert_eq!(results, vec![("probe".into(), "v1".into(), false)]);
+    assert_eq!(seen.lock().unwrap()[0].tools, vec!["probe".to_string()]);
+
+    *generation.lock().unwrap() = "v2".into();
+    let (_, results) = run(&mut agent, "second").await;
+    assert_eq!(results, vec![("probe".into(), "v2".into(), false)]);
     root.shutdown().await.unwrap();
 }
 
@@ -196,23 +258,23 @@ async fn a_dependency_going_away_takes_the_dependents_tools_with_it() {
     let consumer = root.plugin(consumer());
     (&consumer).await.unwrap();
     assert_eq!(consumer.state().state, FiberState::Pending);
-    assert!(bridge.registry().names().is_empty());
+    assert!(bridge.registry().tool_names().is_empty());
 
     let v1 = root.plugin(backend("v1"));
     wait_active(&consumer).await;
-    assert_eq!(bridge.registry().names(), vec!["query".to_string()]);
+    assert_eq!(bridge.registry().tool_names(), vec!["query".to_string()]);
 
     // Unloading the provider evicts the consumer, and its tool with it.
     v1.dispose().await.unwrap();
     wait_state(&consumer, FiberState::Pending).await;
-    assert!(bridge.registry().names().is_empty());
+    assert!(bridge.registry().tool_names().is_empty());
 
     let (agent, seen) = agent(vec![
         text("nothing to do"),
         call("query", serde_json::json!({})),
         text("done"),
     ]);
-    let mut agent = agent.with_rutis(&bridge);
+    let mut agent = agent.with_extension(bridge.extension());
     run(&mut agent, "while the backend is down").await;
     assert!(seen.lock().unwrap()[0].tools.is_empty());
 
@@ -239,7 +301,7 @@ async fn a_config_update_changes_the_tool_between_runs() {
         call("greet", serde_json::json!({})),
         text("done"),
     ]);
-    let mut agent = agent.with_rutis(&bridge);
+    let mut agent = agent.with_extension(bridge.extension());
     let (_, results) = run(&mut agent, "first").await;
     assert_eq!(results, vec![("greet".into(), "hello".into(), false)]);
 
@@ -250,28 +312,35 @@ async fn a_config_update_changes_the_tool_between_runs() {
     root.shutdown().await.unwrap();
 }
 
+/// The plugin used by the sub-agent tests: two tools, a policy denying one
+/// of them (and the child's own `act`), an input check.
+fn child_plugin(greet: Reply, secret: Reply) -> yoagent_rutis::AgentPlugin {
+    plugin(
+        handler("child-plugin")
+            .with_tool(greet)
+            .with_tool(secret)
+            .with_before_tool(|call| match call.tool.as_str() {
+                "secret" | "act" => ToolDecision::Deny(format!("{} is off limits", call.tool)),
+                _ => ToolDecision::Allow,
+            })
+            .with_on_input(|input| {
+                if input.text.contains("forbidden") {
+                    InputDecision::Reject("forbidden task".into())
+                } else {
+                    InputDecision::Pass
+                }
+            }),
+    )
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn a_sub_agent_attached_to_the_bridge_gets_tools_policy_and_input_filter() {
+async fn a_sub_agent_with_the_extension_gets_tools_policy_and_input_checks() {
     let (root, bridge) = setup();
     let greet = Reply::new("greet", "hi");
     let greet_runs = greet.runs();
     let secret = Reply::new("secret", "leaked");
     let secret_runs = secret.runs();
-    let view = root.plugin(
-        AgentPlugin::new("child-plugin")
-            .with_tool(greet)
-            .with_tool(secret)
-            .with_policy(|call| match call.tool_name() {
-                "secret" => ToolVerdict::deny("secret is off limits"),
-                _ => ToolVerdict::Allow,
-            })
-            .with_input_check(|input| {
-                input
-                    .text()
-                    .contains("forbidden")
-                    .then(|| "forbidden task".to_string())
-            }),
-    );
+    let view = root.plugin(child_plugin(greet, secret));
     wait_active(&view).await;
 
     let (child, child_seen) = recording(vec![
@@ -280,7 +349,7 @@ async fn a_sub_agent_attached_to_the_bridge_gets_tools_policy_and_input_filter()
         text("child done"),
     ]);
     let sub = SubAgentTool::from_provider("helper", child, yoagent::provider::ModelConfig::mock())
-        .with_rutis(&bridge);
+        .with_extension(bridge.extension());
     let (parent, _) = agent(vec![
         call("helper", serde_json::json!({"task": "greet"})),
         call(
@@ -297,11 +366,7 @@ async fn a_sub_agent_attached_to_the_bridge_gets_tools_policy_and_input_filter()
         child_seen[0].tools,
         vec!["greet".to_string(), "secret".into()]
     );
-    assert_eq!(
-        greet_runs.load(Ordering::SeqCst),
-        1,
-        "the allowed plugin tool ran"
-    );
+    assert_eq!(greet_runs.load(Ordering::SeqCst), 1, "the allowed tool ran");
     assert_eq!(
         secret_runs.load(Ordering::SeqCst),
         0,
@@ -319,7 +384,55 @@ async fn a_sub_agent_attached_to_the_bridge_gets_tools_policy_and_input_filter()
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn installing_twice_shares_one_registry_and_provide_tool_without_a_bridge_fails() {
+async fn a_tree_extension_carries_plugin_policy_into_sub_agents_without_its_tools() {
+    let (root, bridge) = setup();
+    let greet = Reply::new("greet", "hi");
+    let secret = Reply::new("secret", "leaked");
+    let view = root.plugin(child_plugin(greet, secret));
+    wait_active(&view).await;
+
+    // The child has a tool of its own, `act`, which the plugin denies; the
+    // parent installs the bridge for its whole tree, the child nothing.
+    let act = Reply::new("act", "acted");
+    let act_runs = act.runs();
+    let (child, child_seen) =
+        recording(vec![call("act", serde_json::json!({})), text("child done")]);
+    let sub = SubAgentTool::from_provider("helper", child, yoagent::provider::ModelConfig::mock())
+        .with_tools(vec![Arc::new(act)]);
+    let (parent, parent_seen) = agent(vec![
+        call("helper", serde_json::json!({"task": "act"})),
+        call("helper", serde_json::json!({"task": "the forbidden one"})),
+        text("done"),
+    ]);
+    let mut parent = parent
+        .with_sub_agent(sub)
+        .with_tree_extension(bridge.extension());
+    let (_, results) = run(&mut parent, "delegate").await;
+
+    assert!(
+        parent_seen.lock().unwrap()[0]
+            .tools
+            .contains(&"greet".to_string()),
+        "the parent's run is offered the plugin tools"
+    );
+    let child_seen = child_seen.lock().unwrap().clone();
+    assert_eq!(
+        child_seen[0].tools,
+        vec!["act".to_string()],
+        "a tree extension's tools are not offered to child runs"
+    );
+    assert_eq!(act_runs.load(Ordering::SeqCst), 0, "denied in the child");
+    assert!(
+        !results[0].2,
+        "the first delegation itself succeeds: {results:?}"
+    );
+    assert!(results[1].2, "the child's input was rejected: {results:?}");
+    assert!(results[1].1.contains("forbidden task"), "{results:?}");
+    root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn installing_twice_shares_one_registry_and_registering_without_a_bridge_fails() {
     let root = Ctx::root().unwrap();
     // No bridge yet: a plugin that does not wait for it fails to load.
     let eager = root.plugin(
