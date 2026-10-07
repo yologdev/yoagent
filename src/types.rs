@@ -809,6 +809,24 @@ pub struct ToolContext {
     /// [`report_delegated_run`](Self::report_delegated_run), so they survive a
     /// failed delegation.
     pub(crate) sub_agent_report: Option<SubAgentReport>,
+    /// Set by the loop: the tree extensions a delegated run must apply, its
+    /// depth, and the calling run's label.
+    pub(crate) delegation: Delegation,
+}
+
+/// What a run hands down to the runs it delegates to.
+#[derive(Clone, Default)]
+pub(crate) struct Delegation {
+    pub(crate) tree: Vec<Arc<dyn crate::extension::Extension>>,
+    /// The depth a delegated run has (the calling run's depth + 1).
+    pub(crate) depth: usize,
+    /// The calling run's label, which a delegated run keeps.
+    pub(crate) label: Option<String>,
+    /// The tool call this context belongs to: what a run it delegates to
+    /// was started by.
+    pub(crate) call_id: Option<String>,
+    /// The id the calling run gave its extensions (when it has any).
+    pub(crate) parent_run_id: Option<String>,
 }
 
 impl ToolContext {
@@ -826,6 +844,7 @@ impl ToolContext {
             on_update: None,
             on_progress: None,
             sub_agent_report: None,
+            delegation: Delegation::default(),
         }
     }
 
@@ -872,6 +891,27 @@ impl ToolContext {
             report.lock().unwrap_or_else(|e| e.into_inner()).push(stats);
         }
     }
+
+    /// The tree extensions ([`Agent::with_tree_extension`](crate::Agent::with_tree_extension))
+    /// a run this tool delegates to must apply, ahead of its own. A custom
+    /// delegation tool passes them on, with the depth and label, through
+    /// [`Agent::delegated_from`](crate::Agent::delegated_from) or
+    /// [`AgentLoopConfig::delegated_from`](crate::agent_loop::AgentLoopConfig::delegated_from).
+    pub fn tree_extensions(&self) -> &[Arc<dyn crate::extension::Extension>] {
+        &self.delegation.tree
+    }
+
+    /// The depth of a run this tool delegates to: 1 when called by a
+    /// top-level run.
+    pub fn delegation_depth(&self) -> usize {
+        self.delegation.depth.max(1)
+    }
+
+    /// The calling run's label ([`Agent::with_run_label`](crate::Agent::with_run_label)),
+    /// for a run this tool delegates to.
+    pub fn run_label(&self) -> Option<&str> {
+        self.delegation.label.as_deref()
+    }
 }
 
 impl Clone for ToolContext {
@@ -883,6 +923,7 @@ impl Clone for ToolContext {
             on_update: self.on_update.clone(),
             on_progress: self.on_progress.clone(),
             sub_agent_report: self.sub_agent_report.clone(),
+            delegation: self.delegation.clone(),
         }
     }
 }
@@ -1854,7 +1895,8 @@ impl<F: AsyncInputFilter> InputFilter for AsyncFilter<F> {
 
 /// Whether a user-role text was written by the loop or by compaction rather
 /// than by the user: compaction summaries and markers, execution-limit and
-/// loop-abort notes, and the loop-detection nudge.
+/// loop-abort notes, the loop-detection nudge, and extension continue
+/// messages.
 ///
 /// Use it to skip those messages when reading "what the user said" out of
 /// [`ToolCallRequest::messages`] or [`TurnContext::messages`]. The one list,
@@ -1868,6 +1910,7 @@ pub fn is_loop_injected(text: &str) -> bool {
         crate::agent_loop::AGENT_STOPPED_PREFIX,
         crate::agent_loop::LOOP_ABORT_PREFIX,
         crate::agent_loop::LOOP_NUDGE_PREFIX,
+        crate::extension::EXTENSION_MESSAGE_PREFIX,
     ]
     .iter()
     .any(|prefix| text.starts_with(prefix))

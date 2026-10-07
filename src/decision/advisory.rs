@@ -1,5 +1,6 @@
-//! Advisory integration: a [`TurnHook`] that adds at most a skill hint and a
-//! tool hint to a turn's latest user message. Advisory only — it never
+//! Advisory integration: an extension's `before_model` note (installed by
+//! `with_decision_model`) that adds at most a skill hint and a tool hint to a
+//! turn's latest user message. The advisor is also a [`TurnHook`]. Advisory only — it never
 //! blocks, never removes a tool, and on any failure adds nothing.
 
 use super::question::{Question, QuestionKind};
@@ -8,7 +9,7 @@ use crate::types::{TurnContext, TurnHook};
 use serde_json::json;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Most characters of the user's request sent as state.
@@ -346,6 +347,46 @@ impl Advisor {
 impl TurnHook for Advisor {
     async fn before_turn(&self, turn: &TurnContext<'_>) -> Option<String> {
         self.advise(turn).await
+    }
+}
+
+/// The advisor as an [`Extension`](crate::Extension): its hint is a
+/// `before_model` note. A fresh advisor is built for each run (by
+/// `decision::wire`), so its memo (one request per user request) spans that
+/// run's turns.
+pub(crate) struct AdvisorExtension(Arc<Advisor>);
+
+impl AdvisorExtension {
+    pub(crate) fn new(advisor: Advisor) -> Self {
+        Self(Arc::new(advisor))
+    }
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl crate::Extension for AdvisorExtension {
+    fn name(&self) -> &str {
+        "decision-advisor"
+    }
+
+    async fn start_run(
+        &self,
+        _run: &crate::extension::RunContext<'_>,
+    ) -> Result<Box<dyn crate::RunHooks>, crate::extension::ExtensionError> {
+        Ok(Box::new(AdvisorHooks(self.0.clone())))
+    }
+}
+
+struct AdvisorHooks(Arc<Advisor>);
+
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl crate::RunHooks for AdvisorHooks {
+    async fn before_model(&mut self, turn: &TurnContext<'_>) -> crate::extension::TurnDecision {
+        match self.0.advise(turn).await {
+            Some(note) => crate::extension::TurnDecision::Note(note),
+            None => crate::extension::TurnDecision::Continue,
+        }
     }
 }
 

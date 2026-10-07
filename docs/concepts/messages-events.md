@@ -133,7 +133,7 @@ Events emitted during the agent loop for real-time UI updates:
 | `AgentStart` | Loop begins |
 | `AgentEnd { messages, stats }` | Loop finishes: all new messages plus the run's `SessionStats` |
 | `TurnStart` | New LLM call starting |
-| `TurnEnd { message, tool_results }` | LLM call + tool execution complete |
+| `TurnEnd { message, tool_results }` | LLM call + tool execution complete. Every `TurnStart` gets one: a turn stopped before its LLM call (an execution limit, `on_before_turn` returning `false`, an extension's `Stop`, a required extension's failure, or a cancel before the first request) ends with the history's last message and no tool results |
 | `MessageStart { message }` | A message is available |
 | `MessageUpdate { message, delta }` | Streaming delta arrived |
 | `MessageEnd { message }` | Message finalized |
@@ -179,10 +179,16 @@ That `messageEnd` is **not** the turn's result when `providerRetry` follows
 it, so a client that reports failures should look at the next event first. An
 attempt that failed before streaming anything has no `messageStart`, so it
 gets only the `providerRetry`. A final failure is closed with the error the
-turn returns and is never followed by `providerRetry`. A run cancelled during
+turn returns and is never followed by `providerRetry`; one that streamed
+nothing (or a run cancelled before any output) is still announced with a
+`messageStart` and `messageEnd`, so every message in the history has its
+events. A run cancelled during
 an LLM call ends with `stopReason: "aborted"`, including one cancelled during
 a retry's backoff. Cancelling between turns or while tools run ends the run
-without a new assistant message. It appends a user message
+without a new assistant message. A tool call the run has not started yet when
+it is cancelled is answered with an error result ("the run was cancelled")
+and never runs; a tool already running sees the cancel through its
+`ToolContext`. It appends a user message
 `[Agent stopped: cancelled]` (`agent_loop::CANCELLED_MARKER`, emitted as
 `messageStart` / `messageEnd`) when the run had produced an assistant message,
 so a last assistant message of `ToolUse` does not read as a normal stop. A

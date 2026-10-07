@@ -9,33 +9,9 @@ use yoagent::provider::MockProvider;
 use yoagent::*;
 
 fn make_config(provider: MockProvider) -> AgentLoopConfig {
-    AgentLoopConfig {
-        provider: std::sync::Arc::new(provider),
-        model: "mock".into(),
-        api_key: "test".into(),
-        thinking_level: ThinkingLevel::Off,
-        max_tokens: None,
-        temperature: None,
-        model_config: None,
-        convert_to_llm: None,
-        transform_context: None,
-        get_steering_messages: None,
-        get_follow_up_messages: None,
-        context_config: None,
-        compaction_strategy: None,
-        execution_limits: None,
-        cache_config: CacheConfig::default(),
-        tool_output_sink: None,
-        output_schema: None,
-        tool_execution: ToolExecutionStrategy::default(),
-        retry_config: yoagent::RetryConfig::default(),
-        before_turn: None,
-        after_turn: None,
-        on_error: None,
-        input_filters: vec![],
-        tool_middleware: vec![],
-        turn_delay: None,
-    }
+    let mut config = AgentLoopConfig::new(std::sync::Arc::new(provider), "mock");
+    config.api_key = "test".into();
+    config
 }
 
 fn collect_events(mut rx: mpsc::UnboundedReceiver<AgentEvent>) -> Vec<AgentEvent> {
@@ -944,40 +920,17 @@ async fn test_execution_limit_counts_cached_tokens() {
     });
     let provider_for_config: std::sync::Arc<dyn StreamProvider> = provider.clone();
 
-    let config = AgentLoopConfig {
-        provider: provider_for_config,
-        model: "usage-test".into(),
-        api_key: "test".into(),
-        thinking_level: ThinkingLevel::Off,
-        max_tokens: None,
-        temperature: None,
-        model_config: None,
-        convert_to_llm: None,
-        transform_context: None,
-        get_steering_messages: None,
-        get_follow_up_messages: Some(Box::new(|| {
-            vec![AgentMessage::Llm(Message::user("follow up"))]
-        })),
-        context_config: None,
-        compaction_strategy: None,
-        execution_limits: Some(
-            ExecutionLimits::default()
-                .with_max_turns(50)
-                .with_max_total_tokens(100)
-                .with_max_duration(std::time::Duration::from_secs(60)),
-        ),
-        cache_config: CacheConfig::default(),
-        tool_output_sink: None,
-        output_schema: None,
-        tool_execution: ToolExecutionStrategy::default(),
-        retry_config: yoagent::RetryConfig::default(),
-        before_turn: None,
-        after_turn: None,
-        on_error: None,
-        input_filters: vec![],
-        tool_middleware: vec![],
-        turn_delay: None,
-    };
+    let mut config = AgentLoopConfig::new(provider_for_config, "usage-test");
+    config.api_key = "test".into();
+    config.get_follow_up_messages = Some(Box::new(|| {
+        vec![AgentMessage::Llm(Message::user("follow up"))]
+    }));
+    config.execution_limits = Some(
+        ExecutionLimits::default()
+            .with_max_turns(50)
+            .with_max_total_tokens(100)
+            .with_max_duration(std::time::Duration::from_secs(60)),
+    );
 
     let mut context = AgentContext {
         system_prompt: "test".into(),
@@ -1050,37 +1003,13 @@ async fn test_retry_on_rate_limit_succeeds() {
             inner: MockProvider::text("Success after retries"),
         });
 
-    let config = AgentLoopConfig {
-        provider: provider.clone(),
-        model: "mock".into(),
-        api_key: "test".into(),
-        thinking_level: ThinkingLevel::Off,
-        max_tokens: None,
-        temperature: None,
-        model_config: None,
-        convert_to_llm: None,
-        transform_context: None,
-        get_steering_messages: None,
-        get_follow_up_messages: None,
-        context_config: None,
-        compaction_strategy: None,
-        execution_limits: None,
-        cache_config: CacheConfig::default(),
-        tool_output_sink: None,
-        output_schema: None,
-        tool_execution: ToolExecutionStrategy::default(),
-        retry_config: yoagent::RetryConfig {
-            max_retries: 3,
-            initial_delay_ms: 10,
-            backoff_multiplier: 2.0,
-            max_delay_ms: 100,
-        },
-        before_turn: None,
-        after_turn: None,
-        on_error: None,
-        input_filters: vec![],
-        tool_middleware: vec![],
-        turn_delay: None,
+    let mut config = AgentLoopConfig::new(provider.clone(), "mock");
+    config.api_key = "test".into();
+    config.retry_config = yoagent::RetryConfig {
+        max_retries: 3,
+        initial_delay_ms: 10,
+        backoff_multiplier: 2.0,
+        max_delay_ms: 100,
     };
 
     let mut context = AgentContext {
@@ -1121,37 +1050,13 @@ async fn test_retry_exhausted_returns_error() {
             inner: MockProvider::text("never reached"),
         });
 
-    let config = AgentLoopConfig {
-        provider: provider.clone(),
-        model: "mock".into(),
-        api_key: "test".into(),
-        thinking_level: ThinkingLevel::Off,
-        max_tokens: None,
-        temperature: None,
-        model_config: None,
-        convert_to_llm: None,
-        transform_context: None,
-        get_steering_messages: None,
-        get_follow_up_messages: None,
-        context_config: None,
-        compaction_strategy: None,
-        execution_limits: None,
-        cache_config: CacheConfig::default(),
-        tool_output_sink: None,
-        output_schema: None,
-        tool_execution: ToolExecutionStrategy::default(),
-        retry_config: yoagent::RetryConfig {
-            max_retries: 2,
-            initial_delay_ms: 10,
-            backoff_multiplier: 2.0,
-            max_delay_ms: 100,
-        },
-        before_turn: None,
-        after_turn: None,
-        on_error: None,
-        input_filters: vec![],
-        tool_middleware: vec![],
-        turn_delay: None,
+    let mut config = AgentLoopConfig::new(provider.clone(), "mock");
+    config.api_key = "test".into();
+    config.retry_config = yoagent::RetryConfig {
+        max_retries: 2,
+        initial_delay_ms: 10,
+        backoff_multiplier: 2.0,
+        max_delay_ms: 100,
     };
 
     let mut context = AgentContext {
@@ -1199,33 +1104,9 @@ async fn test_no_retry_on_auth_error() {
             inner: MockProvider::text("never reached"),
         });
 
-    let config = AgentLoopConfig {
-        provider: provider.clone(),
-        model: "mock".into(),
-        api_key: "test".into(),
-        thinking_level: ThinkingLevel::Off,
-        max_tokens: None,
-        temperature: None,
-        model_config: None,
-        convert_to_llm: None,
-        transform_context: None,
-        get_steering_messages: None,
-        get_follow_up_messages: None,
-        context_config: None,
-        compaction_strategy: None,
-        execution_limits: None,
-        cache_config: CacheConfig::default(),
-        tool_output_sink: None,
-        output_schema: None,
-        tool_execution: ToolExecutionStrategy::default(),
-        retry_config: yoagent::RetryConfig::default(), // 3 retries, but auth is not retryable
-        before_turn: None,
-        after_turn: None,
-        on_error: None,
-        input_filters: vec![],
-        tool_middleware: vec![],
-        turn_delay: None,
-    };
+    // default RetryConfig (3 retries); auth errors are not retried
+    let mut config = AgentLoopConfig::new(provider.clone(), "mock");
+    config.api_key = "test".into();
 
     let mut context = AgentContext {
         system_prompt: "test".into(),
@@ -1260,33 +1141,9 @@ async fn test_retry_none_disables_retries() {
             inner: MockProvider::text("never reached"),
         });
 
-    let config = AgentLoopConfig {
-        provider: provider.clone(),
-        model: "mock".into(),
-        api_key: "test".into(),
-        thinking_level: ThinkingLevel::Off,
-        max_tokens: None,
-        temperature: None,
-        model_config: None,
-        convert_to_llm: None,
-        transform_context: None,
-        get_steering_messages: None,
-        get_follow_up_messages: None,
-        context_config: None,
-        compaction_strategy: None,
-        execution_limits: None,
-        cache_config: CacheConfig::default(),
-        tool_output_sink: None,
-        output_schema: None,
-        tool_execution: ToolExecutionStrategy::default(),
-        retry_config: yoagent::RetryConfig::none(), // disabled
-        before_turn: None,
-        after_turn: None,
-        on_error: None,
-        input_filters: vec![],
-        tool_middleware: vec![],
-        turn_delay: None,
-    };
+    let mut config = AgentLoopConfig::new(provider.clone(), "mock");
+    config.api_key = "test".into();
+    config.retry_config = yoagent::RetryConfig::none(); // disabled
 
     let mut context = AgentContext {
         system_prompt: "test".into(),
@@ -1497,35 +1354,12 @@ async fn test_on_error_fires_on_provider_error() {
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let error_msgs_clone = error_msgs.clone();
 
-    let config = AgentLoopConfig {
-        provider: std::sync::Arc::new(provider),
-        model: "mock".into(),
-        api_key: "test".into(),
-        thinking_level: ThinkingLevel::Off,
-        max_tokens: None,
-        temperature: None,
-        model_config: None,
-        convert_to_llm: None,
-        transform_context: None,
-        get_steering_messages: None,
-        get_follow_up_messages: None,
-        context_config: None,
-        compaction_strategy: None,
-        execution_limits: None,
-        cache_config: CacheConfig::default(),
-        tool_output_sink: None,
-        output_schema: None,
-        tool_execution: ToolExecutionStrategy::default(),
-        retry_config: yoagent::RetryConfig::none(),
-        before_turn: None,
-        after_turn: None,
-        on_error: Some(std::sync::Arc::new(move |err| {
-            error_msgs_clone.lock().unwrap().push(err.to_string());
-        })),
-        input_filters: vec![],
-        tool_middleware: vec![],
-        turn_delay: None,
-    };
+    let mut config = AgentLoopConfig::new(std::sync::Arc::new(provider), "mock");
+    config.api_key = "test".into();
+    config.retry_config = yoagent::RetryConfig::none();
+    config.on_error = Some(std::sync::Arc::new(move |err| {
+        error_msgs_clone.lock().unwrap().push(err.to_string());
+    }));
 
     let mut context = AgentContext {
         system_prompt: "test".into(),
@@ -2257,40 +2091,18 @@ async fn test_custom_compaction_strategy_is_called() {
     // Provider returns a simple text response
     let provider = MockProvider::text("Got it.");
 
-    let config = AgentLoopConfig {
-        provider: std::sync::Arc::new(provider),
-        model: "test".into(),
-        api_key: "test".into(),
-        thinking_level: ThinkingLevel::Off,
-        max_tokens: None,
-        temperature: None,
-        model_config: None,
-        convert_to_llm: None,
-        transform_context: None,
-        get_steering_messages: None,
-        get_follow_up_messages: None,
-        context_config: Some(ContextConfig {
-            max_context_tokens: 10, // Tiny budget to force compaction
-            system_prompt_tokens: 0,
-            keep_recent: 1,
-            keep_first: 1,
-            tool_output_max_lines: 10,
-            ..Default::default()
-        }),
-        compaction_strategy: Some(std::sync::Arc::new(MarkerCompaction)),
-        execution_limits: None,
-        cache_config: CacheConfig::default(),
-        tool_output_sink: None,
-        output_schema: None,
-        tool_execution: ToolExecutionStrategy::default(),
-        retry_config: yoagent::RetryConfig::none(),
-        before_turn: None,
-        after_turn: None,
-        on_error: None,
-        input_filters: vec![],
-        tool_middleware: vec![],
-        turn_delay: None,
-    };
+    let mut config = AgentLoopConfig::new(std::sync::Arc::new(provider), "test");
+    config.api_key = "test".into();
+    config.context_config = Some(ContextConfig {
+        max_context_tokens: 10, // Tiny budget to force compaction
+        system_prompt_tokens: 0,
+        keep_recent: 1,
+        keep_first: 1,
+        tool_output_max_lines: 10,
+        ..Default::default()
+    });
+    config.compaction_strategy = Some(std::sync::Arc::new(MarkerCompaction));
+    config.retry_config = yoagent::RetryConfig::none();
 
     let prompt = AgentMessage::Llm(Message::user("Hello"));
     let mut context = AgentContext {
@@ -2337,40 +2149,18 @@ async fn test_none_compaction_strategy_uses_default() {
     // Provider returns a simple text response
     let provider = MockProvider::text("Got it.");
 
-    let config = AgentLoopConfig {
-        provider: std::sync::Arc::new(provider),
-        model: "test".into(),
-        api_key: "test".into(),
-        thinking_level: ThinkingLevel::Off,
-        max_tokens: None,
-        temperature: None,
-        model_config: None,
-        convert_to_llm: None,
-        transform_context: None,
-        get_steering_messages: None,
-        get_follow_up_messages: None,
-        context_config: Some(ContextConfig {
-            max_context_tokens: 10, // Tiny budget to force compaction
-            system_prompt_tokens: 0,
-            keep_recent: 1,
-            keep_first: 1,
-            tool_output_max_lines: 10,
-            ..Default::default()
-        }),
-        compaction_strategy: None, // Should fall back to DefaultCompaction
-        execution_limits: None,
-        cache_config: CacheConfig::default(),
-        tool_output_sink: None,
-        output_schema: None,
-        tool_execution: ToolExecutionStrategy::default(),
-        retry_config: yoagent::RetryConfig::none(),
-        before_turn: None,
-        after_turn: None,
-        on_error: None,
-        input_filters: vec![],
-        tool_middleware: vec![],
-        turn_delay: None,
-    };
+    // no compaction_strategy: falls back to DefaultCompaction
+    let mut config = AgentLoopConfig::new(std::sync::Arc::new(provider), "test");
+    config.api_key = "test".into();
+    config.context_config = Some(ContextConfig {
+        max_context_tokens: 10, // Tiny budget to force compaction
+        system_prompt_tokens: 0,
+        keep_recent: 1,
+        keep_first: 1,
+        tool_output_max_lines: 10,
+        ..Default::default()
+    });
+    config.retry_config = yoagent::RetryConfig::none();
 
     let prompt = AgentMessage::Llm(Message::user("Hello"));
     let mut context = AgentContext {
@@ -2516,47 +2306,28 @@ fn calibration_config(
     strategy: std::sync::Arc<RecordingCompaction>,
     max_context_tokens: usize,
 ) -> AgentLoopConfig {
-    AgentLoopConfig {
-        provider,
-        model: "usage-test".into(),
-        api_key: "test".into(),
-        thinking_level: ThinkingLevel::Off,
-        max_tokens: None,
-        temperature: None,
-        model_config: None,
-        convert_to_llm: None,
-        transform_context: None,
-        get_steering_messages: None,
-        get_follow_up_messages: Some(Box::new(|| {
-            vec![AgentMessage::Llm(Message::user("follow up"))]
-        })),
-        context_config: Some(yoagent::context::ContextConfig {
-            max_context_tokens,
-            system_prompt_tokens: 500,
-            keep_recent: 1,
-            keep_first: 1,
-            tool_output_max_lines: 10,
-            ..Default::default()
-        }),
-        compaction_strategy: Some(strategy),
-        execution_limits: Some(
-            ExecutionLimits::default()
-                .with_max_turns(2)
-                .with_max_total_tokens(1_000_000)
-                .with_max_duration(std::time::Duration::from_secs(60)),
-        ),
-        cache_config: CacheConfig::default(),
-        tool_output_sink: None,
-        output_schema: None,
-        tool_execution: ToolExecutionStrategy::default(),
-        retry_config: yoagent::RetryConfig::none(),
-        before_turn: None,
-        after_turn: None,
-        on_error: None,
-        input_filters: vec![],
-        tool_middleware: vec![],
-        turn_delay: None,
-    }
+    let mut config = AgentLoopConfig::new(provider, "usage-test");
+    config.api_key = "test".into();
+    config.get_follow_up_messages = Some(Box::new(|| {
+        vec![AgentMessage::Llm(Message::user("follow up"))]
+    }));
+    config.context_config = Some(yoagent::context::ContextConfig {
+        max_context_tokens,
+        system_prompt_tokens: 500,
+        keep_recent: 1,
+        keep_first: 1,
+        tool_output_max_lines: 10,
+        ..Default::default()
+    });
+    config.compaction_strategy = Some(strategy);
+    config.execution_limits = Some(
+        ExecutionLimits::default()
+            .with_max_turns(2)
+            .with_max_total_tokens(1_000_000)
+            .with_max_duration(std::time::Duration::from_secs(60)),
+    );
+    config.retry_config = yoagent::RetryConfig::none();
+    config
 }
 
 async fn run_calibration_loop(max_context_tokens: usize) -> Vec<(usize, usize, f32)> {
@@ -4841,43 +4612,23 @@ fn failing_config(
     max_retries: usize,
     delay_ms: u64,
 ) -> AgentLoopConfig {
-    AgentLoopConfig {
-        provider: std::sync::Arc::new(FailingProvider {
+    let mut config = AgentLoopConfig::new(
+        std::sync::Arc::new(FailingProvider {
             attempts: std::sync::atomic::AtomicUsize::new(0),
             failures,
             mode,
             inner: MockProvider::text("final answer"),
         }),
-        model: "mock".into(),
-        api_key: "test".into(),
-        thinking_level: ThinkingLevel::Off,
-        max_tokens: None,
-        temperature: None,
-        model_config: None,
-        convert_to_llm: None,
-        transform_context: None,
-        get_steering_messages: None,
-        get_follow_up_messages: None,
-        context_config: None,
-        compaction_strategy: None,
-        execution_limits: None,
-        cache_config: CacheConfig::default(),
-        tool_output_sink: None,
-        output_schema: None,
-        tool_execution: ToolExecutionStrategy::default(),
-        retry_config: yoagent::RetryConfig {
-            max_retries,
-            initial_delay_ms: delay_ms,
-            backoff_multiplier: 1.0,
-            max_delay_ms: delay_ms,
-        },
-        before_turn: None,
-        after_turn: None,
-        on_error: None,
-        input_filters: vec![],
-        tool_middleware: vec![],
-        turn_delay: None,
-    }
+        "mock",
+    );
+    config.api_key = "test".into();
+    config.retry_config = yoagent::RetryConfig {
+        max_retries,
+        initial_delay_ms: delay_ms,
+        backoff_multiplier: 1.0,
+        max_delay_ms: delay_ms,
+    };
+    config
 }
 
 /// The assistant message lifecycle seen by consumers, one entry per event:
@@ -5115,11 +4866,21 @@ async fn cancelling_during_the_backoff_aborts_the_turn_without_retrying() {
         started.elapsed() < std::time::Duration::from_secs(10),
         "the 60 s backoff was not interrupted"
     );
+    // No second attempt after the cancel. The aborted message that ends the
+    // turn was never streamed, so it is announced on its own (#243): a
+    // consumer rebuilding the transcript from events sees what the history
+    // holds.
     let lifecycle = assistant_lifecycle(&events_rx.await.unwrap());
     assert_eq!(
         lifecycle,
-        ["start", "delta:partial-0", &closing(1, 4), "retry:1/4"],
-        "no second attempt after the cancel"
+        [
+            "start",
+            "delta:partial-0",
+            &closing(1, 4),
+            "retry:1/4",
+            "start",
+            "end:Aborted:Cancelled",
+        ],
     );
     let last = new_messages.iter().rev().find_map(|m| match m {
         AgentMessage::Llm(Message::Assistant { stop_reason, .. }) => Some(stop_reason.clone()),

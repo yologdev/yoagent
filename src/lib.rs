@@ -93,6 +93,7 @@
 pub mod agent;
 pub mod agent_loop;
 pub mod context;
+pub mod extension;
 pub mod llm_compaction;
 pub mod mcp;
 pub mod provider;
@@ -121,6 +122,7 @@ pub mod decision;
 pub use agent::{Agent, AgentBuildError, StructuredPromptError};
 pub use agent_loop::{agent_loop, agent_loop_continue};
 pub use context::{CompactionStrategy, DefaultCompaction};
+pub use extension::{Extension, ExtensionMode, RunHooks};
 pub use llm_compaction::LlmCompaction;
 pub use retry::RetryConfig;
 pub use session::{Session, SessionEntry, SessionError};

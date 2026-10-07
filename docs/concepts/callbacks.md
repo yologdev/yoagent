@@ -102,7 +102,8 @@ reason, which the parent's model sees.
 Input filters see a run's **prompts** only: messages queued with
 `Agent::steer` / `Agent::follow_up` enter the loop without passing through
 them. With the `decision` feature, `Agent::with_input_guard` is a ready-made
-async filter backed by a decision model (see
+input check backed by a decision model, installed as an extension (`on_input`)
+that runs after these filters (see
 [Decision Models](decision-models.md#blocking-with_input_guard)).
 
 ## Turn Hooks
@@ -160,12 +161,10 @@ For direct loop usage without the `Agent` wrapper:
 use std::sync::Arc;
 use yoagent::agent_loop::AgentLoopConfig;
 
-let config = AgentLoopConfig {
-    before_turn: Some(Arc::new(|_msgs, turn| turn < 5)),
-    after_turn: Some(Arc::new(|_msgs, _usage| { /* log */ })),
-    on_error: Some(Arc::new(|err| eprintln!("{}", err))),
-    // ... other fields
-};
+let mut config = AgentLoopConfig::new(provider, "model");
+config.before_turn = Some(Arc::new(|_msgs, turn| turn < 5));
+config.after_turn = Some(Arc::new(|_msgs, _usage| { /* log */ }));
+config.on_error = Some(Arc::new(|err| eprintln!("{}", err)));
 ```
 
 ## Callback Timing

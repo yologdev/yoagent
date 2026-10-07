@@ -15,33 +15,10 @@ fn api_key() -> String {
 }
 
 fn make_config(provider: AnthropicProvider) -> AgentLoopConfig {
-    AgentLoopConfig {
-        provider: std::sync::Arc::new(provider),
-        model: "claude-sonnet-5".into(),
-        api_key: api_key(),
-        thinking_level: ThinkingLevel::Off,
-        max_tokens: Some(1024),
-        temperature: None,
-        model_config: None,
-        convert_to_llm: None,
-        transform_context: None,
-        get_steering_messages: None,
-        get_follow_up_messages: None,
-        context_config: None,
-        compaction_strategy: None,
-        execution_limits: None,
-        cache_config: CacheConfig::default(),
-        tool_output_sink: None,
-        output_schema: None,
-        tool_execution: ToolExecutionStrategy::default(),
-        retry_config: yoagent::RetryConfig::default(),
-        before_turn: None,
-        after_turn: None,
-        on_error: None,
-        input_filters: vec![],
-        tool_middleware: vec![],
-        turn_delay: None,
-    }
+    let mut config = AgentLoopConfig::new(std::sync::Arc::new(provider), "claude-sonnet-5");
+    config.api_key = api_key();
+    config.max_tokens = Some(1024);
+    config
 }
 
 fn extract_assistant_text(messages: &[AgentMessage]) -> String {

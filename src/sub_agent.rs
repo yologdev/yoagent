@@ -79,6 +79,9 @@ pub struct SubAgentTool {
     turn_delay: Option<std::time::Duration>,
     model_config: Option<ModelConfig>,
     tool_middleware: Vec<Arc<dyn ToolMiddleware>>,
+    extensions: Vec<Arc<dyn crate::Extension>>,
+    tree_extensions: Vec<Arc<dyn crate::Extension>>,
+    max_stop_continues: usize,
     turn_hooks: Vec<Arc<dyn TurnHook>>,
     input_filters: Vec<Arc<dyn InputFilter>>,
     #[cfg(feature = "decision")]
@@ -127,6 +130,9 @@ impl SubAgentTool {
             turn_delay: None,
             model_config: None,
             tool_middleware: Vec::new(),
+            extensions: Vec::new(),
+            tree_extensions: Vec::new(),
+            max_stop_continues: crate::extension::DEFAULT_MAX_STOP_CONTINUES,
             turn_hooks: Vec::new(),
             input_filters: Vec::new(),
             #[cfg(feature = "decision")]
@@ -272,6 +278,31 @@ impl SubAgentTool {
         self
     }
 
+    /// Add an [`Extension`](crate::Extension) for the sub-agent's runs (see
+    /// [`crate::extension`]). Extensions run in installation order, after the
+    /// tree extensions and after the older hooks (middleware, filters).
+    pub fn with_extension(mut self, extension: impl crate::Extension + 'static) -> Self {
+        self.extensions.push(Arc::new(extension));
+        self
+    }
+
+    /// Add an [`Extension`](crate::Extension) for the sub-agent's runs **and
+    /// every run they delegate to**, at any depth: host policy (permissions,
+    /// deny rules, redaction, audit, a budget across the tree). A child runs
+    /// it ahead of its own extensions and cannot remove it. Its tools are not
+    /// offered to child runs.
+    pub fn with_tree_extension(mut self, extension: impl crate::Extension + 'static) -> Self {
+        self.tree_extensions.push(Arc::new(extension));
+        self
+    }
+
+    /// How many times per run an extension's `on_stop` may continue it
+    /// (default [`DEFAULT_MAX_STOP_CONTINUES`](crate::extension::DEFAULT_MAX_STOP_CONTINUES)).
+    pub fn with_max_stop_continues(mut self, max: usize) -> Self {
+        self.max_stop_continues = max;
+        self
+    }
+
     /// Add a [`TurnHook`] for the sub-agent's own LLM requests. Mirrors
     /// [`Agent::with_turn_hook`](crate::Agent::with_turn_hook): awaited
     /// before every request, it may append one note to that request's
@@ -303,7 +334,7 @@ impl SubAgentTool {
     #[cfg_attr(docsrs, doc(cfg(feature = "decision")))]
     pub fn with_input_guard(self, guard: crate::decision::InputGuard) -> Self {
         guard.assert_has_checks();
-        self.with_async_input_filter(guard)
+        self.with_extension(guard)
     }
 
     /// Attach a decision model for the sub-agent's own turns: advisory skill
@@ -548,54 +579,44 @@ impl AgentTool for SubAgentTool {
         };
 
         #[cfg(feature = "decision")]
-        let (provider, tool_middleware) = {
-            let (hooks, middleware) = crate::decision::wire(
-                self.decision.as_ref(),
-                self.tool_gate.as_ref(),
-                &self.skills,
-                self.turn_hooks.clone(),
-                self.tool_middleware.clone(),
-            );
-            (with_turn_hooks(&self.provider, hooks), middleware)
-        };
-        #[cfg(not(feature = "decision"))]
+        let decision_extensions = crate::decision::wire(
+            self.decision.as_ref(),
+            self.tool_gate.as_ref(),
+            &self.skills,
+        );
         let (provider, tool_middleware) = (
             with_turn_hooks(&self.provider, self.turn_hooks.clone()),
             self.tool_middleware.clone(),
         );
 
         // Config with Arc'd provider
-        let config = AgentLoopConfig {
-            provider,
-            model: self.model.clone(),
-            api_key: if self.api_key.is_empty() {
-                crate::provider::resolve_api_key_or_warn(self.model_config.as_ref())
-            } else {
-                self.api_key.clone()
-            },
-            thinking_level: self.thinking_level,
-            max_tokens: self.max_tokens,
-            temperature: self.temperature,
-            model_config: self.model_config.clone(),
-            convert_to_llm: None,
-            transform_context: None,
-            get_steering_messages: None,
-            get_follow_up_messages: None,
-            context_config: self.context_config.clone(),
-            compaction_strategy: None,
-            execution_limits: Some(self.execution_limits.clone()),
-            cache_config: self.cache_config.clone(),
-            tool_output_sink: self.shared_state.clone(),
-            tool_execution: self.tool_execution.clone(),
-            retry_config: self.retry_config.clone(),
-            before_turn: None,
-            after_turn: None,
-            on_error: None,
-            input_filters: self.input_filters.clone(),
-            tool_middleware,
-            output_schema: None,
-            turn_delay: self.turn_delay,
+        let mut config = AgentLoopConfig::new(provider, self.model.clone());
+        config.api_key = if self.api_key.is_empty() {
+            crate::provider::resolve_api_key_or_warn(self.model_config.as_ref())
+        } else {
+            self.api_key.clone()
         };
+        config.thinking_level = self.thinking_level;
+        config.max_tokens = self.max_tokens;
+        config.temperature = self.temperature;
+        config.model_config = self.model_config.clone();
+        config.context_config = self.context_config.clone();
+        config.execution_limits = Some(self.execution_limits.clone());
+        config.cache_config = self.cache_config.clone();
+        config.tool_output_sink = self.shared_state.clone();
+        config.tool_execution = self.tool_execution.clone();
+        config.retry_config = self.retry_config.clone();
+        config.input_filters = self.input_filters.clone();
+        config.tool_middleware = tool_middleware;
+        config.turn_delay = self.turn_delay;
+        config.extensions = self.extensions.clone();
+        #[cfg(feature = "decision")]
+        config.extensions.extend(decision_extensions);
+        config.tree_extensions = self.tree_extensions.clone();
+        config.max_stop_continues = self.max_stop_continues;
+        // The caller's tree extensions (host policy) apply here too, ahead of
+        // this sub-agent's own, at this delegation's depth and label.
+        config.delegated_from(&ctx);
 
         // Channel for sub-agent events
         let (tx, rx) = mpsc::unbounded_channel();
@@ -653,12 +674,19 @@ impl AgentTool for SubAgentTool {
 
         // Run the sub-agent loop
         let prompt = AgentMessage::Llm(Message::user(task));
+        let run_cancel = cancel.clone();
         let (new_messages, run_stats) =
             agent_loop_with_stats(vec![prompt], &mut context, &config, tx, cancel).await;
 
-        // Wait for event forwarding to complete
+        // Wait for event forwarding to complete. A forwarder that failed may
+        // have missed a rejection: the delegation then fails rather than
+        // passing for an empty success.
+        let mut forward_failed = None;
         if let Some(handle) = forward_handle {
-            let _ = handle.await;
+            if let Err(e) = handle.await {
+                tracing::error!(tool = %self.tool_name, "sub-agent event forwarder failed: {e}");
+                forward_failed = Some(e.to_string());
+            }
         } else if let Some(mut rx) = unforwarded {
             while let Ok(event) = rx.try_recv() {
                 if let AgentEvent::InputRejected { reason } = event {
@@ -672,6 +700,12 @@ impl AgentTool for SubAgentTool {
         // `run_stats` covers this run's own turns and, recursively, whatever
         // its own sub-agents reported to it.
         ctx.report_delegated_run(run_stats.clone());
+        if let Some(e) = forward_failed {
+            return Err(ToolError::Failed(format!(
+                "sub-agent '{}' could not be followed: its event forwarder failed ({e})",
+                self.tool_name
+            )));
+        }
 
         // An input filter rejected the task: nothing ran.
         let rejection = rejected.lock().unwrap_or_else(|e| e.into_inner()).take();
@@ -680,6 +714,14 @@ impl AgentTool for SubAgentTool {
                 "Sub-agent '{}' rejected its task: {}",
                 self.tool_name, reason
             )));
+        }
+
+        // Cancelled before the model answered at all: not an empty success.
+        let answered = new_messages
+            .iter()
+            .any(|m| matches!(m, AgentMessage::Llm(Message::Assistant { .. })));
+        if run_cancel.is_cancelled() && !answered {
+            return Err(ToolError::Cancelled);
         }
 
         // Check if the last message was an error

@@ -6,9 +6,52 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- **Extensions** (`yoagent::extension`, #241): one plug-in contract for the agent lifecycle. An `Extension` is installed with `Agent::with_extension` / `SubAgentTool::with_extension` (an `Arc<E>` is one too), and each run gets fresh `RunHooks` from `start_run`, so state for one run is isolated. The hooks:
+  - `tools` (once per run);
+  - `on_input`;
+  - `before_model` (note, stop or fail);
+  - `before_tool` (allow, modify or deny; `&self`, so parallel calls are judged concurrently);
+  - `after_tool` (edit the `ToolOutput`);
+  - `on_stop` (accept, continue or fail the final answer);
+  - `on_event` (every event, in order);
+  - `finish` (with a `RunOutcome` whose `end()` is a `RunEnd`).
+
+  **Advisory or required:** a required extension's failure fails the run, which ends with an `Error` message prefixed `EXTENSION_FAILED_PREFIX`; tool calls not started yet are not run.
+
+  **Every hook watches the run's cancellation**, and `finish` is bounded. **Partial tool output** is withheld while an extension filters tool output. **A rechecking policy** judges rewritten arguments again. `ClonedHooks` wraps hooks cloned per run.
+
+  **`with_tree_extension`** applies an extension to every delegated run at any depth, so host policy reaches sub-agents (a parent's `ToolMiddleware` never did); a custom delegation tool passes the tree on with `Agent::delegated_from` / `AgentLoopConfig::delegated_from`, reading `ToolContext::{tree_extensions, delegation_depth, run_label}`. Also new: `Agent::with_run_label` and `Agent::with_max_stop_continues`. Guide: `docs/concepts/extensions.md`.
+
+- **`extension::Budget`**: a dollar limit, checked before each model request: once spend reaches it, the run stops (the request that goes past it still completes). Per run (a sub-agent's reported spend included), or `.across_runs()` (a session, or a whole delegation tree with `with_tree_extension`; `spent_usd()` reads the total). `Budget::for_model` returns `None` for an unpriced model; a negative or NaN limit panics.
+
 ### Changed
 
 - **`yoagent-rutis` (unpublished) moves to rutis 0.6** (`rutis = "0.6"`, built against 0.6.1). 0.6 only made rutis's public types `#[non_exhaustive]`, and 0.6.1 adds optional APIs; the bridge needed no source change. One test now builds `EventOptions` with `EventOptions::default().prepend(true)`. rutis's dispatch is unchanged in 0.6.1, so the bridge's liveness checks before and after dispatch still apply.
+- **The decision features run as extensions** (#241 dogfooding). `with_tool_gate`, `with_input_guard` and `with_decision_model` install a `ToolGate` (`before_tool`), an `InputGuard` (`on_input`) and the advisor (a `before_model` note); the gate and guard keep their old trait impls, now deprecated (below). Three ordering effects:
+  - the gate runs after every middleware **and extension**, so it also judges arguments an extension rewrote;
+  - the guard screens after all input filters, not in their list;
+  - the advisor's hint comes before turn-hook notes and is judged once per turn rather than once per provider attempt (it was memoized per request, so the same request is sent).
+
+### Changed (breaking)
+
+- **`AgentLoopConfig` is `#[non_exhaustive]`; build it with `AgentLoopConfig::new(provider, model)`.** `new` sets every other field to the default the struct-literal examples used (no API key, thinking off, no context management, no hooks, parallel tools, the default retry policy). Fields stay public, so set what you need afterwards: `config.max_tokens = Some(1024);`. A struct literal no longer compiles outside the crate. Every field added so far was a breaking change for code calling `agent_loop` directly, which is why recent features went through task-locals; new fields (such as `#241`'s extensions) no longer break anyone. `Agent` and `SubAgentTool` users are unaffected.
+
+### Deprecated
+
+- **`ToolGate` as a `ToolMiddleware` and `InputGuard` as an `AsyncInputFilter`.** Install them with `with_tool_gate` / `with_input_guard` (or as extensions), and drive them outside the loop with the new `ToolGate::decide(&call)` and `InputGuard::screen(text)`. Rust cannot mark a trait impl `#[deprecated]`, so the first use of each in a process logs a warning; both impls will be removed in a later release. A gate installed as a middleware runs before every extension and before any middleware added after it, so it does not judge arguments those rewrite.
+
+### Fixed
+
+These change what consumers see: a run can now send more events (a `MessageStart`/`MessageEnd` pair, a `TurnEnd`) and run fewer tools than before. A consumer that counts events, or relied on tools running after a cancel, should check them.
+
+- **A sub-agent cancelled before it answered fails its delegation** with `ToolError::Cancelled`. It used to return "(sub-agent produced no text output)" as a success.
+
+
+- **A cancelled run no longer executes the tool calls it had not started** (#243). If the run was cancelled while the model's response arrived, its tool calls used to run anyway, and the cancel was only seen at the next turn: after a user pressed cancel, the agent could still run a command or write a file. Such a call is now answered with an error result ("Tool call not run: the run was cancelled.") and never runs, and the run ends with `[Agent stopped: cancelled]` as before. A tool already running still gets the cancel through its `ToolContext`.
+- **Every message in the history has its events** (#243). A final failure or a cancel before the provider sent any output appended its assistant message without a `MessageStart`/`MessageEnd`, so transcripts rebuilt from events missed it. It is now announced with both. This includes a run aborted during a retry's backoff: after the `ProviderRetry`, its `Aborted` message arrives as a `MessageStart` and `MessageEnd` with no text, also through `retry_safe_events`. A retried attempt that failed before any output still gets only its `ProviderRetry`.
+- **Every `TurnStart` has a `TurnEnd`** (#243). A turn stopped by an execution limit, or by `on_before_turn` returning `false`, ended without one. It now ends with the history's last message (the stop marker, for a limit) and no tool results.
 
 ## 0.24.3
 

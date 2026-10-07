@@ -150,6 +150,7 @@ mod tests {
             on_update: None,
             on_progress: None,
             sub_agent_report: None,
+            delegation: Default::default(),
         }
     }
 

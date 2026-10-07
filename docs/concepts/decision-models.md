@@ -464,7 +464,7 @@ use yoagent::decision::ToolGate;
 let agent = agent.with_tool_gate(ToolGate::new(DecisionModel::jev()));
 ```
 
-The tool gate is a `ToolMiddleware` and a **separate, explicit opt-in**,
+The tool gate is an [extension](extensions.md) (its `ToolMiddleware` impl is deprecated) and a **separate, explicit opt-in**,
 because it blocks. For every tool call it sends one request whose state is
 `{"user_request": .., "tool_call": {"tool": .., "arguments": ..}}`, with two
 Nouls:
@@ -537,10 +537,15 @@ denied without asking.
 
 **Scope.**
 
-- `Agent::with_tool_gate` always runs the gate **last**, after every other
-  middleware, so it judges the arguments that will actually run. A `ToolGate`
-  installed by hand with `with_tool_middleware` must be added last yourself —
-  a middleware after it could modify arguments after approval.
+- `Agent::with_tool_gate` installs the gate as an extension after the agent's
+  own, so it runs **last**, after every middleware and extension, and judges
+  the arguments that will actually run. (Installing a `ToolGate` with
+  `with_tool_middleware` is deprecated: it then runs before every extension
+  and before any middleware added after it, and either could modify arguments
+  after approval.)
+  Install it with `with_tree_extension` to cover sub-agents too. A tree
+  extension runs *first*, so the gate then judges a call again (a second
+  decision request) whenever a later extension rewrote its arguments.
 - A gate covers the agent it is installed on. Calls made **inside a
   `SubAgentTool` are not covered** by the parent's gate; give the sub-agent
   its own (`SubAgentTool::with_tool_gate`). There, `user_request` is the task
@@ -580,7 +585,7 @@ use yoagent::decision::InputGuard;
 let agent = agent.with_input_guard(InputGuard::new(DecisionModel::jev()));
 ```
 
-The input guard is an `AsyncInputFilter` — and, because it blocks, a
+The input guard is an [extension](extensions.md) (`on_input`; its `AsyncInputFilter` impl is deprecated) — and, because it blocks, a
 **separate, explicit opt-in**. It screens each prompt's text (every user text
 block, joined) with **one batched request of Nouls** whose state is
 `{"input": ..}`. The default checks each reject at **`p >= 0.8`**:
@@ -632,18 +637,18 @@ check, question and threshold. Thresholds outside `[0, 1]`, `with_threshold`
 on an unknown id, and an empty or repeated added id panic at setup, and so
 does `Agent::with_input_guard` / `SubAgentTool::with_input_guard` on a guard
 with **no checks** — a blocking guard that checks nothing is a setup
-mistake. (Used directly as a filter, such a guard rejects.)
+mistake. (Screened directly with `screen`, such a guard rejects.)
 
 **Scope and limits.**
 
 - **Input with no text passes** unscreened (an image-only prompt): there is
   nothing to screen, and no request is sent.
-- **Steering and follow-up messages are not screened.** Input filters run on
-  a run's prompts only; `Agent::steer` and `Agent::follow_up` messages enter
-  the loop without them. This is a limitation of the filter hook, unchanged
-  here.
-- It runs in the input-filter list in installation order, alongside
-  `with_input_filter` / `with_async_input_filter` filters.
+- **Steering and follow-up messages are not screened.** `on_input`, like the
+  input filters, runs on a run's prompts only; `Agent::steer` and
+  `Agent::follow_up` messages enter the loop without it.
+- `with_input_guard` installs it as an extension: it screens after every
+  `with_input_filter` / `with_async_input_filter` filter. (Placing it in the
+  filter list by hand, as an `AsyncInputFilter`, is deprecated.)
 - `SubAgentTool::with_input_guard` screens the task the parent model hands a
   sub-agent; a rejected task fails the tool call with the reason.
 - The thresholds are starting points, not calibrated constants — calibrate
@@ -685,8 +690,8 @@ any policy engine:
   prompt's text) — for policies that want the pieces; the prose of
   `user_request()` is not a stable format.
   `ToolCallRequest::new(id, tool, &args)` with `with_messages` /
-  `with_run_prompts` builds one to unit-test a middleware — `ToolGate`
-  included — outside the loop.
+  `with_run_prompts` builds one to unit-test a middleware (or a `ToolGate`,
+  with `decide`) outside the loop.
 - `AsyncInputFilter` (`Agent::with_async_input_filter`,
   `SubAgentTool::with_async_input_filter`) — input filters that await. You
   own the timeout; a panic is contained and rejects.
@@ -797,13 +802,13 @@ let model = DecisionModel::from_backend(mock.clone(), "jev-test");
 // ... use `model`, then inspect `mock.requests()`.
 ```
 
-A `ToolGate` (or any middleware) can be driven without an agent:
+A `ToolGate` can be driven without an agent with `decide` (an `InputGuard` with `screen(text)`):
 
 ```rust
 let args = json!({"path": "/srv/data"});
 let prompts = [Message::user("summarize the README")];
 let call = ToolCallRequest::new("call-1", "rm", &args).with_run_prompts(&prompts);
-let decision = ToolGate::new(model).before_tool(&call).await; // ToolDecision
+let decision = ToolGate::new(model).decide(&call).await; // ToolDecision
 ```
 
 The logprob backend's tests run against a wiremock OpenAI-compatible server;

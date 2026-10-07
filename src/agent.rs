@@ -77,6 +77,14 @@ pub struct Agent {
 
     // Tool middleware (permissions/policy hooks)
     tool_middleware: Vec<Arc<dyn ToolMiddleware>>,
+    extensions: Vec<Arc<dyn crate::Extension>>,
+    tree_extensions: Vec<Arc<dyn crate::Extension>>,
+    max_stop_continues: usize,
+    run_label: Option<String>,
+    inherited_extensions: Vec<Arc<dyn crate::Extension>>,
+    depth: usize,
+    delegated_by: Option<String>,
+    parent_run_id: Option<String>,
 
     // Per-turn hooks (transient notes on the latest user turn)
     turn_hooks: Vec<Arc<dyn TurnHook>>,
@@ -324,6 +332,14 @@ impl Agent {
             on_error: None,
             input_filters: Vec::new(),
             tool_middleware: Vec::new(),
+            extensions: Vec::new(),
+            tree_extensions: Vec::new(),
+            max_stop_continues: crate::extension::DEFAULT_MAX_STOP_CONTINUES,
+            run_label: None,
+            inherited_extensions: Vec::new(),
+            depth: 0,
+            delegated_by: None,
+            parent_run_id: None,
             turn_hooks: Vec::new(),
             #[cfg(feature = "decision")]
             skills: crate::skills::SkillSet::empty(),
@@ -613,13 +629,18 @@ impl Agent {
     ///
     /// - **Fails closed:** a decision-model error, timeout, or malformed
     ///   answer denies the call.
-    /// - **Runs last**, after every other middleware, whenever you add them,
-    ///   so it judges the arguments that will actually run. (A `ToolGate`
-    ///   installed by hand with [`with_tool_middleware`](Self::with_tool_middleware)
-    ///   must be added last yourself.)
+    /// - **Runs last**, after every middleware and extension, whenever you
+    ///   add them, so it judges the arguments that will actually run.
+    ///   (Installing a `ToolGate` with
+    ///   [`with_tool_middleware`](Self::with_tool_middleware) is deprecated:
+    ///   it then runs before every extension and before any middleware added
+    ///   after it, so arguments either rewrites are never judged.)
     /// - **This agent only:** calls made inside a
     ///   [`SubAgentTool`](crate::SubAgentTool) are not covered; give it its
-    ///   own gate, where the "user request" is the task text this agent wrote.
+    ///   own gate, where the "user request" is the task text this agent
+    ///   wrote, or install the gate with
+    ///   [`with_tree_extension`](Self::with_tree_extension) to cover every
+    ///   delegated run.
     /// - Requests and spend are reported in [`SessionStats::decision`].
     ///
     /// Defence in depth, not a security boundary — injected content can
@@ -646,12 +667,12 @@ impl Agent {
     ///
     /// - **Fails closed:** a decision-model error or timeout (3 s) rejects
     ///   the input; `InputGuard::with_fail_open` opts out.
-    /// - Installed as an async input filter, in order with the others
+    /// - Installed as an extension: it screens after every input filter
     ///   ([`with_input_filter`](Self::with_input_filter),
     ///   [`with_async_input_filter`](Self::with_async_input_filter)).
     /// - Input with no text (an image-only prompt) passes unscreened;
-    ///   steering and follow-up messages are not screened (input filters see
-    ///   a run's prompts only).
+    ///   steering and follow-up messages are not screened (`on_input`, like
+    ///   the input filters, sees a run's prompts only).
     /// - The input text is sent to the decision model's backend. Requests
     ///   and spend are reported in [`SessionStats::decision`].
     ///
@@ -665,7 +686,56 @@ impl Agent {
     #[cfg_attr(docsrs, doc(cfg(feature = "decision")))]
     pub fn with_input_guard(self, guard: crate::decision::InputGuard) -> Self {
         guard.assert_has_checks();
-        self.with_async_input_filter(guard)
+        self.with_extension(guard)
+    }
+
+    /// Add an [`Extension`](crate::Extension) for this agent's runs (see
+    /// [`crate::extension`]). Extensions run in installation order, after the
+    /// tree extensions and after the older hooks (middleware, filters).
+    pub fn with_extension(mut self, extension: impl crate::Extension + 'static) -> Self {
+        self.extensions.push(Arc::new(extension));
+        self
+    }
+
+    /// Add an [`Extension`](crate::Extension) for this agent's runs **and
+    /// every run they delegate to**, at any depth: host policy (permissions,
+    /// deny rules, redaction, audit, a budget across the tree). A child runs
+    /// it ahead of its own extensions and cannot remove it. Its tools are not
+    /// offered to child runs.
+    pub fn with_tree_extension(mut self, extension: impl crate::Extension + 'static) -> Self {
+        self.tree_extensions.push(Arc::new(extension));
+        self
+    }
+
+    /// How many times per run an extension's `on_stop` may continue it
+    /// (default [`DEFAULT_MAX_STOP_CONTINUES`](crate::extension::DEFAULT_MAX_STOP_CONTINUES)).
+    pub fn with_max_stop_continues(mut self, max: usize) -> Self {
+        self.max_stop_continues = max;
+        self
+    }
+
+    /// The host's label for this agent's runs (a session id, say), passed to
+    /// extensions as [`RunContext::label`](crate::extension::RunContext::label).
+    pub fn with_run_label(mut self, label: impl Into<String>) -> Self {
+        self.run_label = Some(label.into());
+        self
+    }
+
+    /// Make this agent's runs delegated runs of the tool call `ctx` belongs
+    /// to: the calling run's tree extensions apply (ahead of this agent's
+    /// own, their tools not offered), at the delegation's depth and under the
+    /// calling run's label unless this agent has one. What a custom
+    /// delegation tool that runs an `Agent` calls; see
+    /// [`AgentLoopConfig::delegated_from`].
+    pub fn delegated_from(mut self, ctx: &ToolContext) -> Self {
+        self.inherited_extensions = ctx.tree_extensions().to_vec();
+        self.depth = ctx.delegation_depth();
+        self.delegated_by = ctx.delegation.call_id.clone();
+        self.parent_run_id = ctx.delegation.parent_run_id.clone();
+        if self.run_label.is_none() {
+            self.run_label = ctx.run_label().map(String::from);
+        }
+        self
     }
 
     /// Add a tool middleware — an async approve/deny/modify hook that gates
@@ -1449,17 +1519,14 @@ impl Agent {
         let follow_up_queue = self.follow_up_queue.clone();
         let follow_up_mode = self.follow_up_mode;
 
-        // The decision integration appends its advisor hook and tool gate
-        // last, so the gate sees arguments after every user middleware.
+        // The decision integration (advisor, tool gate) runs as extensions,
+        // appended after the agent's own below.
         #[cfg(feature = "decision")]
-        let (turn_hooks, tool_middleware) = crate::decision::wire(
+        let decision_extensions = crate::decision::wire(
             self.decision.as_ref(),
             self.tool_gate.as_ref(),
             &self.skills,
-            self.turn_hooks.clone(),
-            self.tool_middleware.clone(),
         );
-        #[cfg(not(feature = "decision"))]
         let (turn_hooks, tool_middleware) = (self.turn_hooks.clone(), self.tool_middleware.clone());
         let provider: Arc<dyn StreamProvider> = if turn_hooks.is_empty() {
             self.provider.clone()
@@ -1470,66 +1537,72 @@ impl Agent {
             ))
         };
 
-        AgentLoopConfig {
-            provider,
-            model: self.model.clone(),
-            api_key: self.resolved_api_key(),
-            thinking_level: self.thinking_level,
-            max_tokens: self.max_tokens,
-            temperature: self.temperature,
-            model_config: self.model_config.clone(),
-            convert_to_llm: None,
-            transform_context: None,
-            get_steering_messages: Some(Box::new(move || {
-                let mut queue = steering_queue.lock().unwrap();
-                match steering_mode {
-                    QueueMode::OneAtATime => {
-                        if queue.is_empty() {
-                            vec![]
-                        } else {
-                            vec![queue.remove(0)]
-                        }
+        let mut config = AgentLoopConfig::new(provider, self.model.clone());
+        config.api_key = self.resolved_api_key();
+        config.thinking_level = self.thinking_level;
+        config.max_tokens = self.max_tokens;
+        config.temperature = self.temperature;
+        config.model_config = self.model_config.clone();
+        config.get_steering_messages = Some(Box::new(move || {
+            let mut queue = steering_queue.lock().unwrap();
+            match steering_mode {
+                QueueMode::OneAtATime => {
+                    if queue.is_empty() {
+                        vec![]
+                    } else {
+                        vec![queue.remove(0)]
                     }
-                    QueueMode::All => queue.drain(..).collect(),
                 }
-            })),
-            context_config: if self.context_management_disabled {
-                None
-            } else {
-                Some(self.context_config.clone().unwrap_or_else(|| {
-                    self.model_config
-                        .as_ref()
-                        .map(|m| ContextConfig::from_context_window(m.context_window))
-                        .unwrap_or_default()
-                }))
-            },
-            compaction_strategy: self.compaction_strategy.clone(),
-            execution_limits: self.execution_limits.clone(),
-            cache_config: self.cache_config.clone(),
-            tool_output_sink: self.shared_state.clone(),
-            tool_execution: self.tool_execution.clone(),
-            retry_config: self.retry_config.clone(),
-            get_follow_up_messages: Some(Box::new(move || {
-                let mut queue = follow_up_queue.lock().unwrap();
-                match follow_up_mode {
-                    QueueMode::OneAtATime => {
-                        if queue.is_empty() {
-                            vec![]
-                        } else {
-                            vec![queue.remove(0)]
-                        }
+                QueueMode::All => queue.drain(..).collect(),
+            }
+        }));
+        config.context_config = if self.context_management_disabled {
+            None
+        } else {
+            Some(self.context_config.clone().unwrap_or_else(|| {
+                self.model_config
+                    .as_ref()
+                    .map(|m| ContextConfig::from_context_window(m.context_window))
+                    .unwrap_or_default()
+            }))
+        };
+        config.compaction_strategy = self.compaction_strategy.clone();
+        config.execution_limits = self.execution_limits.clone();
+        config.cache_config = self.cache_config.clone();
+        config.tool_output_sink = self.shared_state.clone();
+        config.tool_execution = self.tool_execution.clone();
+        config.retry_config = self.retry_config.clone();
+        config.get_follow_up_messages = Some(Box::new(move || {
+            let mut queue = follow_up_queue.lock().unwrap();
+            match follow_up_mode {
+                QueueMode::OneAtATime => {
+                    if queue.is_empty() {
+                        vec![]
+                    } else {
+                        vec![queue.remove(0)]
                     }
-                    QueueMode::All => queue.drain(..).collect(),
                 }
-            })),
-            before_turn: self.before_turn.clone(),
-            after_turn: self.after_turn.clone(),
-            on_error: self.on_error.clone(),
-            input_filters: self.input_filters.clone(),
-            tool_middleware,
-            output_schema: None,
-            turn_delay: None,
-        }
+                QueueMode::All => queue.drain(..).collect(),
+            }
+        }));
+        config.before_turn = self.before_turn.clone();
+        config.after_turn = self.after_turn.clone();
+        config.on_error = self.on_error.clone();
+        config.input_filters = self.input_filters.clone();
+        config.tool_middleware = tool_middleware;
+        config.extensions = self.extensions.clone();
+        // The decision features (advisor, gate) run after the agent's own
+        // extensions, so the gate judges the final call.
+        #[cfg(feature = "decision")]
+        config.extensions.extend(decision_extensions);
+        config.tree_extensions = self.tree_extensions.clone();
+        config.max_stop_continues = self.max_stop_continues;
+        config.run_label = self.run_label.clone();
+        config.inherited_extensions = self.inherited_extensions.clone();
+        config.depth = self.depth;
+        config.delegated_by = self.delegated_by.clone();
+        config.parent_run_id = self.parent_run_id.clone();
+        config
     }
 }
 

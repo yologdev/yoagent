@@ -186,39 +186,19 @@ async fn run(api: Api, server: &MockServer, strategy: ToolExecutionStrategy) -> 
     mc.base_url = server.uri();
     let follow_up_polls = Arc::new(AtomicUsize::new(0));
     let polls = follow_up_polls.clone();
-    let config = AgentLoopConfig {
-        provider,
-        model: "gpt-5.5".into(),
-        api_key: "test".into(),
-        thinking_level: ThinkingLevel::Off,
-        max_tokens: None,
-        temperature: None,
-        model_config: Some(mc),
-        convert_to_llm: None,
-        transform_context: None,
-        get_steering_messages: None,
-        // Counts polls without ever queueing anything, so a positive control
-        // still ends; the refusal path must not reach the poll at all.
-        get_follow_up_messages: Some(Box::new(move || {
-            polls.fetch_add(1, Ordering::SeqCst);
-            Vec::new()
-        })),
-        context_config: None,
-        compaction_strategy: None,
-        // Loop detection and turn accounting live on the tracker; keep it on.
-        execution_limits: Some(ExecutionLimits::default()),
-        cache_config: CacheConfig::default(),
-        tool_output_sink: None,
-        output_schema: None,
-        tool_execution: strategy,
-        retry_config: yoagent::RetryConfig::none(),
-        before_turn: None,
-        after_turn: None,
-        on_error: None,
-        input_filters: vec![],
-        tool_middleware: vec![],
-        turn_delay: None,
-    };
+    let mut config = AgentLoopConfig::new(provider, "gpt-5.5");
+    config.api_key = "test".into();
+    config.model_config = Some(mc);
+    // Counts polls without ever queueing anything, so a positive control
+    // still ends; the refusal path must not reach the poll at all.
+    config.get_follow_up_messages = Some(Box::new(move || {
+        polls.fetch_add(1, Ordering::SeqCst);
+        Vec::new()
+    }));
+    // Loop detection and turn accounting live on the tracker; keep it on.
+    config.execution_limits = Some(ExecutionLimits::default());
+    config.tool_execution = strategy;
+    config.retry_config = yoagent::RetryConfig::none();
     let tool_runs = Arc::new(AtomicUsize::new(0));
     let mut context = AgentContext {
         system_prompt: "test".into(),

@@ -115,7 +115,8 @@ pub(crate) fn log_retry(attempt: usize, max: usize, delay: &Duration, error: &Pr
 ///   but `Error` or `Aborted`).
 /// - An attempt that is retried disappears: only its `ProviderRetry` passes.
 ///   That includes the last one when the run is aborted during the retry's
-///   backoff: the turn's final state is then only in `TurnEnd` / `AgentEnd`.
+///   backoff: the turn's `Aborted` message then arrives on its own, as a
+///   `MessageStart` and `MessageEnd` with no deltas.
 /// - An attempt that fails for good passes as its `MessageStart` and its
 ///   `Error` or `Aborted` `MessageEnd` (whose `content` keeps what it
 ///   produced), without its deltas.

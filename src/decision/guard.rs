@@ -1,4 +1,4 @@
-//! [`InputGuard`]: an [`AsyncInputFilter`] that screens the user's input with
+//! [`InputGuard`]: an [`Extension`](crate::Extension) that screens the user's input with
 //! a decision model before it reaches the LLM. Blocking, so strictly opt-in,
 //! and fail-closed by default.
 
@@ -79,11 +79,13 @@ const BUILT_IN: [(&str, &str); 2] = [
 /// **Scope and limits.**
 /// - **Input with no text passes** — an image-only prompt has nothing to
 ///   screen, so no request is sent.
-/// - **Steering and follow-up messages are not screened**: input filters run
-///   on a run's prompts only ([`Agent::steer`](crate::Agent::steer) and
-///   [`Agent::follow_up`](crate::Agent::follow_up) bypass them).
+/// - **Steering and follow-up messages are not screened**: `on_input`, like
+///   the input filters, runs on a run's prompts only
+///   ([`Agent::steer`](crate::Agent::steer) and
+///   [`Agent::follow_up`](crate::Agent::follow_up) bypass it).
 /// - **A guard must check something.** `Agent::with_input_guard` panics on a
-///   guard with no checks; used directly as a filter, such a guard rejects.
+///   guard with no checks; screened directly ([`InputGuard::screen`]), such a
+///   guard rejects.
 /// - **Privacy:** the input text is sent to the decision model's backend —
 ///   a hosted vendor unless you use a local model.
 /// - The spend is recorded in the run's
@@ -255,7 +257,9 @@ impl InputGuard {
         }
     }
 
-    async fn screen(&self, text: &str) -> FilterResult {
+    /// Screen one input: what the guard decides when installed. For testing
+    /// a guard's settings outside the loop.
+    pub async fn screen(&self, text: &str) -> FilterResult {
         if text.trim().is_empty() {
             return FilterResult::Pass;
         }
@@ -302,10 +306,57 @@ impl InputGuard {
     }
 }
 
+/// **Deprecated since 0.25**, to be removed in a later release: install the
+/// guard with [`Agent::with_input_guard`](crate::Agent::with_input_guard) (or
+/// as an extension), and call [`InputGuard::screen`] to drive it outside the
+/// loop. Rust cannot mark a trait impl `#[deprecated]`, so the first use in
+/// the process logs a warning instead.
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl AsyncInputFilter for InputGuard {
     async fn filter(&self, text: &str) -> FilterResult {
+        if super::warn_once("deprecated:InputGuard as AsyncInputFilter".into()) {
+            tracing::warn!(
+                "InputGuard used as an AsyncInputFilter is deprecated: install it with \
+                 with_input_guard (or as an extension), or call InputGuard::screen"
+            );
+        }
         self.screen(text).await
+    }
+}
+
+/// The guard as an [`Extension`](crate::Extension): what
+/// [`Agent::with_input_guard`](crate::Agent::with_input_guard) installs. Its
+/// `on_input` is [`InputGuard::screen`].
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl crate::Extension for InputGuard {
+    fn name(&self) -> &str {
+        "input-guard"
+    }
+
+    async fn start_run(
+        &self,
+        _run: &crate::extension::RunContext<'_>,
+    ) -> Result<Box<dyn crate::RunHooks>, crate::extension::ExtensionError> {
+        Ok(Box::new(GuardHooks(self.clone())))
+    }
+}
+
+struct GuardHooks(InputGuard);
+
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl crate::RunHooks for GuardHooks {
+    async fn on_input(
+        &mut self,
+        input: &crate::extension::InputContext<'_>,
+    ) -> crate::extension::InputDecision {
+        use crate::extension::InputDecision;
+        match self.0.screen(input.text).await {
+            FilterResult::Reject(reason) => InputDecision::Reject(reason),
+            // The guard never warns; a pass is a pass.
+            FilterResult::Pass | FilterResult::Warn(_) => InputDecision::Pass,
+        }
     }
 }

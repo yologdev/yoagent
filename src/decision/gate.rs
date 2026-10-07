@@ -1,6 +1,6 @@
-//! [`ToolGate`]: a [`ToolMiddleware`] that asks a decision model whether a
-//! tool call is destructive and whether the user asked for it. Blocking, so
-//! strictly opt-in, and fail-closed.
+//! [`ToolGate`]: an [`Extension`](crate::Extension) that asks a decision
+//! model whether a tool call is destructive and whether the user asked for
+//! it. Blocking, so strictly opt-in, and fail-closed.
 
 use super::advisory::{assert_threshold, truncate_middle};
 use super::question::Question;
@@ -56,9 +56,9 @@ const DEFAULT_REQUESTED_QUESTION: &str = "Is `tool_call` something the user aske
 /// missing or malformed answer, and a non-finite probability all deny.
 ///
 /// **Scope.**
-/// - Install it **last**: middleware after it could modify the arguments
-///   after they were approved. [`Agent::with_tool_gate`](crate::Agent::with_tool_gate)
-///   does this for you.
+/// - Install it with [`Agent::with_tool_gate`](crate::Agent::with_tool_gate),
+///   which runs it **last**, after every middleware and extension, so
+///   nothing can modify the arguments after they were approved.
 /// - It gates the agent it is installed on. Calls made *inside* a
 ///   [`SubAgentTool`](crate::SubAgentTool) are not covered by the parent's
 ///   gate; give the sub-agent its own (`SubAgentTool::with_tool_gate`) —
@@ -164,7 +164,10 @@ impl ToolGate {
         self
     }
 
-    async fn decide(&self, call: &ToolCallRequest<'_>) -> ToolDecision {
+    /// Judge one call: what the gate decides when installed. For testing a
+    /// gate's settings outside the loop, with a call built by
+    /// [`ToolCallRequest::new`].
+    pub async fn decide(&self, call: &ToolCallRequest<'_>) -> ToolDecision {
         let arguments = shorten(call.args);
         let size = serde_json::to_string(&arguments).map_or(usize::MAX, |s| s.chars().count());
         if size > MAX_ARGS_CHARS {
@@ -295,10 +298,58 @@ fn shorten(v: &Value) -> Value {
     }
 }
 
+/// **Deprecated since 0.25**, to be removed in a later release: install the
+/// gate with [`Agent::with_tool_gate`](crate::Agent::with_tool_gate) (or as an
+/// extension, `with_extension` / `with_tree_extension`), and call
+/// [`ToolGate::decide`] to drive it outside the loop. Installed as a
+/// middleware it runs before every extension and before any middleware added
+/// after it, so arguments either rewrites are never judged. Rust cannot mark
+/// a trait impl `#[deprecated]`, so the first use in the process logs a
+/// warning instead.
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl ToolMiddleware for ToolGate {
     async fn before_tool(&self, call: &ToolCallRequest<'_>) -> ToolDecision {
+        if super::warn_once("deprecated:ToolGate as ToolMiddleware".into()) {
+            tracing::warn!(
+                "ToolGate used as a ToolMiddleware is deprecated: install it with \
+                 with_tool_gate (or as an extension), or call ToolGate::decide"
+            );
+        }
         self.decide(call).await
+    }
+}
+
+/// The gate as an [`Extension`](crate::Extension): what
+/// [`Agent::with_tool_gate`](crate::Agent::with_tool_gate) installs. Its
+/// `before_tool` is [`ToolGate::decide`].
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl crate::Extension for ToolGate {
+    fn name(&self) -> &str {
+        "tool-gate"
+    }
+
+    /// A gate judges the arguments that will run, also when it is installed
+    /// ahead of an extension that rewrites them (as a tree extension is).
+    fn rechecks_modified_calls(&self) -> bool {
+        true
+    }
+
+    async fn start_run(
+        &self,
+        _run: &crate::extension::RunContext<'_>,
+    ) -> Result<Box<dyn crate::RunHooks>, crate::extension::ExtensionError> {
+        Ok(Box::new(GateHooks(self.clone())))
+    }
+}
+
+struct GateHooks(ToolGate);
+
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl crate::RunHooks for GateHooks {
+    async fn before_tool(&self, call: &ToolCallRequest<'_>) -> ToolDecision {
+        self.0.decide(call).await
     }
 }

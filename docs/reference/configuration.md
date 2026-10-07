@@ -2,9 +2,10 @@
 
 ## AgentLoopConfig
 
-The main configuration for the agent loop:
+The main configuration for the agent loop. Build it with `AgentLoopConfig::new(provider, model)`, which sets every other field to its default, then set the fields you need. The struct is `#[non_exhaustive]`: it cannot be built as a struct literal outside the crate, so new fields can be added without breaking callers.
 
 ```rust
+#[non_exhaustive]
 pub struct AgentLoopConfig {
     pub provider: Arc<dyn StreamProvider>,
     pub model: String,
@@ -31,6 +32,10 @@ pub struct AgentLoopConfig {
     pub on_error: Option<OnErrorFn>,
     pub input_filters: Vec<Arc<dyn InputFilter>>,
     pub turn_delay: Option<Duration>,
+    pub extensions: Vec<Arc<dyn Extension>>,
+    pub tree_extensions: Vec<Arc<dyn Extension>>,
+    pub max_stop_continues: usize,
+    pub run_label: Option<String>,
 }
 ```
 
