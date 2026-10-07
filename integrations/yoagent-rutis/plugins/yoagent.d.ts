@@ -55,9 +55,15 @@ export interface Options {
  * The hooks, every one optional and async. Arguments are plain JSON (copied
  * across processes). A hook that throws, or that does not answer within the
  * host's timeout (60 s policy hooks, 30 s `on_input`, 5 s the others, by
- * default), counts as failed: `before_tool` then denies the call, `on_input`
- * rejects the input, `after_tool` withholds the result, and the others are
- * skipped (or fail the run, if the host made the bridge required).
+ * default; `call_tool` is bounded only by the run's cancellation), counts as
+ * failed: `before_tool` then denies the call, `on_input` rejects the input,
+ * `after_tool` withholds the result, `on_event` is switched off for the run,
+ * and the others are skipped (each fails the run instead, if the host made
+ * the bridge required). An answer of an unexpected shape counts as failed
+ * too.
+ *
+ * A member named like a hook must be a function: `register` throws on
+ * anything else, so a policy never goes missing silently.
  *
  * Hooks run in registration order across every plugin: a `deny` wins, an
  * `args` rewrite feeds the next handler, notes are joined.
@@ -79,7 +85,12 @@ export interface Handler {
   on_stop?(stop: Stop): Promise<StopVerdict>
   /** When the run ends, however it ends. */
   finish?(outcome: Outcome): Promise<void>
-  /** Each event of the types in `options.events`, in order. Delivered asynchronously: the run never waits for it. */
+  /**
+   * Each event of the types in `options.events`, in order. Delivered
+   * asynchronously: the run never waits for it. Its failure is noticed at the
+   * next event or decision point (a tool call, a model request, the stop);
+   * one that falls 1024 events behind counts as failed.
+   */
   on_event?(event: AgentEvent): Promise<void>
 }
 

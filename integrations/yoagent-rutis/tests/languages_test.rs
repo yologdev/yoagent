@@ -446,8 +446,53 @@ def apply(ctx, config):
     probe.record(f"py {name}: registered")
 "#;
 
+/// Registrations `register` must refuse, each answer recorded; then a
+/// handler whose `on_event` throws and whose `call_tool` answers badly.
+const JS_STRICT: &str = r#"
+import { definePlugin } from 'RUTIS'
+export default definePlugin({
+  inject: ['yoagent', 'probe'],
+  apply(ctx) {
+    const probe = ctx.use('probe')
+    const yoagent = ctx.use('yoagent')
+    const attempts = {
+      'no hooks': [{}],
+      'tools without call_tool': [{ async tools() { return [] } }],
+      'events without on_event': [{ async before_tool() {} }, { events: ['agentEnd'] }],
+      'on_event without events': [{ async on_event() {} }],
+      'a hook that is not a function': [{ before_tool: 42, async on_stop() {} }],
+    }
+    for (const [what, args] of Object.entries(attempts)) {
+      try {
+        yoagent.register('bad', ...args)
+        probe.record(`accepted: ${what}`)
+      } catch (error) {
+        probe.record(`refused: ${what}: ${error.message}`)
+      }
+    }
+    ctx.effect(yoagent.register('strict', {
+      async tools() {
+        return [{ name: 'bad_flag' }, { name: 'bad_text' }, { name: 'empty' }]
+      },
+      async call_tool(call) {
+        if (call.tool === 'bad_flag') return { text: 'ok?', is_error: 'yes' }
+        if (call.tool === 'bad_text') return { text: 42 }
+        return {}
+      },
+      async before_tool(call) {
+        if (call.tool === 'bad_args') return { args: 'not an object' }
+      },
+      async on_event(event) {
+        throw new Error('observer down')
+      },
+    }, { events: ['toolExecutionEnd'] }))
+  },
+})
+"#;
+
 struct Fixtures {
     js: PathBuf,
+    strict: PathBuf,
     py: PathBuf,
     _dir: tempfile::TempDir,
 }
@@ -461,10 +506,17 @@ fn fixtures() -> Fixtures {
         .unwrap_or_default();
     let js = dir.path().join("hooks.mjs");
     std::fs::write(&js, JS_HOOKS.replace("RUTIS", &rutis)).unwrap();
+    let strict = dir.path().join("strict.mjs");
+    std::fs::write(&strict, JS_STRICT.replace("RUTIS", &rutis)).unwrap();
     let py = dir.path().join("py");
     std::fs::create_dir_all(&py).unwrap();
     std::fs::write(py.join("py_hooks.py"), PY_HOOKS).unwrap();
-    Fixtures { js, py, _dir: dir }
+    Fixtures {
+        js,
+        strict,
+        py,
+        _dir: dir,
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -724,7 +776,12 @@ async fn a_crashed_runtime_withdraws_its_handlers() {
     // handler that is gone, so its policy denies.
     assert!(results[0].2, "{results:?}");
     assert!(results[1].2, "{results:?}");
-    assert!(results[1].1.contains("no longer available"), "{results:?}");
+    // Denied either way: as unavailable once the closed session was
+    // noticed, or by the failed call before that.
+    assert!(
+        results[1].1.contains("no longer available") || results[1].1.contains("py-hooks"),
+        "{results:?}"
+    );
     host.until_no_handler("py-hooks").await;
 
     // The next run has no Python handler at all.
@@ -830,4 +887,119 @@ async fn a_tree_extension_carries_a_language_policy_into_sub_agents() {
         "the parent ran the delegation"
     );
     host.root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn register_and_results_are_strict() {
+    let Some(node) = node_runtime() else {
+        return;
+    };
+    let fx = fixtures();
+    let host = host(Some(&node), None).await;
+    host.load(vec![ts_row("strict", &fx.strict, json!({}))])
+        .await;
+    host.until_handlers(&["strict"]).await;
+    for (what, why) in [
+        ("no hooks", "must be an object (or dict) of async functions"),
+        ("tools without call_tool", "must implement `call_tool`"),
+        ("events without on_event", "needs an `on_event` method"),
+        ("on_event without events", "needs `options.events`"),
+        (
+            "a hook that is not a function",
+            "`before_tool` is not a function",
+        ),
+    ] {
+        let line = host
+            .probe
+            .lines()
+            .into_iter()
+            .find(|l| l.contains(what))
+            .unwrap_or_else(|| panic!("{what}: {:?}", host.probe.lines()));
+        assert!(line.starts_with("refused") && line.contains(why), "{line}");
+    }
+
+    for required in [false, true] {
+        let echo = Reply::new("bad_args", "ran");
+        let echo_runs = echo.runs();
+        let (agent, _) = agent(vec![
+            calls(&[
+                ("bad_flag", json!({})),
+                ("bad_text", json!({})),
+                ("empty", json!({})),
+                ("bad_args", json!({})),
+                ("pause", json!({})),
+            ]),
+            text("done"),
+        ]);
+        let extension = if required {
+            host.bridge.extension().required()
+        } else {
+            host.bridge.extension()
+        };
+        // A remote `on_event` failure is noticed at the first event or
+        // decision point after it lands: the pause lets it land before the
+        // next model request.
+        let mut agent = agent
+            .with_tools(vec![Box::new(echo), Box::new(Pause)])
+            .with_extension(extension);
+        let (_, results) = tokio::time::timeout(Duration::from_secs(30), run(&mut agent, "go"))
+            .await
+            .expect("the run finishes");
+        if required {
+            // The failed `on_event` (after the first tool's end) fails the
+            // run; calls not started yet do not run.
+            let error = run_error(&agent).expect("the run failed");
+            assert!(error.contains("observer down"), "{error}");
+            continue;
+        }
+        let result = |name: &str| {
+            results
+                .iter()
+                .find(|(n, ..)| n == name)
+                .unwrap_or_else(|| panic!("{name}: {results:?}"))
+                .clone()
+        };
+        for name in ["bad_flag", "bad_text", "empty"] {
+            let (_, text, is_error) = result(name);
+            assert!(
+                is_error && text.contains("unexpected value"),
+                "{name}: {text}"
+            );
+        }
+        let (_, text, is_error) = result("bad_args");
+        assert!(is_error && text.contains("unexpected value"), "{text}");
+        assert_eq!(echo_runs.load(Ordering::SeqCst), 0);
+        assert_eq!(run_error(&agent), None, "advisory: on_event switched off");
+    }
+    host.root.shutdown().await.unwrap();
+}
+
+/// Sleeps briefly.
+struct Pause;
+
+#[async_trait::async_trait]
+impl yoagent::AgentTool for Pause {
+    fn name(&self) -> &str {
+        "pause"
+    }
+    fn label(&self) -> &str {
+        "pause"
+    }
+    fn description(&self) -> &str {
+        "waits half a second"
+    }
+    fn parameters_schema(&self) -> Value {
+        json!({"type": "object", "properties": {}})
+    }
+    async fn execute(
+        &self,
+        _params: Value,
+        _ctx: yoagent::ToolContext,
+    ) -> Result<yoagent::ToolResult, yoagent::ToolError> {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        Ok(yoagent::ToolResult {
+            content: vec![],
+            details: Value::Null,
+        })
+    }
 }

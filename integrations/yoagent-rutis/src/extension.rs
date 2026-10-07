@@ -224,11 +224,13 @@ impl Extension for RutisExtension {
             .iter()
             .filter(|h| h.hooks.on_event)
             .filter_map(|h| {
-                h.handler.events(&info).map(|sink| Observer {
-                    handler: h.clone(),
-                    sink,
-                    off: AtomicBool::new(false),
-                })
+                h.handler
+                    .events(&info, self.timeouts.turn)
+                    .map(|sink| Observer {
+                        handler: h.clone(),
+                        sink,
+                        off: AtomicBool::new(false),
+                    })
             })
             .collect();
         let unjudged = self.require_policy && !handlers.iter().any(|h| h.hooks.before_tool);
@@ -382,8 +384,25 @@ impl RunState {
         }
     }
 
+    /// Pick up a delivery failure of a handler that delivers events later
+    /// (a language plugin): its `on_event` is switched off, and a required
+    /// failure is recorded, to deny tool calls and fail the run at the next
+    /// model request or stop.
+    fn check_sinks(&self) {
+        for observer in &self.events {
+            if observer.off.load(Ordering::Relaxed) {
+                continue;
+            }
+            if let Some(why) = observer.sink.failure() {
+                observer.off.store(true, Ordering::Relaxed);
+                self.skipped(&Missed::Failed(why));
+            }
+        }
+    }
+
     /// The pending required failure, without taking it.
     fn pending(&self) -> Option<String> {
+        self.check_sinks();
         self.failure
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -398,6 +417,7 @@ impl RunState {
     }
 
     fn take_failure(&self) -> Option<String> {
+        self.check_sinks();
         self.failure
             .lock()
             .unwrap_or_else(|e| e.into_inner())

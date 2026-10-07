@@ -14,6 +14,7 @@
 
 use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures::future::BoxFuture;
 use serde::Serialize;
@@ -521,6 +522,10 @@ pub(crate) trait EventSink: Send + Sync {
     fn flush(&self) -> BoxFuture<'static, ()> {
         Box::pin(async {})
     }
+    /// A delivery that failed since (for handlers that deliver later).
+    fn failure(&self) -> Option<String> {
+        None
+    }
 }
 
 /// A registered handler, whatever implements it: a Rust [`Handler`], or a
@@ -542,7 +547,8 @@ pub(crate) trait HandlerImpl: Send + Sync + 'static {
     async fn on_stop(&self, stop: Stop) -> Result<StopDecision, ExtensionError>;
     async fn finish(&self, outcome: RunOutcome, run: RunInfo) -> Result<(), ExtensionError>;
     /// This run's event delivery, if the handler observes events.
-    fn events(&self, run: &RunInfo) -> Option<Box<dyn EventSink>>;
+    /// `limit` bounds each delivery, for handlers that deliver remotely.
+    fn events(&self, run: &RunInfo, limit: Option<Duration>) -> Option<Box<dyn EventSink>>;
 }
 
 struct ClosureEvents {
@@ -657,7 +663,7 @@ impl HandlerImpl for Handler {
         Ok(())
     }
 
-    fn events(&self, run: &RunInfo) -> Option<Box<dyn EventSink>> {
+    fn events(&self, run: &RunInfo, _limit: Option<Duration>) -> Option<Box<dyn EventSink>> {
         (!self.on_event.is_empty()).then(|| {
             Box::new(ClosureEvents {
                 run: run.clone(),

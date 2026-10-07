@@ -55,9 +55,33 @@ use yoagent::extension::{
 };
 use yoagent::{AgentEvent, AgentTool, Content, ToolContext, ToolDecision, ToolError, ToolResult};
 
-use crate::extension::DEFAULT_TURN_TIMEOUT;
+use std::time::Duration;
+
 use crate::handler::{EventSink, HandlerImpl, Hooks, Input, RunInfo, Stop, ToolCall, Turn};
 use crate::registry::Registry;
+
+/// How many events may wait for one handler's `on_event` before it counts
+/// as failed (fallen behind).
+const EVENT_QUEUE: usize = 1024;
+
+/// The event types (`AgentEvent`'s `type` tag) this bridge knows.
+const EVENT_TYPES: [&str; 15] = [
+    "agentStart",
+    "agentEnd",
+    "turnStart",
+    "turnEnd",
+    "messageStart",
+    "messageUpdate",
+    "messageEnd",
+    "toolExecutionStart",
+    "toolExecutionUpdate",
+    "toolExecutionEnd",
+    "progressMessage",
+    "inputRejected",
+    "providerRetry",
+    "loopDetected",
+    "contextCompacted",
+];
 
 /// The host service's name.
 pub const SERVICE: &str = "yoagent";
@@ -148,7 +172,7 @@ impl Service {
             },
         };
         let hooks = target.hooks()?;
-        if hooks.tools && !target.has("call_tool") {
+        if hooks.tools && !target.has("call_tool")? {
             return Err(invalid(format!(
                 "register `{name}`: a handler with `tools` must implement `call_tool`"
             )));
@@ -158,6 +182,16 @@ impl Service {
                 "register `{name}`: `options.events` needs an `on_event` method"
             )));
         }
+        if hooks.on_event && options.events.is_empty() {
+            return Err(invalid(format!(
+                "register `{name}`: `on_event` needs `options.events`, the event types to send"
+            )));
+        }
+        for kind in &options.events {
+            if !EVENT_TYPES.contains(&kind.as_str()) {
+                tracing::warn!(handler = %name, event = %kind, "not an event type this bridge knows; it may never be sent");
+            }
+        }
         let caller = session::caller();
         let owner = match &caller {
             Some(connection) => format!("language plugin (session {})", connection.tag()),
@@ -166,10 +200,7 @@ impl Service {
         let handler = Arc::new(RemoteHandler {
             name: name.clone(),
             target: Arc::new(target),
-            hooks: Hooks {
-                on_event: hooks.on_event && !options.events.is_empty(),
-                ..hooks
-            },
+            hooks,
             events: Arc::new(options.events),
         });
         let lifetime = CancellationToken::new();
@@ -248,29 +279,37 @@ impl Target {
     }
 
     /// Whether the handler implements `hook`. For a live object this reads
-    /// the member back (a synchronous call on the plugin's call chain).
-    fn has(&self, hook: &str) -> bool {
+    /// the member back (a synchronous call on the plugin's call chain). A
+    /// member that is there but not a function, or that cannot be read, is
+    /// an error: a policy must never go missing silently.
+    fn has(&self, hook: &str) -> Result<bool, Error> {
         match self {
-            Self::Record(functions) => functions.contains_key(hook),
-            Self::Object(object) => matches!(
-                object.get(hook),
-                Ok(Value::Reference(member)) if member.is_function()
-            ),
+            Self::Record(functions) => Ok(functions.contains_key(hook)),
+            Self::Object(object) => match object.get(hook) {
+                Ok(Value::Undefined) | Ok(Value::Data(Json::Null)) => Ok(false),
+                Ok(Value::Reference(member)) if member.is_function() => Ok(true),
+                Ok(_) => Err(invalid(format!("register: `{hook}` is not a function"))),
+                // Python's getattr on a missing attribute.
+                Err(Error::Remote { name, .. }) if name == "AttributeError" => Ok(false),
+                Err(error) => Err(invalid(format!(
+                    "register: cannot read the handler's `{hook}`: {error}"
+                ))),
+            },
         }
     }
 
     fn hooks(&self) -> Result<Hooks, Error> {
         let hooks = Hooks {
-            tools: self.has("tools"),
-            before_tool: self.has("before_tool"),
-            after_tool: self.has("after_tool"),
-            before_model: self.has("before_model"),
-            on_input: self.has("on_input"),
-            on_stop: self.has("on_stop"),
-            finish: self.has("finish"),
-            on_event: self.has("on_event"),
+            tools: self.has("tools")?,
+            before_tool: self.has("before_tool")?,
+            after_tool: self.has("after_tool")?,
+            before_model: self.has("before_model")?,
+            on_input: self.has("on_input")?,
+            on_stop: self.has("on_stop")?,
+            finish: self.has("finish")?,
+            on_event: self.has("on_event")?,
         };
-        if hooks == Hooks::default() && !self.has("call_tool") {
+        if hooks == Hooks::default() && !self.has("call_tool")? {
             return Err(invalid(format!(
                 "register: the handler implements none of {}",
                 HOOKS.join(", ")
@@ -314,10 +353,6 @@ fn to_json<T: serde::Serialize>(value: &T) -> Json {
 
 fn unexpected(hook: &str, value: &Json) -> ExtensionError {
     ExtensionError::new(format!("`{hook}` returned an unexpected value: {value}"))
-}
-
-fn string_field(value: &Json, key: &str) -> Option<String> {
-    value.get(key).and_then(Json::as_str).map(str::to_string)
 }
 
 /// One object key, with nothing else: `{deny: "..."}`.
@@ -367,7 +402,7 @@ impl HandlerImpl for RemoteHandler {
                 None => Err(unexpected("before_tool", &value)),
             };
         }
-        if let Some(args) = only(&value, "args") {
+        if let Some(args) = only(&value, "args").filter(|args| args.is_object()) {
             return Ok(ToolDecision::Modify(args.clone()));
         }
         Err(unexpected("before_tool", &value))
@@ -480,14 +515,15 @@ impl HandlerImpl for RemoteHandler {
         Ok(())
     }
 
-    fn events(&self, run: &RunInfo) -> Option<Box<dyn EventSink>> {
+    fn events(&self, run: &RunInfo, limit: Option<Duration>) -> Option<Box<dyn EventSink>> {
         if !self.hooks.on_event {
             return None;
         }
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Delivery>();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Delivery>(EVENT_QUEUE);
         let target = self.target.clone();
         let name = self.name.clone();
-        let run_id = run.run_id.clone();
+        let failed = Arc::new(std::sync::Mutex::new(None::<String>));
+        let failure = failed.clone();
         // One task per run and handler: events arrive in order, and the run
         // never waits for them. It ends once the run's hooks are dropped and
         // the queue is drained (`AgentEnd` comes after `finish`).
@@ -500,16 +536,24 @@ impl HandlerImpl for RemoteHandler {
                         continue;
                     }
                 };
+                if failure.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+                    continue; // switched off: drop what is still queued
+                }
                 let call = target.call("on_event", vec![event]);
-                match tokio::time::timeout(DEFAULT_TURN_TIMEOUT, call).await {
-                    Ok(Ok(_)) => {}
-                    Ok(Err(error)) => {
-                        tracing::warn!(handler = %name, %run_id, "on_event failed: {error}")
-                    }
-                    Err(_) => tracing::warn!(
-                        handler = %name, %run_id,
-                        "on_event did not answer within {DEFAULT_TURN_TIMEOUT:?}"
-                    ),
+                let outcome = match limit {
+                    Some(limit) => tokio::time::timeout(limit, call).await.unwrap_or_else(|_| {
+                        Err(ExtensionError::new(format!(
+                            "did not answer within {limit:?}"
+                        )))
+                    }),
+                    None => call.await,
+                };
+                if let Err(error) = outcome {
+                    let why = format!("plugin handler `{name}` failed in `on_event`: {error}");
+                    failure
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .get_or_insert(why);
                 }
             }
         });
@@ -517,6 +561,7 @@ impl HandlerImpl for RemoteHandler {
             filter: self.events.clone(),
             run: run.clone(),
             tx,
+            failed,
         }))
     }
 }
@@ -578,11 +623,30 @@ fn event_type(event: &AgentEvent) -> String {
 struct RemoteEvents {
     filter: Arc<Vec<String>>,
     run: RunInfo,
-    tx: tokio::sync::mpsc::UnboundedSender<Delivery>,
+    tx: tokio::sync::mpsc::Sender<Delivery>,
+    /// The first delivery failure (an error, a timeout, a full queue): the
+    /// handler's `on_event` is switched off for the run.
+    failed: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+impl RemoteEvents {
+    /// Report a failure to the run: the extension contains this unwind,
+    /// switches the handler's `on_event` off, and fails a required run.
+    fn give_up(&self) {
+        let why = self
+            .failed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        if let Some(why) = why {
+            std::panic::resume_unwind(Box::new(why));
+        }
+    }
 }
 
 impl EventSink for RemoteEvents {
     fn send(&self, event: &AgentEvent) {
+        self.give_up();
         let kind = event_type(event);
         if !self.filter.contains(&kind) {
             return;
@@ -591,14 +655,31 @@ impl EventSink for RemoteEvents {
         if let (Some(fields), Json::Object(run)) = (json.as_object_mut(), to_json(&self.run)) {
             fields.insert("run".into(), Json::Object(run));
         }
-        let _ = self.tx.send(Delivery::Event(json));
+        if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) =
+            self.tx.try_send(Delivery::Event(json))
+        {
+            self.failed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get_or_insert(format!(
+                    "plugin handler's `on_event` fell {EVENT_QUEUE} events behind"
+                ));
+            self.give_up();
+        }
+    }
+
+    fn failure(&self) -> Option<String> {
+        self.failed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     fn flush(&self) -> futures::future::BoxFuture<'static, ()> {
         let (done, flushed) = tokio::sync::oneshot::channel();
-        let queued = self.tx.send(Delivery::Flush(done)).is_ok();
+        let tx = self.tx.clone();
         Box::pin(async move {
-            if queued {
+            if tx.send(Delivery::Flush(done)).await.is_ok() {
                 let _ = flushed.await;
             }
         })
@@ -652,27 +733,30 @@ impl AgentTool for RemoteTool {
             _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
         }
         .map_err(|e| ToolError::Failed(e.to_string()))?;
+        let unexpected =
+            || ToolError::Failed(format!("`call_tool` returned an unexpected value: {value}"));
         let (text, details, is_error) = match &value {
             Json::String(text) => (text.clone(), Json::Null, false),
             Json::Object(fields)
-                if fields
-                    .keys()
-                    .all(|k| ["text", "details", "is_error"].contains(&k.as_str())) =>
+                if !fields.is_empty()
+                    && fields
+                        .keys()
+                        .all(|k| ["text", "details", "is_error"].contains(&k.as_str())) =>
             {
-                (
-                    string_field(&value, "text").unwrap_or_default(),
-                    fields.get("details").cloned().unwrap_or(Json::Null),
-                    fields
-                        .get("is_error")
-                        .and_then(Json::as_bool)
-                        .unwrap_or(false),
-                )
+                let text = match fields.get("text") {
+                    None => String::new(),
+                    Some(Json::String(text)) => text.clone(),
+                    Some(_) => return Err(unexpected()),
+                };
+                let is_error = match fields.get("is_error") {
+                    None => false,
+                    Some(Json::Bool(is_error)) => *is_error,
+                    Some(_) => return Err(unexpected()),
+                };
+                let details = fields.get("details").cloned().unwrap_or(Json::Null);
+                (text, details, is_error)
             }
-            _ => {
-                return Err(ToolError::Failed(format!(
-                    "`call_tool` returned an unexpected value: {value}"
-                )))
-            }
+            _ => return Err(unexpected()),
         };
         if is_error {
             return Err(ToolError::Failed(text));

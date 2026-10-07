@@ -215,6 +215,14 @@ sits inside every run of every agent using the extension:
   that peer register handlers: treat it as part of the agent's trust
   boundary, use `wss` with a per-peer token (see rutis's guide to nodes), and
   set `.filters_tool_output()` only if you trust it to redact.
+- **Registration** with an object handler reads each hook name back with a
+  synchronous call (about ten round trips per `register`; a Python dict
+  needs none).
+- **Which session.** A handler is removed when the session that registered
+  it closes. For a plugin behind a link, that is the link: a remote runtime
+  that crashes while the link stays up leaves its handlers registered and
+  failing (every tool call denied) until the plugin's own `ctx.effect`
+  cleanup or the link goes, and its name stays taken.
 - **Availability.** An unreachable handler fails closed for that call, but a
   peer that disconnects has its handlers removed: later runs have no policy
   from it, and allow, unless the extension has `.require_policy()`. Use it
