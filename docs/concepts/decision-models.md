@@ -464,7 +464,7 @@ use yoagent::decision::ToolGate;
 let agent = agent.with_tool_gate(ToolGate::new(DecisionModel::jev()));
 ```
 
-The tool gate is an [extension](extensions.md) (and still a `ToolMiddleware`, for installing by hand) and a **separate, explicit opt-in**,
+The tool gate is an [extension](extensions.md) (its `ToolMiddleware` impl is deprecated) and a **separate, explicit opt-in**,
 because it blocks. For every tool call it sends one request whose state is
 `{"user_request": .., "tool_call": {"tool": .., "arguments": ..}}`, with two
 Nouls:
@@ -539,9 +539,9 @@ denied without asking.
 
 - `Agent::with_tool_gate` installs the gate as an extension after the agent's
   own, so it runs **last**, after every middleware and extension, and judges
-  the arguments that will actually run. A `ToolGate` installed by hand with
-  `with_tool_middleware` must be added last yourself, and runs before any
-  extension: an extension after it could modify arguments after approval.
+  the arguments that will actually run. (Installing a `ToolGate` with
+  `with_tool_middleware` is deprecated: it then runs before every extension,
+  which could modify arguments after approval.)
   Install it with `with_tree_extension` to cover sub-agents too. A tree
   extension runs *first*, so the gate then judges a call again (a second
   decision request) whenever a later extension rewrote its arguments.
@@ -584,7 +584,7 @@ use yoagent::decision::InputGuard;
 let agent = agent.with_input_guard(InputGuard::new(DecisionModel::jev()));
 ```
 
-The input guard is an `AsyncInputFilter` — and, because it blocks, a
+The input guard is an [extension](extensions.md) (`on_input`; its `AsyncInputFilter` impl is deprecated) — and, because it blocks, a
 **separate, explicit opt-in**. It screens each prompt's text (every user text
 block, joined) with **one batched request of Nouls** whose state is
 `{"input": ..}`. The default checks each reject at **`p >= 0.8`**:
@@ -636,7 +636,7 @@ check, question and threshold. Thresholds outside `[0, 1]`, `with_threshold`
 on an unknown id, and an empty or repeated added id panic at setup, and so
 does `Agent::with_input_guard` / `SubAgentTool::with_input_guard` on a guard
 with **no checks** — a blocking guard that checks nothing is a setup
-mistake. (Used directly as a filter, such a guard rejects.)
+mistake. (Screened directly with `screen`, such a guard rejects.)
 
 **Scope and limits.**
 
@@ -647,8 +647,8 @@ mistake. (Used directly as a filter, such a guard rejects.)
   the loop without them. This is a limitation of the filter hook, unchanged
   here.
 - `with_input_guard` installs it as an extension: it screens after every
-  `with_input_filter` / `with_async_input_filter` filter. (It is still an
-  `AsyncInputFilter`, to place in the filter list by hand.)
+  `with_input_filter` / `with_async_input_filter` filter. (Placing it in the
+  filter list by hand, as an `AsyncInputFilter`, is deprecated.)
 - `SubAgentTool::with_input_guard` screens the task the parent model hands a
   sub-agent; a rejected task fails the tool call with the reason.
 - The thresholds are starting points, not calibrated constants — calibrate

@@ -83,7 +83,8 @@ const BUILT_IN: [(&str, &str); 2] = [
 ///   on a run's prompts only ([`Agent::steer`](crate::Agent::steer) and
 ///   [`Agent::follow_up`](crate::Agent::follow_up) bypass them).
 /// - **A guard must check something.** `Agent::with_input_guard` panics on a
-///   guard with no checks; used directly as a filter, such a guard rejects.
+///   guard with no checks; screened directly ([`InputGuard::screen`]), such a
+///   guard rejects.
 /// - **Privacy:** the input text is sent to the decision model's backend —
 ///   a hosted vendor unless you use a local model.
 /// - The spend is recorded in the run's
