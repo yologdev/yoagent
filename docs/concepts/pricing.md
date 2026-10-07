@@ -255,9 +255,11 @@ The whole install holds one lock and returns an `OverrideReport`
 - `reverted`: models whose price changed because a previous user layer listed
   them and this one does not. They revert to the fetched or bundled price,
   or become unpriced.
-- `inert`: entries whose provider is not in `PRICED_PROVIDERS`. No
-  constructor looks them up; only `with_prices` reads them. A gateway name
-  like `openrouter` or `opencode-zen` is the typical case.
+- `inert`: entries whose provider nothing looks up — not in
+  `PRICED_PROVIDERS`, and (with the `decision` feature) not a decision price
+  key (`typesafe`, `cloudflare`, `openai-decisions`). Only `with_prices` reads
+  them. A gateway name like `openrouter` or `opencode-zen` is the typical
+  case.
 - `warnings`: everything below, also logged at `warn`.
 
 An entry replaces the lower entry whole, and the mistakes that makes easy

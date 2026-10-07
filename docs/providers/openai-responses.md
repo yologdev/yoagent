@@ -84,7 +84,8 @@ context-tier selection still uses the full prompt size.
 `ThinkingLevel` becomes `reasoning.effort`. How high it goes is the model's
 declared capability, read from `ModelConfig::compat`:
 `OpenAiCompat::max_reasoning_effort` (`High` / `XHigh` / `Max`). This provider
-reads that one field and ignores the rest of `OpenAiCompat`.
+reads that field and `encrypted_reasoning` (see below), and ignores the rest of
+`OpenAiCompat`.
 
 `ThinkingLevel::Off` omits `reasoning` entirely, on every model. That runs a
 reasoning model at its default effort (`medium` on most OpenAI models), not

@@ -193,7 +193,7 @@ Each line links to its chapter in [the book](https://yologdev.github.io/yoagent/
 
 ## Examples
 
-Seventeen of the runnable examples in [`examples/`](examples/) are below; eleven need no API key at all. The rest are live-provider harnesses and offline evaluation sweeps.
+Seventeen of the runnable examples in [`examples/`](examples/) are below; ten need no API key at all (eleven counting `cli` with a local model). The rest are live-provider harnesses and offline evaluation sweeps.
 
 | Example | What it shows | Key needed |
 |---|---|---|

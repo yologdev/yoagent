@@ -107,6 +107,7 @@ yoagent/
 │   │   ├── openai_compat.rs    # OpenAI Chat Completions (15+ providers)
 │   │   ├── openai_responses.rs # OpenAI Responses API
 │   │   ├── azure_openai.rs     # Azure OpenAI
+│   │   ├── responses_request.rs # Request body shared by Responses and Azure
 │   │   ├── responses_stream.rs # SSE parser shared by Responses and Azure
 │   │   ├── google.rs           # Google Generative AI
 │   │   ├── google_vertex.rs    # Google Vertex AI
@@ -118,7 +119,7 @@ yoagent/
 │   │   ├── prices.rs           # PriceTable (+ prices/global.rs, prices/fetch.rs)
 │   │   ├── prices.json         # Bundled price snapshot (applied only on opt-in)
 │   │   ├── mock.rs             # Mock provider for testing
-│   │   └── sse.rs              # SSE utilities
+│   │   └── sse.rs              # SSE utilities (crate-private)
 │   ├── tools/
 │   │   ├── bash.rs             # BashTool (native)
 │   │   ├── file.rs             # ReadFileTool, WriteFileTool (native)
