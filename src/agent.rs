@@ -633,7 +633,8 @@ impl Agent {
     ///   add them, so it judges the arguments that will actually run.
     ///   (Installing a `ToolGate` with
     ///   [`with_tool_middleware`](Self::with_tool_middleware) is deprecated:
-    ///   it then runs before every extension.)
+    ///   it then runs before every extension and before any middleware added
+    ///   after it, so arguments either rewrites are never judged.)
     /// - **This agent only:** calls made inside a
     ///   [`SubAgentTool`](crate::SubAgentTool) are not covered; give it its
     ///   own gate, where the "user request" is the task text this agent
@@ -670,8 +671,8 @@ impl Agent {
     ///   ([`with_input_filter`](Self::with_input_filter),
     ///   [`with_async_input_filter`](Self::with_async_input_filter)).
     /// - Input with no text (an image-only prompt) passes unscreened;
-    ///   steering and follow-up messages are not screened (input filters see
-    ///   a run's prompts only).
+    ///   steering and follow-up messages are not screened (`on_input`, like
+    ///   the input filters, sees a run's prompts only).
     /// - The input text is sent to the decision model's backend. Requests
     ///   and spend are reported in [`SessionStats::decision`].
     ///

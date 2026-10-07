@@ -540,8 +540,9 @@ denied without asking.
 - `Agent::with_tool_gate` installs the gate as an extension after the agent's
   own, so it runs **last**, after every middleware and extension, and judges
   the arguments that will actually run. (Installing a `ToolGate` with
-  `with_tool_middleware` is deprecated: it then runs before every extension,
-  which could modify arguments after approval.)
+  `with_tool_middleware` is deprecated: it then runs before every extension
+  and before any middleware added after it, and either could modify arguments
+  after approval.)
   Install it with `with_tree_extension` to cover sub-agents too. A tree
   extension runs *first*, so the gate then judges a call again (a second
   decision request) whenever a later extension rewrote its arguments.
@@ -642,10 +643,9 @@ mistake. (Screened directly with `screen`, such a guard rejects.)
 
 - **Input with no text passes** unscreened (an image-only prompt): there is
   nothing to screen, and no request is sent.
-- **Steering and follow-up messages are not screened.** Input filters run on
-  a run's prompts only; `Agent::steer` and `Agent::follow_up` messages enter
-  the loop without them. This is a limitation of the filter hook, unchanged
-  here.
+- **Steering and follow-up messages are not screened.** `on_input`, like the
+  input filters, runs on a run's prompts only; `Agent::steer` and
+  `Agent::follow_up` messages enter the loop without it.
 - `with_input_guard` installs it as an extension: it screens after every
   `with_input_filter` / `with_async_input_filter` filter. (Placing it in the
   filter list by hand, as an `AsyncInputFilter`, is deprecated.)
@@ -808,7 +808,7 @@ A `ToolGate` can be driven without an agent with `check` (an `InputGuard` with `
 let args = json!({"path": "/srv/data"});
 let prompts = [Message::user("summarize the README")];
 let call = ToolCallRequest::new("call-1", "rm", &args).with_run_prompts(&prompts);
-let decision = ToolGate::new(model).check(&call).await; // ToolDecision
+let decision = ToolGate::new(model).decide(&call).await; // ToolDecision
 ```
 
 The logprob backend's tests run against a wiremock OpenAI-compatible server;

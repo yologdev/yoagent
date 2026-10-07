@@ -33,13 +33,13 @@ adheres to [Semantic Versioning](https://semver.org/).
   - the guard screens after all input filters, not in their list;
   - the advisor's hint comes before turn-hook notes and is judged once per turn rather than once per provider attempt (it was memoized per request, so the same request is sent).
 
-### Deprecated
-
-- **`ToolGate` as a `ToolMiddleware` and `InputGuard` as an `AsyncInputFilter`.** Install them with `with_tool_gate` / `with_input_guard` (or as extensions), and drive them outside the loop with the new `ToolGate::check(&call)` and `InputGuard::screen(text)`. Rust cannot mark a trait impl `#[deprecated]`, so the first use of each logs a warning; both impls will be removed in a later release. A gate installed as a middleware runs before every extension, so it does not judge arguments an extension rewrites.
-
 ### Changed (breaking)
 
 - **`AgentLoopConfig` is `#[non_exhaustive]`; build it with `AgentLoopConfig::new(provider, model)`.** `new` sets every other field to the default the struct-literal examples used (no API key, thinking off, no context management, no hooks, parallel tools, the default retry policy). Fields stay public, so set what you need afterwards: `config.max_tokens = Some(1024);`. A struct literal no longer compiles outside the crate. Every field added so far was a breaking change for code calling `agent_loop` directly, which is why recent features went through task-locals; new fields (such as `#241`'s extensions) no longer break anyone. `Agent` and `SubAgentTool` users are unaffected.
+
+### Deprecated
+
+- **`ToolGate` as a `ToolMiddleware` and `InputGuard` as an `AsyncInputFilter`.** Install them with `with_tool_gate` / `with_input_guard` (or as extensions), and drive them outside the loop with the new `ToolGate::decide(&call)` and `InputGuard::screen(text)`. Rust cannot mark a trait impl `#[deprecated]`, so the first use of each in a process logs a warning; both impls will be removed in a later release. A gate installed as a middleware runs before every extension and before any middleware added after it, so it does not judge arguments those rewrite.
 
 ### Fixed
 

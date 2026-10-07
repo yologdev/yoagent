@@ -1,6 +1,6 @@
 //! [`ToolGate`]: an [`Extension`](crate::Extension) that asks a decision
-//! model whether a tool call is destructive and whether the user asked for it. Blocking, so
-//! strictly opt-in, and fail-closed.
+//! model whether a tool call is destructive and whether the user asked for
+//! it. Blocking, so strictly opt-in, and fail-closed.
 
 use super::advisory::{assert_threshold, truncate_middle};
 use super::question::Question;
@@ -167,7 +167,7 @@ impl ToolGate {
     /// Judge one call: what the gate decides when installed. For testing a
     /// gate's settings outside the loop, with a call built by
     /// [`ToolCallRequest::new`].
-    pub async fn check(&self, call: &ToolCallRequest<'_>) -> ToolDecision {
+    pub async fn decide(&self, call: &ToolCallRequest<'_>) -> ToolDecision {
         let arguments = shorten(call.args);
         let size = serde_json::to_string(&arguments).map_or(usize::MAX, |s| s.chars().count());
         if size > MAX_ARGS_CHARS {
@@ -301,10 +301,11 @@ fn shorten(v: &Value) -> Value {
 /// **Deprecated since 0.25**, to be removed in a later release: install the
 /// gate with [`Agent::with_tool_gate`](crate::Agent::with_tool_gate) (or as an
 /// extension, `with_extension` / `with_tree_extension`), and call
-/// [`ToolGate::check`] to drive it outside the loop. Installed as a
-/// middleware it runs before every extension, so it does not judge arguments
-/// an extension rewrites. Rust cannot mark a trait impl `#[deprecated]`, so
-/// the first use logs a warning instead.
+/// [`ToolGate::decide`] to drive it outside the loop. Installed as a
+/// middleware it runs before every extension and before any middleware added
+/// after it, so arguments either rewrites are never judged. Rust cannot mark
+/// a trait impl `#[deprecated]`, so the first use in the process logs a
+/// warning instead.
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl ToolMiddleware for ToolGate {
@@ -312,16 +313,16 @@ impl ToolMiddleware for ToolGate {
         if super::warn_once("deprecated:ToolGate as ToolMiddleware".into()) {
             tracing::warn!(
                 "ToolGate used as a ToolMiddleware is deprecated: install it with \
-                 with_tool_gate (or as an extension), or call ToolGate::check"
+                 with_tool_gate (or as an extension), or call ToolGate::decide"
             );
         }
-        self.check(call).await
+        self.decide(call).await
     }
 }
 
 /// The gate as an [`Extension`](crate::Extension): what
 /// [`Agent::with_tool_gate`](crate::Agent::with_tool_gate) installs. Its
-/// `before_tool` is [`ToolGate::check`].
+/// `before_tool` is [`ToolGate::decide`].
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl crate::Extension for ToolGate {
@@ -349,6 +350,6 @@ struct GateHooks(ToolGate);
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl crate::RunHooks for GateHooks {
     async fn before_tool(&self, call: &ToolCallRequest<'_>) -> ToolDecision {
-        self.0.check(call).await
+        self.0.decide(call).await
     }
 }

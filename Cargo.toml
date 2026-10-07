@@ -161,6 +161,10 @@ required-features = ["decision"]
 name = "decision_guard_test"
 required-features = ["decision"]
 
+[[test]]
+name = "decision_deprecation_test"
+required-features = ["decision"]
+
 [[example]]
 name = "decision"
 required-features = ["decision"]

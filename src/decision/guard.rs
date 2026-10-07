@@ -79,9 +79,10 @@ const BUILT_IN: [(&str, &str); 2] = [
 /// **Scope and limits.**
 /// - **Input with no text passes** — an image-only prompt has nothing to
 ///   screen, so no request is sent.
-/// - **Steering and follow-up messages are not screened**: input filters run
-///   on a run's prompts only ([`Agent::steer`](crate::Agent::steer) and
-///   [`Agent::follow_up`](crate::Agent::follow_up) bypass them).
+/// - **Steering and follow-up messages are not screened**: `on_input`, like
+///   the input filters, runs on a run's prompts only
+///   ([`Agent::steer`](crate::Agent::steer) and
+///   [`Agent::follow_up`](crate::Agent::follow_up) bypass it).
 /// - **A guard must check something.** `Agent::with_input_guard` panics on a
 ///   guard with no checks; screened directly ([`InputGuard::screen`]), such a
 ///   guard rejects.
@@ -308,8 +309,8 @@ impl InputGuard {
 /// **Deprecated since 0.25**, to be removed in a later release: install the
 /// guard with [`Agent::with_input_guard`](crate::Agent::with_input_guard) (or
 /// as an extension), and call [`InputGuard::screen`] to drive it outside the
-/// loop. Rust cannot mark a trait impl `#[deprecated]`, so the first use logs
-/// a warning instead.
+/// loop. Rust cannot mark a trait impl `#[deprecated]`, so the first use in
+/// the process logs a warning instead.
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl AsyncInputFilter for InputGuard {

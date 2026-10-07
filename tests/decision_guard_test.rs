@@ -477,7 +477,7 @@ async fn the_gate_can_be_unit_tested_through_tool_call_request_new() {
 
     // Destructive and unrequested: denied.
     let mock = gate_answers(0.95, 0.1);
-    let decision = ToolGate::new(model(&mock)).check(&call).await;
+    let decision = ToolGate::new(model(&mock)).decide(&call).await;
     let ToolDecision::Deny(reason) = decision else {
         panic!("expected a denial, got {decision:?}");
     };
@@ -489,7 +489,7 @@ async fn the_gate_can_be_unit_tested_through_tool_call_request_new() {
 
     // Positive control: the same call, clearly requested, is allowed.
     let decision = ToolGate::new(model(&gate_answers(0.95, 0.95)))
-        .check(&call)
+        .decide(&call)
         .await;
     assert!(matches!(decision, ToolDecision::Allow), "{decision:?}");
 
@@ -509,7 +509,7 @@ async fn the_gate_can_be_unit_tested_through_tool_call_request_new() {
     ];
     let mock = gate_answers(0.9, 0.9);
     let call = ToolCallRequest::new("call-2", "rm", &args).with_messages(&history);
-    ToolGate::new(model(&mock)).check(&call).await;
+    ToolGate::new(model(&mock)).decide(&call).await;
     let seen = mock.requests()[0].state["user_request"]
         .as_str()
         .unwrap()
@@ -522,7 +522,7 @@ async fn the_gate_can_be_unit_tested_through_tool_call_request_new() {
     // No user request at all: denied without asking.
     let mock = gate_answers(0.0, 1.0);
     let bare = ToolCallRequest::new("call-3", "rm", &args);
-    let decision = ToolGate::new(model(&mock)).check(&bare).await;
+    let decision = ToolGate::new(model(&mock)).decide(&bare).await;
     assert!(matches!(decision, ToolDecision::Deny(_)));
     assert_eq!(mock.request_count(), 0);
 }
