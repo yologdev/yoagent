@@ -295,8 +295,11 @@ async fn llm_stream_cost_distinguishes_free_from_unpriced() {
     assert_eq!(llm_stream_field(&unpriced, "cost_usd"), None);
 }
 
+/// Each new span's name with its parent's name.
+type SpanParents = Arc<Mutex<Vec<(String, Option<String>)>>>;
+
 /// Layer that records each new span's name with its parent's name.
-struct ParentCollector(Arc<Mutex<Vec<(String, Option<String>)>>>);
+struct ParentCollector(SpanParents);
 
 impl<S> tracing_subscriber::Layer<S> for ParentCollector
 where
