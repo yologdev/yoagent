@@ -24,12 +24,14 @@ use yoagent::*;
 type Log = Arc<Mutex<Vec<String>>>;
 
 /// Records every request's messages; fails the attempts whose (0-based)
-/// index is in `fail`, with a retryable rate limit, before streaming.
+/// index is in `fail` with a retryable rate limit — before streaming, or,
+/// with `mid_stream`, after starting a message and streaming some text.
 struct Recording {
     inner: MockProvider,
     requests: Arc<Mutex<Vec<Vec<Message>>>>,
     attempts: AtomicUsize,
     fail: Vec<usize>,
+    mid_stream: bool,
 }
 
 #[async_trait::async_trait]
@@ -42,6 +44,14 @@ impl StreamProvider for Recording {
     ) -> Result<Message, ProviderError> {
         let attempt = self.attempts.fetch_add(1, Ordering::SeqCst);
         if self.fail.contains(&attempt) {
+            if self.mid_stream {
+                tx.send(StreamEvent::Start).ok();
+                tx.send(StreamEvent::TextDelta {
+                    content_index: 0,
+                    delta: "half an answ".into(),
+                })
+                .ok();
+            }
             return Err(ProviderError::RateLimited {
                 retry_after_ms: Some(1),
             });
@@ -60,6 +70,7 @@ fn provider(script: Vec<MockResponse>, fail: Vec<usize>) -> (Recording, Requests
         requests: requests.clone(),
         attempts: AtomicUsize::new(0),
         fail,
+        mid_stream: false,
     };
     (provider, requests)
 }
@@ -106,6 +117,7 @@ fn texts(content: &[Content]) -> String {
 }
 
 /// Every `ToolExecutionEnd`: `(text, is_error)`, in event order.
+#[cfg(feature = "decision")]
 fn tool_results(events: &[AgentEvent]) -> Vec<(String, bool)> {
     events
         .iter()
@@ -113,6 +125,44 @@ fn tool_results(events: &[AgentEvent]) -> Vec<(String, bool)> {
             AgentEvent::ToolExecutionEnd {
                 result, is_error, ..
             } => Some((texts(&result.content), *is_error)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every `ToolExecutionEnd` paired, by `tool_call_id`, with the `text`
+/// argument of its own `ToolExecutionStart`: `(arg, result text, is_error)`.
+fn results_by_call(events: &[AgentEvent]) -> Vec<(String, String, bool)> {
+    let mut args = std::collections::HashMap::new();
+    for e in events {
+        if let AgentEvent::ToolExecutionStart {
+            tool_call_id,
+            args: a,
+            ..
+        } = e
+        {
+            let text = a["text"].as_str().unwrap_or_default().to_string();
+            assert!(
+                args.insert(tool_call_id.clone(), text).is_none(),
+                "duplicate call id {tool_call_id}"
+            );
+        }
+    }
+    events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::ToolExecutionEnd {
+                tool_call_id,
+                result,
+                is_error,
+                ..
+            } => Some((
+                args.get(tool_call_id)
+                    .unwrap_or_else(|| panic!("no start for {tool_call_id}"))
+                    .clone(),
+                texts(&result.content),
+                *is_error,
+            )),
             _ => None,
         })
         .collect()
@@ -252,14 +302,18 @@ async fn every_tool_strategy_judges_filters_and_withholds_each_call() {
             let mut ran = ran.lock().unwrap().clone();
             ran.sort();
             assert_eq!(ran, ["a", "c"], "{strategy:?}");
-            let mut results = tool_results(&events);
+            // Pair each result with its own call's arguments (by
+            // `tool_call_id`), so a denial or a filtered result that landed
+            // on the wrong call would fail here.
+            let mut results = results_by_call(&events);
             results.sort();
             assert_eq!(
                 results,
                 [
-                    ("ECHO A".to_string(), false),
-                    ("ECHO C".to_string(), false),
+                    ("a".to_string(), "ECHO A".to_string(), false),
+                    ("c".to_string(), "ECHO C".to_string(), false),
                     (
+                        "forbidden".to_string(),
                         "Tool call denied: forbidden is not allowed".to_string(),
                         true
                     ),
@@ -291,7 +345,10 @@ async fn every_tool_strategy_judges_filters_and_withholds_each_call() {
 // Compaction and steering
 // ---------------------------------------------------------------------------
 
-/// The level-3 compaction marker (crate-private; `is_loop_injected` knows it).
+/// The level-3 compaction marker: a copy of the crate-private
+/// `yoagent::context::COMPACTION_MARKER` (src/context.rs), which tests cannot
+/// import. Keep the two in step; the test asserts through the public
+/// `is_loop_injected` that the loop still treats this text as its own.
 const COMPACTION_MARKER_TEXT: &str =
     "[Context compacted: earlier messages removed to fit the context window]";
 
@@ -378,6 +435,12 @@ fn user_text(m: &Message) -> String {
 /// extension's hooks still see it (the run prompts survive compaction).
 #[tokio::test]
 async fn extension_hooks_keep_the_user_request_after_compaction() {
+    // The copied marker must still be one the loop recognizes, or this test
+    // would exercise an ordinary user message instead of a compaction.
+    assert!(
+        is_loop_injected(COMPACTION_MARKER_TEXT),
+        "COMPACTION_MARKER_TEXT drifted from context::COMPACTION_MARKER"
+    );
     let log = Log::default();
     let (p, requests) = provider(vec![echo("one"), echo("two"), text("done")], vec![]);
     let mut agent = Agent::from_provider(p, ModelConfig::mock())
@@ -564,10 +627,14 @@ fn costing(cents: u64, response: MockResponse) -> MockResponse {
 }
 
 /// A retried request is judged once by `before_model`, seen by `on_event`
-/// as a `ProviderRetry`, and billed once: the budget stops the run at the
-/// same point it would without the retry.
+/// as a `ProviderRetry`, and charged only for the attempt that succeeded: a
+/// failed attempt reports no usage, and when it failed mid-stream the
+/// `MessageEnd` the loop closes it with (which the budget does observe)
+/// carries none either, so the budget stops the run at the same point it
+/// would without the retry. (A provider that reports usage for a failed
+/// attempt, via `StreamEvent::Error`, is charged for it: that is real spend.)
 #[tokio::test]
-async fn a_retried_request_is_judged_and_billed_once() {
+async fn a_retried_request_is_judged_once_and_charged_for_the_success_only() {
     let script = || {
         vec![
             costing(4, echo("one")),
@@ -582,14 +649,16 @@ async fn a_retried_request_is_judged_and_billed_once() {
         backoff_multiplier: 1.0,
         max_delay_ms: 1,
     };
-    // Attempt 1 (the second request) fails once and is retried.
-    for fail in [vec![], vec![1]] {
+    // Attempt 1 (the second request) fails once and is retried: before
+    // streaming, or after its `MessageStart` and some text.
+    for (fail, mid_stream) in [(vec![], false), (vec![1], false), (vec![1], true)] {
         let counter = TurnCounter {
             before_model: Arc::default(),
             retries_seen: Arc::default(),
         };
         let budget = Arc::new(Budget::usd(0.10, CostConfig::new(1.0, 0.0)).across_runs());
-        let (p, requests) = provider(script(), fail.clone());
+        let (mut p, requests) = provider(script(), fail.clone());
+        p.mid_stream = mid_stream;
         let mut agent = Agent::from_provider(p, ModelConfig::mock())
             .with_tools(vec![Box::new(Echo(Log::default()))])
             .with_retry_config(fast_retry.clone())
@@ -616,10 +685,35 @@ async fn a_retried_request_is_judged_and_billed_once() {
             4,
             "once per turn, not per attempt: fail={fail:?}"
         );
+        // Positive control for the mid-stream case: the failed attempt
+        // really opened a message, and the loop closed it as an error, so
+        // the budget was shown one more assistant `MessageEnd`. Before
+        // streaming, the failed attempt left no message at all.
+        let errored = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    AgentEvent::MessageEnd {
+                        message: AgentMessage::Llm(Message::Assistant {
+                            stop_reason: StopReason::Error,
+                            ..
+                        })
+                    }
+                )
+            })
+            .count();
+        assert_eq!(errored, usize::from(mid_stream), "fail={fail:?}");
+        assert_eq!(
+            assistant_messages(&events),
+            3 + usize::from(mid_stream),
+            "fail={fail:?} mid_stream={mid_stream}"
+        );
         let spent = budget.spent_usd().unwrap();
-        assert!((spent - 0.12).abs() < 1e-9, "fail={fail:?}: {spent}");
-        // The failed attempt streamed nothing, so it left no message.
-        assert_eq!(assistant_messages(&events), 3, "fail={fail:?}");
+        assert!(
+            (spent - 0.12).abs() < 1e-9,
+            "fail={fail:?} mid_stream={mid_stream}: {spent}"
+        );
         let Some(AgentEvent::AgentEnd { messages, .. }) = events.last() else {
             panic!("ends with AgentEnd");
         };

@@ -24,12 +24,16 @@ use yoagent::provider::mock::{MockResponse, MockToolCall};
 use yoagent::provider::CostConfig;
 use yoagent::*;
 
-/// The price the budget charges: the live model's own, or (offline) $1 per
-/// million input tokens, so the scripted usage below reads in cents.
-fn price() -> CostConfig {
-    live_model()
-        .and_then(|m| m.cost)
-        .unwrap_or_else(|| CostConfig::new(1.0, 0.0))
+/// A budget of `max_usd`. Live, it charges the model's own prices, and there
+/// is none for a model yoagent has no prices for (`Budget::for_model` returns
+/// `None`): a made-up price would make the limit meaningless. Offline, the
+/// scripted model costs $1 per million input tokens, so the usage below
+/// reads in cents.
+fn budget(max_usd: f64) -> Option<Budget> {
+    match live_model() {
+        Some(model) => Budget::for_model(max_usd, &model),
+        None => Some(Budget::usd(max_usd, CostConfig::new(1.0, 0.0))),
+    }
 }
 
 /// A scripted turn that calls `search` and costs `cents`.
@@ -99,13 +103,17 @@ fn summarize(events: &[AgentEvent]) -> (usize, bool) {
 #[tokio::main]
 async fn main() {
     const PROMPT: &str = "Keep searching the tracker for `flaky test` until you are sure.";
+    let (Some(per_run), Some(session)) = (budget(0.10), budget(0.10)) else {
+        println!("model unpriced, skipping the live budget");
+        return;
+    };
 
     // Per run: 10 cents each. A model that keeps searching at 4 cents a
     // turn is stopped before its fourth request (4 + 4 + 4 = 12 >= 10).
     let script = (0..8).map(|_| search_costing(4)).collect();
     let mut agent = new_agent(script)
         .with_tools(vec![Box::new(Search)])
-        .with_extension(Budget::usd(0.10, price()));
+        .with_extension(per_run);
     for n in 1..=2 {
         let events = run(&mut agent, PROMPT).await;
         let (requests, stopped) = summarize(&events);
@@ -120,11 +128,7 @@ async fn main() {
     }
 
     // Across runs: one 10-cent total for the session. Keep an `Arc` to read it.
-    let session = Arc::new(
-        Budget::usd(0.10, price())
-            .across_runs()
-            .with_name("session"),
-    );
+    let session = Arc::new(session.across_runs().with_name("session"));
     let script = (0..8).map(|_| search_costing(4)).collect();
     let mut agent = new_agent(script)
         .with_tools(vec![Box::new(Search)])

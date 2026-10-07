@@ -6,7 +6,9 @@
 //!   - `with_extension` for contrast: it sees this agent's own calls only
 //!   - `RunContext::depth`, telling the parent's run (0) from a child's (1)
 //!   - a delegation tool written by hand that passes the tree on with
-//!     `Agent::delegated_from(&ctx)` (`SubAgentTool` does this itself)
+//!     `Agent::delegated_from(&ctx)`, passes the parent's cancel down, and
+//!     reports the child's spend with `ctx.report_delegated_run`
+//!     (`SubAgentTool` does all three itself)
 //!
 //! Run (offline, scripted model; exits non-zero on a regression):
 //!   cargo run --example extension_tree
@@ -152,7 +154,37 @@ impl AgentTool for AskReviewer {
             // run's tree extensions apply to it, at depth 1.
             .delegated_from(&ctx);
         let question = args["question"].as_str().unwrap_or("Review the change.");
-        let events = run(&mut reviewer, question).await;
+
+        // `prompt` runs the child on its own task, so this tool can watch the
+        // parent's cancel token meanwhile and pass a cancel down with
+        // `abort()`; the child then ends `Aborted` and still sends `AgentEnd`.
+        let mut rx = reviewer.prompt(question).await;
+        let mut events = Vec::new();
+        let mut cancelled = false;
+        loop {
+            tokio::select! {
+                event = rx.recv() => match event {
+                    Some(event) => events.push(event),
+                    None => break,
+                },
+                _ = ctx.cancel.cancelled(), if !cancelled => {
+                    reviewer.abort();
+                    cancelled = true;
+                }
+            }
+        }
+        reviewer.finish().await;
+
+        // Report the child's stats before returning, on every path (a
+        // cancelled or failed delegation still spent money): this is how its
+        // spend reaches the parent's `SessionStats::sub_agents`, and any
+        // `Budget` the parent runs. `SubAgentTool` does the same.
+        if let Some(AgentEvent::AgentEnd { stats, .. }) = events.last() {
+            ctx.report_delegated_run(stats.clone());
+        }
+        if cancelled {
+            return Err(ToolError::Cancelled);
+        }
         Ok(ToolResult {
             content: vec![Content::Text {
                 text: last_text(&events),
@@ -229,5 +261,17 @@ async fn main() {
     check(
         parent_calls == 3,
         "the ordinary extension saw only the parent's three calls",
+    );
+
+    let Some(AgentEvent::AgentEnd { stats, .. }) = events.last() else {
+        panic!("the run ended without AgentEnd");
+    };
+    println!(
+        "delegated runs in the parent's stats: {}",
+        stats.sub_agents.runs
+    );
+    check(
+        stats.sub_agents.runs == 2,
+        "the parent's stats count both delegated runs (fixer and the hand-written reviewer)",
     );
 }

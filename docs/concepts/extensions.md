@@ -169,7 +169,7 @@ Six runnable examples, one feature each. They run offline on a scripted `MockPro
 | [`extension_redact`](https://github.com/yologdev/yoagent/blob/main/examples/extension_redact.rs) | An `after_tool` redactor, and why it declares `filters_tool_output` (partial output leaks without it) |
 | [`extension_verifier`](https://github.com/yologdev/yoagent/blob/main/examples/extension_verifier.rs) | A per-run `Extension` whose `on_stop` sends the model back, capped by `with_max_stop_continues`; `finish` reading `RunOutcome::end()`, advisory versus required at the cap |
 | [`extension_budget`](https://github.com/yologdev/yoagent/blob/main/examples/extension_budget.rs) | `Budget` per run, and `.across_runs()` read through an `Arc` with `spent_usd()` |
-| [`extension_tree`](https://github.com/yologdev/yoagent/blob/main/examples/extension_tree.rs) | A host policy installed with `with_tree_extension` judging a `SubAgentTool`'s child and a hand-written delegation tool's (`Agent::delegated_from`) |
+| [`extension_tree`](https://github.com/yologdev/yoagent/blob/main/examples/extension_tree.rs) | A host policy installed with `with_tree_extension` judging a `SubAgentTool`'s child and a hand-written delegation tool's (`Agent::delegated_from`, forwarding the parent's cancel and reporting the child's spend with `report_delegated_run`) |
 | [`extension_audit`](https://github.com/yologdev/yoagent/blob/main/examples/extension_audit.rs) | `on_event` + `finish` writing a JSON-lines audit log, including a run another extension's `on_input` rejected |
 
 ```bash

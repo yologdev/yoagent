@@ -11,7 +11,7 @@
 //! machine that happens to export a key never spends money by surprise.
 #![allow(dead_code)] // each example uses a different subset
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::mpsc;
 use yoagent::provider::mock::{MockResponse, MockToolCall};
 use yoagent::provider::{MockProvider, ModelConfig};
@@ -19,19 +19,25 @@ use yoagent::sub_agent::SubAgentTool;
 use yoagent::*;
 
 /// The live model, when `--live` was passed and a key is set.
+///
+/// Decided once per process, so a missing key is reported once.
 pub fn live_model() -> Option<ModelConfig> {
-    if !std::env::args().any(|a| a == "--live") {
-        return None;
-    }
-    let has = |var: &str| std::env::var(var).is_ok_and(|v| !v.trim().is_empty());
-    if has("DEEPSEEK_API_KEY") {
-        Some(ModelConfig::deepseek("deepseek-flash", "DeepSeek Flash"))
-    } else if has("ANTHROPIC_API_KEY") {
-        Some(ModelConfig::claude_haiku_4_5())
-    } else {
-        eprintln!("--live needs DEEPSEEK_API_KEY or ANTHROPIC_API_KEY; running offline");
-        None
-    }
+    static LIVE: OnceLock<Option<ModelConfig>> = OnceLock::new();
+    LIVE.get_or_init(|| {
+        if !std::env::args().any(|a| a == "--live") {
+            return None;
+        }
+        let has = |var: &str| std::env::var(var).is_ok_and(|v| !v.trim().is_empty());
+        if has("DEEPSEEK_API_KEY") {
+            Some(ModelConfig::deepseek("deepseek-flash", "DeepSeek Flash"))
+        } else if has("ANTHROPIC_API_KEY") {
+            Some(ModelConfig::claude_haiku_4_5())
+        } else {
+            eprintln!("--live needs DEEPSEEK_API_KEY or ANTHROPIC_API_KEY; running offline");
+            None
+        }
+    })
+    .clone()
 }
 
 pub fn is_live() -> bool {

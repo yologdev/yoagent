@@ -25,14 +25,20 @@ use yoagent::*;
 struct TestsReported {
     required: bool,
     /// How every run ended. Lives in the extension, so it spans runs.
-    endings: Arc<Mutex<Vec<RunEnd>>>,
+    endings: Arc<Mutex<Vec<Ending>>>,
+}
+
+/// How a run ended, and how often the verifier refused its answer.
+struct Ending {
+    end: RunEnd,
+    asked: usize,
 }
 
 /// One run's hooks.
 struct TestsReportedRun {
     /// How often this run's answer was refused (the cap may stop the last).
     asked: usize,
-    endings: Arc<Mutex<Vec<RunEnd>>>,
+    endings: Arc<Mutex<Vec<Ending>>>,
 }
 
 #[async_trait::async_trait]
@@ -79,11 +85,16 @@ impl RunHooks for TestsReportedRun {
             outcome.end(),
             self.asked
         );
-        self.endings.lock().unwrap().push(outcome.end().clone());
+        self.endings.lock().unwrap().push(Ending {
+            end: outcome.end().clone(),
+            asked: self.asked,
+        });
     }
 }
 
-async fn demo(title: &str, required: bool, script: Vec<MockResponse>) -> RunEnd {
+/// One scripted run: how it ended, how often the verifier refused an answer,
+/// and the run's last message.
+async fn demo(title: &str, required: bool, script: Vec<MockResponse>) -> (Ending, String) {
     println!("{title}");
     let endings = Arc::new(Mutex::new(Vec::new()));
     let mut agent = new_agent(script)
@@ -95,15 +106,16 @@ async fn demo(title: &str, required: bool, script: Vec<MockResponse>) -> RunEnd 
             endings: endings.clone(),
         });
     let events = run(&mut agent, "Fix the off-by-one in pagination.").await;
-    println!("  last message: {:?}\n", last_text(&events));
-    let end = endings.lock().unwrap().pop().expect("finish ran");
-    end
+    let last = last_text(&events);
+    println!("  last message: {last:?}\n");
+    let ending = endings.lock().unwrap().pop().expect("finish ran");
+    (ending, last)
 }
 
 #[tokio::main]
 async fn main() {
     // The model claims success, is sent back once, then reports the tests.
-    let end = demo(
+    let (ending, last) = demo(
         "A model that reports after one reminder:",
         false,
         vec![
@@ -113,8 +125,8 @@ async fn main() {
     )
     .await;
     check(
-        end == RunEnd::Completed,
-        "the run completed after one continue",
+        ending.end == RunEnd::Completed && ending.asked == 1 && last.ends_with("Tests: passed"),
+        "the run completed with the second answer, after one continue",
     );
 
     // A model that never reports: after two continues the cap is reached.
@@ -125,15 +137,16 @@ async fn main() {
             answer("All done."),
         ]
     };
-    let end = demo("An advisory verifier at its cap:", false, never()).await;
+    let (ending, last) = demo("An advisory verifier at its cap:", false, never()).await;
     check(
-        end == RunEnd::Completed,
-        "an advisory verifier's last refusal is overridden (with a warning) at the cap",
+        ending.end == RunEnd::Completed && ending.asked == 3 && last == "All done.",
+        "an advisory verifier is asked three times; its third refusal is overridden (with a warning) at the cap",
     );
 
-    let end = demo("A required verifier at its cap:", true, never()).await;
+    let (ending, _) = demo("A required verifier at its cap:", true, never()).await;
     check(
-        matches!(&end, RunEnd::Failed { extension: Some(name), .. } if name == "tests-reported"),
-        "a required verifier fails the run at the cap",
+        ending.asked == 3
+            && matches!(&ending.end, RunEnd::Failed { extension: Some(name), .. } if name == "tests-reported"),
+        "a required verifier fails the run at the cap, after its third refusal",
     );
 }
