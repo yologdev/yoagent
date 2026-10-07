@@ -94,6 +94,11 @@ For LLM-based summarization, install `LlmCompaction` with
 `with_compaction_strategy(LlmCompaction::from_config(..))`: it summarizes old
 turns in a background request and falls back to deterministic compaction
 whenever no summary is ready. On wasm32 it never summarizes (compaction stays deterministic).
+What the summaries cost is in the run's `SessionStats::compaction` (priced at the
+summarization model's own `cost`) and in `total_cost_usd()` / `total_usage()`; a
+request still in flight when a run ends is counted by the next run. Per
+compaction, `LlmCompaction::with_event_sender` reports each request on
+`AgentEvent::ContextCompacted` — the same spend, so do not add the two.
 `replace_messages()` and `compact_messages()` remain available for manual
 control.
 

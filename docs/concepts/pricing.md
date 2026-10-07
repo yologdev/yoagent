@@ -4,6 +4,13 @@ yoagent reports what a run cost (`Agent::session_cost_usd`, `SessionStats`,
 the `llm_stream` span's `cost_usd`) from the `CostConfig` on
 `ModelConfig::cost`. This page covers where those rates come from.
 
+Each model is priced at its own rates: a sub-agent's turns at the sub-agent's
+model (`SessionStats::sub_agents`), `LlmCompaction`'s summaries at the
+summarization model (`SessionStats::compaction`), decision-model requests at the
+decision model (`SessionStats::decision`). `SessionStats::total_cost_usd()` and
+`Agent::total_cost_usd()` add them all, and are `None` when any part with
+non-zero usage has no price.
+
 ## The data file
 
 Every price the crate knows lives in one JSON file,

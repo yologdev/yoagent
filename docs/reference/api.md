@@ -141,8 +141,9 @@ All return `Self` for chaining (unless noted as `Result`).
 | `is_streaming() -> bool` | Whether the agent is currently running |
 | `session_cost_usd() -> Option<f64>` | Cost of the current history at the current rates (excludes sub-agents); `None` = unpriced |
 | `sub_agent_spend() -> &SubAgentSpend` | What sub-agents spent on this agent's behalf since construction or `reset()` |
-| `total_cost_usd() -> Option<f64>` | Everything this agent's runs spent, sub-agents included |
-| `total_usage() -> Usage` | Token usage over the same window as `total_cost_usd()` |
+| `compaction_spend() -> &CompactionSpend` | What `LlmCompaction`'s summarization requests cost over the same window (sub-agents' included) |
+| `total_cost_usd() -> Option<f64>` | Everything this agent's runs spent: own turns, sub-agents, compaction summaries and decision-model requests |
+| `total_usage() -> Usage` | Token usage over the same window as `total_cost_usd()` (decision-model tokens excluded) |
 
 ### State Mutation
 

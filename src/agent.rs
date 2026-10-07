@@ -1467,9 +1467,26 @@ impl Agent {
         &self.spend.sub_agents
     }
 
+    /// What compaction's summarization requests
+    /// ([`LlmCompaction`](crate::LlmCompaction)) cost over every run since
+    /// construction or the last [`reset`](Self::reset) — sub-agents'
+    /// compaction included, each request priced at its summarization model's
+    /// rates. Per run, the same figure is on [`AgentEvent::AgentEnd`] as
+    /// `stats.compaction`; see [`SessionStats::compaction`] for when a
+    /// background request is counted.
+    ///
+    /// Only the compaction part, already included in
+    /// [`total_cost_usd`](Self::total_cost_usd) /
+    /// [`total_usage`](Self::total_usage), which cover the same window.
+    pub fn compaction_spend(&self) -> &CompactionSpend {
+        &self.spend.compaction
+    }
+
     /// Everything this agent's runs spent in dollars — its own turns plus
     /// every sub-agent they delegated to, each run priced at its own model's
-    /// rates at the time it ran.
+    /// rates at the time it ran, plus compaction's summarization requests
+    /// ([`compaction_spend`](Self::compaction_spend)) and decision-model
+    /// requests ([`SessionStats::decision`]).
     ///
     /// **Window: the same as [`sub_agent_spend`](Self::sub_agent_spend)** —
     /// every run since construction or the last [`reset`](Self::reset),
@@ -1487,14 +1504,15 @@ impl Agent {
     /// [`SubAgentSpend::is_unpriced`] / [`SessionStats::is_unpriced`]) — an
     /// unpriced sub-agent makes the bill unknown, not silently low — and when
     /// no run has carried a cost yet (nothing spent, nothing priced). A priced
-    /// turn that reported no usage makes it `Some(0.0)`. With no delegation it is
-    /// this agent's own cost.
+    /// turn that reported no usage makes it `Some(0.0)`. With no delegation,
+    /// summarizing compaction or decision model it is this agent's own cost.
     pub fn total_cost_usd(&self) -> Option<f64> {
         self.spend.total_cost_usd()
     }
 
     /// Provider usage of everything this agent's runs spent — its own turns
-    /// plus every sub-agent's. Same window as
+    /// plus every sub-agent's, plus compaction's summarization requests
+    /// (decision-model tokens are not included). Same window as
     /// [`total_cost_usd`](Self::total_cost_usd). `total_tokens` stays 0, as in
     /// [`SessionStats::usage`].
     pub fn total_usage(&self) -> Usage {
