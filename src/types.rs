@@ -1251,14 +1251,15 @@ pub struct SessionStats {
     /// [`context::total_tokens`]: crate::context::total_tokens
     ///
     /// Deliberately **not** split into spliced-summary vs deterministic
-    /// fallback, and carrying no summarization spend. That detail exists — on
-    /// [`AgentEvent::ContextCompacted`], with its [`SummaryStats`] — but
+    /// fallback. That detail exists — on [`AgentEvent::ContextCompacted`],
+    /// with its [`SummaryStats`] — but
     /// [`CompactionStrategy::compact`](crate::context::CompactionStrategy::compact)
     /// is synchronous and has no event channel, so the loop cannot see it. Wire
-    /// `LlmCompaction::with_event_sender` to the same channel and aggregate the
-    /// two together — the events *describe* the same compactions this counts,
-    /// with the breakdown attached, so do not sum the two. Folding a guess in
-    /// here would be worse than the gap.
+    /// `LlmCompaction::with_event_sender` to the same channel for the
+    /// breakdown — the events *describe* the same compactions this counts.
+    ///
+    /// What the summarization requests cost is in
+    /// [`compaction`](Self::compaction), not here.
     #[serde(default)]
     pub compactions: u32,
     /// What this run's [`SubAgentTool`](crate::SubAgentTool) delegations
@@ -1287,6 +1288,89 @@ pub struct SessionStats {
     /// counts LLM tokens only.
     #[serde(default, skip_serializing_if = "DecisionStats::is_empty")]
     pub decision: DecisionStats,
+    /// What compaction's own model requests cost —
+    /// [`LlmCompaction`](crate::LlmCompaction)'s summarization requests —
+    /// including those of sub-agents this run delegated to. Empty with the
+    /// deterministic strategies, which make no request, and omitted from the
+    /// wire when empty.
+    ///
+    /// A **separate bucket**, like [`decision`](Self::decision):
+    /// [`usage`](Self::usage), [`turns`](Self::turns) and
+    /// [`cost_usd`](Self::cost_usd) stay the agent's own turns, and
+    /// [`sub_agents`](Self::sub_agents) what the sub-agents' own turns spent.
+    /// Its tokens are part of [`total_usage`](Self::total_usage) and its
+    /// dollar cost part of [`total_cost_usd`](Self::total_cost_usd), each
+    /// request priced at the summarization model's own rates.
+    ///
+    /// Summarization runs in the background, so a request is counted by the
+    /// run whose compaction step first finds it finished — usually the run
+    /// that started it, but a request still in flight when a run ends is
+    /// counted by the next run that uses the same strategy (and never, if
+    /// there is none). Each request is counted once, whether its briefing was
+    /// spliced, discarded or rejected; a request that failed or timed out
+    /// reported no usage and adds nothing.
+    #[serde(default, skip_serializing_if = "CompactionSpend::is_empty")]
+    pub compaction: CompactionSpend,
+}
+
+/// What compaction's model requests cost; see [`SessionStats::compaction`]
+/// and [`Agent::compaction_spend`](crate::Agent::compaction_spend).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct CompactionSpend {
+    /// Provider usage summed over the summarization requests. `total_tokens`
+    /// stays 0, as in [`SessionStats::usage`].
+    #[serde(default)]
+    pub usage: Usage,
+    /// Dollar cost of [`usage`](Self::usage) at the summarization model's
+    /// rates, with the crate's rule: `None` once any request with non-zero
+    /// usage could not be priced (a summarizer with `cost: None`), and when
+    /// nothing was priced. [`is_unpriced`](Self::is_unpriced) tells them
+    /// apart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    /// Summarization requests that returned a response, accepted or not.
+    #[serde(default)]
+    pub requests: u32,
+}
+
+impl CompactionSpend {
+    /// Whether no summarization request was counted.
+    pub fn is_empty(&self) -> bool {
+        self.requests == 0 && usage_is_zero(&self.usage) && self.cost_usd.is_none()
+    }
+
+    /// Whether compaction spend happened that cannot be priced: non-zero
+    /// [`usage`](Self::usage) with no [`cost_usd`](Self::cost_usd). `false`
+    /// for an empty bucket.
+    pub fn is_unpriced(&self) -> bool {
+        is_unpriced(&self.usage, self.cost_usd)
+    }
+
+    /// Fold another bucket into this one — for a caller accumulating across
+    /// runs. Keeps [`cost_usd`](Self::cost_usd) `None` once any part is
+    /// unpriced.
+    pub fn merge(&mut self, other: &CompactionSpend) {
+        self.cost_usd = combine_cost(&self.usage, self.cost_usd, &other.usage, other.cost_usd);
+        self.usage = add_usage(&self.usage, &other.usage);
+        self.requests = self.requests.saturating_add(other.requests);
+    }
+
+    /// One summarization response, priced with the summarizer's rates
+    /// (`None` = an unpriced model).
+    pub(crate) fn record_request(
+        &mut self,
+        usage: &Usage,
+        cost: Option<&crate::provider::CostConfig>,
+    ) {
+        self.merge(&CompactionSpend {
+            // Through `add_usage` so `total_tokens` is dropped here too.
+            usage: add_usage(&Usage::default(), usage),
+            cost_usd: cost.map(|c| c.cost_usd(usage)),
+            requests: 1,
+        });
+    }
 }
 
 /// What decision-model requests cost during a run; see
@@ -1403,6 +1487,7 @@ impl SessionStats {
             compactions,
             sub_agents: SubAgentSpend::default(),
             decision: DecisionStats::default(),
+            compaction: CompactionSpend::default(),
         }
     }
 
@@ -1414,12 +1499,18 @@ impl SessionStats {
         is_unpriced(&self.usage, self.cost_usd)
     }
 
-    /// This run's own usage plus everything its sub-agents spent.
+    /// This run's own usage plus everything its sub-agents spent, plus what
+    /// compaction's summarization requests used
+    /// ([`compaction`](Self::compaction)). Decision-model tokens are not
+    /// included (see [`decision`](Self::decision)).
     ///
     /// `total_tokens` stays 0, as in [`usage`](Self::usage), and for the same
     /// reason: providers disagree on what it counts.
     pub fn total_usage(&self) -> Usage {
-        add_usage(&self.usage, &self.sub_agents.usage)
+        add_usage(
+            &add_usage(&self.usage, &self.sub_agents.usage),
+            &self.compaction.usage,
+        )
     }
 
     /// Dollar cost of this run plus its sub-agents, each priced at its **own**
@@ -1432,8 +1523,9 @@ impl SessionStats {
     /// `Some(0.0)`, not `None`. Spend of zero tokens needs no price, so a
     /// zero-usage part never poisons the rest.
     ///
-    /// Decision-model spend ([`decision`](Self::decision)) is included, under
-    /// the same rule.
+    /// Decision-model spend ([`decision`](Self::decision)) and compaction
+    /// spend ([`compaction`](Self::compaction)) are included, under the same
+    /// rule.
     pub fn total_cost_usd(&self) -> Option<f64> {
         let own_and_delegated = combine_cost(
             &self.usage,
@@ -1441,13 +1533,20 @@ impl SessionStats {
             &self.sub_agents.usage,
             self.sub_agents.cost_usd,
         );
+        let turns_usage = add_usage(&self.usage, &self.sub_agents.usage);
+        let with_compaction = combine_cost(
+            &turns_usage,
+            own_and_delegated,
+            &self.compaction.usage,
+            self.compaction.cost_usd,
+        );
         if self.decision.is_unpriced() {
             return None;
         }
-        let llm_usage = add_usage(&self.usage, &self.sub_agents.usage);
+        let llm_usage = add_usage(&turns_usage, &self.compaction.usage);
         combine_cost(
             &llm_usage,
-            own_and_delegated,
+            with_compaction,
             &self.decision.usage,
             self.decision.cost_usd,
         )
@@ -1463,6 +1562,7 @@ impl SessionStats {
         self.compactions = self.compactions.saturating_add(other.compactions);
         self.sub_agents.merge(&other.sub_agents);
         self.decision.merge(&other.decision);
+        self.compaction.merge(&other.compaction);
     }
 
     /// The [`SessionStats`] of a sub-agent run, if `result` came from a
@@ -1737,6 +1837,57 @@ mod spend_rollup_tests {
         a.merge(&a.clone());
         assert_eq!(a.usage.input, u64::MAX);
         assert_eq!(a.runs, u32::MAX);
+    }
+
+    /// Compaction spend is part of both totals, priced with its own rates,
+    /// and leaves the run's own figures alone.
+    #[test]
+    fn compaction_spend_counts_in_the_totals() {
+        let mut stats = SessionStats::default();
+        stats.record_turn(&u(1_000_000), Some(&priced()));
+        stats
+            .compaction
+            .record_request(&u(1_000_000), Some(&CostConfig::new(3.0, 0.0)));
+        assert_eq!(stats.cost_usd, Some(1.0));
+        assert_eq!(stats.usage.input, 1_000_000);
+        assert_eq!(stats.total_cost_usd(), Some(4.0));
+        assert_eq!(stats.total_usage().input, 2_000_000);
+        assert_eq!(stats.compaction.requests, 1);
+    }
+
+    /// An unpriced summarizer makes the whole bill unknown — and stays
+    /// unknown after a later priced request — while a zero-usage unpriced
+    /// response needs no price.
+    #[test]
+    fn unpriced_compaction_poisons_the_total() {
+        let mut stats = SessionStats::default();
+        stats.record_turn(&u(1_000_000), Some(&priced()));
+
+        stats.compaction.record_request(&u(0), None);
+        assert_eq!(stats.total_cost_usd(), Some(1.0));
+        assert!(!stats.compaction.is_unpriced());
+
+        stats.compaction.record_request(&u(10), None);
+        stats.compaction.record_request(&u(10), Some(&priced()));
+        assert!(stats.compaction.is_unpriced());
+        assert_eq!(stats.compaction.cost_usd, None);
+        assert_eq!(stats.total_cost_usd(), None);
+        assert_eq!(stats.compaction.requests, 3);
+    }
+
+    /// Merging runs (the `Agent` window) keeps the compaction bucket apart.
+    #[test]
+    fn merge_folds_the_compaction_bucket() {
+        let mut run = SessionStats::default();
+        run.compaction
+            .record_request(&u(1_000_000), Some(&priced()));
+        let mut total = SessionStats::default();
+        total.merge(&run);
+        total.merge(&run);
+        assert_eq!(total.compaction.requests, 2);
+        assert_eq!(total.compaction.cost_usd, Some(2.0));
+        assert_eq!(total.usage, Usage::default());
+        assert_eq!(total.total_cost_usd(), Some(2.0));
     }
 }
 
@@ -2596,6 +2747,17 @@ mod wire_tag_freeze {
                     },
                     cost_usd: Some(0.0000378),
                     unpriced: 0,
+                },
+                compaction: CompactionSpend {
+                    usage: Usage {
+                        input: 1_000,
+                        output: 100,
+                        cache_read: 10,
+                        cache_write: 1,
+                        total_tokens: 0,
+                    },
+                    cost_usd: Some(0.012),
+                    requests: 2,
                 },
             },
         ),

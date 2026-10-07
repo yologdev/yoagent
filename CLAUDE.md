@@ -179,6 +179,18 @@ details (`SessionStats::from_sub_agent_result`). Every cost rollup —
 `reset()` window, unaffected by clearing/replacing history, whereas
 `session_cost_usd()` is history-derived and excludes sub-agents.
 
+**Compaction spend** (`LlmCompaction`'s summaries, #228) is a third bucket:
+`SessionStats::compaction` (`CompactionSpend { usage, cost_usd, requests }`,
+priced at the summarizer's own `cost`), in `total_usage()`/`total_cost_usd()`,
+`Agent::compaction_spend()`. The request runs on a spawned task (outside the
+`LoopScope`), so it records into a ledger in `State.unreported` (every
+response, accepted or rejected; errors/timeouts have no usage); `compact()`
+starts with `report_spend`, which moves the ledger into the scope via
+`agent_loop::record_compaction` — only inside a loop (outside one it stays in
+the ledger). So a request in flight at run end is counted by the next run.
+`with_loop_scope` returns `ScopeSpend { decision, compaction }`; child runs fold
+into `compaction` (not `sub_agents`), like `decision`.
+
 `AgentLoopConfig` also supports `turn_delay: Option<Duration>` — an inter-turn delay to throttle API calls for rate-limit-sensitive providers. Exposed on `SubAgentTool` via `with_turn_delay()`.
 
 ### wasm32 and the `native` feature

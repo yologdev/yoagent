@@ -26,6 +26,8 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 - **`extension::Budget`**: a dollar limit, checked before each model request: once spend reaches it, the run stops (the request that goes past it still completes). Per run (a sub-agent's reported spend included), or `.across_runs()` (a session, or a whole delegation tree with `with_tree_extension`; `spent_usd()` reads the total). `Budget::for_model` returns `None` for an unpriced model; a negative or NaN limit panics.
 
+- **`SessionStats::compaction`** (`CompactionSpend { usage, cost_usd, requests }`) and **`Agent::compaction_spend()`**: what `LlmCompaction`'s summarization requests cost, priced at the summarizer's own `cost`. See the fix below.
+
 ### Changed
 
 - **`yoagent-rutis` (unpublished) moves to rutis 0.6** (`rutis = "0.6"`, built against 0.6.1). 0.6 only made rutis's public types `#[non_exhaustive]`, and 0.6.1 adds optional APIs; the bridge needed no source change. One test now builds `EventOptions` with `EventOptions::default().prepend(true)`. rutis's dispatch is unchanged in 0.6.1, so the bridge's liveness checks before and after dispatch still apply.
@@ -55,6 +57,11 @@ These change what consumers see: a run can now send more events (a `MessageStart
 
 - **A sub-agent cancelled before it answered fails its delegation** with `ToolError::Cancelled`. It used to return "(sub-agent produced no text output)" as a success.
 - **The `*_with_sender` methods run on the same spawned path as `prompt` / `continue_loop`** (#228). Dropping one of their futures (a `tokio::time::timeout`, a `select!`) used to drop the loop mid-turn, lose the agent's tools and leave it "streaming" for good, so the next prompt panicked. Now it cancels the run: the run ends aborted, its last events (with `AgentEnd`) still reach the sender while the `Agent` lives (call `finish` after a timeout rather than dropping the agent), and the next `finish` or prompt restores the agent's history and tools. A panic in the run still propagates to the caller. The spawned run keeps the caller's tracing span as its parent (this also fixes `prompt` / `continue_loop`, whose loop spans used to start a new trace). `finish` and `reset` are also safe to cancel now. The four run starters share one implementation, and the stale "misuse-`Result` variant planned for 0.10" notes are gone.
+- **`LlmCompaction`'s summarization spend now reaches the run's stats** (#228). It was reported only on `ContextCompacted` events and in an `info!` log, so `SessionStats`, `total_usage()`, `total_cost_usd()` and `Agent::total_cost_usd()` under-counted every session that summarized. The spend is a separate bucket, `SessionStats::compaction`, so `usage`, `turns` and `cost_usd` stay the main model's own turns. Details:
+  - **Totals change:** `total_usage()` and `total_cost_usd()` (on `SessionStats` and `Agent`) now include it, so they are higher for sessions that summarized; with a summarizer that has no price (`cost: None`), `total_cost_usd()` is now `None` rather than a figure that left the summaries out.
+  - **When it is counted:** the request runs on its own task, so its spend is counted by the run whose next compaction step finds it finished. A request still in flight when a run ends is counted by the next run that uses the strategy (`Agent` keeps one strategy across runs). Each request is counted once, whether its briefing was spliced, discarded or rejected (a `Length` or `Refusal` summary was billed too); a request that failed or timed out reported no usage.
+  - **Sub-agents:** a child run's compaction spend folds into the parent's `compaction` bucket (one bucket for the delegation tree, like `decision`), not into `sub_agents`. `extension::Budget` counts it in a sub-agent's reported total; it still does not count the run's own compaction or decision spend. A child whose summarizer is unpriced now reports an unpriced total, so `Budget` prices that child's whole usage at the budget's own rate (as it already did for unpriced decision spend).
+  - **Serialized stats:** the field is omitted when empty and defaults when absent, so stored `SessionStats` still deserialize.
 
 ## 0.24.3
 
