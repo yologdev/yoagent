@@ -1,0 +1,13 @@
+{
+  "name": "yoagent-rutis-plugins",
+  "private": true,
+  "description": "Example TypeScript plugins for yoagent-rutis, and the Node runtime the end-to-end tests run them in",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@arcships/rutis": "0.7.0",
+    "@arcships/rutis-runtime": "0.7.0"
+  }
+}

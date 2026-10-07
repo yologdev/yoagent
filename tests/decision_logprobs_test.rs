@@ -653,6 +653,20 @@ async fn a_failed_question_keeps_the_others_spend() {
 }
 
 #[tokio::test]
+async fn an_unreadable_completion_keeps_its_own_spend() {
+    // The harmful check's completion arrives (100 prompt tokens) but its
+    // first token is no label: a BadResponse, billed all the same.
+    let server = split_server(
+        ResponseTemplate::new(200).set_body_json(completion(&[("<think>", 0.99)], (100, 1))),
+    )
+    .await;
+    let (rejected, stats) = guarded_stats(&server, Duration::from_secs(5)).await;
+    assert!(rejected.is_some());
+    assert_eq!((stats.decision.requests, stats.decision.failures), (1, 1));
+    assert_eq!(stats.decision.usage.input, 300, "all three were billed");
+}
+
+#[tokio::test]
 async fn a_timeout_keeps_the_answered_questions_spend() {
     let slow = ResponseTemplate::new(200)
         .set_body_json(completion(&[("B", 0.95), ("A", 0.05)], (100, 1)))

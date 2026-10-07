@@ -10,9 +10,10 @@ pub mod openai_compat;
 pub mod openai_responses;
 pub mod prices;
 pub mod registry;
+mod responses_request;
 mod responses_stream;
 mod sigv4;
-pub mod sse;
+mod sse;
 pub mod tool_args;
 pub mod traits;
 pub mod turn_hook;
@@ -29,6 +30,8 @@ pub use model::{
 };
 pub use openai_compat::OpenAiCompatProvider;
 pub use openai_responses::OpenAiResponsesProvider;
+#[cfg(feature = "native")]
+pub use prices::LivePrices;
 pub use prices::{
     CacheOptions, CacheProblem, CachedPrices, FetchOptions, FetchReport, PriceChange, PriceEntry,
     PriceError, PriceOrigin, PriceSource, PriceTable, SkippedModel, DEFAULT_FETCH_TIMEOUT,

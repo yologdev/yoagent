@@ -12,8 +12,10 @@ use super::answer::{Answer, ChoiceAnswer, DecisionUsage, Evaluation, NoulAnswer,
 use super::backend::{Capabilities, DecisionBackend};
 use super::error::DecisionError;
 use super::question::{Question, QuestionKind, Request};
+use super::{add_billed, billed_only};
 use crate::retry::RetryConfig;
 use serde_json::Value;
+use std::sync::Mutex;
 use std::time::Duration;
 
 pub(crate) const TYPESAFE_BASE_URL: &str = "https://api.typesafe.ai";
@@ -256,6 +258,9 @@ impl SystemOneBackend {
     fn key(&self) -> Result<Option<(String, Option<&str>)>, DecisionError> {
         match &self.key {
             Key::None => Ok(None),
+            Key::Fixed(k) if k.trim().is_empty() => Err(DecisionError::MissingApiKey(
+                "a non-empty key (the one given to with_api_key is empty)".into(),
+            )),
             Key::Fixed(k) => Ok(Some((k.trim().to_string(), None))),
             Key::Env(vars) => {
                 let found = vars.iter().find_map(|var| {
@@ -277,13 +282,20 @@ impl SystemOneBackend {
         }
     }
 
-    async fn send_once(&self, request: &Request, body: &[u8]) -> Result<Evaluation, DecisionError> {
+    async fn send_once(
+        &self,
+        request: &Request,
+        body: &[u8],
+        billed: &Mutex<Option<Evaluation>>,
+    ) -> Result<Evaluation, DecisionError> {
         let key = self.key()?;
-        let value = post_json(
+        let value = post_json_billed(
             &self.client,
             &self.endpoint_url(),
             key.as_ref().map(|(k, _)| k.as_str()),
             body,
+            billed,
+            &request.model,
         )
         .await
         .map_err(|e| match (e, key.as_ref().and_then(|(_, var)| *var)) {
@@ -293,8 +305,77 @@ impl SystemOneBackend {
             }
             (e, _) => e,
         })?;
-        parse_systemone_response(value, request)
+        parse_billed(value, request, billed)
     }
+
+    /// [`evaluate`](DecisionBackend::evaluate), adding to `billed` what a
+    /// response that arrived but could not be used was billed for.
+    pub(crate) async fn evaluate_billed(
+        &self,
+        request: &Request,
+        billed: &Mutex<Option<Evaluation>>,
+    ) -> Result<Evaluation, DecisionError> {
+        // Fail on a missing key before serializing anything.
+        self.key()?;
+        let body = serde_json::to_vec(request)
+            .map_err(|e| DecisionError::Invalid(format!("request does not serialize: {e}")))?;
+        with_retries(&self.retry, || self.send_once(request, &body, billed)).await
+    }
+}
+
+/// [`parse_systemone_response`], adding to `billed` what a response that
+/// was answered but could not be used was billed for: its reported usage, or
+/// unknown spend when the envelope held no usable response. A Cloudflare
+/// `"success": false` is a failure, not an answer, and adds nothing.
+fn parse_billed(
+    value: Value,
+    request: &Request,
+    billed: &Mutex<Option<Evaluation>>,
+) -> Result<Evaluation, DecisionError> {
+    let body = match unwrap_envelope(value) {
+        Ok(body) => body,
+        Err(e) => {
+            if matches!(e, DecisionError::BadResponse(_)) {
+                add_billed(
+                    billed,
+                    &billed_only(&request.model, DecisionUsage::default(), false),
+                );
+            }
+            return Err(e);
+        }
+    };
+    parse_evaluation(&body, request).inspect_err(|_| add_billed(billed, &billed_by(&body, request)))
+}
+
+/// What a SystemOne body says it was billed for, answers aside: its model
+/// and `usage` — or, without a `usage` object, the per-answer
+/// `input_tokens` of every answer present.
+fn billed_by(body: &Value, request: &Request) -> Evaluation {
+    let model = body
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|m| !m.is_empty())
+        .unwrap_or(&request.model);
+    let per_answer: Vec<u64> = body
+        .get("answers")
+        .and_then(Value::as_object)
+        .map(|answers| {
+            answers
+                .values()
+                .filter_map(|a| a.get("input_tokens").and_then(Value::as_u64))
+                .collect()
+        })
+        .unwrap_or_default();
+    let usage = body.get("usage").filter(|u| u.is_object());
+    let tokens = |k: &str| usage.and_then(|u| u.get(k)).and_then(Value::as_u64);
+    billed_only(
+        model,
+        DecisionUsage::new(
+            tokens("input_tokens").unwrap_or_else(|| per_answer.iter().sum()),
+            tokens("output_tokens").unwrap_or(0),
+        ),
+        tokens("input_tokens").is_some() || !per_answer.is_empty(),
+    )
 }
 
 /// Cloudflare's REST API wraps a model's output as
@@ -368,9 +449,29 @@ fn json_kind(v: &Value) -> &'static str {
     }
 }
 
+/// [`post_json`], adding unknown spend to `billed` when a success arrived
+/// whose body is unusable (unreadable or not JSON): the server answered, so
+/// it billed, but nothing says how much — unpriced, never $0.
+pub(crate) async fn post_json_billed(
+    client: &reqwest::Client,
+    url: &str,
+    key: Option<&str>,
+    body: &[u8],
+    billed: &Mutex<Option<Evaluation>>,
+    model: &str,
+) -> Result<Value, DecisionError> {
+    post_json(client, url, key, body).await.inspect_err(|e| {
+        if matches!(e, DecisionError::BadResponse(_)) {
+            add_billed(billed, &billed_only(model, DecisionUsage::default(), false));
+        }
+    })
+}
+
 /// POST a JSON `body` (bearer `key` when set) and read a JSON response,
 /// mapping failures to [`DecisionError`]s the retry policy understands.
-/// Shared by the HTTP backends.
+/// Shared by the HTTP backends. [`DecisionError::BadResponse`] means a 2xx
+/// arrived whose body is unusable (and only that: other statuses are
+/// classified by [`status_error`]), which [`post_json_billed`] relies on.
 pub(crate) async fn post_json(
     client: &reqwest::Client,
     url: &str,
@@ -427,11 +528,7 @@ impl DecisionBackend for SystemOneBackend {
     }
 
     async fn evaluate(&self, request: &Request) -> Result<Evaluation, DecisionError> {
-        // Fail on a missing key before serializing anything.
-        self.key()?;
-        let body = serde_json::to_vec(request)
-            .map_err(|e| DecisionError::Invalid(format!("request does not serialize: {e}")))?;
-        with_retries(&self.retry, || self.send_once(request, &body)).await
+        self.evaluate_billed(request, &Mutex::new(None)).await
     }
 }
 

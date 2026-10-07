@@ -45,6 +45,19 @@ jobs:
       - name: Build
         run: cargo build --all-features
 
+      # Compiling an example does not prove it still shows what it claims.
+      # These run offline on a scripted MockProvider and assert their own
+      # outcome, so a behaviour change fails here (each takes well under a
+      # second once built).
+      - name: Run offline examples
+        run: |
+          for example in extension_policy extension_redact extension_verifier \
+                         extension_budget extension_tree extension_audit; do
+            echo "::group::$example"
+            cargo run --all-features --example "$example"
+            echo "::endgroup::"
+          done
+
   # Every job above builds `--all-features`, but `openapi`, `gasp` and `decision` are all
   # off by default — so the feature set a `cargo add yoagent` user actually gets
   # was never compiled here. A `#[cfg(feature = ...)]` mistake that leaves an
@@ -222,8 +235,9 @@ jobs:
       - name: Example
         run: cargo run --manifest-path "$MANIFEST" --example policy_plugin
 
-  # The bridge declares rust-version 1.86 (yoagent's MSRV; rutis 0.6.1 declares
-  # 1.85). Mirrors the `msrv` job above, including its yoke-derive pin.
+  # The bridge declares rust-version 1.86 (yoagent's MSRV; rutis 0.6.1 and
+  # rutis-bridge 0.7 declare 1.85). Mirrors the `msrv` job above, including its
+  # yoke-derive pin; the language features build there too.
   rutis-bridge-msrv:
     name: yoagent-rutis MSRV (1.86)
     runs-on: ubuntu-latest
@@ -242,6 +256,53 @@ jobs:
           cargo update --manifest-path "$MANIFEST" -p yoke-derive --precise 0.8.2
       - name: Check
         run: cargo check --manifest-path "$MANIFEST" --all-targets
+      - name: Check with the language features (rutis-bridge 0.7)
+        run: cargo check --manifest-path "$MANIFEST" --all-targets --features node,python,websocket
+
+  # TypeScript and Python plugins through rutis-bridge 0.7, end to end: real
+  # Node 24 and Python 3.12 runtimes load the example plugins and fixtures as
+  # rutis-loader rows. The npm and PyPI packages are pinned to the 0.7.0
+  # train (plugins/package-lock.json, plugins/requirements.txt). A missing
+  # runtime fails the job instead of skipping (YOAGENT_RUTIS_REQUIRE_RUNTIMES).
+  rutis-bridge-languages:
+    name: yoagent-rutis TypeScript / Python plugins
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      MANIFEST: integrations/yoagent-rutis/Cargo.toml
+      PLUGINS: integrations/yoagent-rutis/plugins
+      YOAGENT_RUTIS_REQUIRE_RUNTIMES: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: integrations/yoagent-rutis
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the rutis npm packages
+        run: npm ci --prefix "$PLUGINS"
+      - name: Install the rutis Python package
+        run: |
+          python -m venv "$PLUGINS/.venv"
+          "$PLUGINS/.venv/bin/pip" install -r "$PLUGINS/requirements.txt"
+      - name: Clippy (each language feature, and all)
+        run: |
+          for features in node python websocket node,python,websocket; do
+            cargo clippy --manifest-path "$MANIFEST" --all-targets --features "$features"
+          done
+      - name: Documentation
+        run: RUSTDOCFLAGS="-Dwarnings" cargo doc --manifest-path "$MANIFEST" --no-deps --features node,python,websocket
+      - name: Test
+        run: cargo test --manifest-path "$MANIFEST" --features node,python,websocket
+      - name: Example
+        run: cargo run --manifest-path "$MANIFEST" --features node,python --example language_plugins
 
   # yoagent claims to be a tested GASP-conformant runtime — this job is the
   # test: emit an agent repo with the gasp bridge (mock provider, no network)

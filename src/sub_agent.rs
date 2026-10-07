@@ -94,6 +94,7 @@ pub struct SubAgentTool {
 
 impl SubAgentTool {
     /// Create a new sub-agent tool with a name and provider.
+    #[doc(hidden)]
     #[deprecated(
         since = "0.10.0",
         note = "use SubAgentTool::from_config(name, config) — provider + env key \
@@ -205,7 +206,9 @@ impl SubAgentTool {
     /// style: call it before handing the tool to an agent, because a
     /// registered tool is shared and immutable. Constructors resolve prices
     /// when they run, so either install prices
-    /// ([`global::install_override`](crate::provider::prices::global::install_override),
+    /// ([`prices::enable_bundled`](crate::provider::prices::enable_bundled),
+    /// `prices::enable_live`,
+    /// [`global::install_override`](crate::provider::prices::global::install_override),
     /// [`global::install_fetched`](crate::provider::prices::global::install_fetched))
     /// before building the config, or call this afterwards. Same rules as
     /// [`ModelConfig::reprice`].
@@ -242,6 +245,7 @@ impl SubAgentTool {
         self
     }
 
+    #[doc(hidden)]
     #[deprecated(
         since = "0.10.0",
         note = "the model id now comes from the ModelConfig passed to \
@@ -479,6 +483,7 @@ impl SubAgentTool {
     /// Set the model configuration for multi-provider support.
     /// Required for non-Anthropic providers (OpenAI-compat, Google, etc.)
     /// to specify base URL, compat flags, and other provider-specific settings.
+    #[doc(hidden)]
     #[deprecated(
         since = "0.10.0",
         note = "pass the ModelConfig to SubAgentTool::from_config(name, config) or \

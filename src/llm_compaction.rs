@@ -71,6 +71,15 @@
 //! [`AgentEvent::ContextCompacted`], which reports the request's own usage next
 //! to the tokens it saved.
 //!
+//! The spend is also in the run's [`SessionStats::compaction`] — and so in
+//! [`SessionStats::total_cost_usd`], [`Agent::total_cost_usd`](crate::Agent::total_cost_usd)
+//! and [`Agent::compaction_spend`](crate::Agent::compaction_spend) — priced at
+//! the summarization model's own [`cost`](crate::provider::ModelConfig::cost).
+//! The request runs on its own task, so its spend is held until the next
+//! `compact` call the loop makes and counted by that run: a request still in
+//! flight when a run ends is counted by the next run, once, whether its
+//! briefing is spliced, discarded or rejected.
+//!
 //! # Why the request is standalone, not appended to the live session
 //!
 //! An obvious-looking optimisation is to append the summarization instruction
@@ -441,6 +450,12 @@ struct State {
     /// "paying for briefings" having spent nothing, in the same session as
     /// `warn_inert_once` giving the opposite `trigger_ratio` advice.
     ever_spawned: bool,
+    /// What finished summarization requests cost that no run's stats have
+    /// counted yet. The request runs on its own task, outside the loop's
+    /// task-local scope, so it lands here and the next `compact` call — which
+    /// the loop makes inside its scope — moves it into the run's
+    /// [`SessionStats::compaction`].
+    unreported: CompactionSpend,
 }
 
 impl Default for State {
@@ -450,6 +465,7 @@ impl Default for State {
             fallbacks: 0,
             ever_spawned: false,
             warned: Warned::default(),
+            unreported: CompactionSpend::default(),
         }
     }
 }
@@ -515,6 +531,9 @@ fn lock(state: &Arc<Mutex<State>>) -> MutexGuard<'_, State> {
 pub struct LlmCompaction {
     provider: Arc<dyn StreamProvider>,
     config: ModelConfig,
+    /// The summarizer's rates: `config.cost` until [`reprice`](Self::reprice)
+    /// looks them up again.
+    cost: Mutex<Option<crate::provider::CostConfig>>,
     api_key: String,
     trigger_ratio: f32,
     /// `None` derives it from the budget at call time — see
@@ -598,6 +617,7 @@ impl LlmCompaction {
     fn build(provider: Arc<dyn StreamProvider>, config: ModelConfig, api_key: String) -> Self {
         Self {
             provider,
+            cost: Mutex::new(config.cost.clone()),
             config,
             api_key,
             trigger_ratio: DEFAULT_TRIGGER_RATIO,
@@ -703,7 +723,8 @@ impl LlmCompaction {
     /// channel, so the sender has to come in from the side. Pair it with
     /// [`Agent::prompt_with_sender`](crate::Agent::prompt_with_sender), where
     /// the caller owns the channel. Without it the per-compaction cost is still
-    /// logged at `info!`, but nothing structured is emitted.
+    /// logged at `info!` and summed in [`SessionStats::compaction`], but no
+    /// per-compaction event is emitted.
     ///
     /// ```no_run
     /// # use yoagent::provider::ModelConfig;
@@ -734,7 +755,32 @@ impl LlmCompaction {
 
     /// Cost of the summarization request, when the model's rates are known.
     fn summary_cost(&self, usage: &Usage) -> Option<f64> {
-        self.config.cost.as_ref().map(|cost| cost.cost_usd(usage))
+        self.cost().as_ref().map(|cost| cost.cost_usd(usage))
+    }
+
+    /// The summarizer's current rates.
+    fn cost(&self) -> Option<crate::provider::CostConfig> {
+        self.cost.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Re-price the summarization model against the process-wide price
+    /// table now — [`ModelConfig::reprice`] on its config — for a strategy
+    /// built before
+    /// [`prices::enable_bundled`](crate::provider::prices::enable_bundled),
+    /// `prices::enable_live`,
+    /// [`global::install_override`](crate::provider::prices::global::install_override)
+    /// or [`global::install_fetched`](crate::provider::prices::global::install_fetched).
+    /// Same rules as [`ModelConfig::reprice`]: only a config a first-party
+    /// pricing constructor built is looked up again, the cost may become
+    /// `None`, and a cost you set yourself is replaced.
+    ///
+    /// Takes `&self`, so it reaches a strategy already installed:
+    /// [`Agent::reprice`](crate::Agent::reprice) calls it (through
+    /// [`CompactionStrategy::reprice`]). Requests sent after the call are
+    /// priced at the new rates; one already in flight keeps the old ones.
+    pub fn reprice(&self) {
+        let cost = self.config.clone().reprice().cost;
+        *self.cost.lock().unwrap_or_else(|e| e.into_inner()) = cost;
     }
 
     /// The tail budget for this call: explicit if set, else derived from the
@@ -897,6 +943,7 @@ impl LlmCompaction {
         let state = Arc::clone(&self.state);
         let cancel = self.cancel.child_token();
         let (timeout, retry) = (self.timeout, self.retry.clone());
+        let cost = self.cost();
 
         // `StreamConfig` is #[non_exhaustive]: construct via `new` and mutate,
         // per its own documented convention.
@@ -907,7 +954,11 @@ impl LlmCompaction {
             self.instruction
         ))];
         stream_config.max_tokens = Some(self.max_summary_tokens);
-        stream_config.model_config = Some(self.config.clone());
+        stream_config.model_config = Some({
+            let mut config = self.config.clone();
+            config.cost = cost.clone();
+            config
+        });
         // `temperature` is left at the `StreamConfig::new` default of `None`:
         // there is no temperature quirk flag in the compat matrix, so an
         // explicit value goes through verbatim, and the newest reasoning models
@@ -932,24 +983,53 @@ impl LlmCompaction {
             cut
         );
 
-        spawn_on(&handle, async move {
-            // Whatever happens below — hung request, panic, runtime shutdown —
-            // the slot returns to Idle when this guard drops.
-            let mut guard = InflightGuard {
-                state: Arc::clone(&state),
-                disarmed: false,
-            };
+        // The summary's logs go where the run's own logs go.
+        use tracing::instrument::{Instrument, WithSubscriber};
+        spawn_on(
+            &handle,
+            async move {
+                // Whatever happens below — hung request, panic, runtime shutdown —
+                // the slot returns to Idle when this guard drops.
+                let mut guard = InflightGuard {
+                    state: Arc::clone(&state),
+                    disarmed: false,
+                };
 
-            let outcome = summarize(&provider, stream_config, timeout, &retry, &cancel).await;
-            let Some((text, usage)) = outcome else { return };
+                let Some(response) =
+                    summarize(&provider, stream_config, timeout, &retry, &cancel).await
+                else {
+                    return;
+                };
+                // Billed whether or not the briefing is accepted below.
+                lock(&state)
+                    .unreported
+                    .record_request(&assistant_usage(&response), cost.as_ref());
+                let Some((text, usage)) = accept_summary(response) else {
+                    return;
+                };
 
-            lock(&state).phase = Phase::Ready(Box::new(Summary {
-                fingerprint: fp,
-                head_end,
-                usage,
-                text,
-            }));
-            guard.disarm();
+                lock(&state).phase = Phase::Ready(Box::new(Summary {
+                    fingerprint: fp,
+                    head_end,
+                    usage,
+                    text,
+                }));
+                guard.disarm();
+            }
+            .in_current_span()
+            .with_current_subscriber(),
+        );
+    }
+
+    /// Move the spend of finished requests into the enclosing loop's
+    /// [`SessionStats::compaction`]. Outside a loop it stays in the ledger,
+    /// for the next call that runs inside one.
+    fn report_spend(&self) {
+        crate::agent_loop::record_compaction(|stats| {
+            let spend = std::mem::take(&mut lock(&self.state).unreported);
+            if !spend.is_empty() {
+                stats.merge(&spend);
+            }
         });
     }
 
@@ -1052,16 +1132,18 @@ enum NoCut {
 
 /// Run one summarization request to completion, with timeout and retry.
 ///
-/// Returns the briefing and its usage, or `None` if it could not be produced —
-/// every failure path logs before returning, so a silent degradation to
-/// deterministic compaction is not possible.
+/// Returns the completed response — still to be checked by
+/// [`accept_summary`] — or `None` if there was none: every failure path logs
+/// before returning, so a silent degradation to deterministic compaction is
+/// not possible. A failed or timed-out attempt reports no usage, so only a
+/// returned response has spend to count.
 async fn summarize(
     provider: &Arc<dyn StreamProvider>,
     stream_config: StreamConfig,
     timeout: Duration,
     retry: &RetryConfig,
     cancel: &CancellationToken,
-) -> Option<(String, Usage)> {
+) -> Option<Message> {
     for attempt in 0..=retry.max_retries {
         if cancel.is_cancelled() {
             tracing::debug!("llm compaction: cancelled");
@@ -1101,7 +1183,7 @@ async fn summarize(
                 tracing::warn!("llm compaction: summarization failed: {e}");
                 return None;
             }
-            Ok(Ok(message)) => return accept_summary(message),
+            Ok(Ok(message)) => return Some(message),
         }
         if attempt < retry.max_retries {
             crate::rt::sleep(retry.delay_for_attempt(attempt + 1)).await;
@@ -1164,7 +1246,12 @@ where
 }
 
 impl CompactionStrategy for LlmCompaction {
+    fn reprice(&self) {
+        LlmCompaction::reprice(self);
+    }
+
     fn compact(&self, messages: Vec<AgentMessage>, config: &ContextConfig) -> Vec<AgentMessage> {
+        self.report_spend();
         let budget = config
             .max_context_tokens
             .saturating_sub(config.system_prompt_tokens);
@@ -1559,6 +1646,25 @@ mod tests {
                     if text.contains("Ship the parser"))))
         }));
         assert!(run.peak_tokens <= 2_000, "the budget must hold throughout");
+    }
+
+    /// Outside an agent loop there is no run to charge, so the spend of
+    /// finished requests waits in the ledger instead of being dropped.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn spend_outside_a_loop_stays_in_the_ledger() {
+        let (provider, calls) = ScriptedProvider::new("## Goal\nShip the parser.");
+        let strategy = LlmCompaction::from_provider(provider, ModelConfig::mock())
+            .with_trigger_ratio(0.1)
+            .with_retain_tail_tokens(200);
+        let cfg = config(2_000);
+
+        drive(&strategy, &cfg, 30, |i| turn(i, 400)).await;
+        settle().await;
+        let sent = calls.load(std::sync::atomic::Ordering::SeqCst) as u32;
+        assert!(sent > 0);
+        // Every response is in the ledger; one still in flight may not be.
+        let unreported = lock(&strategy.state).unreported.requests;
+        assert!(unreported >= sent.saturating_sub(1) && unreported <= sent);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2356,7 +2462,7 @@ mod losing_race_warning {
                 })
                 .collect::<Vec<_>>()
                 .join("\n"),
-            AgentMessage::Extension(_) => String::new(),
+            AgentMessage::Custom(_) => String::new(),
         }
     }
 

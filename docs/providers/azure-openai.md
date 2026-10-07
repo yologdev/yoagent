@@ -91,6 +91,27 @@ When the key is empty, the provider sends no `api-key` header.
 - **Errors**: a mid-stream `too_many_requests` / `no_capacity` error is
   `RateLimited` and retried, not a context overflow
 - **Structured outputs**: `prompt_structured` schemas are ignored with a warning
+- **Request body**: built by the same code as the OpenAI Responses provider;
+  only the URL, the auth header and the legacy deployment override of `model`
+  differ
+- **Prompt caching**: `prompt_cache_key` is sent, chosen as on
+  [OpenAI](openai-responses.md#prompt-caching) (`CacheConfig::session_key`, else
+  derived from the system prompt). Azure's prompt-caching guide documents the
+  field and needs no API version for it
+- **Encrypted reasoning**: requested with
+  `include: ["reasoning.encrypted_content"]` and replayed in place on the next
+  turn, as on [OpenAI](openai-responses.md#encrypted-reasoning) — opt-in
+  (`with_encrypted_reasoning(true)`, off by default, not yet verified live), and
+  only when the config says the deployment reasons. A `custom` config has
+  `reasoning: false`, so set `config.reasoning = true` for a reasoning
+  deployment (or send a `ThinkingLevel` other than `Off`, which implies it).
+  Azure's reasoning guide describes the same replay ("Send those items back
+  … in the `input` array of your next request"); the call or message that
+  followed a reasoning item is replayed with its item `id`, as on OpenAI.
+  A deployment that is not marked as reasoning (and sends no effort) gets no
+  reasoning items replayed either, and their paired items go without ids.
+  Encrypted reasoning from
+  OpenAI's own API is not replayed to Azure, nor Azure's to OpenAI
 
 ## Thinking
 
@@ -125,6 +146,7 @@ Uses the Responses API input format:
 |----------|-------------------|
 | User message | `{"role": "user", "content": "..."}` |
 | Assistant text | `{"type": "message", "role": "assistant", "content": [{"type": "output_text", ...}]}` |
+| Encrypted reasoning (`Content::Thinking` from this API) | `{"type": "reasoning", "id": "...", "summary": [...], "encrypted_content": "..."}`, before the call or message it led to |
 | Tool call | `{"type": "function_call", "call_id": "...", "name": "...", "arguments": "..."}` |
 | Tool result | `{"type": "function_call_output", "call_id": "...", "output": "..."}` |
 | System prompt | `instructions` field |

@@ -224,6 +224,9 @@ fn model() -> ModelConfig {
 
 #[tokio::main]
 async fn main() {
+    // Check 3 compares costs against the bundled snapshot: opt in before
+    // building the config (nothing is priced by default).
+    yoagent::provider::prices::enable_bundled();
     let cfg = model();
     println!("\nyoagent release smoke — live provider: {}\n", cfg.name);
 

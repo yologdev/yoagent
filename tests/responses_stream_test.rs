@@ -18,8 +18,8 @@ use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 use yoagent::agent::Agent;
 use yoagent::provider::{
-    unparsed_tool_arguments, AzureOpenAiProvider, CostConfig, ModelConfig, OpenAiResponsesProvider,
-    StreamConfig, StreamEvent, StreamProvider,
+    unparsed_tool_arguments, ApiProtocol, AzureOpenAiProvider, CostConfig, ModelConfig,
+    OpenAiResponsesProvider, StreamConfig, StreamEvent, StreamProvider,
 };
 use yoagent::types::*;
 
@@ -286,7 +286,7 @@ async fn run(which: Which, body: String) -> (Message, Vec<StreamEvent>) {
         .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
         .mount(&server)
         .await;
-    let mut mc = ModelConfig::openai_responses("gpt-5.5", "GPT-5.5");
+    let mut mc = ModelConfig::openai_responses("gpt-5.5", "GPT-5.5").with_encrypted_reasoning(true);
     mc.base_url = server.uri();
     let mut config = StreamConfig::new("gpt-5.5", "test-key");
     config.system_prompt = "test".into();
@@ -477,6 +477,354 @@ async fn reasoning_summary_becomes_thinking() {
     }
 }
 
+/// The fixture above carries no `encrypted_content` (it was not requested,
+/// or the server omits it): the summary is plain thinking, never replayed.
+#[tokio::test]
+async fn reasoning_without_encrypted_content_is_not_kept_for_replay() {
+    for which in BOTH {
+        let (m, _) = run(which, reasoning_fixture()).await;
+        let (content, _, _) = parts(&m);
+        assert!(
+            matches!(
+                &content[0],
+                Content::Thinking {
+                    redacted: None,
+                    redacted_protocol: None,
+                    ..
+                }
+            ),
+            "{which:?}: {content:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Encrypted reasoning items
+// ---------------------------------------------------------------------------
+
+impl Which {
+    fn protocol(self) -> ApiProtocol {
+        match self {
+            Which::Responses => ApiProtocol::OpenAiResponses,
+            Which::Azure => ApiProtocol::AzureOpenAiResponses,
+        }
+    }
+}
+
+fn reasoning_done(
+    output_index: usize,
+    id: &str,
+    summary: Value,
+    encrypted: Value,
+) -> (&'static str, Value) {
+    (
+        "response.output_item.done",
+        json!({"output_index": output_index, "item": {
+            "type": "reasoning", "id": id, "summary": summary,
+            "encrypted_content": encrypted, "status": "completed"
+        }}),
+    )
+}
+
+/// The stored replay data on a thinking block, parsed.
+fn stored(c: &Content) -> Option<(Value, Option<ApiProtocol>)> {
+    match c {
+        Content::Thinking {
+            redacted: Some(data),
+            redacted_protocol,
+            ..
+        } => Some((serde_json::from_str(data).unwrap(), *redacted_protocol)),
+        _ => None,
+    }
+}
+
+/// Encrypted content arrives only in the finished item (`output_item.added`
+/// may carry an incomplete copy): it is attached to the block the summary
+/// deltas built, tagged with the stream's own protocol, and the summary
+/// parts are kept as sent.
+#[tokio::test]
+async fn encrypted_content_is_kept_on_the_streamed_summary_block() {
+    let summary = json!([
+        {"type": "summary_text", "text": "First."},
+        {"type": "summary_text", "text": "Second."}
+    ]);
+    let mut ev = vec![
+        created(),
+        (
+            "response.output_item.added",
+            json!({"output_index": 0, "item": {"type": "reasoning", "id": "rs_7", "summary": [], "encrypted_content": "trunc"}}),
+        ),
+        (
+            "response.reasoning_summary_text.delta",
+            json!({"item_id": "rs_7", "output_index": 0, "summary_index": 0, "delta": "First."}),
+        ),
+        (
+            "response.reasoning_summary_text.delta",
+            json!({"item_id": "rs_7", "output_index": 0, "summary_index": 1, "delta": "Second."}),
+        ),
+        reasoning_done(0, "rs_7", summary.clone(), json!("gAAAA-full")),
+    ];
+    ev.extend(message_item(1, &["Answer"]));
+    ev.push(completed(plain_usage()));
+    let body = sse(ev);
+    for which in BOTH {
+        let (m, _) = run(which, body.clone()).await;
+        let (content, stop, _) = parts(&m);
+        assert_eq!(content.len(), 2, "{which:?}: {content:?}");
+        assert!(
+            matches!(&content[0], Content::Thinking { thinking, .. } if thinking == "First.\n\nSecond."),
+            "{which:?}: {content:?}"
+        );
+        assert_eq!(
+            stored(&content[0]),
+            Some((
+                // `message_id`: the message item that directly followed it.
+                json!({"id": "rs_7", "summary": summary, "encrypted_content": "gAAAA-full",
+                       "message_id": "msg_1"}),
+                Some(which.protocol())
+            )),
+            "{which:?}"
+        );
+        assert!(matches!(&content[1], Content::Text { text } if text == "Answer"));
+        assert_eq!(*stop, StopReason::Stop);
+    }
+}
+
+/// No summary streamed or sent (OpenAI's default without `reasoning.summary`):
+/// a thinking block with empty text carries the item, before the function
+/// call that followed it.
+#[tokio::test]
+async fn encrypted_reasoning_without_a_summary_gets_its_own_block_in_order() {
+    let args = r#"{"q":"x"}"#;
+    let body = sse(vec![
+        created(),
+        (
+            "response.output_item.added",
+            json!({"output_index": 0, "item": {"type": "reasoning", "id": "rs_1", "summary": []}}),
+        ),
+        reasoning_done(0, "rs_1", json!([]), json!("enc-1")),
+        fc_added(1, 1, "search"),
+        fc_args_done(1, 1, args),
+        fc_item_done(1, 1, "search", args),
+        completed(plain_usage()),
+    ]);
+    for which in BOTH {
+        let (m, events) = run(which, body.clone()).await;
+        let (content, stop, _) = parts(&m);
+        assert_eq!(content.len(), 2, "{which:?}: {content:?}");
+        assert!(
+            matches!(&content[0], Content::Thinking { thinking, .. } if thinking.is_empty()),
+            "{which:?}: {content:?}"
+        );
+        assert_eq!(
+            stored(&content[0]),
+            Some((
+                // `call_ids`: the call that followed it, by `call_id`.
+                json!({"id": "rs_1", "summary": [], "encrypted_content": "enc-1",
+                       "call_ids": {"call_1": "fc_1"}}),
+                Some(which.protocol())
+            ))
+        );
+        assert_eq!(
+            tool_calls(content),
+            vec![("call_1", "search", &json!({"q": "x"}))]
+        );
+        assert_eq!(*stop, StopReason::ToolUse);
+        // The call keeps its own content index (1), after the reasoning.
+        assert!(events.iter().any(|e| matches!(
+            e,
+            StreamEvent::ToolCallStart {
+                content_index: 1,
+                ..
+            }
+        )));
+    }
+}
+
+/// A reasoning item without encrypted content (summary streamed or not)
+/// ends the previous stored item's range: the call and message after it are
+/// paired with it, not filed under the earlier item — which would replay
+/// them with ids but without their own reasoning item.
+#[tokio::test]
+async fn an_unstored_reasoning_item_ends_the_previous_items_range() {
+    let args = r#"{"q":"x"}"#;
+    for with_summary in [false, true] {
+        let mut ev = vec![
+            created(),
+            reasoning_done(0, "rs_1", json!([]), json!("enc-1")),
+            fc_added(1, 1, "search"),
+            fc_args_done(1, 1, args),
+            fc_item_done(1, 1, "search", args),
+        ];
+        let summary = if with_summary {
+            ev.push((
+                "response.reasoning_summary_text.delta",
+                json!({"item_id": "rs_2", "output_index": 2, "summary_index": 0, "delta": "Hm."}),
+            ));
+            json!([{"type": "summary_text", "text": "Hm."}])
+        } else {
+            json!([])
+        };
+        ev.push(reasoning_done(2, "rs_2", summary, Value::Null));
+        ev.extend([
+            fc_added(3, 2, "search"),
+            fc_args_done(3, 2, args),
+            fc_item_done(3, 2, "search", args),
+        ]);
+        ev.extend(message_item(4, &["done"]));
+        ev.push(completed(plain_usage()));
+        let body = sse(ev);
+        for which in BOTH {
+            let (m, _) = run(which, body.clone()).await;
+            let (content, _, _) = parts(&m);
+            assert_eq!(
+                stored(&content[0]),
+                Some((
+                    json!({"id": "rs_1", "summary": [], "encrypted_content": "enc-1",
+                           "call_ids": {"call_1": "fc_1"}}),
+                    Some(which.protocol())
+                )),
+                "{which:?}, summary {with_summary}: {content:?}"
+            );
+            let stored_count = content.iter().filter(|c| stored(c).is_some()).count();
+            assert_eq!(stored_count, 1, "{which:?}: {content:?}");
+        }
+    }
+}
+
+/// A reasoning item that streams both a summary and raw reasoning text has
+/// two thinking blocks; its own second block does not end its range.
+#[tokio::test]
+async fn a_reasoning_items_own_second_block_does_not_end_its_range() {
+    let args = r#"{"q":"x"}"#;
+    let body = sse(vec![
+        created(),
+        (
+            "response.reasoning_summary_text.delta",
+            json!({"item_id": "rs_1", "output_index": 0, "summary_index": 0, "delta": "Sum."}),
+        ),
+        (
+            "response.reasoning_text.delta",
+            json!({"item_id": "rs_1", "output_index": 0, "content_index": 0, "delta": "Raw."}),
+        ),
+        reasoning_done(
+            0,
+            "rs_1",
+            json!([{"type": "summary_text", "text": "Sum."}]),
+            json!("enc-1"),
+        ),
+        fc_added(1, 1, "search"),
+        fc_args_done(1, 1, args),
+        fc_item_done(1, 1, "search", args),
+        completed(plain_usage()),
+    ]);
+    for which in BOTH {
+        let (m, _) = run(which, body.clone()).await;
+        let (content, _, _) = parts(&m);
+        assert_eq!(content.len(), 3, "{which:?}: {content:?}");
+        let (item, _) = stored(&content[0]).expect("stored on the summary block");
+        assert_eq!(item["call_ids"], json!({"call_1": "fc_1"}), "{which:?}");
+    }
+}
+
+/// An empty reasoning item (no summary, no text, no encrypted content)
+/// leaves a bound at the index the next block takes. The next item's own
+/// raw-text block must still not end that item's range.
+#[tokio::test]
+async fn an_empty_reasoning_item_does_not_cut_the_next_items_range() {
+    let args = r#"{"q":"x"}"#;
+    let body = sse(vec![
+        created(),
+        reasoning_done(0, "rs_0", json!([]), Value::Null),
+        (
+            "response.reasoning_summary_text.delta",
+            json!({"item_id": "rs_1", "output_index": 1, "summary_index": 0, "delta": "Sum."}),
+        ),
+        (
+            "response.reasoning_text.delta",
+            json!({"item_id": "rs_1", "output_index": 1, "content_index": 0, "delta": "Raw."}),
+        ),
+        reasoning_done(
+            1,
+            "rs_1",
+            json!([{"type": "summary_text", "text": "Sum."}]),
+            json!("enc-1"),
+        ),
+        fc_added(2, 1, "search"),
+        fc_args_done(2, 1, args),
+        fc_item_done(2, 1, "search", args),
+        completed(plain_usage()),
+    ]);
+    for which in BOTH {
+        let (m, _) = run(which, body.clone()).await;
+        let (content, _, _) = parts(&m);
+        let (item, _) = content
+            .iter()
+            .find_map(stored)
+            .expect("rs_1 is stored on its summary block");
+        assert_eq!(item["id"], "rs_1", "{which:?}: {content:?}");
+        assert_eq!(item["call_ids"], json!({"call_1": "fc_1"}), "{which:?}");
+    }
+}
+
+/// A summary sent only in the finished item (no deltas) still becomes the
+/// thinking text, and is streamed as one delta.
+#[tokio::test]
+async fn a_summary_only_in_the_finished_item_becomes_thinking() {
+    let mut ev = vec![
+        created(),
+        reasoning_done(
+            0,
+            "rs_2",
+            json!([{"type": "summary_text", "text": "A."}, {"type": "summary_text", "text": "B."}]),
+            json!("enc-2"),
+        ),
+    ];
+    ev.extend(message_item(1, &["ok"]));
+    ev.push(completed(plain_usage()));
+    let body = sse(ev);
+    for which in BOTH {
+        let (m, events) = run(which, body.clone()).await;
+        let (content, _, _) = parts(&m);
+        assert!(
+            matches!(&content[0], Content::Thinking { thinking, .. } if thinking == "A.\n\nB."),
+            "{which:?}: {content:?}"
+        );
+        assert!(stored(&content[0]).is_some(), "{which:?}");
+        assert!(events.iter().any(|e| matches!(
+            e,
+            StreamEvent::ThinkingDelta { content_index: 0, delta } if delta == "A.\n\nB."
+        )));
+    }
+}
+
+/// `encrypted_content` / `summary` sent as explicit `null`, and an empty
+/// string: nothing to replay, no empty block, and the rest of the response
+/// is unaffected.
+#[tokio::test]
+async fn null_or_empty_encrypted_content_adds_nothing() {
+    for encrypted in [Value::Null, json!("")] {
+        let mut ev = vec![
+            created(),
+            (
+                "response.output_item.done",
+                json!({"output_index": 0, "item": {
+                    "type": "reasoning", "id": "rs_3", "summary": null, "encrypted_content": encrypted
+                }}),
+            ),
+        ];
+        ev.extend(message_item(1, &["ok"]));
+        ev.push(completed(plain_usage()));
+        let body = sse(ev);
+        for which in BOTH {
+            let (m, _) = run(which, body.clone()).await;
+            let (content, _, _) = parts(&m);
+            assert_eq!(content.len(), 1, "{which:?}: {content:?}");
+            assert!(matches!(&content[0], Content::Text { text } if text == "ok"));
+        }
+    }
+}
+
 #[tokio::test]
 async fn incomplete_mid_arguments_keeps_length_and_marks_the_call() {
     for which in BOTH {
@@ -555,7 +903,7 @@ async fn from_config_openai_responses_runs_a_function_call_end_to_end() {
         .mount(&server)
         .await;
 
-    let mut mc = ModelConfig::openai_responses("gpt-5.5", "GPT-5.5");
+    let mut mc = ModelConfig::openai_responses("gpt-5.5", "GPT-5.5").with_encrypted_reasoning(true);
     mc.base_url = server.uri();
     let mut agent = Agent::from_config(mc);
     let mut rx = agent.prompt("search for rust").await;
@@ -822,7 +1170,8 @@ async fn azure_no_capacity_mid_stream_is_rate_limited() {
             )
             .mount(&server)
             .await;
-        let mut mc = ModelConfig::openai_responses("gpt-5.5", "GPT-5.5");
+        let mut mc =
+            ModelConfig::openai_responses("gpt-5.5", "GPT-5.5").with_encrypted_reasoning(true);
         mc.base_url = server.uri();
         let mut config = StreamConfig::new("gpt-5.5", "test-key");
         config.messages = vec![Message::user("hi")];

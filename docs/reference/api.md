@@ -55,7 +55,7 @@ let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude
 | `Agent::from_provider(provider: impl StreamProvider + 'static, config: ModelConfig) -> Self` | Build from an explicit provider plus its `ModelConfig` (custom providers and test doubles — pair with `ModelConfig::mock()`) |
 | `Agent::from_config_with(registry: &ProviderRegistry, config: ModelConfig) -> Result<Self, AgentBuildError>` | Like `from_config`, but resolves the provider from a caller-supplied registry |
 
-`Agent::new(provider)` with `with_model` / `with_model_config` still works but is deprecated since 0.10.0.
+`Agent::new(provider)` with `with_model` / `with_model_config` (and the same on `SubAgentTool`) still compiles but is deprecated since 0.10.0 and hidden from the docs since 0.25; it will be removed in 1.0.
 
 ### Builder Methods
 
@@ -141,8 +141,9 @@ All return `Self` for chaining (unless noted as `Result`).
 | `is_streaming() -> bool` | Whether the agent is currently running |
 | `session_cost_usd() -> Option<f64>` | Cost of the current history at the current rates (excludes sub-agents); `None` = unpriced |
 | `sub_agent_spend() -> &SubAgentSpend` | What sub-agents spent on this agent's behalf since construction or `reset()` |
-| `total_cost_usd() -> Option<f64>` | Everything this agent's runs spent, sub-agents included |
-| `total_usage() -> Usage` | Token usage over the same window as `total_cost_usd()` |
+| `compaction_spend() -> &CompactionSpend` | What `LlmCompaction`'s summarization requests cost over the same window (sub-agents' included) |
+| `total_cost_usd() -> Option<f64>` | Everything this agent's runs spent: own turns, sub-agents, compaction summaries and decision-model requests |
+| `total_usage() -> Usage` | Token usage over the same window as `total_cost_usd()` (decision-model tokens excluded) |
 
 ### State Mutation
 

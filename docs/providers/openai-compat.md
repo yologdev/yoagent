@@ -31,6 +31,7 @@ pub struct OpenAiCompat {
     pub thinking_format: ThinkingFormat,        // OpenAi, Xai, or Qwen
     pub supports_prompt_cache_key: bool,
     pub replays_reasoning_content: bool,
+    pub encrypted_reasoning: bool,              // Responses / Azure only; opt-in, see openai-responses.md
     pub max_reasoning_effort: ReasoningEffortCeiling, // High (default), XHigh, Max
 }
 ```

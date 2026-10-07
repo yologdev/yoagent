@@ -2,7 +2,8 @@
 //! fetched layer, what each install reports, and `reprice`.
 //!
 //! Every test mutates process-wide state or asserts on `tracing` output, so
-//! all of them serialize on `LOCK` and start from built-in data only.
+//! all of them serialize on `LOCK` and start from the bundled snapshot only
+//! (opted in with `prices::enable_bundled`).
 
 use std::sync::{Arc, Mutex, MutexGuard};
 use tracing_subscriber::layer::SubscriberExt;
@@ -15,6 +16,7 @@ fn exclusive() -> MutexGuard<'static, ()> {
     let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     global::clear_override();
     global::clear_fetched();
+    yoagent::provider::prices::enable_bundled();
     guard
 }
 
@@ -400,7 +402,7 @@ fn add_only_merges_and_never_overrides() {
     assert!(ModelConfig::deepseek("deepseek-flash", "D").cost.is_none());
 }
 
-/// Disagreements with the built-in data are logged: the first five, then
+/// Disagreements with the bundled snapshot are logged: the first five, then
 /// a count of the rest.
 #[test]
 fn fetched_disagreements_are_logged_and_truncated() {
@@ -421,7 +423,7 @@ fn fetched_disagreements_are_logged_and_truncated() {
     assert_eq!(changes.len(), 7);
     let log = warns
         .iter()
-        .find(|w| w.contains("disagrees with the built-in data"))
+        .find(|w| w.contains("disagrees with the bundled snapshot"))
         .expect("the disagreement is logged");
     assert!(log.contains("on 7 model(s)"), "{log}");
     assert!(log.contains("and 2 more"), "{log}");
@@ -513,4 +515,44 @@ fn reprice_ignores_a_config_whose_provider_changed() {
         restored.reprice().cost,
         PriceTable::builtin().cost("anthropic", "claude-sonnet-5")
     );
+}
+
+/// With prices in effect but not the bundled snapshot (a user table alone),
+/// a first-party lookup that misses is warned about, once per model; with
+/// the snapshot on, or with nothing priced at all, a miss stays quiet.
+#[test]
+fn a_miss_under_a_user_table_alone_is_warned_once_per_model() {
+    let _g = exclusive();
+    global::clear_bundled();
+    let _ = global::install_override(sonnet_override());
+
+    let (config, warns) = warns_of(|| ModelConfig::anthropic("claude-warn-test-a", "A"));
+    assert!(config.cost.is_none());
+    assert_eq!(warns.len(), 1, "{warns:?}");
+    assert!(
+        warns[0].contains("anthropic/claude-warn-test-a") && warns[0].contains("enable_bundled"),
+        "{warns:?}"
+    );
+    // Once per model: not again for the same one, but for another.
+    let (_, warns) = warns_of(|| ModelConfig::anthropic("claude-warn-test-a", "A").reprice());
+    assert!(warns.is_empty(), "{warns:?}");
+    let (_, warns) = warns_of(|| ModelConfig::anthropic("claude-warn-test-b", "B"));
+    assert_eq!(warns.len(), 1, "{warns:?}");
+    // A listed model is not warned about.
+    let (config, warns) = warns_of(ModelConfig::claude_sonnet_5);
+    assert!(config.cost.is_some());
+    assert!(warns.is_empty(), "{warns:?}");
+
+    // With the snapshot under it, a miss is a model nobody lists: quiet.
+    let _ = yoagent::provider::prices::enable_bundled();
+    let (config, warns) = warns_of(|| ModelConfig::anthropic("claude-warn-test-c", "C"));
+    assert!(config.cost.is_none());
+    assert!(warns.is_empty(), "{warns:?}");
+
+    // Nothing priced at all: the default, quiet.
+    global::clear_bundled();
+    global::clear_override();
+    let (config, warns) = warns_of(|| ModelConfig::anthropic("claude-warn-test-d", "D"));
+    assert!(config.cost.is_none());
+    assert!(warns.is_empty(), "{warns:?}");
 }

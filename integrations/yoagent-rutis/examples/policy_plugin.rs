@@ -1,7 +1,11 @@
-//! Two rutis plugins extending a yoagent agent, offline (MockProvider).
+//! Three rutis plugins extending a yoagent agent, offline (MockProvider).
 //!
 //! - `text-tools` contributes a `word_count` tool.
 //! - `policy` denies tools by name and caps how often each tool may run.
+//! - `redactor` masks API keys in every tool result (`after_tool`).
+//!
+//! The host installs the bridge's one extension; an observer on the rutis
+//! bus prints each tool result as the model saw it.
 //!
 //! Run: `cargo run --manifest-path integrations/yoagent-rutis/Cargo.toml --example policy_plugin`
 
@@ -10,12 +14,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberState, FiberView, Plugin, TypeKey};
+use yoagent::extension::ToolOutput;
 use yoagent::provider::mock::{MockResponse, MockToolCall};
 use yoagent::provider::{MockProvider, ModelConfig};
-use yoagent::{Agent, AgentEvent, AgentTool, Content, ToolContext, ToolError, ToolResult};
-use yoagent_rutis::{
-    AgentPlugin, AgentRutisExt, PluginCtxExt, RutisBridge, ToolRegistry, ToolVerdict,
+use yoagent::{
+    Agent, AgentEvent, AgentTool, Content, ToolContext, ToolDecision, ToolError, ToolResult,
 };
+use yoagent_rutis::{AgentPlugin, Handler, PluginCtxExt, Registry, RutisBridge};
 
 /// The tool the `text-tools` plugin contributes.
 struct WordCount;
@@ -71,24 +76,71 @@ impl Plugin for Policy {
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
         let denied = self.denied.clone();
         let cap = self.max_calls_per_tool;
+        // Fresh for each generation: built in `apply`.
         let counts: Mutex<HashMap<String, usize>> = Mutex::default();
         Box::pin(async move {
-            ctx.on_tool_call(move |call| {
-                if denied.contains(&call.tool_name()) {
-                    return ToolVerdict::deny(format!("`{}` is disabled", call.tool_name()));
+            ctx.register_handler(Handler::new("policy").with_before_tool(move |call| {
+                if denied.contains(&call.tool.as_str()) {
+                    return ToolDecision::Deny(format!("`{}` is disabled", call.tool));
                 }
                 let mut counts = counts.lock().unwrap();
-                let n = counts.entry(call.tool_name().to_string()).or_default();
+                let n = counts.entry(call.tool.clone()).or_default();
                 if *n >= cap {
-                    return ToolVerdict::deny(format!(
+                    return ToolDecision::Deny(format!(
                         "rate cap: `{}` may run at most {cap} times",
-                        call.tool_name()
+                        call.tool
                     ));
                 }
                 *n += 1;
-                ToolVerdict::Allow
-            })?;
+                ToolDecision::Allow
+            }))?;
             Ok(Effect::Done)
+        })
+    }
+}
+
+/// Mask anything that looks like an API key (`sk-...`).
+fn redact(output: &mut ToolOutput) {
+    for block in &mut output.result.content {
+        if let Content::Text { text } = block {
+            *text = text
+                .split(' ')
+                .map(|word| {
+                    if word.starts_with("sk-") {
+                        "[key]"
+                    } else {
+                        word
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+        }
+    }
+}
+
+/// Stand-in for a tool whose output may carry a secret.
+struct Env;
+
+#[async_trait::async_trait]
+impl AgentTool for Env {
+    fn name(&self) -> &str {
+        "env"
+    }
+    fn label(&self) -> &str {
+        "env"
+    }
+    fn description(&self) -> &str {
+        "print the environment"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object", "properties": {}})
+    }
+    async fn execute(&self, _: serde_json::Value, _: ToolContext) -> Result<ToolResult, ToolError> {
+        Ok(ToolResult {
+            content: vec![Content::Text {
+                text: "HOME=/home/me OPENAI_KEY= sk-live-123".into(),
+            }],
+            details: serde_json::Value::Null,
         })
     }
 }
@@ -154,14 +206,23 @@ async fn main() -> Result<(), BoxError> {
 
     // Plugins can be loaded (and unloaded) at any time; each run sees the
     // set active when it starts.
-    let tools = root.plugin(AgentPlugin::new("text-tools").with_tool(WordCount));
+    let tools = root.plugin(AgentPlugin::new(
+        Handler::new("text-tools").with_tool(WordCount),
+    ));
     let policy = root.plugin(Policy {
         denied: vec!["bash"],
         max_calls_per_tool: 2,
-        injects: vec![TypeKey::of::<ToolRegistry>()],
+        injects: vec![TypeKey::of::<Registry>()],
     });
+    let redactor = root.plugin(AgentPlugin::new(Handler::new("redactor").with_after_tool(
+        |_call, output| {
+            redact(output);
+            Ok(())
+        },
+    )));
     wait_active(&tools).await?;
     wait_active(&policy).await?;
+    wait_active(&redactor).await?;
 
     // Observe the agent's events on the bus. (A plugin would do the same
     // from its `apply`; registered on the root, it lives as long as the root.)
@@ -196,27 +257,32 @@ async fn main() -> Result<(), BoxError> {
         call("word_count", serde_json::json!({"text": "one two three"})),
         call("word_count", serde_json::json!({"text": "four five"})),
         call("word_count", serde_json::json!({"text": "six"})),
+        call("env", serde_json::json!({})),
         call("bash", serde_json::json!({"command": "rm -rf /"})),
         MockResponse::Text("All done.".into()),
     ];
     let mut agent = Agent::from_provider(MockProvider::new(script), ModelConfig::mock())
-        .with_tools(vec![Box::new(Bash)])
-        .with_rutis(&bridge);
+        .with_tools(vec![Box::new(Bash), Box::new(Env)])
+        // The redactor is trusted: withhold partial output, send only the
+        // filtered result.
+        .with_extension(bridge.extension().filters_tool_output());
 
-    let (tx, forwarder) = bridge.event_sender(None);
+    // `prompt_with_sender` returns when the run has ended (`prompt` would
+    // return its receiver right away, with the run still going).
+    let (events, _receiver) = tokio::sync::mpsc::unbounded_channel();
     tokio::time::timeout(
         Duration::from_secs(10),
-        agent.prompt_with_sender("Count some words, then clean up.", tx),
+        agent.prompt_with_sender("Count some words, then clean up.", events),
     )
     .await
     .map_err(|_| "the agent run did not finish within 10 s")?;
-    forwarder.await?;
 
     // Bus dispatch is asynchronous: wait (bounded) for the listener.
     let expected = [
         "word_count: [ok] 3 words",
         "word_count: [ok] 2 words",
         "word_count: [denied/error] Tool call denied: rate cap: `word_count` may run at most 2 times",
+        "env: [ok] HOME=/home/me OPENAI_KEY= [key]",
         "bash: [denied/error] Tool call denied: `bash` is disabled",
     ];
     tokio::time::timeout(Duration::from_secs(5), async {

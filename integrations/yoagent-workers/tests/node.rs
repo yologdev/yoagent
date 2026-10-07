@@ -61,6 +61,8 @@ fn clef_output() -> Value {
 
 #[wasm_bindgen_test]
 async fn clef_runs_through_the_binding_and_is_priced() {
+    // Nothing is priced until the process opts in (idempotent).
+    yoagent::provider::prices::enable_bundled();
     let binding = answering(&clef_output());
     let clef = ai::clef(JsValue::from(binding.clone()));
     let eval = clef
@@ -105,6 +107,7 @@ async fn clef_runs_through_the_binding_and_is_priced() {
 
 #[wasm_bindgen_test]
 async fn clef_flash_asks_for_its_own_model() {
+    yoagent::provider::prices::enable_bundled();
     let binding = answering(&json!({
         "model": "clef-flash",
         "answers": {"q": {"type": "noul", "noul": 0.2}},

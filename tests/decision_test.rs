@@ -1079,3 +1079,71 @@ async fn rounded_distributions_over_many_options_are_accepted() {
         "{e:?}"
     );
 }
+
+#[tokio::test]
+async fn an_empty_fixed_key_fails_before_sending() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(typesafe_response()))
+        .expect(0)
+        .mount(&server)
+        .await;
+    for key in ["", "  \n"] {
+        let systemone = DecisionModel::jev().with_api_key(key);
+        assert!(
+            matches!(systemone.noul("s", "q").await, Err(DecisionError::MissingApiKey(w)) if w.contains("with_api_key")),
+            "{key:?}"
+        );
+        let logprobs = DecisionModel::logprobs(server.uri(), "m").with_api_key(key);
+        assert!(
+            matches!(logprobs.noul("s", "q").await, Err(DecisionError::MissingApiKey(w)) if w.contains("with_api_key")),
+            "{key:?}"
+        );
+    }
+}
+
+/// The input guard over `model` in one agent run: its decision stats.
+async fn guarded_decision_stats(model: DecisionModel) -> yoagent::DecisionStats {
+    use yoagent::provider::{MockProvider, ModelConfig};
+    let mut agent = yoagent::Agent::from_provider(MockProvider::text("hi"), ModelConfig::mock())
+        .with_input_guard(InputGuard::new(model));
+    let mut rx = agent.prompt("hello there").await;
+    let mut stats = None;
+    while let Some(e) = rx.recv().await {
+        if let yoagent::AgentEvent::AgentEnd { stats: s, .. } = e {
+            stats = Some(s);
+        }
+    }
+    agent.finish().await;
+    stats.expect("AgentEnd").decision
+}
+
+#[tokio::test]
+async fn an_unusable_systemone_answer_still_records_its_usage() {
+    let bodies = [
+        // Rejected while parsing: a noul that is not a number.
+        json!({"model": "jevk5", "answers": {
+            "injection": {"type": "noul", "noul": "high"},
+            "harmful": {"type": "noul", "noul": 0.1}
+        }, "usage": {"input_tokens": 777, "output_tokens": 2}}),
+        // Rejected by the central check: out of range.
+        json!({"model": "jevk5", "answers": {
+            "injection": {"type": "noul", "noul": 1.5},
+            "harmful": {"type": "noul", "noul": 0.1}
+        }, "usage": {"input_tokens": 777, "output_tokens": 2}}),
+        // No `usage` object: the per-answer counts.
+        json!({"model": "jevk5", "answers": {
+            "injection": {"type": "noul", "noul": 1.5, "input_tokens": 400},
+            "harmful": {"type": "noul", "noul": 0.1, "input_tokens": 377}
+        }}),
+    ];
+    for body in bodies {
+        let server = MockServer::start().await;
+        mount_ok(&server, body.clone()).await;
+        // `local()` is the built-in SystemOne backend, priced free.
+        let d = guarded_decision_stats(DecisionModel::local(server.uri())).await;
+        assert_eq!((d.requests, d.failures), (1, 1), "{body}");
+        assert_eq!(d.usage.input, 777, "{body}");
+        assert_eq!(d.cost_usd, Some(0.0), "{body}");
+    }
+}

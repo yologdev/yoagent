@@ -333,11 +333,18 @@ struct LoopScope {
     /// Decision-model spend, recorded by the decision integrations and
     /// folded into the run's `SessionStats`.
     decision: DecisionStats,
+    /// Compaction-model spend, recorded by `LlmCompaction::compact` (which
+    /// the loop calls synchronously inside its task) and folded into the
+    /// run's `SessionStats::compaction`.
+    compaction: CompactionSpend,
     /// The user messages this run was given — its prompts, steering and
     /// follow-ups — kept apart from the context so compaction cannot remove
     /// them. Exposed as `ToolCallRequest::run_prompts` /
     /// `TurnContext::run_prompts`.
     prompts: Vec<Message>,
+    /// The same decision and compaction spend, piece by piece with each
+    /// piece's own price, for the run's extensions (`Budget`).
+    spend: Option<Arc<crate::extension::RunSpend>>,
 }
 
 tokio::task_local! {
@@ -350,7 +357,48 @@ tokio::task_local! {
 /// outside a loop.
 #[cfg_attr(not(feature = "decision"), allow(dead_code))]
 pub(crate) fn record_decision(f: impl FnOnce(&mut DecisionStats)) {
-    let _ = LOOP_SCOPE.try_with(|cell| f(&mut cell.borrow_mut().decision));
+    let _ = LOOP_SCOPE.try_with(|cell| {
+        // Recorded on its own first, so the piece's own price is known.
+        let mut piece = DecisionStats::default();
+        f(&mut piece);
+        let mut scope = cell.borrow_mut();
+        if let Some(spend) = &scope.spend {
+            spend.add(&piece.usage, piece.cost_usd);
+        }
+        scope.decision.merge(&piece);
+    });
+}
+
+/// Record compaction-model spend into the enclosing loop's stats. `f` runs
+/// only inside a loop, so a caller can move spend out of its own ledger in
+/// `f` without losing it outside one; returns whether it ran.
+pub(crate) fn record_compaction(f: impl FnOnce(&mut CompactionSpend)) -> bool {
+    LOOP_SCOPE
+        .try_with(|cell| {
+            let mut piece = CompactionSpend::default();
+            f(&mut piece);
+            let mut scope = cell.borrow_mut();
+            if let Some(spend) = &scope.spend {
+                spend.add(&piece.usage, piece.cost_usd);
+            }
+            scope.compaction.merge(&piece);
+        })
+        .is_ok()
+}
+
+/// What hooks inside a run recorded into its [`LoopScope`].
+#[derive(Default)]
+struct ScopeSpend {
+    decision: DecisionStats,
+    compaction: CompactionSpend,
+}
+
+impl ScopeSpend {
+    /// Fold into the run's stats.
+    fn fold_into(&self, stats: &mut SessionStats) {
+        stats.decision.merge(&self.decision);
+        stats.compaction.merge(&self.compaction);
+    }
 }
 
 /// The user messages the enclosing loop's run was given so far (empty
@@ -381,19 +429,27 @@ fn note_run_prompts(messages: &[AgentMessage]) {
 }
 
 /// Run `fut` in a fresh [`LoopScope`] seeded with the run's prompts, and
-/// return its output plus the decision spend recorded.
+/// return its output plus the spend recorded.
 async fn with_loop_scope<T>(
     prompts: Vec<Message>,
+    spend: Arc<crate::extension::RunSpend>,
     fut: impl std::future::Future<Output = T>,
-) -> (T, DecisionStats) {
+) -> (T, ScopeSpend) {
     let scope = LoopScope {
         prompts,
+        spend: Some(spend),
         ..Default::default()
     };
     LOOP_SCOPE
         .scope(std::cell::RefCell::new(scope), async {
             let out = fut.await;
-            let recorded = LOOP_SCOPE.with(|cell| std::mem::take(&mut cell.borrow_mut().decision));
+            let recorded = LOOP_SCOPE.with(|cell| {
+                let mut scope = cell.borrow_mut();
+                ScopeSpend {
+                    decision: std::mem::take(&mut scope.decision),
+                    compaction: std::mem::take(&mut scope.compaction),
+                }
+            });
             (out, recorded)
         })
         .await
@@ -441,7 +497,7 @@ pub(crate) async fn agent_loop_with_stats(
 
     // One scope for the whole run, input filters included, so decision
     // spend in an async filter is counted — also when it rejects.
-    let (outcome, decision) = with_loop_scope(Vec::new(), async {
+    let (outcome, recorded) = with_loop_scope(Vec::new(), exts.spend(), async {
         // What the filters see, without the warnings they append.
         let text = if exts.is_empty() {
             String::new()
@@ -504,10 +560,8 @@ pub(crate) async fn agent_loop_with_stats(
                 None,
             ))
             .await;
-            let stats = SessionStats {
-                decision,
-                ..Default::default()
-            };
+            let mut stats = SessionStats::default();
+            recorded.fold_into(&mut stats);
             tx.send(AgentEvent::AgentEnd {
                 messages: vec![],
                 stats: stats.clone(),
@@ -518,7 +572,7 @@ pub(crate) async fn agent_loop_with_stats(
             return (vec![], stats);
         }
     };
-    stats.decision.merge(&decision);
+    recorded.fold_into(&mut stats);
 
     exts.finish(&run_outcome(&new_messages, &cancel)).await;
     tx.send(AgentEvent::AgentEnd {
@@ -720,37 +774,43 @@ impl EventObserver {
         exts.connect_observer(flush_tx);
         let (done_tx, mut done_rx) = tokio::sync::oneshot::channel::<()>();
         let observed = exts.clone();
-        let task = crate::rt::spawn(async move {
-            loop {
-                tokio::select! {
-                    biased;
-                    event = rx.recv() => match event {
-                        Some(event) => {
-                            observed.on_event(&event).await;
-                            out.send(event).ok();
+        // What the hooks log goes where the run's own logs go.
+        use tracing::instrument::{Instrument, WithSubscriber};
+        let task = crate::rt::spawn(
+            async move {
+                loop {
+                    tokio::select! {
+                        biased;
+                        event = rx.recv() => match event {
+                            Some(event) => {
+                                observed.on_event(&event).await;
+                                out.send(event).ok();
+                            }
+                            None => break,
+                        },
+                        Some(ack) = flush_rx.recv() => {
+                            // Every event sent before the request is queued.
+                            while let Ok(event) = rx.try_recv() {
+                                observed.on_event(&event).await;
+                                out.send(event).ok();
+                            }
+                            let _ = ack.send(());
                         }
-                        None => break,
-                    },
-                    Some(ack) = flush_rx.recv() => {
-                        // Every event sent before the request is queued.
-                        while let Ok(event) = rx.try_recv() {
-                            observed.on_event(&event).await;
-                            out.send(event).ok();
+                        _ = &mut done_rx => {
+                            // The run is over: deliver what is queued and stop,
+                            // even if a stray sender clone is still alive.
+                            while let Ok(event) = rx.try_recv() {
+                                observed.on_event(&event).await;
+                                out.send(event).ok();
+                            }
+                            break;
                         }
-                        let _ = ack.send(());
-                    }
-                    _ = &mut done_rx => {
-                        // The run is over: deliver what is queued and stop,
-                        // even if a stray sender clone is still alive.
-                        while let Ok(event) = rx.try_recv() {
-                            observed.on_event(&event).await;
-                            out.send(event).ok();
-                        }
-                        break;
                     }
                 }
             }
-        });
+            .in_current_span()
+            .with_current_subscriber(),
+        );
         Self {
             tx,
             exts: exts.clone(),
@@ -910,8 +970,9 @@ pub(crate) async fn agent_loop_continue_with_stats(
     tx.send(AgentEvent::TurnStart).ok();
 
     let stats = {
-        let (mut stats, decision) = with_loop_scope(
+        let (mut stats, recorded) = with_loop_scope(
             Vec::new(),
+            exts.spend(),
             run_with_extensions(
                 context,
                 &mut new_messages,
@@ -923,7 +984,7 @@ pub(crate) async fn agent_loop_continue_with_stats(
             ),
         )
         .await;
-        stats.decision.merge(&decision);
+        recorded.fold_into(&mut stats);
         stats
     };
 
@@ -1495,8 +1556,10 @@ async fn run_loop(
                 // Separate bucket: `usage`/`cost_usd` stay this agent's own.
                 for child in &execution.sub_agent_stats {
                     stats.sub_agents.record_run(child);
-                    // Decision spend has one bucket for the whole tree.
+                    // Decision and compaction spend each have one bucket
+                    // for the whole tree.
                     stats.decision.merge(&child.decision);
+                    stats.compaction.merge(&child.compaction);
                 }
 
                 // Cap oversized output on the way in when configured, so

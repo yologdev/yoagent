@@ -1,4 +1,4 @@
-//! Agent events forwarded onto the rutis bus.
+//! Agent events published on the rutis bus by the extension.
 
 mod common;
 
@@ -7,73 +7,69 @@ use std::time::{Duration, Instant};
 
 use common::*;
 use rutis::{BoxFuture, CordisError, Ctx, EventKey, Listener};
-use tokio::sync::{mpsc, Semaphore};
-use yoagent::AgentEvent;
-use yoagent_rutis::{AgentEventEmitted, AgentRutisExt, PluginCtxExt, RutisBridge};
+use tokio::sync::Semaphore;
+use yoagent::{AgentEvent, SubAgentTool};
+use yoagent_rutis::{AgentEventEmitted, PluginCtxExt, RutisBridge};
 
-fn kind(e: &AgentEvent) -> &'static str {
-    match e {
-        AgentEvent::AgentStart => "AgentStart",
-        AgentEvent::AgentEnd { .. } => "AgentEnd",
-        AgentEvent::TurnStart => "TurnStart",
-        AgentEvent::TurnEnd { .. } => "TurnEnd",
-        AgentEvent::MessageStart { .. } => "MessageStart",
-        AgentEvent::MessageUpdate { .. } => "MessageUpdate",
-        AgentEvent::MessageEnd { .. } => "MessageEnd",
-        AgentEvent::ToolExecutionStart { .. } => "ToolExecutionStart",
-        AgentEvent::ToolExecutionUpdate { .. } => "ToolExecutionUpdate",
-        AgentEvent::ToolExecutionEnd { .. } => "ToolExecutionEnd",
-        _ => "other",
-    }
+fn kind(e: &AgentEvent) -> String {
+    serde_json::to_value(e).unwrap()["type"]
+        .as_str()
+        .unwrap()
+        .to_string()
 }
 
 /// What the agent emits for the mock script `[call act, text "done"]`,
 /// pinned independently of the bridge.
 const EXPECTED: &[&str] = &[
-    "AgentStart",
-    "TurnStart",
-    "MessageStart",
-    "MessageEnd",
-    "MessageStart",
-    "MessageEnd",
-    "ToolExecutionStart",
-    "ToolExecutionEnd",
-    "MessageStart",
-    "MessageEnd",
-    "TurnEnd",
-    "TurnStart",
-    "MessageStart",
-    "MessageUpdate",
-    "MessageEnd",
-    "TurnEnd",
-    "AgentEnd",
+    "agentStart",
+    "turnStart",
+    "messageStart",
+    "messageEnd",
+    "messageStart",
+    "messageEnd",
+    "toolExecutionStart",
+    "toolExecutionEnd",
+    "messageStart",
+    "messageEnd",
+    "turnEnd",
+    "turnStart",
+    "messageStart",
+    "messageUpdate",
+    "messageEnd",
+    "turnEnd",
+    "agentEnd",
 ];
 
 fn script() -> Vec<yoagent::provider::mock::MockResponse> {
     vec![call("act", serde_json::json!({})), text("done")]
 }
 
-type Log = Arc<Mutex<Vec<(Option<String>, &'static str)>>>;
+/// `(run label, run id, depth, kind)` of every event observed.
+type Log = Arc<Mutex<Vec<(Option<String>, String, usize, String)>>>;
 
-/// A plugin recording `(label, kind)` of every event it observes.
+fn record(log: &Log, e: &AgentEventEmitted) {
+    log.lock().unwrap().push((
+        e.label().map(str::to_string),
+        e.run_id().to_string(),
+        e.depth(),
+        kind(e.event()),
+    ))
+}
+
+/// A plugin recording every event it observes on the bus.
 fn observer_plugin(log: Log) -> Setup {
     Setup::new("observer", move |ctx| {
         let log = log.clone();
-        ctx.on_agent_event(move |e| {
-            log.lock()
-                .unwrap()
-                .push((e.label().map(str::to_string), kind(e.event())))
-        })
-        .map(drop)
+        ctx.on_agent_event(move |e| record(&log, e)).map(drop)
     })
 }
 
-fn kinds(log: &Log, label: Option<&str>) -> Vec<&'static str> {
+fn kinds(log: &Log, label: Option<&str>) -> Vec<String> {
     log.lock()
         .unwrap()
         .iter()
-        .filter(|(l, _)| l.as_deref() == label)
-        .map(|(_, k)| *k)
+        .filter(|(l, ..)| l.as_deref() == label)
+        .map(|(.., k)| k.clone())
         .collect()
 }
 
@@ -87,34 +83,39 @@ async fn until_count(log: &Log, n: usize) {
     .unwrap_or_else(|_| panic!("only {:?} arrived", log.lock().unwrap()));
 }
 
-async fn attached(bridge: &RutisBridge) -> yoagent::Agent {
+fn attached(bridge: &RutisBridge, label: Option<&str>) -> yoagent::Agent {
     let (agent, _) = agent(script());
-    agent
+    let agent = agent
         .with_tools(vec![Box::new(Reply::new("act", "acted"))])
-        .with_rutis(bridge)
+        .with_extension(bridge.extension());
+    match label {
+        Some(label) => agent.with_run_label(label),
+        None => agent,
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_bus_listener_sees_exactly_the_agents_events_in_order() {
+async fn a_bus_listener_sees_exactly_the_runs_events_in_order() {
     let (root, bridge) = setup();
     let log = Log::default();
     let observer = root.plugin(observer_plugin(log.clone()));
     wait_active(&observer).await;
-    let mut agent = attached(&bridge).await;
+    let mut agent = attached(&bridge, None);
 
-    let (ui_tx, mut ui_rx) = mpsc::unbounded_channel();
-    let (tx, forwarder) = bridge.event_sender(Some(ui_tx));
-    agent.prompt_with_sender("go", tx).await;
-    forwarder.await.unwrap();
-    let mut ui = Vec::new();
-    while let Ok(e) = ui_rx.try_recv() {
-        ui.push(kind(&e));
-    }
-    assert_eq!(ui, EXPECTED, "the caller's own consumer gets every event");
+    let (events, _) = run(&mut agent, "go").await;
+    let own: Vec<String> = events.iter().map(kind).collect();
+    assert_eq!(own, EXPECTED, "the caller's own consumer gets every event");
 
     until_count(&log, EXPECTED.len()).await;
     tokio::time::sleep(Duration::from_millis(50)).await; // nothing extra follows
     assert_eq!(kinds(&log, None), EXPECTED);
+    let ids: std::collections::HashSet<String> = log
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, id, ..)| id.clone())
+        .collect();
+    assert_eq!(ids.len(), 1, "one run id for the whole run");
     root.shutdown().await.unwrap();
 }
 
@@ -132,7 +133,7 @@ impl Listener<AgentEventEmitted> for Gated {
     ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
         Box::pin(async move {
             self.gate.acquire().await.unwrap().forget();
-            self.log.lock().unwrap().push((None, kind(e.event())));
+            record(&self.log, e);
             Ok(None)
         })
     }
@@ -160,13 +161,11 @@ async fn a_blocked_listener_does_not_hold_the_agent_back() {
     let log = Log::default();
     let slow = root.plugin(gated_observer(gate.clone(), log.clone()));
     wait_active(&slow).await;
-    let mut agent = attached(&bridge).await;
+    let mut agent = attached(&bridge, None);
 
-    let (tx, forwarder) = bridge.event_sender(None);
-    tokio::time::timeout(Duration::from_secs(5), agent.prompt_with_sender("go", tx))
+    tokio::time::timeout(Duration::from_secs(5), run(&mut agent, "go"))
         .await
         .expect("the run completes while the listener is blocked");
-    forwarder.await.unwrap();
     assert!(
         log.lock().unwrap().is_empty(),
         "the listener has not handled a single event, yet the run is done"
@@ -183,108 +182,16 @@ async fn a_blocked_listener_does_not_hold_the_agent_back() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_closed_forward_receiver_does_not_stop_publishing() {
-    let (root, bridge) = setup();
-    let log = Log::default();
-    let observer = root.plugin(observer_plugin(log.clone()));
-    wait_active(&observer).await;
-    let mut agent = attached(&bridge).await;
-
-    let (ui_tx, ui_rx) = mpsc::unbounded_channel();
-    drop(ui_rx);
-    let (tx, forwarder) = bridge.event_sender(Some(ui_tx));
-    agent.prompt_with_sender("go", tx).await;
-    forwarder.await.unwrap();
-    until_count(&log, EXPECTED.len()).await;
-    assert_eq!(kinds(&log, None), EXPECTED);
-    root.shutdown().await.unwrap();
-}
-
-/// Records, for each event it receives from the bus, whether the caller's
-/// forward channel already held that event.
-struct ForwardFirst {
-    forwarded: Arc<Mutex<mpsc::UnboundedReceiver<AgentEvent>>>,
-    ahead: Arc<Mutex<Vec<bool>>>,
-}
-
-impl Listener<AgentEventEmitted> for ForwardFirst {
-    fn call<'a>(
-        &'a self,
-        _ctx: &'a Ctx,
-        e: &'a AgentEventEmitted,
-    ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
-        Box::pin(async move {
-            let got = self.forwarded.lock().unwrap().try_recv();
-            let ok = matches!(&got, Ok(f) if kind(f) == kind(e.event()));
-            self.ahead.lock().unwrap().push(ok);
-            Ok(None)
-        })
-    }
-}
-
-fn forward_first_plugin(
-    forwarded: Arc<Mutex<mpsc::UnboundedReceiver<AgentEvent>>>,
-    ahead: Arc<Mutex<Vec<bool>>>,
-) -> Setup {
-    Setup::new("forward-first", move |ctx| {
-        ctx.events()
-            .on(
-                ctx,
-                &EventKey::<AgentEventEmitted>::of(),
-                ForwardFirst {
-                    forwarded: forwarded.clone(),
-                    ahead: ahead.clone(),
-                },
-            )
-            .map(drop)
-    })
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn the_callers_consumer_is_never_behind_the_bus() {
-    let (root, bridge) = setup();
-    let (ui_tx, ui_rx) = mpsc::unbounded_channel();
-    let forwarded = Arc::new(Mutex::new(ui_rx));
-    let ahead = Arc::new(Mutex::new(Vec::new()));
-    let p = root.plugin(forward_first_plugin(forwarded, ahead.clone()));
-    wait_active(&p).await;
-    let mut agent = attached(&bridge).await;
-    let (tx, forwarder) = bridge.event_sender(Some(ui_tx));
-    agent.prompt_with_sender("go", tx).await;
-    forwarder.await.unwrap();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while ahead.lock().unwrap().len() < EXPECTED.len() {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .unwrap();
-    assert!(
-        ahead.lock().unwrap().iter().all(|ok| *ok),
-        "every event was forwarded before the bus saw it: {:?}",
-        ahead.lock().unwrap()
-    );
-    root.shutdown().await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn two_agents_on_one_bridge_are_told_apart_by_label() {
     let (root, bridge) = setup();
     let log = Log::default();
     let observer = root.plugin(observer_plugin(log.clone()));
     wait_active(&observer).await;
-    let mut a = attached(&bridge).await;
-    let mut b = attached(&bridge).await;
+    let mut a = attached(&bridge, Some("agent-a"));
+    let mut b = attached(&bridge, Some("agent-b"));
 
-    let (tx_a, fwd_a) = bridge.event_sender_labeled("agent-a", None);
-    let (tx_b, fwd_b) = bridge.event_sender_labeled("agent-b", None);
     let started = Instant::now();
-    tokio::join!(
-        a.prompt_with_sender("go", tx_a),
-        b.prompt_with_sender("go", tx_b)
-    );
-    fwd_a.await.unwrap();
-    fwd_b.await.unwrap();
+    tokio::join!(run(&mut a, "go"), run(&mut b, "go"));
     assert!(started.elapsed() < Duration::from_secs(5));
 
     until_count(&log, 2 * EXPECTED.len()).await;
@@ -292,4 +199,84 @@ async fn two_agents_on_one_bridge_are_told_apart_by_label() {
     assert_eq!(kinds(&log, Some("agent-b")), EXPECTED);
     assert!(kinds(&log, None).is_empty());
     root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sub_agents_events_carry_its_depth_with_a_tree_extension() {
+    let (root, bridge) = setup();
+    let log = Log::default();
+    let observer = root.plugin(observer_plugin(log.clone()));
+    wait_active(&observer).await;
+    let (child, _) = recording(vec![text("child done")]);
+    let sub = SubAgentTool::from_provider("helper", child, yoagent::provider::ModelConfig::mock());
+    let (parent, _) = agent(vec![
+        call("helper", serde_json::json!({"task": "help"})),
+        text("done"),
+    ]);
+    let mut parent = parent
+        .with_sub_agent(sub)
+        .with_run_label("tree")
+        .with_tree_extension(bridge.extension());
+    run(&mut parent, "delegate").await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !log
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, _, depth, k)| *depth == 0 && k == "agentEnd")
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the parent's run ends on the bus");
+    let log = log.lock().unwrap().clone();
+    let child: Vec<_> = log.iter().filter(|(_, _, depth, _)| *depth == 1).collect();
+    assert!(
+        !child.is_empty(),
+        "the child's events are published: {log:?}"
+    );
+    assert!(
+        child
+            .iter()
+            .all(|(label, ..)| label.as_deref() == Some("tree")),
+        "a delegated run keeps its parent's label"
+    );
+    let parent_ids: std::collections::HashSet<_> = log
+        .iter()
+        .filter(|(_, _, d, _)| *d == 0)
+        .map(|(_, id, ..)| id)
+        .collect();
+    assert!(
+        child.iter().all(|(_, id, ..)| !parent_ids.contains(id)),
+        "the child's run has its own id"
+    );
+    root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn nothing_is_published_after_the_host_stops() {
+    let (root, bridge) = setup();
+    let log = Log::default();
+    let observer = root.plugin(observer_plugin(log.clone()));
+    wait_active(&observer).await;
+    // Positive control: while the host runs, a run's events reach the
+    // listener within the window the negative check waits below, so an
+    // empty log after the shutdown is not just slow delivery.
+    const WINDOW: Duration = Duration::from_millis(500);
+    let mut agent = attached(&bridge, None);
+    run(&mut agent, "go").await;
+    tokio::time::sleep(WINDOW).await;
+    assert_eq!(
+        kinds(&log, None),
+        EXPECTED,
+        "while running, the whole run is published within the window"
+    );
+    log.lock().unwrap().clear();
+
+    let mut agent = attached(&bridge, None);
+    root.shutdown().await.unwrap();
+    run(&mut agent, "go").await;
+    tokio::time::sleep(WINDOW).await;
+    assert!(log.lock().unwrap().is_empty(), "{:?}", log.lock().unwrap());
 }

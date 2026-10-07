@@ -172,7 +172,7 @@ fn texts(m: &AgentMessage) -> impl Iterator<Item = &str> {
         AgentMessage::Llm(Message::User { content, .. })
         | AgentMessage::Llm(Message::Assistant { content, .. })
         | AgentMessage::Llm(Message::ToolResult { content, .. }) => content,
-        AgentMessage::Extension(_) => &[],
+        AgentMessage::Custom(_) => &[],
     };
     content.iter().filter_map(|c| match c {
         Content::Text { text } => Some(text.as_str()),

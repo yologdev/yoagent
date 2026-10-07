@@ -10,6 +10,10 @@ use yoagent::provider::{ModelConfig, PriceTable};
 fn an_empty_env_var_is_unset() {
     std::env::set_var("YOAGENT_PRICES", "");
     assert!(matches!(global::env_override_status(), EnvOverride::Unset));
+    // No layer at all: nothing is priced until the process opts in.
+    assert!(global::resolved().is_empty());
+    assert!(ModelConfig::claude_sonnet_5().cost.is_none());
+    yoagent::provider::prices::enable_bundled();
     assert_eq!(global::resolved(), PriceTable::builtin());
     assert_eq!(
         ModelConfig::claude_sonnet_5().cost,

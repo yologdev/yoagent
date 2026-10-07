@@ -115,8 +115,9 @@ impl Capabilities {
 /// A decision-model backend: evaluates a [`Request`] into an [`Evaluation`].
 ///
 /// Built in: [`SystemOneBackend`](super::SystemOneBackend) (HTTP, TypeSafe's
-/// API and compatible servers) and [`MockBackend`](super::MockBackend)
-/// (tests). Implement it to plug in anything else; wrap it with
+/// API and compatible servers), [`LogprobBackend`](super::LogprobBackend),
+/// [`OpenAiDecisionBackend`](super::OpenAiDecisionBackend) (OpenAI's
+/// Decisions API) and [`MockBackend`](super::MockBackend) (tests). Implement it to plug in anything else; wrap it with
 /// [`DecisionModel::from_backend`](super::DecisionModel::from_backend).
 ///
 /// [`DecisionModel`](super::DecisionModel) validates each request against

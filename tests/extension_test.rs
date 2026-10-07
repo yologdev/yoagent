@@ -2855,3 +2855,281 @@ async fn a_sub_agent_cancelled_before_it_answers_is_a_cancelled_delegation() {
         "{results:?}"
     );
 }
+
+/// Records a failure from `on_event` (on the event `on`) without panicking,
+/// and hands it over through `take_failure`.
+#[derive(Clone)]
+struct Recorder {
+    on: fn(&AgentEvent) -> bool,
+    failure: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+impl Recorder {
+    fn new(on: fn(&AgentEvent) -> bool) -> Self {
+        Self {
+            on,
+            failure: Arc::default(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl RunHooks for Recorder {
+    fn on_event(&self, event: &AgentEvent) {
+        if (self.on)(event) {
+            self.failure
+                .lock()
+                .unwrap()
+                .get_or_insert_with(|| "audit sink down".into());
+        }
+    }
+    fn take_failure(&self) -> Option<String> {
+        self.failure.lock().unwrap().take()
+    }
+}
+
+/// A failure recorded through `take_failure` fails a required run, also
+/// when the run ends without another hook (a plain final answer here), and
+/// a tool call not started yet is not run.
+#[tokio::test]
+async fn a_failure_handed_over_by_take_failure_fails_a_required_run() {
+    // On the final answer: no later hook asks, only the loop's own check.
+    let (agent, _) = scripted(vec![text("done")]);
+    let mut agent = agent.with_extension(
+        ClonedHooks::new(
+            "audit",
+            Recorder::new(|e| matches!(e, AgentEvent::MessageEnd { .. })),
+        )
+        .required(),
+    );
+    let events = run(&mut agent, "go").await;
+    assert_failed_by(&events, "audit", "audit sink down");
+
+    // On the tool call's turn: the call is not run.
+    let (agent, _) = scripted(vec![
+        call("echo", serde_json::json!({"text": "x"})),
+        text("done"),
+    ]);
+    let mut agent = agent.with_extension(
+        ClonedHooks::new(
+            "audit",
+            Recorder::new(|e| matches!(e, AgentEvent::MessageEnd { .. })),
+        )
+        .required(),
+    );
+    let events = run(&mut agent, "go").await;
+    assert_failed_by(&events, "audit", "audit sink down");
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            AgentEvent::ToolExecutionEnd {
+                is_error: false,
+                ..
+            }
+        )),
+        "the echo call did not run"
+    );
+
+    // Positive control: advisory, the same failure is only logged.
+    let (agent, _) = scripted(vec![text("done")]);
+    let mut agent = agent.with_extension(ClonedHooks::new(
+        "audit",
+        Recorder::new(|e| matches!(e, AgentEvent::MessageEnd { .. })),
+    ));
+    let events = run(&mut agent, "go").await;
+    assert!(!events.iter().any(|e| matches!(
+        e,
+        AgentEvent::MessageEnd {
+            message: AgentMessage::Llm(Message::Assistant {
+                stop_reason: StopReason::Error,
+                ..
+            }),
+            ..
+        }
+    )));
+}
+
+// --- `take_failure` on every ending its docs promise ----------------------
+
+fn is_tool_result_end(e: &AgentEvent) -> bool {
+    matches!(
+        e,
+        AgentEvent::MessageEnd {
+            message: AgentMessage::Llm(Message::ToolResult { .. })
+        }
+    )
+}
+
+fn is_assistant_end(e: &AgentEvent) -> bool {
+    matches!(
+        e,
+        AgentEvent::MessageEnd {
+            message: AgentMessage::Llm(Message::Assistant { .. })
+        }
+    )
+}
+
+/// A failure recorded on the last turn's events, when `max_turns` ends the
+/// run, still fails a required run.
+#[tokio::test]
+async fn take_failure_is_asked_when_max_turns_ends_the_run() {
+    let (agent, _) = scripted(vec![
+        call("echo", serde_json::json!({"text": "x"})),
+        text("never"),
+    ]);
+    let mut agent = agent
+        .with_execution_limits(yoagent::context::ExecutionLimits::default().with_max_turns(1))
+        .with_extension(ClonedHooks::new("audit", Recorder::new(is_tool_result_end)).required());
+    let events = run(&mut agent, "go").await;
+    assert_failed_by(&events, "audit", "audit sink down");
+}
+
+/// Records a failure on the event `on` and cancels the run there.
+struct CancelOn(fn(&AgentEvent) -> bool);
+
+struct CancelOnHooks {
+    on: fn(&AgentEvent) -> bool,
+    cancel: CancellationToken,
+    failure: Mutex<Option<String>>,
+}
+
+#[async_trait::async_trait]
+impl RunHooks for CancelOnHooks {
+    fn on_event(&self, event: &AgentEvent) {
+        if (self.on)(event) {
+            self.failure
+                .lock()
+                .unwrap()
+                .get_or_insert_with(|| "audit sink down".into());
+            self.cancel.cancel();
+        }
+    }
+    fn take_failure(&self) -> Option<String> {
+        self.failure.lock().unwrap().take()
+    }
+}
+
+#[async_trait::async_trait]
+impl Extension for CancelOn {
+    fn name(&self) -> &str {
+        "audit"
+    }
+    fn mode(&self) -> ExtensionMode {
+        ExtensionMode::Required
+    }
+    async fn start_run(&self, run: &RunContext<'_>) -> Result<Box<dyn RunHooks>, ExtensionError> {
+        Ok(Box::new(CancelOnHooks {
+            on: self.0,
+            cancel: run.cancel.clone(),
+            failure: Mutex::new(None),
+        }))
+    }
+}
+
+/// A failure recorded as the run is cancelled still fails a required run:
+/// on the tool results (the cancel is seen between turns) and on the final
+/// answer (seen as the run ends).
+#[tokio::test]
+async fn take_failure_is_asked_when_a_cancel_ends_the_run() {
+    let (agent, _) = scripted(vec![
+        call("echo", serde_json::json!({"text": "x"})),
+        text("never"),
+    ]);
+    let mut agent = agent.with_extension(CancelOn(is_tool_result_end));
+    let events = run(&mut agent, "go").await;
+    assert_failed_by(&events, "audit", "audit sink down");
+
+    let (agent, _) = scripted(vec![text("done")]);
+    let mut agent = agent.with_extension(CancelOn(is_assistant_end));
+    let events = run(&mut agent, "go").await;
+    assert_failed_by(&events, "audit", "audit sink down");
+}
+
+/// Answers every request with text cut off at the output limit.
+struct CutOff;
+
+#[async_trait::async_trait]
+impl StreamProvider for CutOff {
+    async fn stream(
+        &self,
+        _config: StreamConfig,
+        _tx: mpsc::UnboundedSender<StreamEvent>,
+        _cancel: CancellationToken,
+    ) -> Result<Message, ProviderError> {
+        Ok(Message::assistant(
+            vec![Content::Text {
+                text: "half an ans".into(),
+            }],
+            StopReason::Length,
+            "mock",
+            "mock",
+            Usage::default(),
+        ))
+    }
+}
+
+/// `on_stop` is not called for an answer cut off at the output limit; a
+/// failure recorded on it still fails a required run.
+#[tokio::test]
+async fn take_failure_is_asked_when_the_final_answer_is_cut_off() {
+    let mut agent = Agent::from_provider(CutOff, ModelConfig::mock())
+        .with_extension(ClonedHooks::new("audit", Recorder::new(is_assistant_end)).required());
+    let events = run(&mut agent, "go").await;
+    assert_failed_by(&events, "audit", "audit sink down");
+
+    // Positive control: without the failure the run ends on the cut-off
+    // answer.
+    let mut agent = Agent::from_provider(CutOff, ModelConfig::mock())
+        .with_extension(ClonedHooks::new("audit", Recorder::new(|_| false)).required());
+    let events = run(&mut agent, "go").await;
+    assert_eq!(final_assistant(&events).0, StopReason::Length);
+}
+
+/// `take_failure` itself panics, every time it is asked.
+#[derive(Clone)]
+struct PanickyTake;
+
+#[async_trait::async_trait]
+impl RunHooks for PanickyTake {
+    fn take_failure(&self) -> Option<String> {
+        panic!("ledger poisoned")
+    }
+}
+
+/// A panicking `take_failure` is contained: it fails a required run (once),
+/// is only logged for an advisory one, and the loop carries on either way.
+#[tokio::test]
+async fn a_panicking_take_failure_is_contained() {
+    let (agent, _) = scripted(vec![
+        call("echo", serde_json::json!({"text": "x"})),
+        text("done"),
+    ]);
+    let mut agent = agent.with_extension(ClonedHooks::new("audit", PanickyTake).required());
+    let events = run(&mut agent, "go").await;
+    assert_failed_by(&events, "audit", "ledger poisoned");
+    let failures = end_messages(&events)
+        .iter()
+        .filter(|m| {
+            matches!(
+                m,
+                AgentMessage::Llm(Message::Assistant {
+                    stop_reason: StopReason::Error,
+                    ..
+                })
+            )
+        })
+        .count();
+    assert_eq!(failures, 1, "the run fails once");
+
+    let (agent, _) = scripted(vec![
+        call("echo", serde_json::json!({"text": "x"})),
+        text("done"),
+    ]);
+    let mut agent = agent.with_extension(ClonedHooks::new("audit", PanickyTake));
+    let events = run(&mut agent, "go").await;
+    assert_eq!(final_assistant(&events).0, StopReason::Stop);
+    let results = tool_results(&events);
+    assert_eq!(results.len(), 1);
+    assert!(!results[0].1, "the call ran: {results:?}");
+    assert!(turns_paired(&events));
+}

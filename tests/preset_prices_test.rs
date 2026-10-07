@@ -6,8 +6,9 @@
 //! not a tolerance). Change a price here only together with the data file and
 //! the vendor page that justifies it.
 //!
-//! Each test first drops the user layer (a developer's `YOAGENT_PRICES`),
-//! so presets resolve against the built-in data alone.
+//! Each test first drops the user layer (a developer's `YOAGENT_PRICES`)
+//! and opts in to the bundled snapshot (`prices::enable_bundled`), so presets
+//! resolve against the snapshot alone.
 
 use yoagent::provider::{ContextTier, CostConfig, ModelConfig};
 
@@ -93,6 +94,7 @@ fn pinned() -> Vec<(&'static str, ModelConfig, CostConfig)> {
 fn every_preset_cost_config_is_pinned() {
     // List prices only: a developer's YOAGENT_PRICES must not change them.
     yoagent::provider::prices::global::clear_override();
+    yoagent::provider::prices::enable_bundled();
     for (name, config, expected) in pinned() {
         assert_eq!(
             config.cost.as_ref(),
@@ -128,6 +130,7 @@ fn every_preset_output_limit_is_pinned() {
 #[test]
 fn the_pin_detects_a_one_ulp_change() {
     yoagent::provider::prices::global::clear_override();
+    yoagent::provider::prices::enable_bundled();
     let (_, config, expected) = pinned().remove(0);
     let mut nudged = config.cost.unwrap();
     nudged.input_per_million = f64::from_bits(nudged.input_per_million.to_bits() + 1);

@@ -3,8 +3,10 @@
 Run [yoagent](https://crates.io/crates/yoagent) on Cloudflare Workers through
 the Worker's own bindings.
 
-Requires yoagent 0.24 or later (the first release with
-`decision::parse_systemone_response`).
+Requires yoagent 0.25 or later (from the next release of this crate: it
+reads `prices::global::pricing_enabled`, and pricing is opt-in from yoagent
+0.25 — call `yoagent::provider::prices::enable_bundled()` to price Clef).
+yoagent-workers 0.1 works with yoagent 0.24.
 
 yoagent itself builds for `wasm32-unknown-unknown` (`default-features = false`)
 and reaches every LLM provider over the Worker's `fetch` (see the
@@ -52,10 +54,13 @@ the raw `env.AI` `JsValue`, and return an ordinary `DecisionModel`: batched
 questions and fallbacks (`.or(..)`) work, and it can be handed to an agent's
 advisory hints, tool gate or input guard like any other decision model (the
 tool gate has run live on the binding path, in the `clef-worker` example; the
-advisory hints and input guard have not). They are priced at the
-`prices.json` rate the price table holds when they are built (`cloudflare/clef`
-$0.24, `cloudflare/clef-flash` $0.09 per million input tokens by default; a
-later price override does not reprice them). That is the list price;
+advisory hints and input guard have not). Like every yoagent model they are
+**unpriced unless the Worker opts in** before building them —
+`yoagent::provider::prices::enable_bundled()` (works on wasm32) — and then
+priced at the rate the price table holds when they are built
+(`cloudflare/clef` $0.24, `cloudflare/clef-flash` $0.09 per million input
+tokens in the bundled snapshot; a later price override does not reprice
+them). That is the list price;
 Cloudflare bills in neurons with a daily free allocation.
 
 For another SystemOne model on Workers AI, or your own capabilities, retry

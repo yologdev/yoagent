@@ -110,6 +110,10 @@ name = "price_fetch_test"
 required-features = ["native"]
 
 [[test]]
+name = "price_enable_test"
+required-features = ["native"]
+
+[[test]]
 name = "integration_anthropic"
 required-features = ["native"]
 
@@ -139,6 +143,10 @@ required-features = ["decision"]
 
 [[test]]
 name = "decision_clef_test"
+required-features = ["decision"]
+
+[[test]]
+name = "decision_openai_test"
 required-features = ["decision"]
 
 [[test]]

@@ -177,6 +177,9 @@ pub struct RunContext<'a> {
     pub inherited: bool,
     /// The run's cancellation token.
     pub cancel: &'a CancellationToken,
+    /// What the run spends outside its model turns (decision models,
+    /// compaction summaries), for [`Budget`]. `None` outside a loop.
+    pub(crate) spend: Option<&'a Arc<RunSpend>>,
 }
 
 impl<'a> RunContext<'a> {
@@ -191,6 +194,7 @@ impl<'a> RunContext<'a> {
             parent_run_id: None,
             inherited: false,
             cancel,
+            spend: None,
         }
     }
 
@@ -464,6 +468,20 @@ pub trait RunHooks: MaybeSend + MaybeSync {
     /// and before `finish`, so what it records is current there.
     fn on_event(&self, _event: &AgentEvent) {}
 
+    /// A failure these hooks recorded but could not raise where it happened:
+    /// from `on_event` (which must not block, and whose panic would switch
+    /// off this extension's observation for the run), or from work of their
+    /// own running in the background. Return it once; the loop takes it.
+    ///
+    /// The loop asks whenever it acts on failures: before each turn, before
+    /// a response's tools run, before `on_stop`, and when the run ends
+    /// however it ends (a limit, a cancel, an answer cut off). A required
+    /// extension's failure then fails the run, and tool calls not started yet
+    /// are not run; an advisory one's is logged.
+    fn take_failure(&self) -> Option<String> {
+        None
+    }
+
     /// When the run ends. Not called if the run's future is dropped, so
     /// correctness must not depend on it. Bounded by [`FINISH_TIMEOUT`].
     async fn finish(&mut self, _outcome: &RunOutcome) {}
@@ -604,6 +622,45 @@ pub(crate) struct ActiveExtensions {
     flush: std::sync::OnceLock<tokio::sync::mpsc::UnboundedSender<FlushRequest>>,
     /// The run has been failed: later failures are only logged.
     failed_run: AtomicBool,
+    /// The run's spend outside its model turns.
+    spend: Arc<RunSpend>,
+}
+
+/// What a run spent outside its own model turns — decision-model
+/// evaluations and compaction summaries recorded into the loop's scope —
+/// kept so [`Budget`] can count it. Each piece keeps the price it was
+/// recorded with; a piece that had none is kept as usage, priced by the
+/// reader.
+#[derive(Debug, Default)]
+pub(crate) struct RunSpend(std::sync::Mutex<RunSpendInner>);
+
+#[derive(Debug, Default)]
+struct RunSpendInner {
+    priced_usd: f64,
+    unpriced: Usage,
+}
+
+impl RunSpend {
+    /// Record one piece of spend; `cost_usd: None` = unpriced.
+    pub(crate) fn add(&self, usage: &Usage, cost_usd: Option<f64>) {
+        let mut inner = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        match cost_usd {
+            Some(usd) => inner.priced_usd += usd.max(0.0),
+            None => {
+                let u = &mut inner.unpriced;
+                u.input = u.input.saturating_add(usage.input);
+                u.output = u.output.saturating_add(usage.output);
+                u.cache_read = u.cache_read.saturating_add(usage.cache_read);
+                u.cache_write = u.cache_write.saturating_add(usage.cache_write);
+            }
+        }
+    }
+
+    /// Dollars so far, the unpriced pieces priced with `fallback`.
+    fn usd_at(&self, fallback: &crate::provider::CostConfig) -> f64 {
+        let inner = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        inner.priced_usd + fallback.cost_usd(&inner.unpriced)
+    }
 }
 
 /// Await `fut`, containing a panic as `Err(payload text)`.
@@ -659,6 +716,7 @@ impl ActiveExtensions {
             failure: std::sync::Mutex::new(None),
             flush: std::sync::OnceLock::new(),
             failed_run: AtomicBool::new(false),
+            spend: Arc::default(),
         }
     }
 
@@ -681,7 +739,14 @@ impl ActiveExtensions {
             parent_run_id: self.parent_run_id.as_deref(),
             inherited: false,
             cancel: &self.cancel,
+            spend: Some(&self.spend),
         }
+    }
+
+    /// What the run spends outside its model turns; the loop records into
+    /// it (decision models, compaction summaries).
+    pub(crate) fn spend(&self) -> Arc<RunSpend> {
+        Arc::clone(&self.spend)
     }
 
     /// Await a hook, contained and abandoned if the run is cancelled.
@@ -812,6 +877,18 @@ impl ActiveExtensions {
             let acked = flush.send(ack).is_ok() && done.await.is_ok();
             if !acked {
                 tracing::error!(run_id = %self.run_id, "the extension event observer is gone; events are no longer observed");
+            }
+        }
+        // With observation current, collect what the hooks recorded.
+        for a in &self.active {
+            let hooks = a.hooks.read().await;
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hooks.take_failure())) {
+                Ok(None) => {}
+                Ok(Some(reason)) => self.failed(a, "take_failure", reason),
+                Err(payload) => {
+                    let why = crate::tool_source::panic_message(&*payload);
+                    self.failed(a, "take_failure", format!("panicked: {why}"));
+                }
             }
         }
     }
@@ -1138,9 +1215,17 @@ pub(crate) fn tool_definitions(tools: &[Box<dyn AgentTool>]) -> Vec<ToolDefiniti
 /// is before each request, not during one.
 ///
 /// Spend is each assistant message's usage priced with the given
-/// [`CostConfig`](crate::provider::CostConfig), as the message is observed,
-/// plus what a sub-agent reports spending (its own price, or this one if it
-/// has none). By default the limit is per run, sub-agents included. With
+/// [`CostConfig`](crate::provider::CostConfig), as the message is observed;
+/// plus the run's own requests outside its turns — an
+/// [`LlmCompaction`](crate::LlmCompaction) summary and decision-model
+/// evaluations (the tool gate, input guard and advisor; feature
+/// `decision`) — each at its own model's price, or this one if it has none,
+/// counted before each request and when the run ends; plus what a sub-agent
+/// reports spending, all of the above included (its own price, or this one
+/// if it has none). That is the spend
+/// [`SessionStats::total_cost_usd`](crate::SessionStats::total_cost_usd)
+/// adds up, except that it never stays unknown: an unpriced part is priced
+/// at this budget's rates. By default the limit is per run, sub-agents included. With
 /// [`across_runs`](Self::across_runs) it is one total for every run the
 /// extension serves: a session's runs, or, installed with
 /// [`Agent::with_tree_extension`](crate::Agent::with_tree_extension), every
@@ -1153,6 +1238,8 @@ pub(crate) fn tool_definitions(tools: &[Box<dyn AgentTool>]) -> Vec<ToolDefiniti
 /// ```
 /// # use yoagent::extension::Budget;
 /// # use yoagent::provider::ModelConfig;
+/// // Nothing is priced until the process opts in.
+/// yoagent::provider::prices::enable_bundled();
 /// let model = ModelConfig::claude_sonnet_5();
 /// // `None` when the model has no price: an unpriced budget would be no limit.
 /// let budget = Budget::for_model(2.0, &model).expect("a priced model");
@@ -1228,12 +1315,27 @@ struct BudgetRun {
     /// The run's own spend, or the shared total when `across_runs`.
     spent: Arc<std::sync::Mutex<f64>>,
     children: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// The run's spend outside its turns (decision, compaction), and how
+    /// much of it is already in `spent`.
+    extra: Option<Arc<RunSpend>>,
+    extra_counted: f64,
 }
 
 impl BudgetRun {
     fn add(&self, usd: f64) {
         if usd > 0.0 {
             *self.spent.lock().unwrap_or_else(|e| e.into_inner()) += usd;
+        }
+    }
+
+    /// Count what the run spent outside its turns since the last call.
+    fn count_extra(&mut self) {
+        if let Some(extra) = &self.extra {
+            let now = extra.usd_at(&self.cost);
+            if now > self.extra_counted {
+                self.add(now - self.extra_counted);
+                self.extra_counted = now;
+            }
         }
     }
 }
@@ -1268,6 +1370,8 @@ impl Extension for Budget {
                 Arc::default()
             },
             children: self.children.clone(),
+            extra: run.spend.cloned(),
+            extra_counted: 0.0,
         }))
     }
 }
@@ -1276,6 +1380,7 @@ impl Extension for Budget {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl RunHooks for BudgetRun {
     async fn before_model(&mut self, _turn: &TurnContext<'_>) -> TurnDecision {
+        self.count_extra();
         let spent = *self.spent.lock().unwrap_or_else(|e| e.into_inner());
         if spent >= self.max_usd {
             TurnDecision::Stop(format!(
@@ -1316,5 +1421,11 @@ impl RunHooks for BudgetRun {
             }
             _ => {}
         }
+    }
+
+    async fn finish(&mut self, _outcome: &RunOutcome) {
+        // Spend after the last request (a gate judging the last calls, a
+        // summary that finished late) still counts toward a shared total.
+        self.count_extra();
     }
 }

@@ -7,7 +7,7 @@
 use std::sync::{Arc, Mutex};
 use tracing_subscriber::layer::SubscriberExt;
 use yoagent::provider::prices::global::{self, EnvOverride};
-use yoagent::provider::{ModelConfig, PriceError, PriceTable};
+use yoagent::provider::{ModelConfig, PriceError};
 
 /// Captures every event's message and fields on this thread.
 #[derive(Clone, Default)]
@@ -46,13 +46,11 @@ fn a_bad_env_file_is_logged_and_ignored() {
     let _guard =
         tracing::subscriber::set_default(tracing_subscriber::registry().with(logs.clone()));
 
-    // First use reads the variable. No panic, built-in rates.
+    // First use reads the variable. No panic, and no user layer: nothing
+    // is priced (no other opt-in).
     let opus = ModelConfig::claude_opus_5();
-    assert_eq!(
-        opus.cost,
-        PriceTable::builtin().cost("anthropic", "claude-opus-5")
-    );
-    assert_eq!(global::resolved(), PriceTable::builtin());
+    assert!(opus.cost.is_none());
+    assert!(global::resolved().is_empty());
 
     // Positive control: the rejection was reported, naming the file and why.
     let logs = logs.0.lock().unwrap();

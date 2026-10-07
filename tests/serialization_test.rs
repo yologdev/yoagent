@@ -75,11 +75,41 @@ fn test_agent_message_roundtrip() {
 
 #[test]
 fn test_extension_message_roundtrip() {
-    let ext = ExtensionMessage::new("status_update", serde_json::json!({"status": "running"}));
+    let ext = CustomMessage::new("status_update", serde_json::json!({"status": "running"}));
     roundtrip(&ext);
 
-    let am = AgentMessage::Extension(ext);
+    let am = AgentMessage::Custom(ext);
     roundtrip(&am);
+}
+
+/// A custom message saved before the 0.25 rename (as `AgentMessage::Extension`)
+/// reads back unchanged: the enum is untagged and the role stays "extension".
+#[test]
+fn a_custom_message_saved_before_the_rename_still_loads() {
+    let saved = r#"{"role":"extension","kind":"status_update","data":{"status":"running"}}"#;
+    let am: AgentMessage = serde_json::from_str(saved).expect("deserialize");
+    assert_eq!(
+        am,
+        AgentMessage::Custom(CustomMessage::new(
+            "status_update",
+            serde_json::json!({"status": "running"})
+        ))
+    );
+    assert_eq!(serde_json::to_string(&am).unwrap(), saved);
+    // Positive control: an LLM message is not taken for a custom one.
+    let user: AgentMessage = serde_json::from_str(
+        &serde_json::to_string(&AgentMessage::Llm(Message::user("hi"))).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(user, AgentMessage::Llm(_)));
+}
+
+/// The old struct name still compiles, as a deprecated alias.
+#[test]
+#[allow(deprecated)]
+fn the_old_message_name_is_an_alias() {
+    let old: ExtensionMessage = ExtensionMessage::new("k", 1);
+    let _: CustomMessage = old;
 }
 
 // ---------------------------------------------------------------------------
@@ -226,7 +256,7 @@ fn test_full_conversation_roundtrip() {
             )
             .with_timestamp(300),
         ),
-        AgentMessage::Extension(ExtensionMessage::new(
+        AgentMessage::Custom(CustomMessage::new(
             "ui_event",
             serde_json::json!({"action": "scroll"}),
         )),

@@ -86,6 +86,10 @@ fn print_stats(stats: &SessionStats) {
 
 #[tokio::main]
 async fn main() {
+    // Costs are unpriced unless the process opts in. The bundled snapshot is
+    // offline and reproducible; `prices::enable_live(&PriceSource::ModelsDev)`
+    // fetches current prices instead.
+    yoagent::provider::prices::enable_bundled();
     let args: Vec<String> = std::env::args().collect();
 
     let api_url = args

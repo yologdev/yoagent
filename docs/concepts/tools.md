@@ -520,9 +520,10 @@ The contract:
   tools to that run.
 
 Several sources may be added. `SubAgentTool::with_tool_source` mirrors it —
-consulted once per delegation. The [rutis bridge](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis)
-(`yoagent-rutis`) is built on it: plugins contribute tools, and an agent sees
-exactly the tools of the currently loaded plugins at each run start.
+consulted once per delegation. An [extension](extensions.md)'s `tools` hook
+follows the same once-per-run rule; the [rutis bridge](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis)
+(`yoagent-rutis`) uses it, so an agent sees exactly the tools of the plugins
+loaded at each run start.
 
 ## Execution Strategies
 

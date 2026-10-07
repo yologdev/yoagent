@@ -202,6 +202,8 @@ fn presets() -> Vec<Preset> {
 fn every_priced_preset_is_an_audited_entry() {
     // List prices only: a developer's YOAGENT_PRICES must not change them.
     yoagent::provider::prices::global::clear_override();
+    // The snapshot under audit, opted in (nothing is priced by default).
+    yoagent::provider::prices::enable_bundled();
     let table = PriceTable::builtin();
     for config in [
         ModelConfig::claude_fable_5(),

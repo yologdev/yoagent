@@ -22,10 +22,13 @@
 //!
 //! # Layers
 //!
-//! The **resolved table** is the built-in data, with the **fetched layer**
+//! The **resolved table** is the bundled snapshot — only once
+//! [`enable_bundled`](super::enable_bundled) or an `enable_live*` function
+//! turned it on; empty by default — with the **fetched layer**
 //! ([`install_fetched`]) over it and the **user layer** ([`install_override`],
 //! or the `YOAGENT_PRICES` file) over that. Each layer replaces whole entries
-//! per `(provider, id)`.
+//! per `(provider, id)`. With no layer, the table is empty and constructors
+//! price nothing; each layer alone prices exactly the models it lists.
 //!
 //! Constructors read the resolved table **when they run**. Install prices
 //! first and build configs afterwards, or re-price configs you already hold
@@ -42,8 +45,8 @@
 //!   call. Its [`OverrideReport`] splits that into the overridden models
 //!   (`changes`) and models that revert because a previous override no
 //!   longer lists them (`reverted`).
-//! - [`install_fetched`] / [`install_fetched_with`] compare the built-in plus
-//!   fetched layers before and after the call. A change to a model the user
+//! - [`install_fetched`] / [`install_fetched_with`] compare the bundled (when
+//!   enabled) plus fetched layers before and after the call. A change to a model the user
 //!   layer overrides is still reported, marked
 //!   [`shadowed`](PriceChange::shadowed): it does not change what is billed.
 
@@ -53,7 +56,7 @@ use crate::provider::model::CostConfig;
 use std::path::PathBuf;
 use std::sync::{OnceLock, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-/// How many disagreements with the built-in data [`install_fetched_with`]
+/// How many disagreements with the bundled snapshot [`install_fetched_with`]
 /// spells out in its log line; the rest are counted.
 const LOGGED_CHANGES: usize = 5;
 
@@ -62,12 +65,13 @@ const LOGGED_CHANGES: usize = 5;
 #[non_exhaustive]
 pub enum InstallPolicy {
     /// Replace the fetched layer with the table: every entry overrides the
-    /// built-in data where both list a model. What [`install_fetched`] does.
+    /// bundled snapshot (when enabled) where both list a model. What [`install_fetched`] does.
     /// Replacing a non-empty fetched layer is logged at `warn`.
     #[default]
     ReplaceAll,
     /// Merge into the current fetched layer only the models that no lower
-    /// layer — the built-in data or the current fetched layer — lists:
+    /// layer — the bundled snapshot (when enabled) or the current fetched
+    /// layer — lists:
     /// extend coverage, never override a price already in effect.
     AddOnly,
 }
@@ -102,14 +106,14 @@ pub struct OverrideReport {
     /// before the call. Excludes `inert` entries.
     pub changes: Vec<PriceChange>,
     /// Models whose price changed because a previous user layer listed them
-    /// and the new one does not: they revert to the fetched or built-in
+    /// and the new one does not: they revert to the fetched or bundled
     /// price, or become unpriced. Unlike `changes`, this can include
     /// entries for providers no constructor prices (an inert entry of the
     /// previous override); those never affected billing.
     pub reverted: Vec<PriceChange>,
     /// `provider/model` of entries whose provider is not in
     /// [`PRICED_PROVIDERS`] (nor, with the `decision` feature, `typesafe`,
-    /// which decision models read): no constructor reads them; only
+    /// `cloudflare` or `openai-decisions`, which decision models read): no constructor reads them; only
     /// [`ModelConfig::with_prices`](crate::provider::ModelConfig::with_prices) does.
     pub inert: Vec<String>,
     /// Everything that was also logged at `warn`: inert entries, dropped
@@ -126,19 +130,28 @@ struct UserLayer {
 }
 
 struct Layers {
+    /// Whether the bundled snapshot (`prices.json`) is the bottom layer.
+    /// Off until [`enable_bundled`](super::enable_bundled) or one of the
+    /// `enable_live*` functions turns it on.
+    bundled: bool,
     fetched: Option<PriceTable>,
     user: Option<UserLayer>,
-    /// `builtin`, then `fetched`, then `user`, rebuilt on every change so a
-    /// lookup is one map read.
+    /// The bundled snapshot (when enabled), then `fetched`, then `user`,
+    /// rebuilt on every change so a lookup is one map read.
     resolved: PriceTable,
 }
 
 impl Layers {
     /// Everything below the user layer.
     fn lower(&self) -> PriceTable {
+        let base = if self.bundled {
+            builtin_ref().clone()
+        } else {
+            PriceTable::default()
+        };
         match &self.fetched {
-            Some(fetched) => builtin_ref().layered(fetched),
-            None => builtin_ref().clone(),
+            Some(fetched) => base.layered(fetched),
+            None => base,
         }
     }
 
@@ -159,6 +172,7 @@ fn layers() -> &'static RwLock<Layers> {
         let (user, status) = env_layer();
         let _ = ENV_STATUS.set(status);
         let mut layers = Layers {
+            bundled: false,
             fetched: None,
             user,
             resolved: PriceTable::default(),
@@ -283,9 +297,11 @@ fn override_warnings(table: &PriceTable, lower: &PriceTable) -> Vec<String> {
 
 /// Whether anything in this build reads a provider's entries: a pricing
 /// constructor ([`PRICED_PROVIDERS`]) or, with the `decision` feature, a
-/// decision model (`typesafe`).
+/// decision model (`typesafe`, `cloudflare`, `openai-decisions`).
 fn is_read(provider: &str) -> bool {
-    PRICED_PROVIDERS.contains(&provider) || (cfg!(feature = "decision") && provider == "typesafe")
+    PRICED_PROVIDERS.contains(&provider)
+        || (cfg!(feature = "decision")
+            && matches!(provider, "typesafe" | "cloudflare" | "openai-decisions"))
 }
 
 fn inert_entries(table: &PriceTable) -> Vec<String> {
@@ -299,9 +315,10 @@ fn inert_entries(table: &PriceTable) -> Vec<String> {
 /// Install `table` as the **user layer**, replacing any previous one
 /// (including one loaded from `YOAGENT_PRICES`, which is not re-read).
 ///
-/// Its entries take precedence over the fetched layer and the built-in data
-/// per `(provider, id)`; models it does not list keep their lower-layer
-/// price. Affects configs built **after** this call.
+/// Its entries take precedence over the fetched layer and the bundled
+/// snapshot per `(provider, id)`; models it does not list keep their
+/// lower-layer price (none, when nothing else opted in). On its own it is an
+/// opt-in for exactly the models it lists. Affects configs built **after** this call.
 ///
 /// The whole operation holds one lock. The [`OverrideReport`] compares the
 /// resolved table before and after it. An entry replaces the lower entry
@@ -365,10 +382,12 @@ pub fn clear_override() {
 /// Install `table` as the **fetched layer**, replacing the current one:
 /// [`install_fetched_with`] with [`InstallPolicy::ReplaceAll`].
 ///
-/// Returns the changes to the built-in-plus-fetched table (see the
-/// [module docs](self)). Separately, every built-in model the new layer
-/// prices differently from the built-in data is logged at `warn` — the count
-/// and the first few — so trusting a fetched source is never silent.
+/// Returns the changes to the bundled-plus-fetched table (see the
+/// [module docs](self)). Separately, while the bundled snapshot is enabled,
+/// every snapshot model the new layer prices differently is logged at
+/// `warn` — the count and the first few — so trusting a fetched source is
+/// never silent. On its own (snapshot off) it prices exactly the models it
+/// lists; [`enable_live`](super::enable_live) installs over the snapshot.
 ///
 /// Affects configs built **after** this call: fetch and install first, then
 /// build configs, or [`reprice`](crate::provider::ModelConfig::reprice)
@@ -392,8 +411,62 @@ pub fn install_fetched(table: PriceTable) -> Vec<PriceChange> {
 /// ```
 #[must_use = "the returned changes are how you see where the fetched prices differ"]
 pub fn install_fetched_with(table: PriceTable, policy: InstallPolicy) -> Vec<PriceChange> {
-    let mut warnings = Vec::new();
     let mut layers = write_layers();
+    let installed = install_fetched_locked(&mut layers, table, policy);
+    drop(layers);
+    installed.log(policy)
+}
+
+/// What [`install_fetched_locked`] did, logged by [`FetchedInstall::log`]
+/// once the lock is released.
+struct FetchedInstall {
+    changes: Vec<PriceChange>,
+    warnings: Vec<String>,
+    disagreements: Vec<PriceChange>,
+}
+
+impl FetchedInstall {
+    fn log(self, policy: InstallPolicy) -> Vec<PriceChange> {
+        for warning in &self.warnings {
+            tracing::warn!("yoagent prices: install_fetched: {warning}");
+        }
+        let disagreements = &self.disagreements;
+        if !disagreements.is_empty() {
+            let first: Vec<String> = disagreements
+                .iter()
+                .take(LOGGED_CHANGES)
+                .map(ToString::to_string)
+                .collect();
+            tracing::warn!(
+                differing = disagreements.len(),
+                "yoagent prices: the fetched table disagrees with the bundled snapshot on {} \
+                 model(s) and takes precedence for them: {}{}",
+                disagreements.len(),
+                first.join("; "),
+                if disagreements.len() > LOGGED_CHANGES {
+                    format!("; and {} more", disagreements.len() - LOGGED_CHANGES)
+                } else {
+                    String::new()
+                }
+            );
+        }
+        tracing::info!(
+            changed = self.changes.len(),
+            ?policy,
+            "yoagent prices: installed fetched prices"
+        );
+        self.changes
+    }
+}
+
+/// [`install_fetched_with`] under a lock the caller holds. The changes
+/// compare everything below the user layer before and after.
+fn install_fetched_locked(
+    layers: &mut Layers,
+    table: PriceTable,
+    policy: InstallPolicy,
+) -> FetchedInstall {
+    let mut warnings = Vec::new();
     let before = layers.lower();
     let fetched = match policy {
         InstallPolicy::ReplaceAll => {
@@ -417,11 +490,17 @@ pub fn install_fetched_with(table: PriceTable, policy: InstallPolicy) -> Vec<Pri
             merged
         }
     };
-    let disagreements: Vec<PriceChange> = fetched
-        .changes_from(builtin_ref())
-        .into_iter()
-        .filter(|c| c.before.is_some())
-        .collect();
+    // Disagreements with the bundled snapshot matter only when it is in
+    // effect: otherwise the fetched table overrides nothing.
+    let disagreements: Vec<PriceChange> = if layers.bundled {
+        fetched
+            .changes_from(builtin_ref())
+            .into_iter()
+            .filter(|c| c.before.is_some())
+            .collect()
+    } else {
+        Vec::new()
+    };
     layers.fetched = Some(fetched);
     layers.rebuild();
     let mut changes = diff_tables(&before, &layers.lower());
@@ -430,36 +509,53 @@ pub fn install_fetched_with(table: PriceTable, policy: InstallPolicy) -> Vec<Pri
             change.shadowed = user.table.entry(&change.provider, &change.model).is_some();
         }
     }
-    drop(layers);
+    FetchedInstall {
+        changes,
+        warnings,
+        disagreements,
+    }
+}
 
-    for warning in &warnings {
-        tracing::warn!("yoagent prices: install_fetched: {warning}");
+/// Turn the bundled snapshot on and, when given, install `fetched` over it
+/// as the fetched layer ([`InstallPolicy::ReplaceAll`]), under one lock.
+/// Returns the changes to the resolved table — what constructors bill.
+/// Backs [`enable_bundled`](super::enable_bundled) and the `enable_live*`
+/// functions.
+pub(crate) fn enable(fetched: Option<PriceTable>) -> Vec<PriceChange> {
+    let mut layers = write_layers();
+    let before = layers.resolved.clone();
+    layers.bundled = true;
+    layers.rebuild();
+    let installed =
+        fetched.map(|t| install_fetched_locked(&mut layers, t, InstallPolicy::ReplaceAll));
+    let changes = diff_tables(&before, &layers.resolved);
+    drop(layers);
+    if let Some(installed) = installed {
+        let _ = installed.log(InstallPolicy::ReplaceAll);
     }
-    if !disagreements.is_empty() {
-        let first: Vec<String> = disagreements
-            .iter()
-            .take(LOGGED_CHANGES)
-            .map(ToString::to_string)
-            .collect();
-        tracing::warn!(
-            differing = disagreements.len(),
-            "yoagent prices: the fetched table disagrees with the built-in data on {} \
-             model(s) and takes precedence for them: {}{}",
-            disagreements.len(),
-            first.join("; "),
-            if disagreements.len() > LOGGED_CHANGES {
-                format!("; and {} more", disagreements.len() - LOGGED_CHANGES)
-            } else {
-                String::new()
-            }
-        );
-    }
-    tracing::info!(
-        changed = changes.len(),
-        ?policy,
-        "yoagent prices: installed fetched prices"
-    );
     changes
+}
+
+/// Turn the bundled snapshot off again: models only it priced become
+/// unpriced for configs built afterwards. The fetched and user layers stay.
+/// The default state of a process.
+pub fn clear_bundled() {
+    let mut layers = write_layers();
+    layers.bundled = false;
+    layers.rebuild();
+}
+
+/// Whether the bundled snapshot is in effect
+/// ([`enable_bundled`](super::enable_bundled) or an `enable_live*` call).
+pub fn is_bundled_enabled() -> bool {
+    read_layers().bundled
+}
+
+/// Whether any price is in effect — the bundled snapshot, a fetched table,
+/// or a user layer (`YOAGENT_PRICES` included). `false` in a process that
+/// never opted in: every constructor then leaves `cost` at `None`.
+pub fn pricing_enabled() -> bool {
+    !read_layers().resolved.is_empty()
 }
 
 /// Remove the fetched layer.
@@ -497,8 +593,41 @@ pub fn load_env_override() -> Result<Option<PriceTable>, PriceError> {
 }
 
 /// The rates a first-party constructor gets for `(provider, id)`.
+///
+/// A miss while some prices are in effect but the bundled snapshot is not
+/// (only `YOAGENT_PRICES`, [`install_override`] or [`install_fetched`]) is
+/// warned about once per `(provider, id)`: the process asked for prices, so
+/// a model silently left unpriced is more likely a gap in the caller's table
+/// than an intent. With the snapshot on, a miss is a model the snapshot does
+/// not list either, as before — not warned.
 pub(crate) fn resolved_cost(provider: &str, id: &str) -> Option<CostConfig> {
-    read_layers().resolved.cost(provider, id)
+    let (cost, warn) = {
+        let layers = read_layers();
+        let cost = layers.resolved.cost(provider, id);
+        let warn = cost.is_none() && !layers.bundled && !layers.resolved.is_empty();
+        (cost, warn)
+    };
+    if warn && first_miss(provider, id) {
+        tracing::warn!(
+            provider,
+            model = id,
+            "yoagent prices: {provider}/{id} is not in the prices in effect (a user or \
+             fetched table, without the bundled snapshot), so it is unpriced; add it to \
+             that table, or enable the snapshot under it with prices::enable_bundled"
+        );
+    }
+    cost
+}
+
+/// Whether this is the first unpriced lookup of `(provider, id)` warned
+/// about by [`resolved_cost`].
+fn first_miss(provider: &str, id: &str) -> bool {
+    static SEEN: OnceLock<std::sync::Mutex<std::collections::HashSet<(String, String)>>> =
+        OnceLock::new();
+    SEEN.get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert((provider.to_string(), id.to_string()))
 }
 
 #[cfg(test)]

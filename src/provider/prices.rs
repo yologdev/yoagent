@@ -1,8 +1,38 @@
-//! Model prices as data: the built-in `prices.json`, [`PriceTable`], runtime
-//! overrides ([`global`]) and opt-in live sources ([`PriceSource`]).
+//! Model prices as data: the bundled `prices.json` snapshot, [`PriceTable`],
+//! the opt-in functions, runtime overrides ([`global`]) and live sources
+//! ([`PriceSource`]).
 //!
-//! Every price this crate knows lives in `src/provider/prices.json`, embedded
-//! at compile time, keyed by [`ModelConfig::provider`] then [`ModelConfig::id`]:
+//! # Nothing is priced until you opt in
+//!
+//! By default every constructor leaves [`ModelConfig::cost`] at `None`, so
+//! costs (`total_cost_usd()`, `Budget::for_model`, …) report *unpriced*.
+//! Opt in once, process-wide, **before** building configs:
+//!
+//! ```
+//! use yoagent::provider::prices;
+//! // Offline and reproducible: the snapshot compiled into this release.
+//! prices::enable_bundled();
+//! # prices::global::clear_bundled();
+//! ```
+//!
+//! ```no_run
+//! # #[cfg(feature = "native")]
+//! # async fn run() {
+//! use yoagent::provider::{prices, PriceSource};
+//! // Live (native only): fetch models.dev now, over the bundled snapshot;
+//! // a failed fetch falls back to the snapshot and says so.
+//! let live = prices::enable_live(&PriceSource::ModelsDev).await;
+//! if live.fell_back() { eprintln!("using the bundled snapshot"); }
+//! # }
+//! ```
+//!
+//! A `YOAGENT_PRICES` file, [`global::install_override`] or
+//! [`global::install_fetched`] also opt in — for exactly the models they
+//! list. No pricing function makes a network request unless you call one
+//! that says it does.
+//!
+//! The **bundled snapshot** lives in `src/provider/prices.json`, embedded
+//! at compile time (applied only when asked), keyed by [`ModelConfig::provider`] then [`ModelConfig::id`]:
 //!
 //! ```json
 //! {
@@ -47,8 +77,9 @@
 //! The first-party constructors whose provider is in [`PRICED_PROVIDERS`]
 //! ([`ModelConfig::anthropic`], [`ModelConfig::openai`],
 //! [`ModelConfig::google`], …, and the named presets built on them) look
-//! their `(provider, id)` up when they build a config and get `Some` for a
-//! listed model, `None` otherwise. Gateways and custom endpoints
+//! their `(provider, id)` up in the process-wide table when they build a
+//! config and get `Some` for a listed model, `None` otherwise — always
+//! `None` until something opted in. Gateways and custom endpoints
 //! ([`ModelConfig::custom`], [`ModelConfig::openai_compat`],
 //! [`ModelConfig::local`], [`ModelConfig::ollama`], the OpenCode gateways)
 //! never look up: what they bill is not the vendor's list price.
@@ -60,10 +91,15 @@
 //!
 //! 1. the **user layer**: [`global::install_override`], or on first use the
 //!    file named by the `YOAGENT_PRICES` environment variable;
-//! 2. the **fetched layer**: [`global::install_fetched`], opt-in, from a live
-//!    [`PriceSource`] (see its trust caveats) — nothing is fetched unless you
-//!    call [`PriceTable::fetch`] or [`PriceTable::fetch_cached`];
-//! 3. the built-in `prices.json`.
+//! 2. the **fetched layer**: [`global::install_fetched`] or `enable_live*`,
+//!    from a live [`PriceSource`] (see its trust caveats) — nothing is
+//!    fetched unless you call `enable_live*`, [`PriceTable::fetch`] or
+//!    `PriceTable::fetch_cached`;
+//! 3. the **bundled snapshot** (`prices.json`), off until
+//!    [`enable_bundled`] or `enable_live*` turns it on
+//!    ([`global::clear_bundled`] turns it off).
+//!
+//! With no layer installed the table is empty and nothing is priced.
 //!
 //! Each layer replaces whole entries per `(provider, id)`. **Constructors
 //! resolve when they run**, so install prices before building configs, or
@@ -77,6 +113,7 @@
 //! See `docs/concepts/pricing.md` for the full guide.
 //!
 //! [`ModelConfig::reprice`]: crate::provider::ModelConfig::reprice
+//! [`ModelConfig::cost`]: crate::provider::ModelConfig::cost
 //! [`ModelConfig::with_prices`]: crate::provider::ModelConfig::with_prices
 //! [`ModelConfig::provider`]: crate::provider::ModelConfig::provider
 //! [`ModelConfig::id`]: crate::provider::ModelConfig::id
@@ -126,6 +163,154 @@ pub const PRICED_PROVIDERS: &[&str] = &[
     "qwen",
     "meta",
 ];
+
+/// Price first-party constructors from the **bundled snapshot** — the
+/// `prices.json` compiled into this release — process-wide, offline and
+/// reproducible. Nothing is priced until you opt in (this, or
+/// [`enable_live`] / [`enable_live_cached`], or a user layer).
+///
+/// Affects configs built **after** the call (re-price others with
+/// [`ModelConfig::reprice`](crate::provider::ModelConfig::reprice)).
+/// Idempotent; works on every target. Returns every entry of the resolved
+/// table that changed (empty on a repeat call), including providers no
+/// constructor reads, such as decision-model prices without the `decision`
+/// feature. Undo with
+/// [`global::clear_bundled`].
+///
+/// ```
+/// use yoagent::provider::{prices, ModelConfig};
+/// prices::enable_bundled();
+/// assert!(ModelConfig::claude_sonnet_5().cost.is_some());
+/// # prices::global::clear_bundled();
+/// ```
+pub fn enable_bundled() -> Vec<PriceChange> {
+    global::enable(None)
+}
+
+/// What [`enable_live`] / [`enable_live_cached`] installed.
+#[cfg(feature = "native")]
+#[cfg_attr(docsrs, doc(cfg(feature = "native")))]
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+#[must_use = "a fetch that failed falls back to the bundled snapshot; check `fell_back()` or `origin`"]
+pub struct LivePrices {
+    /// Where the prices came from. [`PriceOrigin::Builtin`] means the fetch
+    /// failed (see [`PriceOrigin::fetch_error`]) and only the bundled
+    /// snapshot was enabled — see [`fell_back`](Self::fell_back).
+    pub origin: PriceOrigin,
+    /// Every entry of the resolved table whose price changed (providers no
+    /// constructor reads included), compared with the resolved table before
+    /// the call (a user layer's models included, as
+    /// billed: a fetched change the user layer hides is not listed).
+    pub changes: Vec<PriceChange>,
+    /// Models a models.dev source listed but could not be mapped.
+    pub skipped: Vec<SkippedModel>,
+    /// Fields a lenient parse ignored.
+    pub ignored_fields: Vec<String>,
+    /// A cache file that existed but could not be used
+    /// ([`enable_live_cached`] only).
+    pub cache_problem: Option<CacheProblem>,
+}
+
+#[cfg(feature = "native")]
+impl LivePrices {
+    /// The fetch failed (and no usable cache existed): only the bundled
+    /// snapshot is in effect.
+    pub fn fell_back(&self) -> bool {
+        self.origin.is_builtin()
+    }
+}
+
+/// Price first-party constructors from a **live** source, process-wide:
+/// fetch `source` now (one request, [`DEFAULT_FETCH_TIMEOUT`]) and install
+/// it over the bundled snapshot. If the fetch fails, the bundled snapshot
+/// alone is enabled, logged at `warn` and reported as
+/// [`PriceOrigin::Builtin`] ([`LivePrices::fell_back`]).
+///
+/// The bundled snapshot stays underneath either way: the fetched table
+/// overrides it for every model it lists, and models it does not list (or
+/// could not map) keep the snapshot's price. Mind the trust caveats on
+/// [`PriceSource`] — [`PriceSource::ModelsDev`] is community-maintained.
+///
+/// This is the only network request pricing ever makes, and only because
+/// you called it. Affects configs built **after** it returns. For a process
+/// that starts often, prefer [`enable_live_cached`].
+///
+/// ```no_run
+/// # async fn run() {
+/// use yoagent::provider::{prices, PriceSource};
+/// let live = prices::enable_live(&PriceSource::ModelsDev).await;
+/// if let Some(e) = live.origin.fetch_error() {
+///     eprintln!("price fetch failed ({e}); using the bundled snapshot");
+/// }
+/// # }
+/// ```
+#[cfg(feature = "native")]
+#[cfg_attr(docsrs, doc(cfg(feature = "native")))]
+pub async fn enable_live(source: &PriceSource) -> LivePrices {
+    match PriceTable::fetch_with(source, FetchOptions::default()).await {
+        Ok(report) => LivePrices {
+            origin: PriceOrigin::Fetched {
+                cache_write_error: None,
+            },
+            changes: global::enable(Some(report.table)),
+            skipped: report.skipped,
+            ignored_fields: report.ignored_fields,
+            cache_problem: None,
+        },
+        Err(fetch_error) => {
+            tracing::warn!(
+                url = source.url(),
+                error = %fetch_error,
+                "yoagent prices: fetch failed; falling back to the bundled snapshot"
+            );
+            LivePrices {
+                origin: PriceOrigin::Builtin { fetch_error },
+                changes: global::enable(None),
+                skipped: Vec::new(),
+                ignored_fields: Vec::new(),
+                cache_problem: None,
+            }
+        }
+    }
+}
+
+/// [`enable_live`] through a cache file: [`PriceTable::fetch_cached`]
+/// (a fresh cache is used without a request; a failed fetch falls back to
+/// an expired cache within `max_stale`, then to the bundled snapshot), and
+/// the result installed over the bundled snapshot.
+///
+/// ```no_run
+/// # async fn run() {
+/// use yoagent::provider::{prices, CacheOptions, PriceSource};
+/// let live = prices::enable_live_cached(
+///     &PriceSource::ModelsDev,
+///     "/var/cache/myapp/yoagent-prices.json",
+///     CacheOptions::new(), // refetch daily; offline, accept a week-old cache
+/// )
+/// .await;
+/// if live.fell_back() {
+///     eprintln!("no live prices; using the bundled snapshot");
+/// }
+/// # }
+/// ```
+#[cfg(feature = "native")]
+#[cfg_attr(docsrs, doc(cfg(feature = "native")))]
+pub async fn enable_live_cached(
+    source: &PriceSource,
+    cache_path: impl AsRef<Path>,
+    options: CacheOptions,
+) -> LivePrices {
+    let cached = PriceTable::fetch_cached(source, cache_path, options).await;
+    let fetched = (!cached.origin.is_builtin()).then_some(cached.table);
+    LivePrices {
+        changes: global::enable(fetched),
+        origin: cached.origin,
+        skipped: cached.skipped,
+        ignored_fields: cached.ignored_fields,
+        cache_problem: cached.cache_problem,
+    }
+}
 
 /// The built-in data, embedded at compile time.
 const BUILTIN_JSON: &str = include_str!("prices.json");
@@ -441,7 +626,9 @@ impl PriceTable {
         Self::default()
     }
 
-    /// The data compiled into this release (`src/provider/prices.json`).
+    /// The bundled snapshot compiled into this release
+    /// (`src/provider/prices.json`), as a value. Reading it installs
+    /// nothing: [`enable_bundled`] does.
     pub fn builtin() -> PriceTable {
         builtin_ref().clone()
     }

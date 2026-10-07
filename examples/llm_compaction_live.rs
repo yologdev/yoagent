@@ -88,8 +88,8 @@ impl StreamProvider for BulkProvider {
 /// Resolve a model id to its named preset where one exists.
 ///
 /// Prices alone would not need this: the generic constructors look a listed
-/// id up in `prices.json` too. The presets matter for everything else they
-/// set — the 1M context window this harness measures compaction against, the
+/// id up in the bundled `prices.json` (enabled in `main`) too. The presets
+/// matter for everything else they set — the 1M context window this harness measures compaction against, the
 /// max output, and for GPT-6 the Responses API. Ids the price table does not
 /// list come back unpriced, which blanks the cost column — the one number
 /// this harness exists to surface — so that is noted.
@@ -137,7 +137,9 @@ fn noting_unpriced(config: ModelConfig) -> ModelConfig {
 }
 
 fn note_unpriced(model: &str) {
-    eprintln!("note: prices.json does not list '{model}' — the cost column will be blank");
+    eprintln!(
+        "note: the bundled prices.json does not list '{model}' — the cost column will be blank"
+    );
 }
 
 /// A DeepSeek config carrying peak-window rates. `cache_write` is left unset
@@ -348,6 +350,9 @@ fn briefings(messages: &[AgentMessage]) -> Vec<String> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // The cost column needs prices: opt in to the bundled snapshot before any
+    // config is built (nothing is priced by default).
+    yoagent::provider::prices::enable_bundled();
     // INFO surfaces the strategy's own per-compaction line, which reports the
     // cost even when no event sender is wired. `env-filter` is not among the
     // crate's tracing-subscriber features, so this is level-based rather than
@@ -577,6 +582,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
+    // The same spend as the events' rows, summed by the loop into the runs'
+    // `SessionStats::compaction`. It is counted when a request finishes rather
+    // than when its briefing is spliced or discarded, so the two can differ by
+    // requests the session never used (or one still in flight at the end).
+    let compaction_spend = agent.compaction_spend().clone();
+    let total_cost_usd = agent.total_cost_usd();
     drop(agent);
     drop(compact_tx);
 
@@ -672,6 +683,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(c) => println!("\nsummarization cost: ${c:.4}"),
         None => println!("\nsummarization cost: unpriced"),
     }
+    println!(
+        "SessionStats::compaction: {} request(s), {}/{} tokens, {}",
+        compaction_spend.requests,
+        compaction_spend.usage.input,
+        compaction_spend.usage.output,
+        compaction_spend
+            .cost_usd
+            .map(|c| format!("${c:.4}"))
+            .unwrap_or_else(|| "unpriced".into()),
+    );
+    println!(
+        "agent total (turns + summaries): {}",
+        total_cost_usd
+            .map(|c| format!("${c:.4}"))
+            .unwrap_or_else(|| "unpriced".into()),
+    );
 
     println!("\n{}", "=".repeat(72));
     println!("SESSION TOKENS & PROMPT CACHE");

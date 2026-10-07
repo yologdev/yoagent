@@ -6,9 +6,11 @@ use super::answer::{Answer, ChoiceAnswer, DecisionUsage, Evaluation, NoulAnswer,
 use super::backend::{Capabilities, DecisionBackend};
 use super::error::DecisionError;
 use super::question::{Question, QuestionKind, Request};
-use super::systemone::{post_json, with_retries};
+use super::systemone::{post_json_billed, with_retries};
+use super::{add_billed, billed_only};
 use crate::retry::RetryConfig;
 use serde_json::{json, Map, Value};
+use std::sync::Mutex;
 
 /// Most `top_logprobs` OpenAI accepts; the default K and Choice limit.
 const DEFAULT_TOP_LOGPROBS: usize = 20;
@@ -272,13 +274,20 @@ impl LogprobBackend {
         }
     }
 
-    /// One question, one completion.
+    /// One question, one completion. A completion that arrived but could not
+    /// be read adds what it was billed for to `billed`.
     async fn ask_one(
         &self,
         request: &Request,
         id: &str,
         question: &Question,
+        billed: &Mutex<Option<Evaluation>>,
     ) -> Result<(Answer, String, DecisionUsage, bool), DecisionError> {
+        if self.key.as_deref().is_some_and(|k| k.trim().is_empty()) {
+            return Err(DecisionError::MissingApiKey(
+                "a non-empty key (the one given to with_api_key is empty)".into(),
+            ));
+        }
         let labels = labels_for(question);
         let mut body = self.extra_body.clone();
         for (k, v) in [
@@ -298,12 +307,37 @@ impl LogprobBackend {
             .map_err(|e| DecisionError::Invalid(format!("request does not serialize: {e}")))?;
         let url = self.endpoint_url();
         let value = with_retries(&self.retry, || {
-            post_json(&self.client, &url, self.key.as_deref(), &body)
+            post_json_billed(
+                &self.client,
+                &url,
+                self.key.as_deref().map(str::trim),
+                &body,
+                billed,
+                &request.model,
+            )
         })
         .await?;
 
+        let model = value
+            .get("model")
+            .and_then(Value::as_str)
+            .filter(|m| !m.is_empty())
+            .unwrap_or(&request.model)
+            .to_string();
+        // Usage first: an unreadable answer was still billed.
+        let usage = value.get("usage").filter(|u| u.is_object());
+        let tokens = |k: &str| usage.and_then(|u| u.get(k)).and_then(Value::as_u64);
+        let reported = tokens("prompt_tokens").is_some();
+        let usage = DecisionUsage::new(
+            tokens("prompt_tokens").unwrap_or(0),
+            tokens("completion_tokens").unwrap_or(0),
+        );
+
         let probs = label_distribution(&value, &labels, self.temperature, self.min_label_mass)
-            .map_err(|e| DecisionError::BadResponse(format!("answers.{id}: {e}")))?;
+            .map_err(|e| {
+                add_billed(billed, &billed_only(&model, usage, reported));
+                DecisionError::BadResponse(format!("answers.{id}: {e}"))
+            })?;
         let answer: Answer = match question.kind() {
             QuestionKind::Noul => NoulAnswer::new(probs[0]).into(),
             QuestionKind::Choice => {
@@ -320,21 +354,48 @@ impl LogprobBackend {
                 ScoreAnswer::new(legend, probs).into()
             }
         };
-
-        let model = value
-            .get("model")
-            .and_then(Value::as_str)
-            .filter(|m| !m.is_empty())
-            .unwrap_or(&request.model)
-            .to_string();
-        let usage = value.get("usage").filter(|u| u.is_object());
-        let tokens = |k: &str| usage.and_then(|u| u.get(k)).and_then(Value::as_u64);
-        let reported = tokens("prompt_tokens").is_some();
-        let usage = DecisionUsage::new(
-            tokens("prompt_tokens").unwrap_or(0),
-            tokens("completion_tokens").unwrap_or(0),
-        );
         Ok((answer, model, usage, reported))
+    }
+
+    /// [`evaluate`](DecisionBackend::evaluate), adding to `billed` what was
+    /// spent when it fails: the questions already answered and a completion
+    /// that arrived but could not be read.
+    pub(crate) async fn evaluate_billed(
+        &self,
+        request: &Request,
+        billed: &Mutex<Option<Evaluation>>,
+    ) -> Result<Evaluation, DecisionError> {
+        let mut eval: Option<Evaluation> = None;
+        let (mut input, mut output, mut reported) = (0u64, 0u64, true);
+        for (id, q) in &request.questions {
+            let step = if KINDS.contains(&q.kind()) {
+                self.ask_one(request, id, q, billed).await
+            } else {
+                Err(DecisionError::Unsupported(format!(
+                    "questions.{id}: {} questions are not supported by the logprob backend",
+                    q.kind()
+                )))
+            };
+            let (answer, model, usage, usage_reported) = match step {
+                Ok(step) => step,
+                Err(e) => {
+                    if let Some(done) = &eval {
+                        let usage = DecisionUsage::new(input, output);
+                        add_billed(billed, &billed_only(&done.model, usage, reported));
+                    }
+                    return Err(e);
+                }
+            };
+            input += usage.input_tokens;
+            output += usage.output_tokens;
+            reported &= usage_reported;
+            let e = eval.take().unwrap_or_else(|| Evaluation::new(model, usage));
+            eval = Some(e.with_answer(id.clone(), answer));
+        }
+        let mut eval = eval.ok_or_else(|| DecisionError::Invalid("questions: empty".into()))?;
+        eval.usage = DecisionUsage::new(input, output);
+        eval.usage_reported = reported;
+        Ok(eval)
     }
 }
 
@@ -349,26 +410,7 @@ impl DecisionBackend for LogprobBackend {
     /// (A [`DecisionModel`](super::DecisionModel) splits a request into
     /// single questions and sends them concurrently itself.)
     async fn evaluate(&self, request: &Request) -> Result<Evaluation, DecisionError> {
-        let mut eval: Option<Evaluation> = None;
-        let (mut input, mut output, mut reported) = (0u64, 0u64, true);
-        for (id, q) in &request.questions {
-            if !KINDS.contains(&q.kind()) {
-                return Err(DecisionError::Unsupported(format!(
-                    "questions.{id}: {} questions are not supported by the logprob backend",
-                    q.kind()
-                )));
-            }
-            let (answer, model, usage, usage_reported) = self.ask_one(request, id, q).await?;
-            input += usage.input_tokens;
-            output += usage.output_tokens;
-            reported &= usage_reported;
-            let e = eval.take().unwrap_or_else(|| Evaluation::new(model, usage));
-            eval = Some(e.with_answer(id.clone(), answer));
-        }
-        let mut eval = eval.ok_or_else(|| DecisionError::Invalid("questions: empty".into()))?;
-        eval.usage = DecisionUsage::new(input, output);
-        eval.usage_reported = reported;
-        Ok(eval)
+        self.evaluate_billed(request, &Mutex::new(None)).await
     }
 }
 

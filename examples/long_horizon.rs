@@ -280,6 +280,9 @@ fn model() -> ModelConfig {
 
 #[tokio::main]
 async fn main() {
+    // The cost check needs prices: opt in to the bundled snapshot before any
+    // config is built (nothing is priced by default).
+    yoagent::provider::prices::enable_bundled();
     // Compaction decisions are only visible through tracing. `YO_LOG=debug`
     // shows which path each compaction took and why summarization did or did
     // not arm; without a subscriber the diagnosis is guesswork.
