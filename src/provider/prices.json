@@ -176,6 +176,16 @@
         "absent_upstream": "models.dev lists no Clef model; checked 2026-10-03"
       }
     },
+    "openai-decisions": {
+      "gpt-6-luna": {
+        "input": 0.1,
+        "output": 0.0,
+        "note": "A decision model (feature `decision`), not a ModelConfig: DecisionModel::gpt_6_luna() prices each evaluation on OpenAI's Decisions API (POST /v1/decisions) by the model id the response reports, while requests go to api.openai.com. Distinct from chat gpt-6-luna pricing (provider `openai`). Billed per input token, cached input included; no cache-read, cache-write or output charges. Regional-processing and long-context multipliers are not modelled.",
+        "source": "https://developers.openai.com/api/docs/guides/decisions",
+        "verified": "2026-10-07",
+        "absent_upstream": "models.dev lists no Decisions API pricing (its openai entries are chat rates); checked 2026-10-07"
+      }
+    },
     "typesafe": {
       "jev-1.13.0": {
         "input": 0.042,

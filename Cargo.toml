@@ -146,6 +146,10 @@ name = "decision_clef_test"
 required-features = ["decision"]
 
 [[test]]
+name = "decision_openai_test"
+required-features = ["decision"]
+
+[[test]]
 name = "decision_live"
 required-features = ["decision"]
 

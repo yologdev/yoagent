@@ -50,7 +50,9 @@
 //! [`SystemOneBackend`] speaks the SystemOne HTTP API (TypeSafe, OpenCode Zen,
 //! self-hosted JevK5), [`LogprobBackend`] turns any OpenAI-compatible server
 //! that returns logprobs into a decision model
-//! ([`DecisionModel::logprobs`]), [`MockBackend`] scripts answers for tests,
+//! ([`DecisionModel::logprobs`]), [`OpenAiDecisionBackend`] speaks OpenAI's
+//! Decisions API ([`DecisionModel::gpt_6_luna`]), [`MockBackend`] scripts
+//! answers for tests,
 //! and any other backend plugs in through [`DecisionModel::from_backend`].
 //! Chain fallbacks with [`DecisionModel::or`]; measure a model on your own
 //! labelled examples with [`calibrate()`].
@@ -97,6 +99,7 @@ mod gate;
 mod guard;
 mod logprobs;
 mod mock;
+mod openai;
 mod question;
 mod systemone;
 
@@ -115,6 +118,7 @@ pub use gate::ToolGate;
 pub use guard::InputGuard;
 pub use logprobs::LogprobBackend;
 pub use mock::MockBackend;
+pub use openai::OpenAiDecisionBackend;
 pub use question::{Question, QuestionKind, Request};
 pub use systemone::{parse_systemone_response, SystemOneBackend};
 
@@ -129,6 +133,10 @@ pub(crate) const TYPESAFE_PRICE_PROVIDER: &str = "typesafe";
 /// The `prices.json` provider key for Cloudflare Workers AI's models.
 pub(crate) const CLOUDFLARE_PRICE_PROVIDER: &str = "cloudflare";
 
+/// The `prices.json` provider key for OpenAI's Decisions API models — not
+/// `openai`: a decision is billed at its own rate, not the chat model's.
+pub(crate) const OPENAI_DECISIONS_PRICE_PROVIDER: &str = "openai-decisions";
+
 /// Default overall timeout of one [`DecisionModel`] call, retries included.
 pub(crate) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -136,6 +144,7 @@ pub(crate) const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 enum Slot {
     SystemOne(SystemOneBackend),
     Logprobs(LogprobBackend),
+    OpenAi(OpenAiDecisionBackend),
     Custom(Arc<dyn DecisionBackend>),
 }
 
@@ -144,6 +153,7 @@ impl Slot {
         match self {
             Slot::SystemOne(b) => b,
             Slot::Logprobs(b) => b,
+            Slot::OpenAi(b) => b,
             Slot::Custom(b) => b.as_ref(),
         }
     }
@@ -157,6 +167,9 @@ enum Pricing {
     /// Workers AI's list prices from the resolved price table, by the model
     /// id (`clef`, `clef-flash`) — only while requests go to Cloudflare.
     CloudflareList,
+    /// OpenAI's Decisions API list prices from the resolved price table, by
+    /// the reported model id — only while requests go to `api.openai.com`.
+    OpenAiDecisionsList,
     Fixed(CostConfig),
     Unpriced,
 }
@@ -167,7 +180,8 @@ enum Pricing {
 /// Cheap to clone (the backend is shared). Choose one with a preset —
 /// [`jev`](Self::jev), [`jev_opencode`](Self::jev_opencode),
 /// [`jev_opencode_free`](Self::jev_opencode_free),
-/// [`clef`](Self::clef), [`clef_flash`](Self::clef_flash), [`local`](Self::local),
+/// [`clef`](Self::clef), [`clef_flash`](Self::clef_flash),
+/// [`gpt_6_luna`](Self::gpt_6_luna), [`local`](Self::local),
 /// [`logprobs`](Self::logprobs) — or [`from_backend`](Self::from_backend);
 /// everything else has defaults. Chain fallbacks with [`or`](Self::or).
 #[derive(Clone)]
@@ -195,6 +209,7 @@ impl std::fmt::Debug for DecisionModel {
         match &self.backend {
             Slot::SystemOne(b) => d.field("backend", b),
             Slot::Logprobs(b) => d.field("backend", b),
+            Slot::OpenAi(b) => d.field("backend", b),
             Slot::Custom(_) => d.field("backend", &"custom"),
         };
         if !self.fallbacks.is_empty() {
@@ -291,6 +306,52 @@ impl DecisionModel {
             model: model.into(),
             timeout: DEFAULT_TIMEOUT,
             pricing: Pricing::CloudflareList,
+            attempt_timeout: None,
+            fallbacks: Vec::new(),
+        }
+    }
+
+    /// OpenAI's `gpt-6-luna` on the Decisions API (`POST /v1/decisions`,
+    /// public beta), key from `OPENAI_API_KEY` at call time (or
+    /// [`with_api_key`](Self::with_api_key)). See [`OpenAiDecisionBackend`]
+    /// for how questions map onto the API; a question OpenAI refuses fails
+    /// the call with [`DecisionError::Backend`], so the tool gate and the
+    /// input guard fail closed. Priced from the process-wide price table by
+    /// the model id the response reports, while requests go to
+    /// `api.openai.com` — **unpriced until the process opts in**
+    /// ([`prices::enable_bundled`](crate::provider::prices::enable_bundled):
+    /// $0.10 per million input tokens, output and caching free; OpenAI's
+    /// regional-processing and long-context multipliers are not modelled).
+    ///
+    /// Another model id: [`with_model`](Self::with_model) (same endpoint).
+    /// Another base URL, a fixed key or a `safety_identifier`: configure an
+    /// [`OpenAiDecisionBackend`] and use
+    /// [`from_openai_backend`](Self::from_openai_backend).
+    ///
+    /// ```no_run
+    /// # async fn demo() -> Result<(), yoagent::decision::DecisionError> {
+    /// use yoagent::decision::DecisionModel;
+    /// let luna = DecisionModel::gpt_6_luna();
+    /// let urgent = luna.noul("Checkout fails for every customer.", "Is this urgent?").await?;
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// Tested against mock servers only; never run against the live API.
+    pub fn gpt_6_luna() -> Self {
+        Self::from_openai_backend(OpenAiDecisionBackend::new(), "gpt-6-luna")
+    }
+
+    /// A model on OpenAI's Decisions API through a backend you configured
+    /// (base URL, key, retry, `safety_identifier`), asking for `model`.
+    /// Keeps the preset conveniences: [`with_api_key`](Self::with_api_key)
+    /// and [`with_retry`](Self::with_retry) apply, and the list price
+    /// applies while the host is `api.openai.com` (once pricing is enabled).
+    pub fn from_openai_backend(backend: OpenAiDecisionBackend, model: impl Into<String>) -> Self {
+        Self {
+            backend: Slot::OpenAi(backend),
+            model: model.into(),
+            timeout: DEFAULT_TIMEOUT,
+            pricing: Pricing::OpenAiDecisionsList,
             attempt_timeout: None,
             fallbacks: Vec::new(),
         }
@@ -497,6 +558,7 @@ impl DecisionModel {
         match self.backend {
             Slot::SystemOne(b) => self.backend = Slot::SystemOne(b.with_api_key(key)),
             Slot::Logprobs(b) => self.backend = Slot::Logprobs(b.with_api_key(key)),
+            Slot::OpenAi(b) => self.backend = Slot::OpenAi(b.with_api_key(key)),
             Slot::Custom(_) => {
                 tracing::warn!(
                     "DecisionModel::with_api_key ignored: custom backends own their keys"
@@ -511,6 +573,7 @@ impl DecisionModel {
         match self.backend {
             Slot::SystemOne(b) => self.backend = Slot::SystemOne(b.with_retry(retry)),
             Slot::Logprobs(b) => self.backend = Slot::Logprobs(b.with_retry(retry)),
+            Slot::OpenAi(b) => self.backend = Slot::OpenAi(b.with_retry(retry)),
             Slot::Custom(_) => {
                 tracing::warn!(
                     "DecisionModel::with_retry ignored: custom backends own their retries"
@@ -578,6 +641,29 @@ impl DecisionModel {
                         model = %id,
                         "no price for {CLOUDFLARE_PRICE_PROVIDER}/{id} in the price table; \
                          its evaluations are unpriced"
+                    );
+                }
+                cost?
+            }
+            Pricing::OpenAiDecisionsList => {
+                let on_openai = matches!(&self.backend, Slot::OpenAi(b) if b.is_openai_host());
+                if !on_openai {
+                    return None;
+                }
+                let cost = crate::provider::prices::global::resolved_cost(
+                    OPENAI_DECISIONS_PRICE_PROVIDER,
+                    model,
+                );
+                if cost.is_none()
+                    && crate::provider::prices::global::pricing_enabled()
+                    && warn_once(format!(
+                        "unlisted:{OPENAI_DECISIONS_PRICE_PROVIDER}/{model}"
+                    ))
+                {
+                    tracing::warn!(
+                        model = %model,
+                        "no price for {OPENAI_DECISIONS_PRICE_PROVIDER}/{model} in the price \
+                         table; its evaluations are unpriced"
                     );
                 }
                 cost?
@@ -1109,6 +1195,30 @@ mod pricing_tests {
             ..DecisionModel::clef("acct")
         };
         assert_eq!(proxied.cost_usd("clef", &usage), None);
+    }
+
+    #[test]
+    fn gpt_6_luna_prices_by_reported_model_only_on_openai() {
+        crate::provider::prices::enable_bundled();
+        let usage = DecisionUsage::new(2_000_000, 500);
+        let luna = DecisionModel::gpt_6_luna();
+        let cost = luna.cost_usd("gpt-6-luna", &usage).unwrap();
+        // $0.10 per million input tokens; output free.
+        assert!((cost - 0.2).abs() < 1e-12, "{cost}");
+        assert_eq!(luna.cost_usd("gpt-6-luna-x", &usage), None, "unlisted");
+        // Not the chat model's rate: its own price key.
+        assert_ne!(
+            crate::provider::prices::global::resolved_cost("openai", "gpt-6-luna"),
+            crate::provider::prices::global::resolved_cost(
+                OPENAI_DECISIONS_PRICE_PROVIDER,
+                "gpt-6-luna"
+            )
+        );
+        let proxied = DecisionModel::from_openai_backend(
+            OpenAiDecisionBackend::new().with_base_url("https://proxy.example/v1"),
+            "gpt-6-luna",
+        );
+        assert_eq!(proxied.cost_usd("gpt-6-luna", &usage), None);
     }
 
     #[test]

@@ -8,6 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **OpenAI's Decisions API as a decision backend** (feature `decision`): `OpenAiDecisionBackend` (`POST /v1/decisions`, key from `OPENAI_API_KEY` at call time, `with_api_key` / `with_base_url` / `with_retry` / `with_safety_identifier` / `with_capabilities`) and the preset `DecisionModel::gpt_6_luna()`; another model id with `with_model`, a configured backend with `DecisionModel::from_openai_backend`. Noul → `predicate`, Choice → `choice`, Score → `score`, question ids → `name`, a JSON state → pretty-printed `input` text; answers matched by `name` (by position only when unnamed and one per question). A `refusal` answer fails the call with a non-retryable `DecisionError::Backend` naming the question, so the tool gate and the input guard fail closed. Priced, after `prices::enable_bundled()`, from the new bundled entry `openai-decisions/gpt-6-luna` ($0.10 per million input tokens, output free) only while requests go to `api.openai.com`. Image input is not supported. **Tested against mock servers only — not run against the live API.**
 - **Extensions** (`yoagent::extension`, #241): one plug-in contract for the agent lifecycle. An `Extension` is installed with `Agent::with_extension` / `SubAgentTool::with_extension` (an `Arc<E>` is one too), and each run gets fresh `RunHooks` from `start_run`, so state for one run is isolated. The hooks:
   - `tools` (once per run);
   - `on_input`;

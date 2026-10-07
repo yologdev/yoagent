@@ -112,8 +112,8 @@ pub struct OverrideReport {
     /// previous override); those never affected billing.
     pub reverted: Vec<PriceChange>,
     /// `provider/model` of entries whose provider is not in
-    /// [`PRICED_PROVIDERS`] (nor, with the `decision` feature, `typesafe` or
-    /// `cloudflare`, which decision models read): no constructor reads them; only
+    /// [`PRICED_PROVIDERS`] (nor, with the `decision` feature, `typesafe`,
+    /// `cloudflare` or `openai-decisions`, which decision models read): no constructor reads them; only
     /// [`ModelConfig::with_prices`](crate::provider::ModelConfig::with_prices) does.
     pub inert: Vec<String>,
     /// Everything that was also logged at `warn`: inert entries, dropped
@@ -297,10 +297,11 @@ fn override_warnings(table: &PriceTable, lower: &PriceTable) -> Vec<String> {
 
 /// Whether anything in this build reads a provider's entries: a pricing
 /// constructor ([`PRICED_PROVIDERS`]) or, with the `decision` feature, a
-/// decision model (`typesafe`, `cloudflare`).
+/// decision model (`typesafe`, `cloudflare`, `openai-decisions`).
 fn is_read(provider: &str) -> bool {
     PRICED_PROVIDERS.contains(&provider)
-        || (cfg!(feature = "decision") && matches!(provider, "typesafe" | "cloudflare"))
+        || (cfg!(feature = "decision")
+            && matches!(provider, "typesafe" | "cloudflare" | "openai-decisions"))
 }
 
 fn inert_entries(table: &PriceTable) -> Vec<String> {

@@ -23,7 +23,9 @@ something the user did not ask to delete?*
 
 The first supported vendor is [TypeSafe](https://docs.typesafe.ai)'s **Jev**;
 Cloudflare's **Clef** (27B) and **Clef Flash** (9B) on Workers AI speak the
-same API. yoagent depends on a trait, not on a vendor: any backend that speaks
+same API. OpenAI's **Decisions API** (`gpt-6-luna`, public beta) asks the
+same kinds of questions over its own wire format. yoagent depends on a trait,
+not on a vendor: any backend that speaks
 the SystemOne API, **any OpenAI-compatible server that returns logprobs** (llama.cpp, vLLM,
 SGLang, LM Studio, hosted APIs) — or anything you implement — plugs in the
 same way.
@@ -58,6 +60,7 @@ let jev = DecisionModel::jev_opencode_free();                    // OpenCode Zen
 let jev = DecisionModel::local("http://localhost:8000");         // self-hosted (JevK5, ...), no key
 let clef = DecisionModel::clef("your-account-id");               // Cloudflare Workers AI, CLOUDFLARE_API_TOKEN
 let clef = DecisionModel::clef_flash("your-account-id");         // Clef Flash: smaller, faster, cheaper
+let luna = DecisionModel::gpt_6_luna();                          // OpenAI Decisions API, OPENAI_API_KEY
 let llm = DecisionModel::logprobs("http://localhost:8080", "llama-3.1-8b-instruct"); // any OpenAI-compatible server with logprobs (thinking off)
 let both = DecisionModel::jev().or(DecisionModel::local("http://localhost:8000")); // fallback
 ```
@@ -70,6 +73,8 @@ let both = DecisionModel::jev().or(DecisionModel::local("http://localhost:8000")
 | `local(url)` | `{url}/v1/systemone` | none | `jev-latest` | $0 |
 | `clef(account_id)` | `https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/@cf/cloudflare/clef` | `CLOUDFLARE_API_TOKEN`, then `CLOUDFLARE_AUTH_TOKEN` | `clef` | after an opt-in (see [Pricing](#pricing)), by the reported model id |
 | `clef_flash(account_id)` | same, `…/@cf/cloudflare/clef-flash` | same | `clef-flash` | same |
+| `gpt_6_luna()` | `https://api.openai.com/v1/decisions` | `OPENAI_API_KEY` | `gpt-6-luna` | after an opt-in (see [Pricing](#pricing)), by the reported model id — only while the host is `api.openai.com` |
+| `from_openai_backend(backend, id)` | as `gpt_6_luna`, with your `OpenAiDecisionBackend` settings (base URL, key, `safety_identifier`) | as `gpt_6_luna` | `id` | as `gpt_6_luna` |
 | `logprobs(url, id)` | `{url}/chat/completions` (`/v1` added to a bare host) | none unless `with_api_key` | `id` | $0 on a loopback host, otherwise unpriced |
 | `from_logprob_backend(backend, id)` | as `logprobs`, with your `LogprobBackend` settings | as `logprobs` | `id` | as `logprobs` |
 | `from_backend(b, id)` / `from_arc(arc, id)` | yours | yours | `id` | unpriced |
@@ -769,6 +774,58 @@ restricted than the REST API): `yoagent_workers::ai::clef(env.ai("AI")?)`.
 Its [`clef-worker`](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-workers/examples/clef-worker)
 example is a complete Worker in which Clef gates an agent's tool calls.
 
+### OpenAI's Decisions API
+
+`gpt_6_luna()` calls OpenAI's Decisions API (`POST /v1/decisions`, public
+beta; `gpt-6-luna` is the only model it serves today) through
+`OpenAiDecisionBackend`. Another model id: `.with_model(..)` (same endpoint).
+Another base URL (`/v1` included, as in OpenAI's SDKs), a fixed key or a
+`safety_identifier` (an opaque end-user id for OpenAI's abuse monitoring):
+configure the backend and use `DecisionModel::from_openai_backend(backend, id)`.
+
+The request is mapped, not passed through:
+
+| yoagent | Decisions API |
+|---|---|
+| `state`, text | `input`, as is |
+| `state`, JSON | `input`, pretty-printed JSON text |
+| question id | the question's `name` |
+| Noul | `{"type": "predicate"}`; its yes/no criteria are appended to the instructions |
+| Choice | `{"type": "choice", "choices": [{"value", "description"?}]}`, option order kept; values are strings |
+| Score | `{"type": "score", "levels": [{"label"}]}`, lowest first |
+| instructions, criteria or levels given as JSON | serialized JSON text (the API takes strings) |
+
+Answers are matched to questions by `name`. An answer without a name is
+matched by position — OpenAI documents that answers come in question order —
+but only when there is exactly one answer per question; otherwise it is
+`BadResponse`. A predicate's `probability` is the Noul's `p_true`; OpenAI
+returns no confidence for it, so the Noul's confidence is the computed
+`|2p - 1|` (see [Confidence](#confidence)). A Choice keeps OpenAI's `choice`
+and `confidence`; a Score keeps its `score` (the probability-weighted level
+index, as yoagent computes it) and `confidence`, its per-level probabilities
+read by level index (`value`). Usage is `input_tokens` / `output_tokens`.
+
+**A refusal** (`{"type": "refusal"}` — OpenAI may decline one question) fails
+the whole call with `DecisionError::Backend` naming the question, not retried:
+the tool gate denies and the input guard rejects, as on any error.
+
+Errors follow the other HTTP backends: 429 / 529 and transport failures are
+retried (`with_retry`), other statuses are `Http` (401 / 403 say the key came
+from `$OPENAI_API_KEY`, never the key), 422 is `Invalid`. The key is read at
+call time and trimmed; unset or empty, the call fails with `MissingApiKey`
+before anything is sent.
+
+Not supported: image input (the API's `input_image` parts) — a request's state
+is text or JSON. OpenAI's schema publishes no limits, so the backend reports
+the same capabilities as the SystemOne presets (255 options, 10 levels, 64k
+tokens per request, 32k for the state plus the longest question) — yoagent's
+defaults, not OpenAI's; change them with `with_capabilities`.
+
+**Tested against mock servers only**: no live OpenAI key was available when
+it was written, so the mapping follows OpenAI's published schema (the
+generated types of `openai-python`) and has not been run against the real
+API.
+
 ## Pricing
 
 Like chat models, the decision presets are **unpriced until the process opts
@@ -795,6 +852,14 @@ unpriced (`None`), never guessed. The runtime price layers
 (`install_override`, `YOAGENT_PRICES`) apply as for chat models. models.dev
 does not list TypeSafe, so the price audit records the entry as explicitly
 absent upstream.
+
+`prices.json` carries `openai-decisions/gpt-6-luna` (input $0.10 per million;
+output free) — its own provider key, because a decision is billed at its own
+rate, not at chat `gpt-6-luna`'s. OpenAI bills only input tokens (cached input
+included; no cache-read, cache-write or output charges). `gpt_6_luna()` prices
+each evaluation by the model id the response reports while requests go to
+`api.openai.com`; any other host, or an unlisted id, is unpriced. OpenAI's
+regional-processing and long-context multipliers are not modelled.
 
 ## Testing
 

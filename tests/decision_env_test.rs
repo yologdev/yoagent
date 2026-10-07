@@ -2,7 +2,8 @@
 //! the keys and base URL in the environment.
 //!
 //! Its own binary because it sets process environment variables:
-//! `TYPESAFE_API_KEY`, `OPENCODE_API_KEY` and `TYPESAFE_BASE_URL`, the latter
+//! `TYPESAFE_API_KEY`, `OPENCODE_API_KEY`, `OPENAI_API_KEY` and
+//! `TYPESAFE_BASE_URL`, the latter
 //! pointed at a wiremock server that fails the test if it receives anything.
 
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -50,6 +51,7 @@ async fn keys_in_the_environment_send_nothing_on_their_own() {
     std::env::set_var("TYPESAFE_API_KEY", "sk-env-test");
     std::env::set_var("OPENCODE_API_KEY", "sk-env-test");
     std::env::set_var("TYPESAFE_BASE_URL", server.uri());
+    std::env::set_var("OPENAI_API_KEY", "sk-env-test");
 
     // Positive control: the environment really does point `jev()` at the
     // server — a request made on purpose arrives there.
@@ -65,6 +67,11 @@ async fn keys_in_the_environment_send_nothing_on_their_own() {
         DecisionModel::jev_opencode(),
         DecisionModel::jev_opencode_free(),
         DecisionModel::local(server.uri()),
+        DecisionModel::gpt_6_luna(),
+        DecisionModel::from_openai_backend(
+            OpenAiDecisionBackend::new().with_base_url(server.uri()),
+            "gpt-6-luna",
+        ),
     ] {
         let _ = (model.model(), model.timeout(), model.capabilities());
         let _ = ToolGate::new(model.clone());
