@@ -611,7 +611,9 @@ pub(crate) fn resolved_cost(provider: &str, id: &str) -> Option<CostConfig> {
         tracing::warn!(
             provider,
             model = id,
-            "yoagent prices: {provider}/{id} is not in the prices in effect (a user or              fetched table, without the bundled snapshot), so it is unpriced; add it to              that table, or enable the snapshot under it with prices::enable_bundled"
+            "yoagent prices: {provider}/{id} is not in the prices in effect (a user or \
+             fetched table, without the bundled snapshot), so it is unpriced; add it to \
+             that table, or enable the snapshot under it with prices::enable_bundled"
         );
     }
     cost

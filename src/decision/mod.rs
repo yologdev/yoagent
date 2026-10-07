@@ -534,8 +534,8 @@ impl DecisionModel {
     ///   chain and is returned as is. A model declining to judge is an
     ///   answer about the input, not an outage; asking the next model would
     ///   turn it into a yes or a no (so `gpt_6_luna().or(jev())` never asks
-    ///   Jev what OpenAI declined, and the tool gate and the input guard fail
-    ///   closed on it).
+    ///   Jev what OpenAI declined; the tool gate denies on it, and the input
+    ///   guard rejects unless built `with_fail_open`).
     /// - **Each member is validated against its own capabilities** before it
     ///   is tried. A request structurally invalid everywhere (no questions, a
     ///   one-option Choice, ...) fails with `Invalid` at once, nothing sent;

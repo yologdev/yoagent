@@ -77,7 +77,9 @@ pub enum DecisionError {
     /// retried, and **terminal in a fallback chain**
     /// ([`DecisionModel::or`](super::DecisionModel::or)) — asking another
     /// model what one declined would turn a refusal into an answer. The tool
-    /// gate and the input guard fail closed on it like on any error.
+    /// gate denies and the input guard rejects on it, like on any error (an
+    /// input guard built [`with_fail_open`](super::InputGuard::with_fail_open)
+    /// lets the input through, as on any error).
     #[error("decision model refused to answer: {message}")]
     #[non_exhaustive]
     Refused {
