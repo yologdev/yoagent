@@ -27,6 +27,7 @@ adheres to [Semantic Versioning](https://semver.org/).
 - **`extension::Budget`**: a dollar limit, checked before each model request: once spend reaches it, the run stops (the request that goes past it still completes). Per run (a sub-agent's reported spend included), or `.across_runs()` (a session, or a whole delegation tree with `with_tree_extension`; `spent_usd()` reads the total). `Budget::for_model` returns `None` for an unpriced model; a negative or NaN limit panics.
 
 - **`SessionStats::compaction`** (`CompactionSpend { usage, cost_usd, requests }`) and **`Agent::compaction_spend()`**: what `LlmCompaction`'s summarization requests cost, priced at the summarizer's own `cost`. See the fix below.
+- **Extension examples**: `extension_policy` (deny/modify with `ClonedHooks`, `rechecks_modified_calls`), `extension_redact` (`after_tool` + `filters_tool_output`), `extension_verifier` (`on_stop` continues, `finish` reading `RunOutcome::end()`), `extension_budget` (per run and `.across_runs()`), `extension_tree` (`with_tree_extension` over a `SubAgentTool` and a hand-written `Agent::delegated_from` tool) and `extension_audit` (`on_event` + `finish`). Each runs offline on a scripted `MockProvider` and checks its own result, and CI runs them all; `-- --live` drives a real model (`DEEPSEEK_API_KEY` or `ANTHROPIC_API_KEY`). New `tests/extension_combos_test.rs` covers extensions together with every tool strategy, compaction, steering, `prompt_structured`, provider retries (with `Budget`), and middleware plus the tool gate on one call.
 
 ### Changed
 

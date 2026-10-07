@@ -193,7 +193,7 @@ Each line links to its chapter in [the book](https://yologdev.github.io/yoagent/
 
 ## Examples
 
-Eleven of the runnable examples in [`examples/`](examples/) are below; five need no API key at all. The rest are live-provider harnesses and offline evaluation sweeps.
+Seventeen of the runnable examples in [`examples/`](examples/) are below; eleven need no API key at all. The rest are live-provider harnesses and offline evaluation sweeps.
 
 | Example | What it shows | Key needed |
 |---|---|---|
@@ -208,8 +208,11 @@ Eleven of the runnable examples in [`examples/`](examples/) are below; five need
 | [`telemetry`](examples/telemetry.rs) | `tracing` spans with token and cost fields | **no** |
 | [`gasp_emit`](examples/gasp_emit.rs) | Recording a run into a GASP repo | **no** |
 | [`decision`](examples/decision.rs) | Decision-model questions in one line, and attaching a model to an agent (feature `decision`) | yes |
+| [`extension_policy`](examples/extension_policy.rs), [`_redact`](examples/extension_redact.rs), [`_verifier`](examples/extension_verifier.rs), [`_budget`](examples/extension_budget.rs), [`_tree`](examples/extension_tree.rs), [`_audit`](examples/extension_audit.rs) | Extensions: a tool policy, redaction, a verifier, budgets, policy over sub-agents, an audit log ([guide](https://yologdev.github.io/yoagent/concepts/extensions.html)) | **no**² |
 
 ¹ `--provider ollama` or `--api-url` needs no key; hosted providers read their conventional env var.
+
+² Scripted offline by default; `-- --live` uses `DEEPSEEK_API_KEY` or `ANTHROPIC_API_KEY`.
 
 ---
 

@@ -45,6 +45,19 @@ jobs:
       - name: Build
         run: cargo build --all-features
 
+      # Compiling an example does not prove it still shows what it claims.
+      # These run offline on a scripted MockProvider and assert their own
+      # outcome, so a behaviour change fails here (each takes well under a
+      # second once built).
+      - name: Run offline examples
+        run: |
+          for example in extension_policy extension_redact extension_verifier \
+                         extension_budget extension_tree extension_audit; do
+            echo "::group::$example"
+            cargo run --all-features --example "$example"
+            echo "::endgroup::"
+          done
+
   # Every job above builds `--all-features`, but `openapi`, `gasp` and `decision` are all
   # off by default — so the feature set a `cargo add yoagent` user actually gets
   # was never compiled here. A `#[cfg(feature = ...)]` mistake that leaves an
