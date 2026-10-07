@@ -31,7 +31,8 @@
 //!
 //! # A host that is not running
 //!
-//! When the bridge's rutis context has shut down (or the root was disposed),
+//! When the bridge's rutis context has shut down (or the root was disposed
+//! or restarted since the bridge was installed),
 //! a run starting then denies every tool call, rejects its input and gets no
 //! notes, and a run already going denies its later tool calls. Every plugin
 //! was unloaded with it, so an empty registry must not read as "no policy
@@ -43,7 +44,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::FutureExt;
-use rutis::Ctx;
 use yoagent::extension::{
     ExtensionError, InputContext, InputDecision, RunContext, RunOutcome, StopContext, StopDecision,
     ToolOutput, TurnDecision,
@@ -54,6 +54,7 @@ use yoagent::{
 };
 
 use crate::handler::{join_notes, EventSink, Input, RunInfo, Stop, ToolCall, Turn};
+use crate::host::{Host, NOT_RUNNING};
 use crate::registry::{LiveTool, Registered, Registry};
 
 /// Default bound on one handler's `before_tool`, `after_tool` and `on_stop`
@@ -69,8 +70,6 @@ pub const DEFAULT_INPUT_TIMEOUT: Duration = Duration::from_secs(30);
 /// (the handler is skipped past it).
 pub const DEFAULT_TURN_TIMEOUT: Duration = Duration::from_secs(5);
 
-const NOT_RUNNING: &str =
-    "the plugin host is not running (shut down, or disposed and not restarted)";
 const UNJUDGED: &str = "no plugin policy is loaded to judge this call";
 
 /// The bridge's plugins as one yoagent [`Extension`].
@@ -80,7 +79,7 @@ const UNJUDGED: &str = "no plugin policy is loaded to judge this call";
 /// make itself required, or declare that it filters output.
 #[derive(Clone)]
 pub struct RutisExtension {
-    ctx: Ctx,
+    host: Host,
     registry: Arc<Registry>,
     name: String,
     mode: ExtensionMode,
@@ -98,9 +97,9 @@ struct Timeouts {
 }
 
 impl RutisExtension {
-    pub(crate) fn new(ctx: Ctx, registry: Arc<Registry>) -> Self {
+    pub(crate) fn new(host: Host, registry: Arc<Registry>) -> Self {
         Self {
-            ctx,
+            host,
             registry,
             name: "rutis".into(),
             mode: ExtensionMode::Advisory,
@@ -214,7 +213,7 @@ impl Extension for RutisExtension {
 
     async fn start_run(&self, run: &RunContext<'_>) -> Result<Box<dyn RunHooks>, ExtensionError> {
         let info = RunInfo::from_context(run);
-        let closed = crate::host::closed(&self.ctx).is_some();
+        let closed = self.host.is_closed();
         let handlers = if closed {
             tracing::warn!(run_id = %info.run_id, "{NOT_RUNNING}: tool calls are denied and input rejected");
             Vec::new()
@@ -234,7 +233,7 @@ impl Extension for RutisExtension {
             .collect();
         let unjudged = self.require_policy && !handlers.iter().any(|h| h.hooks.before_tool);
         Ok(Box::new(RunState {
-            ctx: self.ctx.clone(),
+            host: self.host.clone(),
             run: info,
             required: self.mode == ExtensionMode::Required,
             closed,
@@ -257,7 +256,7 @@ struct Observer {
 
 /// One run's hooks over the snapshot of handlers.
 struct RunState {
-    ctx: Ctx,
+    host: Host,
     run: RunInfo,
     required: bool,
     closed: bool,
@@ -265,8 +264,10 @@ struct RunState {
     timeouts: Timeouts,
     handlers: Vec<Registered>,
     events: Vec<Observer>,
-    /// A required failure recorded where it could not end the run (`tools`,
-    /// `on_event`); acted on at the next `before_model` or `on_stop`.
+    /// A required failure recorded where it could not end the run: one in
+    /// `before_model` / `on_stop` (returned as `Fail` right away), or, in a
+    /// build where panics abort, one in `tools` / `on_event` (see
+    /// [`RunState::escalate`]). Tool calls are denied while it is pending.
     failure: Mutex<Option<String>>,
 }
 
@@ -362,6 +363,33 @@ impl RunState {
         }
     }
 
+    /// A handler of `tools` or `on_event` failed. yoagent learns of a failure
+    /// there only from a panic, so a required one is handed over as one (a
+    /// `resume_unwind`, which does not run the panic hook): yoagent then
+    /// stops tool calls not started yet and fails the run at its next
+    /// boundary, whatever that is. Where panics abort, it is recorded
+    /// instead and acted on at the next tool call, model request or stop.
+    fn escalate(&self, missed: Missed) {
+        match missed {
+            Missed::Failed(why) if self.required => {
+                tracing::error!(run_id = %self.run.run_id, "{why}");
+                #[cfg(panic = "unwind")]
+                std::panic::resume_unwind(Box::new(why));
+                #[cfg(not(panic = "unwind"))]
+                self.record(why);
+            }
+            other => self.skipped(&other),
+        }
+    }
+
+    /// The pending required failure, without taking it.
+    fn pending(&self) -> Option<String> {
+        self.failure
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     fn record(&self, why: String) {
         self.failure
             .lock()
@@ -416,6 +444,10 @@ impl RunHooks for RunState {
             }
         };
         for h in &self.handlers {
+            if !h.gate.is_available() {
+                tracing::debug!(run_id = %self.run.run_id, handler = %h.name, "its plugin unloaded; offering none of its tools");
+                continue;
+            }
             for tool in h.handler.static_tools() {
                 offer(tool, h, &mut tools);
             }
@@ -433,7 +465,7 @@ impl RunHooks for RunState {
                             offer(tool, h, &mut tools);
                         }
                     }
-                    Err(missed) => self.skipped(&missed),
+                    Err(missed) => self.escalate(missed),
                 }
             }
         }
@@ -507,8 +539,11 @@ impl RunHooks for RunState {
     async fn before_tool(&self, request: &ToolCallRequest<'_>) -> ToolDecision {
         // Checked per call too: the host may stop mid-run, taking every
         // plugin (and so every policy) with it.
-        if self.closed || crate::host::closed(&self.ctx).is_some() {
+        if self.closed || self.host.is_closed() {
             return ToolDecision::Deny(NOT_RUNNING.into());
+        }
+        if let Some(why) = self.pending() {
+            return ToolDecision::Deny(format!("a required plugin handler failed this run: {why}"));
         }
         if self.unjudged {
             tracing::warn!(run_id = %self.run.run_id, tool = request.tool_name, "{UNJUDGED}; denying (require_policy)");
@@ -545,6 +580,9 @@ impl RunHooks for RunState {
         request: &ToolCallRequest<'_>,
         output: &mut ToolOutput,
     ) -> Result<(), ExtensionError> {
+        if let Some(why) = self.pending() {
+            return Err(ExtensionError::new(why));
+        }
         let event = ToolCall::from_request(request, &self.run);
         for h in self.with(|h| h.hooks.after_tool) {
             let edited = call(
@@ -607,7 +645,7 @@ impl RunHooks for RunState {
 
     fn on_event(&self, event: &AgentEvent) {
         if !self.closed {
-            crate::events::publish(&self.ctx, &self.run, event);
+            crate::events::publish(&self.host, &self.run, event);
         }
         for observer in &self.events {
             if observer.off.load(Ordering::Relaxed) || !observer.handler.gate.is_available() {
@@ -621,12 +659,16 @@ impl RunHooks for RunState {
                     observer.handler.name,
                     panic_text(&*payload)
                 ));
-                self.skipped(&missed);
+                self.escalate(missed);
             }
         }
     }
 
     async fn finish(&mut self, outcome: &RunOutcome) {
+        if let Some(why) = self.take_failure() {
+            // Only where panics abort: yoagent could not be told in time.
+            tracing::error!(run_id = %self.run.run_id, "a required plugin handler failed after the run's last decision point: {why}");
+        }
         let this = &*self;
         // Every event sent so far reaches its handler before `finish` does.
         let closing = this.events.iter().map(|o| async move {

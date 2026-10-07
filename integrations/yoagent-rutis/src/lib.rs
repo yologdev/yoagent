@@ -100,7 +100,8 @@
 //! - **No policy means allow**, including while a policy plugin reloads and
 //!   before it first loads, unless the host sets
 //!   [`require_policy`](RutisExtension::require_policy).
-//! - **A host that is not running** (the root shut down or disposed) denies
+//! - **A host that is not running** (the root shut down, disposed or
+//!   restarted since the bridge was installed) denies
 //!   every tool call and rejects every prompt.
 //! - **Finite default timeouts** per handler call (60 s policy hooks, 30 s
 //!   input, 5 s turn hooks), plus the run's cancellation through yoagent.

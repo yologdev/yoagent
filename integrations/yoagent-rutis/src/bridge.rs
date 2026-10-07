@@ -6,6 +6,7 @@ use std::sync::Arc;
 use rutis::{CordisError, Ctx};
 
 use crate::extension::RutisExtension;
+use crate::host::Host;
 use crate::registry::Registry;
 
 /// Connects one rutis context to yoagent agents.
@@ -18,7 +19,7 @@ use crate::registry::Registry;
 /// stderr. Route it into your logging with `Ctx::root_with_sink`.
 #[derive(Clone)]
 pub struct RutisBridge {
-    ctx: Ctx,
+    host: Host,
     registry: Arc<Registry>,
 }
 
@@ -30,8 +31,10 @@ impl RutisBridge {
     /// provides it, and the bridge is bound to `ctx`'s generation: installed
     /// on a plugin's context, it reads as stopped — denying every tool call
     /// and rejecting every prompt, for good — once that plugin unloads or
-    /// reloads. Fails only when rutis refuses the registration (e.g. the root
-    /// was shut down).
+    /// reloads. The same holds for a root that is disposed or restarted: the
+    /// registry went with that generation, and an empty registry must not
+    /// read as "no policy objected". Fails only when rutis refuses the
+    /// registration (e.g. the root was shut down).
     pub fn install(ctx: &Ctx) -> Result<Self, CordisError> {
         let registry = match ctx.get::<Registry>() {
             Some(existing) => existing,
@@ -42,7 +45,7 @@ impl RutisBridge {
             }
         };
         Ok(Self {
-            ctx: ctx.clone(),
+            host: Host::new(ctx),
             registry,
         })
     }
@@ -52,12 +55,12 @@ impl RutisBridge {
     /// or `with_tree_extension` to cover sub-agents too; see
     /// [`RutisExtension`] for the host's options.
     pub fn extension(&self) -> RutisExtension {
-        RutisExtension::new(self.ctx.clone(), self.registry.clone())
+        RutisExtension::new(self.host.clone(), self.registry.clone())
     }
 
     /// The rutis context the bridge is installed on.
     pub fn ctx(&self) -> &Ctx {
-        &self.ctx
+        self.host.ctx()
     }
 
     /// The registry plugins add handlers to.

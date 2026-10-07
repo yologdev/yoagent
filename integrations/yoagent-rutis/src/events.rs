@@ -14,9 +14,10 @@
 //! [`AgentEventEmitted::label`] (the host's `Agent::with_run_label`). A
 //! listener may see an event before or after the run's own consumer does.
 //!
-//! **Cost.** Each event is cloned once to publish it while any listener is
-//! registered, every published event spawns one tokio task, and streaming
-//! produces one `MessageUpdate` event per text delta. Dispatches of the event
+//! **Cost.** Each event is cloned once to publish it (whether or not a
+//! listener is registered: rutis does not say), every event published while
+//! a listener is registered spawns one tokio task, and streaming produces
+//! one `MessageUpdate` event per text delta. Dispatches of the event
 //! key form **one queue shared by every run on the bus**: a slow listener
 //! delays delivery of *all* runs' later events (never the runs themselves),
 //! and a listener permanently slower than the agents builds an unbounded
@@ -30,6 +31,7 @@ use rutis::{BoxFuture, CordisError, Ctx, Event, EventKey, Listener};
 use yoagent::AgentEvent;
 
 use crate::handler::RunInfo;
+use crate::host::Host;
 
 /// One [`AgentEvent`], as published on the rutis bus.
 #[derive(Debug, Clone)]
@@ -86,10 +88,11 @@ impl AgentEventEmitted {
 }
 
 /// Publish one event of `run` on `ctx`'s bus (fire-and-forget; never blocks).
-pub(crate) fn publish(ctx: &Ctx, run: &RunInfo, event: &AgentEvent) {
-    if crate::host::closed(ctx).is_some() {
+pub(crate) fn publish(host: &Host, run: &RunInfo, event: &AgentEvent) {
+    if host.is_closed() {
         return;
     }
+    let ctx = host.ctx();
     let wrapped = AgentEventEmitted {
         run_id: run.run_id.as_str().into(),
         label: run.label.as_deref().map(Into::into),

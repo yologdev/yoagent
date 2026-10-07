@@ -420,3 +420,123 @@ async fn a_bridge_installed_on_a_plugin_context_stops_with_that_plugin() {
     );
     root.shutdown().await.unwrap();
 }
+
+/// Panics when it sees the assistant message that asks for tools.
+fn panics_on_tool_use(name: &str) -> yoagent_rutis::Handler {
+    handler(name).with_on_event(|_run, event| {
+        if let AgentEvent::MessageEnd {
+            message:
+                yoagent::AgentMessage::Llm(Message::Assistant {
+                    stop_reason: yoagent::StopReason::ToolUse,
+                    ..
+                }),
+        } = event
+        {
+            panic!("observer bug");
+        }
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_required_on_event_failure_stops_pending_tool_calls_and_fails_the_run() {
+    let (root, bridge) = setup();
+    let p = root.plugin(plugin(panics_on_tool_use("fragile-observer")));
+    wait_active(&p).await;
+    for required in [false, true] {
+        let tool = Reply::new("act", "acted");
+        let runs = tool.runs();
+        let two_calls = yoagent::provider::mock::MockResponse::ToolCalls(
+            (0..2)
+                .map(|_| yoagent::provider::mock::MockToolCall {
+                    provider_metadata: None,
+                    name: "act".into(),
+                    arguments: serde_json::json!({}),
+                })
+                .collect(),
+        );
+        let (agent, _) = agent(vec![two_calls, text("done")]);
+        let extension = if required {
+            bridge.extension().required()
+        } else {
+            bridge.extension()
+        };
+        let mut agent = agent
+            .with_tools(vec![Box::new(tool)])
+            .with_extension(extension);
+        run(&mut agent, "go").await;
+        if required {
+            assert_eq!(runs.load(Ordering::SeqCst), 0, "no pending call ran");
+            let error = run_error(&agent).expect("the run failed");
+            assert!(
+                error.contains("fragile-observer") && error.contains("observer bug"),
+                "{error}"
+            );
+        } else {
+            assert_eq!(runs.load(Ordering::SeqCst), 2, "advisory: logged only");
+            assert_eq!(run_error(&agent), None);
+        }
+    }
+    root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restarted_root_reads_as_stopped_for_the_bridge_installed_before() {
+    let (root, bridge) = setup();
+    let policy = root.plugin(plugin(deny_all("deny-all", "nothing may run")));
+    wait_active(&policy).await;
+    let old = bridge.extension();
+    assert!(matches!(judge(&old, "go").await, ToolDecision::Deny(r) if r == "nothing may run"));
+
+    root.root_view()
+        .expect("the root's own view")
+        .restart()
+        .await
+        .unwrap();
+    // The registry went with the old generation: the old extension denies
+    // everything rather than reading an empty registry as "no objection".
+    let decision = judge(&old, "go").await;
+    assert!(
+        matches!(&decision, ToolDecision::Deny(r) if r.contains("not running")),
+        "{decision:?}"
+    );
+
+    root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unavailable_handler_rejects_input_and_withholds_output() {
+    let (root, bridge) = setup();
+    let guard = root.plugin(plugin(
+        handler("guard")
+            .with_on_input(|_| InputDecision::Pass)
+            .with_after_tool(|_, _| Ok(())),
+    ));
+    wait_active(&guard).await;
+    let mut hooks = start(&bridge.extension(), &[]).await;
+    // The plugin unloads after the run started: the run still holds its
+    // handler, which can no longer answer.
+    guard.dispose().await.unwrap();
+    let rejected = hooks.on_input(&InputContext::new("hello", &[])).await;
+    assert!(
+        matches!(&rejected, InputDecision::Reject(r) if r.contains("no longer available")),
+        "{rejected:?}"
+    );
+    let args = serde_json::json!({});
+    let mut output = yoagent::extension::ToolOutput::new(
+        yoagent::ToolResult {
+            content: vec![yoagent::Content::Text {
+                text: "secret".into(),
+            }],
+            details: serde_json::Value::Null,
+        },
+        false,
+    );
+    let filtered = hooks
+        .after_tool(&ToolCallRequest::new("c1", "read", &args), &mut output)
+        .await;
+    assert!(
+        filtered.is_err_and(|e| e.to_string().contains("no longer available")),
+        "an unavailable filter withholds"
+    );
+    root.shutdown().await.unwrap();
+}

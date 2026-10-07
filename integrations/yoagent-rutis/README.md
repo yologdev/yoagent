@@ -156,7 +156,8 @@ the others).
   handler is removed before the new generation registers) and before it first
   becomes active. If a policy plugin is load-bearing, use
   `.require_policy()`. Input checks have no such switch.
-- **A host that is not running** (`root.shutdown()`, or a disposed root):
+- **A host that is not running** (`root.shutdown()`, or a root disposed or
+  restarted since the bridge was installed):
   every plugin went with it, so the bridge denies every tool call (checked per
   call), rejects every prompt and adds no notes, rather than reading the empty
   registry as "nobody objected".

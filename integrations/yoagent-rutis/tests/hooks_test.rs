@@ -152,7 +152,8 @@ async fn a_panicking_policy_denies_fail_closed() {
     assert_eq!(runs.load(Ordering::SeqCst), 0);
     assert!(results[0].2);
     assert!(
-        results[0].1.contains("panicked") && results[0].1.contains("policy bug"),
+        results[0].1.contains("plugin handler `panicky` panicked")
+            && results[0].1.contains("policy bug"),
         "{results:?}"
     );
     root.shutdown().await.unwrap();
@@ -288,7 +289,7 @@ async fn a_panicking_input_handler_rejects_fail_closed() {
     assert!(
         events.iter().any(|e| matches!(
             e,
-            AgentEvent::InputRejected { reason } if reason.contains("input rejected") && reason.contains("panicked")
+            AgentEvent::InputRejected { reason } if reason.contains("input rejected") && reason.contains("plugin handler `panicking-input` panicked")
         )),
         "{events:?}"
     );
