@@ -363,6 +363,89 @@ async fn the_gate_follows_the_fallbacks_verdict() {
     assert_eq!(stats.decision.failures, 2);
 }
 
+/// The gate over `primary.or(fallback)`, the fallback saying harmless.
+async fn gated_chain(primary: MockBackend, fallback: MockBackend) -> (usize, SessionStats) {
+    let ran = Arc::new(std::sync::Mutex::new(0));
+    let provider = MockProvider::new(vec![
+        MockResponse::ToolCalls(vec![MockToolCall {
+            provider_metadata: None,
+            name: "rm".into(),
+            arguments: json!({"path": "/tmp/x"}),
+        }]),
+        MockResponse::Text("done".into()),
+    ]);
+    let chain = DecisionModel::from_backend(primary, "primary")
+        .or(DecisionModel::from_backend(fallback, "fallback"));
+    let agent = Agent::from_provider(provider, ModelConfig::mock())
+        .with_tools(vec![Box::new(Rm(ran.clone()))])
+        .with_tool_gate(ToolGate::new(chain));
+    let (_agent, stats) = run_stats(agent, "summarize the README").await;
+    let n = *ran.lock().unwrap();
+    (n, stats)
+}
+
+/// The input guard over `primary.or(fallback)`: the rejection reason, if any.
+async fn guarded_chain(primary: MockBackend, fallback: MockBackend) -> Option<String> {
+    let chain = DecisionModel::from_backend(primary, "primary")
+        .or(DecisionModel::from_backend(fallback, "fallback"));
+    let mut agent = Agent::from_provider(MockProvider::text("hello"), ModelConfig::mock())
+        .with_input_guard(InputGuard::new(chain));
+    let mut rx = agent.prompt("hello there").await;
+    let mut rejected = None;
+    while let Some(e) = rx.recv().await {
+        if let AgentEvent::InputRejected { reason } = e {
+            rejected = Some(reason);
+        }
+    }
+    agent.finish().await;
+    rejected
+}
+
+#[tokio::test]
+async fn a_refusal_ends_the_chain_and_never_reaches_the_fallback() {
+    let refusing = || failing(DecisionError::refused("declined to judge `destructive`"));
+
+    // Directly: the refusal itself, not AllFailed; the fallback is not asked.
+    let primary = refusing();
+    let fallback = answers("fallback-1", 0.1);
+    let err = DecisionModel::from_backend(primary.clone(), "primary")
+        .or(DecisionModel::from_backend(fallback.clone(), "fallback"))
+        .noul("s", "q?")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DecisionError::Refused { .. }), "{err:?}");
+    assert_eq!(primary.request_count(), 1);
+    assert_eq!(fallback.request_count(), 0);
+
+    // The tool gate denies, though the fallback would have allowed.
+    let fallback = gate_answers(0.05, 0.1);
+    let (ran, stats) = gated_chain(refusing(), fallback.clone()).await;
+    assert_eq!(ran, 0, "a refusal is never turned into an allow");
+    assert_eq!(fallback.request_count(), 0);
+    assert_eq!((stats.decision.requests, stats.decision.failures), (1, 1));
+
+    // Control: an outage still falls through, and the fallback allows.
+    let fallback = gate_answers(0.05, 0.1);
+    let (ran, _) = gated_chain(failing(DecisionError::http(503, "down")), fallback.clone()).await;
+    assert_eq!(ran, 1);
+    assert_eq!(fallback.request_count(), 1);
+
+    // The input guard rejects, though the fallback finds the input clean.
+    let clean = answers("fallback-1", 0.0);
+    let reason = guarded_chain(refusing(), clean.clone()).await;
+    assert!(
+        reason.as_deref().is_some_and(|r| r.contains("refused")),
+        "{reason:?}"
+    );
+    assert_eq!(clean.request_count(), 0);
+
+    // Control: a transport failure falls through to the clean verdict.
+    let clean = answers("fallback-1", 0.0);
+    let reason = guarded_chain(failing(DecisionError::transport("reset")), clean.clone()).await;
+    assert_eq!(reason, None);
+    assert_eq!(clean.request_count(), 1);
+}
+
 #[tokio::test]
 async fn from_arc_shares_one_backend() {
     let mock = MockBackend::neutral();

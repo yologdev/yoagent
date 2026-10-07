@@ -13,7 +13,7 @@
 //! | Noul | `predicate`; `probability` → [`NoulAnswer::p_true`] |
 //! | Choice | `choice`; options → `choices[].value` (strings), criteria → `description` |
 //! | Score | `score`; levels → `levels[].label`, answered by level index |
-//! | `refusal` answer | [`DecisionError::Backend`] naming the question (not retried) |
+//! | `refusal` answer | [`DecisionError::Refused`] naming the question (not retried; ends a fallback chain) |
 //!
 //! Instructions, criteria and levels that are JSON rather than text are sent
 //! as serialized JSON strings (the API takes strings). A Noul's yes/no
@@ -23,6 +23,11 @@
 //! Images (the API's `input_image` parts) are not supported: a request's
 //! state is text or JSON.
 //!
+//! A response that arrived but could not be used — a refusal, an unusable
+//! answer — was still billed: its `usage` is read first and recorded in
+//! [`SessionStats::decision`](crate::SessionStats::decision) with the
+//! failure (a 2xx body that is not even JSON counts as unpriced spend).
+//!
 //! Tested against mock servers only: no live OpenAI key was available when
 //! this backend was written.
 
@@ -30,9 +35,11 @@ use super::answer::{Answer, ChoiceAnswer, DecisionUsage, Evaluation, NoulAnswer,
 use super::backend::{Capabilities, DecisionBackend};
 use super::error::DecisionError;
 use super::question::{Question, QuestionKind, Request};
-use super::systemone::{post_json, with_retries};
+use super::systemone::{post_json_billed, with_retries};
+use super::{add_billed, billed_only};
 use crate::retry::RetryConfig;
 use serde_json::{json, Map, Value};
+use std::sync::Mutex;
 
 /// OpenAI's API base, `/v1` included (the convention of OpenAI's SDKs).
 pub(crate) const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
@@ -174,6 +181,9 @@ impl OpenAiDecisionBackend {
     /// The key (trimmed) and the variable it came from, if any.
     fn key(&self) -> Result<(String, Option<&str>), DecisionError> {
         match &self.key {
+            Key::Fixed(k) if k.trim().is_empty() => Err(DecisionError::MissingApiKey(
+                "a non-empty key (the one given to with_api_key is empty)".into(),
+            )),
             Key::Fixed(k) => Ok((k.trim().to_string(), None)),
             Key::Env(var) => match std::env::var(var) {
                 Ok(v) if !v.trim().is_empty() => Ok((v.trim().to_string(), Some(var.as_str()))),
@@ -203,22 +213,51 @@ impl OpenAiDecisionBackend {
         Value::Object(body)
     }
 
-    async fn send_once(&self, request: &Request, body: &[u8]) -> Result<Evaluation, DecisionError> {
+    async fn send_once(
+        &self,
+        request: &Request,
+        body: &[u8],
+        billed: &Mutex<Option<Evaluation>>,
+    ) -> Result<Evaluation, DecisionError> {
         let (key, var) = self.key()?;
-        let value = post_json(&self.client, &self.endpoint_url(), Some(&key), body)
-            .await
-            .map_err(|e| match e {
-                // Say which variable the rejected key came from.
-                DecisionError::Http { status, body } if status == 401 || status == 403 => {
-                    let from = match var {
-                        Some(var) => format!("key from ${var}"),
-                        None => format!("key set with with_api_key, not ${OPENAI_API_KEY_ENV}"),
-                    };
-                    DecisionError::http(status, format!("{body} ({from})"))
-                }
-                e => e,
-            })?;
-        parse_response(&value, request)
+        let value = post_json_billed(
+            &self.client,
+            &self.endpoint_url(),
+            Some(&key),
+            body,
+            billed,
+            &request.model,
+        )
+        .await
+        .map_err(|e| match e {
+            // Say which variable the rejected key came from.
+            DecisionError::Http { status, body } if status == 401 || status == 403 => {
+                let from = match var {
+                    Some(var) => format!("key from ${var}"),
+                    None => format!("key set with with_api_key, not ${OPENAI_API_KEY_ENV}"),
+                };
+                DecisionError::http(status, format!("{body} ({from})"))
+            }
+            e => e,
+        })?;
+        parse_response(&value, request).inspect_err(|_| {
+            // Answered, so billed: keep what the response says it cost.
+            add_billed(billed, &billed_by(&value, request));
+        })
+    }
+
+    /// [`evaluate`](DecisionBackend::evaluate), adding to `billed` what a
+    /// response that arrived but could not be used was billed for.
+    pub(crate) async fn evaluate_billed(
+        &self,
+        request: &Request,
+        billed: &Mutex<Option<Evaluation>>,
+    ) -> Result<Evaluation, DecisionError> {
+        // Fail on a missing key before serializing anything.
+        self.key()?;
+        let body = serde_json::to_vec(&self.body(request))
+            .map_err(|e| DecisionError::Invalid(format!("request does not serialize: {e}")))?;
+        with_retries(&self.retry, || self.send_once(request, &body, billed)).await
     }
 }
 
@@ -230,11 +269,7 @@ impl DecisionBackend for OpenAiDecisionBackend {
     }
 
     async fn evaluate(&self, request: &Request) -> Result<Evaluation, DecisionError> {
-        // Fail on a missing key before serializing anything.
-        self.key()?;
-        let body = serde_json::to_vec(&self.body(request))
-            .map_err(|e| DecisionError::Invalid(format!("request does not serialize: {e}")))?;
-        with_retries(&self.retry, || self.send_once(request, &body)).await
+        self.evaluate_billed(request, &Mutex::new(None)).await
     }
 }
 
@@ -302,16 +337,10 @@ pub(crate) fn parse_response(body: &Value, request: &Request) -> Result<Evaluati
         .get("answers")
         .and_then(Value::as_array)
         .ok_or_else(|| DecisionError::BadResponse("response has no `answers` array".into()))?;
-    let model = body
-        .get("model")
-        .and_then(Value::as_str)
-        .filter(|m| !m.is_empty())
-        .unwrap_or(&request.model)
-        .to_string();
     let positional = answers.len() == request.questions.len();
     let name_of = |a: &Value| a.get("name").and_then(Value::as_str).map(str::to_string);
 
-    let mut eval = Evaluation::new(model, DecisionUsage::default());
+    let mut eval = billed_by(body, request);
     for (i, (id, question)) in request.questions.iter().enumerate() {
         let raw = answers
             .iter()
@@ -325,16 +354,29 @@ pub(crate) fn parse_response(body: &Value, request: &Request) -> Result<Evaluati
         let answer = parse_answer(id, raw, question)?;
         eval = eval.with_answer(id.clone(), answer);
     }
+    Ok(eval)
+}
 
+/// What a response body says it was billed for, answers aside: its model
+/// and `usage`. Read before the answers, so a refusal or an unusable answer
+/// still records its spend. No usage means the evaluation cannot be priced
+/// (never a priced $0).
+fn billed_by(body: &Value, request: &Request) -> Evaluation {
+    let model = body
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|m| !m.is_empty())
+        .unwrap_or(&request.model);
     let usage = body.get("usage").filter(|u| u.is_object());
     let tokens = |k: &str| usage.and_then(|u| u.get(k)).and_then(Value::as_u64);
-    eval.usage = DecisionUsage::new(
-        tokens("input_tokens").unwrap_or(0),
-        tokens("output_tokens").unwrap_or(0),
-    );
-    // No usage means the evaluation cannot be priced (never a priced $0).
-    eval.usage_reported = tokens("input_tokens").is_some();
-    Ok(eval)
+    billed_only(
+        model,
+        DecisionUsage::new(
+            tokens("input_tokens").unwrap_or(0),
+            tokens("output_tokens").unwrap_or(0),
+        ),
+        tokens("input_tokens").is_some(),
+    )
 }
 
 fn parse_answer(id: &str, raw: &Value, question: &Question) -> Result<Answer, DecisionError> {
@@ -344,7 +386,7 @@ fn parse_answer(id: &str, raw: &Value, question: &Question) -> Result<Answer, De
     if kind == "refusal" {
         // The gate and the guard fail closed on any error; a refusal must
         // never read as an answer.
-        return Err(DecisionError::backend(format!(
+        return Err(DecisionError::refused(format!(
             "OpenAI declined to answer question `{id}` (refusal)"
         )));
     }

@@ -157,6 +157,23 @@ impl Slot {
             Slot::Custom(b) => b.as_ref(),
         }
     }
+
+    /// Evaluate, adding to `billed` what a failed call was billed for — a
+    /// response that arrived but could not be used (a refusal, an unusable
+    /// answer). The built-in backends report it; a custom backend's failure
+    /// carries no spend.
+    async fn evaluate_billed(
+        &self,
+        request: &Request,
+        billed: &std::sync::Mutex<Option<Evaluation>>,
+    ) -> Result<Evaluation, DecisionError> {
+        match self {
+            Slot::SystemOne(b) => b.evaluate_billed(request, billed).await,
+            Slot::Logprobs(b) => b.evaluate_billed(request, billed).await,
+            Slot::OpenAi(b) => b.evaluate_billed(request, billed).await,
+            Slot::Custom(b) => b.evaluate(request).await,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -315,8 +332,9 @@ impl DecisionModel {
     /// public beta), key from `OPENAI_API_KEY` at call time (or
     /// [`with_api_key`](Self::with_api_key)). See [`OpenAiDecisionBackend`]
     /// for how questions map onto the API; a question OpenAI refuses fails
-    /// the call with [`DecisionError::Backend`], so the tool gate and the
-    /// input guard fail closed. Priced from the process-wide price table by
+    /// the call with [`DecisionError::Refused`] (its usage still recorded),
+    /// so the tool gate and the input guard fail closed — and a fallback
+    /// chain ([`or`](Self::or)) stops there rather than ask another model. Priced from the process-wide price table by
     /// the model id the response reports, while requests go to
     /// `api.openai.com` — **unpriced until the process opts in**
     /// ([`prices::enable_bundled`](crate::provider::prices::enable_bundled):
@@ -511,7 +529,13 @@ impl DecisionModel {
     /// - **Falls back on every error a member returns** — outages, rate
     ///   limits, missing keys, unusable answers, an unsupported question
     ///   kind, a member's own timeout, and a member's `Invalid` too (a 422 is
-    ///   that server's own limit; another may accept the request).
+    ///   that server's own limit; another may accept the request) —
+    ///   **except a refusal**: a member's [`DecisionError::Refused`] ends the
+    ///   chain and is returned as is. A model declining to judge is an
+    ///   answer about the input, not an outage; asking the next model would
+    ///   turn it into a yes or a no (so `gpt_6_luna().or(jev())` never asks
+    ///   Jev what OpenAI declined, and the tool gate and the input guard fail
+    ///   closed on it).
     /// - **Each member is validated against its own capabilities** before it
     ///   is tried. A request structurally invalid everywhere (no questions, a
     ///   one-option Choice, ...) fails with `Invalid` at once, nothing sent;
@@ -812,6 +836,8 @@ impl DecisionModel {
             record_attempt(&result);
             match result {
                 Ok(eval) => return Ok(eval),
+                // A refusal is the chain's answer: never ask another model.
+                Err(e) if e.is_refusal() => return Err(e),
                 // The clock, not the error kind, says whether the overall
                 // budget is spent: a backend may report a timeout of its own.
                 Err(_) if crate::rt::Instant::now() >= deadline => {
@@ -863,7 +889,7 @@ impl DecisionModel {
     /// question is returned.
     async fn evaluate_singles(
         &self,
-        backend: &dyn DecisionBackend,
+        backend: &Slot,
         request: &Request,
         concurrency: usize,
         billed: &std::sync::Mutex<Option<Evaluation>>,
@@ -893,7 +919,7 @@ impl DecisionModel {
                     state: request.state.clone(),
                     questions: vec![(id.clone(), q.clone())],
                 };
-                let result = match backend.evaluate(&single).await {
+                let result = match backend.evaluate_billed(&single, billed).await {
                     Ok(mut eval) => {
                         add_billed(billed, &eval);
                         check_complete(&single, &mut eval).map(|()| eval)
@@ -941,8 +967,8 @@ impl DecisionModel {
         request: Request,
         limit: Duration,
     ) -> Result<Evaluation, DecisionError> {
-        let backend = self.backend.get();
-        let caps = backend.capabilities();
+        let backend = &self.backend;
+        let caps = backend.get().capabilities();
         request.validate(&caps)?;
 
         let span = tracing::debug_span!(
@@ -952,14 +978,16 @@ impl DecisionModel {
             tokens_in = tracing::field::Empty,
             cost_usd = tracing::field::Empty,
         );
-        // What a non-batching request has already been billed for, kept
-        // outside the future so a timeout (which drops the future) or a later
-        // failure still records it.
+        // What a failed request was billed for — the questions a non-batching
+        // request answered so far, a response that arrived but could not be
+        // used — kept outside the future so a timeout (which drops the
+        // future) or a later failure still records it.
         let billed: std::sync::Mutex<Option<Evaluation>> = std::sync::Mutex::new(None);
         let work = async {
             if caps.batching || request.questions.len() == 1 {
-                let mut eval = backend.evaluate(&request).await?;
-                check_complete(&request, &mut eval)?;
+                let mut eval = backend.evaluate_billed(&request, &billed).await?;
+                // Answered, so billed, even when the answers are unusable.
+                check_complete(&request, &mut eval).inspect_err(|_| add_billed(&billed, &eval))?;
                 Ok(eval)
             } else {
                 let answers = self
@@ -995,8 +1023,8 @@ impl DecisionModel {
             Err(_) => Err(DecisionError::Timeout(limit)),
         };
         if result.is_err() {
-            // A failed or timed-out non-batching request: record what the
-            // questions answered so far were billed.
+            // A failed or timed-out request: record what it was billed for
+            // (unpriced when that is unknown, never $0).
             let done = billed.lock().unwrap_or_else(|e| e.into_inner()).take();
             if let Some(done) = done {
                 let cost = self.price(&done);
@@ -1015,8 +1043,17 @@ impl DecisionModel {
     }
 }
 
-/// Add what `eval` was billed to the running total of a split request.
-fn add_billed(billed: &std::sync::Mutex<Option<Evaluation>>, eval: &Evaluation) {
+/// What a response that was answered but could not be used was billed
+/// for: no answers, `usage` as reported (`reported: false` = unknown, so
+/// the spend is unpriced).
+pub(crate) fn billed_only(model: &str, usage: DecisionUsage, reported: bool) -> Evaluation {
+    let mut eval = Evaluation::new(model, usage);
+    eval.usage_reported = reported;
+    eval
+}
+
+/// Add what `eval` was billed to the running total of a failed request.
+pub(crate) fn add_billed(billed: &std::sync::Mutex<Option<Evaluation>>, eval: &Evaluation) {
     let mut total = billed.lock().unwrap_or_else(|e| e.into_inner());
     let step = Evaluation {
         answers: Vec::new(),

@@ -72,6 +72,18 @@ pub enum DecisionError {
         #[source]
         source: Option<Arc<dyn std::error::Error + Send + Sync + 'static>>,
     },
+    /// The model declined to answer (OpenAI's Decisions API `refusal`, or a
+    /// custom backend's equivalent): a judgement, not an outage. Never
+    /// retried, and **terminal in a fallback chain**
+    /// ([`DecisionModel::or`](super::DecisionModel::or)) — asking another
+    /// model what one declined would turn a refusal into an answer. The tool
+    /// gate and the input guard fail closed on it like on any error.
+    #[error("decision model refused to answer: {message}")]
+    #[non_exhaustive]
+    Refused {
+        /// What was refused, in the backend's words.
+        message: String,
+    },
     /// The answer could not be used: not JSON or unreadable, a missing
     /// answer or one of the wrong type, a probability or confidence that is
     /// not finite or not in `[0, 1]`, a distribution that does not cover
@@ -199,6 +211,19 @@ impl DecisionError {
             message: message.into(),
             source: Some(Arc::new(source)),
         }
+    }
+
+    /// A [`Refused`](Self::Refused) error, for custom backends whose model
+    /// declined to answer.
+    pub fn refused(message: impl Into<String>) -> Self {
+        Self::Refused {
+            message: message.into(),
+        }
+    }
+
+    /// Whether the model declined to answer ([`Refused`](Self::Refused)).
+    pub fn is_refusal(&self) -> bool {
+        matches!(self, Self::Refused { .. })
     }
 
     /// A [`Backend`](Self::Backend) error without a source.

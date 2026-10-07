@@ -238,7 +238,7 @@ async fn unnamed_answers_are_matched_by_position_only_when_counts_match() {
 }
 
 #[tokio::test]
-async fn a_refusal_fails_the_call_naming_the_question_and_is_not_retried() {
+async fn a_refusal_is_refused_naming_the_question_and_is_not_retried() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -267,7 +267,7 @@ async fn a_refusal_fails_the_call_naming_the_question_and_is_not_retried() {
         .send()
         .await
         .unwrap_err();
-    assert!(matches!(err, DecisionError::Backend { .. }), "{err:?}");
+    assert!(matches!(err, DecisionError::Refused { .. }), "{err:?}");
     assert!(!err.is_retryable());
     assert!(err.to_string().contains("`urgent`"), "{err}");
     assert!(err.to_string().contains("refusal"), "{err}");
@@ -540,4 +540,250 @@ async fn bundled_pricing_applies_only_on_openais_host() {
     let server = serve(three_answers()).await;
     let eval = ask_three(&model(&server)).await.unwrap();
     assert_eq!(eval.cost_usd(), None);
+}
+
+// ---- Spend of failed evaluations, refusals in chains, empty keys ----
+
+/// A tool the gate is asked about; counts its runs.
+struct Rm(std::sync::Arc<std::sync::Mutex<usize>>);
+
+#[async_trait::async_trait]
+impl yoagent::AgentTool for Rm {
+    fn name(&self) -> &str {
+        "rm"
+    }
+    fn label(&self) -> &str {
+        "rm"
+    }
+    fn description(&self) -> &str {
+        "Remove a file."
+    }
+    fn parameters_schema(&self) -> Value {
+        json!({"type": "object"})
+    }
+    async fn execute(
+        &self,
+        _params: Value,
+        _ctx: yoagent::ToolContext,
+    ) -> Result<yoagent::ToolResult, yoagent::ToolError> {
+        *self.0.lock().unwrap() += 1;
+        Ok(yoagent::ToolResult {
+            content: vec![yoagent::Content::Text { text: "ok".into() }],
+            details: Value::Null,
+        })
+    }
+}
+
+/// One agent run whose single `rm` call is judged by a `ToolGate` over
+/// `model`: whether `rm` ran, and the run's stats.
+async fn gated_run(model: DecisionModel) -> (usize, yoagent::SessionStats) {
+    use yoagent::provider::mock::{MockResponse, MockToolCall};
+    use yoagent::provider::{MockProvider, ModelConfig};
+    let ran = std::sync::Arc::new(std::sync::Mutex::new(0));
+    let provider = MockProvider::new(vec![
+        MockResponse::ToolCalls(vec![MockToolCall {
+            provider_metadata: None,
+            name: "rm".into(),
+            arguments: json!({"path": "/tmp/x"}),
+        }]),
+        MockResponse::Text("done".into()),
+    ]);
+    let mut agent = yoagent::Agent::from_provider(provider, ModelConfig::mock())
+        .with_tools(vec![Box::new(Rm(ran.clone()))])
+        .with_tool_gate(ToolGate::new(model));
+    let mut rx = agent.prompt("summarize the README").await;
+    let mut stats = None;
+    while let Some(e) = rx.recv().await {
+        if let yoagent::AgentEvent::AgentEnd { stats: s, .. } = e {
+            stats = Some(s);
+        }
+    }
+    agent.finish().await;
+    let n = *ran.lock().unwrap();
+    (n, stats.expect("AgentEnd"))
+}
+
+/// $0.10 per million input tokens, output free (the gpt-6-luna list price).
+fn luna_rate() -> Option<yoagent::provider::CostConfig> {
+    Some(yoagent::provider::CostConfig::new(0.1, 0.0))
+}
+
+fn refusing() -> Value {
+    json!({
+        "model": "gpt-6-luna",
+        "answers": [
+            {"type": "refusal", "name": "destructive"},
+            {"type": "predicate", "name": "requested", "probability": 0.99}
+        ],
+        "usage": usage()
+    })
+}
+
+#[tokio::test]
+async fn a_refused_evaluation_records_its_usage_in_the_run() {
+    // Priced: the refusal's 412 input tokens are spent and priced.
+    let server = serve(refusing()).await;
+    let (ran, stats) = gated_run(model(&server).with_cost(luna_rate())).await;
+    assert_eq!(ran, 0, "the gate fails closed on a refusal");
+    let d = &stats.decision;
+    assert_eq!((d.requests, d.failures, d.timeouts), (1, 1, 0));
+    assert_eq!((d.usage.input, d.usage.output), (412, 9));
+    assert_eq!(d.unpriced, 0);
+    let cost = d.cost_usd.expect("priced");
+    assert!((cost - 412.0 * 0.1 / 1e6).abs() < 1e-15, "{cost}");
+    assert!(!d.is_unpriced());
+    assert_eq!(stats.total_cost_usd(), Some(cost));
+
+    // Unpriced (off api.openai.com, no cost set): the usage is still there,
+    // and the spend reads as unknown, never $0.
+    let server = serve(refusing()).await;
+    let (_, stats) = gated_run(model(&server)).await;
+    let d = &stats.decision;
+    assert_eq!((d.usage.input, d.usage.output), (412, 9));
+    assert_eq!(d.unpriced, 1);
+    assert_eq!(d.cost_usd, None);
+    assert!(d.is_unpriced());
+}
+
+#[tokio::test]
+async fn an_unusable_answer_still_records_its_usage() {
+    let bodies = [
+        // Rejected while parsing: not a number.
+        json!({"model": "gpt-6-luna", "answers": [
+            {"type": "predicate", "name": "destructive", "probability": "high"},
+            {"type": "predicate", "name": "requested", "probability": 0.9}
+        ], "usage": usage()}),
+        // Rejected by the central check: out of range.
+        json!({"model": "gpt-6-luna", "answers": [
+            {"type": "predicate", "name": "destructive", "probability": 1.7},
+            {"type": "predicate", "name": "requested", "probability": 0.9}
+        ], "usage": usage()}),
+    ];
+    for body in bodies {
+        let server = serve(body.clone()).await;
+        let (ran, stats) = gated_run(model(&server).with_cost(luna_rate())).await;
+        assert_eq!(ran, 0, "{body}");
+        let d = &stats.decision;
+        assert_eq!((d.requests, d.failures), (1, 1), "{body}");
+        assert_eq!(d.usage.input, 412, "{body}");
+        assert_eq!(d.unpriced, 0, "{body}");
+        assert!(d.cost_usd.is_some_and(|c| c > 0.0), "{body}: {d:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_success_whose_spend_is_unknown_counts_as_unpriced_not_free() {
+    // A 2xx whose body is not JSON was answered (and billed) — at an
+    // unknown price, even under a cost.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("<html>oops</html>"))
+        .mount(&server)
+        .await;
+    let (ran, stats) = gated_run(model(&server).with_cost(luna_rate())).await;
+    assert_eq!(ran, 0);
+    let d = &stats.decision;
+    assert_eq!((d.requests, d.failures, d.unpriced), (1, 1, 1));
+    assert_eq!(d.cost_usd, None);
+    assert!(d.is_unpriced());
+
+    // A failure with no answer (a 500) spent nothing: nothing unpriced.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+    let (_, stats) = gated_run(model(&server).with_cost(luna_rate())).await;
+    let d = &stats.decision;
+    assert_eq!((d.requests, d.failures, d.unpriced), (1, 1, 0));
+    assert!(!d.is_unpriced());
+}
+
+#[tokio::test]
+async fn a_refusal_ends_a_fallback_chain() {
+    let server = serve(refusing()).await;
+    let fallback = MockBackend::neutral();
+    let chain = model(&server).or(DecisionModel::from_backend(fallback.clone(), "fallback"));
+    let err = chain
+        .ask("s")
+        .noul("destructive", "Destructive?")
+        .noul("requested", "Requested?")
+        .send()
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DecisionError::Refused { .. }), "{err:?}");
+    assert!(err.is_refusal());
+    assert!(!err.is_retryable());
+    assert!(err.to_string().contains("`destructive`"), "{err}");
+    assert_eq!(
+        fallback.request_count(),
+        0,
+        "never asked what OpenAI declined"
+    );
+
+    // Through the gate: denied, one request recorded with its usage.
+    let fallback = MockBackend::neutral();
+    let server = serve(refusing()).await;
+    let chain = model(&server)
+        .with_cost(luna_rate())
+        .or(DecisionModel::from_backend(fallback.clone(), "fallback"));
+    let (ran, stats) = gated_run(chain).await;
+    assert_eq!(ran, 0);
+    assert_eq!(fallback.request_count(), 0);
+    assert_eq!((stats.decision.requests, stats.decision.failures), (1, 1));
+    assert_eq!(stats.decision.usage.input, 412);
+}
+
+#[tokio::test]
+async fn an_empty_fixed_key_fails_before_sending() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(three_answers()))
+        .expect(0)
+        .mount(&server)
+        .await;
+    for key in ["", "   ", "\n\t"] {
+        let model =
+            DecisionModel::from_openai_backend(backend(&server).with_api_key(key), "gpt-6-luna");
+        match model.noul("s", "q").await {
+            Err(DecisionError::MissingApiKey(what)) => {
+                assert!(what.contains("with_api_key"), "{what}")
+            }
+            other => panic!("{key:?}: expected MissingApiKey, got {other:?}"),
+        }
+        // The same through the handle's own setter.
+        let model =
+            DecisionModel::from_openai_backend(backend(&server), "gpt-6-luna").with_api_key(key);
+        assert!(
+            matches!(
+                model.noul("s", "q").await,
+                Err(DecisionError::MissingApiKey(_))
+            ),
+            "{key:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn two_entries_for_one_option_are_a_bad_response() {
+    let server = serve(json!({
+        "answers": [{"type": "choice", "name": "q", "choice": "a", "confidence": 0.5,
+            "probabilities": [
+                {"value": "a", "probability": 0.5},
+                {"value": "a", "probability": 0.2},
+                {"value": "b", "probability": 0.3}
+            ]}],
+        "usage": usage()
+    }))
+    .await;
+    let err = model(&server)
+        .choice("s", "Which?", ["a", "b"])
+        .await
+        .unwrap_err();
+    match err {
+        DecisionError::BadResponse(text) => {
+            assert!(text.contains("two entries for \"a\""), "{text}")
+        }
+        other => panic!("expected BadResponse, got {other:?}"),
+    }
 }
