@@ -294,3 +294,77 @@ async fn llm_stream_cost_distinguishes_free_from_unpriced() {
     );
     assert_eq!(llm_stream_field(&unpriced, "cost_usd"), None);
 }
+
+/// Each new span's name with its parent's name.
+type SpanParents = Arc<Mutex<Vec<(String, Option<String>)>>>;
+
+/// Layer that records each new span's name with its parent's name.
+struct ParentCollector(SpanParents);
+
+impl<S> tracing_subscriber::Layer<S> for ParentCollector
+where
+    S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        _id: &tracing::span::Id,
+        ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let parent = if let Some(id) = attrs.parent() {
+            ctx.span(id).map(|s| s.name().to_string())
+        } else if attrs.is_contextual() {
+            ctx.lookup_current().map(|s| s.name().to_string())
+        } else {
+            None
+        };
+        self.0
+            .lock()
+            .unwrap()
+            .push((attrs.metadata().name().to_string(), parent));
+    }
+}
+
+/// An `Agent` run is spawned, yet its `agent_loop` span stays a child of the
+/// caller's span, for the receiver and the sender methods alike.
+#[tokio::test]
+async fn an_agent_run_keeps_the_caller_s_span_as_parent() {
+    use tracing::Instrument;
+    let spans = Arc::new(Mutex::new(Vec::new()));
+    // A thread-local default on the current-thread runtime also covers the
+    // spawned run, which polls on this thread.
+    let _guard = tracing::subscriber::set_default(
+        tracing_subscriber::registry().with(ParentCollector(spans.clone())),
+    );
+
+    let mut agent = Agent::from_provider(
+        MockProvider::text("hi"),
+        yoagent::provider::ModelConfig::mock(),
+    );
+    async {
+        let mut rx = agent.prompt("one").await;
+        while rx.recv().await.is_some() {}
+        agent.finish().await;
+    }
+    .instrument(tracing::info_span!("request_a"))
+    .await;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+    agent
+        .prompt_with_sender("two", tx)
+        .instrument(tracing::info_span!("request_b"))
+        .await;
+    drain.await.unwrap();
+
+    let loops: Vec<Option<String>> = spans
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(name, _)| name == "agent_loop")
+        .map(|(_, parent)| parent.clone())
+        .collect();
+    assert_eq!(
+        loops,
+        vec![Some("request_a".to_string()), Some("request_b".to_string())]
+    );
+}

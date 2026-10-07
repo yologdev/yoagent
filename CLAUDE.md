@@ -41,7 +41,7 @@ The central abstraction is a **stateless agent loop** (`agent_loop.rs`) driven b
 
 The loop: stream assistant response → extract tool calls → execute tools (parallel by default) → append results → repeat until `StopReason::Stop` with no follow-ups.
 
-`agent_loop` and `agent_loop_continue` are **free functions**, not methods. The `Agent` struct (`agent.rs`) is an optional stateful wrapper that manages message history, tool registry, steering/follow-up queues, and provider selection. The `_with_sender` methods (`prompt_with_sender`, `prompt_messages_with_sender`, `continue_loop_with_sender`) accept a caller-provided `mpsc::UnboundedSender<AgentEvent>` for real-time event consumption on a separate task.
+`agent_loop` and `agent_loop_continue` are **free functions**, not methods. The `Agent` struct (`agent.rs`) is an optional stateful wrapper that manages message history, tool registry, steering/follow-up queues, and provider selection. The `_with_sender` methods (`prompt_with_sender`, `prompt_messages_with_sender`, `continue_loop_with_sender`) accept a caller-provided `mpsc::UnboundedSender<AgentEvent>` for real-time event consumption on a separate task. Every run starts in one private `start_run` (spawned; `finish` joins it); the `_with_sender` methods then await `join_run`, whose cancellation `DropGuard` cancels the run if their future is dropped (it ends aborted, the next `finish` restores state). `finish`/`reset` await the `JoinHandle` in place and take it only once joined, so they are cancel-safe.
 
 ### Provider System
 
