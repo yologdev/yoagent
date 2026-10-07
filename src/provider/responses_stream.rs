@@ -29,7 +29,8 @@
 //! - A replayed reasoning item must be followed by its paired output item
 //!   ("Item 'rs_…' of type 'reasoning' was provided without its required
 //!   following item"), so the ids of the output items that followed it in
-//!   the response are kept in the same stored JSON: `call_ids` maps each
+//!   the response (up to the next reasoning item, stored or not) are kept in
+//!   the same stored JSON: `call_ids` maps each
 //!   `function_call`'s `call_id` to its item `id` (`fc_…`), and `message_id`
 //!   is the id (`msg_…`) of the first `message` after it. They ride on the
 //!   reasoning item, so they carry its protocol tag and are replayed only
@@ -112,6 +113,11 @@ pub(crate) struct ResponsesStreamState {
     /// Content indices of the thinking blocks that store a reasoning item, in
     /// content order.
     reasoning_blocks: Vec<usize>,
+    /// Where every finished reasoning item starts in content order, stored or
+    /// not: its thinking block's index, or, for one with no block, the index
+    /// the next item takes. Output items after it belong to it, not to an
+    /// earlier stored reasoning item. Paired with the item's output_index.
+    reasoning_bounds: Vec<(usize, Option<usize>)>,
     /// output_index → the `message` item id sent for it.
     message_ids: HashMap<Option<usize>, String>,
     usage: Usage,
@@ -135,6 +141,7 @@ impl ResponsesStreamState {
             thinking_slots: HashMap::new(),
             calls: Vec::new(),
             reasoning_blocks: Vec::new(),
+            reasoning_bounds: Vec::new(),
             message_ids: HashMap::new(),
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
@@ -613,8 +620,14 @@ impl ResponsesStreamState {
                 self.content.push(Content::thinking(String::new()));
                 self.content.len() - 1
             }
-            None => return,
+            None => {
+                // Nothing to keep, but the items after it are its own.
+                self.reasoning_bounds
+                    .push((self.content.len(), output_index));
+                return;
+            }
         };
+        self.reasoning_bounds.push((idx, output_index));
         let (Some(encrypted), Some(id)) = (encrypted, item.id) else {
             debug!(
                 "{}: reasoning item without encrypted_content (or id); it will not be replayed",
@@ -649,15 +662,32 @@ impl ResponsesStreamState {
     }
 
     /// Add to each stored reasoning item the ids of the output items that
-    /// followed it (up to the next stored reasoning item): `call_ids` for its
-    /// function calls, `message_id` for its first message. Content order is
-    /// arrival order, which follows `output_index`.
+    /// followed it (up to the next reasoning item of any kind — stored or
+    /// not, finished or only streamed): `call_ids` for its function calls,
+    /// `message_id` for its first message. Content order is arrival order,
+    /// which follows `output_index`.
+    ///
+    /// The range must end at *every* reasoning item: items after one that is
+    /// not replayed (no encrypted content) are paired with it, and filing
+    /// them under an earlier item would replay them with ids but without
+    /// their own reasoning item, which the API rejects.
     fn record_following_ids(&mut self) {
-        for (n, &r) in self.reasoning_blocks.iter().enumerate() {
-            let end = self
-                .reasoning_blocks
-                .get(n + 1)
-                .copied()
+        let mut bounds = self.reasoning_bounds.clone();
+        // Reasoning that streamed text but whose finished item never came.
+        bounds.extend(
+            self.thinking_slots
+                .iter()
+                .map(|((oi, _), (idx, _))| (*idx, *oi)),
+        );
+        for &r in &self.reasoning_blocks {
+            // The item's own other block (raw text beside its summary) is
+            // not a boundary.
+            let own = bounds.iter().find(|(p, _)| *p == r).and_then(|(_, oi)| *oi);
+            let end = bounds
+                .iter()
+                .filter(|(p, oi)| *p > r && (own.is_none() || *oi != own))
+                .map(|(p, _)| *p)
+                .min()
                 .unwrap_or(self.content.len());
             let in_region = |i: usize| i > r && i < end;
             let call_ids: serde_json::Map<String, serde_json::Value> = self

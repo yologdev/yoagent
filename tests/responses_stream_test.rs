@@ -641,6 +641,92 @@ async fn encrypted_reasoning_without_a_summary_gets_its_own_block_in_order() {
     }
 }
 
+/// A reasoning item without encrypted content (summary streamed or not)
+/// ends the previous stored item's range: the call and message after it are
+/// paired with it, not filed under the earlier item — which would replay
+/// them with ids but without their own reasoning item.
+#[tokio::test]
+async fn an_unstored_reasoning_item_ends_the_previous_items_range() {
+    let args = r#"{"q":"x"}"#;
+    for with_summary in [false, true] {
+        let mut ev = vec![
+            created(),
+            reasoning_done(0, "rs_1", json!([]), json!("enc-1")),
+            fc_added(1, 1, "search"),
+            fc_args_done(1, 1, args),
+            fc_item_done(1, 1, "search", args),
+        ];
+        let summary = if with_summary {
+            ev.push((
+                "response.reasoning_summary_text.delta",
+                json!({"item_id": "rs_2", "output_index": 2, "summary_index": 0, "delta": "Hm."}),
+            ));
+            json!([{"type": "summary_text", "text": "Hm."}])
+        } else {
+            json!([])
+        };
+        ev.push(reasoning_done(2, "rs_2", summary, Value::Null));
+        ev.extend([
+            fc_added(3, 2, "search"),
+            fc_args_done(3, 2, args),
+            fc_item_done(3, 2, "search", args),
+        ]);
+        ev.extend(message_item(4, &["done"]));
+        ev.push(completed(plain_usage()));
+        let body = sse(ev);
+        for which in BOTH {
+            let (m, _) = run(which, body.clone()).await;
+            let (content, _, _) = parts(&m);
+            assert_eq!(
+                stored(&content[0]),
+                Some((
+                    json!({"id": "rs_1", "summary": [], "encrypted_content": "enc-1",
+                           "call_ids": {"call_1": "fc_1"}}),
+                    Some(which.protocol())
+                )),
+                "{which:?}, summary {with_summary}: {content:?}"
+            );
+            let stored_count = content.iter().filter(|c| stored(c).is_some()).count();
+            assert_eq!(stored_count, 1, "{which:?}: {content:?}");
+        }
+    }
+}
+
+/// A reasoning item that streams both a summary and raw reasoning text has
+/// two thinking blocks; its own second block does not end its range.
+#[tokio::test]
+async fn a_reasoning_items_own_second_block_does_not_end_its_range() {
+    let args = r#"{"q":"x"}"#;
+    let body = sse(vec![
+        created(),
+        (
+            "response.reasoning_summary_text.delta",
+            json!({"item_id": "rs_1", "output_index": 0, "summary_index": 0, "delta": "Sum."}),
+        ),
+        (
+            "response.reasoning_text.delta",
+            json!({"item_id": "rs_1", "output_index": 0, "content_index": 0, "delta": "Raw."}),
+        ),
+        reasoning_done(
+            0,
+            "rs_1",
+            json!([{"type": "summary_text", "text": "Sum."}]),
+            json!("enc-1"),
+        ),
+        fc_added(1, 1, "search"),
+        fc_args_done(1, 1, args),
+        fc_item_done(1, 1, "search", args),
+        completed(plain_usage()),
+    ]);
+    for which in BOTH {
+        let (m, _) = run(which, body.clone()).await;
+        let (content, _, _) = parts(&m);
+        assert_eq!(content.len(), 3, "{which:?}: {content:?}");
+        let (item, _) = stored(&content[0]).expect("stored on the summary block");
+        assert_eq!(item["call_ids"], json!({"call_1": "fc_1"}), "{which:?}");
+    }
+}
+
 /// A summary sent only in the finished item (no deltas) still becomes the
 /// thinking text, and is streamed as one delta.
 #[tokio::test]

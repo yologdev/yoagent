@@ -130,9 +130,9 @@ last function call"):
   when no summary was requested, which is OpenAI's default), and `redacted`
   holds the item's `id`, `summary` and `encrypted_content` as a JSON object,
   with `redacted_protocol = OpenAiResponses`. The same object records the ids
-  of the output items that followed it: `call_ids` (each function call's
-  `call_id` → its item `id`, `fc_…`) and `message_id` (the first message's
-  `msg_…`).
+  of the output items that followed it, up to the next reasoning item (stored
+  or not): `call_ids` (each function call's `call_id` → its item `id`,
+  `fc_…`) and `message_id` (the first message's `msg_…`).
 - **Replayed in place.** The next request sends it back as
   `{"type": "reasoning", "id", "summary", "encrypted_content"}`, before the
   function call or message it led to, and that call or message carries its
@@ -141,6 +141,11 @@ last function call"):
   following item"). Items with no replayed reasoning before them are sent
   without ids. A reasoning item with no output after it in its turn (a
   cut-off response) is not sent.
+- **Only to a reasoning model.** Replay follows the same test as `include`:
+  a history made by a reasoning model and sent to a non-reasoning one (after
+  `Agent::set_model` from `gpt-5.5` to `gpt-4.1`, say) goes without its
+  reasoning items, and their calls and messages without ids — such a model
+  rejects reasoning input.
 - **Only to the API that produced it.** Encrypted reasoning from Azure,
   Anthropic (`redacted_thinking`), Bedrock or of unknown origin is skipped, and
   this provider's blocks are skipped by every other provider — including Azure,

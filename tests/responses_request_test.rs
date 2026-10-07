@@ -713,6 +713,78 @@ async fn openai_responses_preset_sends_include_only_for_reasoning_ids() {
     assert!(sent.get("include").is_none(), "{sent}");
 }
 
+/// A history made by a reasoning model, sent on the same API to a
+/// non-reasoning model (as after `Agent::set_model` from `gpt-5.5` to
+/// `gpt-4.1`): no reasoning item and no item `id` — such a model rejects
+/// encrypted reasoning input. The same history to `gpt-5.5` (positive
+/// control) replays both. Azure: a deployment with `reasoning: false` and
+/// thinking off, then the same with an effort sent.
+#[tokio::test]
+async fn reasoning_is_not_replayed_to_a_non_reasoning_model() {
+    for which in BOTH {
+        let (_, reply) = one_request(
+            which,
+            None,
+            vec![Message::user("read a.txt")],
+            reasoning_then_call_fixture(),
+            |_| {},
+        )
+        .await;
+        let history = vec![
+            Message::user("read a.txt"),
+            reply,
+            tool_result("call_1", "contents"),
+        ];
+        let plain_call = json!({"type": "function_call", "call_id": "call_1",
+                                "name": "read_file", "arguments": "{\"path\":\"a.txt\"}"});
+        let output = json!({"type": "function_call_output", "call_id": "call_1",
+                            "output": "contents"});
+
+        let plain = match which {
+            Which::Responses => ModelConfig::openai_responses("gpt-4.1", "GPT-4.1"),
+            Which::Azure => {
+                let mut mc = which.model_config("http://unused");
+                mc.reasoning = false;
+                mc
+            }
+        };
+        let (sent, _) = one_request(
+            which,
+            Some(plain.clone()),
+            history.clone(),
+            text_fixture(),
+            |_| {},
+        )
+        .await;
+        assert_eq!(
+            sent["input"],
+            json!([{"role": "user", "content": "read a.txt"}, plain_call, output]),
+            "{which:?}"
+        );
+        assert!(sent.get("include").is_none(), "{which:?}: {sent}");
+
+        // Positive control: a reasoning target replays the pair — declared
+        // (`gpt-5.5`), or implied by an effort on the same plain config.
+        let mut paired_call = plain_call.clone();
+        paired_call["id"] = json!("fc_1");
+        let replayed = json!([
+            {"role": "user", "content": "read a.txt"},
+            {"type": "reasoning", "id": "rs_1",
+             "summary": [{"type": "summary_text", "text": "Need the file."}],
+             "encrypted_content": "gAAAA-enc-1"},
+            paired_call,
+            output,
+        ]);
+        let (sent, _) = one_request(which, None, history.clone(), text_fixture(), |_| {}).await;
+        assert_eq!(sent["input"], replayed, "{which:?}");
+        let (sent, _) = one_request(which, Some(plain), history, text_fixture(), |c| {
+            c.thinking_level = ThinkingLevel::Medium
+        })
+        .await;
+        assert_eq!(sent["input"], replayed, "{which:?} with an effort");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // prompt_cache_key and include gating
 // ---------------------------------------------------------------------------

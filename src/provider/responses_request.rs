@@ -34,6 +34,9 @@
 //!   (`fc_…` / `msg_…`) the same API gave them, recorded in the reasoning
 //!   item's stored JSON. Items with no replayed reasoning before them are
 //!   sent without ids, as before.
+//! - A non-reasoning model rejects reasoning input items, so neither
+//!   `include` nor any reasoning item is sent to one (the same test for
+//!   both), and the paired items then go without ids.
 
 use super::model::{ApiProtocol, OpenAiCompat};
 use super::responses_stream::{Flow, ResponsesStreamState, CALL_IDS_KEY, MESSAGE_ID_KEY};
@@ -52,6 +55,29 @@ pub(crate) const INCLUDE_ENCRYPTED_REASONING: &str = "reasoning.encrypted_conten
 /// to: only encrypted reasoning that came from that same protocol is
 /// replayed (OpenAI's and Azure's are separate services).
 pub(crate) fn build_request_body(config: &StreamConfig, protocol: ApiProtocol) -> Value {
+    // The effort capability comes from `ModelConfig::compat` (see
+    // `OpenAiCompat::max_reasoning_effort`); `None` means a `high` ceiling.
+    // `Off` omits it.
+    let default_compat = OpenAiCompat::default();
+    let compat = config
+        .model_config
+        .as_ref()
+        .and_then(|m| m.compat.as_ref())
+        .unwrap_or(&default_compat);
+    let effort = compat.openai_reasoning_effort(&config.model, config.thinking_level);
+
+    // Encrypted reasoning — asked for, and replayed from history — only for
+    // a reasoning model: declared by `ModelConfig::reasoning`, or implied by
+    // sending a reasoning effort (which a non-reasoning model rejects
+    // anyway). A model without reasoning has nothing to return for it and
+    // rejects reasoning input items ("Encrypted content is not supported
+    // with this model"), so neither is sent there — e.g. after
+    // `Agent::set_model` from a reasoning model to `gpt-4.1` on the same API.
+    let reasoning_model =
+        config.model_config.as_ref().is_some_and(|m| m.reasoning) || effort.is_some();
+    // Replay is keyed on the target protocol; `None` replays nothing.
+    let replay = reasoning_model.then_some(protocol);
+
     let mut input: Vec<Value> = Vec::new();
 
     for msg in &config.messages {
@@ -72,7 +98,7 @@ pub(crate) fn build_request_body(config: &StreamConfig, protocol: ApiProtocol) -
                     }));
                 }
             }
-            Message::Assistant { content, .. } => assistant_items(content, protocol, &mut input),
+            Message::Assistant { content, .. } => assistant_items(content, replay, &mut input),
             Message::ToolResult {
                 tool_call_id,
                 content,
@@ -129,27 +155,12 @@ pub(crate) fn build_request_body(config: &StreamConfig, protocol: ApiProtocol) -
         body["tools"] = json!(tools);
     }
 
-    // The effort capability comes from `ModelConfig::compat` (see
-    // `OpenAiCompat::max_reasoning_effort`); `None` means a `high` ceiling.
-    // `Off` omits it.
-    let default_compat = OpenAiCompat::default();
-    let compat = config
-        .model_config
-        .as_ref()
-        .and_then(|m| m.compat.as_ref())
-        .unwrap_or(&default_compat);
-    let effort = compat.openai_reasoning_effort(&config.model, config.thinking_level);
     if let Some(effort) = effort {
         body["reasoning"] = json!({"effort": effort});
     }
 
-    // Encrypted reasoning, for replay on the next turn. Only for a reasoning
-    // model: declared by `ModelConfig::reasoning`, or implied by sending a
-    // reasoning effort (which a non-reasoning model rejects anyway). A model
-    // without reasoning has nothing to return for it, and a request asking
-    // anyway risks a 400, so it is not sent there.
-    let reasoning_model = config.model_config.as_ref().is_some_and(|m| m.reasoning);
-    if reasoning_model || effort.is_some() {
+    // Encrypted reasoning, for replay on the next turn (see `reasoning_model`).
+    if reasoning_model {
         body["include"] = json!([INCLUDE_ENCRYPTED_REASONING]);
     }
 
@@ -201,7 +212,12 @@ fn input_parts(content: &[Content]) -> Vec<Value> {
 /// the ids the same API gave them, read from that reasoning item's stored
 /// JSON (`call_ids`, `message_id`; see [`ResponsesStreamState`]), so the
 /// reasoning item arrives with its paired item. Nothing else gets an id.
-fn assistant_items(content: &[Content], protocol: ApiProtocol, input: &mut Vec<Value>) {
+///
+/// `replay` is the protocol whose encrypted reasoning may be replayed, or
+/// `None` when the target model takes no reasoning items: then every
+/// reasoning item is skipped and its paired items go without ids, the same
+/// as after another API's reasoning.
+fn assistant_items(content: &[Content], replay: Option<ApiProtocol>, input: &mut Vec<Value>) {
     let mut pending_reasoning: Vec<Value> = Vec::new();
     // Ids recorded by the reasoning items replayed so far in this message.
     let mut call_ids: HashMap<String, String> = HashMap::new();
@@ -211,17 +227,23 @@ fn assistant_items(content: &[Content], protocol: ApiProtocol, input: &mut Vec<V
         match c {
             Content::Thinking {
                 redacted: Some(_), ..
-            } => match c.redacted_for(protocol).and_then(reasoning_item) {
-                Some(replayed) => {
-                    pending_reasoning.push(replayed.item);
-                    call_ids.extend(replayed.call_ids);
-                    message_id = replayed.message_id;
+            } => {
+                let Some(target) = replay else {
+                    debug!("Responses: target model takes no reasoning items; not replayed");
+                    continue;
+                };
+                match c.redacted_for(target).and_then(reasoning_item) {
+                    Some(replayed) => {
+                        pending_reasoning.push(replayed.item);
+                        call_ids.extend(replayed.call_ids);
+                        message_id = replayed.message_id;
+                    }
+                    None => debug!(
+                        "Responses ({target}): skipping encrypted reasoning from another \
+                         provider (or unreadable)"
+                    ),
                 }
-                None => debug!(
-                    "Responses ({protocol}): skipping encrypted reasoning from another \
-                     provider (or unreadable)"
-                ),
-            },
+            }
             Content::Text { text } if text.is_empty() => {}
             Content::Text { text } => {
                 input.append(&mut pending_reasoning);
@@ -260,8 +282,7 @@ fn assistant_items(content: &[Content], protocol: ApiProtocol, input: &mut Vec<V
     }
     if !pending_reasoning.is_empty() {
         debug!(
-            "Responses ({protocol}): {} trailing reasoning item(s) with no output after \
-             them; not replayed",
+            "Responses: {} trailing reasoning item(s) with no output after them; not replayed",
             pending_reasoning.len()
         );
     }

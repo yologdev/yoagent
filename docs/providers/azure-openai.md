@@ -107,6 +107,8 @@ When the key is empty, the provider sends no `api-key` header.
   Azure's reasoning guide describes the same replay ("Send those items back
   … in the `input` array of your next request"); the call or message that
   followed a reasoning item is replayed with its item `id`, as on OpenAI.
+  A deployment that is not marked as reasoning (and sends no effort) gets no
+  reasoning items replayed either, and their paired items go without ids.
   Encrypted reasoning from
   OpenAI's own API is not replayed to Azure, nor Azure's to OpenAI
 
