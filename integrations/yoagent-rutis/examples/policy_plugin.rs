@@ -267,9 +267,12 @@ async fn main() -> Result<(), BoxError> {
         // filtered result.
         .with_extension(bridge.extension().filters_tool_output());
 
+    // `prompt_with_sender` returns when the run has ended (`prompt` would
+    // return its receiver right away, with the run still going).
+    let (events, _receiver) = tokio::sync::mpsc::unbounded_channel();
     tokio::time::timeout(
         Duration::from_secs(10),
-        agent.prompt("Count some words, then clean up."),
+        agent.prompt_with_sender("Count some words, then clean up.", events),
     )
     .await
     .map_err(|_| "the agent run did not finish within 10 s")?;
