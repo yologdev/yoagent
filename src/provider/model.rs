@@ -502,7 +502,8 @@ pub struct OpenAiCompat {
     /// Read by the Chat Completions provider (when
     /// [`supports_reasoning_effort`](Self::supports_reasoning_effort) is set)
     /// **and** by the OpenAI Responses and Azure OpenAI providers, which take
-    /// it from `ModelConfig::compat` and ignore every other flag here. Not
+    /// it from `ModelConfig::compat` and otherwise read only
+    /// [`encrypted_reasoning`](Self::encrypted_reasoning). Not
     /// read on the DeepSeek ladder
     /// ([`supports_thinking_control`](Self::supports_thinking_control)), which
     /// has its own `low`/`high`/`max` mapping.
@@ -1096,9 +1097,10 @@ pub struct ModelConfig {
     #[serde(default)]
     pub headers: HashMap<String, String>,
     /// OpenAI quirk flags. The Chat Completions provider (`OpenAiCompletions`)
-    /// reads all of them; the OpenAI Responses and Azure OpenAI providers read
-    /// only [`OpenAiCompat::max_reasoning_effort`] (the reasoning-effort
-    /// ceiling) and ignore the rest. `None` means `OpenAiCompat::default()`
+    /// reads all of them except [`OpenAiCompat::encrypted_reasoning`]; the
+    /// OpenAI Responses and Azure OpenAI providers read only
+    /// [`OpenAiCompat::max_reasoning_effort`] (the reasoning-effort ceiling)
+    /// and [`OpenAiCompat::encrypted_reasoning`], and ignore the rest. `None` means `OpenAiCompat::default()`
     /// on Chat Completions and a `high` ceiling on Responses/Azure.
     #[serde(default)]
     pub compat: Option<OpenAiCompat>,
@@ -1687,7 +1689,8 @@ impl ModelConfig {
     /// (`ThinkingLevel::Off` always omits it). For a model with a higher
     /// ceiling, set `compat` to an [`OpenAiCompat`] carrying
     /// [`max_reasoning_effort`](OpenAiCompat::max_reasoning_effort) — the
-    /// Responses provider reads that field and ignores the rest.
+    /// Responses provider reads that field and `encrypted_reasoning`, and
+    /// ignores the rest.
     ///
     /// **`reasoning` is inferred from the id.** It is `false` for OpenAI's
     /// non-reasoning families — ids starting with `gpt-3`, `gpt-4` (so

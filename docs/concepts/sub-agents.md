@@ -79,7 +79,7 @@ When the parent LLM calls multiple sub-agents in a single response, they run con
 | `with_async_input_filter()` | Screen the task before the sub-agent runs; a `Reject` fails the tool call |
 | `with_shared_state()` / `with_scoped_shared_state()` | Shared key-value store (see [Shared State](#shared-state)) |
 | `with_context_config()` | Compaction budget for the sub-agent's context |
-| `with_model()` / `with_max_tokens()` / `with_temperature()` | Override model id and sampling settings |
+| `with_max_tokens()` / `with_temperature()` | Override sampling settings (the model comes from `from_config` / `from_provider`) |
 | `with_max_turns(N)` | Turn limit (default: 10). Primary guard against runaway execution. |
 | `with_execution_limits(ExecutionLimits)` | All per-delegation limits: turns, tokens, duration, loop detection (default: 10 / 1M / 300 s / on). |
 | `with_thinking()` | Enable extended thinking for the sub-agent |

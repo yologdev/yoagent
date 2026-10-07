@@ -78,7 +78,7 @@ pub enum Content {
     Thinking {
         thinking: String,
         signature: Option<String>,
-        redacted: Option<String>, // provider-encrypted reasoning (Anthropic `redacted_thinking`, Bedrock `redactedContent`)
+        redacted: Option<String>, // provider-encrypted reasoning (Anthropic `redacted_thinking`, Bedrock `redactedContent`, an OpenAI Responses / Azure reasoning item when encrypted reasoning is on)
         redacted_protocol: Option<ApiProtocol>, // the API that produced `redacted`
     },
     ToolCall {
