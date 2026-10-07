@@ -16,6 +16,7 @@
 //! ```
 //!
 //! ```no_run
+//! # #[cfg(feature = "native")]
 //! # async fn run() {
 //! use yoagent::provider::{prices, PriceSource};
 //! // Live (native only): fetch models.dev now, over the bundled snapshot;
