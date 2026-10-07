@@ -260,9 +260,23 @@ async fn nothing_is_published_after_the_host_stops() {
     let log = Log::default();
     let observer = root.plugin(observer_plugin(log.clone()));
     wait_active(&observer).await;
+    // Positive control: while the host runs, a run's events reach the
+    // listener within the window the negative check waits below, so an
+    // empty log after the shutdown is not just slow delivery.
+    const WINDOW: Duration = Duration::from_millis(500);
+    let mut agent = attached(&bridge, None);
+    run(&mut agent, "go").await;
+    tokio::time::sleep(WINDOW).await;
+    assert_eq!(
+        kinds(&log, None),
+        EXPECTED,
+        "while running, the whole run is published within the window"
+    );
+    log.lock().unwrap().clear();
+
     let mut agent = attached(&bridge, None);
     root.shutdown().await.unwrap();
     run(&mut agent, "go").await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert!(log.lock().unwrap().is_empty());
+    tokio::time::sleep(WINDOW).await;
+    assert!(log.lock().unwrap().is_empty(), "{:?}", log.lock().unwrap());
 }
