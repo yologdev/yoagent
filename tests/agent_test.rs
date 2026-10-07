@@ -423,6 +423,78 @@ async fn dropping_a_with_sender_future_cancels_the_run_and_the_agent_recovers() 
     assert_eq!(ends, vec![false], "the restored tool ran: {events:?}");
 }
 
+/// `finish` is safe to cancel: a `finish` dropped mid-wait leaves the run
+/// pending, and a later `finish` still joins it and restores the history.
+#[tokio::test]
+async fn a_dropped_finish_leaves_the_run_to_the_next_one() {
+    let mut agent = Agent::from_provider(calls_wait(), ModelConfig::mock())
+        .with_tools(vec![Box::new(WaitsForCancel)]);
+    let mut rx = agent.prompt("wait please").await;
+    let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+    let waited = tokio::time::timeout(std::time::Duration::from_millis(100), agent.finish()).await;
+    assert!(waited.is_err(), "the run is still blocked in its tool");
+    assert!(
+        agent.is_streaming(),
+        "the dropped finish left the run pending"
+    );
+
+    agent.abort();
+    agent.finish().await;
+    drain.await.unwrap();
+    assert!(!agent.is_streaming());
+    assert!(
+        agent
+            .messages()
+            .iter()
+            .any(|m| matches!(m, AgentMessage::Llm(Message::User { .. }))),
+        "the run's history came back"
+    );
+}
+
+/// A provider that panics mid-run.
+struct PanickingProvider;
+
+#[async_trait::async_trait]
+impl yoagent::provider::StreamProvider for PanickingProvider {
+    async fn stream(
+        &self,
+        _config: yoagent::provider::StreamConfig,
+        _tx: mpsc::UnboundedSender<yoagent::provider::StreamEvent>,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<Message, yoagent::provider::ProviderError> {
+        panic!("provider exploded");
+    }
+}
+
+/// A panic in a `*_with_sender` run reaches its caller, as it did when the
+/// loop ran inline; `prompt` + `finish` only log it.
+#[tokio::test]
+async fn a_panic_in_a_with_sender_run_reaches_the_caller() {
+    let caller = tokio::spawn(async {
+        let mut agent = Agent::from_provider(PanickingProvider, ModelConfig::mock());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        agent.prompt_with_sender("hi", tx).await;
+    });
+    let err = caller.await.expect_err("the panic propagated");
+    assert!(err.is_panic());
+    let payload = err.into_panic();
+    let text = payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_default();
+    assert!(text.contains("provider exploded"), "{text}");
+
+    // Positive control: the receiver path only logs it.
+    let mut agent = Agent::from_provider(PanickingProvider, ModelConfig::mock());
+    let mut rx = agent.prompt("hi").await;
+    while rx.recv().await.is_some() {}
+    agent.finish().await;
+    assert!(!agent.is_streaming());
+}
+
 /// Positive control for the test above: a `*_with_sender` future that is
 /// not dropped runs to the end without being cancelled.
 #[tokio::test]

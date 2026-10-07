@@ -1188,7 +1188,8 @@ impl Agent {
         let mut config = self.build_config();
         config.output_schema = output_schema;
 
-        let handle = crate::rt::spawn(async move {
+        // The run's spans stay children of the caller's span.
+        let handle = crate::rt::spawn(tracing::Instrument::in_current_span(async move {
             let (_new_messages, stats) = match input {
                 RunInput::Prompt(messages) => {
                     agent_loop_with_stats(messages, &mut context, &config, tx, cancel).await
@@ -1200,7 +1201,7 @@ impl Agent {
             // Sourced tools belong to this run only.
             context.tools.truncate(own_tools);
             (context.tools, context.messages, stats)
-        });
+        }));
 
         self.pending_completion = Some(handle);
     }
@@ -1210,11 +1211,21 @@ impl Agent {
     /// cancelled: it ends as aborted, its events still reach the sender, and
     /// the next [`finish`](Self::finish) or prompt takes the agent's state
     /// back.
+    ///
+    /// A panic in the run reaches the caller, as it did when these methods
+    /// ran the loop inline.
     async fn join_run(&mut self) {
         let stop_if_dropped = self.cancel.clone().map(CancellationToken::drop_guard);
-        self.finish().await;
+        let failed = self.join_pending().await;
         if let Some(guard) = stop_if_dropped {
             guard.disarm();
+        }
+        if let Some(e) = failed {
+            #[cfg(not(target_arch = "wasm32"))]
+            if e.is_panic() {
+                std::panic::resume_unwind(e.into_panic());
+            }
+            tracing::error!("Agent loop task failed: {}", e);
         }
     }
 
@@ -1228,9 +1239,15 @@ impl Agent {
     ///
     /// **Dropping this future stops the run** (wrap it in
     /// `tokio::time::timeout` to bound it): the run is cancelled and ends as
-    /// aborted, its last events (including [`AgentEvent::AgentEnd`]) still
-    /// reach `tx`, and the next [`finish`](Self::finish) or prompt restores
-    /// the agent's messages and tools. To steer or abort a run while it is
+    /// aborted, and the next [`finish`](Self::finish) or prompt restores the
+    /// agent's messages and tools. Its last events (including
+    /// [`AgentEvent::AgentEnd`]) still reach `tx` as long as the `Agent`
+    /// lives until the run has ended: call `finish()` after the timeout
+    /// rather than dropping the agent, whose `Drop` aborts the run.
+    ///
+    /// A panic in the run (outside a tool or hook, which are contained)
+    /// propagates out of this method. The agent's tools are lost with the
+    /// run, as they would be after a panic in [`prompt()`](Self::prompt). To steer or abort a run while it is
     /// going, use [`prompt()`](Self::prompt), which leaves the agent free.
     ///
     /// ```rust,no_run
@@ -1308,25 +1325,31 @@ impl Agent {
     /// Safe to cancel: if this future is dropped before the run ends, the run
     /// stays pending and the next `finish` (or prompt) joins it.
     pub async fn finish(&mut self) {
+        if let Some(e) = self.join_pending().await {
+            tracing::error!("Agent loop task failed: {}", e);
+        }
+    }
+
+    /// Join the pending run, if any, and take its state back. Returns the
+    /// task's error when it panicked or was aborted; the agent's tools went
+    /// with it, so the agent then has none.
+    async fn join_pending(&mut self) -> Option<crate::rt::JoinError> {
         // Await the handle in place and take it only once the run has ended,
         // so dropping this future mid-wait doesn't lose the run (and with it
         // the agent's tools and history).
-        if let Some(handle) = self.pending_completion.as_mut() {
-            let joined = handle.await;
-            self.pending_completion = None;
-            match joined {
-                Ok((tools, messages, stats)) => {
-                    self.tools = tools;
-                    self.messages = messages;
-                    self.spend.merge(&stats);
-                }
-                Err(e) => {
-                    // Task panicked or was cancelled — log and leave state as-is
-                    tracing::error!("Agent loop task failed: {}", e);
-                }
+        let handle = self.pending_completion.as_mut()?;
+        let joined = handle.await;
+        self.pending_completion = None;
+        self.is_streaming = false;
+        self.cancel = None;
+        match joined {
+            Ok((tools, messages, stats)) => {
+                self.tools = tools;
+                self.messages = messages;
+                self.spend.merge(&stats);
+                None
             }
-            self.is_streaming = false;
-            self.cancel = None;
+            Err(e) => Some(e),
         }
     }
 
