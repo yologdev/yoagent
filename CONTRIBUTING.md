@@ -27,8 +27,19 @@ cargo clippy --all-targets --all-features
 cargo test --all-features
 ```
 
-CI additionally runs a Windows compile check, an MSRV (1.86) check, and a GASP conformance job
-that emits an agent repo and validates it against the protocol's checker.
+Also run `RUSTDOCFLAGS="-Dwarnings" cargo doc --no-deps --all-features`, which CI runs too.
+
+**What CI runs:** the checks above on Linux and macOS; a Windows compile check; a pinned MSRV
+(1.86) job; per-feature builds (default, `openapi`, `gasp`, `decision`, `--no-default-features`);
+a `wasm32-unknown-unknown` clippy job plus the wasm32 test suite under Node; the
+`yoagent-rutis` and `yoagent-workers` integration jobs; and a GASP conformance job that emits an
+agent repo and validates it against the protocol's checker. Mutation testing runs weekly
+(`.github/workflows/mutants.yml`).
+
+**How the crate is tested:** every test runs offline. `MockProvider` scripts the model, and
+`wiremock` serves the HTTP-level suites (provider streams, Bedrock auth and eventstream, MCP over
+HTTP, OpenAPI, decision backends, price fetching). Opt-in live checks and benchmarks are
+`#[ignore]`d; see "Live smoke" below.
 
 ## Conventions
 
