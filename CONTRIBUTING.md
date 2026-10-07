@@ -12,9 +12,8 @@ cargo test --all-features
 
 You need **Rust 1.86 or newer** — that's the MSRV, and CI checks it on every PR.
 
-No API keys are required to develop on yoagent. Of the 463 tests, 456 run with no network and no
-credentials; the 7 that need a live key are `#[ignore]`d by default and live in
-`tests/integration_*.rs`.
+No API keys are required to develop on yoagent. Every test that runs by default needs no network
+and no credentials; the few that call a live API are `#[ignore]`d.
 
 ## Before you open a PR
 
@@ -36,7 +35,7 @@ a `wasm32-unknown-unknown` clippy job plus the wasm32 test suite under Node; the
 agent repo and validates it against the protocol's checker. Mutation testing runs weekly
 (`.github/workflows/mutants.yml`).
 
-**How the crate is tested:** every test runs offline. `MockProvider` scripts the model, and
+**How the crate is tested:** every test that runs by default is offline. `MockProvider` scripts the model, and
 `wiremock` serves the HTTP-level suites (provider streams, Bedrock auth and eventstream, MCP over
 HTTP, OpenAPI, decision backends, price fetching). Opt-in live checks and benchmarks are
 `#[ignore]`d; see "Live smoke" below.

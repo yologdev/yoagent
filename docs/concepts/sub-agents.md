@@ -2,6 +2,12 @@
 
 Sub-agents let a parent agent delegate tasks to child agent loops, each with their own system prompt, tools, and provider. The parent LLM invokes them like any other tool.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="../images/subagents.svg">
+  <source media="(prefers-color-scheme: light)" srcset="../images/subagents-light.svg">
+  <img alt="Sub-agents sharing artifacts by reference through SharedState" src="../images/subagents.svg" width="100%">
+</picture>
+
 ## Overview
 
 ```

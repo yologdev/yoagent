@@ -177,12 +177,12 @@ Built something on yoagent? [Open a PR](CONTRIBUTING.md) and add it here — we'
 
 Each line links to its chapter in [the book](https://yologdev.github.io/yoagent/).
 
-- **The loop** — a full event stream, parallel / sequential / batched tools, steering and follow-ups, execution limits, loop detection, retry with backoff and jitter. [Agent loop](https://yologdev.github.io/yoagent/concepts/agent-loop.html) · [Events](https://yologdev.github.io/yoagent/concepts/messages-events.html) · [Retry](https://yologdev.github.io/yoagent/concepts/retry.html)
+- **The loop** — a full event stream, parallel / sequential / batched tools, steering and follow-ups, execution limits, retry with backoff and jitter, and the original hooks (`ToolMiddleware`, input filters, `TurnHook`, lifecycle callbacks). [Agent loop](https://yologdev.github.io/yoagent/concepts/agent-loop.html) · [Events](https://yologdev.github.io/yoagent/concepts/messages-events.html) · [Retry](https://yologdev.github.io/yoagent/concepts/retry.html) · [Callbacks & hooks](https://yologdev.github.io/yoagent/concepts/callbacks.html)
 - **Extensions** — one plug-in contract for the whole run: add tools, check input, gate and rewrite tool calls, redact results, verify the final answer, enforce a dollar `Budget`, audit events, and cover sub-agents with host policy. [Extensions](https://yologdev.github.io/yoagent/concepts/extensions.html)
 - **Providers** — 7 native protocols (Anthropic, OpenAI Completions and Responses, Azure, Gemini, Vertex, Bedrock) reaching 20+ providers, with thinking controls, prompt-cache hints and centralised context-overflow detection. [Providers](https://yologdev.github.io/yoagent/providers/overview.html) · [Prompt caching](https://yologdev.github.io/yoagent/concepts/prompt-caching.html)
 - **Tools** — built-in `bash`, file read/write/edit, `list_files` and `search` (native), custom tools via one trait, MCP over stdio or HTTP, OpenAPI specs, and per-run `ToolSource`s. [Tools](https://yologdev.github.io/yoagent/concepts/tools.html) · [MCP](https://yologdev.github.io/yoagent/guides/mcp.html) · [OpenAPI](https://yologdev.github.io/yoagent/guides/openapi.html)
 - **Sub-agents and shared state** — delegate to child loops with their own model and tools; pass large artifacts by reference. [Sub-agents](https://yologdev.github.io/yoagent/concepts/sub-agents.html)
-- **Context** — usage-calibrated tracking, tiered compaction, optional `LlmCompaction`. [Context management](https://yologdev.github.io/yoagent/concepts/context-management.html)
+- **Context** — usage-calibrated tracking, tiered compaction, optional `LlmCompaction`, loop detection. [Context management](https://yologdev.github.io/yoagent/concepts/context-management.html)
 - **Sessions, skills, structured outputs** — branching session trees with JSONL persistence, AgentSkills `SKILL.md` loading, typed `prompt_structured::<T>()`. [Session trees](https://yologdev.github.io/yoagent/concepts/session-trees.html) · [Skills](https://yologdev.github.io/yoagent/concepts/skills.html) · [Structured outputs](https://yologdev.github.io/yoagent/concepts/structured-outputs.html)
 - **Decision models** (feature `decision`) — typed yes/no, one-of-N and score judgments in a few hundred ms; a tool gate and an input guard built on them. [Decision models](https://yologdev.github.io/yoagent/concepts/decision-models.html)
 - **Cost and telemetry** — per-model pricing from a data file, `SessionStats` on every run including sub-agents, `tracing` spans with tokens and cost. [Pricing](https://yologdev.github.io/yoagent/concepts/pricing.html) · [Telemetry](https://yologdev.github.io/yoagent/concepts/telemetry.html)
@@ -197,7 +197,7 @@ Eleven of the runnable examples in [`examples/`](examples/) are below; five need
 
 | Example | What it shows | Key needed |
 |---|---|---|
-| [`cli`](examples/cli.rs) | A 385-line coding agent — all tools, skills, streaming, colored output. Like a baby Claude Code | optional¹ |
+| [`cli`](examples/cli.rs) | A ~400-line coding agent — all tools, skills, streaming, colored output. Like a baby Claude Code | optional¹ |
 | [`rlm`](examples/rlm.rs) | An LLM that explores a codebase on its own by spawning sub-agents | yes |
 | [`code_review`](examples/code_review.rs) | Three sub-agents reviewing a diff in parallel, results merged | yes |
 | [`shared_state`](examples/shared_state.rs) | Passing a large artifact between sub-agents by reference | yes |
