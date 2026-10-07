@@ -1,4 +1,5 @@
 //! `YOAGENT_PRICES` names a partial override file, read once on first use.
+//! On its own it is an opt-in for exactly the models it lists.
 //!
 //! Its own test binary with a single test: the variable is read when the
 //! process-wide table is first touched, so nothing may touch it earlier.
@@ -30,10 +31,20 @@ fn env_var_file_overrides_what_it_lists_and_is_read_once() {
             .output_per_million,
         15.0
     );
-    // Unlisted: built-in.
+    // Unlisted: unpriced — the file alone opts in only what it lists...
+    assert!(ModelConfig::claude_opus_5().cost.is_none());
+    // ...until the bundled snapshot is enabled under it.
+    yoagent::provider::prices::enable_bundled();
     assert_eq!(
         ModelConfig::claude_opus_5().cost,
         PriceTable::builtin().cost("anthropic", "claude-opus-5")
+    );
+    assert_eq!(
+        ModelConfig::claude_haiku_4_5()
+            .cost
+            .unwrap()
+            .input_per_million,
+        0.8
     );
 
     // The outcome is visible to the host, with the same warnings

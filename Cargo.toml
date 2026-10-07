@@ -110,6 +110,10 @@ name = "price_fetch_test"
 required-features = ["native"]
 
 [[test]]
+name = "price_enable_test"
+required-features = ["native"]
+
+[[test]]
 name = "integration_anthropic"
 required-features = ["native"]
 

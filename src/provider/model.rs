@@ -65,13 +65,20 @@ pub(crate) fn openai_id_is_reasoning(id: &str) -> bool {
 ///
 /// # These are a snapshot, not an authority
 ///
-/// Built-in rates live in `src/provider/prices.json` (see
+/// **Nothing is priced by default**: constructors leave `cost` at `None`
+/// until the process opts in, with
+/// [`prices::enable_bundled`](crate::provider::prices::enable_bundled)
+/// (offline) or `prices::enable_live` (native). See
+/// [`prices`](crate::provider::prices).
+///
+/// The bundled rates live in `src/provider/prices.json` (see
 /// [`PriceTable`](crate::provider::PriceTable)), each entry verified against
 /// the vendor's published pricing on the date it records. Vendors reprice,
 /// and a compiled-in number cannot notice — `claude_sonnet_5` shipped Sonnet
 /// 4.6's rates across 18 releases, v0.9.0 through v0.16.5, overstating every
 /// `cost_usd` for that model by 50%, and nothing detected it. You can
-/// override the built-in data without waiting for a release: process-wide
+/// override the bundled data without waiting for a release: live with
+/// `prices::enable_live` (native), process-wide
 /// with [`global::install_override`](crate::provider::prices::global::install_override)
 /// or the `YOAGENT_PRICES` environment variable (both apply to configs built
 /// afterwards), or per config with [`ModelConfig::with_prices`] and
@@ -110,7 +117,8 @@ pub(crate) fn openai_id_is_reasoning(id: &str) -> bool {
 /// ```
 /// # use yoagent::provider::{CostConfig, ModelConfig};
 /// # yoagent::provider::prices::global::clear_override(); // ignore a developer's YOAGENT_PRICES
-/// // A named preset is priced; adjust one rate and keep the rest.
+/// yoagent::provider::prices::enable_bundled(); // opt in to the bundled prices
+/// // A named preset is then priced; adjust one rate and keep the rest.
 /// let mut config = ModelConfig::claude_sonnet_5();
 /// config
 ///     .cost
@@ -1004,10 +1012,12 @@ pub struct ModelConfig {
     pub max_tokens: u32,
     /// Per-token rates, or `None` when this crate does not know the price.
     ///
-    /// Constructors fill it from the price table
-    /// ([`PriceTable`](crate::provider::PriceTable), built from
-    /// `src/provider/prices.json`) **when the config is built**. The named
-    /// presets (`claude_fable_5_1`, `gpt_5_5`, …) are always listed. The
+    /// **`None` from every constructor until the process opts in to prices**
+    /// ([`prices::enable_bundled`](crate::provider::prices::enable_bundled),
+    /// `prices::enable_live`, a user layer). After that, constructors fill
+    /// it from the process-wide price table **when the config is built**;
+    /// the bundled snapshot (`src/provider/prices.json`) lists every named
+    /// preset (`claude_fable_5_1`, `gpt_5_5`, …). The
     /// generic first-party constructors ([`anthropic`](Self::anthropic),
     /// [`openai`](Self::openai), [`openai_responses`](Self::openai_responses),
     /// [`google`](Self::google), [`xai`](Self::xai), [`groq`](Self::groq),
@@ -1028,7 +1038,8 @@ pub struct ModelConfig {
     /// ([`install_override`](crate::provider::prices::global::install_override)
     /// or the `YOAGENT_PRICES` file) over an opt-in fetched layer
     /// ([`install_fetched`](crate::provider::prices::global::install_fetched))
-    /// over the built-in data. It is read when the constructor runs, so
+    /// over the bundled snapshot (once enabled); empty by default. It is
+    /// read when the constructor runs, so
     /// install prices **before** building configs, or call
     /// [`reprice`](Self::reprice) afterwards.
     ///
@@ -1165,6 +1176,7 @@ impl ModelConfig {
 
     /// Repeat the constructor's price lookup against the process-wide table
     /// **now** — for a config built before
+    /// [`enable_bundled`](super::prices::enable_bundled), `enable_live`,
     /// [`global::install_override`](super::prices::global::install_override)
     /// or [`global::install_fetched`](super::prices::global::install_fetched).
     ///
@@ -1182,11 +1194,11 @@ impl ModelConfig {
     /// # use yoagent::provider::{ModelConfig, PriceTable};
     /// use yoagent::provider::prices::global;
     /// # global::clear_override(); // ignore a developer's YOAGENT_PRICES
-    /// let config = ModelConfig::claude_sonnet_5(); // built early
+    /// let config = ModelConfig::claude_sonnet_5(); // built before any opt-in
+    /// assert!(config.cost.is_none());
     /// let _ = global::install_override(PriceTable::from_json_str(
     ///     r#"{"schema": 1, "providers": {"anthropic": {"claude-sonnet-5": {"input": 1.8, "output": 9.0}}}}"#,
     /// )?);
-    /// assert_eq!(config.cost.as_ref().unwrap().input_per_million, 2.0);
     /// let config = config.reprice();
     /// assert_eq!(config.cost.unwrap().input_per_million, 1.8);
     /// # global::clear_override();
@@ -1206,7 +1218,8 @@ impl ModelConfig {
     /// not, `cost` is left as it is. It **never clears a price**, so a
     /// partial table overrides exactly what it contains, as
     /// [`PriceTable::layered`] does. To make a table the whole authority,
-    /// start from [`PriceTable::builtin`] and layer yours on top.
+    /// start from [`PriceTable::builtin`] (the bundled snapshot) and layer
+    /// yours on top. It needs no opt-in: the table you pass is the opt-in.
     ///
     /// Unlike the process-wide overrides this touches no global state, and
     /// it **applies to any config, gateways and custom endpoints included**
@@ -1275,8 +1288,9 @@ impl ModelConfig {
     /// and tool-forced structured outputs, which every gateway accepts. The
     /// context window and output limit are generic (200K / 16K); for a
     /// current model prefer its preset — [`claude_sonnet_5`](Self::claude_sonnet_5)
-    /// and friends — which sets those too. Pricing comes from the price table
-    /// either way.
+    /// and friends — which sets those too. Pricing comes from the process-wide price
+    /// table either way — none until the process opts in
+    /// ([`prices`](crate::provider::prices)).
     pub fn anthropic(id: impl Into<String>, name: impl Into<String>) -> Self {
         let id = id.into();
         let compat = id
@@ -1639,7 +1653,8 @@ impl ModelConfig {
     /// [`OpenAiResponsesProvider`](crate::provider::OpenAiResponsesProvider)
     /// and reads the key from `OPENAI_API_KEY`.
     ///
-    /// Priced when `prices.json` lists the id (as for [`openai`](Self::openai)),
+    /// Priced when the process-wide price table lists the id (as for
+    /// [`openai`](Self::openai); nothing is listed until the process opts in),
     /// else `cost: None`; set `cost` for a model it does not list.
     ///
     /// `compat` is `None`, so reasoning effort tops out at `high`
@@ -1904,7 +1919,8 @@ impl ModelConfig {
     /// tune it; `Off` omits the field, which means Meta's default (medium)
     /// applies — not "no reasoning".
     ///
-    /// Priced per model id from `prices.json`: `muse-spark-1.1` and
+    /// Priced per model id once the process opts in to prices (see
+    /// [`prices`](crate::provider::prices)); the bundled snapshot lists `muse-spark-1.1` and
     /// `muse-spark-1.2` carry the standard rates (verified 2026-08-19). Any
     /// other id is `cost: None` — through 0.19 every id got those rates, so
     /// `ModelConfig::meta("muse-spark-1.2-contributor", ..)` overstated the
@@ -2102,6 +2118,7 @@ mod tests {
 
     #[test]
     fn meta_preset_matches_launch_specs() {
+        crate::provider::prices::enable_bundled();
         let mc = ModelConfig::meta("muse-spark-1.1", "Muse Spark 1.1");
         assert_eq!(mc.provider, "meta");
         assert_eq!(mc.api, ApiProtocol::OpenAiCompletions);
@@ -2257,6 +2274,7 @@ mod tests {
 
     #[test]
     fn test_new_generation_presets() {
+        crate::provider::prices::enable_bundled();
         let fable = ModelConfig::claude_fable_5();
         assert_eq!(fable.id, "claude-fable-5");
         assert_eq!(fable.api, ApiProtocol::AnthropicMessages);
@@ -2337,6 +2355,7 @@ mod tests {
 
     #[test]
     fn gpt_6_presets() {
+        crate::provider::prices::enable_bundled();
         for (mc, id) in [
             (ModelConfig::gpt_6_astra(), "gpt-6-astra"),
             (ModelConfig::gpt_6_sol(), "gpt-6-sol"),
@@ -2410,6 +2429,7 @@ mod tests {
     /// each kind: the dollar figures are OpenAI's published per-1M rates.
     #[test]
     fn gpt_6_rates_per_band() {
+        crate::provider::prices::enable_bundled();
         // (preset, short in/cached/write/out, long in/cached/write/out)
         type Band = [f64; 4];
         let cases: [(ModelConfig, Band, Band); 3] = [
@@ -2474,6 +2494,7 @@ mod tests {
 
     #[test]
     fn gpt_5_5_long_band() {
+        crate::provider::prices::enable_bundled();
         let cost = ModelConfig::gpt_5_5().cost.unwrap();
         let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
         // Short band unchanged: $5 in, $0.50 cached, $30 out, no cache-write charge.
@@ -2976,6 +2997,7 @@ mod tests {
     /// with exactly the named preset's rates.
     #[test]
     fn generic_constructors_price_listed_ids() {
+        crate::provider::prices::enable_bundled();
         let pairs = [
             (
                 ModelConfig::anthropic("claude-sonnet-5", "S"),
@@ -3023,6 +3045,7 @@ mod tests {
 
     #[test]
     fn named_presets_are_priced() {
+        crate::provider::prices::enable_bundled();
         for mc in [
             ModelConfig::claude_fable_5(),
             ModelConfig::claude_fable_5_1(),
@@ -3050,6 +3073,7 @@ mod tests {
     /// `None` must not be written as `null` (older releases would reject it).
     #[test]
     fn cost_serde_back_compat() {
+        crate::provider::prices::enable_bundled();
         let mut v = serde_json::to_value(ModelConfig::claude_sonnet_5()).unwrap();
 
         // A priced object round-trips to Some with its rates.

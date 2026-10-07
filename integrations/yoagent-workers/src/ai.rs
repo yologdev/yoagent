@@ -150,25 +150,30 @@ impl DecisionBackend for AiBackend {
 }
 
 /// Clef through the Worker's AI binding: model `clef`, priced at the
-/// `cloudflare/clef` rate yoagent's price table holds when this is called
-/// ($0.24 per million input tokens by default). A later
+/// `cloudflare/clef` rate yoagent's process-wide price table holds when this
+/// is called — **unpriced unless the Worker opted in to prices first**
+/// ([`enable_bundled`](yoagent::provider::prices::enable_bundled): $0.24 per
+/// million input tokens). A later opt-in or
 /// [`install_override`](yoagent::provider::prices::global::install_override)
-/// does not reprice the returned model; with no rate in the table it is
-/// unpriced (logged).
+/// does not reprice the returned model; with prices enabled but no rate in
+/// the table it is unpriced (logged).
 pub fn clef(ai: impl Into<JsValue>) -> DecisionModel {
     model(ai, CLEF, "clef")
 }
 
 /// Clef Flash through the Worker's AI binding: model `clef-flash`, priced
 /// like [`clef`] at the `cloudflare/clef-flash` rate ($0.09 per million input
-/// tokens by default).
+/// tokens in the bundled snapshot; unpriced without an opt-in).
 pub fn clef_flash(ai: impl Into<JsValue>) -> DecisionModel {
     model(ai, CLEF_FLASH, "clef-flash")
 }
 
 fn model(ai: impl Into<JsValue>, path: &str, id: &str) -> DecisionModel {
-    let cost = yoagent::provider::prices::global::resolved().cost(PRICE_PROVIDER, id);
-    if cost.is_none() {
+    use yoagent::provider::prices::global;
+    let cost = global::resolved().cost(PRICE_PROVIDER, id);
+    // Unpriced is yoagent's default; a missing rate is news only once the
+    // Worker opted in to prices.
+    if cost.is_none() && global::pricing_enabled() {
         tracing::warn!("no price for {PRICE_PROVIDER}/{id} in the price table; {id} is unpriced");
     }
     DecisionModel::from_backend(AiBackend::new(ai, path), id).with_cost(cost)

@@ -204,6 +204,9 @@ async fn fetch(mut req: Request, env: Env, _ctx: Context) -> Result<Response> {
     // `?gate=jev`), with a timer around each call and the preset's price.
     let started = yoagent::rt::Instant::now();
     let gate_ms = Rc::new(RefCell::new(Vec::new()));
+    // Nothing is priced by default: opt in to the bundled snapshot
+    // (offline, idempotent) so the gate's spend is reported.
+    yoagent::provider::prices::enable_bundled();
     let prices = yoagent::provider::prices::global::resolved();
     let (backend, model_id, cost): (Box<dyn DecisionBackend>, &str, _) = if use_jev {
         let key = match required_secret(&env, "TYPESAFE_API_KEY") {

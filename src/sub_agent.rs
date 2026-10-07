@@ -206,7 +206,9 @@ impl SubAgentTool {
     /// style: call it before handing the tool to an agent, because a
     /// registered tool is shared and immutable. Constructors resolve prices
     /// when they run, so either install prices
-    /// ([`global::install_override`](crate::provider::prices::global::install_override),
+    /// ([`prices::enable_bundled`](crate::provider::prices::enable_bundled),
+    /// `prices::enable_live`,
+    /// [`global::install_override`](crate::provider::prices::global::install_override),
     /// [`global::install_fetched`](crate::provider::prices::global::install_fetched))
     /// before building the config, or call this afterwards. Same rules as
     /// [`ModelConfig::reprice`].

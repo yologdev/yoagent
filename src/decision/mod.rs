@@ -207,10 +207,12 @@ impl std::fmt::Debug for DecisionModel {
 impl DecisionModel {
     /// TypeSafe's Jev (`jev-latest`), key from `TYPESAFE_API_KEY` and base
     /// URL from `TYPESAFE_BASE_URL` (default `https://api.typesafe.ai`), both
-    /// read at call time. Priced from the built-in table by the versioned id
-    /// the API reports ($0.042 per million input tokens for `jev-1.13.0`;
-    /// output is free) — while the base URL is TypeSafe's host; pointed
-    /// elsewhere it is unpriced.
+    /// read at call time. Priced from the process-wide price table by the
+    /// versioned id the API reports — while the base URL is TypeSafe's host;
+    /// pointed elsewhere it is unpriced. **Unpriced until the process opts
+    /// in** ([`prices::enable_bundled`](crate::provider::prices::enable_bundled)
+    /// or a user layer; the bundled snapshot has $0.042 per million input
+    /// tokens for `jev-1.13.0`, output free).
     pub fn jev() -> Self {
         Self {
             backend: Slot::SystemOne(SystemOneBackend::typesafe()),
@@ -250,10 +252,11 @@ impl DecisionModel {
     /// (Workers AI Read and Edit) is read at call time from
     /// `CLOUDFLARE_API_TOKEN`, then `CLOUDFLARE_AUTH_TOKEN`, or set with
     /// [`with_api_key`](Self::with_api_key) — on wasm32 there is no process
-    /// environment. Priced from the resolved price table ($0.24 per million
-    /// input tokens by default) by the model id the response reports; that is
-    /// the list price, while Cloudflare bills in neurons with a daily free
-    /// allocation.
+    /// environment. Priced from the process-wide price table by the model id
+    /// the response reports — **unpriced until the process opts in**
+    /// ([`prices::enable_bundled`](crate::provider::prices::enable_bundled):
+    /// $0.24 per million input tokens). That is the list price, while
+    /// Cloudflare bills in neurons with a daily free allocation.
     ///
     /// Keep the preset's model id: Clef's input schema accepts only `clef`
     /// and `clef-flash`, each at its own URL, and
@@ -553,7 +556,7 @@ impl DecisionModel {
                 if !on_typesafe {
                     return None;
                 }
-                crate::provider::prices::global::resolved().cost(TYPESAFE_PRICE_PROVIDER, model)?
+                crate::provider::prices::global::resolved_cost(TYPESAFE_PRICE_PROVIDER, model)?
             }
             Pricing::CloudflareList => {
                 let on_cloudflare =
@@ -564,8 +567,12 @@ impl DecisionModel {
                 // The model may report itself by its catalog path.
                 let id = model.strip_prefix("@cf/cloudflare/").unwrap_or(model);
                 let cost =
-                    crate::provider::prices::global::resolved().cost(CLOUDFLARE_PRICE_PROVIDER, id);
-                if cost.is_none() && warn_once(format!("unlisted:{CLOUDFLARE_PRICE_PROVIDER}/{id}"))
+                    crate::provider::prices::global::resolved_cost(CLOUDFLARE_PRICE_PROVIDER, id);
+                // Unpriced is the default; an unlisted id is news only once
+                // the process opted in to prices.
+                if cost.is_none()
+                    && crate::provider::prices::global::pricing_enabled()
+                    && warn_once(format!("unlisted:{CLOUDFLARE_PRICE_PROVIDER}/{id}"))
                 {
                     tracing::warn!(
                         model = %id,
@@ -1080,6 +1087,7 @@ mod pricing_tests {
 
     #[test]
     fn clef_prices_by_model_only_on_cloudflare() {
+        crate::provider::prices::enable_bundled();
         let usage = DecisionUsage::new(2_000_000, 500);
         let clef = DecisionModel::clef("acct");
         let cost = clef.cost_usd("clef", &usage).unwrap();
@@ -1105,6 +1113,7 @@ mod pricing_tests {
 
     #[test]
     fn jev_prices_by_reported_version_only_on_typesafe() {
+        crate::provider::prices::enable_bundled();
         let usage = DecisionUsage::new(2_000_000, 500);
         let jev = DecisionModel {
             backend: Slot::SystemOne(

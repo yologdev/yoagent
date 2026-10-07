@@ -2,7 +2,8 @@
 //! fetched layer, what each install reports, and `reprice`.
 //!
 //! Every test mutates process-wide state or asserts on `tracing` output, so
-//! all of them serialize on `LOCK` and start from built-in data only.
+//! all of them serialize on `LOCK` and start from the bundled snapshot only
+//! (opted in with `prices::enable_bundled`).
 
 use std::sync::{Arc, Mutex, MutexGuard};
 use tracing_subscriber::layer::SubscriberExt;
@@ -15,6 +16,7 @@ fn exclusive() -> MutexGuard<'static, ()> {
     let guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     global::clear_override();
     global::clear_fetched();
+    yoagent::provider::prices::enable_bundled();
     guard
 }
 
@@ -400,7 +402,7 @@ fn add_only_merges_and_never_overrides() {
     assert!(ModelConfig::deepseek("deepseek-flash", "D").cost.is_none());
 }
 
-/// Disagreements with the built-in data are logged: the first five, then
+/// Disagreements with the bundled snapshot are logged: the first five, then
 /// a count of the rest.
 #[test]
 fn fetched_disagreements_are_logged_and_truncated() {
@@ -421,7 +423,7 @@ fn fetched_disagreements_are_logged_and_truncated() {
     assert_eq!(changes.len(), 7);
     let log = warns
         .iter()
-        .find(|w| w.contains("disagrees with the built-in data"))
+        .find(|w| w.contains("disagrees with the bundled snapshot"))
         .expect("the disagreement is logged");
     assert!(log.contains("on 7 model(s)"), "{log}");
     assert!(log.contains("and 2 more"), "{log}");

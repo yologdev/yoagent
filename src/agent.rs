@@ -246,6 +246,8 @@ impl Agent {
     /// Re-price this agent's model config against the process-wide price
     /// table now — [`ModelConfig::reprice`] on the stored config. For an
     /// agent built before
+    /// [`prices::enable_bundled`](crate::provider::prices::enable_bundled),
+    /// `prices::enable_live`,
     /// [`global::install_override`](crate::provider::prices::global::install_override)
     /// or [`global::install_fetched`](crate::provider::prices::global::install_fetched):
     /// constructors resolve prices when they run, so either install prices

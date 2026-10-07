@@ -88,8 +88,8 @@ impl StreamProvider for BulkProvider {
 /// Resolve a model id to its named preset where one exists.
 ///
 /// Prices alone would not need this: the generic constructors look a listed
-/// id up in `prices.json` too. The presets matter for everything else they
-/// set — the 1M context window this harness measures compaction against, the
+/// id up in the bundled `prices.json` (enabled in `main`) too. The presets
+/// matter for everything else they set — the 1M context window this harness measures compaction against, the
 /// max output, and for GPT-6 the Responses API. Ids the price table does not
 /// list come back unpriced, which blanks the cost column — the one number
 /// this harness exists to surface — so that is noted.
@@ -137,7 +137,9 @@ fn noting_unpriced(config: ModelConfig) -> ModelConfig {
 }
 
 fn note_unpriced(model: &str) {
-    eprintln!("note: prices.json does not list '{model}' — the cost column will be blank");
+    eprintln!(
+        "note: the bundled prices.json does not list '{model}' — the cost column will be blank"
+    );
 }
 
 /// A DeepSeek config carrying peak-window rates. `cache_write` is left unset
@@ -348,6 +350,9 @@ fn briefings(messages: &[AgentMessage]) -> Vec<String> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // The cost column needs prices: opt in to the bundled snapshot before any
+    // config is built (nothing is priced by default).
+    yoagent::provider::prices::enable_bundled();
     // INFO surfaces the strategy's own per-compaction line, which reports the
     // cost even when no event sender is wired. `env-filter` is not among the
     // crate's tracing-subscriber features, so this is level-based rather than

@@ -2,8 +2,11 @@
 //! GitHub, or any URL serving the `prices.json` format.
 //!
 //! Nothing here runs unless the caller asks, and nothing here installs a
-//! table: pass the result to [`global::install_fetched`](super::global::install_fetched)
-//! (process-wide, above the built-in data and below any user override) or
+//! table: [`enable_live`](super::enable_live) /
+//! [`enable_live_cached`](super::enable_live_cached) fetch and install over
+//! the bundled snapshot in one call; or pass a fetched table to
+//! [`global::install_fetched`](super::global::install_fetched)
+//! (process-wide, above the bundled snapshot and below any user override) or
 //! [`ModelConfig::with_prices`](crate::provider::ModelConfig::with_prices)
 //! (one config).
 
@@ -33,7 +36,7 @@ const CACHE_MARKER: &str = "yoagent_price_cache";
 ///
 /// # Trust
 ///
-/// A table installed with the default policy overrides the built-in data for
+/// A table installed with the default policy overrides the bundled snapshot for
 /// every model it lists, so pick a source you trust for the models you use:
 ///
 /// - [`YoagentMain`](Self::YoagentMain) is this crate's own `prices.json` on
@@ -42,7 +45,7 @@ const CACHE_MARKER: &str = "yoagent_price_cache";
 /// - [`ModelsDev`](Self::ModelsDev) is [models.dev](https://models.dev), a
 ///   community-maintained database covering far more models. It is **not
 ///   authoritative** and has been provably wrong before (Claude context-tier
-///   data, DeepSeek V4 Pro's price). Installing it logs the built-in models
+///   data, DeepSeek V4 Pro's price). Installing it logs the snapshot models
 ///   where it disagrees (the first few, and a count) and returns them all;
 ///   the fetched rates win unless you install with
 ///   [`InstallPolicy::AddOnly`](super::global::InstallPolicy::AddOnly).
@@ -142,7 +145,7 @@ pub struct CacheOptions {
     /// day.
     pub max_age: Duration,
     /// When the fetch fails, an expired cache no older than this is used
-    /// instead of the built-in data. Default: seven days. `Duration::MAX`
+    /// instead of the bundled snapshot. Default: seven days. `Duration::MAX`
     /// accepts a cache of any age, including one whose age is unknown.
     pub max_stale: Duration,
     /// The fetch timeout. Default [`DEFAULT_FETCH_TIMEOUT`].
@@ -208,14 +211,16 @@ pub enum PriceOrigin {
         age: Option<Duration>,
         fetch_error: PriceError,
     },
-    /// The fetch failed and there was no usable cache: the built-in data.
+    /// The fetch failed and there was no usable cache: the bundled snapshot
+    /// ([`PriceTable::builtin`]).
     #[non_exhaustive]
     Builtin { fetch_error: PriceError },
 }
 
 impl PriceOrigin {
-    /// Whether this is [`PriceOrigin::Builtin`]: installing the table would
-    /// change nothing.
+    /// Whether this is [`PriceOrigin::Builtin`]: the table is the bundled
+    /// snapshot, which [`enable_bundled`](super::enable_bundled) installs
+    /// as such — installing it as a fetched layer would only duplicate it.
     pub fn is_builtin(&self) -> bool {
         matches!(self, Self::Builtin { .. })
     }
@@ -357,7 +362,7 @@ impl PriceTable {
     /// non-zero `reasoning` rate different from `output`, a non-context
     /// tier, or rates that fail validation. Audio rates (`input_audio`,
     /// `output_audio`) are ignored — this crate sends text. A skipped model
-    /// that the built-in data lists is named in a `warn` log. A document from
+    /// that the bundled snapshot lists is named in a `warn` log. A document from
     /// which no model maps is an error, so a changed envelope cannot install
     /// an empty table.
     pub fn from_models_dev_json(json: &str) -> Result<PriceTable, PriceError> {
@@ -420,8 +425,9 @@ impl PriceTable {
             .collect();
         if !dropped.is_empty() {
             tracing::warn!(
-                "yoagent prices: models.dev data for built-in model(s) could not be mapped \
-                 and was skipped; they keep their built-in price: {}",
+                "yoagent prices: models.dev data for snapshot model(s) could not be mapped \
+                 and was skipped; they keep the bundled snapshot's price when it is \
+                 enabled: {}",
                 dropped.join("; ")
             );
         }
@@ -454,8 +460,8 @@ impl PriceTable {
     ///    A failed cache write is logged and reported in the origin; the
     ///    fetched table is still returned.
     /// 3. If the fetch fails, an expired cache no older than `max_stale` is
-    ///    used — [`PriceOrigin::StaleCache`] — and failing that the built-in
-    ///    data — [`PriceOrigin::Builtin`]. The fetch error is logged and in
+    ///    used — [`PriceOrigin::StaleCache`] — and failing that the bundled
+    ///    snapshot — [`PriceOrigin::Builtin`]. The fetch error is logged and in
     ///    the origin.
     ///
     /// A cache whose age is unknown (modification time in the future, or
@@ -467,7 +473,8 @@ impl PriceTable {
     ///
     /// The result is not installed — decide from it, and install **before**
     /// building configs (or [`reprice`](crate::provider::ModelConfig::reprice)
-    /// the ones you hold):
+    /// the ones you hold). [`enable_live_cached`](super::enable_live_cached)
+    /// does all of this in one call; by hand:
     ///
     /// ```no_run
     /// # use std::time::Duration;
@@ -483,7 +490,10 @@ impl PriceTable {
     /// if let Some(e) = prices.origin.fetch_error() {
     ///     eprintln!("price refresh failed ({e}); using {:?}", prices.origin);
     /// }
-    /// if !prices.origin.is_builtin() {
+    /// if prices.origin.is_builtin() {
+    ///     yoagent::provider::prices::enable_bundled();
+    /// } else {
+    ///     // Alone, a fetched layer prices exactly the models it lists.
     ///     let changes = global::install_fetched(prices.table);
     ///     eprintln!("{} model prices changed", changes.len());
     /// }
@@ -542,7 +552,7 @@ impl PriceTable {
                     url,
                     error = %fetch_error,
                     "yoagent prices: fetch failed; falling back to {}",
-                    if usable.is_some() { "the expired cache" } else { "built-in prices" }
+                    if usable.is_some() { "the expired cache" } else { "the bundled snapshot" }
                 );
                 match usable {
                     Some(c) => CachedPrices {

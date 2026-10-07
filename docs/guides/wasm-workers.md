@@ -61,7 +61,10 @@ The same holds everywhere yoagent would read the environment (see
   region cannot fall back to `AWS_REGION`.
 - **Decision models**: `DecisionModel::jev()` and the OpenCode presets find no
   key; pass one with `.with_api_key(..)`.
-- **Prices**: `YOAGENT_PRICES` is never set; install an override with
+- **Prices**: nothing is priced by default; `prices::enable_bundled()`
+  works on wasm32 (the live `enable_live*` are native-only — fetch with
+  `PriceTable::fetch` and `global::install_fetched` if you need fresh prices).
+  `YOAGENT_PRICES` is never set; install an override with
   `prices::global::install_override(..)`.
 
 ## Writing tools and providers for both targets

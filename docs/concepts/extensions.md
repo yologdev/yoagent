@@ -136,8 +136,11 @@ A delegation tool you write yourself passes the tree on with `Agent::delegated_f
 
 ```rust
 use yoagent::extension::Budget;
-use yoagent::provider::ModelConfig;
+use yoagent::provider::{prices, ModelConfig};
 
+// Nothing is priced by default: opt in once, before building configs
+// (or give the budget a price yourself with `Budget::usd`).
+prices::enable_bundled();
 let model = ModelConfig::claude_sonnet_5();
 // `None` for an unpriced model: a budget without a price is no limit.
 let budget = Budget::for_model(2.0, &model).expect("a priced model");
@@ -147,7 +150,7 @@ let agent = Agent::from_config(model).with_extension(budget);
 - **Per run** by default, sub-agents included: what a sub-agent reports spending (at its own price, or this one if it has none) counts toward the run that delegated.
 - **`.across_runs()`** makes it one total for every run the extension serves: all of a session's runs, or, with `with_tree_extension`, a whole delegation tree, where each run's own messages are counted once. Read the total with `spent_usd()` through an `Arc<Budget>` you keep.
 - A **per-run budget installed as a tree extension** gives every run of the tree its own limit.
-- Messages are priced at the one rate given (`Budget::usd(max, CostConfig)` to choose it). A negative or NaN limit panics; `with_name` tells several budgets apart.
+- Messages are priced at the one rate given (`Budget::usd(max, CostConfig)` to choose it). `Budget::for_model` takes the model's `cost`, which is `None` until the process opts in to prices ([Model Pricing](pricing.md#enabling-pricing)). A negative or NaN limit panics; `with_name` tells several budgets apart.
 - The check is before each request, so the request that crosses the limit still completes. A provider attempt that fails mid-stream reports no usage, so its billed input tokens are not counted.
 
 ## Built on extensions

@@ -1179,6 +1179,8 @@ pub(crate) fn tool_definitions(tools: &[Box<dyn AgentTool>]) -> Vec<ToolDefiniti
 /// ```
 /// # use yoagent::extension::Budget;
 /// # use yoagent::provider::ModelConfig;
+/// // Nothing is priced until the process opts in.
+/// yoagent::provider::prices::enable_bundled();
 /// let model = ModelConfig::claude_sonnet_5();
 /// // `None` when the model has no price: an unpriced budget would be no limit.
 /// let budget = Budget::for_model(2.0, &model).expect("a priced model");

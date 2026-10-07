@@ -64,11 +64,11 @@ let both = DecisionModel::jev().or(DecisionModel::local("http://localhost:8000")
 
 | Preset | Endpoint | Key (read at call time) | Model | Priced |
 |---|---|---|---|---|
-| `jev()` | `https://api.typesafe.ai/v1/systemone` (or `TYPESAFE_BASE_URL`) | `TYPESAFE_API_KEY` | `jev-latest` | from `prices.json`, by the reported version — only while the base URL is TypeSafe's host |
+| `jev()` | `https://api.typesafe.ai/v1/systemone` (or `TYPESAFE_BASE_URL`) | `TYPESAFE_API_KEY` | `jev-latest` | after an opt-in (see [Pricing](#pricing)), by the reported version — only while the base URL is TypeSafe's host |
 | `jev_opencode()` | `https://opencode.ai/zen/v1/systemone` | `OPENCODE_API_KEY` | `jev-1.13` | unpriced (a gateway) |
 | `jev_opencode_free()` | same | `OPENCODE_API_KEY` | `jev-1.13-free` | unpriced |
 | `local(url)` | `{url}/v1/systemone` | none | `jev-latest` | $0 |
-| `clef(account_id)` | `https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/@cf/cloudflare/clef` | `CLOUDFLARE_API_TOKEN`, then `CLOUDFLARE_AUTH_TOKEN` | `clef` | from `prices.json`, by the reported model id |
+| `clef(account_id)` | `https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/@cf/cloudflare/clef` | `CLOUDFLARE_API_TOKEN`, then `CLOUDFLARE_AUTH_TOKEN` | `clef` | after an opt-in (see [Pricing](#pricing)), by the reported model id |
 | `clef_flash(account_id)` | same, `…/@cf/cloudflare/clef-flash` | same | `clef-flash` | same |
 | `logprobs(url, id)` | `{url}/chat/completions` (`/v1` added to a bare host) | none unless `with_api_key` | `id` | $0 on a loopback host, otherwise unpriced |
 | `from_logprob_backend(backend, id)` | as `logprobs`, with your `LogprobBackend` settings | as `logprobs` | `id` | as `logprobs` |
@@ -771,12 +771,19 @@ example is a complete Worker in which Clef gates an agent's tool calls.
 
 ## Pricing
 
-`prices.json` carries `cloudflare/clef` (input $0.24 per million) and
+Like chat models, the decision presets are **unpriced until the process opts
+in** to prices — `yoagent::provider::prices::enable_bundled()` (offline) or
+`prices::enable_live(..)` (native); see
+[Model Pricing](pricing.md#enabling-pricing). Free handles need no opt-in:
+`local()` and a loopback `logprobs()` are always $0, and `with_cost` sets a
+price of your own.
+
+The bundled `prices.json` carries `cloudflare/clef` (input $0.24 per million) and
 `cloudflare/clef-flash` (input $0.09 per million); Workers AI lists no output
 price for them, recorded as $0. `clef()` / `clef_flash()` price each
 evaluation by the model id the response reports (an `@cf/cloudflare/` prefix
-is ignored) while requests go to `api.cloudflare.com`; an id missing from the
-table is unpriced, with a warning logged once. These are list prices:
+is ignored) while requests go to `api.cloudflare.com`; once prices are
+enabled, an id missing from the table is unpriced, with a warning logged once. These are list prices:
 Cloudflare bills Workers AI in neurons, with a daily free allocation, so the
 bill can be lower.
 

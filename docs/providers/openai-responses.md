@@ -14,6 +14,7 @@ use yoagent::provider::ModelConfig;
 let agent = Agent::from_config(ModelConfig::openai_responses("gpt-5.5", "GPT-5.5"));
 ```
 
+Once the process opts in to prices ([Model Pricing](../concepts/pricing.md#enabling-pricing)),
 `openai_responses` is priced when the id is listed in the price data
 (`gpt-5.5`, the GPT-6 models — see [Model Pricing](../concepts/pricing.md))
 and unpriced (`cost: None`) otherwise. For an unlisted model, set `cost` to a
@@ -21,7 +22,7 @@ and unpriced (`cost: None`) otherwise. For an unlisted model, set `cost` to a
 field.
 
 The GPT-6 presets — `ModelConfig::gpt_6_astra()`, `gpt_6_sol()`,
-`gpt_6_luna()` — are built on `openai_responses` and priced, including their
+`gpt_6_luna()` — are built on `openai_responses` and priced (after the opt-in), including their
 272K context tier. They use Responses because Chat Completions does not
 support function calling with GPT-6 Astra, and on Sol/Luna allows it only at
 reasoning effort `none`. This provider does not enforce `prompt_structured`

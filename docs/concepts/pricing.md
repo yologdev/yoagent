@@ -11,11 +11,66 @@ decision model (`SessionStats::decision`). `SessionStats::total_cost_usd()` and
 `Agent::total_cost_usd()` add them all, and are `None` when any part with
 non-zero usage has no price.
 
+## Enabling pricing
+
+**Nothing is priced by default** (since 0.25). Every constructor leaves
+`ModelConfig::cost` at `None`, so costs read as *unpriced*: `session_cost_usd()`
+and `total_cost_usd()` return `None`, `SessionStats::is_unpriced()` is true,
+`Budget::for_model` returns `None`, and the decision presets (`jev()`,
+`clef*()`) report no cost. Only models you run for free stay priced at $0
+(`DecisionModel::local`, a loopback `DecisionModel::logprobs`, or a `cost` of
+zero rates you set yourself).
+
+Opt in **once per process, before building configs**, with one call:
+
+```rust
+use yoagent::provider::prices;
+
+// Offline and reproducible: the snapshot compiled into this release.
+prices::enable_bundled();
+```
+
+```rust
+use yoagent::provider::{prices, PriceSource};
+
+// Live (native only): fetch models.dev now and install it over the bundled
+// snapshot. If the fetch fails, the snapshot alone is used — and it says so.
+let live = prices::enable_live(&PriceSource::ModelsDev).await;
+if let Some(e) = live.origin.fetch_error() {
+    tracing::warn!("price fetch failed ({e}); using the bundled snapshot");
+}
+```
+
+| Function | Network | Targets | What it installs |
+|----------|---------|---------|------------------|
+| `prices::enable_bundled()` | none | all, wasm32 included | the bundled snapshot |
+| `prices::enable_live(&source)` | one request, now | `native` | the fetched table over the snapshot; the snapshot alone if the fetch fails |
+| `prices::enable_live_cached(&source, path, CacheOptions)` | only when the cache is stale | `native` | as `enable_live`, through a cache file (see [Caching](#caching)) |
+
+All three return what changed for constructors: `enable_bundled` a
+`Vec<PriceChange>`, the live ones a `LivePrices` report carrying `changes`
+plus the fetch's `origin`, `skipped`, `ignored_fields` and `cache_problem`
+(`live.fell_back()` is true when only the snapshot is in effect; the fallback
+is also logged at `warn`). They affect configs built **afterwards**; re-price
+the ones you hold with `config.reprice()` / `agent.reprice()`.
+`global::clear_bundled()` turns the snapshot off again;
+`global::is_bundled_enabled()` and `global::pricing_enabled()` report the
+state. On wasm32, `PriceTable::fetch` still works: fetch, then
+`enable_bundled()` and `global::install_fetched(table)`.
+
+A user layer is an opt-in of its own, for exactly the models it lists: the
+`YOAGENT_PRICES` file and `global::install_override` (and likewise
+`global::install_fetched` with the snapshot off). An app that shows costs — a
+yoyo-style CLI — needs one of these calls at startup.
+
+yoagent **never makes a network request for prices unless you call a
+function that says it does** (`enable_live*`, `PriceTable::fetch*`).
+
 ## The data file
 
-Every price the crate knows lives in one JSON file,
+The **bundled snapshot** is one JSON file,
 [`src/provider/prices.json`](https://github.com/yologdev/yoagent/blob/main/src/provider/prices.json),
-embedded at compile time. It is keyed by `ModelConfig::provider`, then by
+embedded at compile time and applied only when you opt in. It is keyed by `ModelConfig::provider`, then by
 `ModelConfig::id`:
 
 ```json
@@ -106,7 +161,7 @@ In code the file is a `PriceTable`, plain data:
 ```rust
 use yoagent::provider::PriceTable;
 
-let builtin = PriceTable::builtin();
+let builtin = PriceTable::builtin(); // the bundled snapshot, as a value — installs nothing
 let opus = builtin.cost("anthropic", "claude-opus-5-5"); // Option<CostConfig>
 for (provider, id, entry) in builtin.iter() {
     println!("{provider}/{id}: ${}/M in, verified {:?}", entry.cost.input_per_million, entry.verified);
@@ -121,11 +176,14 @@ errors name the file or URL they came from.
 
 ## Which constructors are priced
 
-Constructors look `(provider, id)` up **when the config is built**:
+Constructors look `(provider, id)` up in the process-wide table **when the
+config is built**. Until the process opts in (above) the table is empty and
+every lookup is `None`. Once it has:
 
 - **Named presets** (`claude_fable_5`, `claude_fable_5_1`, `claude_opus_5_5`,
   `claude_opus_5`, `claude_opus_4_8`, `claude_sonnet_5`, `claude_haiku_4_5`,
-  `gpt_5_5`, `gpt_6_astra`, `gpt_6_sol`, `gpt_6_luna`) are always listed.
+  `gpt_5_5`, `gpt_6_astra`, `gpt_6_sol`, `gpt_6_luna`) are all listed in the
+  bundled snapshot.
 - **Generic first-party constructors** — those whose provider is in
   `PRICED_PROVIDERS`: `anthropic`, `openai` and `openai_responses` (both use
   provider `openai`), `google`, `xai`, `groq`, `deepseek`, `mistral`, `zai`,
@@ -151,8 +209,11 @@ precedence first:
 | # | Layer | Set by |
 |---|-------|--------|
 | 1 | User override | `global::install_override(table)`, or the file named by `YOAGENT_PRICES` |
-| 2 | Fetched | `global::install_fetched(table)` — opt-in, see [Live sources](#live-sources) |
-| 3 | Built-in | `src/provider/prices.json`, compiled in |
+| 2 | Fetched | `prices::enable_live*`, or `global::install_fetched(table)` — see [Live sources](#live-sources) |
+| 3 | Bundled snapshot | `src/provider/prices.json`, compiled in; **off** until `prices::enable_bundled()` or `enable_live*` |
+
+With no layer, the table is empty and nothing is priced. Each layer alone
+prices exactly the models it lists.
 
 A `cost` you set on a config yourself wins over every layer, because only
 constructors read them. But `config.reprice()` and `config.with_prices()`
@@ -174,6 +235,8 @@ for c in &report.changes {
 }
 
 let config = ModelConfig::claude_sonnet_5();   // priced from the override
+// Models the override does not list stay unpriced unless the snapshot (or a
+// fetched table) is enabled under it: `prices::enable_bundled()`.
 ```
 
 Or, with no code change:
@@ -190,7 +253,7 @@ The whole install holds one lock and returns an `OverrideReport`
 - `changes`: the models the new override prices differently. Entries no
   constructor reads are excluded.
 - `reverted`: models whose price changed because a previous user layer listed
-  them and this one does not. They revert to the fetched or built-in price,
+  them and this one does not. They revert to the fetched or bundled price,
   or become unpriced.
 - `inert`: entries whose provider is not in `PRICED_PROVIDERS`. No
   constructor looks them up; only `with_prices` reads them. A gateway name
@@ -202,7 +265,7 @@ are warned about:
 
 - **Inert entries**, as above.
 - **Dropped tiers.** The entry has no context tiers, but the entry it
-  replaces — built-in or fetched — had some. Every request then bills at the
+  replaces — bundled or fetched — had some. Every request then bills at the
   base rates.
 - **Unset cache rate.** The entry leaves a cache rate unset, so it bills at
   the input rate, where the replaced entry set one.
@@ -216,6 +279,9 @@ returns a snapshot of what a constructor would use now.
 
 - It is read **once**, the first time anything touches the process-wide
   table. Unset or empty means no file.
+- It is honoured with nothing else enabled, and is then the opt-in for
+  exactly the models it lists; everything else stays unpriced unless the
+  process also calls `prices::enable_bundled()` or `enable_live*`.
 - A missing, unreadable or invalid file does not panic. It is logged with
   `tracing::warn!` and ignored, and no user layer is installed.
 - The outcome is visible to the host, not just in the log:
@@ -245,8 +311,10 @@ hold: `config.reprice()`, `agent.reprice()`, or `SubAgentTool::reprice()`
 
 ## Live sources
 
-yoagent **never fetches prices on its own**. When you ask,
-`PriceTable::fetch(&source)` downloads a table from a `PriceSource`:
+yoagent **never fetches prices on its own**. When you ask —
+`prices::enable_live(&source)` / `enable_live_cached`, which also install the
+result, or `PriceTable::fetch(&source)`, which only returns it — it downloads
+a table from a `PriceSource`:
 
 | Source | What it is | Parsed |
 |--------|------------|--------|
@@ -276,6 +344,9 @@ offline (`max_stale`), and a 10 s timeout. Each has a `with_*` setter.
 `fetch_cached` needs the default `native` feature (its disk cache); on wasm32
 use `PriceTable::fetch` / `fetch_with`.
 
+`prices::enable_live_cached(&source, path, CacheOptions)` is this plus the
+install, in one call. By hand:
+
 ```rust
 use yoagent::provider::prices::global;
 use yoagent::provider::{CacheOptions, PriceSource, PriceTable};
@@ -289,6 +360,7 @@ let prices = PriceTable::fetch_cached(
 if let Some(e) = prices.origin.fetch_error() {
     tracing::warn!("price refresh failed ({e}); using {:?}", prices.origin);
 }
+yoagent::provider::prices::enable_bundled(); // the floor under the fetched table
 if !prices.origin.is_builtin() {
     let changes = global::install_fetched(prices.table);
     for c in changes.iter().filter(|c| c.before.is_some()) {
@@ -309,7 +381,8 @@ and carries only the data that makes sense for that origin:
 3. **`StaleCache { age, fetch_error }`.** The fetch failed, so an expired
    cache no older than `max_stale` was used.
 4. **`Builtin { fetch_error }`.** The fetch failed and no cache was usable:
-   the built-in data. Installing it changes nothing.
+   the table is the bundled snapshot. Enable it with
+   `prices::enable_bundled()` rather than installing it as a fetched layer.
 
 `CachedPrices` also carries `skipped` and `ignored_fields` (as in
 `FetchReport`) and `cache_problem`: a cache file that existed but could not
@@ -334,18 +407,19 @@ Some edge cases:
 
 `global::install_fetched(table)` is
 `global::install_fetched_with(table, InstallPolicy::ReplaceAll)`. It replaces
-the fetched layer, so the table overrides the built-in data for every model
+the fetched layer, so the table overrides the bundled snapshot (when enabled)
+for every model it lists. With the snapshot off, it prices exactly the models
 it lists. Replacing a non-empty fetched layer is logged at `warn`.
 
 `InstallPolicy::AddOnly` merges into the current fetched layer only the
-models that no lower layer — the built-in data or the current fetched layer —
-lists. A fetched table can then extend coverage (models.dev's thousands of
+models that no lower layer — the bundled snapshot (when enabled) or the
+current fetched layer — lists. A fetched table can then extend coverage (models.dev's thousands of
 models) without overriding any price already in effect.
 
 Both are `#[must_use]`. They return `Vec<PriceChange>`, computed against the
-built-in plus fetched table **before** the call. So a model the previous
-fetched layer listed and the new one does not shows up too, with `after:
-None` or its built-in price. A change the user layer overrides is still
+bundled (when enabled) plus fetched table **before** the call. So a model the
+previous fetched layer listed and the new one does not shows up too, with
+`after: None` or its bundled price. A change the user layer overrides is still
 reported, marked `shadowed: true`: it does not change what is billed until
 the override is cleared.
 
@@ -353,8 +427,8 @@ the override is cleared.
 
 ### Trust
 
-With the default policy, a fetched table **overrides the built-in data** for
-every model it lists.
+With the default policy, a fetched table **overrides the bundled snapshot**
+for every model it lists.
 
 - **`YoagentMain`** is as trustworthy as a release — it is the file releases
   are cut from. Suppose `main` moves to a newer schema than your yoagent
@@ -369,20 +443,22 @@ every model it lists.
   - A model whose cost carries structure `CostConfig` cannot express is
     **skipped**, not approximated. That covers a separate reasoning rate, a
     non-context tier and an unknown key.
-  - A skipped model that the built-in data lists is **named in a `warn`
-    log**. It keeps its built-in price.
+  - A skipped model that the bundled snapshot lists is **named in a `warn`
+    log**. It keeps the snapshot's price when the snapshot is enabled
+    (`enable_live*` always enables it).
   - Audio rates are ignored.
   - Provider keys are models.dev's own, with two renames to this crate's
     names: `alibaba` becomes `qwen`, and `opencode` becomes `opencode-zen`.
   - A document from which nothing maps is an error, never an empty table.
 
-Either way, disagreements are visible, not silent. `install_fetched`
-compares the new layer with the built-in data **as billed**: a zero cache
-rate counts as the input rate. It logs, at `warn`, how many built-in models
-it prices differently, spelling out the first five and counting the rest:
+Either way, disagreements are visible, not silent. While the bundled snapshot
+is enabled, `install_fetched` (and `enable_live*`) compare the new layer with
+the snapshot **as billed**: a zero cache rate counts as the input rate. They
+log, at `warn`, how many snapshot models it prices differently, spelling out
+the first five and counting the rest:
 
 ```text
-WARN yoagent prices: the fetched table disagrees with the built-in data on 7 model(s)
+WARN yoagent prices: the fetched table disagrees with the bundled snapshot on 7 model(s)
      and takes precedence for them: anthropic/claude-sonnet-5: input 2 -> 1.5, ...; and 2 more
 ```
 
@@ -396,8 +472,8 @@ There are two ways to re-price a config you already built, and they differ
 on purpose.
 
 **`config.reprice()`** repeats the constructor's own lookup against the
-process-wide table **now**. Use it for configs built before an override or a
-fetched layer was installed. `Agent::reprice()` and `SubAgentTool::reprice()`
+process-wide table **now**. Use it for configs built before an opt-in, an
+override or a fetched layer was installed. `Agent::reprice()` and `SubAgentTool::reprice()`
 do the same for the config they hold.
 
 - The result is exactly what the constructor would set today, **including
@@ -412,7 +488,7 @@ do the same for the config they hold.
   whose `provider` you changed are returned unchanged.
 
 ```rust
-let config = ModelConfig::claude_sonnet_5();  // built before the override
+let config = ModelConfig::claude_sonnet_5();  // built before the override: unpriced
 let _ = global::install_override(mine);
 let config = config.reprice();                // now priced from the override
 ```
@@ -423,6 +499,9 @@ hold, without touching any global state.
 - A model the table lists gets its rates, replacing any `cost` you set.
 - A model it does not list **keeps its current cost**: `with_prices` never
   clears a price.
+- It needs no opt-in: the table you pass is the price list
+  (`with_prices(&PriceTable::builtin())` prices one config from the snapshot
+  without touching process-wide state).
 - It applies to **any** config, gateways and custom endpoints included. It
   looks them up under their own `provider`, such as `opencode-zen`: calling
   it is you saying what you pay there.
@@ -436,7 +515,7 @@ let config = ModelConfig::claude_sonnet_5().with_prices(&mine); // your negotiat
 
 ## Keeping the data honest
 
-`tests/price_audit.rs` diffs **every** `prices.json` entry against
+`tests/price_audit.rs` diffs **every** entry of the bundled snapshot against
 [models.dev](https://models.dev) — rates, tiers and thresholds — and fails on
 drift, on an entry that vanished upstream, and on a comparison that silently
 checked nothing. The comparison logic also runs offline in CI, against a

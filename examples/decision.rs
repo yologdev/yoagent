@@ -21,6 +21,8 @@ use yoagent::Agent;
 
 #[tokio::main]
 async fn main() {
+    // 0. Evaluations are unpriced unless the process opts in to prices.
+    yoagent::provider::prices::enable_bundled();
     // 1. Choose a model. Nothing is sent until you ask it something.
     let model = match std::env::var("CLOUDFLARE_ACCOUNT_ID") {
         Ok(account) if !account.trim().is_empty() => {

@@ -30,6 +30,8 @@ pub use model::{
 };
 pub use openai_compat::OpenAiCompatProvider;
 pub use openai_responses::OpenAiResponsesProvider;
+#[cfg(feature = "native")]
+pub use prices::LivePrices;
 pub use prices::{
     CacheOptions, CacheProblem, CachedPrices, FetchOptions, FetchReport, PriceChange, PriceEntry,
     PriceError, PriceOrigin, PriceSource, PriceTable, SkippedModel, DEFAULT_FETCH_TIMEOUT,

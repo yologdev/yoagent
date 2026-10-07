@@ -179,6 +179,8 @@ fn spent_usd_is_the_across_runs_total() {
 #[test]
 fn an_unpriced_model_gets_no_budget() {
     assert!(Budget::for_model(1.0, &ModelConfig::mock()).is_none());
+    // Presets are priced once the process opts in.
+    yoagent::provider::prices::enable_bundled();
     let priced = ModelConfig::claude_sonnet_5();
     assert!(Budget::for_model(1.0, &priced).is_some());
 }

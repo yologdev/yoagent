@@ -208,9 +208,11 @@ costs `$0`. There is no way to say "cache reads are free but input is not";
 set a tiny positive rate if a vendor ever charges that.
 
 `ModelConfig::cost` is an `Option<CostConfig>`, filled at construction from
-the price table (`src/provider/prices.json`; see [Model Pricing](../concepts/pricing.md)).
-`None` means **pricing unknown**, not free. The named presets (`claude_*`,
-`gpt_5_5`, `gpt_6_astra` / `gpt_6_sol` / `gpt_6_luna`) are always priced; the
+the process-wide price table — **empty until the process opts in** with
+`prices::enable_bundled()` (the bundled `src/provider/prices.json`) or
+`prices::enable_live(..)`; see [Model Pricing](../concepts/pricing.md#enabling-pricing).
+`None` means **pricing unknown**, not free. Once opted in, the named presets (`claude_*`,
+`gpt_5_5`, `gpt_6_astra` / `gpt_6_sol` / `gpt_6_luna`) are all priced; the
 generic first-party constructors (`anthropic`, `openai`, `openai_responses`,
 `google`, `xai`, `groq`, `deepseek`, `mistral`, `zai`, `minimax`, `qwen`,
 `meta`) are priced when the table lists the id — so

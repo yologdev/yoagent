@@ -116,7 +116,7 @@ yoagent/
 │   │   ├── turn_hook.rs        # TurnHookProvider
 │   │   ├── tool_args.rs        # Tool-argument parsing
 │   │   ├── prices.rs           # PriceTable (+ prices/global.rs, prices/fetch.rs)
-│   │   ├── prices.json         # Built-in price data
+│   │   ├── prices.json         # Bundled price snapshot (applied only on opt-in)
 │   │   ├── mock.rs             # Mock provider for testing
 │   │   └── sse.rs              # SSE utilities
 │   ├── tools/

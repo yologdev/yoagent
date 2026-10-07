@@ -24,8 +24,9 @@ use yoagent::provider::mock::{MockResponse, MockToolCall};
 use yoagent::provider::CostConfig;
 use yoagent::*;
 
-/// A budget of `max_usd`. Live, it charges the model's own prices, and there
-/// is none for a model yoagent has no prices for (`Budget::for_model` returns
+/// A budget of `max_usd`. Live, it charges the model's own prices — from the
+/// bundled snapshot `main` opts in to, since nothing is priced by default —
+/// and there is none for a model with no price (`Budget::for_model` returns
 /// `None`): a made-up price would make the limit meaningless. Offline, the
 /// scripted model costs $1 per million input tokens, so the usage below
 /// reads in cents.
@@ -103,6 +104,9 @@ fn summarize(events: &[AgentEvent]) -> (usize, bool) {
 #[tokio::main]
 async fn main() {
     const PROMPT: &str = "Keep searching the tracker for `flaky test` until you are sure.";
+    // Opt in to prices before building configs: without it every model is
+    // unpriced and `Budget::for_model` returns `None`.
+    yoagent::provider::prices::enable_bundled();
     let (Some(per_run), Some(session)) = (budget(0.10), budget(0.10)) else {
         println!("model unpriced, skipping the live budget");
         return;
