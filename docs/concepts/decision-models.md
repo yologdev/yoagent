@@ -691,7 +691,7 @@ any policy engine:
   `user_request()` is not a stable format.
   `ToolCallRequest::new(id, tool, &args)` with `with_messages` /
   `with_run_prompts` builds one to unit-test a middleware (or a `ToolGate`,
-  with `check`) outside the loop.
+  with `decide`) outside the loop.
 - `AsyncInputFilter` (`Agent::with_async_input_filter`,
   `SubAgentTool::with_async_input_filter`) — input filters that await. You
   own the timeout; a panic is contained and rejects.
@@ -802,7 +802,7 @@ let model = DecisionModel::from_backend(mock.clone(), "jev-test");
 // ... use `model`, then inspect `mock.requests()`.
 ```
 
-A `ToolGate` can be driven without an agent with `check` (an `InputGuard` with `screen(text)`):
+A `ToolGate` can be driven without an agent with `decide` (an `InputGuard` with `screen(text)`):
 
 ```rust
 let args = json!({"path": "/srv/data"});
