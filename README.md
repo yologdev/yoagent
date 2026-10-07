@@ -255,10 +255,10 @@ servers over stdio or Streamable HTTP (session ids, SSE framing, incremental par
 their tools transparently. Stdio needs the default `native` feature; HTTP works on wasm32 too.
 
 **`ToolSource`** — tools resolved at the start of every run (`with_tool_source`), for tool sets
-that change while the agent lives: plugin systems, reconnecting MCP servers. The
-[`yoagent-rutis`](integrations/yoagent-rutis/) bridge (not yet on crates.io) builds on it so
-[rutis](https://crates.io/crates/rutis) plugins can add tools, gate calls, add turn notes and
-filter input.
+that change while the agent lives: plugin systems, reconnecting MCP servers. For plugins that
+do more than add tools, the [`yoagent-rutis`](integrations/yoagent-rutis/) bridge (not yet on
+crates.io) installs [rutis](https://crates.io/crates/rutis) plugins as one `Extension`: they
+add tools, gate calls, redact output, add turn notes, check input and verify answers.
 
 **OpenAPI** (`features = ["openapi"]`) — point `with_openapi_url()` at a spec and every operation
 becomes a tool, filtered by `OperationFilter`.

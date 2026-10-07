@@ -155,6 +155,8 @@ The decision features are extensions themselves:
 - **`with_tool_gate`** (a `before_tool`) and **`with_decision_model`** (a `before_model` note) are appended after the agent's own extensions, so the gate judges the final arguments. Installed with `with_tree_extension`, the gate runs first instead and rechecks rewritten calls (a second decision request).
 - **`with_input_guard`** (an `on_input`) is an ordinary extension at its installation position: it screens after every input filter.
 
+So is the [`yoagent-rutis`](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis) bridge (a separate crate, not yet on crates.io): `RutisBridge::extension()` is one extension over the handlers that [rutis](https://crates.io/crates/rutis) plugins register and unregister at runtime, snapshotted at each run's start. The host keeps the decisions plugins must not make: `.required()`, `.filters_tool_output()`, `.rechecks_modified_calls()`.
+
 ## Order with the older hooks
 
 `ToolMiddleware`, `InputFilter`, `TurnHook`, `ToolSource` and the `on_*` closures keep working unchanged. Input filters run before `on_input`, and middleware before `before_tool`. Notes from `before_model` come before a `TurnHook`'s (turn hooks run inside the provider call, once per attempt).
