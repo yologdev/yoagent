@@ -1,8 +1,8 @@
 # yoagent-rutis
 
 Extend [yoagent](https://crates.io/crates/yoagent) agents at runtime with
-[rutis](https://crates.io/crates/rutis) plugins, through one yoagent
-`Extension`.
+[rutis](https://crates.io/crates/rutis) plugins — in Rust, TypeScript or
+Python — through one yoagent `Extension`.
 
 **Status:** 0.1.0, not yet on crates.io; needs yoagent's `Extension` (0.25).
 
@@ -26,14 +26,15 @@ contribute to live agents:
 | `on_input` | reject a prompt |
 | `on_stop` | send the model back with a message (a verifier) |
 | `finish` | see how the run ended |
-| `on_event` | observe the run's events (Rust handlers) |
+| `on_event` | observe the run's events (opt-in and filtered by type for TypeScript / Python) |
 
 Every event is also published on the rutis bus as `AgentEventEmitted`.
 
 yoagent does not depend on rutis; this crate uses only yoagent's public API.
-It depends on `rutis = "0.6"` (0.x caret: any 0.6.x, never 0.7). rutis types
-are part of this crate's API, so every rutis minor bump is a yoagent-rutis
-minor bump.
+It depends on `rutis = "0.6"` (0.x caret: any 0.6.x, never 0.7) and, with a
+language feature, `rutis-bridge = "0.7"` (the matching release train). rutis
+types are part of this crate's API, so every rutis or rutis-bridge minor bump
+is a yoagent-rutis minor bump.
 
 ## Host
 
@@ -110,6 +111,117 @@ Runnable offline: `cargo run --example policy_plugin` from this directory, or
 with `--manifest-path integrations/yoagent-rutis/Cargo.toml` from the repo
 root (a tool plugin, a policy plugin that denies a tool by name and caps
 calls per tool, and a redactor).
+
+## TypeScript and Python plugins
+
+With a language feature, `RutisBridge::install` also provides the registry
+to plugins in other languages, through
+[rutis-bridge](https://crates.io/crates/rutis-bridge) 0.7, as the host
+service `yoagent`:
+
+| Feature | Adds (rutis-bridge feature of the same name) |
+|---|---|
+| *(default)* | Rust plugins only |
+| `node` | TypeScript / JavaScript plugins in local Node runtimes (Node 24+, Linux/macOS) |
+| `python` | Python plugins in local Python runtimes (Python 3.12+, Linux/macOS) |
+| `websocket` | runtimes and nodes on other machines, over `wss` |
+
+```toml
+yoagent-rutis = { git = "https://github.com/yologdev/yoagent", features = ["node", "python"] }
+```
+
+A plugin injects `yoagent` and registers a handler: an object (in Python, a
+class instance or a dict) of async functions, passed by reference — rutis
+calls them in the plugin's own process. `register(name, handler, options?)`
+returns a function that unregisters it; pass it to `ctx.effect` so the
+handler goes when the plugin unloads.
+
+```ts
+import { definePlugin } from '@arcships/rutis'
+import type { Yoagent } from './yoagent.d.ts'
+
+export default definePlugin({
+  inject: ['yoagent'],
+  apply(ctx) {
+    const yoagent = ctx.use<Yoagent>('yoagent')
+    ctx.effect(yoagent.register('no-shell', {
+      async before_tool(call) {
+        if (call.tool === 'bash') return { deny: 'shell access is disabled' }
+      },
+      async after_tool(call, output) {
+        if (output.text.includes('sk-')) return { text: output.text.replace(/sk-\S+/g, '[key]') }
+      },
+    }))
+  },
+})
+```
+
+```python
+class Handler:
+    async def before_tool(self, call):
+        if call["tool"] == "rm":
+            return {"deny": "rm is disabled"}
+
+inject = ["yoagent"]
+
+def apply(ctx, config):
+    ctx.effect(ctx.use("yoagent").register("no-rm", Handler()))
+```
+
+- **The handler shape** — every hook, its plain-JSON argument
+  (`{tool, call_id, args, user_request, run_id, label, depth, ...}`) and what
+  it returns — is in [`plugins/yoagent.d.ts`](plugins/yoagent.d.ts); copy it
+  into your plugin (there is no SDK package yet). Python uses the same names
+  and shapes. Examples: [`plugins/ts/example.ts`](plugins/ts/example.ts),
+  [`plugins/python/yoagent_example.py`](plugins/python/yoagent_example.py).
+- **Every hook is async.** rutis warns that synchronous calls across
+  runtimes can deadlock. `register` itself is synchronous: it reads the
+  handler's members back while the plugin waits.
+- **`on_event` is opt-in and filtered**: one cross-process call per event,
+  so only the types in `options.events` (`["toolExecutionEnd", "agentEnd"]`)
+  are sent, in order, asynchronously (the run never waits for them; events
+  sent before `finish` reach the plugin before it, `agentEnd` comes after).
+- **A crashed runtime withdraws its handlers.** When a runtime process exits,
+  its session closes and every handler it registered is removed; a run that
+  still holds one sees it as unavailable (its tool calls fail, its
+  `before_tool` denies, its `on_input` rejects, its `after_tool` withholds).
+- **The same rules as Rust handlers**: one registry and one name space for
+  every language, registration order, fail closed on errors and timeouts.
+- **The bridge never loads plugins**: the host does, typically with
+  [rutis-loader](https://crates.io/crates/rutis-loader) rows, and must share
+  `yoagent` in the loader's catalog (`catalog.register_shared("yoagent")` or
+  `share_by_name()`). [`examples/language_plugins.rs`](examples/language_plugins.rs)
+  is a complete host: `npm ci` in `plugins/`, a Python 3.12+ with
+  `rutis==0.7.0` in `plugins/.venv`, then
+  `cargo run --features node,python --example language_plugins`.
+
+### Remote handlers: latency and trust
+
+With `websocket`, a handler can live on another machine: a runtime there
+(`RuntimePlugin::remote`), or a node the host exports `yoagent` to. It then
+sits inside every run of every agent using the extension:
+
+- **Latency.** Each hook is a network round trip, and `before_tool` runs for
+  **every** tool call — the agent's own tools too — once per handler, before
+  the tool starts. A slow link slows every tool call. The default timeouts
+  (60 s policy, 30 s input, 5 s turn) are generous for a remote handler;
+  lower them with `with_policy_timeout` & co. A timeout denies the call
+  (`before_tool`), rejects the input (`on_input`) or withholds the result
+  (`after_tool`).
+- **Trust.** A remote handler sees what its hooks receive: tool names and
+  arguments, the user's request, tool output (`after_tool`), and with
+  `on_event` whatever events it subscribes to (messages included). It can
+  deny, rewrite arguments and edit output. Exporting `yoagent` to a peer lets
+  that peer register handlers: treat it as part of the agent's trust
+  boundary, use `wss` with a per-peer token (see rutis's guide to nodes), and
+  set `.filters_tool_output()` only if you trust it to redact.
+- **Availability.** An unreachable handler fails closed for that call, but a
+  peer that disconnects has its handlers removed: later runs have no policy
+  from it, and allow, unless the extension has `.require_policy()`. Use it
+  when a remote policy is load-bearing.
+
+The end-to-end tests cover local Node and Python runtimes; a remote node over
+`wss` is not tested here.
 
 ## Semantics
 
