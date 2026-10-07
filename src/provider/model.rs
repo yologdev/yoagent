@@ -1694,10 +1694,12 @@ impl ModelConfig {
     /// `gpt-4o`, `gpt-4.1`, …) or `chatgpt-`, and any id containing `-chat`
     /// (`gpt-5-chat-latest`) — and `true` for everything else (the o-series,
     /// `gpt-5*`, the GPT-6 models, and ids it does not know). It matters
-    /// because a reasoning model's request asks for
+    /// once encrypted reasoning is on ([`with_encrypted_reasoning`](Self::with_encrypted_reasoning)):
+    /// a reasoning model's request then asks for
     /// `include: ["reasoning.encrypted_content"]`, which a non-reasoning
     /// model rejects with a 400 ("Encrypted content is not supported with
-    /// this model"). Set `config.reasoning` afterwards to override the
+    /// this model"). It also drives the warning for a `ThinkingLevel` set on
+    /// a model not marked as reasoning. Set `config.reasoning` afterwards to override the
     /// inference either way.
     pub fn openai_responses(id: impl Into<String>, name: impl Into<String>) -> Self {
         let id = id.into();
@@ -2404,9 +2406,9 @@ mod tests {
         }
     }
 
-    /// `openai_responses` infers `reasoning` from the id: the request asks
-    /// for encrypted reasoning only for a reasoning model, and a
-    /// non-reasoning model rejects that with a 400.
+    /// `openai_responses` infers `reasoning` from the id: with encrypted
+    /// reasoning on, the request asks for it only for a reasoning model, and
+    /// a non-reasoning model rejects that with a 400.
     #[test]
     fn openai_responses_infers_reasoning_from_the_id() {
         for id in [

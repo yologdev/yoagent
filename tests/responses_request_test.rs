@@ -966,27 +966,62 @@ async fn agent_loop_replays_the_reasoning_item_after_a_tool_call() {
     }
 }
 
-/// Encrypted reasoning is opt-in: by default a reasoning model is not asked
-/// for it and none is replayed — the request looks as it did before 0.25.
+/// Encrypted reasoning is opt-in. A default config — a GPT-6 preset (whose
+/// `compat` is set) and an Azure reasoning deployment — is not asked for it,
+/// and a history that holds this API's stored reasoning goes out as in 0.24:
+/// no `include`, no `reasoning` item, no item `id`.
 #[tokio::test]
 async fn encrypted_reasoning_is_off_by_default() {
+    fn has_reasoning_or_ids(input: &Value) -> bool {
+        input
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["type"] == "reasoning" || item.get("id").is_some())
+    }
     for which in BOTH {
-        let mut mc = which.model_config("http://unused");
-        mc.compat.as_mut().unwrap().encrypted_reasoning = false;
+        // A reply with stored reasoning, from an opted-in first turn.
+        let user = Message::user("read a.txt");
+        let (_, reply) = one_request(
+            which,
+            None,
+            vec![user.clone()],
+            reasoning_then_call_fixture(),
+            |_| {},
+        )
+        .await;
+        let history = vec![user, reply, tool_result("call_1", "contents")];
+
+        let default = match which {
+            Which::Responses => ModelConfig::gpt_6_luna(),
+            Which::Azure => {
+                let mut mc = ModelConfig::custom(
+                    ApiProtocol::AzureOpenAiResponses,
+                    "azure",
+                    "http://unused/openai/v1",
+                    "gpt-5.5",
+                    "GPT-5.5",
+                );
+                mc.reasoning = true;
+                mc
+            }
+        };
         let (sent, _) = one_request(
             which,
-            Some(mc.clone()),
-            vec![Message::user("a")],
+            Some(default.clone()),
+            history.clone(),
             text_fixture(),
             |_| {},
         )
         .await;
         assert!(sent.get("include").is_none(), "{which:?}: {sent}");
-        // Positive control: the same config opted in asks for it.
+        assert!(!has_reasoning_or_ids(&sent["input"]), "{which:?}: {sent}");
+
+        // Positive control: the same config opted in asks and replays.
         let (sent, _) = one_request(
             which,
-            Some(mc.with_encrypted_reasoning(true)),
-            vec![Message::user("a")],
+            Some(default.with_encrypted_reasoning(true)),
+            history,
             text_fixture(),
             |_| {},
         )
@@ -996,5 +1031,6 @@ async fn encrypted_reasoning_is_off_by_default() {
             serde_json::json!(["reasoning.encrypted_content"]),
             "{which:?}"
         );
+        assert!(has_reasoning_or_ids(&sent["input"]), "{which:?}: {sent}");
     }
 }
