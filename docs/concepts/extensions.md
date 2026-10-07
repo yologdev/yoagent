@@ -147,7 +147,8 @@ let budget = Budget::for_model(2.0, &model).expect("a priced model");
 let agent = Agent::from_config(model).with_extension(budget);
 ```
 
-- **Per run** by default, sub-agents included: what a sub-agent reports spending (at its own price, or this one if it has none) counts toward the run that delegated.
+- **What counts:** the run's assistant turns, its own decision evaluations (tool gate, input guard, advisor) and `LlmCompaction` summaries — each at its model's price, or the budget's rate when unpriced — and what a sub-agent reports spending (at its own price, or this one if it has none).
+- **Per run** by default, sub-agents included.
 - **`.across_runs()`** makes it one total for every run the extension serves: all of a session's runs, or, with `with_tree_extension`, a whole delegation tree, where each run's own messages are counted once. Read the total with `spent_usd()` through an `Arc<Budget>` you keep.
 - A **per-run budget installed as a tree extension** gives every run of the tree its own limit.
 - Messages are priced at the one rate given (`Budget::usd(max, CostConfig)` to choose it). `Budget::for_model` takes the model's `cost`, which is `None` until the process opts in to prices ([Model Pricing](pricing.md#enabling-pricing)). A negative or NaN limit panics; `with_name` tells several budgets apart.

@@ -806,8 +806,10 @@ index, as yoagent computes it) and `confidence`, its per-level probabilities
 read by level index (`value`). Usage is `input_tokens` / `output_tokens`.
 
 **A refusal** (`{"type": "refusal"}` — OpenAI may decline one question) fails
-the whole call with `DecisionError::Backend` naming the question, not retried:
-the tool gate denies and the input guard rejects, as on any error.
+the whole call with `DecisionError::Refused` naming the question, not retried.
+It also ends a fallback chain (`or`): a fallback model is never asked what the
+first one declined. The tool gate denies and the input guard rejects. The
+refused response's reported usage is still recorded as spend.
 
 Errors follow the other HTTP backends: 429 / 529 and transport failures are
 retried (`with_retry`), other statuses are `Http` (401 / 403 say the key came

@@ -476,7 +476,12 @@ on purpose.
 **`config.reprice()`** repeats the constructor's own lookup against the
 process-wide table **now**. Use it for configs built before an opt-in, an
 override or a fetched layer was installed. `Agent::reprice()` and `SubAgentTool::reprice()`
-do the same for the config they hold.
+do the same for the config they hold; `Agent::reprice()` also re-prices an
+`LlmCompaction` summarizer (`LlmCompaction::reprice()`).
+
+With only a `YOAGENT_PRICES` file or `install_override` / `install_fetched` in
+effect (no bundled snapshot), a first-party lookup that misses logs a warning
+once per model: it is unpriced, and `enable_bundled()` would price it.
 
 - The result is exactly what the constructor would set today, **including
   `None`** when the model is no longer listed.
