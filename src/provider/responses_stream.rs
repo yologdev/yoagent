@@ -681,8 +681,13 @@ impl ResponsesStreamState {
         );
         for &r in &self.reasoning_blocks {
             // The item's own other block (raw text beside its summary) is
-            // not a boundary.
-            let own = bounds.iter().find(|(p, _)| *p == r).and_then(|(_, oi)| *oi);
+            // not a boundary. `rfind`: an empty reasoning item just before
+            // this one left a bound at this same index (the index the next
+            // block takes), and this item's own entry comes after it.
+            let own = bounds
+                .iter()
+                .rfind(|(p, _)| *p == r)
+                .and_then(|(_, oi)| *oi);
             let end = bounds
                 .iter()
                 .filter(|(p, oi)| *p > r && (own.is_none() || *oi != own))

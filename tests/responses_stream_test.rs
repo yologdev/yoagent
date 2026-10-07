@@ -727,6 +727,46 @@ async fn a_reasoning_items_own_second_block_does_not_end_its_range() {
     }
 }
 
+/// An empty reasoning item (no summary, no text, no encrypted content)
+/// leaves a bound at the index the next block takes. The next item's own
+/// raw-text block must still not end that item's range.
+#[tokio::test]
+async fn an_empty_reasoning_item_does_not_cut_the_next_items_range() {
+    let args = r#"{"q":"x"}"#;
+    let body = sse(vec![
+        created(),
+        reasoning_done(0, "rs_0", json!([]), Value::Null),
+        (
+            "response.reasoning_summary_text.delta",
+            json!({"item_id": "rs_1", "output_index": 1, "summary_index": 0, "delta": "Sum."}),
+        ),
+        (
+            "response.reasoning_text.delta",
+            json!({"item_id": "rs_1", "output_index": 1, "content_index": 0, "delta": "Raw."}),
+        ),
+        reasoning_done(
+            1,
+            "rs_1",
+            json!([{"type": "summary_text", "text": "Sum."}]),
+            json!("enc-1"),
+        ),
+        fc_added(2, 1, "search"),
+        fc_args_done(2, 1, args),
+        fc_item_done(2, 1, "search", args),
+        completed(plain_usage()),
+    ]);
+    for which in BOTH {
+        let (m, _) = run(which, body.clone()).await;
+        let (content, _, _) = parts(&m);
+        let (item, _) = content
+            .iter()
+            .find_map(stored)
+            .expect("rs_1 is stored on its summary block");
+        assert_eq!(item["id"], "rs_1", "{which:?}: {content:?}");
+        assert_eq!(item["call_ids"], json!({"call_1": "fc_1"}), "{which:?}");
+    }
+}
+
 /// A summary sent only in the finished item (no deltas) still becomes the
 /// thinking text, and is streamed as one delta.
 #[tokio::test]
