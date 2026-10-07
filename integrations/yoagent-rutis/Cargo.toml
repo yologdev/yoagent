@@ -3,7 +3,7 @@ name = "yoagent-rutis"
 version = "0.1.0"
 edition = "2021"
 resolver = "3"
-description = "Extend a yoagent Agent at runtime with rutis plugins: tools, tool policy, turn notes, input filters and events"
+description = "Extend yoagent agents at runtime with rutis plugins, as one yoagent Extension: tools, tool policy, output filters, turn notes, input checks, verifiers and events"
 license = "MIT"
 repository = "https://github.com/yologdev/yoagent"
 documentation = "https://docs.rs/yoagent-rutis"
@@ -13,17 +13,19 @@ categories = ["asynchronous", "development-tools"]
 authors = ["Yuanhao <yuanhao@yolog.dev>"]
 # yoagent's MSRV; rutis 0.6.1 declares 1.85.
 rust-version = "1.86"
-# Not published yet. It needs yoagent 0.24 or later.
+# Not published yet. It needs yoagent's `Extension`, which ships in 0.25.
 publish = false
 
 [dependencies]
-# The path's version; 0.23.0 is the first release with `ToolSource`.
-yoagent = { path = "../..", version = "0.24.0" }
+# The path's version. Publishing needs the first yoagent release with
+# `Extension` (0.25): raise this to it then.
+yoagent = { path = "../..", version = "0.24.3" }
 # 0.x caret: 0.6.x only (0.7 would be breaking). Any rutis minor bump is a
 # yoagent-rutis minor bump — its types are part of this crate's API.
 rutis = "0.6"
 async-trait = "0.1"
 futures = "0.3"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 # Same crate rutis hands its cancellation tokens out as.
