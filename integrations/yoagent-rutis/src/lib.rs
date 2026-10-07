@@ -104,8 +104,8 @@
 //!   unloaded (or restarted / updated) mid-run leaves its handler in that run
 //!   but **unavailable**: its tools fail ("no longer available", or "plugin
 //!   unloaded during the call" for one in flight), its `before_tool` denies,
-//!   its `on_input` rejects, its `after_tool` withholds the result, its other
-//!   hooks are skipped. Never rebound to the new generation. See
+//!   its `on_input` rejects, its `after_tool` withholds the result (without
+//!   failing a required run), its other hooks are skipped. Never rebound to the new generation. See
 //!   [`registry`].
 //! - **Names are unique across plugins**: handler names, and the names of
 //!   static tools. A clash is refused (`CordisError::ServiceExists`, logged;

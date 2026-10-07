@@ -32,6 +32,13 @@
 //! plugin's after an unload: its tool calls fail, its `before_tool` denies,
 //! its `on_input` rejects, its `after_tool` withholds.
 //!
+//! An abandoned call (a timeout, a cancelled run, an unloaded plugin) is
+//! dropped on the host side; a Python coroutine is then cancelled, but a
+//! JavaScript function runs to completion (no `AbortSignal` is passed:
+//! rutis-bridge passes one only as an extra positional argument, which a
+//! Python method with a fixed signature would refuse), so a `call_tool` can
+//! still act after its run was cancelled.
+//!
 //! The hooks, their plain-JSON arguments and the values they return are
 //! described in `plugins/yoagent.d.ts` in the crate's repository. Every hook
 //! is called asynchronously (rutis warns that synchronous calls across
@@ -264,6 +271,8 @@ impl Target {
                         Value::Reference(f) if f.is_function() => {
                             functions.insert(key, f);
                         }
+                        // Absent, as on a live object (`None` in Python).
+                        Value::Undefined | Value::Data(Json::Null) => {}
                         _ if HOOKS.contains(&key.as_str()) => {
                             return Err(invalid(format!("register: `{key}` is not a function")))
                         }
@@ -524,6 +533,7 @@ impl HandlerImpl for RemoteHandler {
         let name = self.name.clone();
         let failed = Arc::new(std::sync::Mutex::new(None::<String>));
         let failure = failed.clone();
+        let run_id = run.run_id.clone();
         // One task per run and handler: events arrive in order, and the run
         // never waits for them. It ends once the run's hooks are dropped and
         // the queue is drained (`AgentEnd` comes after `finish`).
@@ -549,7 +559,12 @@ impl HandlerImpl for RemoteHandler {
                     None => call.await,
                 };
                 if let Err(error) = outcome {
-                    let why = format!("plugin handler `{name}` failed in `on_event`: {error}");
+                    let why = format!(
+                        "plugin handler `{name}` failed in `on_event`: {error} (not called again this run)"
+                    );
+                    // Logged here too: a failure on the run's last events
+                    // (`AgentEnd` comes after `finish`) is seen by nothing else.
+                    tracing::warn!(run_id = %run_id, "{why}");
                     failure
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
@@ -558,6 +573,7 @@ impl HandlerImpl for RemoteHandler {
             }
         });
         Some(Box::new(RemoteEvents {
+            name: self.name.clone(),
             filter: self.events.clone(),
             run: run.clone(),
             tx,
@@ -621,32 +637,21 @@ fn event_type(event: &AgentEvent) -> String {
 
 /// Queues a run's events (those of the subscribed types) for delivery.
 struct RemoteEvents {
+    name: String,
     filter: Arc<Vec<String>>,
     run: RunInfo,
     tx: tokio::sync::mpsc::Sender<Delivery>,
     /// The first delivery failure (an error, a timeout, a full queue): the
-    /// handler's `on_event` is switched off for the run.
+    /// handler's `on_event` is switched off for the run. Never raised as a
+    /// panic: the extension reads it with [`EventSink::failure`].
     failed: Arc<std::sync::Mutex<Option<String>>>,
-}
-
-impl RemoteEvents {
-    /// Report a failure to the run: the extension contains this unwind,
-    /// switches the handler's `on_event` off, and fails a required run.
-    fn give_up(&self) {
-        let why = self
-            .failed
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
-        if let Some(why) = why {
-            std::panic::resume_unwind(Box::new(why));
-        }
-    }
 }
 
 impl EventSink for RemoteEvents {
     fn send(&self, event: &AgentEvent) {
-        self.give_up();
+        if self.failure().is_some() {
+            return;
+        }
         let kind = event_type(event);
         if !self.filter.contains(&kind) {
             return;
@@ -662,9 +667,9 @@ impl EventSink for RemoteEvents {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .get_or_insert(format!(
-                    "plugin handler's `on_event` fell {EVENT_QUEUE} events behind"
+                    "plugin handler `{}` fell {EVENT_QUEUE} events behind in `on_event` (not called again this run)",
+                    self.name
                 ));
-            self.give_up();
         }
     }
 
@@ -693,14 +698,32 @@ struct ToolSpec {
     name: String,
     #[serde(default)]
     label: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     description: String,
-    #[serde(default = "empty_schema")]
+    #[serde(default = "empty_schema", deserialize_with = "null_as_empty_schema")]
     parameters: Json,
 }
 
 fn empty_schema() -> Json {
     json!({"type": "object", "properties": {}})
+}
+
+/// `null` (Python's `None`) reads as a missing field.
+fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de> + Default,
+{
+    use serde::Deserialize;
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+fn null_as_empty_schema<'de, D>(deserializer: D) -> Result<Json, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    Ok(Option::<Json>::deserialize(deserializer)?.unwrap_or_else(empty_schema))
 }
 
 /// A language plugin's tool, run through its handler's `call_tool`.
@@ -737,11 +760,11 @@ impl AgentTool for RemoteTool {
             || ToolError::Failed(format!("`call_tool` returned an unexpected value: {value}"));
         let (text, details, is_error) = match &value {
             Json::String(text) => (text.clone(), Json::Null, false),
+            // `{}` is an empty text, as `after_tool`'s edit reads it.
             Json::Object(fields)
-                if !fields.is_empty()
-                    && fields
-                        .keys()
-                        .all(|k| ["text", "details", "is_error"].contains(&k.as_str())) =>
+                if fields
+                    .keys()
+                    .all(|k| ["text", "details", "is_error"].contains(&k.as_str())) =>
             {
                 let text = match fields.get("text") {
                     None => String::new(),

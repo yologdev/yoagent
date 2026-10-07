@@ -28,8 +28,9 @@ use rutis_loader::{
     ServiceCatalog,
 };
 use serde_json::{json, Value};
+use yoagent::extension::RunContext;
 use yoagent::provider::mock::{MockResponse, MockToolCall};
-use yoagent::AgentEvent;
+use yoagent::{AgentEvent, Extension, ToolCallRequest, ToolDecision};
 use yoagent_rutis::RutisBridge;
 
 fn plugins_dir() -> PathBuf {
@@ -442,6 +443,8 @@ def apply(ctx, config):
         "tools": tools,
         "call_tool": call_tool,
         "finish": finish,
+        # None reads as absent, as on a live object.
+        "on_stop": None,
     }))
     probe.record(f"py {name}: registered")
 "#;
@@ -472,11 +475,17 @@ export default definePlugin({
     }
     ctx.effect(yoagent.register('strict', {
       async tools() {
-        return [{ name: 'bad_flag' }, { name: 'bad_text' }, { name: 'empty' }]
+        return [
+          { name: 'bad_flag' },
+          { name: 'bad_text' },
+          { name: 'empty' },
+          { name: 'nulls', description: null, parameters: null },
+        ]
       },
       async call_tool(call) {
         if (call.tool === 'bad_flag') return { text: 'ok?', is_error: 'yes' }
         if (call.tool === 'bad_text') return { text: 42 }
+        if (call.tool === 'nulls') return 'nulls ok'
         return {}
       },
       async before_tool(call) {
@@ -918,88 +927,83 @@ async fn register_and_results_are_strict() {
         assert!(line.starts_with("refused") && line.contains(why), "{line}");
     }
 
-    for required in [false, true] {
-        let echo = Reply::new("bad_args", "ran");
-        let echo_runs = echo.runs();
-        let (agent, _) = agent(vec![
-            calls(&[
-                ("bad_flag", json!({})),
-                ("bad_text", json!({})),
-                ("empty", json!({})),
-                ("bad_args", json!({})),
-                ("pause", json!({})),
-            ]),
-            text("done"),
-        ]);
-        let extension = if required {
-            host.bridge.extension().required()
-        } else {
-            host.bridge.extension()
-        };
-        // A remote `on_event` failure is noticed at the first event or
-        // decision point after it lands: the pause lets it land before the
-        // next model request.
-        let mut agent = agent
-            .with_tools(vec![Box::new(echo), Box::new(Pause)])
-            .with_extension(extension);
-        let (_, results) = tokio::time::timeout(Duration::from_secs(30), run(&mut agent, "go"))
-            .await
-            .expect("the run finishes");
-        if required {
-            // The failed `on_event` (after the first tool's end) fails the
-            // run; calls not started yet do not run.
-            let error = run_error(&agent).expect("the run failed");
-            assert!(error.contains("observer down"), "{error}");
-            continue;
-        }
-        let result = |name: &str| {
-            results
-                .iter()
-                .find(|(n, ..)| n == name)
-                .unwrap_or_else(|| panic!("{name}: {results:?}"))
-                .clone()
-        };
-        for name in ["bad_flag", "bad_text", "empty"] {
-            let (_, text, is_error) = result(name);
-            assert!(
-                is_error && text.contains("unexpected value"),
-                "{name}: {text}"
-            );
-        }
-        let (_, text, is_error) = result("bad_args");
-        assert!(is_error && text.contains("unexpected value"), "{text}");
-        assert_eq!(echo_runs.load(Ordering::SeqCst), 0);
-        assert_eq!(run_error(&agent), None, "advisory: on_event switched off");
+    let echo = Reply::new("bad_args", "ran");
+    let echo_runs = echo.runs();
+    let (agent, seen) = agent(vec![
+        calls(&[
+            ("bad_flag", json!({})),
+            ("bad_text", json!({})),
+            ("empty", json!({})),
+            ("nulls", json!({})),
+            ("bad_args", json!({})),
+        ]),
+        text("done"),
+    ]);
+    let mut agent = agent
+        .with_tools(vec![Box::new(echo)])
+        .with_extension(host.bridge.extension());
+    let (_, results) = tokio::time::timeout(Duration::from_secs(30), run(&mut agent, "go"))
+        .await
+        .expect("the run finishes");
+    let result = |name: &str| {
+        results
+            .iter()
+            .find(|(n, ..)| n == name)
+            .unwrap_or_else(|| panic!("{name}: {results:?}"))
+            .clone()
+    };
+    for name in ["bad_flag", "bad_text"] {
+        let (_, text, is_error) = result(name);
+        assert!(
+            is_error && text.contains("unexpected value"),
+            "{name}: {text}"
+        );
     }
-    host.root.shutdown().await.unwrap();
-}
+    // `{}` is an empty text, as `after_tool` reads it.
+    assert_eq!(result("empty"), ("empty".into(), String::new(), false));
+    // `description: null, parameters: null` read as missing.
+    assert_eq!(result("nulls"), ("nulls".into(), "nulls ok".into(), false));
+    assert!(seen.lock().unwrap()[0].tools.contains(&"nulls".to_string()));
+    let (_, text, is_error) = result("bad_args");
+    assert!(is_error && text.contains("unexpected value"), "{text}");
+    assert_eq!(echo_runs.load(Ordering::SeqCst), 0);
+    assert_eq!(run_error(&agent), None, "advisory: on_event switched off");
 
-/// Sleeps briefly.
-struct Pause;
-
-#[async_trait::async_trait]
-impl yoagent::AgentTool for Pause {
-    fn name(&self) -> &str {
-        "pause"
-    }
-    fn label(&self) -> &str {
-        "pause"
-    }
-    fn description(&self) -> &str {
-        "waits half a second"
-    }
-    fn parameters_schema(&self) -> Value {
-        json!({"type": "object", "properties": {}})
-    }
-    async fn execute(
-        &self,
-        _params: Value,
-        _ctx: yoagent::ToolContext,
-    ) -> Result<yoagent::ToolResult, yoagent::ToolError> {
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        Ok(yoagent::ToolResult {
+    // Required: the throwing `on_event` is picked up at the next decision
+    // point. Driven through the extension, waiting on the decision itself
+    // rather than on the clock.
+    let extension = host.bridge.extension().required();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let hooks = extension
+        .start_run(&RunContext::new("strict-run", &[], &cancel))
+        .await
+        .unwrap();
+    hooks.on_event(&AgentEvent::ToolExecutionEnd {
+        tool_call_id: "c1".into(),
+        tool_name: "empty".into(),
+        result: yoagent::ToolResult {
             content: vec![],
             details: Value::Null,
-        })
-    }
+        },
+        is_error: false,
+    });
+    let args = json!({});
+    let request = ToolCallRequest::new("c2", "anything", &args);
+    let denial = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            match hooks.before_tool(&request).await {
+                ToolDecision::Deny(reason) => break reason,
+                _ => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        }
+    })
+    .await
+    .expect("the failure reaches the run");
+    assert!(
+        denial.contains("required plugin handler failed")
+            && denial.contains("strict")
+            && denial.contains("observer down"),
+        "{denial}"
+    );
+    host.root.shutdown().await.unwrap();
 }

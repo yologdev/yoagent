@@ -62,8 +62,16 @@ export interface Options {
  * the bridge required). An answer of an unexpected shape counts as failed
  * too.
  *
- * A member named like a hook must be a function: `register` throws on
- * anything else, so a policy never goes missing silently.
+ * An abandoned call is not stopped in JavaScript: when the host stops
+ * waiting (a timeout, the run cancelled, the plugin unloaded) the answer is
+ * discarded, but no `AbortSignal` is passed, so the function runs to
+ * completion — `call_tool` included, side effects and all, after the run
+ * was cancelled. Make tools idempotent, or keep your own deadline. (Python
+ * coroutines are cancelled.)
+ *
+ * A member named like a hook must be a function (or absent: `undefined`,
+ * `null`, `None`): `register` throws on anything else, so a policy never
+ * goes missing silently.
  *
  * Hooks run in registration order across every plugin: a `deny` wins, an
  * `args` rewrite feeds the next handler, notes are joined.
@@ -71,7 +79,11 @@ export interface Options {
 export interface Handler {
   /** Tools to offer for a run (asked once, at its start). */
   tools?(run: RunInfo): Promise<ToolSpec[]>
-  /** Run one of this handler's tools. Required with `tools`. */
+  /**
+   * Run one of this handler's tools. Required with `tools`. No timeout
+   * besides the run's cancellation, and a cancelled call keeps running here
+   * (its result is discarded): see above.
+   */
   call_tool?(call: ToolCall): Promise<ToolResult>
   /** Judge a tool call: every call of the run, the agent's own tools too. */
   before_tool?(call: ToolCall): Promise<ToolVerdict>
@@ -173,13 +185,16 @@ export interface Outcome extends RunInfo {
 
 export interface ToolSpec {
   name: string
-  label?: string
-  description?: string
-  /** JSON Schema of the arguments (default: an object with no properties). */
-  parameters?: Record<string, unknown>
+  label?: string | null
+  description?: string | null
+  /** JSON Schema of the arguments (default, also for `null`: an object with no properties). */
+  parameters?: Record<string, unknown> | null
 }
 
-/** The tool's text, or the text plus details; `is_error` (or a throw) fails the call. */
+/**
+ * The tool's text, or the text plus details (a missing `text` — `{}` too —
+ * is an empty text); `is_error` (or a throw) fails the call.
+ */
 export type ToolResult = string | { text?: string; details?: unknown; is_error?: boolean }
 
 export type AgentEventType =

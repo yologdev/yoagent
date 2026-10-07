@@ -55,7 +55,7 @@ The host decides how much it trusts its plugins:
 
 | `bridge.extension()` option | Effect |
 |---|---|
-| `.required()` | a failing `tools`, `before_model`, `after_tool`, `on_stop` or `on_event` fails the run (default: logged, the handler skipped) |
+| `.required()` | a failing `tools`, `before_model`, `after_tool`, `on_stop` or `on_event` fails the run (default: logged, the handler skipped). A `tools` / `on_event` failure fails it at the next decision point (tool calls are denied meanwhile); one in the run's last events (`TurnEnd`, `AgentEnd`) is only logged. A handler whose plugin unloads mid-run never fails the run: an unloaded `after_tool` still withholds the result |
 | `.filters_tool_output()` | plugins redact output: yoagent withholds partial tool output, so only the filtered result is sent |
 | `.rechecks_modified_calls()` | plugin policy judges a call again when an extension installed later rewrote it |
 | `.require_policy()` | a run that starts with no `before_tool` handler denies every tool call |
@@ -187,6 +187,17 @@ def apply(ctx, config):
   `before_tool` denies, its `on_input` rejects, its `after_tool` withholds).
 - **The same rules as Rust handlers**: one registry and one name space for
   every language, registration order, fail closed on errors and timeouts.
+- **An abandoned JavaScript hook keeps running.** When the bridge stops
+  waiting for a hook — its timeout passed, the run was cancelled
+  (`Agent::abort()`), its plugin unloaded — the answer is discarded, but a
+  JavaScript function is not stopped: no `AbortSignal` is passed, so it runs
+  to completion. That includes **`call_tool` side effects after a run was
+  cancelled** (a write, a request, a payment): make tools idempotent, or check
+  your own deadline before acting. A Python coroutine is cancelled
+  (`asyncio.CancelledError` at its next `await`). (rutis-bridge 0.7 can pass
+  an `AbortSignal`, but only as an extra positional argument, which a Python
+  method with a fixed signature would refuse; the bridge cannot tell the two
+  apart, so it passes none.)
 - **The bridge never loads plugins**: the host does, typically with
   [rutis-loader](https://crates.io/crates/rutis-loader) rows, and must share
   `yoagent` in the loader's catalog (`catalog.register_shared("yoagent")` or
@@ -241,8 +252,9 @@ The end-to-end tests cover local Node and Python runtimes; a remote node over
   that run (the plugin's cancellation token is cancelled before its cleanup
   runs): its tool calls fail ("no longer available", or "plugin unloaded
   during the call" for one in flight), its `before_tool` denies every call,
-  its `on_input` rejects, its `after_tool` withholds the result, and its
-  `before_model`, `on_stop`, `on_event` and `finish` are skipped. A restart
+  its `on_input` rejects, its `after_tool` withholds the result (fail closed,
+  but not a failure: a `required()` run goes on), and its `before_model`,
+  `on_stop`, `on_event` and `finish` are skipped. A restart
   or config update is the same: the new generation serves the next run. The
   bridge never rebinds a run to a newer generation.
 - **Everything a plugin registers goes when it goes** — on `dispose`,
@@ -268,7 +280,7 @@ the others).
 | `before_tool` | a `Deny` wins (later handlers never see the call); a `Modify` feeds the next handler | denies the call |
 | `after_tool` | each sees the previous edit | withholds the result (`required()`: the run fails too) |
 | `on_stop` | every `Continue` message is sent, joined | skipped (`required()`: the run fails) |
-| `on_event` | all, in order, synchronously | switched off for the run (`required()`: the run fails) |
+| `on_event` | all, in order, synchronously | that handler is switched off for the run; the others and bus publishing go on (`required()`: the run fails at its next decision point) |
 | `finish` | all, concurrently | logged |
 
 - **No policy means allow.** A run that starts with no `before_tool` handler
