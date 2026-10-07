@@ -102,7 +102,8 @@ reason, which the parent's model sees.
 Input filters see a run's **prompts** only: messages queued with
 `Agent::steer` / `Agent::follow_up` enter the loop without passing through
 them. With the `decision` feature, `Agent::with_input_guard` is a ready-made
-async filter backed by a decision model (see
+input check backed by a decision model, installed as an extension (`on_input`)
+that runs after these filters (see
 [Decision Models](decision-models.md#blocking-with_input_guard)).
 
 ## Turn Hooks

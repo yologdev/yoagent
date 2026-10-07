@@ -238,22 +238,48 @@ fn a_guard_with_no_checks_panics_at_setup() {
         Agent::from_provider(MockProvider::text("x"), ModelConfig::mock()).with_input_guard(guard);
 }
 
+/// The deprecated trait impls still work, and decide as `check` / `screen` do.
+#[tokio::test]
+async fn the_deprecated_middleware_and_filter_impls_still_decide() {
+    let args = json!({"path": "/srv/data"});
+    let prompts = [Message::user("summarize the README")];
+    let call = ToolCallRequest::new("call-1", "rm", &args).with_run_prompts(&prompts);
+    let gate = ToolGate::new(model(&gate_answers(0.95, 0.05)));
+    assert!(matches!(
+        ToolMiddleware::before_tool(&gate, &call).await,
+        ToolDecision::Deny(_)
+    ));
+    let gate = ToolGate::new(model(&gate_answers(0.95, 0.95)));
+    assert!(matches!(
+        ToolMiddleware::before_tool(&gate, &call).await,
+        ToolDecision::Allow
+    ));
+
+    let guard = InputGuard::new(model(&checks(|_| 0.95)));
+    assert!(matches!(
+        AsyncInputFilter::filter(&guard, "anything").await,
+        FilterResult::Reject(_)
+    ));
+    let guard = InputGuard::new(model(&checks(|_| 0.0)));
+    assert!(matches!(
+        AsyncInputFilter::filter(&guard, "anything").await,
+        FilterResult::Pass
+    ));
+}
+
 #[tokio::test]
 async fn a_guard_with_no_checks_rejects_when_used_directly() {
     let mock = checks(|_| 0.0);
     let guard = InputGuard::new(model(&mock)).without_default_checks();
     assert!(guard.check_ids().is_empty());
     assert!(matches!(
-        AsyncInputFilter::filter(&guard, "anything").await,
+        guard.screen("anything").await,
         FilterResult::Reject(_)
     ));
     assert_eq!(mock.request_count(), 0);
     // Positive control: with a check, it screens and passes.
     let guard = guard.with_check("pii", "PII?", 0.5);
-    assert!(matches!(
-        AsyncInputFilter::filter(&guard, "anything").await,
-        FilterResult::Pass
-    ));
+    assert!(matches!(guard.screen("anything").await, FilterResult::Pass));
     assert_eq!(mock.request_count(), 1);
 }
 
@@ -451,7 +477,7 @@ async fn the_gate_can_be_unit_tested_through_tool_call_request_new() {
 
     // Destructive and unrequested: denied.
     let mock = gate_answers(0.95, 0.1);
-    let decision = ToolGate::new(model(&mock)).before_tool(&call).await;
+    let decision = ToolGate::new(model(&mock)).decide(&call).await;
     let ToolDecision::Deny(reason) = decision else {
         panic!("expected a denial, got {decision:?}");
     };
@@ -463,7 +489,7 @@ async fn the_gate_can_be_unit_tested_through_tool_call_request_new() {
 
     // Positive control: the same call, clearly requested, is allowed.
     let decision = ToolGate::new(model(&gate_answers(0.95, 0.95)))
-        .before_tool(&call)
+        .decide(&call)
         .await;
     assert!(matches!(decision, ToolDecision::Allow), "{decision:?}");
 
@@ -483,7 +509,7 @@ async fn the_gate_can_be_unit_tested_through_tool_call_request_new() {
     ];
     let mock = gate_answers(0.9, 0.9);
     let call = ToolCallRequest::new("call-2", "rm", &args).with_messages(&history);
-    ToolGate::new(model(&mock)).before_tool(&call).await;
+    ToolGate::new(model(&mock)).decide(&call).await;
     let seen = mock.requests()[0].state["user_request"]
         .as_str()
         .unwrap()
@@ -496,7 +522,7 @@ async fn the_gate_can_be_unit_tested_through_tool_call_request_new() {
     // No user request at all: denied without asking.
     let mock = gate_answers(0.0, 1.0);
     let bare = ToolCallRequest::new("call-3", "rm", &args);
-    let decision = ToolGate::new(model(&mock)).before_tool(&bare).await;
+    let decision = ToolGate::new(model(&mock)).decide(&bare).await;
     assert!(matches!(decision, ToolDecision::Deny(_)));
     assert_eq!(mock.request_count(), 0);
 }

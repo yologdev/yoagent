@@ -971,7 +971,8 @@ fn is_free(c: &CostConfig) -> bool {
 }
 
 /// Whether `key` is new to this process: each warning that would repeat on
-/// every evaluation (no usage, an unlisted price) is logged once per model.
+/// every evaluation (no usage, an unlisted price) is logged once per model,
+/// and each deprecated use (`deprecated:` keys) once per process.
 pub(crate) fn warn_once(key: String) -> bool {
     static WARNED: std::sync::Mutex<std::collections::BTreeSet<String>> =
         std::sync::Mutex::new(std::collections::BTreeSet::new());
