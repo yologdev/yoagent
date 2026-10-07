@@ -60,7 +60,7 @@ As of 0.13 all field names are camelCase; the pre-0.13 snake_case names
 (`cache_read`, `cache_write`, `total_tokens`, `error_message`,
 `provider_metadata`) are still accepted when loading older files.
 
-Extension messages use a nested structure:
+Custom messages (`CustomMessage`) use a nested structure:
 
 ```json
 {

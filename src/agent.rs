@@ -265,8 +265,8 @@ impl Agent {
     /// Provider handling depends on how the agent was built:
     /// - Built with [`from_config`](Self::from_config): the built-in provider
     ///   for the new protocol is selected from the default registry.
-    /// - Built with an **explicit** provider ([`from_provider`](Self::from_provider)
-    ///   or [`new`](Self::new)): that provider is **kept** — it is never
+    /// - Built with an **explicit** provider ([`from_provider`](Self::from_provider),
+    ///   or the deprecated `new`): that provider is **kept** — it is never
     ///   silently replaced — and a warning is logged if it may not serve the
     ///   new protocol. Reconstruct with `from_provider` to change providers.
     pub fn set_model(&mut self, config: ModelConfig) {
