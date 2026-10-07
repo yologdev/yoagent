@@ -306,10 +306,7 @@ async fn a_listener_cannot_override_a_later_denial() {
                 ctx,
                 &EventKey::<ToolCallEvent>::of(),
                 Overrider,
-                EventOptions {
-                    prepend: true,
-                    ..EventOptions::default()
-                },
+                EventOptions::default().prepend(true),
             )
             .map(drop)
     }));
@@ -600,10 +597,7 @@ async fn a_recorded_denial_after_approval_beats_an_earlier_allow() {
                 ctx,
                 &EventKey::<ToolCallEvent>::of(),
                 Overrider,
-                EventOptions {
-                    prepend: true,
-                    ..EventOptions::default()
-                },
+                EventOptions::default().prepend(true),
             )
             .map(drop)
     }));

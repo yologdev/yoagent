@@ -222,7 +222,7 @@ jobs:
       - name: Example
         run: cargo run --manifest-path "$MANIFEST" --example policy_plugin
 
-  # The bridge declares rust-version 1.86 (yoagent's MSRV; rutis 0.5 declares
+  # The bridge declares rust-version 1.86 (yoagent's MSRV; rutis 0.6.1 declares
   # 1.85). Mirrors the `msrv` job above, including its yoke-derive pin.
   rutis-bridge-msrv:
     name: yoagent-rutis MSRV (1.86)

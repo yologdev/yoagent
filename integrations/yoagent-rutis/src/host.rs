@@ -11,7 +11,7 @@ const NOT_RUNNING: &str =
 
 /// Why the host can no longer run plugin chains, if it cannot.
 ///
-/// rutis 0.5 does not refuse a non-instance `waterfall` / `serial` dispatch
+/// rutis 0.6 does not refuse a non-instance `waterfall` / `serial` dispatch
 /// after the root shut down: it drains every listener and then dispatches to
 /// an empty chain, which would read as "no policy objected". So the bridge
 /// checks liveness itself, before every dispatch: the dispatching context's

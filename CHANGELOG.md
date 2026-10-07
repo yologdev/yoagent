@@ -28,6 +28,7 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **`yoagent-rutis` (unpublished) moves to rutis 0.6** (`rutis = "0.6"`, built against 0.6.1). 0.6 only made rutis's public types `#[non_exhaustive]`, and 0.6.1 adds optional APIs; the bridge needed no source change. One test now builds `EventOptions` with `EventOptions::default().prepend(true)`. rutis's dispatch is unchanged in 0.6.1, so the bridge's liveness checks before and after dispatch still apply.
 - **The decision features run as extensions** (#241 dogfooding). `with_tool_gate`, `with_input_guard` and `with_decision_model` install a `ToolGate` (`before_tool`), an `InputGuard` (`on_input`) and the advisor (a `before_model` note); the gate and guard keep their old trait impls, now deprecated (below). Three ordering effects:
   - the gate runs after every middleware **and extension**, so it also judges arguments an extension rewrote;
   - the guard screens after all input filters, not in their list;
