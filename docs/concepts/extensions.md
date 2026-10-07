@@ -158,3 +158,21 @@ The decision features are extensions themselves:
 ## Order with the older hooks
 
 `ToolMiddleware`, `InputFilter`, `TurnHook`, `ToolSource` and the `on_*` closures keep working unchanged. Input filters run before `on_input`, and middleware before `before_tool`. Notes from `before_model` come before a `TurnHook`'s (turn hooks run inside the provider call, once per attempt).
+
+## Examples
+
+Six runnable examples, one feature each. They run offline on a scripted `MockProvider` and check their own results (CI runs them, so they stay current); pass `-- --live` with `DEEPSEEK_API_KEY` or `ANTHROPIC_API_KEY` set to drive a real model instead.
+
+| Example | Shows |
+| --- | --- |
+| [`extension_policy`](https://github.com/yologdev/yoagent/blob/main/examples/extension_policy.rs) | `before_tool` allowing, rewriting and denying calls with `ClonedHooks`; `rechecks_modified_calls` catching a rewrite by a later extension |
+| [`extension_redact`](https://github.com/yologdev/yoagent/blob/main/examples/extension_redact.rs) | An `after_tool` redactor, and why it declares `filters_tool_output` (partial output leaks without it) |
+| [`extension_verifier`](https://github.com/yologdev/yoagent/blob/main/examples/extension_verifier.rs) | A per-run `Extension` whose `on_stop` sends the model back, capped by `with_max_stop_continues`; `finish` reading `RunOutcome::end()`, advisory versus required at the cap |
+| [`extension_budget`](https://github.com/yologdev/yoagent/blob/main/examples/extension_budget.rs) | `Budget` per run, and `.across_runs()` read through an `Arc` with `spent_usd()` |
+| [`extension_tree`](https://github.com/yologdev/yoagent/blob/main/examples/extension_tree.rs) | A host policy installed with `with_tree_extension` judging a `SubAgentTool`'s child and a hand-written delegation tool's (`Agent::delegated_from`) |
+| [`extension_audit`](https://github.com/yologdev/yoagent/blob/main/examples/extension_audit.rs) | `on_event` + `finish` writing a JSON-lines audit log, including a run another extension's `on_input` rejected |
+
+```bash
+cargo run --example extension_policy
+cargo run --example extension_policy -- --live   # a real model; the checks are skipped
+```

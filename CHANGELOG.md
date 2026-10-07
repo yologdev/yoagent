@@ -26,6 +26,8 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 - **`extension::Budget`**: a dollar limit, checked before each model request: once spend reaches it, the run stops (the request that goes past it still completes). Per run (a sub-agent's reported spend included), or `.across_runs()` (a session, or a whole delegation tree with `with_tree_extension`; `spent_usd()` reads the total). `Budget::for_model` returns `None` for an unpriced model; a negative or NaN limit panics.
 
+- **Extension examples**: `extension_policy` (deny/modify with `ClonedHooks`, `rechecks_modified_calls`), `extension_redact` (`after_tool` + `filters_tool_output`), `extension_verifier` (`on_stop` continues, `finish` reading `RunOutcome::end()`), `extension_budget` (per run and `.across_runs()`), `extension_tree` (`with_tree_extension` over a `SubAgentTool` and a hand-written `Agent::delegated_from` tool) and `extension_audit` (`on_event` + `finish`). Each runs offline on a scripted `MockProvider` and checks its own result, and CI runs them all; `-- --live` drives a real model (`DEEPSEEK_API_KEY` or `ANTHROPIC_API_KEY`). New `tests/extension_combos_test.rs` covers extensions together with every tool strategy, compaction, steering, `prompt_structured`, provider retries (with `Budget`), and middleware plus the tool gate on one call.
+
 ### Changed
 
 - **`yoagent-rutis` (unpublished) moves to rutis 0.6** (`rutis = "0.6"`, built against 0.6.1). 0.6 only made rutis's public types `#[non_exhaustive]`, and 0.6.1 adds optional APIs; the bridge needed no source change. One test now builds `EventOptions` with `EventOptions::default().prepend(true)`. rutis's dispatch is unchanged in 0.6.1, so the bridge's liveness checks before and after dispatch still apply.
