@@ -998,12 +998,13 @@ impl Agent {
             cancel.cancel();
         }
         if let Some(handle) = self.pending_completion.as_mut() {
-            // Await the cancelled task to recover tools; ignore panic. Taken
-            // only once joined, so a dropped `reset` loses nothing.
+            // Await the cancelled task to recover tools. Taken only once
+            // joined, so a dropped `reset` loses nothing.
             let joined = handle.await;
             self.pending_completion = None;
-            if let Ok((tools, _messages, _stats)) = joined {
-                self.tools = tools;
+            match joined {
+                Ok((tools, _messages, _stats)) => self.tools = tools,
+                Err(e) => tracing::error!("Agent loop task failed: {}", e),
             }
         }
         self.messages.clear();
@@ -1245,10 +1246,14 @@ impl Agent {
     /// lives until the run has ended: call `finish()` after the timeout
     /// rather than dropping the agent, whose `Drop` aborts the run.
     ///
-    /// A panic in the run (outside a tool or hook, which are contained)
-    /// propagates out of this method. The agent's tools are lost with the
-    /// run, as they would be after a panic in [`prompt()`](Self::prompt). To steer or abort a run while it is
-    /// going, use [`prompt()`](Self::prompt), which leaves the agent free.
+    /// A panic in the run that the loop doesn't contain (tools, middleware,
+    /// extensions and tool sources are contained; a provider or a lifecycle
+    /// callback is not) propagates out of this method. The agent's tools are
+    /// lost with the run, as they would be after a panic in
+    /// [`prompt()`](Self::prompt).
+    ///
+    /// To steer or abort a run while it is going, use
+    /// [`prompt()`](Self::prompt), which leaves the agent free.
     ///
     /// ```rust,no_run
     /// # use yoagent::Agent;
