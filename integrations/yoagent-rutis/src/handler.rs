@@ -511,13 +511,14 @@ impl Hooks {
     }
 }
 
-/// Delivers one run's events to one handler; dropped (or closed) when the
+/// Delivers one run's events to one handler; dropped when the
 /// run ends.
 pub(crate) trait EventSink: Send + Sync {
     /// Must not block.
     fn send(&self, event: &AgentEvent);
-    /// Wait (bounded by the caller) until every event sent was delivered.
-    fn close(&self) -> BoxFuture<'static, ()> {
+    /// Wait (bounded by the caller) until every event sent so far was
+    /// delivered. More may follow: yoagent sends `AgentEnd` after `finish`.
+    fn flush(&self) -> BoxFuture<'static, ()> {
         Box::pin(async {})
     }
 }

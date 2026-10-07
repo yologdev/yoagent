@@ -1,5 +1,8 @@
+// The `doc(cfg)` feature badges, on docs.rs only; a no-op on stable.
+#![cfg_attr(docsrs, feature(doc_cfg))]
 //! **yoagent-rutis** — extend [yoagent](https://docs.rs/yoagent) agents at
-//! runtime with [rutis](https://docs.rs/rutis) plugins.
+//! runtime with [rutis](https://docs.rs/rutis) plugins, in Rust, TypeScript
+//! or Python.
 //!
 //! rutis (a Rust port of the Cordis plugin kernel) loads, unloads, reloads
 //! and hot-updates plugins, and tears down everything a plugin registered
@@ -74,6 +77,27 @@
 //!
 //! [`AgentPlugin`] wraps a handler as a plugin in one expression.
 //!
+//! # TypeScript and Python plugins
+//!
+//! With the `node`, `python` or `websocket` feature (rutis-bridge 0.7),
+//! [`RutisBridge::install`] also provides the registry to plugins in other
+//! languages, as the host service `yoagent`. Such a plugin registers an
+//! object (or a Python dict) of async functions, with the same hooks and the
+//! same plain-JSON arguments as a Rust [`Handler`]:
+//!
+//! ```ts
+//! const yoagent = ctx.use('yoagent')
+//! ctx.effect(yoagent.register('no-shell', {
+//!   async before_tool(call) {
+//!     if (call.tool === 'bash') return { deny: 'shell access is disabled' }
+//!   },
+//! }))
+//! ```
+//!
+//! The bridge never loads plugins: the host does (with rutis-loader, sharing
+//! `yoagent` in its catalog). See the `languages` module (built with those
+//! features) and `plugins/yoagent.d.ts` in the repository.
+//!
 //! # Semantics worth knowing
 //!
 //! - **A run uses the handlers registered when it started.** A plugin
@@ -115,6 +139,12 @@ pub mod events;
 pub mod extension;
 pub mod handler;
 mod host;
+#[cfg(any(feature = "node", feature = "python", feature = "websocket"))]
+#[cfg_attr(
+    docsrs,
+    doc(cfg(any(feature = "node", feature = "python", feature = "websocket")))
+)]
+pub mod languages;
 pub mod plugin;
 pub mod registry;
 

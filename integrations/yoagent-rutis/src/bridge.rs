@@ -44,6 +44,8 @@ impl RutisBridge {
                     .ok_or_else(|| CordisError::ServiceNotFound("Registry".into()))?
             }
         };
+        #[cfg(any(feature = "node", feature = "python", feature = "websocket"))]
+        crate::languages::provide(ctx, &registry)?;
         Ok(Self {
             host: Host::new(ctx),
             registry,

@@ -672,13 +672,13 @@ impl RunHooks for RunState {
         let this = &*self;
         // Every event sent so far reaches its handler before `finish` does.
         let closing = this.events.iter().map(|o| async move {
-            let close = o.sink.close();
+            let flush = o.sink.flush();
             if let Some(limit) = this.timeouts.turn {
-                if tokio::time::timeout(limit, close).await.is_err() {
+                if tokio::time::timeout(limit, flush).await.is_err() {
                     tracing::warn!(run_id = %this.run.run_id, handler = %o.handler.name, "event delivery did not drain within {limit:?}");
                 }
             } else {
-                close.await;
+                flush.await;
             }
         });
         futures::future::join_all(closing).await;
