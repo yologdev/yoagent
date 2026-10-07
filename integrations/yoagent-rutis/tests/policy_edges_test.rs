@@ -479,6 +479,82 @@ async fn a_required_on_event_failure_stops_pending_tool_calls_and_fails_the_run(
     root.shutdown().await.unwrap();
 }
 
+/// Panics when it sees the final answer (`MessageEnd` of an assistant
+/// message that stops): no tool call follows, so only yoagent's own checks
+/// after it (before `on_stop`, and at the run's end) can fail the run.
+fn panics_on_final_answer(name: &str) -> yoagent_rutis::Handler {
+    handler(name).with_on_event(|_run, event| {
+        if let AgentEvent::MessageEnd {
+            message:
+                yoagent::AgentMessage::Llm(Message::Assistant {
+                    stop_reason: yoagent::StopReason::Stop,
+                    ..
+                }),
+        } = event
+        {
+            panic!("answer observer bug");
+        }
+    })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_required_on_event_failure_on_the_final_answer_fails_the_run() {
+    let (root, bridge) = setup();
+    let p = root.plugin(plugin(panics_on_final_answer("answer-observer")));
+    wait_active(&p).await;
+    for required in [false, true] {
+        let (agent, _) = agent(vec![text("done")]);
+        let extension = if required {
+            bridge.extension().required()
+        } else {
+            bridge.extension()
+        };
+        let mut agent = agent.with_extension(extension);
+        run(&mut agent, "go").await;
+        if required {
+            let error = run_error(&agent).expect("the run failed");
+            assert!(
+                error.contains("answer-observer") && error.contains("answer observer bug"),
+                "{error}"
+            );
+        } else {
+            assert_eq!(run_error(&agent), None, "advisory: logged only");
+        }
+    }
+    root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_required_on_event_failure_on_agent_end_is_only_logged() {
+    let (root, bridge) = setup();
+    let seen_end = Arc::new(AtomicUsize::new(0));
+    let p = root.plugin(plugin(handler("end-observer").with_on_event({
+        let seen_end = seen_end.clone();
+        move |_run, event| {
+            if let AgentEvent::AgentEnd { .. } = event {
+                seen_end.fetch_add(1, Ordering::SeqCst);
+                panic!("end observer bug");
+            }
+        }
+    })));
+    wait_active(&p).await;
+    let (agent, _) = agent(vec![text("done")]);
+    let mut agent = agent.with_extension(bridge.extension().required());
+    let (events, _) = run(&mut agent, "go").await;
+    assert_eq!(
+        seen_end.load(Ordering::SeqCst),
+        1,
+        "the handler saw AgentEnd"
+    );
+    // Too late to fail: the run already ended, as its consumer saw.
+    assert_eq!(run_error(&agent), None);
+    assert!(
+        matches!(events.last(), Some(AgentEvent::AgentEnd { .. })),
+        "{events:?}"
+    );
+    root.shutdown().await.unwrap();
+}
+
 fn event_kind(e: &AgentEvent) -> String {
     serde_json::to_value(e).unwrap()["type"]
         .as_str()

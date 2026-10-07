@@ -51,7 +51,11 @@
 //! language rows can inject it.
 
 use std::collections::BTreeMap;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
+
+use futures::future::BoxFuture;
+use futures::FutureExt;
 
 use rutis::Ctx;
 use rutis_bridge::session::{self, host_key, Error, HostDispatch, Reference, Reply, Value};
@@ -528,57 +532,18 @@ impl HandlerImpl for RemoteHandler {
         if !self.hooks.on_event {
             return None;
         }
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<Delivery>(EVENT_QUEUE);
         let target = self.target.clone();
-        let name = self.name.clone();
-        let failed = Arc::new(std::sync::Mutex::new(None::<String>));
-        let failure = failed.clone();
-        let run_id = run.run_id.clone();
-        // One task per run and handler: events arrive in order, and the run
-        // never waits for them. It ends once the run's hooks are dropped and
-        // the queue is drained (`AgentEnd` comes after `finish`).
-        tokio::spawn(async move {
-            while let Some(delivery) = rx.recv().await {
-                let event = match delivery {
-                    Delivery::Event(event) => event,
-                    Delivery::Flush(done) => {
-                        let _ = done.send(());
-                        continue;
-                    }
-                };
-                if failure.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
-                    continue; // switched off: drop what is still queued
-                }
-                let call = target.call("on_event", vec![event]);
-                let outcome = match limit {
-                    Some(limit) => tokio::time::timeout(limit, call).await.unwrap_or_else(|_| {
-                        Err(ExtensionError::new(format!(
-                            "did not answer within {limit:?}"
-                        )))
-                    }),
-                    None => call.await,
-                };
-                if let Err(error) = outcome {
-                    let why = format!(
-                        "plugin handler `{name}` failed in `on_event`: {error} (not called again this run)"
-                    );
-                    // Logged here too: a failure on the run's last events
-                    // (`AgentEnd` comes after `finish`) is seen by nothing else.
-                    tracing::warn!(run_id = %run_id, "{why}");
-                    failure
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .get_or_insert(why);
-                }
-            }
+        let deliver: Deliver = Arc::new(move |event| {
+            let target = target.clone();
+            Box::pin(async move { target.call("on_event", vec![event]).await })
         });
-        Some(Box::new(RemoteEvents {
-            name: self.name.clone(),
-            filter: self.events.clone(),
-            run: run.clone(),
-            tx,
-            failed,
-        }))
+        Some(Box::new(RemoteEvents::start(
+            self.name.clone(),
+            self.events.clone(),
+            run.clone(),
+            limit,
+            deliver,
+        )))
     }
 }
 
@@ -635,16 +600,120 @@ fn event_type(event: &AgentEvent) -> String {
     known.to_string()
 }
 
+/// Delivers one event to a handler's `on_event` (a call into its runtime).
+type Deliver = Arc<dyn Fn(Json) -> BoxFuture<'static, Result<Json, ExtensionError>> + Send + Sync>;
+
 /// Queues a run's events (those of the subscribed types) for delivery.
 struct RemoteEvents {
     name: String,
     filter: Arc<Vec<String>>,
     run: RunInfo,
     tx: tokio::sync::mpsc::Sender<Delivery>,
-    /// The first delivery failure (an error, a timeout, a full queue): the
-    /// handler's `on_event` is switched off for the run. Never raised as a
-    /// panic: the extension reads it with [`EventSink::failure`].
+    /// The first delivery failure (an error, a panic, a timeout, a full
+    /// queue, a delivery task that ended): the handler's `on_event` is
+    /// switched off for the run. Never raised as a panic: the extension reads
+    /// it with [`EventSink::failure`].
     failed: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+/// Record `why` as the first delivery failure (later ones are dropped).
+fn record_failure(failed: &std::sync::Mutex<Option<String>>, why: String) {
+    failed
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert(why);
+}
+
+/// The failure of a delivery task that is gone while the run still sends.
+fn delivery_ended(name: &str) -> String {
+    format!(
+        "plugin handler `{name}`: its event delivery ended unexpectedly (`on_event` not called again this run)"
+    )
+}
+
+/// Text of a panic payload.
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "non-string panic payload".into())
+}
+
+impl RemoteEvents {
+    /// Spawn the run's delivery task: one per run and handler, so events
+    /// arrive in order and the run never waits for them. It ends once the
+    /// sink is dropped and the queue drained (`AgentEnd` comes after
+    /// `finish`). A delivery that panics (the handler's call or the session
+    /// code around it) is contained and recorded as the handler's failure;
+    /// should the task end anyway, the next `send` or `flush` records that.
+    fn start(
+        name: String,
+        filter: Arc<Vec<String>>,
+        run: RunInfo,
+        limit: Option<Duration>,
+        deliver: Deliver,
+    ) -> Self {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Delivery>(EVENT_QUEUE);
+        let failed = Arc::new(std::sync::Mutex::new(None::<String>));
+        let failure = failed.clone();
+        let task_name = name.clone();
+        let run_id = run.run_id.clone();
+        tokio::spawn(async move {
+            let name = task_name;
+            while let Some(delivery) = rx.recv().await {
+                let event = match delivery {
+                    Delivery::Event(event) => event,
+                    Delivery::Flush(done) => {
+                        let _ = done.send(());
+                        continue;
+                    }
+                };
+                if failure.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+                    continue; // switched off: drop what is still queued
+                }
+                // Built inside the guard too: a panic before the future exists.
+                let call = AssertUnwindSafe(async { deliver(event).await }).catch_unwind();
+                let outcome = match limit {
+                    Some(limit) => tokio::time::timeout(limit, call).await.unwrap_or_else(|_| {
+                        Ok(Err(ExtensionError::new(format!(
+                            "did not answer within {limit:?}"
+                        ))))
+                    }),
+                    None => call.await,
+                };
+                let why = match outcome {
+                    Ok(Ok(_)) => continue,
+                    Ok(Err(error)) => format!(
+                        "plugin handler `{name}` failed in `on_event`: {error} (not called again this run)"
+                    ),
+                    Err(payload) => format!(
+                        "plugin handler `{name}` panicked in `on_event`: {} (not called again this run)",
+                        panic_text(&*payload)
+                    ),
+                };
+                // Logged here too: a failure on the run's last events
+                // (`AgentEnd` comes after `finish`) is seen by nothing else.
+                tracing::warn!(run_id = %run_id, "{why}");
+                record_failure(&failure, why);
+            }
+        });
+        Self {
+            name,
+            filter,
+            run,
+            tx,
+            failed,
+        }
+    }
+
+    /// The delivery task is gone while the run still holds the sink: never
+    /// silently, or a required handler would never fail.
+    fn ended(&self) {
+        let why = delivery_ended(&self.name);
+        tracing::warn!(run_id = %self.run.run_id, "{why}");
+        record_failure(&self.failed, why);
+    }
 }
 
 impl EventSink for RemoteEvents {
@@ -660,16 +729,17 @@ impl EventSink for RemoteEvents {
         if let (Some(fields), Json::Object(run)) = (json.as_object_mut(), to_json(&self.run)) {
             fields.insert("run".into(), Json::Object(run));
         }
-        if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) =
-            self.tx.try_send(Delivery::Event(json))
-        {
-            self.failed
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .get_or_insert(format!(
+        use tokio::sync::mpsc::error::TrySendError;
+        match self.tx.try_send(Delivery::Event(json)) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => record_failure(
+                &self.failed,
+                format!(
                     "plugin handler `{}` fell {EVENT_QUEUE} events behind in `on_event` (not called again this run)",
                     self.name
-                ));
+                ),
+            ),
+            Err(TrySendError::Closed(_)) => self.ended(),
         }
     }
 
@@ -680,12 +750,20 @@ impl EventSink for RemoteEvents {
             .clone()
     }
 
-    fn flush(&self) -> futures::future::BoxFuture<'static, ()> {
+    fn flush(&self) -> BoxFuture<'static, ()> {
         let (done, flushed) = tokio::sync::oneshot::channel();
         let tx = self.tx.clone();
+        let failed = self.failed.clone();
+        let name = self.name.clone();
+        let run_id = self.run.run_id.clone();
         Box::pin(async move {
-            if tx.send(Delivery::Flush(done)).await.is_ok() {
-                let _ = flushed.await;
+            // Either fails only when the delivery task is gone: it answers
+            // every flush it receives, even once switched off.
+            let delivered = tx.send(Delivery::Flush(done)).await.is_ok() && flushed.await.is_ok();
+            if !delivered {
+                let why = delivery_ended(&name);
+                tracing::warn!(run_id = %run_id, "{why}");
+                record_failure(&failed, why);
             }
         })
     }
@@ -788,5 +866,245 @@ impl AgentTool for RemoteTool {
             content: vec![Content::Text { text }],
             details,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+    use yoagent::extension::RunContext;
+    use yoagent::{Extension, ToolCallRequest};
+
+    type Failed = Arc<Mutex<Option<String>>>;
+
+    /// How the test handler's event delivery goes wrong.
+    #[derive(Clone, Copy)]
+    enum Breaks {
+        /// The handler's call panics inside the delivery task.
+        Panics,
+        /// The delivery task is gone (it died) while the run still sends.
+        TaskDies,
+    }
+
+    /// A handler observing `toolExecutionEnd` whose delivery breaks.
+    struct Broken {
+        breaks: Breaks,
+        /// The sink's failure slot, once a run started.
+        failed: Mutex<Option<Failed>>,
+    }
+
+    fn sink(breaks: Breaks, run: &RunInfo) -> RemoteEvents {
+        let filter = Arc::new(vec!["toolExecutionEnd".to_string()]);
+        match breaks {
+            Breaks::Panics => RemoteEvents::start(
+                "broken".into(),
+                filter,
+                run.clone(),
+                None,
+                Arc::new(
+                    |_event| -> BoxFuture<'static, Result<Json, ExtensionError>> {
+                        Box::pin(async { panic!("delivery bug") })
+                    },
+                ),
+            ),
+            Breaks::TaskDies => {
+                let (tx, rx) = tokio::sync::mpsc::channel(EVENT_QUEUE);
+                drop(rx);
+                RemoteEvents {
+                    name: "broken".into(),
+                    filter,
+                    run: run.clone(),
+                    tx,
+                    failed: Arc::default(),
+                }
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl HandlerImpl for Broken {
+        fn hooks(&self) -> Hooks {
+            Hooks {
+                on_event: true,
+                ..Hooks::default()
+            }
+        }
+        fn static_tools(&self) -> Vec<Arc<dyn AgentTool>> {
+            Vec::new()
+        }
+        async fn tools(&self, _: RunInfo) -> Result<Vec<Arc<dyn AgentTool>>, ExtensionError> {
+            Ok(Vec::new())
+        }
+        async fn before_tool(&self, _: ToolCall) -> Result<ToolDecision, ExtensionError> {
+            Ok(ToolDecision::Allow)
+        }
+        async fn after_tool(
+            &self,
+            _: ToolCall,
+            output: ToolOutput,
+        ) -> Result<ToolOutput, ExtensionError> {
+            Ok(output)
+        }
+        async fn before_model(&self, _: Turn) -> Result<TurnDecision, ExtensionError> {
+            Ok(TurnDecision::Continue)
+        }
+        async fn on_input(&self, _: Input) -> Result<InputDecision, ExtensionError> {
+            Ok(InputDecision::Pass)
+        }
+        async fn on_stop(&self, _: Stop) -> Result<StopDecision, ExtensionError> {
+            Ok(StopDecision::Accept)
+        }
+        async fn finish(&self, _: RunOutcome, _: RunInfo) -> Result<(), ExtensionError> {
+            Ok(())
+        }
+        fn events(&self, run: &RunInfo, _: Option<Duration>) -> Option<Box<dyn EventSink>> {
+            let sink = sink(self.breaks, run);
+            *self.failed.lock().unwrap() = Some(sink.failed.clone());
+            Some(Box::new(sink))
+        }
+    }
+
+    fn tool_end() -> AgentEvent {
+        AgentEvent::ToolExecutionEnd {
+            tool_call_id: "c1".into(),
+            tool_name: "act".into(),
+            result: ToolResult {
+                content: vec![],
+                details: Json::Null,
+            },
+            is_error: false,
+        }
+    }
+
+    async fn until_failed(failed: &Failed) -> String {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(why) = failed.lock().unwrap().clone() {
+                    break why;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the delivery failure is recorded")
+    }
+
+    /// One event through a run of the bridge's extension: what the sink
+    /// recorded, what `take_failure` handed yoagent, and the decision on a
+    /// later tool call.
+    async fn observe(breaks: Breaks, required: bool) -> (String, Option<String>, ToolDecision) {
+        let root = rutis::Ctx::root().unwrap();
+        let bridge = crate::RutisBridge::install(&root).unwrap();
+        let handler = Arc::new(Broken {
+            breaks,
+            failed: Mutex::new(None),
+        });
+        bridge
+            .registry()
+            .insert(
+                "broken".into(),
+                "test".into(),
+                handler.clone(),
+                CancellationToken::new(),
+            )
+            .unwrap();
+        let extension = if required {
+            bridge.extension().required()
+        } else {
+            bridge.extension()
+        };
+        let cancel = CancellationToken::new();
+        let hooks = extension
+            .start_run(&RunContext::new("run-1", &[], &cancel))
+            .await
+            .unwrap();
+        hooks.on_event(&tool_end());
+        let failed = handler.failed.lock().unwrap().clone().unwrap();
+        let recorded = until_failed(&failed).await;
+        let args = json!({});
+        let decision = hooks
+            .before_tool(&ToolCallRequest::new("c2", "act", &args))
+            .await;
+        let taken = hooks.take_failure();
+        drop(hooks);
+        root.shutdown().await.unwrap();
+        (recorded, taken, decision)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_panicking_delivery_is_the_handlers_failure() {
+        let (recorded, taken, decision) = observe(Breaks::Panics, true).await;
+        assert!(
+            recorded.contains("`broken` panicked in `on_event`: delivery bug"),
+            "{recorded}"
+        );
+        assert!(
+            matches!(&decision, ToolDecision::Deny(r) if r.contains("delivery bug")),
+            "{decision:?}"
+        );
+        assert_eq!(
+            taken.as_deref(),
+            Some(recorded.as_str()),
+            "required: fails the run"
+        );
+
+        let (recorded, taken, decision) = observe(Breaks::Panics, false).await;
+        assert!(recorded.contains("delivery bug"), "{recorded}");
+        assert_eq!(taken, None, "advisory: logged only");
+        assert!(matches!(decision, ToolDecision::Allow), "{decision:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_delivery_task_that_died_is_the_handlers_failure() {
+        let (recorded, taken, decision) = observe(Breaks::TaskDies, true).await;
+        assert!(
+            recorded.contains("`broken`") && recorded.contains("event delivery ended"),
+            "{recorded}"
+        );
+        assert!(
+            matches!(&decision, ToolDecision::Deny(r) if r.contains("event delivery ended")),
+            "{decision:?}"
+        );
+        assert_eq!(
+            taken.as_deref(),
+            Some(recorded.as_str()),
+            "required: fails the run"
+        );
+
+        let (recorded, taken, decision) = observe(Breaks::TaskDies, false).await;
+        assert!(recorded.contains("event delivery ended"), "{recorded}");
+        assert_eq!(taken, None, "advisory: logged only");
+        assert!(matches!(decision, ToolDecision::Allow), "{decision:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_flush_finding_the_delivery_task_gone_records_it() {
+        let sink = sink(Breaks::TaskDies, &RunInfo::new("run-1"));
+        sink.flush().await;
+        let why = sink.failure().expect("recorded");
+        assert!(why.contains("event delivery ended"), "{why}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_working_delivery_records_nothing() {
+        let delivered = Arc::new(Mutex::new(Vec::new()));
+        let sink = RemoteEvents::start(
+            "fine".into(),
+            Arc::new(vec!["toolExecutionEnd".to_string()]),
+            RunInfo::new("run-1"),
+            None,
+            Arc::new({
+                let delivered = delivered.clone();
+                move |event| -> BoxFuture<'static, Result<Json, ExtensionError>> {
+                    delivered.lock().unwrap().push(event);
+                    Box::pin(async { Ok(Json::Null) })
+                }
+            }),
+        );
+        sink.send(&tool_end());
+        sink.flush().await;
+        assert_eq!(delivered.lock().unwrap().len(), 1);
+        assert_eq!(sink.failure(), None);
     }
 }
