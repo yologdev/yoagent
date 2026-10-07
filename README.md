@@ -209,8 +209,9 @@ live in `OpenAiCompat` / `AnthropicCompat` flags — 12 compat profiles ship in 
 The `opencode_zen(..)` / `opencode_go(..)` gateways pick the wire protocol from the model id
 automatically, so one config reaches models across several vendors.
 
-Thinking/reasoning controls are wired for all 7 protocols. Client-side cache hints are sent on two:
-Anthropic gets `cache_control` breakpoints, native OpenAI gets a `prompt_cache_key`. Most others cache
+Thinking/reasoning controls are wired for all 7 protocols. Client-side cache hints are sent on four:
+Anthropic gets `cache_control` breakpoints; native OpenAI, the OpenAI Responses API and Azure OpenAI get a
+`prompt_cache_key`. Most others cache
 server-side with nothing to configure; Bedrock does not cache automatically, and its explicit
 `cachePoint` blocks are not yet wired. Context-overflow detection is centralised across 15+
 provider-specific error strings.

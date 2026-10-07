@@ -37,7 +37,10 @@ pub enum Content {
         signature: Option<String>,
         /// Reasoning the provider returned encrypted instead of as text:
         /// Anthropic's `redacted_thinking` `data`, or Amazon Bedrock's
-        /// `redactedContent` (base64). `thinking` is empty for such a block.
+        /// `redactedContent` (base64) — `thinking` is empty for such a
+        /// block — or an OpenAI Responses / Azure reasoning item (its `id`,
+        /// `summary` and `encrypted_content` as a JSON object), whose
+        /// readable summary, if any, stays in `thinking`.
         /// It is opaque: replayed unmodified, and only to the protocol named
         /// by `redacted_protocol`; every other provider skips it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -447,15 +450,16 @@ pub struct CacheConfig {
     /// lookups by key rather than by explicit breakpoints (OpenAI's
     /// `prompt_cache_key`).
     ///
-    /// Leave `None` and one is derived from the request's stable head — the
-    /// system prompt plus the first user message. That derivation is correct
-    /// for the common case and costs nothing, but two sessions opening with
-    /// identical text share a key. Set this explicitly when sessions must be
-    /// routed apart, or when the head is not distinctive.
+    /// Leave `None` and one is derived from the system prompt (see
+    /// [`StreamConfig::cache_session_key`](crate::provider::StreamConfig::cache_session_key)).
+    /// That derivation is correct for the common case and costs nothing, but
+    /// sessions sharing a system prompt share a key. Set this explicitly when
+    /// sessions must be routed apart, or to spread a hot key.
     ///
-    /// Ignored everywhere except the key-routed path — by Anthropic, which
-    /// takes explicit breakpoints, and by Google, Vertex, Bedrock, Azure and
-    /// Responses, which yoagent sends no cache hints to at all.
+    /// Read only by the key-routed protocols — OpenAI Chat Completions (when
+    /// the compat flag allows it), the OpenAI Responses API and Azure OpenAI.
+    /// Ignored by Anthropic, which takes explicit breakpoints, and by Google,
+    /// Vertex and Bedrock, which yoagent sends no cache hints to.
     ///
     /// Note for [`crate::SubAgentTool`]: it holds one `CacheConfig` and clones
     /// it into every invocation, so a key set there is shared by every run the
@@ -571,9 +575,9 @@ pub enum ToolExecutionStrategy {
 /// | provider | shape | what this enum controls |
 /// |---|---|---|
 /// | Anthropic | explicit breakpoints | where `cache_control` markers are placed |
-/// | OpenAI (native) | key-routed | whether `prompt_cache_key` is sent |
+/// | OpenAI (native), OpenAI Responses, Azure | key-routed | whether `prompt_cache_key` is sent |
 /// | DeepSeek, Gemini, and other automatic backends | automatic, server-side | nothing |
-/// | Azure, OpenAI Responses, Bedrock | supported but **not yet wired** | nothing *yet* |
+/// | Bedrock | supported but **not yet wired** | nothing *yet* |
 ///
 /// **Explicit breakpoints** (Anthropic) are the model this enum was designed
 /// around: the client chooses cache boundaries and pays a write premium for
@@ -585,10 +589,12 @@ pub enum ToolExecutionStrategy {
 /// *routing* — it steers requests from one conversation toward the same cache
 /// — so the `Auto`/`Manual` distinction has nothing to act on and both send the
 /// key. Only [`Disabled`](Self::Disabled) is meaningful. The key comes from
-/// [`CacheConfig::session_key`], or is derived from the request head. Gated on
+/// [`CacheConfig::session_key`], or is derived from the system prompt. On
+/// Chat Completions it is gated on
 /// [`OpenAiCompat::supports_prompt_cache_key`](crate::provider::OpenAiCompat),
 /// because the field is OpenAI's and a strict compat server may reject unknown
-/// keys outright rather than ignore them.
+/// keys outright rather than ignore them; the Responses API (OpenAI and Azure)
+/// defines the field itself, so it is always sent there.
 ///
 /// **Automatic, server-side** (DeepSeek, Gemini) caches on its own with nothing
 /// to configure. DeepSeek quantises hits to 64-token blocks and charges nothing
@@ -598,17 +604,13 @@ pub enum ToolExecutionStrategy {
 /// is inert — including `Disabled`, which cannot switch off caching the client
 /// never asked for.
 ///
-/// **Not yet wired** is a separate row on purpose. Azure and the OpenAI
-/// Responses API both accept `prompt_cache_key`, and Bedrock accepts explicit
-/// `cachePoint` blocks; yoagent sends none of them today. That is a gap in this
-/// crate, not a property of those vendors, and conflating the two would make
-/// the omission read as a deliberate design decision.
+/// **Not yet wired** is a separate row on purpose. Bedrock accepts explicit
+/// `cachePoint` blocks; yoagent sends none today. That is a gap in this crate,
+/// not a property of the vendor, and conflating the two would make the
+/// omission read as a deliberate design decision.
 ///
-/// Two practical consequences. A hit rate is not comparable across protocols
-/// without knowing which shape produced it. And only Anthropic, the
-/// OpenAI-compat path and Gemini populate [`Usage::cache_read`] at all — on
-/// Azure, Responses and Bedrock there is no hit rate to read. See
-/// `docs/concepts/prompt-caching.md`.
+/// A hit rate is not comparable across protocols without knowing which shape
+/// produced it. See `docs/concepts/prompt-caching.md`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 #[non_exhaustive]
@@ -616,7 +618,8 @@ pub enum CacheStrategy {
     /// Automatic placement (recommended).
     ///
     /// Anthropic: caches system prompt, tool definitions, and recent history.
-    /// OpenAI: sends `prompt_cache_key`. Elsewhere: no effect.
+    /// OpenAI (Chat Completions and Responses) and Azure: sends
+    /// `prompt_cache_key`. Elsewhere: no effect.
     #[default]
     Auto,
     /// Send no caching hints at all.

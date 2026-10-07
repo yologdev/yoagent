@@ -18,6 +18,14 @@
 //! - Reasoning arrives as `response.reasoning_summary_text.delta` (summaries,
 //!   what hosted OpenAI reasoning models stream) and
 //!   `response.reasoning_text.delta` (raw reasoning content).
+//! - The finished reasoning item arrives in `response.output_item.done`
+//!   (`item.type == "reasoning"`, with `id`, `summary` and, when requested,
+//!   `encrypted_content`; the copy in `output_item.added` "may be
+//!   incomplete"). An item carrying `encrypted_content` is kept on its
+//!   thinking block as redacted data for the stream's protocol (a JSON object
+//!   `{id, summary, encrypted_content}`), so the next request can replay it
+//!   in place; see `responses_request.rs`. A summary sent only in the
+//!   finished item becomes the block's text.
 //! - `response.completed` / `response.incomplete` carry the final `usage`,
 //!   including `input_tokens_details.cached_tokens` and `.cache_write_tokens`.
 //!   A usage count sent as explicit `null` reads as 0 rather than failing the
@@ -34,6 +42,7 @@
 //!   `content_filter` is a [`StopReason::Refusal`]; every other reason stays
 //!   [`StopReason::Length`].
 
+use super::model::ApiProtocol;
 use super::openai_compat::null_as_zero;
 use super::tool_args::finalize_tool_arguments;
 use super::traits::{classify_sse_error_event, ProviderError, StreamEvent};
@@ -76,6 +85,8 @@ enum ReasoningKind {
 /// [`finish`](Self::finish).
 pub(crate) struct ResponsesStreamState {
     label: &'static str,
+    /// The API this stream came from; tags its encrypted reasoning.
+    protocol: ApiProtocol,
     content: Vec<Content>,
     /// output_index (None when a server omits it) → content index of its text block.
     text_slots: HashMap<Option<usize>, usize>,
@@ -92,10 +103,12 @@ pub(crate) struct ResponsesStreamState {
 }
 
 impl ResponsesStreamState {
-    /// `label` names the provider in log lines.
-    pub(crate) fn new(label: &'static str) -> Self {
+    /// `label` names the provider in log lines; `protocol` is the API the
+    /// stream came from, recorded on its encrypted reasoning.
+    pub(crate) fn new(label: &'static str, protocol: ApiProtocol) -> Self {
         Self {
             label,
+            protocol,
             content: Vec::new(),
             text_slots: HashMap::new(),
             thinking_slots: HashMap::new(),
@@ -271,6 +284,7 @@ impl ResponsesStreamState {
                         }
                         self.end_call(i, tx);
                     }
+                    Some("reasoning") => self.reasoning_done(ev.output_index, ev.item, tx),
                     Some("message") => {
                         // Checked before any refusal below opens a text slot.
                         let streamed_text = self.text_slots.contains_key(&ev.output_index);
@@ -524,6 +538,73 @@ impl ResponsesStreamState {
         });
     }
 
+    /// A finished reasoning item. Its `encrypted_content`, when present, is
+    /// kept on the item's thinking block (the summary block if one was
+    /// streamed, else the raw-text block, else a new block) so it can be
+    /// replayed on the next request.
+    fn reasoning_done(
+        &mut self,
+        output_index: Option<usize>,
+        item: OutputItem,
+        tx: &mpsc::UnboundedSender<StreamEvent>,
+    ) {
+        let existing = [ReasoningKind::Summary, ReasoningKind::Text]
+            .iter()
+            .find_map(|kind| self.thinking_slots.get(&(output_index, *kind)))
+            .map(|(idx, _)| *idx);
+        let summary_text: Vec<&str> = item
+            .summary
+            .iter()
+            .filter_map(|p| p.get("text").and_then(serde_json::Value::as_str))
+            .filter(|t| !t.is_empty())
+            .collect();
+        let encrypted = item.encrypted_content.filter(|e| !e.is_empty());
+        let idx = match existing {
+            Some(idx) => idx,
+            // A server that sent the summary only in the finished item.
+            None if !summary_text.is_empty() => {
+                let text = summary_text.join("\n\n");
+                self.content.push(Content::thinking(text.clone()));
+                let idx = self.content.len() - 1;
+                self.thinking_slots
+                    .insert((output_index, ReasoningKind::Summary), (idx, None));
+                let _ = tx.send(StreamEvent::ThinkingDelta {
+                    content_index: idx,
+                    delta: text,
+                });
+                idx
+            }
+            // Nothing streamed, no summary: a block only to carry the
+            // encrypted reasoning.
+            None if encrypted.is_some() => {
+                self.content.push(Content::thinking(String::new()));
+                self.content.len() - 1
+            }
+            None => return,
+        };
+        let (Some(encrypted), Some(id)) = (encrypted, item.id) else {
+            debug!(
+                "{}: reasoning item without encrypted_content (or id); it will not be replayed",
+                self.label
+            );
+            return;
+        };
+        let stored = serde_json::json!({
+            "id": id,
+            "summary": item.summary,
+            "encrypted_content": encrypted,
+        });
+        if let Some(Content::Thinking {
+            redacted,
+            redacted_protocol,
+            ..
+        }) = self.content.get_mut(idx)
+        {
+            *redacted = Some(stored.to_string());
+            *redacted_protocol = Some(self.protocol);
+        }
+    }
+
     fn open_call(
         &mut self,
         output_index: Option<usize>,
@@ -708,8 +789,24 @@ struct OutputItem {
     #[serde(default)]
     arguments: Option<String>,
     /// `message` items: output parts.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     content: Vec<OutputPart>,
+    /// `reasoning` items: `{"type": "summary_text", "text"}` parts, kept as
+    /// sent for replay.
+    #[serde(default, deserialize_with = "null_as_default")]
+    summary: Vec<serde_json::Value>,
+    /// `reasoning` items: the encrypted reasoning, when requested.
+    #[serde(default)]
+    encrypted_content: Option<String>,
+}
+
+/// A field sent as explicit `null` reads as its default, like a missing one.
+fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[derive(Deserialize)]
@@ -834,7 +931,7 @@ mod tests {
     #[test]
     fn data_only_messages_take_the_event_name_from_type() {
         let (tx, _rx) = mpsc::unbounded_channel();
-        let mut s = ResponsesStreamState::new("test");
+        let mut s = ResponsesStreamState::new("test", ApiProtocol::OpenAiResponses);
         s.handle(
             "message",
             r#"{"type":"response.output_text.delta","output_index":0,"delta":"hi"}"#,

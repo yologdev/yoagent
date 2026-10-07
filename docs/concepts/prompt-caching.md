@@ -14,8 +14,8 @@ In a multi-turn agent loop, each request sends the full context: system prompt +
 | **OpenAI** | Automatic (>1024 tokens), key-routed | 90% on hits | ✅ Sends `prompt_cache_key` |
 | **DeepSeek** | Automatic prefix cache | ~97% on hits | None needed |
 | **Google Gemini** | Implicit (automatic) | Varies | None needed — see below |
-| **Azure OpenAI** | Automatic (same as OpenAI) | 90% on hits | Not wired |
-| **OpenAI Responses** | Automatic, key-routed | 90% on hits | Not wired |
+| **Azure OpenAI** | Automatic (same as OpenAI), key-routed | 90% on hits | ✅ Sends `prompt_cache_key` |
+| **OpenAI Responses** | Automatic, key-routed | 90% on hits | ✅ Sends `prompt_cache_key` |
 | **Amazon Bedrock** | Explicit (`cachePoint` blocks) | — | Not wired |
 
 Savings are the cached-read discount off base input in this crate's own price
@@ -80,11 +80,19 @@ let agent = Agent::from_config(ModelConfig::openai("gpt-5.5", "GPT-5.5"))
 A blank key is treated as unset rather than sent literally — an empty
 `prompt_cache_key` would route every caller who did that onto one cache.
 
-This is gated on the `supports_prompt_cache_key` compat flag, which is on only
-for native OpenAI. `prompt_cache_key` is OpenAI's field: a strict
-OpenAI-compatible server that validates unknown keys would reject the whole
-request rather than ignore it, and the providers that cache automatically were
-never reading it.
+On Chat Completions this is gated on the `supports_prompt_cache_key` compat
+flag, which is on only for native OpenAI. `prompt_cache_key` is OpenAI's field:
+a strict OpenAI-compatible server that validates unknown keys would reject the
+whole request rather than ignore it, and the providers that cache automatically
+were never reading it.
+
+The **Responses API** ([OpenAI Responses](../providers/openai-responses.md),
+which the GPT-6 presets use, and [Azure OpenAI](../providers/azure-openai.md))
+gets the same key, chosen the same way, with no compat flag: the field is part
+of the Responses API itself, and Azure documents it too ("You don't need a
+specific API version to use `prompt_cache_key`"). Azure adds that above about
+15 requests a minute for one prefix and key, some requests may miss the cache —
+the same reason to set `session_key` for a hot system prompt.
 
 ### DeepSeek
 

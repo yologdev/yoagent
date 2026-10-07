@@ -1,0 +1,319 @@
+//! Request side of the Responses API, shared by
+//! [`OpenAiResponsesProvider`](super::OpenAiResponsesProvider) and
+//! [`AzureOpenAiProvider`](super::AzureOpenAiProvider): the request body
+//! (message conversion, tools, reasoning effort, caching, encrypted reasoning)
+//! and the read loop that turns the event stream into a [`Message`].
+//!
+//! The two providers differ only in the URL, the auth header and Azure's
+//! legacy deployment override of `model`; everything here is the same API.
+//!
+//! Field shapes follow OpenAI's generated types (`openai-python`,
+//! `src/openai/types/responses/response_create_params.py` and
+//! `response_reasoning_item_param.py`):
+//!
+//! - `prompt_cache_key` (string) routes requests sharing a prefix to the same
+//!   cache. Azure documents the same field ("You don't need a specific API
+//!   version to use `prompt_cache_key`").
+//! - `include: ["reasoning.encrypted_content"]` "includes an encrypted version
+//!   of reasoning tokens in reasoning item outputs. This enables reasoning
+//!   items to be used in multi-turn conversations when using the Responses API
+//!   statelessly" — which is how yoagent uses it: it resends the whole history
+//!   and never uses `previous_response_id`. In stateless mode (`store: false`
+//!   or Zero Data Retention) the API returns `encrypted_content` by default
+//!   and still accepts the `include` value; with the default `store: true` it
+//!   is what asks for it.
+//! - A reasoning input item is `{"type": "reasoning", "id", "summary",
+//!   "encrypted_content"}` (`id` and `summary` required). OpenAI: "If the
+//!   model calls multiple functions consecutively, you should pass back all
+//!   reasoning items, function call items, and function call output items,
+//!   since the last `user` message."
+
+use super::model::{ApiProtocol, OpenAiCompat};
+use super::responses_stream::{Flow, ResponsesStreamState};
+use super::traits::*;
+use crate::types::*;
+use futures::StreamExt;
+use serde_json::{json, Value};
+use tokio::sync::mpsc;
+use tracing::{debug, warn};
+
+/// The `include` value that asks for encrypted reasoning.
+pub(crate) const INCLUDE_ENCRYPTED_REASONING: &str = "reasoning.encrypted_content";
+
+/// Build the Responses request body. `protocol` is the API the request goes
+/// to: only encrypted reasoning that came from that same protocol is
+/// replayed (OpenAI's and Azure's are separate services).
+pub(crate) fn build_request_body(config: &StreamConfig, protocol: ApiProtocol) -> Value {
+    let mut input: Vec<Value> = Vec::new();
+
+    for msg in &config.messages {
+        match msg {
+            Message::User { content, .. } => {
+                let user_content = input_parts(content);
+                if user_content.len() == 1 && user_content[0]["type"] == "input_text" {
+                    // Simple text-only message can use shorthand format
+                    input.push(json!({
+                        "role": "user",
+                        "content": user_content[0]["text"].as_str().unwrap_or(""),
+                    }));
+                } else {
+                    // Multi-modal content uses array format
+                    input.push(json!({
+                        "role": "user",
+                        "content": user_content,
+                    }));
+                }
+            }
+            Message::Assistant { content, .. } => assistant_items(content, protocol, &mut input),
+            Message::ToolResult {
+                tool_call_id,
+                content,
+                ..
+            } => {
+                let output_val = if content.iter().any(|c| matches!(c, Content::Image { .. })) {
+                    json!(input_parts(content))
+                } else {
+                    let text = content
+                        .iter()
+                        .find_map(|c| match c {
+                            Content::Text { text } => Some(text.clone()),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    json!(text)
+                };
+                input.push(json!({
+                    "type": "function_call_output",
+                    "call_id": tool_call_id,
+                    "output": output_val,
+                }));
+            }
+        }
+    }
+
+    let mut body = json!({
+        "model": config.model,
+        "stream": true,
+        "input": input,
+    });
+
+    if !config.system_prompt.is_empty() {
+        body["instructions"] = json!(config.system_prompt);
+    }
+
+    if let Some(max) = config.max_tokens {
+        body["max_output_tokens"] = json!(max);
+    }
+
+    if !config.tools.is_empty() {
+        let tools: Vec<Value> = config
+            .tools
+            .iter()
+            .map(|t| {
+                json!({
+                    "type": "function",
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters,
+                })
+            })
+            .collect();
+        body["tools"] = json!(tools);
+    }
+
+    // The effort capability comes from `ModelConfig::compat` (see
+    // `OpenAiCompat::max_reasoning_effort`); `None` means a `high` ceiling.
+    // `Off` omits it.
+    let default_compat = OpenAiCompat::default();
+    let compat = config
+        .model_config
+        .as_ref()
+        .and_then(|m| m.compat.as_ref())
+        .unwrap_or(&default_compat);
+    let effort = compat.openai_reasoning_effort(&config.model, config.thinking_level);
+    if let Some(effort) = effort {
+        body["reasoning"] = json!({"effort": effort});
+    }
+
+    // Encrypted reasoning, for replay on the next turn. Only for a reasoning
+    // model: declared by `ModelConfig::reasoning`, or implied by sending a
+    // reasoning effort (which a non-reasoning model rejects anyway). A model
+    // without reasoning has nothing to return for it, and a request asking
+    // anyway risks a 400, so it is not sent there.
+    let reasoning_model = config.model_config.as_ref().is_some_and(|m| m.reasoning);
+    if reasoning_model || effort.is_some() {
+        body["include"] = json!([INCLUDE_ENCRYPTED_REASONING]);
+    }
+
+    // Prompt caching. The Responses API caches prefixes automatically; the
+    // key only routes one conversation's requests to the same cache. It is
+    // `CacheConfig::session_key` when set, else derived from the system
+    // prompt (see `StreamConfig::cache_session_key`); none when caching
+    // hints are off. Not gated on a compat flag as on Chat Completions: the
+    // field is part of the Responses API itself.
+    if let Some(key) = config.cache_session_key() {
+        body["prompt_cache_key"] = json!(key);
+    }
+
+    if let Some(temp) = config.temperature {
+        body["temperature"] = json!(temp);
+    }
+
+    body
+}
+
+/// Text and images as Responses `input_text` / `input_image` parts.
+fn input_parts(content: &[Content]) -> Vec<Value> {
+    content
+        .iter()
+        .filter(|c| !matches!(c, Content::Text { text } if text.is_empty()))
+        .filter_map(|c| match c {
+            Content::Text { text } => Some(json!({
+                "type": "input_text",
+                "text": text,
+            })),
+            Content::Image { data, mime_type } => Some(json!({
+                "type": "input_image",
+                "image_url": format!("data:{};base64,{}", mime_type, data),
+            })),
+            _ => None,
+        })
+        .collect()
+}
+
+/// One assistant message as Responses input items, in content order.
+///
+/// A reasoning item is replayed in place, before the output items that
+/// followed it — but only when one did: a reasoning item is the model's
+/// reasoning *for* the next output item, and a trailing one (a turn cut off
+/// after reasoning, or whose only output was empty text) has nothing to
+/// attach to, so it is dropped rather than risk a 400.
+fn assistant_items(content: &[Content], protocol: ApiProtocol, input: &mut Vec<Value>) {
+    let mut pending_reasoning: Vec<Value> = Vec::new();
+    for c in content {
+        match c {
+            Content::Thinking {
+                redacted: Some(_), ..
+            } => match c.redacted_for(protocol).and_then(reasoning_item) {
+                Some(item) => pending_reasoning.push(item),
+                None => debug!(
+                    "Responses ({protocol}): skipping encrypted reasoning from another \
+                     provider (or unreadable)"
+                ),
+            },
+            Content::Text { text } if text.is_empty() => {}
+            Content::Text { text } => {
+                input.append(&mut pending_reasoning);
+                input.push(json!({
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": text}],
+                }));
+            }
+            Content::ToolCall {
+                id,
+                name,
+                arguments,
+                ..
+            } => {
+                input.append(&mut pending_reasoning);
+                input.push(json!({
+                    "type": "function_call",
+                    "call_id": id,
+                    "name": name,
+                    "arguments": arguments.to_string(),
+                }));
+            }
+            // Plain reasoning text (a summary without encrypted content, or
+            // another provider's thinking) is not an input the API takes.
+            _ => {}
+        }
+    }
+    if !pending_reasoning.is_empty() {
+        debug!(
+            "Responses ({protocol}): {} trailing reasoning item(s) with no output after \
+             them; not replayed",
+            pending_reasoning.len()
+        );
+    }
+}
+
+/// The stored reasoning item (see [`ResponsesStreamState`]) as an input item.
+/// `None` if it is not the JSON object this crate wrote.
+fn reasoning_item(data: &str) -> Option<Value> {
+    let stored: Value = serde_json::from_str(data).ok()?;
+    let id = stored.get("id")?.as_str()?;
+    let encrypted = stored.get("encrypted_content")?.as_str()?;
+    let summary = match stored.get("summary") {
+        Some(Value::Array(parts)) => Value::Array(parts.clone()),
+        _ => json!([]),
+    };
+    Some(json!({
+        "type": "reasoning",
+        "id": id,
+        "summary": summary,
+        "encrypted_content": encrypted,
+    }))
+}
+
+/// Send `request`, read the Responses event stream and return the assistant
+/// message. `label` names the provider in log lines; `protocol` tags the
+/// encrypted reasoning the response carries, so it is replayed only there.
+pub(crate) async fn stream_response(
+    request: reqwest::RequestBuilder,
+    label: &'static str,
+    protocol: ApiProtocol,
+    config: &StreamConfig,
+    provider: &str,
+    tx: mpsc::UnboundedSender<StreamEvent>,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Result<Message, ProviderError> {
+    let mut es = super::sse::open_event_source(request)?;
+    let mut state = ResponsesStreamState::new(label, protocol);
+
+    let _ = tx.send(StreamEvent::Start);
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                es.close();
+                return Err(ProviderError::Cancelled);
+            }
+            event = es.next() => {
+                match event {
+                    None => break,
+                    Some(Ok(reqwest_eventsource::Event::Open)) => {}
+                    Some(Ok(reqwest_eventsource::Event::Message(msg))) => {
+                        if state.handle(&msg.event, &msg.data, &tx)? == Flow::Done {
+                            break;
+                        }
+                    }
+                    Some(Err(e)) => {
+                        let provider_err = classify_eventsource_error(e).await;
+                        warn!("{label} SSE error: {provider_err}");
+                        return Err(provider_err);
+                    }
+                }
+            }
+        }
+    }
+
+    // Read before `finish`, which consumes the refusal state.
+    let error_message = state.error_message();
+    let (content, usage, stop_reason) = state.finish(&tx);
+
+    let message = Message::Assistant {
+        content,
+        stop_reason,
+        model: config.model.clone(),
+        provider: provider.to_string(),
+        usage,
+        timestamp: now_ms(),
+        error_message,
+    };
+
+    let _ = tx.send(StreamEvent::Done {
+        message: message.clone(),
+    });
+    Ok(message)
+}
