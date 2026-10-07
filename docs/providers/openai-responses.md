@@ -115,21 +115,32 @@ A reasoning model's reasoning is carried across turns, including across tool
 calls, as OpenAI recommends ("pass back any reasoning items returned with the
 last function call"):
 
-- **Requested.** For a reasoning model — `ModelConfig::reasoning` (set by
-  `openai_responses` and the GPT-6 presets), or any request that sends a
-  reasoning effort — the body carries
+- **Requested.** For a reasoning model — `ModelConfig::reasoning`, or any
+  request that sends a reasoning effort — the body carries
   `include: ["reasoning.encrypted_content"]`. Non-reasoning models get no
-  `include`: they have no reasoning to return, and a strict server may reject
-  the value (this was not tested live).
+  `include`: they have no reasoning to return, and OpenAI rejects it there
+  with a 400 ("Encrypted content is not supported with this model").
+  `openai_responses(id, ..)` infers `reasoning` from the id: `false` for ids
+  starting with `gpt-3`, `gpt-4` (`gpt-4o`, `gpt-4.1`, …) or `chatgpt-`, and
+  for any id containing `-chat` (`gpt-5-chat-latest`); `true` otherwise (the
+  o-series, `gpt-5*`, unknown ids). The GPT-6 presets set `true`. Set
+  `config.reasoning` to override.
 - **Kept.** The finished reasoning item (`response.output_item.done`) is stored
   on its `Content::Thinking` block: `thinking` is the readable summary (empty
   when no summary was requested, which is OpenAI's default), and `redacted`
   holds the item's `id`, `summary` and `encrypted_content` as a JSON object,
-  with `redacted_protocol = OpenAiResponses`.
+  with `redacted_protocol = OpenAiResponses`. The same object records the ids
+  of the output items that followed it: `call_ids` (each function call's
+  `call_id` → its item `id`, `fc_…`) and `message_id` (the first message's
+  `msg_…`).
 - **Replayed in place.** The next request sends it back as
   `{"type": "reasoning", "id", "summary", "encrypted_content"}`, before the
-  function call or message it led to. A reasoning item with no output after it
-  in its turn (a cut-off response) is not sent.
+  function call or message it led to, and that call or message carries its
+  item `id` again: OpenAI refuses a reasoning item sent without its paired
+  item ("Item 'rs_…' of type 'reasoning' was provided without its required
+  following item"). Items with no replayed reasoning before them are sent
+  without ids. A reasoning item with no output after it in its turn (a
+  cut-off response) is not sent.
 - **Only to the API that produced it.** Encrypted reasoning from Azure,
   Anthropic (`redacted_thinking`), Bedrock or of unknown origin is skipped, and
   this provider's blocks are skipped by every other provider — including Azure,

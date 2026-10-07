@@ -105,7 +105,9 @@ When the key is empty, the provider sends no `api-key` header.
   `reasoning: false`, so set `config.reasoning = true` for a reasoning
   deployment (or send a `ThinkingLevel` other than `Off`, which implies it).
   Azure's reasoning guide describes the same replay ("Send those items back
-  … in the `input` array of your next request"). Encrypted reasoning from
+  … in the `input` array of your next request"); the call or message that
+  followed a reasoning item is replayed with its item `id`, as on OpenAI.
+  Encrypted reasoning from
   OpenAI's own API is not replayed to Azure, nor Azure's to OpenAI
 
 ## Thinking

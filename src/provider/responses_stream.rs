@@ -26,6 +26,14 @@
 //!   `{id, summary, encrypted_content}`), so the next request can replay it
 //!   in place; see `responses_request.rs`. A summary sent only in the
 //!   finished item becomes the block's text.
+//! - A replayed reasoning item must be followed by its paired output item
+//!   ("Item 'rs_…' of type 'reasoning' was provided without its required
+//!   following item"), so the ids of the output items that followed it in
+//!   the response are kept in the same stored JSON: `call_ids` maps each
+//!   `function_call`'s `call_id` to its item `id` (`fc_…`), and `message_id`
+//!   is the id (`msg_…`) of the first `message` after it. They ride on the
+//!   reasoning item, so they carry its protocol tag and are replayed only
+//!   where it is (`Content::ToolCall::provider_metadata` stays Gemini's).
 //! - `response.completed` / `response.incomplete` carry the final `usage`,
 //!   including `input_tokens_details.cached_tokens` and `.cache_write_tokens`.
 //!   A usage count sent as explicit `null` reads as 0 rather than failing the
@@ -51,6 +59,14 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
+
+/// Key, in a stored reasoning item, of the `call_id` → item `id` map of the
+/// function calls that followed it.
+pub(crate) const CALL_IDS_KEY: &str = "call_ids";
+
+/// Key, in a stored reasoning item, of the id of the first `message` item
+/// that followed it.
+pub(crate) const MESSAGE_ID_KEY: &str = "message_id";
 
 /// What the caller's read loop should do after an event.
 #[derive(Debug, PartialEq, Eq)]
@@ -93,6 +109,11 @@ pub(crate) struct ResponsesStreamState {
     /// (output_index, kind) → (content index, last part index seen).
     thinking_slots: HashMap<(Option<usize>, ReasoningKind), (usize, Option<u64>)>,
     calls: Vec<CallSlot>,
+    /// Content indices of the thinking blocks that store a reasoning item, in
+    /// content order.
+    reasoning_blocks: Vec<usize>,
+    /// output_index → the `message` item id sent for it.
+    message_ids: HashMap<Option<usize>, String>,
     usage: Usage,
     stop_reason: StopReason,
     /// output_index → the refusal text received for it so far. Present once
@@ -113,6 +134,8 @@ impl ResponsesStreamState {
             text_slots: HashMap::new(),
             thinking_slots: HashMap::new(),
             calls: Vec::new(),
+            reasoning_blocks: Vec::new(),
+            message_ids: HashMap::new(),
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
             refusals: HashMap::new(),
@@ -219,8 +242,12 @@ impl ResponsesStreamState {
                 let Some(ev) = self.parse::<OutputItemEvent>(event, data) else {
                     return Ok(Flow::Continue);
                 };
-                if ev.item.kind.as_deref() == Some("function_call") {
-                    self.open_call(ev.output_index, &ev.item, tx);
+                match ev.item.kind.as_deref() {
+                    Some("function_call") => {
+                        self.open_call(ev.output_index, &ev.item, tx);
+                    }
+                    Some("message") => self.message_id(ev.output_index, ev.item.id.as_deref()),
+                    _ => {}
                 }
             }
             "response.function_call_arguments.delta" => {
@@ -279,6 +306,9 @@ impl ResponsesStreamState {
                         if slot.name.is_empty() {
                             slot.name = ev.item.name.clone().unwrap_or_default();
                         }
+                        if slot.item_id.is_none() {
+                            slot.item_id = ev.item.id.clone();
+                        }
                         if let Some(args) = ev.item.arguments {
                             self.set_final_arguments(i, args, tx);
                         }
@@ -286,6 +316,7 @@ impl ResponsesStreamState {
                     }
                     Some("reasoning") => self.reasoning_done(ev.output_index, ev.item, tx),
                     Some("message") => {
+                        self.message_id(ev.output_index, ev.item.id.as_deref());
                         // Checked before any refusal below opens a text slot.
                         let streamed_text = self.text_slots.contains_key(&ev.output_index);
                         // A refusal part: authoritative even when nothing was
@@ -386,6 +417,8 @@ impl ResponsesStreamState {
                 arguments: args,
             };
         }
+
+        self.record_following_ids();
 
         // A refusal (streamed, or in a finished item) is the most specific
         // verdict, as on the Anthropic provider: nothing overrides it.
@@ -602,6 +635,67 @@ impl ResponsesStreamState {
         {
             *redacted = Some(stored.to_string());
             *redacted_protocol = Some(self.protocol);
+            if !self.reasoning_blocks.contains(&idx) {
+                self.reasoning_blocks.push(idx);
+                self.reasoning_blocks.sort_unstable();
+            }
+        }
+    }
+
+    fn message_id(&mut self, output_index: Option<usize>, id: Option<&str>) {
+        if let Some(id) = id.filter(|id| !id.is_empty()) {
+            self.message_ids.insert(output_index, id.to_string());
+        }
+    }
+
+    /// Add to each stored reasoning item the ids of the output items that
+    /// followed it (up to the next stored reasoning item): `call_ids` for its
+    /// function calls, `message_id` for its first message. Content order is
+    /// arrival order, which follows `output_index`.
+    fn record_following_ids(&mut self) {
+        for (n, &r) in self.reasoning_blocks.iter().enumerate() {
+            let end = self
+                .reasoning_blocks
+                .get(n + 1)
+                .copied()
+                .unwrap_or(self.content.len());
+            let in_region = |i: usize| i > r && i < end;
+            let call_ids: serde_json::Map<String, serde_json::Value> = self
+                .calls
+                .iter()
+                .filter(|c| in_region(c.content_index) && !c.call_id.is_empty())
+                .filter_map(|c| {
+                    let id = c.item_id.as_deref().filter(|id| !id.is_empty())?;
+                    Some((c.call_id.clone(), serde_json::Value::from(id)))
+                })
+                .collect();
+            let message_id = self
+                .text_slots
+                .iter()
+                .filter(|(_, &i)| in_region(i))
+                .filter_map(|(oi, &i)| self.message_ids.get(oi).map(|id| (i, id)))
+                .min_by_key(|(i, _)| *i)
+                .map(|(_, id)| id.clone());
+            if call_ids.is_empty() && message_id.is_none() {
+                continue;
+            }
+            let Some(Content::Thinking {
+                redacted: Some(stored),
+                ..
+            }) = self.content.get_mut(r)
+            else {
+                continue;
+            };
+            let Ok(serde_json::Value::Object(mut item)) = serde_json::from_str(stored) else {
+                continue;
+            };
+            if !call_ids.is_empty() {
+                item.insert(CALL_IDS_KEY.into(), serde_json::Value::Object(call_ids));
+            }
+            if let Some(id) = message_id {
+                item.insert(MESSAGE_ID_KEY.into(), serde_json::Value::from(id));
+            }
+            *stored = serde_json::Value::Object(item).to_string();
         }
     }
 

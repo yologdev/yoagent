@@ -39,8 +39,9 @@ pub enum Content {
         /// Anthropic's `redacted_thinking` `data`, or Amazon Bedrock's
         /// `redactedContent` (base64) — `thinking` is empty for such a
         /// block — or an OpenAI Responses / Azure reasoning item (its `id`,
-        /// `summary` and `encrypted_content` as a JSON object), whose
-        /// readable summary, if any, stays in `thinking`.
+        /// `summary` and `encrypted_content` as a JSON object, plus the ids of
+        /// the output items that followed it: `call_ids` and `message_id`),
+        /// whose readable summary, if any, stays in `thinking`.
         /// It is opaque: replayed unmodified, and only to the protocol named
         /// by `redacted_protocol`; every other provider skips it.
         #[serde(default, skip_serializing_if = "Option::is_none")]

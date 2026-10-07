@@ -249,11 +249,24 @@ async fn encrypted_reasoning_is_requested_and_replayed_in_place_next_turn() {
         };
         assert_eq!(thinking, "Need the file.");
         assert_eq!(*redacted_protocol, Some(which.protocol()), "{which:?}");
-        // The finished item's content, not the partial copy in `added`.
+        // The finished item's content, not the partial copy in `added`, and
+        // the output item id of the call that followed it (by `call_id`).
         assert_eq!(
             serde_json::from_str::<Value>(stored).unwrap(),
             json!({"id": "rs_1", "encrypted_content": "gAAAA-enc-1",
-                   "summary": [{"type": "summary_text", "text": "Need the file."}]})
+                   "summary": [{"type": "summary_text", "text": "Need the file."}],
+                   "call_ids": {"call_1": "fc_1"}})
+        );
+        // The tool call itself carries no provider metadata.
+        assert!(
+            matches!(
+                &content[1],
+                Content::ToolCall {
+                    provider_metadata: None,
+                    ..
+                }
+            ),
+            "{which:?}: {content:?}"
         );
 
         let (second, _) = one_request(
@@ -270,8 +283,9 @@ async fn encrypted_reasoning_is_requested_and_replayed_in_place_next_turn() {
                 {"role": "user", "content": "read a.txt"},
                 {"type": "reasoning", "id": "rs_1", "encrypted_content": "gAAAA-enc-1",
                  "summary": [{"type": "summary_text", "text": "Need the file."}]},
-                {"type": "function_call", "call_id": "call_1", "name": "read_file",
-                 "arguments": "{\"path\":\"a.txt\"}"},
+                // The reasoning item's paired item carries its output item id.
+                {"type": "function_call", "id": "fc_1", "call_id": "call_1",
+                 "name": "read_file", "arguments": "{\"path\":\"a.txt\"}"},
                 {"type": "function_call_output", "call_id": "call_1", "output": "hello"},
             ]),
             "{which:?}"
@@ -378,6 +392,325 @@ async fn own_reasoning_is_replayed_but_a_trailing_item_is_dropped() {
             "{which:?}"
         );
     }
+}
+
+/// Reasoning, then a message: the message's output item id is kept with the
+/// reasoning item it followed, and the next request sends the message with
+/// that id right after the replayed reasoning item. The stored `message_id`
+/// itself is not part of the replayed reasoning item.
+#[tokio::test]
+async fn a_message_after_reasoning_is_replayed_with_its_id() {
+    let fixture = sse(vec![
+        json!({"type": "response.output_item.added", "output_index": 0,
+               "item": {"type": "reasoning", "id": "rs_1", "summary": []}}),
+        json!({"type": "response.output_item.done", "output_index": 0,
+               "item": {"type": "reasoning", "id": "rs_1", "summary": [],
+                        "encrypted_content": "enc-1", "status": "completed"}}),
+        json!({"type": "response.output_item.added", "output_index": 1,
+               "item": {"type": "message", "id": "msg_1", "role": "assistant",
+                        "content": [], "status": "in_progress"}}),
+        json!({"type": "response.output_text.delta", "item_id": "msg_1", "output_index": 1,
+               "content_index": 0, "delta": "Hi."}),
+        json!({"type": "response.output_item.done", "output_index": 1,
+               "item": {"type": "message", "id": "msg_1", "role": "assistant", "status": "completed",
+                        "content": [{"type": "output_text", "text": "Hi.", "annotations": []}]}}),
+        completed(),
+    ]);
+    for which in BOTH {
+        let (_, reply) = one_request(
+            which,
+            None,
+            vec![Message::user("hello")],
+            fixture.clone(),
+            |_| {},
+        )
+        .await;
+        let Message::Assistant { content, .. } = &reply else {
+            panic!("{which:?}: {reply:?}")
+        };
+        let Content::Thinking {
+            redacted: Some(stored),
+            ..
+        } = &content[0]
+        else {
+            panic!("{which:?}: {content:?}")
+        };
+        assert_eq!(
+            serde_json::from_str::<Value>(stored).unwrap(),
+            json!({"id": "rs_1", "summary": [], "encrypted_content": "enc-1",
+                   "message_id": "msg_1"}),
+            "{which:?}"
+        );
+
+        let (sent, _) = one_request(
+            which,
+            None,
+            vec![Message::user("hello"), reply, Message::user("again")],
+            text_fixture(),
+            |_| {},
+        )
+        .await;
+        assert_eq!(
+            sent["input"],
+            json!([
+                {"role": "user", "content": "hello"},
+                {"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "enc-1"},
+                {"type": "message", "id": "msg_1", "role": "assistant",
+                 "content": [{"type": "output_text", "text": "Hi."}]},
+                {"role": "user", "content": "again"},
+            ]),
+            "{which:?}"
+        );
+    }
+}
+
+/// Each reasoning item records the ids of the items up to the next reasoning
+/// item: parallel calls after the first, the message after the second. The
+/// whole response then replays with every pair intact.
+#[tokio::test]
+async fn each_reasoning_item_records_the_items_that_followed_it() {
+    let reasoning = |oi: usize, id: &str| {
+        json!({"type": "response.output_item.done", "output_index": oi,
+               "item": {"type": "reasoning", "id": id, "summary": [],
+                        "encrypted_content": format!("enc-{id}"), "status": "completed"}})
+    };
+    let call = |oi: usize, fc: &str, call_id: &str| {
+        json!({"type": "response.output_item.done", "output_index": oi,
+               "item": {"type": "function_call", "id": fc, "call_id": call_id,
+                        "name": "read_file", "arguments": "{}", "status": "completed"}})
+    };
+    let fixture = sse(vec![
+        reasoning(0, "rs_a"),
+        call(1, "fc_1", "call_1"),
+        call(2, "fc_2", "call_2"),
+        reasoning(3, "rs_b"),
+        json!({"type": "response.output_item.added", "output_index": 4,
+               "item": {"type": "message", "id": "msg_1", "role": "assistant", "content": []}}),
+        json!({"type": "response.output_text.delta", "output_index": 4, "delta": "Both read."}),
+        completed(),
+    ]);
+    for which in BOTH {
+        let (_, reply) = one_request(
+            which,
+            None,
+            vec![Message::user("go")],
+            fixture.clone(),
+            |_| {},
+        )
+        .await;
+        let Message::Assistant { content, .. } = &reply else {
+            panic!("{which:?}: {reply:?}")
+        };
+        let stored: Vec<Value> = content
+            .iter()
+            .filter_map(|c| match c {
+                Content::Thinking {
+                    redacted: Some(s), ..
+                } => Some(serde_json::from_str(s).unwrap()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            stored,
+            vec![
+                json!({"id": "rs_a", "summary": [], "encrypted_content": "enc-rs_a",
+                       "call_ids": {"call_1": "fc_1", "call_2": "fc_2"}}),
+                json!({"id": "rs_b", "summary": [], "encrypted_content": "enc-rs_b",
+                       "message_id": "msg_1"}),
+            ],
+            "{which:?}"
+        );
+
+        let (sent, _) = one_request(
+            which,
+            None,
+            vec![
+                Message::user("go"),
+                reply,
+                tool_result("call_1", "x"),
+                tool_result("call_2", "y"),
+            ],
+            text_fixture(),
+            |_| {},
+        )
+        .await;
+        assert_eq!(
+            sent["input"],
+            json!([
+                {"role": "user", "content": "go"},
+                {"type": "reasoning", "id": "rs_a", "summary": [], "encrypted_content": "enc-rs_a"},
+                {"type": "function_call", "id": "fc_1", "call_id": "call_1",
+                 "name": "read_file", "arguments": "{}"},
+                {"type": "function_call", "id": "fc_2", "call_id": "call_2",
+                 "name": "read_file", "arguments": "{}"},
+                {"type": "reasoning", "id": "rs_b", "summary": [], "encrypted_content": "enc-rs_b"},
+                {"type": "message", "id": "msg_1", "role": "assistant",
+                 "content": [{"type": "output_text", "text": "Both read."}]},
+                {"type": "function_call_output", "call_id": "call_1", "output": "x"},
+                {"type": "function_call_output", "call_id": "call_2", "output": "y"},
+            ]),
+            "{which:?}"
+        );
+    }
+}
+
+/// Output item ids come only from a reasoning item replayed to the same API:
+/// parallel calls after one each get their own recorded id (a call it did
+/// not record gets none), the first message after it gets its `message_id`;
+/// a turn without reasoning, and a turn whose reasoning came from another
+/// API (so is not replayed), go without ids. Another provider's
+/// `provider_metadata` on a call is not read.
+#[tokio::test]
+async fn item_ids_are_replayed_only_after_this_apis_reasoning() {
+    let item = |id: &str, call_ids: Value, message_id: Option<&str>| {
+        let mut v = json!({"id": id, "summary": [], "encrypted_content": "enc",
+                           "call_ids": call_ids});
+        if let Some(m) = message_id {
+            v["message_id"] = json!(m);
+        }
+        v.to_string()
+    };
+    let call = |id: &str| Content::tool_call(id, "read_file", json!({}));
+    for which in BOTH {
+        let own = which.protocol();
+        let other = match which {
+            Which::Responses => ApiProtocol::AzureOpenAiResponses,
+            Which::Azure => ApiProtocol::OpenAiResponses,
+        };
+        let turns = vec![
+            Message::user("go"),
+            // No reasoning: no id, whatever metadata the call carries.
+            assistant(vec![Content::tool_call_with_metadata(
+                "c1",
+                "read_file",
+                json!({}),
+                json!({"thought_signature": "sig", "id": "fc_x"}),
+            )]),
+            tool_result("c1", "r1"),
+            // Own reasoning, then parallel calls (c3 not recorded) and a message.
+            assistant(vec![
+                Content::thinking_redacted(
+                    own,
+                    item(
+                        "rs_2",
+                        json!({"c2": "fc_2", "c4": "fc_4", "c1": "fc_1"}),
+                        Some("msg_2"),
+                    ),
+                ),
+                call("c2"),
+                call("c3"),
+                call("c4"),
+                Content::Text {
+                    text: "Reading.".into(),
+                },
+            ]),
+            tool_result("c2", "r2"),
+            tool_result("c3", "r3"),
+            tool_result("c4", "r4"),
+            // Reasoning from the other API (not replayed): no id.
+            assistant(vec![
+                Content::thinking_redacted(other, item("rs_5", json!({"c5": "fc_5"}), None)),
+                call("c5"),
+            ]),
+            tool_result("c5", "r5"),
+        ];
+        let (sent, _) = one_request(which, None, turns, text_fixture(), |_| {}).await;
+        let fc = |call_id: &str, id: Option<&str>| {
+            let mut v = json!({"type": "function_call", "call_id": call_id,
+                               "name": "read_file", "arguments": "{}"});
+            if let Some(id) = id {
+                v["id"] = json!(id);
+            }
+            v
+        };
+        let out = |call_id: &str, output: &str| json!({"type": "function_call_output", "call_id": call_id, "output": output});
+        assert_eq!(
+            sent["input"],
+            json!([
+                {"role": "user", "content": "go"},
+                fc("c1", None),
+                out("c1", "r1"),
+                {"type": "reasoning", "id": "rs_2", "summary": [], "encrypted_content": "enc"},
+                fc("c2", Some("fc_2")),
+                fc("c3", None),
+                fc("c4", Some("fc_4")),
+                {"type": "message", "id": "msg_2", "role": "assistant",
+                 "content": [{"type": "output_text", "text": "Reading."}]},
+                out("c2", "r2"),
+                out("c3", "r3"),
+                out("c4", "r4"),
+                fc("c5", None),
+                out("c5", "r5"),
+            ]),
+            "{which:?}"
+        );
+    }
+}
+
+/// `ModelConfig::openai_responses` infers `reasoning` from the id, so a
+/// non-reasoning model (`gpt-4o`, `gpt-4.1`, `gpt-5-chat-latest`) with
+/// thinking off is not sent `include` (which it would refuse with a 400),
+/// while a reasoning model (and the GPT-6 presets) still is.
+#[tokio::test]
+async fn openai_responses_preset_sends_include_only_for_reasoning_ids() {
+    for id in ["gpt-4o", "gpt-4.1", "gpt-5-chat-latest"] {
+        let mc = ModelConfig::openai_responses(id, id);
+        let (sent, _) = one_request(
+            Which::Responses,
+            Some(mc),
+            vec![Message::user("a")],
+            text_fixture(),
+            |_| {},
+        )
+        .await;
+        assert!(sent.get("include").is_none(), "{id}: {sent}");
+        assert!(sent.get("reasoning").is_none(), "{id}: {sent}");
+    }
+    for mc in [
+        ModelConfig::openai_responses("gpt-5.5", "GPT-5.5"),
+        ModelConfig::openai_responses("o4-mini", "o4-mini"),
+        ModelConfig::gpt_6_astra(),
+        ModelConfig::gpt_6_sol(),
+        ModelConfig::gpt_6_luna(),
+    ] {
+        let id = mc.id.clone();
+        let (sent, _) = one_request(
+            Which::Responses,
+            Some(mc),
+            vec![Message::user("a")],
+            text_fixture(),
+            |_| {},
+        )
+        .await;
+        assert_eq!(
+            sent["include"],
+            json!(["reasoning.encrypted_content"]),
+            "{id}: {sent}"
+        );
+    }
+    // `config.reasoning` overrides the inference either way.
+    let mut forced = ModelConfig::openai_responses("gpt-4.1", "GPT-4.1");
+    forced.reasoning = true;
+    let (sent, _) = one_request(
+        Which::Responses,
+        Some(forced),
+        vec![Message::user("a")],
+        text_fixture(),
+        |_| {},
+    )
+    .await;
+    assert_eq!(sent["include"], json!(["reasoning.encrypted_content"]));
+    let mut off = ModelConfig::gpt_6_sol();
+    off.reasoning = false;
+    let (sent, _) = one_request(
+        Which::Responses,
+        Some(off),
+        vec![Message::user("a")],
+        text_fixture(),
+        |_| {},
+    )
+    .await;
+    assert!(sent.get("include").is_none(), "{sent}");
 }
 
 // ---------------------------------------------------------------------------
@@ -550,6 +883,7 @@ async fn agent_loop_replays_the_reasoning_item_after_a_tool_call() {
             "{which:?}: {input:?}"
         );
         assert_eq!(input[1]["encrypted_content"], "gAAAA-enc-1", "{which:?}");
+        assert_eq!(input[2]["id"], "fc_1", "{which:?}");
         assert!(first["prompt_cache_key"].is_string(), "{which:?}");
         assert_eq!(first["prompt_cache_key"], second["prompt_cache_key"]);
     }

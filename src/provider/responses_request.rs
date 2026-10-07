@@ -27,13 +27,21 @@
 //!   model calls multiple functions consecutively, you should pass back all
 //!   reasoning items, function call items, and function call output items,
 //!   since the last `user` message."
+//! - A replayed reasoning item must be followed by its paired output item,
+//!   identified by `id` ("Item 'rs_…' of type 'reasoning' was provided
+//!   without its required following item"). So the `function_call` and
+//!   `message` items that followed a replayed reasoning item carry the `id`
+//!   (`fc_…` / `msg_…`) the same API gave them, recorded in the reasoning
+//!   item's stored JSON. Items with no replayed reasoning before them are
+//!   sent without ids, as before.
 
 use super::model::{ApiProtocol, OpenAiCompat};
-use super::responses_stream::{Flow, ResponsesStreamState};
+use super::responses_stream::{Flow, ResponsesStreamState, CALL_IDS_KEY, MESSAGE_ID_KEY};
 use super::traits::*;
 use crate::types::*;
 use futures::StreamExt;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
@@ -188,14 +196,27 @@ fn input_parts(content: &[Content]) -> Vec<Value> {
 /// reasoning *for* the next output item, and a trailing one (a turn cut off
 /// after reasoning, or whose only output was empty text) has nothing to
 /// attach to, so it is dropped rather than risk a 400.
+///
+/// After a replayed reasoning item, the output items that followed it carry
+/// the ids the same API gave them, read from that reasoning item's stored
+/// JSON (`call_ids`, `message_id`; see [`ResponsesStreamState`]), so the
+/// reasoning item arrives with its paired item. Nothing else gets an id.
 fn assistant_items(content: &[Content], protocol: ApiProtocol, input: &mut Vec<Value>) {
     let mut pending_reasoning: Vec<Value> = Vec::new();
+    // Ids recorded by the reasoning items replayed so far in this message.
+    let mut call_ids: HashMap<String, String> = HashMap::new();
+    // The id of the first message after the last replayed reasoning item.
+    let mut message_id: Option<String> = None;
     for c in content {
         match c {
             Content::Thinking {
                 redacted: Some(_), ..
             } => match c.redacted_for(protocol).and_then(reasoning_item) {
-                Some(item) => pending_reasoning.push(item),
+                Some(replayed) => {
+                    pending_reasoning.push(replayed.item);
+                    call_ids.extend(replayed.call_ids);
+                    message_id = replayed.message_id;
+                }
                 None => debug!(
                     "Responses ({protocol}): skipping encrypted reasoning from another \
                      provider (or unreadable)"
@@ -204,11 +225,15 @@ fn assistant_items(content: &[Content], protocol: ApiProtocol, input: &mut Vec<V
             Content::Text { text } if text.is_empty() => {}
             Content::Text { text } => {
                 input.append(&mut pending_reasoning);
-                input.push(json!({
+                let mut item = json!({
                     "type": "message",
                     "role": "assistant",
                     "content": [{"type": "output_text", "text": text}],
-                }));
+                });
+                if let Some(id) = message_id.take() {
+                    item["id"] = json!(id);
+                }
+                input.push(item);
             }
             Content::ToolCall {
                 id,
@@ -217,12 +242,16 @@ fn assistant_items(content: &[Content], protocol: ApiProtocol, input: &mut Vec<V
                 ..
             } => {
                 input.append(&mut pending_reasoning);
-                input.push(json!({
+                let mut item = json!({
                     "type": "function_call",
                     "call_id": id,
                     "name": name,
                     "arguments": arguments.to_string(),
-                }));
+                });
+                if let Some(item_id) = call_ids.get(id) {
+                    item["id"] = json!(item_id);
+                }
+                input.push(item);
             }
             // Plain reasoning text (a summary without encrypted content, or
             // another provider's thinking) is not an input the API takes.
@@ -238,9 +267,20 @@ fn assistant_items(content: &[Content], protocol: ApiProtocol, input: &mut Vec<V
     }
 }
 
-/// The stored reasoning item (see [`ResponsesStreamState`]) as an input item.
-/// `None` if it is not the JSON object this crate wrote.
-fn reasoning_item(data: &str) -> Option<Value> {
+/// A stored reasoning item read back for replay.
+struct ReplayedReasoning {
+    /// The `reasoning` input item.
+    item: Value,
+    /// `call_id` → output item id of the function calls that followed it.
+    call_ids: HashMap<String, String>,
+    /// The id of the first message that followed it.
+    message_id: Option<String>,
+}
+
+/// The stored reasoning item (see [`ResponsesStreamState`]) as an input item,
+/// with the ids of the output items that followed it. `None` if it is not
+/// the JSON object this crate wrote.
+fn reasoning_item(data: &str) -> Option<ReplayedReasoning> {
     let stored: Value = serde_json::from_str(data).ok()?;
     let id = stored.get("id")?.as_str()?;
     let encrypted = stored.get("encrypted_content")?.as_str()?;
@@ -248,12 +288,33 @@ fn reasoning_item(data: &str) -> Option<Value> {
         Some(Value::Array(parts)) => Value::Array(parts.clone()),
         _ => json!([]),
     };
-    Some(json!({
-        "type": "reasoning",
-        "id": id,
-        "summary": summary,
-        "encrypted_content": encrypted,
-    }))
+    let call_ids = stored
+        .get(CALL_IDS_KEY)
+        .and_then(Value::as_object)
+        .map(|ids| {
+            ids.iter()
+                .filter_map(|(call_id, id)| {
+                    let id = id.as_str().filter(|id| !id.is_empty())?;
+                    Some((call_id.clone(), id.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let message_id = stored
+        .get(MESSAGE_ID_KEY)
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string);
+    Some(ReplayedReasoning {
+        item: json!({
+            "type": "reasoning",
+            "id": id,
+            "summary": summary,
+            "encrypted_content": encrypted,
+        }),
+        call_ids,
+        message_id,
+    })
 }
 
 /// Send `request`, read the Responses event stream and return the assistant

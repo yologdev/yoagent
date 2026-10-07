@@ -578,7 +578,9 @@ async fn encrypted_content_is_kept_on_the_streamed_summary_block() {
         assert_eq!(
             stored(&content[0]),
             Some((
-                json!({"id": "rs_7", "summary": summary, "encrypted_content": "gAAAA-full"}),
+                // `message_id`: the message item that directly followed it.
+                json!({"id": "rs_7", "summary": summary, "encrypted_content": "gAAAA-full",
+                       "message_id": "msg_1"}),
                 Some(which.protocol())
             )),
             "{which:?}"
@@ -617,7 +619,9 @@ async fn encrypted_reasoning_without_a_summary_gets_its_own_block_in_order() {
         assert_eq!(
             stored(&content[0]),
             Some((
-                json!({"id": "rs_1", "summary": [], "encrypted_content": "enc-1"}),
+                // `call_ids`: the call that followed it, by `call_id`.
+                json!({"id": "rs_1", "summary": [], "encrypted_content": "enc-1",
+                       "call_ids": {"call_1": "fc_1"}}),
                 Some(which.protocol())
             ))
         );
