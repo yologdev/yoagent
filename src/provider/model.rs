@@ -482,6 +482,20 @@ pub struct OpenAiCompat {
     /// re-create DeepSeek compat from the preset.
     #[serde(default)]
     pub replays_reasoning_content: bool,
+    /// OpenAI Responses / Azure OpenAI: ask for the model's encrypted
+    /// reasoning (`include: ["reasoning.encrypted_content"]`) and send it back
+    /// on later requests, paired with the output items it led to, so a
+    /// reasoning model keeps its chain of thought across tool calls. Only for
+    /// a reasoning model (`ModelConfig::reasoning`, or a reasoning effort
+    /// sent), and only to the API that produced it.
+    ///
+    /// **Off by default, and not yet verified against the live API** — it is
+    /// checked against recorded request shapes only. With it off, reasoning
+    /// is dropped between turns, as before 0.25. Turn it on with
+    /// [`ModelConfig::with_encrypted_reasoning`]. Read only by the Responses
+    /// and Azure providers.
+    #[serde(default)]
+    pub encrypted_reasoning: bool,
     /// The highest reasoning-effort rung the model accepts; see
     /// [`ReasoningEffortCeiling`]. Defaults to `High`.
     ///
@@ -510,6 +524,7 @@ impl Default for OpenAiCompat {
             thinking_format: ThinkingFormat::OpenAi,
             supports_prompt_cache_key: false,
             replays_reasoning_content: false,
+            encrypted_reasoning: false,
             max_reasoning_effort: ReasoningEffortCeiling::High,
         }
     }
@@ -1210,6 +1225,17 @@ impl ModelConfig {
         } else {
             self
         }
+    }
+
+    /// Turn [`OpenAiCompat::encrypted_reasoning`] on or off (OpenAI
+    /// Responses / Azure OpenAI): keep a reasoning model's encrypted
+    /// reasoning across tool calls. Off by default, and not yet verified
+    /// against the live API.
+    pub fn with_encrypted_reasoning(mut self, on: bool) -> Self {
+        self.compat
+            .get_or_insert_with(OpenAiCompat::default)
+            .encrypted_reasoning = on;
+        self
     }
 
     /// Re-resolve `cost` from `table` for this config's `(provider, id)`.

@@ -286,7 +286,7 @@ async fn run(which: Which, body: String) -> (Message, Vec<StreamEvent>) {
         .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
         .mount(&server)
         .await;
-    let mut mc = ModelConfig::openai_responses("gpt-5.5", "GPT-5.5");
+    let mut mc = ModelConfig::openai_responses("gpt-5.5", "GPT-5.5").with_encrypted_reasoning(true);
     mc.base_url = server.uri();
     let mut config = StreamConfig::new("gpt-5.5", "test-key");
     config.system_prompt = "test".into();
@@ -903,7 +903,7 @@ async fn from_config_openai_responses_runs_a_function_call_end_to_end() {
         .mount(&server)
         .await;
 
-    let mut mc = ModelConfig::openai_responses("gpt-5.5", "GPT-5.5");
+    let mut mc = ModelConfig::openai_responses("gpt-5.5", "GPT-5.5").with_encrypted_reasoning(true);
     mc.base_url = server.uri();
     let mut agent = Agent::from_config(mc);
     let mut rx = agent.prompt("search for rust").await;
@@ -1170,7 +1170,8 @@ async fn azure_no_capacity_mid_stream_is_rate_limited() {
             )
             .mount(&server)
             .await;
-        let mut mc = ModelConfig::openai_responses("gpt-5.5", "GPT-5.5");
+        let mut mc =
+            ModelConfig::openai_responses("gpt-5.5", "GPT-5.5").with_encrypted_reasoning(true);
         mc.base_url = server.uri();
         let mut config = StreamConfig::new("gpt-5.5", "test-key");
         config.messages = vec![Message::user("hi")];

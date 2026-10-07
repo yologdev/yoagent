@@ -73,8 +73,11 @@ pub(crate) fn build_request_body(config: &StreamConfig, protocol: ApiProtocol) -
     // rejects reasoning input items ("Encrypted content is not supported
     // with this model"), so neither is sent there — e.g. after
     // `Agent::set_model` from a reasoning model to `gpt-4.1` on the same API.
-    let reasoning_model =
-        config.model_config.as_ref().is_some_and(|m| m.reasoning) || effort.is_some();
+    //
+    // Opt-in (`OpenAiCompat::encrypted_reasoning`, off by default): not yet
+    // verified against the live API.
+    let reasoning_model = compat.encrypted_reasoning
+        && (config.model_config.as_ref().is_some_and(|m| m.reasoning) || effort.is_some());
     // Replay is keyed on the target protocol; `None` replays nothing.
     let replay = reasoning_model.then_some(protocol);
 

@@ -113,14 +113,12 @@ mod tests {
                 _ => Some("high"),
             };
             let got = body(&mc, level);
-            // `openai_responses` declares a reasoning model, so encrypted
-            // reasoning is requested at every level; the empty system prompt
-            // derives no cache key.
+            // Encrypted reasoning is opt-in, so no `include` by default; the
+            // empty system prompt derives no cache key.
             let mut expected = serde_json::json!({
                 "model": "gpt-5.5",
                 "stream": true,
                 "input": [{"role": "user", "content": "hi"}],
-                "include": ["reasoning.encrypted_content"],
                 "temperature": 0.5,
             });
             if let Some(e) = expected_effort {

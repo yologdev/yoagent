@@ -100,8 +100,9 @@ When the key is empty, the provider sends no `api-key` header.
   field and needs no API version for it
 - **Encrypted reasoning**: requested with
   `include: ["reasoning.encrypted_content"]` and replayed in place on the next
-  turn, as on [OpenAI](openai-responses.md#encrypted-reasoning) — but only when
-  the config says the deployment reasons. A `custom` config has
+  turn, as on [OpenAI](openai-responses.md#encrypted-reasoning) — opt-in
+  (`with_encrypted_reasoning(true)`, off by default, not yet verified live), and
+  only when the config says the deployment reasons. A `custom` config has
   `reasoning: false`, so set `config.reasoning = true` for a reasoning
   deployment (or send a `ThinkingLevel` other than `Off`, which implies it).
   Azure's reasoning guide describes the same replay ("Send those items back

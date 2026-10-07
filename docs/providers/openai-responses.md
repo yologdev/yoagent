@@ -112,7 +112,15 @@ and this crate never sends `none`: leave `StreamConfig::temperature` unset.
 
 ## Encrypted reasoning
 
-A reasoning model's reasoning is carried across turns, including across tool
+**Opt-in, off by default, and not yet verified against the live API** (it is
+checked against recorded request shapes only). Turn it on per config:
+
+```rust
+let config = ModelConfig::gpt_6_luna().with_encrypted_reasoning(true);
+```
+
+With it off, reasoning is dropped between turns, as before 0.25. With it on, a
+reasoning model's reasoning is carried across turns, including across tool
 calls, as OpenAI recommends ("pass back any reasoning items returned with the
 last function call"):
 

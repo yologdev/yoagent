@@ -103,7 +103,8 @@ impl Which {
     fn model_config(self, uri: &str) -> ModelConfig {
         match self {
             Which::Responses => {
-                let mut mc = ModelConfig::openai_responses("gpt-5.5", "GPT-5.5");
+                let mut mc = ModelConfig::openai_responses("gpt-5.5", "GPT-5.5")
+                    .with_encrypted_reasoning(true);
                 mc.base_url = uri.to_string();
                 mc
             }
@@ -114,7 +115,8 @@ impl Which {
                     format!("{uri}/openai/v1"),
                     "gpt-5.5",
                     "GPT-5.5",
-                );
+                )
+                .with_encrypted_reasoning(true);
                 mc.reasoning = true;
                 mc
             }
@@ -654,7 +656,7 @@ async fn item_ids_are_replayed_only_after_this_apis_reasoning() {
 #[tokio::test]
 async fn openai_responses_preset_sends_include_only_for_reasoning_ids() {
     for id in ["gpt-4o", "gpt-4.1", "gpt-5-chat-latest"] {
-        let mc = ModelConfig::openai_responses(id, id);
+        let mc = ModelConfig::openai_responses(id, id).with_encrypted_reasoning(true);
         let (sent, _) = one_request(
             Which::Responses,
             Some(mc),
@@ -667,11 +669,11 @@ async fn openai_responses_preset_sends_include_only_for_reasoning_ids() {
         assert!(sent.get("reasoning").is_none(), "{id}: {sent}");
     }
     for mc in [
-        ModelConfig::openai_responses("gpt-5.5", "GPT-5.5"),
-        ModelConfig::openai_responses("o4-mini", "o4-mini"),
-        ModelConfig::gpt_6_astra(),
-        ModelConfig::gpt_6_sol(),
-        ModelConfig::gpt_6_luna(),
+        ModelConfig::openai_responses("gpt-5.5", "GPT-5.5").with_encrypted_reasoning(true),
+        ModelConfig::openai_responses("o4-mini", "o4-mini").with_encrypted_reasoning(true),
+        ModelConfig::gpt_6_astra().with_encrypted_reasoning(true),
+        ModelConfig::gpt_6_sol().with_encrypted_reasoning(true),
+        ModelConfig::gpt_6_luna().with_encrypted_reasoning(true),
     ] {
         let id = mc.id.clone();
         let (sent, _) = one_request(
@@ -689,7 +691,8 @@ async fn openai_responses_preset_sends_include_only_for_reasoning_ids() {
         );
     }
     // `config.reasoning` overrides the inference either way.
-    let mut forced = ModelConfig::openai_responses("gpt-4.1", "GPT-4.1");
+    let mut forced =
+        ModelConfig::openai_responses("gpt-4.1", "GPT-4.1").with_encrypted_reasoning(true);
     forced.reasoning = true;
     let (sent, _) = one_request(
         Which::Responses,
@@ -700,7 +703,7 @@ async fn openai_responses_preset_sends_include_only_for_reasoning_ids() {
     )
     .await;
     assert_eq!(sent["include"], json!(["reasoning.encrypted_content"]));
-    let mut off = ModelConfig::gpt_6_sol();
+    let mut off = ModelConfig::gpt_6_sol().with_encrypted_reasoning(true);
     off.reasoning = false;
     let (sent, _) = one_request(
         Which::Responses,
@@ -741,7 +744,9 @@ async fn reasoning_is_not_replayed_to_a_non_reasoning_model() {
                             "output": "contents"});
 
         let plain = match which {
-            Which::Responses => ModelConfig::openai_responses("gpt-4.1", "GPT-4.1"),
+            Which::Responses => {
+                ModelConfig::openai_responses("gpt-4.1", "GPT-4.1").with_encrypted_reasoning(true)
+            }
             Which::Azure => {
                 let mut mc = which.model_config("http://unused");
                 mc.reasoning = false;
@@ -958,5 +963,38 @@ async fn agent_loop_replays_the_reasoning_item_after_a_tool_call() {
         assert_eq!(input[2]["id"], "fc_1", "{which:?}");
         assert!(first["prompt_cache_key"].is_string(), "{which:?}");
         assert_eq!(first["prompt_cache_key"], second["prompt_cache_key"]);
+    }
+}
+
+/// Encrypted reasoning is opt-in: by default a reasoning model is not asked
+/// for it and none is replayed — the request looks as it did before 0.25.
+#[tokio::test]
+async fn encrypted_reasoning_is_off_by_default() {
+    for which in BOTH {
+        let mut mc = which.model_config("http://unused");
+        mc.compat.as_mut().unwrap().encrypted_reasoning = false;
+        let (sent, _) = one_request(
+            which,
+            Some(mc.clone()),
+            vec![Message::user("a")],
+            text_fixture(),
+            |_| {},
+        )
+        .await;
+        assert!(sent.get("include").is_none(), "{which:?}: {sent}");
+        // Positive control: the same config opted in asks for it.
+        let (sent, _) = one_request(
+            which,
+            Some(mc.with_encrypted_reasoning(true)),
+            vec![Message::user("a")],
+            text_fixture(),
+            |_| {},
+        )
+        .await;
+        assert_eq!(
+            sent["include"],
+            serde_json::json!(["reasoning.encrypted_content"]),
+            "{which:?}"
+        );
     }
 }

@@ -63,9 +63,9 @@ fn model_config() -> ModelConfig {
         Ok(id) if !id.trim().is_empty() => {
             let mut mc = ModelConfig::openai_responses(id.trim(), id.trim());
             mc.compat = ModelConfig::gpt_6_luna().compat;
-            mc
+            mc.with_encrypted_reasoning(true)
         }
-        _ => ModelConfig::gpt_6_luna(),
+        _ => ModelConfig::gpt_6_luna().with_encrypted_reasoning(true),
     }
 }
 
