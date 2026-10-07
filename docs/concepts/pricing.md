@@ -47,7 +47,7 @@ if let Some(e) = live.origin.fetch_error() {
 | `prices::enable_live(&source)` | one request, now | `native` | the fetched table over the snapshot; the snapshot alone if the fetch fails |
 | `prices::enable_live_cached(&source, path, CacheOptions)` | only when the cache is stale | `native` | as `enable_live`, through a cache file (see [Caching](#caching)) |
 
-All three return what changed for constructors: `enable_bundled` a
+All three return what changed in the resolved table (every entry, including providers no constructor reads): `enable_bundled` a
 `Vec<PriceChange>`, the live ones a `LivePrices` report carrying `changes`
 plus the fetch's `origin`, `skipped`, `ignored_fields` and `cache_problem`
 (`live.fell_back()` is true when only the snapshot is in effect; the fallback

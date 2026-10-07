@@ -170,8 +170,10 @@ pub const PRICED_PROVIDERS: &[&str] = &[
 ///
 /// Affects configs built **after** the call (re-price others with
 /// [`ModelConfig::reprice`](crate::provider::ModelConfig::reprice)).
-/// Idempotent; works on every target. Returns the models whose price changed
-/// for constructors (empty on a repeat call). Undo with
+/// Idempotent; works on every target. Returns every entry of the resolved
+/// table that changed (empty on a repeat call), including providers no
+/// constructor reads, such as decision-model prices without the `decision`
+/// feature. Undo with
 /// [`global::clear_bundled`].
 ///
 /// ```
@@ -194,8 +196,9 @@ pub struct LivePrices {
     /// failed (see [`PriceOrigin::fetch_error`]) and only the bundled
     /// snapshot was enabled — see [`fell_back`](Self::fell_back).
     pub origin: PriceOrigin,
-    /// Every model whose price changed for constructors, compared with the
-    /// resolved table before the call (a user layer's models included, as
+    /// Every entry of the resolved table whose price changed (providers no
+    /// constructor reads included), compared with the resolved table before
+    /// the call (a user layer's models included, as
     /// billed: a fetched change the user layer hides is not listed).
     pub changes: Vec<PriceChange>,
     /// Models a models.dev source listed but could not be mapped.
