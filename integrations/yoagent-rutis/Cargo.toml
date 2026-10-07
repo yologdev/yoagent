@@ -3,7 +3,7 @@ name = "yoagent-rutis"
 version = "0.1.0"
 edition = "2021"
 resolver = "3"
-description = "Extend a yoagent Agent at runtime with rutis plugins: tools, tool policy, turn notes, input filters and events"
+description = "Extend yoagent agents at runtime with rutis plugins, as one yoagent Extension: tools, tool policy, output filters, turn notes, input checks, verifiers and events"
 license = "MIT"
 repository = "https://github.com/yologdev/yoagent"
 documentation = "https://docs.rs/yoagent-rutis"
@@ -11,24 +11,59 @@ readme = "README.md"
 keywords = ["agent", "llm", "plugin", "rutis", "yoagent"]
 categories = ["asynchronous", "development-tools"]
 authors = ["Yuanhao <yuanhao@yolog.dev>"]
+# Installed locally for the end-to-end tests; never packaged.
+exclude = ["plugins/node_modules", "plugins/.venv"]
 # yoagent's MSRV; rutis 0.6.1 declares 1.85.
 rust-version = "1.86"
-# Not published yet. It needs yoagent 0.24 or later.
+# Not published yet. It needs yoagent's `Extension`, which ships in 0.25.
 publish = false
 
 [dependencies]
-# The path's version; 0.23.0 is the first release with `ToolSource`.
-yoagent = { path = "../..", version = "0.24.0" }
+# The path's version. Publishing needs the first yoagent release with
+# `Extension` (0.25): raise this to it then.
+yoagent = { path = "../..", version = "0.24.3" }
 # 0.x caret: 0.6.x only (0.7 would be breaking). Any rutis minor bump is a
 # yoagent-rutis minor bump — its types are part of this crate's API.
 rutis = "0.6"
+# TypeScript / Python plugins and remote nodes (the `node`, `python` and
+# `websocket` features). The release train matching rutis 0.6.1; any
+# rutis-bridge minor bump is a yoagent-rutis minor bump too.
+rutis-bridge = { version = "0.7", optional = true, default-features = false }
 async-trait = "0.1"
 futures = "0.3"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 # Same crate rutis hands its cancellation tokens out as.
 tokio-util = "0.7"
 tracing = "0.1"
 
+[package.metadata.docs.rs]
+features = ["node", "python", "websocket"]
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+# Rust plugins only. Each language feature provides the `yoagent` host
+# service to plugins in other languages, through rutis-bridge.
+default = []
+# TypeScript / JavaScript plugins in local Node runtimes (Unix).
+node = ["rutis-bridge/node"]
+# Python plugins in local Python runtimes (Unix).
+python = ["rutis-bridge/python"]
+# Remote nodes and runtimes over WebSocket (rustls).
+websocket = ["rutis-bridge/websocket"]
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+# Loads language plugins as rows in the end-to-end tests. The bridge never
+# loads plugins itself: that is the host's job.
+rutis-loader = { version = "0.7", features = ["node", "python"] }
+tempfile = "3"
+
+[[test]]
+name = "languages_test"
+required-features = ["node", "python"]
+
+[[example]]
+name = "language_plugins"
+required-features = ["node", "python"]
