@@ -516,3 +516,43 @@ fn reprice_ignores_a_config_whose_provider_changed() {
         PriceTable::builtin().cost("anthropic", "claude-sonnet-5")
     );
 }
+
+/// With prices in effect but not the bundled snapshot (a user table alone),
+/// a first-party lookup that misses is warned about, once per model; with
+/// the snapshot on, or with nothing priced at all, a miss stays quiet.
+#[test]
+fn a_miss_under_a_user_table_alone_is_warned_once_per_model() {
+    let _g = exclusive();
+    global::clear_bundled();
+    let _ = global::install_override(sonnet_override());
+
+    let (config, warns) = warns_of(|| ModelConfig::anthropic("claude-warn-test-a", "A"));
+    assert!(config.cost.is_none());
+    assert_eq!(warns.len(), 1, "{warns:?}");
+    assert!(
+        warns[0].contains("anthropic/claude-warn-test-a") && warns[0].contains("enable_bundled"),
+        "{warns:?}"
+    );
+    // Once per model: not again for the same one, but for another.
+    let (_, warns) = warns_of(|| ModelConfig::anthropic("claude-warn-test-a", "A").reprice());
+    assert!(warns.is_empty(), "{warns:?}");
+    let (_, warns) = warns_of(|| ModelConfig::anthropic("claude-warn-test-b", "B"));
+    assert_eq!(warns.len(), 1, "{warns:?}");
+    // A listed model is not warned about.
+    let (config, warns) = warns_of(ModelConfig::claude_sonnet_5);
+    assert!(config.cost.is_some());
+    assert!(warns.is_empty(), "{warns:?}");
+
+    // With the snapshot under it, a miss is a model nobody lists: quiet.
+    let _ = yoagent::provider::prices::enable_bundled();
+    let (config, warns) = warns_of(|| ModelConfig::anthropic("claude-warn-test-c", "C"));
+    assert!(config.cost.is_none());
+    assert!(warns.is_empty(), "{warns:?}");
+
+    // Nothing priced at all: the default, quiet.
+    global::clear_bundled();
+    global::clear_override();
+    let (config, warns) = warns_of(|| ModelConfig::anthropic("claude-warn-test-d", "D"));
+    assert!(config.cost.is_none());
+    assert!(warns.is_empty(), "{warns:?}");
+}

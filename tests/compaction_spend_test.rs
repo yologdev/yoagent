@@ -174,6 +174,31 @@ async fn run(agent: &mut Agent, prompt: &str) -> SessionStats {
     stats.expect("the run sent AgentEnd")
 }
 
+/// The summarization request count once it has stopped changing: each
+/// request answers at once, so a count unchanged over several polls means
+/// nothing is left in flight (its spend recorded too). Bounded, so a
+/// summarizer that never settles fails the test instead of hanging it.
+async fn settled(calls: &AtomicUsize) -> u32 {
+    const STABLE_POLLS: u32 = 5;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut last = calls.load(Ordering::SeqCst);
+    let mut stable = 0;
+    while stable < STABLE_POLLS {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "summarization requests never settled"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let now = calls.load(Ordering::SeqCst);
+        if now == last {
+            stable += 1;
+        } else {
+            (last, stable) = (now, 0);
+        }
+    }
+    u32::try_from(last).unwrap()
+}
+
 fn assert_close(a: f64, b: f64) {
     assert!((a - b).abs() < 1e-12, "{a} != {b}");
 }
@@ -204,8 +229,7 @@ async fn summary_spend_is_counted_once_at_the_summarizers_rates() {
 
     // Let anything still in flight finish; the next run's first compaction
     // step counts it.
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let finished = calls.load(Ordering::SeqCst) as u32;
+    let finished = settled(&calls).await;
     let second = run(&mut agent, "keep going").await;
 
     // Counted once: every request that finished before the second run's
@@ -269,6 +293,56 @@ async fn an_unpriced_summarizer_makes_the_total_unknown() {
     assert!(!stats.is_unpriced());
     assert_eq!(stats.total_cost_usd(), None);
     assert_eq!(agent.total_cost_usd(), None);
+}
+
+/// A `Budget` counts the run's summarization spend too, at the
+/// summarizer's own rates: across one run it adds up to the run's whole
+/// bill.
+#[tokio::test]
+async fn a_budget_counts_summary_spend_at_the_summarizers_rates() {
+    let budget = Arc::new(extension::Budget::usd(f64::INFINITY, main_cost()).across_runs());
+    let (agent, _calls) =
+        compacting_agent(main_script(1, 8), Some(summarizer_cost()), StopReason::Stop);
+    let mut agent = agent.with_extension(Arc::clone(&budget));
+    let stats = run(&mut agent, "fill the context").await;
+    assert!(stats.compaction.requests >= 1, "the test must summarize");
+    assert_close(budget.spent_usd().unwrap(), stats.total_cost_usd().unwrap());
+}
+
+/// An unpriced summarizer's spend is priced at the budget's own rates, never
+/// skipped.
+#[tokio::test]
+async fn a_budget_prices_an_unpriced_summary_at_its_own_rates() {
+    let budget = Arc::new(extension::Budget::usd(f64::INFINITY, main_cost()).across_runs());
+    let (agent, _calls) = compacting_agent(main_script(1, 8), None, StopReason::Stop);
+    let mut agent = agent.with_extension(Arc::clone(&budget));
+    let stats = run(&mut agent, "fill the context").await;
+    assert!(stats.compaction.requests >= 1, "the test must summarize");
+    assert_close(
+        budget.spent_usd().unwrap(),
+        stats.cost_usd.unwrap() + main_cost().cost_usd(&stats.compaction.usage),
+    );
+}
+
+/// The limit acts on summary spend: a per-run budget that the main turns
+/// alone never reach stops the run once summaries are counted.
+#[tokio::test]
+async fn summary_spend_can_stop_a_run_on_budget() {
+    // Each main turn costs $0.00012; each summary $0.012.
+    let limit = 0.01;
+    let (agent, _calls) =
+        compacting_agent(main_script(1, 8), Some(summarizer_cost()), StopReason::Stop);
+    let mut agent = agent.with_extension(extension::Budget::usd(limit, main_cost()));
+    let stats = run(&mut agent, "fill the context").await;
+    assert!(stats.compaction.requests >= 1, "the test must summarize");
+    assert!(stats.cost_usd.unwrap() < limit);
+    assert!(
+        agent.messages().iter().any(|m| matches!(m,
+            AgentMessage::Llm(Message::User { content, .. })
+                if matches!(content.first(), Some(Content::Text { text })
+                    if text.starts_with("[Agent stopped: budget")))),
+        "the run stopped on its budget"
+    );
 }
 
 #[tokio::test]

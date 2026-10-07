@@ -259,9 +259,21 @@ impl Agent {
     /// call; a run already in flight keeps the rates it started with.
     /// [`session_cost_usd`](Self::session_cost_usd) prices the whole history
     /// at the current rates, so it changes immediately.
+    ///
+    /// Also re-prices the compaction strategy's own model
+    /// ([`CompactionStrategy::reprice`]: an
+    /// [`LlmCompaction`](crate::LlmCompaction)'s summarizer), from its next
+    /// request on. Not reached: decision models (priced when built) and the
+    /// models of [`SubAgentTool`](crate::SubAgentTool)s, which are shared
+    /// and immutable once registered — call
+    /// [`SubAgentTool::reprice`](crate::SubAgentTool::reprice) before
+    /// registering one.
     pub fn reprice(&mut self) {
         if let Some(config) = self.model_config.take() {
             self.model_config = Some(config.reprice());
+        }
+        if let Some(strategy) = &self.compaction_strategy {
+            strategy.reprice();
         }
     }
 
@@ -1194,20 +1206,27 @@ impl Agent {
         let mut config = self.build_config();
         config.output_schema = output_schema;
 
-        // The run's spans stay children of the caller's span.
-        let handle = crate::rt::spawn(tracing::Instrument::in_current_span(async move {
-            let (_new_messages, stats) = match input {
-                RunInput::Prompt(messages) => {
-                    agent_loop_with_stats(messages, &mut context, &config, tx, cancel).await
-                }
-                RunInput::Continue => {
-                    agent_loop_continue_with_stats(&mut context, &config, tx, cancel).await
-                }
-            };
-            // Sourced tools belong to this run only.
-            context.tools.truncate(own_tools);
-            (context.tools, context.messages, stats)
-        }));
+        // The run's spans stay children of the caller's span, and go to the
+        // caller's subscriber: a scoped one (`tracing::subscriber::with_default`)
+        // is thread-local, so a task that moves to another worker thread
+        // would otherwise log to the global default.
+        use tracing::instrument::WithSubscriber;
+        let handle = crate::rt::spawn(
+            tracing::Instrument::in_current_span(async move {
+                let (_new_messages, stats) = match input {
+                    RunInput::Prompt(messages) => {
+                        agent_loop_with_stats(messages, &mut context, &config, tx, cancel).await
+                    }
+                    RunInput::Continue => {
+                        agent_loop_continue_with_stats(&mut context, &config, tx, cancel).await
+                    }
+                };
+                // Sourced tools belong to this run only.
+                context.tools.truncate(own_tools);
+                (context.tools, context.messages, stats)
+            })
+            .with_current_subscriber(),
+        );
 
         self.pending_completion = Some(handle);
     }

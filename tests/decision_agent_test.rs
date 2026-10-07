@@ -1050,6 +1050,64 @@ async fn advisory_and_gate_spend_is_reported_in_session_stats() {
     assert_eq!(stats.total_cost_usd(), None);
 }
 
+/// A `Budget` counts the gate's spend at the decision model's own rates, and
+/// an unpriced decision model's at the budget's rates.
+#[tokio::test]
+async fn a_budget_counts_the_gate_spend() {
+    // 50 input tokens per evaluation (`gate_answers`).
+    for (gate_cost, expected) in [
+        (Some(CostConfig::new(1_000.0, 0.0)), 0.05),
+        (None, 50.0 * 2.0 / 1e6),
+    ] {
+        let budget = Arc::new(
+            yoagent::extension::Budget::usd(f64::INFINITY, CostConfig::new(2.0, 0.0)).across_runs(),
+        );
+        let (tools, ran) = make_tools(1);
+        let agent = Agent::from_provider(calls_rm(), ModelConfig::mock())
+            .with_tools(tools)
+            .with_extension(Arc::clone(&budget))
+            .with_tool_gate(ToolGate::new(
+                model(&gate_answers(0.0, 1.0)).with_cost(gate_cost.clone()),
+            ));
+        let (_, stats) = run_stats(agent, "delete /tmp/scratch.txt").await;
+        assert_eq!(ran.lock().unwrap().len(), 1);
+        assert_eq!(stats.decision.requests, 1);
+        let spent = budget.spent_usd().unwrap();
+        assert!((spent - expected).abs() < 1e-12, "{gate_cost:?}: {spent}");
+    }
+}
+
+/// The limit acts on gate spend: the model itself costs nothing here, so
+/// only the gate's evaluation can stop the run before its second request.
+#[tokio::test]
+async fn gate_spend_can_stop_a_run_on_budget() {
+    let (tools, ran) = make_tools(1);
+    let mut agent = Agent::from_provider(calls_rm(), ModelConfig::mock())
+        .with_tools(tools)
+        .with_extension(yoagent::extension::Budget::usd(
+            0.05,
+            CostConfig::new(1.0, 0.0),
+        ))
+        .with_tool_gate(ToolGate::new(
+            model(&gate_answers(0.0, 1.0)).with_cost(Some(CostConfig::new(1_000.0, 0.0))),
+        ));
+    let mut rx = agent.prompt("delete /tmp/scratch.txt").await;
+    let mut last = Vec::new();
+    while let Some(e) = rx.recv().await {
+        if let AgentEvent::AgentEnd { messages, .. } = e {
+            last = messages;
+        }
+    }
+    agent.finish().await;
+    assert_eq!(ran.lock().unwrap().len(), 1, "the call was allowed and ran");
+    assert!(
+        matches!(last.last(), Some(AgentMessage::Llm(Message::User { content, .. }))
+            if matches!(content.first(), Some(Content::Text { text })
+                if text.starts_with("[Agent stopped: budget"))),
+        "stopped before the second request: {last:?}"
+    );
+}
+
 // --- compaction must not make the gate judge an older request ------------
 
 /// Keeps the session's head, a marker, and the last two messages — the

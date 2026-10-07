@@ -352,9 +352,12 @@ async fn encrypted_reasoning_from_another_protocol_is_not_replayed() {
 #[tokio::test]
 async fn own_reasoning_is_replayed_but_a_trailing_item_is_dropped() {
     let item = |id: &str| json!({"id": id, "summary": [], "encrypted_content": "enc"}).to_string();
+    let paired = json!({"id": "rs_a", "summary": [], "encrypted_content": "enc",
+                        "message_id": "msg_a"})
+    .to_string();
     for which in BOTH {
         let turn_1 = assistant(vec![
-            Content::thinking_redacted(which.protocol(), item("rs_a")),
+            Content::thinking_redacted(which.protocol(), paired.clone()),
             Content::Text {
                 text: "Sure.".into(),
             },
@@ -384,7 +387,7 @@ async fn own_reasoning_is_replayed_but_a_trailing_item_is_dropped() {
             json!([
                 {"role": "user", "content": "one"},
                 {"type": "reasoning", "id": "rs_a", "summary": [], "encrypted_content": "enc"},
-                {"type": "message", "role": "assistant",
+                {"type": "message", "id": "msg_a", "role": "assistant",
                  "content": [{"type": "output_text", "text": "Sure."}]},
                 {"role": "user", "content": "two"},
                 {"type": "message", "role": "assistant",

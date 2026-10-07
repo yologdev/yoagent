@@ -373,6 +373,13 @@ pub trait CompactionStrategy: crate::rt::MaybeSend + crate::rt::MaybeSync {
     ///
     /// Called before each LLM turn when `context_config` is set.
     fn compact(&self, messages: Vec<AgentMessage>, config: &ContextConfig) -> Vec<AgentMessage>;
+
+    /// Re-price any model this strategy calls against the process-wide
+    /// price table now. Called by [`Agent::reprice`](crate::Agent::reprice);
+    /// [`LlmCompaction`](crate::LlmCompaction) re-prices its summarization
+    /// model. The default does nothing: a strategy that makes no model
+    /// request has nothing to price.
+    fn reprice(&self) {}
 }
 
 /// Default 3-level compaction: truncate tool outputs → summarize turns → drop middle.

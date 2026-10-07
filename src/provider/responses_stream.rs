@@ -121,6 +121,8 @@ pub(crate) struct ResponsesStreamState {
     /// output_index → the `message` item id sent for it.
     message_ids: HashMap<Option<usize>, String>,
     usage: Usage,
+    /// Whether a terminal event carried a readable `usage`.
+    usage_seen: bool,
     stop_reason: StopReason,
     /// output_index → the refusal text received for it so far. Present once
     /// any refusal signal arrived for that output item.
@@ -144,6 +146,7 @@ impl ResponsesStreamState {
             reasoning_bounds: Vec::new(),
             message_ids: HashMap::new(),
             usage: Usage::default(),
+            usage_seen: false,
             stop_reason: StopReason::Stop,
             refusals: HashMap::new(),
             filtered: None,
@@ -297,6 +300,7 @@ impl ResponsesStreamState {
             }
             "response.output_item.done" => {
                 let Some(ev) = self.parse::<OutputItemEvent>(event, data) else {
+                    self.unreadable_item_done(data);
                     return Ok(Flow::Continue);
                 };
                 match ev.item.kind.as_deref() {
@@ -370,6 +374,7 @@ impl ResponsesStreamState {
                 {
                     if let Some(u) = resp.usage {
                         self.usage = u.into_usage();
+                        self.usage_seen = true;
                     }
                     if resp.status.as_deref() == Some("incomplete") {
                         self.incomplete(resp.incomplete_details);
@@ -389,6 +394,7 @@ impl ResponsesStreamState {
                     Some(r) => {
                         if let Some(u) = r.usage {
                             self.usage = u.into_usage();
+                            self.usage_seen = true;
                         }
                         r.incomplete_details
                     }
@@ -426,6 +432,18 @@ impl ResponsesStreamState {
         }
 
         self.record_following_ids();
+
+        // A response without (readable) usage reports zero tokens, as the
+        // other providers do: `Usage` has no "unknown" state. The structured
+        // `usage_missing` field (as on Bedrock), emitted inside the loop's
+        // `llm_stream` span, lets tracing/OTel consumers find these turns —
+        // their cost reads as $0 though the request was billed.
+        if !self.usage_seen {
+            warn!(
+                usage_missing = true,
+                "{}: the response carried no usage; reporting zero tokens", self.label
+            );
+        }
 
         // A refusal (streamed, or in a finished item) is the most specific
         // verdict, as on the Anthropic provider: nothing overrides it.
@@ -655,6 +673,30 @@ impl ResponsesStreamState {
         }
     }
 
+    /// An `output_item.done` that could not be parsed. If it may have been a
+    /// reasoning item (it says so, or its type cannot be read), the items
+    /// after it may be its own: end the previous reasoning item's range
+    /// here, so they are not replayed as that item's following items. Ending
+    /// a range too early only loses ids, which makes the earlier item skip
+    /// replay rather than be sent wrongly paired.
+    fn unreadable_item_done(&mut self, data: &str) {
+        let value: Option<serde_json::Value> = serde_json::from_str(data).ok();
+        let kind = value
+            .as_ref()
+            .and_then(|v| v.get("item"))
+            .and_then(|i| i.get("type"))
+            .and_then(serde_json::Value::as_str);
+        if matches!(kind, None | Some("reasoning")) {
+            let output_index = value
+                .as_ref()
+                .and_then(|v| v.get("output_index"))
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|i| usize::try_from(i).ok());
+            self.reasoning_bounds
+                .push((self.content.len(), output_index));
+        }
+    }
+
     fn message_id(&mut self, output_index: Option<usize>, id: Option<&str>) {
         if let Some(id) = id.filter(|id| !id.is_empty()) {
             self.message_ids.insert(output_index, id.to_string());
@@ -671,6 +713,12 @@ impl ResponsesStreamState {
     /// not replayed (no encrypted content) are paired with it, and filing
     /// them under an earlier item would replay them with ids but without
     /// their own reasoning item, which the API rejects.
+    ///
+    /// A stored item whose first following output item arrived without an
+    /// id (an empty `item_id`, a message with none) cannot be replayed with
+    /// its paired item, which the API rejects on every later request: its
+    /// encrypted reasoning is dropped (the summary text stays), with a
+    /// warning.
     fn record_following_ids(&mut self) {
         let mut bounds = self.reasoning_bounds.clone();
         // Reasoning that streamed text but whose finished item never came.
@@ -711,6 +759,46 @@ impl ResponsesStreamState {
                 .filter_map(|(oi, &i)| self.message_ids.get(oi).map(|id| (i, id)))
                 .min_by_key(|(i, _)| *i)
                 .map(|(_, id)| id.clone());
+            // The item the reasoning must be replayed with: the first output
+            // item after it, and whether it came with an id.
+            let first_call = self
+                .calls
+                .iter()
+                .filter(|c| in_region(c.content_index))
+                .map(|c| {
+                    let has_id = !c.call_id.is_empty()
+                        && c.item_id.as_deref().is_some_and(|id| !id.is_empty());
+                    (c.content_index, has_id)
+                })
+                .min_by_key(|(i, _)| *i);
+            let first_text = self
+                .text_slots
+                .iter()
+                .filter(|(_, &i)| in_region(i))
+                .map(|(oi, &i)| (i, self.message_ids.contains_key(oi)))
+                .min_by_key(|(i, _)| *i);
+            let first = match (first_call, first_text) {
+                (Some(a), Some(b)) => Some(if a.0 < b.0 { a } else { b }),
+                (a, b) => a.or(b),
+            };
+            if let Some((_, false)) = first {
+                if let Some(Content::Thinking {
+                    redacted,
+                    redacted_protocol,
+                    ..
+                }) = self.content.get_mut(r)
+                {
+                    *redacted = None;
+                    *redacted_protocol = None;
+                }
+                warn!(
+                    "{}: the output item after a reasoning item came without an id, so the \
+                     reasoning item cannot be replayed with it; its encrypted reasoning is \
+                     dropped",
+                    self.label
+                );
+                continue;
+            }
             if call_ids.is_empty() && message_id.is_none() {
                 continue;
             }
@@ -1069,5 +1157,189 @@ mod tests {
         .unwrap();
         let (content, _, _) = s.finish(&tx);
         assert!(matches!(&content[0], Content::Text { text } if text == "hi"));
+    }
+
+    /// Feed `events` (JSON objects with a `type`) and finish.
+    fn stream(events: &[serde_json::Value]) -> (Vec<Content>, Usage, StopReason) {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut s = ResponsesStreamState::new("test", ApiProtocol::OpenAiResponses);
+        for e in events {
+            s.handle(e["type"].as_str().unwrap(), &e.to_string(), &tx)
+                .unwrap();
+        }
+        s.finish(&tx)
+    }
+
+    fn reasoning_done(oi: usize, id: &str) -> serde_json::Value {
+        serde_json::json!({"type": "response.output_item.done", "output_index": oi,
+            "item": {"type": "reasoning", "id": id, "summary": [],
+                     "encrypted_content": format!("enc-{id}")}})
+    }
+
+    fn call_done(oi: usize, item_id: &str, call_id: &str) -> serde_json::Value {
+        serde_json::json!({"type": "response.output_item.done", "output_index": oi,
+            "item": {"type": "function_call", "id": item_id, "call_id": call_id,
+                     "name": "read_file", "arguments": "{}"}})
+    }
+
+    fn completed() -> serde_json::Value {
+        serde_json::json!({"type": "response.completed", "response": {"status": "completed",
+            "usage": {"input_tokens": 3, "output_tokens": 1, "total_tokens": 4}}})
+    }
+
+    fn stored(content: &[Content], i: usize) -> Option<serde_json::Value> {
+        match &content[i] {
+            Content::Thinking {
+                redacted: Some(data),
+                ..
+            } => Some(serde_json::from_str(data).unwrap()),
+            _ => None,
+        }
+    }
+
+    /// Run `f` with `tracing` captured on this thread; return the `WARN`
+    /// lines (level, message and fields).
+    fn warns_of<T>(f: impl FnOnce() -> T) -> (T, Vec<String>) {
+        use tracing_subscriber::layer::SubscriberExt;
+        #[derive(Clone, Default)]
+        struct Logs(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Logs {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                struct Fields(String);
+                impl tracing::field::Visit for Fields {
+                    fn record_debug(
+                        &mut self,
+                        field: &tracing::field::Field,
+                        value: &dyn std::fmt::Debug,
+                    ) {
+                        self.0.push_str(&format!(" {}={value:?}", field.name()));
+                    }
+                }
+                if *event.metadata().level() == tracing::Level::WARN {
+                    let mut fields = Fields(String::new());
+                    event.record(&mut fields);
+                    self.0.lock().unwrap().push(fields.0);
+                }
+            }
+        }
+        let logs = Logs::default();
+        let out = {
+            let _g =
+                tracing::subscriber::set_default(tracing_subscriber::registry().with(logs.clone()));
+            f()
+        };
+        let warns = logs.0.lock().unwrap().clone();
+        (out, warns)
+    }
+
+    /// The call after a stored reasoning item came without an item id: the
+    /// reasoning cannot be replayed with its paired item, so its encrypted
+    /// part is dropped, with a warning. Positive control: with the id it is
+    /// kept and records it.
+    #[test]
+    fn reasoning_whose_following_item_has_no_id_is_not_stored() {
+        let ((content, _, _), warns) = warns_of(|| {
+            stream(&[
+                reasoning_done(0, "rs_1"),
+                call_done(1, "", "call_1"),
+                completed(),
+            ])
+        });
+        assert!(stored(&content, 0).is_none(), "{content:?}");
+        assert!(
+            warns.iter().any(|w| w.contains("without an id")),
+            "{warns:?}"
+        );
+
+        let (content, _, _) = stream(&[
+            reasoning_done(0, "rs_1"),
+            call_done(1, "fc_1", "call_1"),
+            completed(),
+        ]);
+        assert_eq!(
+            stored(&content, 0).unwrap()[CALL_IDS_KEY],
+            serde_json::json!({"call_1": "fc_1"})
+        );
+    }
+
+    /// The same for a message after the reasoning that came without an id.
+    #[test]
+    fn reasoning_whose_following_message_has_no_id_is_not_stored() {
+        let (content, _, _) = stream(&[
+            reasoning_done(0, "rs_1"),
+            serde_json::json!({"type": "response.output_text.delta", "output_index": 1,
+                               "delta": "Hi."}),
+            completed(),
+        ]);
+        assert!(stored(&content, 0).is_none(), "{content:?}");
+    }
+
+    /// A reasoning `output_item.done` that cannot be parsed still ends the
+    /// previous reasoning item's range: the call after it is not recorded as
+    /// the earlier item's following item, and the earlier item is then not
+    /// replayed (its first following item has no id of its own).
+    #[test]
+    fn an_unreadable_reasoning_item_ends_the_previous_range() {
+        let broken = serde_json::json!({"type": "response.output_item.done", "output_index": 1,
+            "item": {"type": "reasoning", "id": "rs_2", "summary": 5}});
+        let (content, _, _) = stream(&[
+            reasoning_done(0, "rs_1"),
+            broken,
+            call_done(2, "fc_2", "call_2"),
+            completed(),
+        ]);
+        let rs_1 = stored(&content, 0).expect("nothing followed rs_1 in its own range");
+        assert!(rs_1.get(CALL_IDS_KEY).is_none(), "{rs_1}");
+
+        // The next request does not pair rs_1 with fc_2: it is not replayed.
+        let mut config = crate::provider::StreamConfig::new("gpt-5.5", "k");
+        config.model_config = Some(
+            crate::provider::ModelConfig::openai_responses("gpt-5.5", "GPT-5.5")
+                .with_encrypted_reasoning(true),
+        );
+        config.messages = vec![
+            crate::types::Message::user("go"),
+            crate::types::Message::assistant(
+                content,
+                StopReason::ToolUse,
+                "gpt-5.5",
+                "openai",
+                Usage::default(),
+            ),
+        ];
+        let (body, warns) = warns_of(|| {
+            super::super::responses_request::build_request_body(
+                &config,
+                ApiProtocol::OpenAiResponses,
+            )
+        });
+        let input = body["input"].as_array().unwrap();
+        assert!(!input.iter().any(|i| i["type"] == "reasoning"), "{input:?}");
+        assert!(
+            warns.iter().any(|w| w.contains("no recorded id")),
+            "{warns:?}"
+        );
+    }
+
+    /// A completed response without usage reports zero tokens and says so
+    /// with `usage_missing`; with usage, nothing is warned.
+    #[test]
+    fn a_response_without_usage_is_warned_about() {
+        let done = serde_json::json!({"type": "response.completed",
+                                      "response": {"status": "completed"}});
+        let ((_, usage, _), warns) = warns_of(|| stream(&[done]));
+        assert_eq!(usage, Usage::default());
+        assert!(
+            warns.iter().any(|w| w.contains("usage_missing=true")),
+            "{warns:?}"
+        );
+
+        let ((_, usage, _), warns) = warns_of(|| stream(&[completed()]));
+        assert_eq!(usage.input, 3);
+        assert!(warns.is_empty(), "{warns:?}");
     }
 }
