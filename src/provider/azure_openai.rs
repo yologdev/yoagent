@@ -9,22 +9,26 @@
 //!
 //! Auth: `api-key` header; for Microsoft Entra ID leave the key empty and set
 //! `Authorization: Bearer ...` via `ModelConfig::headers`.
+//!
+//! The request body and the stream reader are shared with
+//! [`OpenAiResponsesProvider`](super::OpenAiResponsesProvider)
+//! (`responses_request.rs`); this file holds only what differs: the endpoint,
+//! the auth header and the legacy deployment override of `model`.
 
-use super::model::OpenAiCompat;
-use super::responses_stream::{Flow, ResponsesStreamState};
+use super::model::ApiProtocol;
+use super::responses_request::{build_request_body, stream_response};
 use super::traits::*;
 use crate::types::*;
-use futures::StreamExt;
 use tokio::sync::mpsc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 pub struct AzureOpenAiProvider;
 
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl StreamProvider for AzureOpenAiProvider {
-    fn protocol(&self) -> Option<crate::provider::ApiProtocol> {
-        Some(crate::provider::ApiProtocol::AzureOpenAiResponses)
+    fn protocol(&self) -> Option<ApiProtocol> {
+        Some(ApiProtocol::AzureOpenAiResponses)
     }
 
     async fn stream(
@@ -44,7 +48,7 @@ impl StreamProvider for AzureOpenAiProvider {
             .ok_or_else(|| ProviderError::Other("ModelConfig required".into()))?;
 
         let endpoint = responses_endpoint(&model_config.base_url);
-        let mut body = build_azure_request_body(&config);
+        let mut body = build_request_body(&config, ApiProtocol::AzureOpenAiResponses);
         if let Some(deployment) = &endpoint.deployment {
             // Legacy deployment-scoped base_url: the v1 surface names the
             // deployment in the body, not in the path.
@@ -74,56 +78,16 @@ impl StreamProvider for AzureOpenAiProvider {
             request = request.header(k, v);
         }
 
-        let request = request.json(&body);
-        let mut es = super::sse::open_event_source(request)?;
-
-        let mut state = ResponsesStreamState::new("Azure OpenAI");
-
-        let _ = tx.send(StreamEvent::Start);
-
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => {
-                    es.close();
-                    return Err(ProviderError::Cancelled);
-                }
-                event = es.next() => {
-                    match event {
-                        None => break,
-                        Some(Ok(reqwest_eventsource::Event::Open)) => {}
-                        Some(Ok(reqwest_eventsource::Event::Message(msg))) => {
-                            if state.handle(&msg.event, &msg.data, &tx)? == Flow::Done {
-                                break;
-                            }
-                        }
-                        Some(Err(e)) => {
-                            let provider_err = classify_eventsource_error(e).await;
-                            warn!("Azure OpenAI SSE error: {}", provider_err);
-                            return Err(provider_err);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Read before `finish`, which consumes the refusal state.
-        let error_message = state.error_message();
-        let (content, usage, stop_reason) = state.finish(&tx);
-
-        let message = Message::Assistant {
-            content,
-            stop_reason,
-            model: config.model.clone(),
-            provider: model_config.provider.clone(),
-            usage,
-            timestamp: now_ms(),
-            error_message,
-        };
-
-        let _ = tx.send(StreamEvent::Done {
-            message: message.clone(),
-        });
-        Ok(message)
+        stream_response(
+            request.json(&body),
+            "Azure OpenAI",
+            ApiProtocol::AzureOpenAiResponses,
+            &config,
+            &model_config.provider,
+            tx,
+            cancel,
+        )
+        .await
     }
 }
 
@@ -198,162 +162,10 @@ fn responses_endpoint(base_url: &str) -> Endpoint {
     }
 }
 
+/// The shared Responses body, for tests that pin Azure's request.
+#[cfg(test)]
 fn build_azure_request_body(config: &StreamConfig) -> serde_json::Value {
-    // Same format as OpenAI Responses API
-    let mut input: Vec<serde_json::Value> = Vec::new();
-
-    for msg in &config.messages {
-        match msg {
-            Message::User { content, .. } => {
-                // Build content array for user message (supports text + images)
-                let user_content: Vec<serde_json::Value> = content
-                    .iter()
-                    .filter(|c| !matches!(c, Content::Text { text } if text.is_empty()))
-                    .filter_map(|c| match c {
-                        Content::Text { text } => Some(serde_json::json!({
-                            "type": "input_text",
-                            "text": text,
-                        })),
-                        Content::Image { data, mime_type } => Some(serde_json::json!({
-                            "type": "input_image",
-                            "image_url": format!("data:{};base64,{}", mime_type, data),
-                        })),
-                        _ => None,
-                    })
-                    .collect();
-
-                if user_content.len() == 1 && user_content[0]["type"] == "input_text" {
-                    // Simple text-only message can use shorthand format
-                    input.push(serde_json::json!({
-                        "role": "user",
-                        "content": user_content[0]["text"].as_str().unwrap_or(""),
-                    }));
-                } else {
-                    // Multi-modal content uses array format
-                    input.push(serde_json::json!({
-                        "role": "user",
-                        "content": user_content,
-                    }));
-                }
-            }
-            Message::Assistant { content, .. } => {
-                for c in content {
-                    match c {
-                        Content::Text { text } if text.is_empty() => {}
-                        Content::Text { text } => {
-                            input.push(serde_json::json!({
-                                "type": "message",
-                                "role": "assistant",
-                                "content": [{"type": "output_text", "text": text}],
-                            }));
-                        }
-                        Content::ToolCall {
-                            id,
-                            name,
-                            arguments,
-                            ..
-                        } => {
-                            input.push(serde_json::json!({
-                                "type": "function_call",
-                                "call_id": id,
-                                "name": name,
-                                "arguments": arguments.to_string(),
-                            }));
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            Message::ToolResult {
-                tool_call_id,
-                content,
-                ..
-            } => {
-                let output_val = if content.iter().any(|c| matches!(c, Content::Image { .. })) {
-                    let parts: Vec<serde_json::Value> = content
-                        .iter()
-                        .filter(|c| !matches!(c, Content::Text { text } if text.is_empty()))
-                        .filter_map(|c| match c {
-                            Content::Text { text } => Some(serde_json::json!({
-                                "type": "input_text",
-                                "text": text,
-                            })),
-                            Content::Image { data, mime_type } => Some(serde_json::json!({
-                                "type": "input_image",
-                                "image_url": format!("data:{};base64,{}", mime_type, data),
-                            })),
-                            _ => None,
-                        })
-                        .collect();
-                    serde_json::json!(parts)
-                } else {
-                    let text = content
-                        .iter()
-                        .find_map(|c| match c {
-                            Content::Text { text } => Some(text.clone()),
-                            _ => None,
-                        })
-                        .unwrap_or_default();
-                    serde_json::json!(text)
-                };
-                input.push(serde_json::json!({
-                    "type": "function_call_output",
-                    "call_id": tool_call_id,
-                    "output": output_val,
-                }));
-            }
-        }
-    }
-
-    let mut body = serde_json::json!({
-        "model": config.model,
-        "stream": true,
-        "input": input,
-    });
-
-    if !config.system_prompt.is_empty() {
-        body["instructions"] = serde_json::json!(config.system_prompt);
-    }
-
-    if let Some(max) = config.max_tokens {
-        body["max_output_tokens"] = serde_json::json!(max);
-    }
-
-    if !config.tools.is_empty() {
-        let tools: Vec<serde_json::Value> = config
-            .tools
-            .iter()
-            .map(|t| {
-                serde_json::json!({
-                    "type": "function",
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.parameters,
-                })
-            })
-            .collect();
-        body["tools"] = serde_json::json!(tools);
-    }
-
-    if let Some(temp) = config.temperature {
-        body["temperature"] = serde_json::json!(temp);
-    }
-
-    // Thinking: the Responses API's reasoning effort, mapped exactly as the
-    // first-party OpenAI Responses provider maps it. The effort capability
-    // comes from `ModelConfig::compat` (`OpenAiCompat::max_reasoning_effort`);
-    // without one, `high` is the ceiling. `Off` always omits the field.
-    let default_compat = OpenAiCompat::default();
-    let compat = config
-        .model_config
-        .as_ref()
-        .and_then(|m| m.compat.as_ref())
-        .unwrap_or(&default_compat);
-    if let Some(effort) = compat.openai_reasoning_effort(&config.model, config.thinking_level) {
-        body["reasoning"] = serde_json::json!({"effort": effort});
-    }
-
-    body
+    build_request_body(config, ApiProtocol::AzureOpenAiResponses)
 }
 
 #[cfg(test)]

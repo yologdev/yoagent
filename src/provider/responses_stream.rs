@@ -18,6 +18,23 @@
 //! - Reasoning arrives as `response.reasoning_summary_text.delta` (summaries,
 //!   what hosted OpenAI reasoning models stream) and
 //!   `response.reasoning_text.delta` (raw reasoning content).
+//! - The finished reasoning item arrives in `response.output_item.done`
+//!   (`item.type == "reasoning"`, with `id`, `summary` and, when requested,
+//!   `encrypted_content`; the copy in `output_item.added` "may be
+//!   incomplete"). An item carrying `encrypted_content` is kept on its
+//!   thinking block as redacted data for the stream's protocol (a JSON object
+//!   `{id, summary, encrypted_content}`), so the next request can replay it
+//!   in place; see `responses_request.rs`. A summary sent only in the
+//!   finished item becomes the block's text.
+//! - A replayed reasoning item must be followed by its paired output item
+//!   ("Item 'rs_…' of type 'reasoning' was provided without its required
+//!   following item"), so the ids of the output items that followed it in
+//!   the response (up to the next reasoning item, stored or not) are kept in
+//!   the same stored JSON: `call_ids` maps each
+//!   `function_call`'s `call_id` to its item `id` (`fc_…`), and `message_id`
+//!   is the id (`msg_…`) of the first `message` after it. They ride on the
+//!   reasoning item, so they carry its protocol tag and are replayed only
+//!   where it is (`Content::ToolCall::provider_metadata` stays Gemini's).
 //! - `response.completed` / `response.incomplete` carry the final `usage`,
 //!   including `input_tokens_details.cached_tokens` and `.cache_write_tokens`.
 //!   A usage count sent as explicit `null` reads as 0 rather than failing the
@@ -34,6 +51,7 @@
 //!   `content_filter` is a [`StopReason::Refusal`]; every other reason stays
 //!   [`StopReason::Length`].
 
+use super::model::ApiProtocol;
 use super::openai_compat::null_as_zero;
 use super::tool_args::finalize_tool_arguments;
 use super::traits::{classify_sse_error_event, ProviderError, StreamEvent};
@@ -42,6 +60,14 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
+
+/// Key, in a stored reasoning item, of the `call_id` → item `id` map of the
+/// function calls that followed it.
+pub(crate) const CALL_IDS_KEY: &str = "call_ids";
+
+/// Key, in a stored reasoning item, of the id of the first `message` item
+/// that followed it.
+pub(crate) const MESSAGE_ID_KEY: &str = "message_id";
 
 /// What the caller's read loop should do after an event.
 #[derive(Debug, PartialEq, Eq)]
@@ -76,12 +102,24 @@ enum ReasoningKind {
 /// [`finish`](Self::finish).
 pub(crate) struct ResponsesStreamState {
     label: &'static str,
+    /// The API this stream came from; tags its encrypted reasoning.
+    protocol: ApiProtocol,
     content: Vec<Content>,
     /// output_index (None when a server omits it) → content index of its text block.
     text_slots: HashMap<Option<usize>, usize>,
     /// (output_index, kind) → (content index, last part index seen).
     thinking_slots: HashMap<(Option<usize>, ReasoningKind), (usize, Option<u64>)>,
     calls: Vec<CallSlot>,
+    /// Content indices of the thinking blocks that store a reasoning item, in
+    /// content order.
+    reasoning_blocks: Vec<usize>,
+    /// Where every finished reasoning item starts in content order, stored or
+    /// not: its thinking block's index, or, for one with no block, the index
+    /// the next item takes. Output items after it belong to it, not to an
+    /// earlier stored reasoning item. Paired with the item's output_index.
+    reasoning_bounds: Vec<(usize, Option<usize>)>,
+    /// output_index → the `message` item id sent for it.
+    message_ids: HashMap<Option<usize>, String>,
     usage: Usage,
     stop_reason: StopReason,
     /// output_index → the refusal text received for it so far. Present once
@@ -92,14 +130,19 @@ pub(crate) struct ResponsesStreamState {
 }
 
 impl ResponsesStreamState {
-    /// `label` names the provider in log lines.
-    pub(crate) fn new(label: &'static str) -> Self {
+    /// `label` names the provider in log lines; `protocol` is the API the
+    /// stream came from, recorded on its encrypted reasoning.
+    pub(crate) fn new(label: &'static str, protocol: ApiProtocol) -> Self {
         Self {
             label,
+            protocol,
             content: Vec::new(),
             text_slots: HashMap::new(),
             thinking_slots: HashMap::new(),
             calls: Vec::new(),
+            reasoning_blocks: Vec::new(),
+            reasoning_bounds: Vec::new(),
+            message_ids: HashMap::new(),
             usage: Usage::default(),
             stop_reason: StopReason::Stop,
             refusals: HashMap::new(),
@@ -206,8 +249,12 @@ impl ResponsesStreamState {
                 let Some(ev) = self.parse::<OutputItemEvent>(event, data) else {
                     return Ok(Flow::Continue);
                 };
-                if ev.item.kind.as_deref() == Some("function_call") {
-                    self.open_call(ev.output_index, &ev.item, tx);
+                match ev.item.kind.as_deref() {
+                    Some("function_call") => {
+                        self.open_call(ev.output_index, &ev.item, tx);
+                    }
+                    Some("message") => self.message_id(ev.output_index, ev.item.id.as_deref()),
+                    _ => {}
                 }
             }
             "response.function_call_arguments.delta" => {
@@ -266,12 +313,17 @@ impl ResponsesStreamState {
                         if slot.name.is_empty() {
                             slot.name = ev.item.name.clone().unwrap_or_default();
                         }
+                        if slot.item_id.is_none() {
+                            slot.item_id = ev.item.id.clone();
+                        }
                         if let Some(args) = ev.item.arguments {
                             self.set_final_arguments(i, args, tx);
                         }
                         self.end_call(i, tx);
                     }
+                    Some("reasoning") => self.reasoning_done(ev.output_index, ev.item, tx),
                     Some("message") => {
+                        self.message_id(ev.output_index, ev.item.id.as_deref());
                         // Checked before any refusal below opens a text slot.
                         let streamed_text = self.text_slots.contains_key(&ev.output_index);
                         // A refusal part: authoritative even when nothing was
@@ -372,6 +424,8 @@ impl ResponsesStreamState {
                 arguments: args,
             };
         }
+
+        self.record_following_ids();
 
         // A refusal (streamed, or in a finished item) is the most specific
         // verdict, as on the Anthropic provider: nothing overrides it.
@@ -522,6 +576,162 @@ impl ResponsesStreamState {
             content_index: idx,
             delta,
         });
+    }
+
+    /// A finished reasoning item. Its `encrypted_content`, when present, is
+    /// kept on the item's thinking block (the summary block if one was
+    /// streamed, else the raw-text block, else a new block) so it can be
+    /// replayed on the next request.
+    fn reasoning_done(
+        &mut self,
+        output_index: Option<usize>,
+        item: OutputItem,
+        tx: &mpsc::UnboundedSender<StreamEvent>,
+    ) {
+        let existing = [ReasoningKind::Summary, ReasoningKind::Text]
+            .iter()
+            .find_map(|kind| self.thinking_slots.get(&(output_index, *kind)))
+            .map(|(idx, _)| *idx);
+        let summary_text: Vec<&str> = item
+            .summary
+            .iter()
+            .filter_map(|p| p.get("text").and_then(serde_json::Value::as_str))
+            .filter(|t| !t.is_empty())
+            .collect();
+        let encrypted = item.encrypted_content.filter(|e| !e.is_empty());
+        let idx = match existing {
+            Some(idx) => idx,
+            // A server that sent the summary only in the finished item.
+            None if !summary_text.is_empty() => {
+                let text = summary_text.join("\n\n");
+                self.content.push(Content::thinking(text.clone()));
+                let idx = self.content.len() - 1;
+                self.thinking_slots
+                    .insert((output_index, ReasoningKind::Summary), (idx, None));
+                let _ = tx.send(StreamEvent::ThinkingDelta {
+                    content_index: idx,
+                    delta: text,
+                });
+                idx
+            }
+            // Nothing streamed, no summary: a block only to carry the
+            // encrypted reasoning.
+            None if encrypted.is_some() => {
+                self.content.push(Content::thinking(String::new()));
+                self.content.len() - 1
+            }
+            None => {
+                // Nothing to keep, but the items after it are its own.
+                self.reasoning_bounds
+                    .push((self.content.len(), output_index));
+                return;
+            }
+        };
+        self.reasoning_bounds.push((idx, output_index));
+        let (Some(encrypted), Some(id)) = (encrypted, item.id) else {
+            debug!(
+                "{}: reasoning item without encrypted_content (or id); it will not be replayed",
+                self.label
+            );
+            return;
+        };
+        let stored = serde_json::json!({
+            "id": id,
+            "summary": item.summary,
+            "encrypted_content": encrypted,
+        });
+        if let Some(Content::Thinking {
+            redacted,
+            redacted_protocol,
+            ..
+        }) = self.content.get_mut(idx)
+        {
+            *redacted = Some(stored.to_string());
+            *redacted_protocol = Some(self.protocol);
+            if !self.reasoning_blocks.contains(&idx) {
+                self.reasoning_blocks.push(idx);
+                self.reasoning_blocks.sort_unstable();
+            }
+        }
+    }
+
+    fn message_id(&mut self, output_index: Option<usize>, id: Option<&str>) {
+        if let Some(id) = id.filter(|id| !id.is_empty()) {
+            self.message_ids.insert(output_index, id.to_string());
+        }
+    }
+
+    /// Add to each stored reasoning item the ids of the output items that
+    /// followed it (up to the next reasoning item of any kind — stored or
+    /// not, finished or only streamed): `call_ids` for its function calls,
+    /// `message_id` for its first message. Content order is arrival order,
+    /// which follows `output_index`.
+    ///
+    /// The range must end at *every* reasoning item: items after one that is
+    /// not replayed (no encrypted content) are paired with it, and filing
+    /// them under an earlier item would replay them with ids but without
+    /// their own reasoning item, which the API rejects.
+    fn record_following_ids(&mut self) {
+        let mut bounds = self.reasoning_bounds.clone();
+        // Reasoning that streamed text but whose finished item never came.
+        bounds.extend(
+            self.thinking_slots
+                .iter()
+                .map(|((oi, _), (idx, _))| (*idx, *oi)),
+        );
+        for &r in &self.reasoning_blocks {
+            // The item's own other block (raw text beside its summary) is
+            // not a boundary. `rfind`: an empty reasoning item just before
+            // this one left a bound at this same index (the index the next
+            // block takes), and this item's own entry comes after it.
+            let own = bounds
+                .iter()
+                .rfind(|(p, _)| *p == r)
+                .and_then(|(_, oi)| *oi);
+            let end = bounds
+                .iter()
+                .filter(|(p, oi)| *p > r && (own.is_none() || *oi != own))
+                .map(|(p, _)| *p)
+                .min()
+                .unwrap_or(self.content.len());
+            let in_region = |i: usize| i > r && i < end;
+            let call_ids: serde_json::Map<String, serde_json::Value> = self
+                .calls
+                .iter()
+                .filter(|c| in_region(c.content_index) && !c.call_id.is_empty())
+                .filter_map(|c| {
+                    let id = c.item_id.as_deref().filter(|id| !id.is_empty())?;
+                    Some((c.call_id.clone(), serde_json::Value::from(id)))
+                })
+                .collect();
+            let message_id = self
+                .text_slots
+                .iter()
+                .filter(|(_, &i)| in_region(i))
+                .filter_map(|(oi, &i)| self.message_ids.get(oi).map(|id| (i, id)))
+                .min_by_key(|(i, _)| *i)
+                .map(|(_, id)| id.clone());
+            if call_ids.is_empty() && message_id.is_none() {
+                continue;
+            }
+            let Some(Content::Thinking {
+                redacted: Some(stored),
+                ..
+            }) = self.content.get_mut(r)
+            else {
+                continue;
+            };
+            let Ok(serde_json::Value::Object(mut item)) = serde_json::from_str(stored) else {
+                continue;
+            };
+            if !call_ids.is_empty() {
+                item.insert(CALL_IDS_KEY.into(), serde_json::Value::Object(call_ids));
+            }
+            if let Some(id) = message_id {
+                item.insert(MESSAGE_ID_KEY.into(), serde_json::Value::from(id));
+            }
+            *stored = serde_json::Value::Object(item).to_string();
+        }
     }
 
     fn open_call(
@@ -708,8 +918,24 @@ struct OutputItem {
     #[serde(default)]
     arguments: Option<String>,
     /// `message` items: output parts.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     content: Vec<OutputPart>,
+    /// `reasoning` items: `{"type": "summary_text", "text"}` parts, kept as
+    /// sent for replay.
+    #[serde(default, deserialize_with = "null_as_default")]
+    summary: Vec<serde_json::Value>,
+    /// `reasoning` items: the encrypted reasoning, when requested.
+    #[serde(default)]
+    encrypted_content: Option<String>,
+}
+
+/// A field sent as explicit `null` reads as its default, like a missing one.
+fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[derive(Deserialize)]
@@ -834,7 +1060,7 @@ mod tests {
     #[test]
     fn data_only_messages_take_the_event_name_from_type() {
         let (tx, _rx) = mpsc::unbounded_channel();
-        let mut s = ResponsesStreamState::new("test");
+        let mut s = ResponsesStreamState::new("test", ApiProtocol::OpenAiResponses);
         s.handle(
             "message",
             r#"{"type":"response.output_text.delta","output_index":0,"delta":"hi"}"#,

@@ -2,22 +2,26 @@
 //!
 //! This is the newer OpenAI API that uses a different event format
 //! from Chat Completions. It has first-class support for reasoning items.
+//!
+//! The request body and the stream reader are shared with
+//! [`AzureOpenAiProvider`](super::AzureOpenAiProvider) (see
+//! `responses_request.rs`); this file holds only what differs: the URL
+//! (`{base_url}/responses`) and bearer auth.
 
-use super::model::{ModelConfig, OpenAiCompat};
-use super::responses_stream::{Flow, ResponsesStreamState};
+use super::model::ApiProtocol;
+use super::responses_request::{build_request_body, stream_response};
 use super::traits::*;
 use crate::types::*;
-use futures::StreamExt;
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::debug;
 
 pub struct OpenAiResponsesProvider;
 
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl StreamProvider for OpenAiResponsesProvider {
-    fn protocol(&self) -> Option<crate::provider::ApiProtocol> {
-        Some(crate::provider::ApiProtocol::OpenAiResponses)
+    fn protocol(&self) -> Option<ApiProtocol> {
+        Some(ApiProtocol::OpenAiResponses)
     }
 
     async fn stream(
@@ -37,7 +41,7 @@ impl StreamProvider for OpenAiResponsesProvider {
             .ok_or_else(|| ProviderError::Other("ModelConfig required".into()))?;
 
         let url = format!("{}/responses", model_config.base_url);
-        let body = build_request_body(&config, model_config);
+        let body = build_request_body(&config, ApiProtocol::OpenAiResponses);
         debug!(
             "OpenAI Responses request: model={} url={}",
             config.model, url
@@ -53,215 +57,23 @@ impl StreamProvider for OpenAiResponsesProvider {
             request = request.header(k, v);
         }
 
-        let request = request.json(&body);
-        let mut es = super::sse::open_event_source(request)?;
-
-        let mut state = ResponsesStreamState::new("OpenAI Responses");
-
-        let _ = tx.send(StreamEvent::Start);
-
-        loop {
-            tokio::select! {
-                _ = cancel.cancelled() => {
-                    es.close();
-                    return Err(ProviderError::Cancelled);
-                }
-                event = es.next() => {
-                    match event {
-                        None => break,
-                        Some(Ok(reqwest_eventsource::Event::Open)) => {}
-                        Some(Ok(reqwest_eventsource::Event::Message(msg))) => {
-                            if state.handle(&msg.event, &msg.data, &tx)? == Flow::Done {
-                                break;
-                            }
-                        }
-                        Some(Err(e)) => {
-                            let provider_err = classify_eventsource_error(e).await;
-                            warn!("OpenAI Responses SSE error: {}", provider_err);
-                            return Err(provider_err);
-                        }
-                    }
-                }
-            }
-        }
-
-        let error_message = state.error_message();
-        let (content, usage, stop_reason) = state.finish(&tx);
-
-        let message = Message::Assistant {
-            content,
-            stop_reason,
-            model: config.model.clone(),
-            provider: model_config.provider.clone(),
-            usage,
-            timestamp: now_ms(),
-            error_message,
-        };
-
-        let _ = tx.send(StreamEvent::Done {
-            message: message.clone(),
-        });
-        Ok(message)
+        stream_response(
+            request.json(&body),
+            "OpenAI Responses",
+            ApiProtocol::OpenAiResponses,
+            &config,
+            &model_config.provider,
+            tx,
+            cancel,
+        )
+        .await
     }
-}
-
-fn build_request_body(config: &StreamConfig, model_config: &ModelConfig) -> serde_json::Value {
-    let mut input: Vec<serde_json::Value> = Vec::new();
-
-    for msg in &config.messages {
-        match msg {
-            Message::User { content, .. } => {
-                // Build content array for user message (supports text + images)
-                let user_content: Vec<serde_json::Value> = content
-                    .iter()
-                    .filter(|c| !matches!(c, Content::Text { text } if text.is_empty()))
-                    .filter_map(|c| match c {
-                        Content::Text { text } => Some(serde_json::json!({
-                            "type": "input_text",
-                            "text": text,
-                        })),
-                        Content::Image { data, mime_type } => Some(serde_json::json!({
-                            "type": "input_image",
-                            "image_url": format!("data:{};base64,{}", mime_type, data),
-                        })),
-                        _ => None,
-                    })
-                    .collect();
-
-                if user_content.len() == 1 && user_content[0]["type"] == "input_text" {
-                    // Simple text-only message can use shorthand format
-                    input.push(serde_json::json!({
-                        "role": "user",
-                        "content": user_content[0]["text"].as_str().unwrap_or(""),
-                    }));
-                } else {
-                    // Multi-modal content uses array format
-                    input.push(serde_json::json!({
-                        "role": "user",
-                        "content": user_content,
-                    }));
-                }
-            }
-            Message::Assistant { content, .. } => {
-                for c in content {
-                    match c {
-                        Content::Text { text } if text.is_empty() => {}
-                        Content::Text { text } => {
-                            input.push(serde_json::json!({
-                                "type": "message",
-                                "role": "assistant",
-                                "content": [{"type": "output_text", "text": text}],
-                            }));
-                        }
-                        Content::ToolCall {
-                            id,
-                            name,
-                            arguments,
-                            ..
-                        } => {
-                            input.push(serde_json::json!({
-                                "type": "function_call",
-                                "call_id": id,
-                                "name": name,
-                                "arguments": arguments.to_string(),
-                            }));
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            Message::ToolResult {
-                tool_call_id,
-                content,
-                ..
-            } => {
-                let output_val = if content.iter().any(|c| matches!(c, Content::Image { .. })) {
-                    // Images present: build content array
-                    let parts: Vec<serde_json::Value> = content
-                        .iter()
-                        .filter(|c| !matches!(c, Content::Text { text } if text.is_empty()))
-                        .filter_map(|c| match c {
-                            Content::Text { text } => Some(serde_json::json!({
-                                "type": "input_text",
-                                "text": text,
-                            })),
-                            Content::Image { data, mime_type } => Some(serde_json::json!({
-                                "type": "input_image",
-                                "image_url": format!("data:{};base64,{}", mime_type, data),
-                            })),
-                            _ => None,
-                        })
-                        .collect();
-                    serde_json::json!(parts)
-                } else {
-                    let text = content
-                        .iter()
-                        .find_map(|c| match c {
-                            Content::Text { text } => Some(text.clone()),
-                            _ => None,
-                        })
-                        .unwrap_or_default();
-                    serde_json::json!(text)
-                };
-                input.push(serde_json::json!({
-                    "type": "function_call_output",
-                    "call_id": tool_call_id,
-                    "output": output_val,
-                }));
-            }
-        }
-    }
-
-    let mut body = serde_json::json!({
-        "model": config.model,
-        "stream": true,
-        "input": input,
-    });
-
-    if !config.system_prompt.is_empty() {
-        body["instructions"] = serde_json::json!(config.system_prompt);
-    }
-
-    if let Some(max) = config.max_tokens {
-        body["max_output_tokens"] = serde_json::json!(max);
-    }
-
-    if !config.tools.is_empty() {
-        let tools: Vec<serde_json::Value> = config
-            .tools
-            .iter()
-            .map(|t| {
-                serde_json::json!({
-                    "type": "function",
-                    "name": t.name,
-                    "description": t.description,
-                    "parameters": t.parameters,
-                })
-            })
-            .collect();
-        body["tools"] = serde_json::json!(tools);
-    }
-
-    // The effort capability comes from `model_config.compat` (see
-    // `OpenAiCompat::max_reasoning_effort`); `None` means a `high` ceiling,
-    // which is what this provider always sent before. `Off` omits it.
-    let default_compat = OpenAiCompat::default();
-    let compat = model_config.compat.as_ref().unwrap_or(&default_compat);
-    if let Some(effort) = compat.openai_reasoning_effort(&config.model, config.thinking_level) {
-        body["reasoning"] = serde_json::json!({"effort": effort});
-    }
-
-    if let Some(temp) = config.temperature {
-        body["temperature"] = serde_json::json!(temp);
-    }
-
-    body
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::model::ReasoningEffortCeiling;
+    use crate::provider::model::{ModelConfig, OpenAiCompat, ReasoningEffortCeiling};
 
     const ALL_LEVELS: [ThinkingLevel; 7] = [
         ThinkingLevel::Off,
@@ -279,7 +91,7 @@ mod tests {
         config.thinking_level = level;
         config.temperature = Some(0.5);
         config.model_config = Some(mc.clone());
-        build_request_body(&config, mc)
+        build_request_body(&config, ApiProtocol::OpenAiResponses)
     }
 
     fn effort(mc: &ModelConfig, level: ThinkingLevel) -> serde_json::Value {
@@ -287,10 +99,10 @@ mod tests {
     }
 
     #[test]
-    fn without_compat_the_body_is_what_it_always_was() {
-        // Near-miss guard: `openai_responses` carries `compat: None`, and a
-        // Responses config built before this fix must send byte-identical
-        // bodies — Off omits `reasoning`, XHigh/Max clamp to `high`.
+    fn without_compat_the_body_has_the_default_effort_ladder() {
+        // Near-miss guard: `openai_responses` carries `compat: None`, so the
+        // whole body is pinned — Off omits `reasoning`, XHigh/Max clamp to
+        // `high`.
         let mc = ModelConfig::openai_responses("gpt-5.5", "GPT-5.5");
         assert!(mc.compat.is_none());
         for level in ALL_LEVELS {
@@ -301,10 +113,14 @@ mod tests {
                 _ => Some("high"),
             };
             let got = body(&mc, level);
+            // `openai_responses` declares a reasoning model, so encrypted
+            // reasoning is requested at every level; the empty system prompt
+            // derives no cache key.
             let mut expected = serde_json::json!({
                 "model": "gpt-5.5",
                 "stream": true,
                 "input": [{"role": "user", "content": "hi"}],
+                "include": ["reasoning.encrypted_content"],
                 "temperature": 0.5,
             });
             if let Some(e) = expected_effort {

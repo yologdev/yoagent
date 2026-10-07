@@ -32,6 +32,21 @@ impl std::fmt::Display for ApiProtocol {
     }
 }
 
+/// Whether an OpenAI model id names a reasoning model, for
+/// [`ModelConfig::openai_responses`]. `false` only for the known
+/// non-reasoning families (`gpt-3*`, `gpt-4*` — incl. `gpt-4o*` and
+/// `gpt-4.1*` —, `chatgpt-*`, and `*-chat*` such as `gpt-5-chat-latest`);
+/// every other id, an unknown one included, is taken as reasoning. A
+/// provider prefix (`openai/…`) and case are ignored.
+pub(crate) fn openai_id_is_reasoning(id: &str) -> bool {
+    let id = id.rsplit('/').next().unwrap_or(id).to_ascii_lowercase();
+    let non_reasoning = id.starts_with("gpt-3")
+        || id.starts_with("gpt-4")
+        || id.starts_with("chatgpt-")
+        || id.contains("-chat");
+    !non_reasoning
+}
+
 /// Cost per million tokens (input/output).
 ///
 /// # A cache rate left at zero bills at the input rate
@@ -1632,14 +1647,27 @@ impl ModelConfig {
     /// ceiling, set `compat` to an [`OpenAiCompat`] carrying
     /// [`max_reasoning_effort`](OpenAiCompat::max_reasoning_effort) — the
     /// Responses provider reads that field and ignores the rest.
+    ///
+    /// **`reasoning` is inferred from the id.** It is `false` for OpenAI's
+    /// non-reasoning families — ids starting with `gpt-3`, `gpt-4` (so
+    /// `gpt-4o`, `gpt-4.1`, …) or `chatgpt-`, and any id containing `-chat`
+    /// (`gpt-5-chat-latest`) — and `true` for everything else (the o-series,
+    /// `gpt-5*`, the GPT-6 models, and ids it does not know). It matters
+    /// because a reasoning model's request asks for
+    /// `include: ["reasoning.encrypted_content"]`, which a non-reasoning
+    /// model rejects with a 400 ("Encrypted content is not supported with
+    /// this model"). Set `config.reasoning` afterwards to override the
+    /// inference either way.
     pub fn openai_responses(id: impl Into<String>, name: impl Into<String>) -> Self {
+        let id = id.into();
+        let reasoning = openai_id_is_reasoning(&id);
         Self {
-            id: id.into(),
+            id,
             name: name.into(),
             api: ApiProtocol::OpenAiResponses,
             provider: "openai".into(),
             base_url: "https://api.openai.com/v1".into(),
-            reasoning: true,
+            reasoning,
             context_window: 128_000,
             max_tokens: 16_000,
             cost: None, // set by `priced`
@@ -2329,6 +2357,43 @@ mod tests {
             assert_eq!(tiers.len(), 1, "{id}");
             assert_eq!(tiers[0].above_prompt_tokens, 272_000);
         }
+    }
+
+    /// `openai_responses` infers `reasoning` from the id: the request asks
+    /// for encrypted reasoning only for a reasoning model, and a
+    /// non-reasoning model rejects that with a 400.
+    #[test]
+    fn openai_responses_infers_reasoning_from_the_id() {
+        for id in [
+            "gpt-4o",
+            "gpt-4o-mini",
+            "gpt-4.1",
+            "gpt-4.1-nano",
+            "gpt-4-turbo",
+            "gpt-3.5-turbo",
+            "chatgpt-4o-latest",
+            "gpt-5-chat-latest",
+            "GPT-4o",
+            "openai/gpt-4.1",
+        ] {
+            assert!(!ModelConfig::openai_responses(id, id).reasoning, "{id}");
+        }
+        for id in [
+            "o1",
+            "o3",
+            "o3-pro",
+            "o4-mini",
+            "gpt-5",
+            "gpt-5-mini",
+            "gpt-5-codex",
+            "gpt-5.5",
+            "gpt-6-sol",
+            "codex-mini-latest",
+            "some-future-model",
+        ] {
+            assert!(ModelConfig::openai_responses(id, id).reasoning, "{id}");
+        }
+        assert!(ModelConfig::gpt_5_5().reasoning);
     }
 
     fn usage(input: u64, cache_read: u64, cache_write: u64, output: u64) -> crate::types::Usage {
