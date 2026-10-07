@@ -305,6 +305,152 @@ async fn test_continue_loop_with_sender() {
     assert!(!agent.is_streaming());
 }
 
+/// A tool that, called with `{"block": true}`, runs until its run is
+/// cancelled; otherwise it answers at once.
+struct WaitsForCancel;
+
+#[async_trait::async_trait]
+impl AgentTool for WaitsForCancel {
+    fn name(&self) -> &str {
+        "wait"
+    }
+    fn label(&self) -> &str {
+        "wait"
+    }
+    fn description(&self) -> &str {
+        "Waits until cancelled."
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        if params["block"] == true {
+            ctx.cancel.cancelled().await;
+            return Err(ToolError::Cancelled);
+        }
+        Ok(ToolResult {
+            content: vec![Content::Text { text: "ok".into() }],
+            details: serde_json::Value::Null,
+        })
+    }
+}
+
+fn wait_call(block: bool) -> MockResponse {
+    MockResponse::ToolCalls(vec![MockToolCall {
+        provider_metadata: None,
+        name: "wait".into(),
+        arguments: serde_json::json!({"block": block}),
+    }])
+}
+
+/// The first run blocks in the tool; the next one calls it again, which
+/// succeeds only if the agent got its tools back.
+fn calls_wait() -> MockProvider {
+    MockProvider::new(vec![
+        wait_call(true),
+        wait_call(false),
+        MockResponse::Text("after".into()),
+    ])
+}
+
+/// Dropping a `*_with_sender` future (here: a timeout) stops the run
+/// cleanly: the run ends aborted and still sends `AgentEnd`, and the agent
+/// recovers its tools and history instead of staying "streaming" forever.
+#[tokio::test]
+async fn dropping_a_with_sender_future_cancels_the_run_and_the_agent_recovers() {
+    let mut agent = Agent::from_provider(calls_wait(), ModelConfig::mock())
+        .with_tools(vec![Box::new(WaitsForCancel)]);
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let consumer = tokio::spawn(async move {
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+        events
+    });
+
+    let timed_out = tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        agent.prompt_with_sender("wait please", tx),
+    )
+    .await;
+    assert!(timed_out.is_err(), "the tool never finishes on its own");
+
+    // The run was cancelled, not orphaned: it ends and its sender closes.
+    let events = tokio::time::timeout(std::time::Duration::from_secs(5), consumer)
+        .await
+        .expect("the cancelled run ended")
+        .unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AgentEvent::AgentEnd { .. })),
+        "the cancelled run still sent AgentEnd"
+    );
+
+    // `finish` takes the state back: the run's messages, not streaming.
+    agent.finish().await;
+    assert!(!agent.is_streaming());
+    assert!(agent
+        .messages()
+        .iter()
+        .any(|m| matches!(m, AgentMessage::Llm(Message::User { .. }))));
+
+    // And the agent is usable again (this used to panic: "already
+    // streaming"), with its tool back: the next run calls it successfully.
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let drain = tokio::spawn(async move {
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+        events
+    });
+    agent.prompt_with_sender("again", tx).await;
+    let events = drain.await.unwrap();
+    assert!(!agent.is_streaming());
+    let ends: Vec<bool> = events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::ToolExecutionEnd { is_error, .. } => Some(*is_error),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ends, vec![false], "the restored tool ran: {events:?}");
+}
+
+/// Positive control for the test above: a `*_with_sender` future that is
+/// not dropped runs to the end without being cancelled.
+#[tokio::test]
+async fn an_undropped_with_sender_run_is_not_cancelled() {
+    let mut agent = Agent::from_provider(
+        MockProvider::new(vec![MockResponse::Text("done".into())]),
+        ModelConfig::mock(),
+    );
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let consumer = tokio::spawn(async move {
+        let mut events = Vec::new();
+        while let Some(event) = rx.recv().await {
+            events.push(event);
+        }
+        events
+    });
+    agent.prompt_with_sender("hi", tx).await;
+    let events = consumer.await.unwrap();
+    let last_assistant = agent.messages().iter().rev().find_map(|m| match m {
+        AgentMessage::Llm(Message::Assistant { stop_reason, .. }) => Some(stop_reason.clone()),
+        _ => None,
+    });
+    assert_eq!(last_assistant, Some(StopReason::Stop));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, AgentEvent::AgentEnd { .. })));
+}
+
 #[tokio::test]
 async fn test_prompt_with_sender_tools_restored() {
     struct DummyTool;

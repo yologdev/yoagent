@@ -44,6 +44,7 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **The `*_with_sender` methods run on the same spawned path as `prompt` / `continue_loop`** (#228). Dropping one of their futures (a `tokio::time::timeout`, a `select!`) used to drop the loop mid-turn, lose the agent's tools and leave it "streaming" for good, so the next prompt panicked. Now it cancels the run: the run ends aborted, its last events (with `AgentEnd`) still reach the sender, and the next `finish` or prompt restores the agent's history and tools. `finish` and `reset` are also safe to cancel now. The four run starters share one implementation, and the stale "misuse-`Result` variant planned for 0.10" notes are gone.
 These change what consumers see: a run can now send more events (a `MessageStart`/`MessageEnd` pair, a `TurnEnd`) and run fewer tools than before. A consumer that counts events, or relied on tools running after a cancel, should check them.
 
 - **A sub-agent cancelled before it answered fails its delegation** with `ToolError::Cancelled`. It used to return "(sub-agent produced no text output)" as a success.
