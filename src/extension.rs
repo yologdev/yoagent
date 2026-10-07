@@ -464,6 +464,20 @@ pub trait RunHooks: MaybeSend + MaybeSync {
     /// and before `finish`, so what it records is current there.
     fn on_event(&self, _event: &AgentEvent) {}
 
+    /// A failure these hooks recorded but could not raise where it happened:
+    /// from `on_event` (which must not block, and whose panic would switch
+    /// off this extension's observation for the run), or from work of their
+    /// own running in the background. Return it once; the loop takes it.
+    ///
+    /// The loop asks whenever it acts on failures: before each turn, before
+    /// a response's tools run, before `on_stop`, and when the run ends
+    /// however it ends (a limit, a cancel, an answer cut off). A required
+    /// extension's failure then fails the run, and tool calls not started yet
+    /// are not run; an advisory one's is logged.
+    fn take_failure(&self) -> Option<String> {
+        None
+    }
+
     /// When the run ends. Not called if the run's future is dropped, so
     /// correctness must not depend on it. Bounded by [`FINISH_TIMEOUT`].
     async fn finish(&mut self, _outcome: &RunOutcome) {}
@@ -812,6 +826,18 @@ impl ActiveExtensions {
             let acked = flush.send(ack).is_ok() && done.await.is_ok();
             if !acked {
                 tracing::error!(run_id = %self.run_id, "the extension event observer is gone; events are no longer observed");
+            }
+        }
+        // With observation current, collect what the hooks recorded.
+        for a in &self.active {
+            let hooks = a.hooks.read().await;
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hooks.take_failure())) {
+                Ok(None) => {}
+                Ok(Some(reason)) => self.failed(a, "take_failure", reason),
+                Err(payload) => {
+                    let why = crate::tool_source::panic_message(&*payload);
+                    self.failed(a, "take_failure", format!("panicked: {why}"));
+                }
             }
         }
     }

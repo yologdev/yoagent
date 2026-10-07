@@ -31,12 +31,11 @@
 //!
 //! A required extension's `tools` or `on_event` failure is recorded, not
 //! raised: from then on the run's tool calls are denied and their results
-//! withheld, and the next `after_tool`, `before_model` or `on_stop` fails
-//! the run. When the run ends before any of those come, the failure cannot
-//! change the outcome and is only logged at `error` level in `finish`: a
-//! turn ended by an execution limit, `on_before_turn` or loop detection; a
-//! final answer that is not a plain stop (`Length`, `Refusal`, `Error`); a
-//! cancel; or a failure on the run's last events (`AgentEnd`).
+//! withheld, and yoagent takes it at its next boundary
+//! ([`RunHooks::take_failure`]): before a turn or a response's tools,
+//! before `on_stop`, or when the run ends however it ends, and fails the
+//! run. Only a failure on the run's very last event (`AgentEnd`) comes too
+//! late; it is logged at `error` level.
 //!
 //! Required or not is the host's choice ([`RutisExtension::required`]), not
 //! a plugin's. Each hook call is bounded by a timeout (see
@@ -138,8 +137,8 @@ impl RutisExtension {
     /// Make plugin failures fail the run: a handler whose `tools`,
     /// `before_model`, `after_tool`, `on_stop` or `on_event` fails ends the
     /// run with yoagent's `[Extension failed: ...]` error (a `tools` or
-    /// `on_event` failure at the run's next decision point; when the run
-    /// ends before one comes, it is only logged — see the module docs). By default they are logged and the
+    /// `on_event` failure at yoagent's next boundary, the run's end included;
+    /// one on `AgentEnd` is only logged). By default they are logged and the
     /// handler is skipped. A failing `before_tool` denies the call and a
     /// failing `on_input` rejects the input either way. A handler whose
     /// plugin unloaded mid-run never fails the run.
@@ -683,6 +682,16 @@ impl RunHooks for RunState {
     /// Never unwinds: yoagent would switch the whole extension's `on_event`
     /// off for the run, silencing bus publishing and every other handler. A
     /// failing handler is switched off alone and its failure recorded.
+    /// Hand a recorded `tools` / `on_event` failure to yoagent, which asks
+    /// at every boundary, the run's end included.
+    fn take_failure(&self) -> Option<String> {
+        if self.required {
+            RunState::take_failure(self)
+        } else {
+            None
+        }
+    }
+
     fn on_event(&self, event: &AgentEvent) {
         if !self.closed {
             crate::events::publish(&self.host, &self.run, event);

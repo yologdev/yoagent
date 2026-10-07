@@ -55,7 +55,7 @@ The host decides how much it trusts its plugins:
 
 | `bridge.extension()` option | Effect |
 |---|---|
-| `.required()` | a failing `tools`, `before_model`, `after_tool`, `on_stop` or `on_event` fails the run (default: logged, the handler skipped). A `tools` / `on_event` failure fails it at the next decision point (tool calls are denied meanwhile); when the run ends before that point comes (an execution limit, a final answer that is not a plain stop, a cancel, a failure on `AgentEnd`), it is only logged. A handler whose plugin unloads mid-run never fails the run: an unloaded `after_tool` still withholds the result |
+| `.required()` | a failing `tools`, `before_model`, `after_tool`, `on_stop` or `on_event` fails the run (default: logged, the handler skipped). A `tools` / `on_event` failure fails it at the next decision point (tool calls are denied meanwhile); yoagent takes it at its next boundary, the run's end included (only a failure on `AgentEnd` itself is just logged). A handler whose plugin unloads mid-run never fails the run: an unloaded `after_tool` still withholds the result |
 | `.filters_tool_output()` | plugins redact output: yoagent withholds partial tool output, so only the filtered result is sent |
 | `.rechecks_modified_calls()` | plugin policy judges a call again when an extension installed later rewrote it |
 | `.require_policy()` | a run that starts with no `before_tool` handler denies every tool call |
