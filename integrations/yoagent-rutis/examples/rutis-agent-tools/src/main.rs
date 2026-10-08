@@ -179,8 +179,9 @@ impl AgentTool for RegistryTool {
 }
 
 /// A runner's `{"content": [blocks]}` value (as rutis-agent serialized it),
-/// read back as yoagent content: only text and image blocks, and only when
-/// the whole value is that shape — any other output stays text.
+/// read back as yoagent content: only text and image blocks, only when the
+/// whole value is that shape, and only with at least one image — so a tool
+/// that prints such JSON as text (`cat result.json`) mostly stays text.
 fn content_of(output: &str) -> Option<Vec<Content>> {
     if !output.starts_with('{') {
         return None;
@@ -190,16 +191,12 @@ fn content_of(output: &str) -> Option<Vec<Content>> {
         return None;
     }
     let blocks: Vec<Content> = serde_json::from_value(value.remove("content")?).ok()?;
-    blocks
+    let image = |b: &Content| matches!(b, Content::Image { data, mime_type } if !data.is_empty() && mime_type.starts_with("image/"));
+    let valid = blocks
         .iter()
-        .all(|b| match b {
-            Content::Text { .. } => true,
-            Content::Image { data, mime_type } => {
-                !data.is_empty() && mime_type.starts_with("image/")
-            }
-            _ => false,
-        })
-        .then_some(blocks)
+        .all(|b| matches!(b, Content::Text { .. }) || image(b))
+        && blocks.iter().any(image);
+    valid.then_some(blocks)
 }
 
 // ── The host ────────────────────────────────────────────────────

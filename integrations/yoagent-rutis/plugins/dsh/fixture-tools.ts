@@ -5,8 +5,9 @@
 //
 //   fixture_echo  {text}  → "echo: <text>"
 //   fixture_fail  {why}   → throws: dsh reports an `isError` result
-//   fixture_dot   {}      → a text block and an image block referring to the
-//                           attachment `fixture-dot` (see fixture-attachments.ts)
+//   fixture_dot   {}      → a text block, an image block referring to the
+//                           attachment `fixture-dot` (see fixture-attachments.ts),
+//                           an offloaded one and an oversize one
 //   fixture_slow  {}      → writes "started" to `config.abortFile`, waits for
 //                           `exec.signal` to abort (60 s at most), then
 //                           writes how it ended there
@@ -62,6 +63,17 @@ export function apply(ctx: any, config: Config | undefined) {
           {
             type: 'image' as const,
             attachment: { attachmentId: 'fixture-dot', mediaType: 'image/png', bytes: 70, width: 1, height: 1 },
+          },
+          // dsh decided to send this one as text.
+          {
+            type: 'image' as const,
+            attachment: { attachmentId: 'fixture-dot', mediaType: 'image/png', bytes: 70, width: 1, height: 1, name: 'offloaded.png' },
+            offloaded: true as const,
+          },
+          // Over the adapter's provider-safe limit.
+          {
+            type: 'image' as const,
+            attachment: { attachmentId: 'fixture-huge', mediaType: 'image/png', bytes: 9_000_000, width: 9000, height: 9000, name: 'huge.png' },
           },
         ],
       },

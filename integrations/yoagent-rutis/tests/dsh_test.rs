@@ -278,6 +278,15 @@ async fn dsh_images_arrive_as_images_when_an_attachment_store_is_loaded() {
             matches!(&content[0], Content::Text { text } if text == "a dot"),
             "{content:?}"
         );
+        // dsh's offloaded image and the oversize one stay text, store or not.
+        assert!(
+            matches!(&content[2], Content::Text { text } if text.contains("offloaded.png: offloaded")),
+            "{content:?}"
+        );
+        assert!(
+            matches!(&content[3], Content::Text { text } if text.contains("huge.png: too large")),
+            "{content:?}"
+        );
         if with_store {
             // The attachment's bytes, read from the store, as a yoagent image.
             assert!(
