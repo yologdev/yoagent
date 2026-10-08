@@ -939,7 +939,14 @@ async fn handler_names_are_unique_across_languages() {
         }
     })
     .await
-    .expect("both rows fail to load");
+    .unwrap_or_else(|_| {
+        let status = |id| host.loader.get(id).map(|e| format!("{:?}", e.status));
+        panic!(
+            "both rows fail to load; js: {:?}, py: {:?}",
+            status("js"),
+            status("py")
+        )
+    });
     for (id, error) in failed {
         assert!(
             error.contains("yoagent handler `taken`") && error.contains("already registered"),
