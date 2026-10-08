@@ -441,8 +441,13 @@ export default definePlugin<Config>({
       active = new Set(toolNames)
       knownAtActivation = new Set(registered().keys())
     }
-    runtime.getActiveTools = () =>
-      active ? [...active] : [...new Set([...names.values(), ...available().keys()])]
+    runtime.getActiveTools = () => {
+      // Brings in tools registered since setActiveTools, as pi's registry refresh does on registerTool.
+      const tools = available()
+      if (active) return [...active]
+      const builtins = [...names].filter(([yo]) => !withoutBuiltins.has(yo)).map(([, pi]) => pi)
+      return [...new Set([...builtins, ...tools.keys()])]
+    }
     runtime.getAllTools = () => {
       const tools = registered()
       return [

@@ -658,7 +658,12 @@ const tool = (name, extra = {}) => ({
 export default function (pi) {
   pi.registerTool(tool('pi_x', {
     // Registers a tool after setActiveTools: pi's registry refresh activates it.
-    async execute() { pi.registerTool(tool('pi_late')); return { content: [{ type: 'text', text: 'pi_x ran' }], details: undefined } },
+    async execute() {
+      pi.registerTool(tool('pi_late'))
+      // pi's usual narrowing: it must keep the tool just registered.
+      pi.setActiveTools(pi.getActiveTools().filter((n) => n !== 'bash'))
+      return { content: [{ type: 'text', text: 'pi_x ran' }], details: undefined }
+    },
   }))
   pi.registerTool(tool('pi_y'))
   // Not activated on registration, but named in the allowlist: pi activates it.
