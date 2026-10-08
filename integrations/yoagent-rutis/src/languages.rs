@@ -32,12 +32,16 @@
 //! plugin's after an unload: its tool calls fail, its `before_tool` denies,
 //! its `on_input` rejects, its `after_tool` withholds.
 //!
-//! An abandoned call (a timeout, a cancelled run, an unloaded plugin) is
-//! dropped on the host side; a Python coroutine is then cancelled, but a
-//! JavaScript function runs to completion (no `AbortSignal` is passed:
-//! rutis-bridge passes one only as an extra positional argument, which a
-//! Python method with a fixed signature would refuse), so a `call_tool` can
-//! still act after its run was cancelled.
+//! Every hook but `on_event` finds a cancel handle in its first argument,
+//! the `signal` field: an `AbortSignal` in JavaScript, a `rutis` `Signal`
+//! (`.cancelled`, `await signal.wait()`) in Python. It is aborted when the
+//! host gives the call up — the run cancelled (`Agent::abort()`), the hook's
+//! timeout passed, the plugin unloaded mid-call — and never when the call
+//! completes. A JavaScript function that ignores it runs to completion (its
+//! answer is discarded); a Python coroutine is also cancelled
+//! (`asyncio.CancelledError` at its next `await`). Pass `call.signal` on
+//! (to `fetch`, to a child process) so a `call_tool` stops acting once its
+//! run is cancelled.
 //!
 //! The hooks, their plain-JSON arguments and the values they return are
 //! described in `plugins/yoagent.d.ts` in the crate's repository. Every hook
@@ -333,8 +337,38 @@ impl Target {
 
     /// Call `hook` with JSON arguments; a returned Promise / coroutine is
     /// awaited. The result must be plain data.
+    ///
+    /// The first argument, when it is an object, also carries the call's
+    /// cancel handle as its `signal` field ([`with_signal`]): dropping this
+    /// future (a timeout, the run cancelled, the plugin unloaded) cancels the
+    /// call, which aborts the handle.
     async fn call(&self, hook: &str, args: Vec<Json>) -> Result<Json, ExtensionError> {
-        let args = Value::List(args.into_iter().map(Value::Data).collect());
+        let args = Value::List(
+            args.into_iter()
+                .enumerate()
+                .map(|(i, arg)| {
+                    if i == 0 {
+                        with_signal(arg)
+                    } else {
+                        Value::Data(arg)
+                    }
+                })
+                .collect(),
+        );
+        self.call_with(hook, args).await
+    }
+
+    /// Call `hook` with plain JSON arguments and no cancel handle
+    /// (`on_event`: an event is data the plugin may keep or forward as is).
+    async fn call_plain(&self, hook: &str, args: Vec<Json>) -> Result<Json, ExtensionError> {
+        self.call_with(
+            hook,
+            Value::List(args.into_iter().map(Value::Data).collect()),
+        )
+        .await
+    }
+
+    async fn call_with(&self, hook: &str, args: Value) -> Result<Json, ExtensionError> {
         let reply = match self {
             Self::Object(object) => object.call_method_async(hook, args).await,
             Self::Record(functions) => match functions.get(hook) {
@@ -349,6 +383,31 @@ impl Target {
         settled
             .and_then(Value::json)
             .map_err(|error| ExtensionError::new(error.to_string()))
+    }
+}
+
+/// The field of a hook's first argument that carries the call's cancel
+/// handle.
+const SIGNAL_FIELD: &str = "signal";
+
+/// `arg` with the call's cancel handle as its [`SIGNAL_FIELD`]: a JSON object
+/// becomes a record whose fields are copied as data, plus rutis-bridge's
+/// call signal — an `AbortSignal` in JavaScript, a `rutis` `Signal`
+/// (`.cancelled`, `await .wait()`) in Python. rutis-bridge aborts it when
+/// the host gives the call up (its future dropped): the run cancelled, the
+/// hook's timeout, the plugin unloaded. It is a field rather than an extra
+/// positional argument so that a Python method with a fixed signature still
+/// accepts the call. Anything but an object is passed as it is.
+fn with_signal(arg: Json) -> Value {
+    match arg {
+        Json::Object(fields) => Value::Record(
+            fields
+                .into_iter()
+                .map(|(key, value)| (key, Value::Data(value)))
+                .chain([(SIGNAL_FIELD.to_string(), Value::Signal)])
+                .collect(),
+        ),
+        other => Value::Data(other),
     }
 }
 
@@ -535,7 +594,7 @@ impl HandlerImpl for RemoteHandler {
         let target = self.target.clone();
         let deliver: Deliver = Arc::new(move |event| {
             let target = target.clone();
-            Box::pin(async move { target.call("on_event", vec![event]).await })
+            Box::pin(async move { target.call_plain("on_event", vec![event]).await })
         });
         Some(Box::new(RemoteEvents::start(
             self.name.clone(),
@@ -1106,5 +1165,18 @@ mod tests {
         sink.flush().await;
         assert_eq!(delivered.lock().unwrap().len(), 1);
         assert_eq!(sink.failure(), None);
+    }
+
+    #[test]
+    fn an_object_argument_carries_the_cancel_handle() {
+        let Value::Record(fields) = with_signal(json!({"tool": "t", "args": {"a": 1}})) else {
+            panic!("an object becomes a record");
+        };
+        assert!(matches!(fields.get(SIGNAL_FIELD), Some(Value::Signal)));
+        assert!(matches!(fields.get("tool"), Some(Value::Data(t)) if t == "t"));
+        assert!(matches!(fields.get("args"), Some(Value::Data(a)) if a == &json!({"a": 1})));
+        assert_eq!(fields.len(), 3);
+        // Anything else is passed as it is.
+        assert!(matches!(with_signal(json!("text")), Value::Data(t) if t == "text"));
     }
 }

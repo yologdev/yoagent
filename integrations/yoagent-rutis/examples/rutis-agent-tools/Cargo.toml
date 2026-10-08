@@ -1,0 +1,35 @@
+[package]
+name = "rutis-agent-tools"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "rutis-agent's ToolRegistry tools (replace_text, and tools registered while the host runs) offered to a yoagent agent through yoagent-rutis"
+
+# PINNING CAVEAT. Services in a rutis root match by Rust type, so rutis-agent
+# and yoagent-rutis must share ONE `rutis` crate. crates.io's rutis-agent
+# (0.2.0) is built on rutis 0.2, which cannot meet yoagent-rutis' rutis 0.6;
+# the rutis-agent built on rutis 0.6 (the rutis repository at tag v0.7.0,
+# crates/rutis-agent) is not published. So it comes from git, and the patch
+# below swaps crates.io's `rutis` (what yoagent-rutis asks for) for the same
+# tag's, leaving one `rutis` in the graph — check with `cargo tree -d`.
+# Bump the tag and the patch together, and only to a rutis whose version
+# yoagent-rutis' `rutis = "0.6"` still accepts.
+[dependencies]
+yoagent = { path = "../../../.." }
+yoagent-rutis = { path = "../.." }
+rutis = "0.6"
+rutis-agent = { git = "https://github.com/arcships/rutis", tag = "v0.7.0" }
+# For the `Tool::Function` schemas `ToolRegistry::schemas` returns; the
+# version rutis-agent v0.7.0 uses.
+aimux-core = "0.3"
+async-trait = "0.1"
+serde_json = "1"
+tempfile = "3"
+tokio-util = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+
+[patch.crates-io]
+rutis = { git = "https://github.com/arcships/rutis", tag = "v0.7.0" }
+
+# Its own workspace: not part of yoagent's or yoagent-rutis' build.
+[workspace]

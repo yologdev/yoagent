@@ -135,6 +135,20 @@ impl Probe {
         self.0.lock().unwrap().clone()
     }
 
+    /// The first line `matches`, once one is recorded.
+    async fn wait_line(&self, matches: impl Fn(&str) -> bool) -> String {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if let Some(line) = self.lines().into_iter().find(|l| matches(l)) {
+                    return line;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("no such line: {:?}", self.lines()))
+    }
+
     async fn wait_for(&self, line: &str) {
         tokio::time::timeout(Duration::from_secs(30), async {
             while !self.lines().iter().any(|l| l == line) {
@@ -499,9 +513,88 @@ export default definePlugin({
 })
 "#;
 
+/// Hooks that wait on their cancel handle (`signal`), each reporting what
+/// it saw; `js_quick` watches its handle after answering (the control).
+const JS_CANCEL: &str = r#"
+import { definePlugin } from 'RUTIS'
+const aborted = signal => new Promise(resolve => {
+  if (signal.aborted) return resolve()
+  signal.addEventListener('abort', resolve, { once: true })
+  setTimeout(resolve, 60000)
+})
+export default definePlugin({
+  inject: ['yoagent', 'probe'],
+  apply(ctx) {
+    const probe = ctx.use('probe')
+    const yoagent = ctx.use('yoagent')
+    ctx.effect(yoagent.register('js-cancel', {
+      async tools(run) {
+        probe.record(`js tools: signal ${run.signal instanceof AbortSignal}`)
+        return [{ name: 'js_wait' }, { name: 'js_quick' }]
+      },
+      async call_tool(call) {
+        if (call.tool === 'js_quick') {
+          call.signal.addEventListener('abort', () => probe.record('js quick: aborted'))
+          return 'quick'
+        }
+        probe.record('js wait: started')
+        await aborted(call.signal)
+        probe.record(`js wait: aborted=${call.signal.aborted} ${call.signal.reason?.name}`)
+        return 'waited'
+      },
+      async before_tool(call) {
+        if (call.tool !== 'slow_gate') return
+        await aborted(call.signal)
+        probe.record(`js gate: aborted=${call.signal.aborted}`)
+      },
+    }))
+  },
+})
+"#;
+
+/// The same in Python: a coroutine waiting on `signal.wait()` is cancelled
+/// too, after the handle was set.
+const PY_CANCEL: &str = r#"
+import asyncio
+
+inject = ["yoagent", "probe"]
+
+
+class Handler:
+    def __init__(self, probe):
+        self.probe = probe
+        self.watchers = set()
+
+    async def tools(self, run):
+        return [{"name": "py_wait"}, {"name": "py_quick"}]
+
+    async def call_tool(self, call):
+        signal = call["signal"]
+        if call["tool"] == "py_quick":
+            async def watch():
+                await signal.wait()
+                self.probe.record("py quick: cancelled")
+            task = asyncio.get_running_loop().create_task(watch())
+            self.watchers.add(task)
+            return "quick"
+        self.probe.record(f"py wait: started cancelled={signal.cancelled}")
+        try:
+            await signal.wait()
+            self.probe.record(f"py wait: woke cancelled={signal.cancelled}")
+        except asyncio.CancelledError:
+            self.probe.record(f"py wait: CancelledError cancelled={signal.cancelled}")
+            raise
+        return "waited"
+
+
+def apply(ctx, config):
+    ctx.effect(ctx.use("yoagent").register("py-cancel", Handler(ctx.use("probe"))))
+"#;
+
 struct Fixtures {
     js: PathBuf,
     strict: PathBuf,
+    cancel: PathBuf,
     py: PathBuf,
     _dir: tempfile::TempDir,
 }
@@ -517,12 +610,16 @@ fn fixtures() -> Fixtures {
     std::fs::write(&js, JS_HOOKS.replace("RUTIS", &rutis)).unwrap();
     let strict = dir.path().join("strict.mjs");
     std::fs::write(&strict, JS_STRICT.replace("RUTIS", &rutis)).unwrap();
+    let cancel = dir.path().join("cancel.mjs");
+    std::fs::write(&cancel, JS_CANCEL.replace("RUTIS", &rutis)).unwrap();
     let py = dir.path().join("py");
     std::fs::create_dir_all(&py).unwrap();
     std::fs::write(py.join("py_hooks.py"), PY_HOOKS).unwrap();
+    std::fs::write(py.join("py_cancel.py"), PY_CANCEL).unwrap();
     Fixtures {
         js,
         strict,
+        cancel,
         py,
         _dir: dir,
     }
@@ -1004,6 +1101,123 @@ async fn register_and_results_are_strict() {
             && denial.contains("strict")
             && denial.contains("observer down"),
         "{denial}"
+    );
+    host.root.shutdown().await.unwrap();
+}
+
+// ── Cancel handles (`signal`) ───────────────────────────────────
+
+/// Start a run, wait until the plugin records `started`, cancel the run
+/// (`Agent::abort`) and let it end.
+async fn cancel_once_started(probe: &Probe, agent: &mut yoagent::Agent, started: &str) {
+    let mut rx = agent.prompt("go").await;
+    probe.wait_for(started).await;
+    agent.abort();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while rx.recv().await.is_some() {}
+    })
+    .await
+    .expect("the cancelled run ends");
+    agent.finish().await;
+}
+
+/// How long a control waits for an abort that must not come.
+const QUIET: Duration = Duration::from_millis(500);
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_typescript_hook_sees_its_signal_abort_on_cancel_and_timeout() {
+    let Some(node) = node_runtime() else {
+        return;
+    };
+    let fx = fixtures();
+    let host = host(Some(&node), None).await;
+    host.load(vec![ts_row("cancel", &fx.cancel, json!({}))])
+        .await;
+    host.until_handlers(&["js-cancel"]).await;
+
+    let (quick, _) = agent(vec![
+        call("js_quick", json!({})),
+        text("done"),
+        call("js_wait", json!({})),
+        text("never sent"),
+    ]);
+    let mut quick = quick.with_extension(host.bridge.extension());
+    // Control: a call that completes keeps its handle un-aborted, also
+    // after its run ended (checked at the end).
+    let (_, results) = run(&mut quick, "quick").await;
+    assert_eq!(results, vec![("js_quick".into(), "quick".into(), false)]);
+    host.probe.wait_for("js tools: signal true").await;
+
+    // Cancelling the run aborts the signal of the call in flight.
+    cancel_once_started(&host.probe, &mut quick, "js wait: started").await;
+    host.probe
+        .wait_for("js wait: aborted=true AbortError")
+        .await;
+
+    // A hook the host stops waiting for (its timeout) is aborted too.
+    let gate = Reply::new("slow_gate", "ran");
+    let gate_runs = gate.runs();
+    let (gated, _) = agent(vec![call("slow_gate", json!({})), text("done")]);
+    let mut gated = gated.with_tools(vec![Box::new(gate)]).with_extension(
+        host.bridge
+            .extension()
+            .with_policy_timeout(Some(Duration::from_millis(300))),
+    );
+    let (_, results) = run(&mut gated, "gate").await;
+    assert!(
+        results[0].2 && results[0].1.contains("did not answer"),
+        "{results:?}"
+    );
+    assert_eq!(gate_runs.load(Ordering::SeqCst), 0);
+    host.probe.wait_for("js gate: aborted=true").await;
+
+    tokio::time::sleep(QUIET).await;
+    assert!(
+        !host.probe.lines().iter().any(|l| l == "js quick: aborted"),
+        "a completed call is never aborted: {:?}",
+        host.probe.lines()
+    );
+    host.root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_python_hook_sees_its_signal_set_when_the_run_is_cancelled() {
+    let Some(python) = python() else {
+        return;
+    };
+    let fx = fixtures();
+    let host = host(None, Some((&fx.py, &python))).await;
+    host.load(vec![py_row("py", "py_cancel", json!({}))]).await;
+    host.until_handlers(&["py-cancel"]).await;
+
+    let (agent, _) = agent(vec![
+        call("py_quick", json!({})),
+        text("done"),
+        call("py_wait", json!({})),
+        text("never sent"),
+    ]);
+    let mut agent = agent.with_extension(host.bridge.extension());
+    let (_, results) = run(&mut agent, "quick").await;
+    assert_eq!(results, vec![("py_quick".into(), "quick".into(), false)]);
+
+    cancel_once_started(&host.probe, &mut agent, "py wait: started cancelled=False").await;
+    // The handle is set before the coroutine is cancelled: whether the wait
+    // wakes or raises `CancelledError` first, it reads as set.
+    let line = host
+        .probe
+        .wait_line(|l| l.starts_with("py wait: ") && !l.contains("started"))
+        .await;
+    assert!(line.ends_with("cancelled=True"), "{line}");
+
+    tokio::time::sleep(QUIET).await;
+    assert!(
+        !host
+            .probe
+            .lines()
+            .iter()
+            .any(|l| l == "py quick: cancelled"),
+        "a completed call is never cancelled: {:?}",
+        host.probe.lines()
     );
     host.root.shutdown().await.unwrap();
 }

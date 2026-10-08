@@ -11,8 +11,14 @@ readme = "README.md"
 keywords = ["agent", "llm", "plugin", "rutis", "yoagent"]
 categories = ["asynchronous", "development-tools"]
 authors = ["Yuanhao <yuanhao@yolog.dev>"]
-# Installed locally for the end-to-end tests; never packaged.
-exclude = ["plugins/node_modules", "plugins/.venv"]
+# Installed locally for the end-to-end tests, and the rutis-agent example
+# (its own workspace): never packaged.
+exclude = [
+    "plugins/node_modules",
+    "plugins/.venv",
+    "plugins/dsh/node_modules",
+    "examples/rutis-agent-tools",
+]
 # yoagent's MSRV; rutis 0.6.1 declares 1.85.
 rust-version = "1.86"
 # Not published yet. It needs yoagent's `Extension`, which ships in 0.25.
@@ -64,6 +70,14 @@ tempfile = "3"
 name = "languages_test"
 required-features = ["node", "python"]
 
+[[test]]
+name = "dsh_test"
+required-features = ["node"]
+
 [[example]]
 name = "language_plugins"
 required-features = ["node", "python"]
+
+[[example]]
+name = "dsh_tools"
+required-features = ["node"]
