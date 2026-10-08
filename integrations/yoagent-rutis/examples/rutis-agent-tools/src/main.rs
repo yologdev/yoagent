@@ -12,7 +12,10 @@
 //! - a result is text, a failure (rutis-agent's `ok: false`, its
 //!   `error: ...` text) is a real `ToolError::Failed`;
 //! - yoagent's cancel token *is* the token rutis-agent's `execute` watches,
-//!   so cancelling the run stops the runner (`ToolError::Cancelled`).
+//!   so cancelling the run stops the runner. The tool returns
+//!   `ToolError::Cancelled`, but the transcript shows yoagent's "Tool result
+//!   withheld…" error instead: the cancel also cuts off the bridge's `after_tool`,
+//!   and yoagent withholds a result an extension didn't finish with.
 //!
 //! The showcase, in a temporary directory:
 //!
