@@ -230,6 +230,14 @@ def apply(ctx, config):
     return { content: [{ type: 'text', text: 'the chart' }, { type: 'image', data: png.toString('base64'), mimeType: 'image/png' }] }
   }
   ```
+- **Logs reach the host.** `yoagent.log(level, message, { run_id }?)`
+  (`error`, `warn`, `info`, `debug`; fire-and-forget; over 8192 characters
+  cut) writes to the host's `tracing` output under the target
+  `yoagent_rutis::plugin`, where a terminal or service host shows it — a
+  runtime process's own stderr may go nowhere. Pass the hook argument's
+  `run_id` to attribute the line to its run (the event's `run_id` field).
+  On an older host rutis's stand-in for the method throws: wrap the call
+  and fall back to `console.warn`.
 - **The bridge never loads plugins**: the host does, typically with
   [rutis-loader](https://crates.io/crates/rutis-loader) rows, and must share
   `yoagent` in the loader's catalog (`catalog.register_shared("yoagent")` or
@@ -274,7 +282,7 @@ sits inside every run of every agent using the extension:
 The end-to-end tests cover local Node and Python runtimes; a remote node over
 `wss` is not tested here.
 
-## Tools from other rutis ecosystems
+## Tools from other agent ecosystems
 
 ### dsh (DeepSeek Harness) tool plugins
 
@@ -337,6 +345,41 @@ cargo run --manifest-path examples/rutis-agent-tools/Cargo.toml [-- --live]
 > rutis-agent from git at that tag and patches crates.io's `rutis` to the same
 > tag (`[patch.crates-io]`), leaving one `rutis` in the graph (`cargo tree -d`
 > shows none twice). Move the tag and the patch together.
+
+## Writing an ecosystem adapter
+
+An adapter makes another plugin system's plugins (DSH's, rutis-agent's,
+pi's) into handlers. Their APIs rarely map one-to-one — an ecosystem has
+commands, dialogs, sessions, model routing — so every adapter follows the
+same rules, learned from the three above. The point is that **a plugin's
+safety policy never silently stops applying**:
+
+1. **Map only what the host can honour.** Tools, `before_tool` /
+   `after_tool` policies, input checks, turn notes, verifiers and events
+   have a yoagent hook; offer those.
+2. **Refuse to load what would decide or rewrite unenforced.** A plugin
+   handler for something the host never does — rewriting the conversation,
+   rewriting provider requests — would be a policy that never runs. Fail
+   the load (the host may accept it explicitly, by name), and when such a
+   registration appears after load, stop: deny every call, reject input.
+3. **A failing policy denies; a failing redaction withholds.** A thrown
+   error, a timeout or a malformed answer in a `before_tool`-like hook is a
+   denial; in an `after_tool`-like hook the result is withheld, never
+   passed through raw. (The bridge already treats a handler's failures
+   this way; an adapter must not catch them into an allow.)
+4. **Name clashes refuse.** A plugin tool named like one of the host's
+   tools would lose to it and leave its policy judging the wrong tool:
+   refuse unless the host says it left its own out.
+5. **Report what is ignored — through the host.** Commands, renderers,
+   notifications and other app-level parts warn (or refuse with a strict
+   option) through `yoagent.log`, never silently.
+6. **Keep plugin state local, don't fail work.** A plugin that records its
+   own state (a session entry, a result card) gets an adapter-local store
+   rather than an error, so a tool does not fail after its work is done;
+   what would inject input or start a turn still throws.
+7. **No UI means "no".** With no one to ask, a dialog answers as a
+   headless run does — a confirmation is declined — so a policy that would
+   ask denies.
 
 ## Semantics
 

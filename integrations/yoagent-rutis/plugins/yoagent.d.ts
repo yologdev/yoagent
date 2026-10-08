@@ -39,6 +39,17 @@ export interface Yoagent {
    * `on_input` rejects, its `after_tool` withholds the result.
    */
   register(name: string, handler: Handler, options?: Options): () => void
+  /**
+   * Write a diagnostic to the host's logs (its `tracing` output, target
+   * `yoagent_rutis::plugin`) rather than this process's stderr, which a
+   * terminal or service host may not show. Levels `error`, `warn`, `info`,
+   * `debug`; messages over 8192 characters are cut. Fire-and-forget. Pass
+   * `{ run_id }` (from any hook argument) to attribute the line to its run:
+   * it becomes the event's `run_id` field. On a host older than
+   * yoagent-rutis 0.2 rutis's stand-in for it throws: wrap the call
+   * (`try { yoagent.log(l, m).catch(f) } catch { f() }`).
+   */
+  log?(level: 'error' | 'warn' | 'info' | 'debug', message: string, context?: { run_id?: string }): Promise<void>
 }
 
 export interface Options {
