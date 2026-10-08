@@ -20,12 +20,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::*;
-use rutis::Ctx;
+use rutis::{Ctx, FiberState};
 use rutis_bridge::runtime::LocalRuntime;
 use rutis_bridge::session::{host_key, HostDispatch, Reply as RpcReply, Value as RpcValue};
 use rutis_loader::{
-    Chain, Layer, Loader, LoaderOptions, LoaderPlugin, Patch, RuntimeResolver, RuntimeRowsPlugin,
-    ServiceCatalog,
+    Chain, EntryStatus, Layer, Loader, LoaderOptions, LoaderPlugin, Patch, RuntimeResolver,
+    RuntimeRowsPlugin, ServiceCatalog,
 };
 use serde_json::{json, Value};
 use yoagent::extension::RunContext;
@@ -912,23 +912,38 @@ async fn handler_names_are_unique_across_languages() {
         py_row("py", "py_hooks", json!({"name": "taken"})),
     ];
     let patches: Vec<Patch> = serde_json::from_value(json!([{ "insert": rows }])).unwrap();
-    let report = host
-        .loader
+    host.loader
         .reconcile(vec![Layer::new("rows", patches)], None)
         .await
         .unwrap();
-    // `register` threw in both languages, so both rows failed to load.
-    let failed: Vec<(&str, &str)> = report
-        .failures
-        .iter()
-        .map(|f| (f.id.as_str(), f.error.as_str()))
-        .collect();
-    assert_eq!(failed.len(), 2, "{report:?}");
+    // `register` threw in both languages, so both rows fail to load. Polled,
+    // not read from the reconcile report: `reconcile` settles the rows already
+    // starting, and a row whose runtime is still coming up counts as settled
+    // (seen on CI: the report held only Python's failure).
+    let failed = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let failed: Vec<(&str, String)> = ["js", "py"]
+                .into_iter()
+                .filter_map(|id| match host.loader.get(id)?.status {
+                    EntryStatus::Running(s) if s.state == FiberState::Failed => {
+                        Some((id, s.error.map_or_else(String::new, |e| e.to_string())))
+                    }
+                    EntryStatus::Unresolved(e) => Some((id, e.to_string())),
+                    _ => None,
+                })
+                .collect();
+            if failed.len() == 2 {
+                return failed;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("both rows fail to load");
     for (id, error) in failed {
-        assert!(["js", "py"].contains(&id));
         assert!(
             error.contains("yoagent handler `taken`") && error.contains("already registered"),
-            "{error}"
+            "{id}: {error}"
         );
     }
     let handlers = host.bridge.registry().handlers();
