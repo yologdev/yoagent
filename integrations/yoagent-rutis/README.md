@@ -235,7 +235,9 @@ def apply(ctx, config):
   the host's `tracing` output under the target `yoagent_rutis::plugin`,
   where a terminal or service host shows it — a runtime process's own
   stderr may go nowhere. Pass `{ run_id }`, or the hook argument itself, to
-  attribute the line to its run (the event's `run_id` field). It never
+  attribute the line to its run (the event's `run_id` field) — a host
+  recording runs with yoagent's GASP recorder can then keep the line in the
+  run's record (`GaspRecorder::plugin_log_layer`). It never
   rejects (any message, extra context fields ignored). Fire-and-forget in
   JavaScript; in Python `await yoagent.log(...)` — an un-awaited coroutine
   is never sent. On a host without it (yoagent-rutis 0.1.0) rutis's
