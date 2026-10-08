@@ -17,6 +17,7 @@ exclude = [
     "plugins/node_modules",
     "plugins/.venv",
     "plugins/dsh/node_modules",
+    "plugins/pi/node_modules",
     "examples/rutis-agent-tools",
 ]
 # yoagent's MSRV; rutis 0.6.1 declares 1.85.
@@ -77,7 +78,15 @@ name = "dsh_test"
 required-features = ["node"]
 
 [[test]]
+name = "pi_test"
+required-features = ["node"]
+
+[[test]]
 name = "plugin_log_test"
+required-features = ["node"]
+
+[[test]]
+name = "pi_log_test"
 required-features = ["node"]
 
 [[example]]
@@ -86,4 +95,8 @@ required-features = ["node", "python"]
 
 [[example]]
 name = "dsh_tools"
+required-features = ["node"]
+
+[[example]]
+name = "pi_extensions"
 required-features = ["node"]

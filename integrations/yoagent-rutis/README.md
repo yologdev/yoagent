@@ -349,13 +349,120 @@ cargo run --manifest-path examples/rutis-agent-tools/Cargo.toml [-- --live]
 > tag (`[patch.crates-io]`), leaving one `rutis` in the graph (`cargo tree -d`
 > shows none twice). Move the tag and the patch together.
 
+### pi extensions (tools and tool policies)
+
+> **Experimental.** The pi and DSH adapters live here for now, and are
+> expected to move to the yo app (or their own packages) once it hosts
+> plugins: completing them needs app services — commands, dialogs,
+> sessions — that a loop library does not have. The bridge itself stays.
+
+[pi](https://github.com/earendil-works/pi) extensions are TypeScript
+modules written against pi's `ExtensionAPI`.
+[`plugins/pi/pi-extensions-adapter.ts`](plugins/pi/pi-extensions-adapter.ts)
+loads them unchanged with pi's own loader (pi's packages are installed in
+`plugins/pi/`, so their imports — TypeBox, `defineTool`, pi's helpers — are
+the real ones) and maps the part of the API that belongs to an agent loop
+onto one handler, following pi 1.1.0's own runner and agent loop:
+
+| pi | yoagent |
+|---|---|
+| `pi.registerTool` | a tool, while pi would activate it (exposure `direct` / `model-only`, `defaultActive` not false, in the `setActiveTools` allowlist if one was set; the first registration of a name wins). Arguments go through `prepareArguments` and pi's validation before any policy sees them, and `execute` runs only with the arguments the policies left — a call another handler rewrote afterwards is not run. A throw or `isError` is an error result; text and image blocks pass through (pi's shape is yoagent's) |
+| `ctx.executeTool` | another pi tool, the way pi runs a nested call: prepared, validated, judged by `tool_call` (with `parentToolCallId`), its result through `tool_result`; never rejects (an unknown tool, a block or a throw is `isError`). yoagent's own tools are not reachable from it; `ctx.tools` lists the callable ones |
+| `pi.setActiveTools` | an allowlist over the tools pi knows — yoagent's built-ins under pi's names and the extensions' tools: those outside it are not offered and their calls are denied. Tools pi does not know (MCP tools, sub-agents, the host's own) are not affected, as in pi. As in pi, a tool named in it is activated even when `defaultActive` is false (not when hidden), and a tool registered later that pi would activate joins it. `getActiveTools` / `getAllTools` answer from the same view |
+| `on("tool_call")` | `before_tool` for every call. yoagent's built-ins are judged under pi's names (`bash`, `read_file`→`read`, `write_file`→`write`, `edit_file`→`edit` with `edits`, `search`→`grep` with `glob` / `ignoreCase` (yoagent's search is case-insensitive unless asked, pi's grep the reverse), `list_files`→`find`; config `toolNames` adds more), with a relative `path` resolved against `cwd` first so the tool acts where the policy looked (yoagent's built-ins only: another tool's `path` may be a repository's). `{ block }` denies (`terminate: true` also stops the run at its next model request — stricter than pi, which ends only a batch whose results all set it); in-place changes to `event.input` rewrite the arguments, and one the yoagent tool cannot take (a second edit, a `timeout` on `bash`) denies the call; a throwing handler blocks, as in pi |
+| `on("tool_result")` | `after_tool`: content, details and isError edits, chained; only the fields a handler set are applied (a replaced content keeps its text and image blocks). A throwing handler **withholds the result** — unlike pi, which skips it: a failed redaction must not let the raw output through |
+| `on("input")` | `on_input`: `handled` rejects the prompt (it never reaches the agent, as in pi); `transform` and a throwing handler reject it too (yoagent cannot rewrite a prompt) |
+| `on("before_agent_start")` | `before_model`: the handlers run once per run, and the text they add around `event.systemPrompt` is a note on the latest user turn of every request of that run. A handler that throws, replaces the prompt or changes `systemPromptOptions` is skipped with a warning — even under `strict` (a run cannot refuse the load), so a policy that replaces the prompt (a "read-only mode") does not apply; the others still count. A returned `message` is dropped, the same handler's addition kept |
+| `on("session_start")` / `on("session_shutdown")` | when the adapter loads / unloads; a `session_start` handler that throws refuses the load (its extension may be missing its policies) |
+
+**What refuses the load** (fail closed, `strict` or not): an extension that
+fails to load (nothing loads, not just the bad one); a `session_start`
+failure; a handler for an event yoagent never fires that would decide or
+rewrite what the agent does (`context`, `context_with_system`,
+`message_end`, `before_provider_request`, `before_provider_headers`) unless
+the host lists it in `allowUnmapped`; and a pi tool named exactly like a
+yoagent built-in (pi's sandboxed `bash`) unless the host left that built-in
+out and says so in `withoutBuiltins` — otherwise yoagent's own tool would
+win the merge and run unsandboxed. Anything of this kind registered after
+load (inside a handler or a tool) is caught at the next model request or
+tool call and stops the adapter instead: that run stopped, every later call
+denied, prompt rejected.
+
+**Overrides.** An extension tool that replaces one of pi's built-ins under
+another name than yoagent's (`read`, `write`, `edit`, `grep`, `find`) makes
+the adapter deny yoagent's counterpart (`read_file`, ...), so the model
+cannot go around it.
+
+**What is only reported** (a warning in the host's `tracing` logs, through the bridge's `log`; config
+`strict: true` makes it a load failure): every other unfired event —
+observers such as `agent_end` or `tool_execution_*`, pi's session events,
+the boundary events `turn_end` / `agent_before_settle` — commands,
+shortcuts, flags, renderers, model providers, virtual models and MCP
+servers. `pi.appendEntry` and `pi.sendMessage` are recorded in the
+adapter's in-memory session — readable through `ctx.sessionManager`, a
+displayed message also logged — so a tool that records or shows its result
+this way (pi video tools do, after the paid work) does not fail; a message
+never starts a turn or reaches the model (yoagent's history is written only
+by its host). The session lives as long as the adapter: in a long-running
+host it grows until the plugin reloads. Other runtime actions (`pi.sendUserMessage`, `pi.setModel`,
+...) throw "not available in yoagent". There is no UI: `ctx.hasUI` is false and
+`ctx.ui` behaves as in pi's print mode (`confirm` answers false), so a
+policy that would ask the user denies. Commands, dialogs and session
+history are planned as host-level plugin services — `ui` and `commands`
+provided by the attached client, `session` by the host that owns the
+session — which the adapter would route `ctx.ui.*`, `registerCommand` and
+the session calls to; without them it stays in print mode (design: yo's
+`docs/WEB-UI-DESIGN.md` §7, [yoyo-meme/yo#3](https://github.com/yoyo-meme/yo/pull/3); not built).
+
+**Host setup.** Install the bridge's extension with `.require_policy()`, so
+a run that starts before the adapter registered (or after it failed to
+load) has every tool call denied rather than unjudged; and with
+`.rechecks_modified_calls()` when other handlers can rewrite calls after
+the adapter (pi tools are protected by the adapter itself; yoagent's
+built-ins are not). Policies cover what the agent calls under the names pi
+knows: a pi policy for `write` does not see a `bash` command that writes
+the same file (as in pi), nor tools outside `TOOL_NAMES` / `toolNames`
+(MCP tools, sub-agents, your own) under any but their own names.
+
+Config: `extensions` (files, or directories with an `index.ts` /
+`index.js`, loaded in order; relative paths resolve against `cwd`), `cwd`
+(the project the extensions see; default the runtime's), `name`,
+`toolNames`, `withoutBuiltins`, `allowUnmapped`, `strict`. Load it as a
+row of a Node runtime whose `package.json` is `plugins/pi/`'s (pi 1.1.0,
+pinned exactly: the adapter imports pi's loader by file, since the package
+exports only `discoverAndLoadExtensions`, which also loads
+`<cwd>/.pi/extensions` and `~/.pi/agent/extensions`; check it on every pi
+upgrade), with `yoagent` shared in the loader's catalog.
+
+```sh
+(cd plugins/pi && npm ci)
+cargo run --features node --example pi_extensions                          # the fixture extension, scripted
+cargo run --features node --example pi_extensions -- hello.ts todo.ts ...  # your pi extensions
+cargo run --features node --example pi_extensions -- --live --prompt "..." [--without bash] EXT.ts ...  # DeepSeek
+```
+
+The example runs yoagent's own tools in the temporary project the
+extensions see (it is the process's working directory).
+
+Tried (pi 1.1.0, October 2026) with eleven of pi's own examples, unchanged,
+scripted and live with DeepSeek: `hello`, `todo`, `tool-override` (`read`;
+yoagent's `read_file` is then denied), `truncated-tool` (`rg`) and
+`dynamic-tools` offer working tools; `protected-paths` and
+`permission-gate` judge yoagent's own `write_file` and `bash`;
+`claude-rules` loads (its note needs a project with `.claude/rules/`, which
+these runs did not have). `pirate` only acts after its `/pirate` command,
+and `dirty-repo-guard` and `confirm-destructive` only on pi's session
+events, so under the adapter they load and do nothing (reported).
+`tests/pi_test.rs` covers the adapter offline with the fixture extensions
+(`plugins/pi/fixture-extension.ts`, `plugins/pi/fixture-extra.ts`) and small
+ones written per test.
 ## Writing an ecosystem adapter
 
 An adapter makes another plugin system's plugins (DSH's, rutis-agent's,
 pi's) into handlers. Their APIs rarely map one-to-one — an ecosystem has
 commands, dialogs, sessions, model routing — so this is the contract an
-adapter should follow, learned from the DSH and rutis-agent adapters above
-and the pi adapter in review ([#265](https://github.com/yologdev/yoagent/pull/265)).
+adapter should follow, learned from the DSH, rutis-agent and pi adapters
+above.
 The point is that **a plugin's safety policy never silently stops
 applying**. Not every rule arises for every adapter: the DSH adapter maps
 only tools and prompt sections, so it has nothing to refuse (2) or record
