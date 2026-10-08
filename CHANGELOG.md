@@ -88,6 +88,7 @@ adheres to [Semantic Versioning](https://semver.org/).
 - **An `Agent` run carries the caller's tracing subscriber** into its spawned task (and the extension observer and compaction tasks do too), so a subscriber set with `tracing::subscriber::set_default` / `with_default` sees runs on a multi-thread runtime.
 - **Responses / Azure, encrypted reasoning:** a reasoning item whose following output item has no id is no longer stored or replayed (warned) — it would 400 every later request — and an unparseable reasoning `output_item.done` ends the previous item's range.
 - **yoagent-rutis: a TypeScript/Python handler's `on_event` delivery no longer fails silently.** A panic during delivery is caught, and a delivery task that ended (seen on `send` or `flush`) is recorded; either is the handler's failure (a required extension fails the run, an advisory one logs it). Before, the remaining events were dropped and the run never failed.
+- **A cancelled run no longer blames an extension for a withheld tool result.** When the run is cancelled while an extension's `after_tool` is still working, the result is still withheld (a redactor may not have run), but the text now says the run was cancelled before the extension finished, instead of "extension '…' did not finish processing it", which reads like the extension failed.
 
 ## 0.24.3
 

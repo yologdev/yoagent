@@ -3133,3 +3133,69 @@ async fn a_panicking_take_failure_is_contained() {
     assert!(!results[0].1, "the call ran: {results:?}");
     assert!(turns_paired(&events));
 }
+
+/// An `after_tool` that waits until the run is cancelled.
+#[derive(Clone)]
+struct SlowPost;
+
+#[async_trait::async_trait]
+impl RunHooks for SlowPost {
+    async fn after_tool(
+        &self,
+        _call: &ToolCallRequest<'_>,
+        _out: &mut ToolOutput,
+    ) -> Result<(), ExtensionError> {
+        std::future::pending::<()>().await;
+        Ok(())
+    }
+}
+
+/// A run cancelled while an `after_tool` is still working: the result is
+/// withheld (a redactor may not have run), and the text says the run was
+/// cancelled rather than blaming the extension. Control: a failing
+/// `after_tool` still says the extension did not finish.
+#[tokio::test]
+async fn a_cancelled_after_tool_says_the_run_was_cancelled() {
+    let (agent, _) = scripted(vec![
+        call("echo", serde_json::json!({"text": "a"})),
+        text("never"),
+    ]);
+    let mut agent = agent.with_extension(ClonedHooks::new("post", SlowPost));
+    let mut rx = agent.prompt("go").await;
+    let mut events = Vec::new();
+    while let Some(event) = rx.recv().await {
+        if matches!(event, AgentEvent::ToolExecutionStart { .. }) {
+            // Let the tool finish and `after_tool` start waiting.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            agent.abort();
+        }
+        events.push(event);
+    }
+    agent.finish().await;
+    let results = tool_results(&events);
+    assert_eq!(results.len(), 1, "{results:?}");
+    assert!(results[0].1, "an error result: {results:?}");
+    assert!(
+        results[0].0.contains("the run was cancelled"),
+        "{results:?}"
+    );
+
+    let (agent, _) = scripted(vec![
+        call("echo", serde_json::json!({"text": "a"})),
+        text("done"),
+    ]);
+    let mut agent = agent.with_extension(ext(
+        "post",
+        Hooks {
+            fail_after_tool: true,
+            ..Default::default()
+        },
+    ));
+    let events = run(&mut agent, "go").await;
+    let results = tool_results(&events);
+    assert!(
+        results[0].0.contains("did not finish processing it")
+            && !results[0].0.contains("cancelled"),
+        "{results:?}"
+    );
+}
