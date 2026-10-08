@@ -62,12 +62,14 @@ export interface Options {
  * the bridge required). An answer of an unexpected shape counts as failed
  * too.
  *
- * An abandoned call is not stopped in JavaScript: when the host stops
- * waiting (a timeout, the run cancelled, the plugin unloaded) the answer is
- * discarded, but no `AbortSignal` is passed, so the function runs to
- * completion — `call_tool` included, side effects and all, after the run
- * was cancelled. Make tools idempotent, or keep your own deadline. (Python
- * coroutines are cancelled.)
+ * Every hook but `on_event` gets a cancel handle in its first argument:
+ * `signal` (see {@link Cancellable}). It aborts when the host stops waiting
+ * — the run cancelled, the hook's timeout passed, the plugin unloaded — and
+ * never when the call completes. The answer of an abandoned call is
+ * discarded; a function that ignores `signal` still runs to completion
+ * (`call_tool` side effects included), so pass it on (`fetch(url, { signal
+ * })`) or check `signal.aborted` before acting. (Python coroutines are
+ * cancelled as well.)
  *
  * A member named like a hook must be a function (or absent: `undefined`,
  * `null`, `None`): `register` throws on anything else, so a policy never
@@ -78,25 +80,25 @@ export interface Options {
  */
 export interface Handler {
   /** Tools to offer for a run (asked once, at its start). */
-  tools?(run: RunInfo): Promise<ToolSpec[]>
+  tools?(run: RunInfo & Cancellable): Promise<ToolSpec[]>
   /**
    * Run one of this handler's tools. Required with `tools`. No timeout
-   * besides the run's cancellation, and a cancelled call keeps running here
-   * (its result is discarded): see above.
+   * besides the run's cancellation, which aborts `call.signal`: pass it on
+   * to whatever the tool waits for.
    */
-  call_tool?(call: ToolCall): Promise<ToolResult>
+  call_tool?(call: ToolCall & Cancellable): Promise<ToolResult>
   /** Judge a tool call: every call of the run, the agent's own tools too. */
-  before_tool?(call: ToolCall): Promise<ToolVerdict>
+  before_tool?(call: ToolCall & Cancellable): Promise<ToolVerdict>
   /** Edit a call's output before the model, the history and consumers see it (redaction). */
-  after_tool?(call: ToolCall, output: ToolOutput): Promise<OutputEdit>
+  after_tool?(call: ToolCall & Cancellable, output: ToolOutput): Promise<OutputEdit>
   /** Before each model request. */
-  before_model?(turn: Turn): Promise<TurnVerdict>
+  before_model?(turn: Turn & Cancellable): Promise<TurnVerdict>
   /** Judge a prompted run's input. */
-  on_input?(input: Input): Promise<InputVerdict>
+  on_input?(input: Input & Cancellable): Promise<InputVerdict>
   /** When the model ends its answer (a verifier). */
-  on_stop?(stop: Stop): Promise<StopVerdict>
+  on_stop?(stop: Stop & Cancellable): Promise<StopVerdict>
   /** When the run ends, however it ends. */
-  finish?(outcome: Outcome): Promise<void>
+  finish?(outcome: Outcome & Cancellable): Promise<void>
   /**
    * Each event of the types in `options.events`, in order. Delivered
    * asynchronously: the run never waits for it. Its failure is noticed at the
@@ -104,6 +106,24 @@ export interface Handler {
    * one that falls 1024 events behind counts as failed.
    */
   on_event?(event: AgentEvent): Promise<void>
+}
+
+/**
+ * The cancel handle of one hook call, a field of the hook's first argument
+ * (so a Python method with a fixed signature still accepts the call).
+ *
+ * In JavaScript a real `AbortSignal`: rutis aborts it when the host gives
+ * the call up — the run cancelled (`Agent::abort()`), the hook's timeout
+ * passed, or the plugin unloaded mid-call — and never once the call has
+ * completed. In Python it is rutis's `Signal`: `signal.cancelled` (bool) and
+ * `await signal.wait()`; the coroutine is also cancelled
+ * (`asyncio.CancelledError` at its next `await`).
+ *
+ * It is the one field that is not plain data: `JSON.stringify` shows it as
+ * `{}`, and Python's `json.dumps` refuses it (drop it first).
+ */
+export interface Cancellable {
+  signal: AbortSignal
 }
 
 /** The run a hook is called for. */
