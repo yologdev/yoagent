@@ -187,17 +187,28 @@ def apply(ctx, config):
   `before_tool` denies, its `on_input` rejects, its `after_tool` withholds).
 - **The same rules as Rust handlers**: one registry and one name space for
   every language, registration order, fail closed on errors and timeouts.
-- **An abandoned JavaScript hook keeps running.** When the bridge stops
-  waiting for a hook — its timeout passed, the run was cancelled
-  (`Agent::abort()`), its plugin unloaded — the answer is discarded, but a
-  JavaScript function is not stopped: no `AbortSignal` is passed, so it runs
-  to completion. That includes **`call_tool` side effects after a run was
-  cancelled** (a write, a request, a payment): make tools idempotent, or check
-  your own deadline before acting. A Python coroutine is cancelled
-  (`asyncio.CancelledError` at its next `await`). (rutis-bridge 0.7 can pass
-  an `AbortSignal`, but only as an extra positional argument, which a Python
-  method with a fixed signature would refuse; the bridge cannot tell the two
-  apart, so it passes none.)
+- **Every hook gets a cancel handle: `signal`.** Each hook but `on_event`
+  finds it in its first argument (`call.signal`, `turn.signal`, ...): a real
+  `AbortSignal` in JavaScript, rutis's `Signal` in Python
+  (`signal.cancelled`, `await signal.wait()`). It is aborted when the bridge
+  stops waiting — the run was cancelled (`Agent::abort()`), the hook's
+  timeout passed, its plugin unloaded mid-call — and never once the call
+  completed. The answer of an abandoned call is discarded, but a JavaScript
+  function that ignores its signal runs to completion, side effects and all:
+  **pass `call.signal` on** (`fetch(url, { signal })`, a child process, a dsh
+  tool's `execute`) or check `signal.aborted` before acting. A Python
+  coroutine is also cancelled (`asyncio.CancelledError` at its next
+  `await`). The handle is a field rather than an extra positional argument
+  so that a Python method with a fixed signature still accepts the call;
+  it is the one value that is not plain data (`json.dumps(call)` refuses
+  it — drop `signal` first).
+
+  ```ts
+  async call_tool(call) {
+    const res = await fetch(call.args.url, { signal: call.signal })
+    return await res.text()
+  }
+  ```
 - **The bridge never loads plugins**: the host does, typically with
   [rutis-loader](https://crates.io/crates/rutis-loader) rows, and must share
   `yoagent` in the loader's catalog (`catalog.register_shared("yoagent")` or
@@ -241,6 +252,63 @@ sits inside every run of every agent using the extension:
 
 The end-to-end tests cover local Node and Python runtimes; a remote node over
 `wss` is not tested here.
+
+## Tools from other rutis ecosystems
+
+### dsh (DeepSeek Harness) tool plugins
+
+dsh plugins are Cordis plugins, and rutis's Node runtime runs them
+unchanged. [`plugins/dsh/dsh-tools-adapter.ts`](plugins/dsh/dsh-tools-adapter.ts)
+offers every tool in dsh's tool registry (the `tools` service of
+`@deepseek-ai/dsh-tools`) to yoagent agents:
+
+| Hook | What the adapter does |
+|---|---|
+| `tools` | `tools.schemas()` → name, description, parameters (config `tools`: an allowlist) |
+| `call_tool` | `tools.execute({callId, name, arguments, signal})` with the bridge's cancel handle as dsh's `signal`: cancelling the run aborts the dsh call. `isError` → an error tool result; text blocks joined |
+| `before_model` | the system-prompt sections dsh plugins added (the harness identity and persona slots left out, sections whose variables are unset skipped), as one note, capped at `maxNoteChars` (2000) |
+
+Load, as rows of one Node runtime whose `package.json` is `plugins/dsh/`'s:
+`@deepseek-ai/dsh-system-prompt`, `@deepseek-ai/dsh-tools`, your dsh tool
+plugins (and what they need, e.g. `@deepseek-ai/dsh-web`), then the adapter;
+share `yoagent` in the loader's catalog. `plugins/dsh/package.json` pins
+everything exactly (dsh 0.2.0-rc.2 is a release candidate) and is its own
+install, so the language tests' stays small.
+
+```sh
+(cd plugins/dsh && npm ci)
+cargo run --features node --example dsh_tools            # scripted model, real web search: needs network
+cargo run --features node --example dsh_tools -- --live  # DeepSeek: DEEPSEEK_API_KEY or ~/.dskey
+```
+
+[`examples/dsh_tools.rs`](examples/dsh_tools.rs) loads `dsh-web`,
+`dsh-system-prompt`, `dsh-tools`, the unchanged `dsh-free-search` plugin and
+the adapter, runs one search, and checks that a dsh tool answered (and,
+scripted, that free-search's prompt section reached the model).
+`tests/dsh_test.rs` covers the adapter offline with a fixture dsh plugin
+(`plugins/dsh/fixture-tools.ts`).
+
+### rutis-agent tools
+
+[rutis-agent](https://github.com/arcships/rutis/tree/v0.7.0/crates/rutis-agent)
+keeps its tools in a `ToolRegistry` service.
+[`examples/rutis-agent-tools/`](examples/rutis-agent-tools/src/main.rs) is a
+Rust rutis plugin that maps every `ToolDef` to a yoagent tool per run
+(results as text, failures as `ToolError`s, yoagent's cancel token passed as
+rutis-agent's), shown with rutis-agent's `replace_text` and a tool registered
+into the registry while the host runs, which the next run offers.
+
+```sh
+cargo run --manifest-path examples/rutis-agent-tools/Cargo.toml [-- --live]
+```
+
+> **Pinning caveat.** rutis matches services by Rust type, so rutis-agent and
+> this bridge must share one `rutis` crate. crates.io's `rutis-agent` 0.2.0 is
+> built on rutis 0.2; the one on rutis 0.6 (the rutis repository at tag
+> v0.7.0) is unpublished. The example is therefore its own workspace: it takes
+> rutis-agent from git at that tag and patches crates.io's `rutis` to the same
+> tag (`[patch.crates-io]`), leaving one `rutis` in the graph (`cargo tree -d`
+> shows none twice). Move the tag and the patch together.
 
 ## Semantics
 
