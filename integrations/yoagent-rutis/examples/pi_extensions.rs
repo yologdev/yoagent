@@ -18,9 +18,10 @@
 //!
 //! The project is also the process's working directory, so yoagent's own
 //! tools (`bash`, relative paths) act there, not where `cargo run` started.
-//! `--without NAME` leaves a yoagent built-in out (repeatable): use it when
-//! an extension replaces one under the same name, e.g. pi's sandboxed
-//! `bash` (yoagent's own tool would otherwise win and run unsandboxed).
+//! `--without NAME` leaves a yoagent built-in out (repeatable) and tells the
+//! adapter so (`withoutBuiltins`): needed when an extension replaces one
+//! under the same name, e.g. pi's sandboxed `bash` — the adapter refuses to
+//! load otherwise, since yoagent's own tool would win and run unsandboxed.
 //!
 //! Setup (once): `npm ci` in `plugins/pi/` (Node 24+).
 //!
@@ -160,7 +161,12 @@ async fn main() -> Result<(), BoxError> {
     let patches: Vec<Patch> = serde_json::from_value(json!([{ "insert": [{
         "id": "pi",
         "name": pi_dir().join("pi-extensions-adapter.ts"),
-        "config": { "extensions": extensions, "cwd": project.path() },
+        "config": {
+            "extensions": extensions,
+            "cwd": project.path(),
+            // yoagent built-ins left out, so pi tools of the same name are the ones that run.
+            "withoutBuiltins": without,
+        },
     }] }]))?;
     let report = loader
         .reconcile(vec![Layer::new("app", patches)], None)
@@ -190,12 +196,12 @@ async fn main() -> Result<(), BoxError> {
                     name: "write_file".into(),
                     arguments: json!({"path": env_file, "content": "TOKEN=1"}),
                 },
+                // Harmless if a policy lets it through; pi's permission-gate
+                // flags `sudo`.
                 MockToolCall {
                     provider_metadata: None,
                     name: "bash".into(),
-                    arguments: // Harmless if a policy lets it through; pi's permission-gate
-                    // flags `sudo`.
-                    json!({"command": "echo sudo rm -rf build"}),
+                    arguments: json!({"command": "echo sudo rm -rf build"}),
                 },
             ]),
             MockResponse::Text("(scripted) done.".into()),
@@ -277,9 +283,25 @@ async fn main() -> Result<(), BoxError> {
     let written = env_file.exists();
     println!(".env written: {written}");
     let offered = seen.lock().unwrap().first().map(|(t, _)| t.clone());
-    let _ = tokio::time::timeout(Duration::from_secs(10), root.shutdown()).await;
+    let results: Vec<(String, String, bool)> = agent
+        .messages()
+        .iter()
+        .filter_map(|m| match m {
+            AgentMessage::Llm(Message::ToolResult {
+                tool_name,
+                content,
+                is_error,
+                ..
+            }) => Some((tool_name.clone(), text_of(content), *is_error)),
+            _ => None,
+        })
+        .collect();
+    tokio::time::timeout(Duration::from_secs(10), root.shutdown())
+        .await
+        .map_err(|_| "the plugins did not shut down within 10 s")??;
 
-    // Scripted with the fixture: its tools were offered and its policy held.
+    // Scripted with the fixture: its tools were offered, and its policy denied
+    // the write (not a failed run or an unavailable handler).
     if fixture && !live {
         if written {
             return Err("the fixture's policy should have blocked the write to .env".into());
@@ -287,7 +309,16 @@ async fn main() -> Result<(), BoxError> {
         if !offered.unwrap_or_default().iter().any(|t| t == "pi_echo") {
             return Err("the fixture's pi_echo tool was not offered".into());
         }
-        println!("ok: the fixture's tools were offered and its policy held");
+        let denied = results.iter().any(|(tool, text, is_error)| {
+            tool == "write_file" && *is_error && text.contains("is protected")
+        });
+        if !denied {
+            return Err(format!("the fixture's policy did not deny the write: {results:?}").into());
+        }
+        if !results.iter().any(|(tool, _, _)| tool == "bash") {
+            return Err(format!("the bash call never ran: {results:?}").into());
+        }
+        println!("ok: the fixture's tools were offered and its policy denied the write");
     }
     Ok(())
 }

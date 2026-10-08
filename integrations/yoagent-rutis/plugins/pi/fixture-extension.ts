@@ -1,6 +1,7 @@
 // A pi extension for the adapter's tests (`tests/pi_test.rs`): written as
 // any pi extension is, against pi's own API, with no knowledge of yoagent.
-// No network; the slow tool writes `slow.txt` in `ctx.cwd`.
+// No network; the slow tool writes `slow.txt` and `session_shutdown` writes
+// `shutdown.txt` in `ctx.cwd`.
 
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -73,6 +74,8 @@ export default function (pi: ExtensionAPI) {
     if (event.toolName === 'edit') {
       const edits = event.input.edits as { oldText: string; newText: string }[]
       edits[0].newText = edits[0].newText.toUpperCase()
+      // Two edits: yoagent's edit_file runs one, so the call is denied.
+      if (String(event.input.path).endsWith('multi.txt')) edits.push({ oldText: 'x', newText: 'y' })
     }
     return undefined
   })

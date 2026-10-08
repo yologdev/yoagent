@@ -1,7 +1,8 @@
 //! pi coding-agent extensions in yoagent, end to end: the adapter
-//! `plugins/pi/pi-extensions-adapter.ts` loading a fixture pi extension
-//! (`plugins/pi/fixture-extension.ts`, no network) as a rutis-loader row of a
-//! Node runtime.
+//! `plugins/pi/pi-extensions-adapter.ts` loading pi extensions — the fixtures
+//! `plugins/pi/fixture-extension.ts` and `plugins/pi/fixture-extra.ts`, and
+//! small ones written to a temporary directory; no network — as a
+//! rutis-loader row of a Node runtime.
 //!
 //! Needs Node 24+ and `npm ci` in `plugins/pi/`. Without them the test
 //! prints `SKIPPED:` and passes; `YOAGENT_RUTIS_REQUIRE_RUNTIMES=1` (CI) makes
@@ -12,7 +13,7 @@ mod common;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::*;
@@ -24,8 +25,10 @@ use rutis_loader::{
 };
 use serde_json::{json, Value};
 use yoagent::provider::mock::{MockResponse, MockToolCall};
-use yoagent::tools::{BashTool, EditFileTool, ReadFileTool, SearchTool, WriteFileTool};
-use yoagent::{AgentEvent, AgentMessage, Content, Message};
+use yoagent::tools::{
+    BashTool, EditFileTool, ListFilesTool, ReadFileTool, SearchTool, WriteFileTool,
+};
+use yoagent::{AgentEvent, AgentMessage, Content, Message, ToolDecision};
 use yoagent_rutis::RutisBridge;
 
 fn pi_dir() -> PathBuf {
@@ -179,6 +182,8 @@ async fn pi_extensions_reach_a_yoagent_agent_through_the_adapter() {
     let env_file = project.path().join(".env");
     let notes = project.path().join("notes.txt");
     std::fs::write(&notes, "hello world").unwrap();
+    let multi = project.path().join("multi.txt");
+    std::fs::write(&multi, "one").unwrap();
 
     let host = host(&runtime).await;
     host.load(json!([{
@@ -204,6 +209,11 @@ async fn pi_extensions_reach_a_yoagent_agent_through_the_adapter() {
             (
                 "edit_file",
                 json!({"path": notes, "old_text": "world", "new_text": "pi"}),
+            ),
+            // The policy adds a second edit, which yoagent's edit_file cannot run.
+            (
+                "edit_file",
+                json!({"path": multi, "old_text": "one", "new_text": "two"}),
             ),
         ]),
         text("done"),
@@ -252,6 +262,15 @@ async fn pi_extensions_reach_a_yoagent_agent_through_the_adapter() {
     // ...an in-place rewrite of `event.input` changes the call...
     let (_, text, is_error) = result("bash");
     assert!(!is_error && text.contains("rewritten"), "{results:?}");
+    // ...and a rewrite yoagent's tool cannot run is denied, not cut down.
+    let (_, text, is_error) = results
+        .iter()
+        .filter(|(n, _, _)| n == "edit_file")
+        .nth(1)
+        .cloned()
+        .unwrap();
+    assert!(is_error && text.contains("one edit"), "{results:?}");
+    assert_eq!(std::fs::read_to_string(&multi).unwrap(), "one");
     // ...including edit_file's arguments, translated to pi's `edits` and back.
     assert!(!result("edit_file").2, "{results:?}");
     assert_eq!(std::fs::read_to_string(&notes).unwrap(), "hello PI");
@@ -304,7 +323,10 @@ async fn pi_semantics_on_the_less_common_paths() {
     let image = project.path().join("dot.png");
     std::fs::write(&image, PNG).unwrap();
     std::fs::write(project.path().join("a.md"), "needle in markdown").unwrap();
-    std::fs::write(project.path().join("b.txt"), "needle in text").unwrap();
+    // Upper-case: found only because yoagent's search stays case-insensitive.
+    std::fs::write(project.path().join("b.txt"), "NEEDLE in text").unwrap();
+    std::fs::create_dir(project.path().join("inner")).unwrap();
+    std::fs::write(project.path().join("inner/deep.txt"), "deep").unwrap();
 
     let host = host(&runtime).await;
     host.load(json!([{
@@ -341,14 +363,27 @@ async fn pi_semantics_on_the_less_common_paths() {
                 "search",
                 json!({"pattern": "needle", "path": project.path(), "include": "*.md"}),
             ),
+            // Fails pi's validation: `text` is required.
+            ("pi_echo", json!({})),
+            ("list_files", json!({"path": project.path()})),
+            ("bash", json!({"command": "echo SECRET"})),
+            ("bash", json!({"command": "echo BREAK"})),
+            ("bash", json!({"command": "echo bounded"})),
+            // Relative: resolved against the extensions' cwd, not the test's.
+            ("write_file", json!({"path": "rel.txt", "content": "here"})),
+            // Blocked with terminate: the run stops before its next request.
+            ("bash", json!({"command": "echo stop-now"})),
         ]),
-        text("done"),
+        text("never requested"),
     ]);
     let mut agent = agent
         .with_tools(vec![
             Box::new(ReadFileTool::new()),
             Box::new(EditFileTool::new()),
             Box::new(SearchTool::new()),
+            Box::new(ListFilesTool::new()),
+            Box::new(BashTool::new()),
+            Box::new(WriteFileTool::new()),
         ])
         .with_extension(host.bridge.extension());
     let (events, results) = tokio::time::timeout(Duration::from_secs(60), run(&mut agent, "go"))
@@ -371,7 +406,10 @@ async fn pi_semantics_on_the_less_common_paths() {
     );
     // defaultActive: false is not offered, so the call fails as unknown.
     assert!(!seen_now[0].tools.contains(&"pi_inactive".to_string()));
-    assert!(result(3).2 && !result(3).1.contains("inactive ran"));
+    assert!(
+        result(3).2 && result(3).1.contains("Tool pi_inactive not found"),
+        "{results:?}"
+    );
     // yoagent's edit_file is denied: an extension overrides pi's `edit`.
     assert!(
         result(4).2 && result(4).1.contains(r#"call "edit" instead"#),
@@ -410,16 +448,54 @@ async fn pi_semantics_on_the_less_common_paths() {
         "the details edit landed"
     );
     // search's include is grep's glob, and its default case-insensitivity is
-    // ignoreCase: true: the policy's rewrite to *.txt reached the tool.
+    // ignoreCase: true both ways: the rewrite to *.txt reached the tool, which
+    // still matched the upper-case NEEDLE.
     let (_, text, _) = result(8);
     assert!(
         text.contains("b.txt") && !text.contains("a.md"),
         "{results:?}"
     );
-    // The crashing, message-returning and prompt-replacing before_agent_start
-    // handlers are skipped; the good one still adds its text.
-    // A message is skipped but its handler's addition kept; a handler after
-    // the failing ones still counts.
+    // A pi tool's arguments are validated before the policies: a missing field denies.
+    assert!(result(9).2 && result(9).1.contains("text"), "{results:?}");
+    // list_files as pi's find: the required pattern defaulted to '*', and the
+    // policy's path rewrite reached the tool.
+    let (_, text, is_error) = result(10);
+    assert!(
+        !is_error && text.contains("deep.txt") && !text.contains("a.md"),
+        "{results:?}"
+    );
+    // A content-replacing tool_result edit applies to yoagent's built-ins too.
+    let (_, text, _) = result(11);
+    assert!(
+        text.contains("[redacted]") && !text.contains("SECRET"),
+        "{results:?}"
+    );
+    // A tool_result handler that throws withholds the result.
+    let (_, text, _) = result(12);
+    assert!(
+        text.contains("withheld") && !text.contains("BREAK"),
+        "{results:?}"
+    );
+    // A rewrite to a field yoagent's bash does not have is denied.
+    assert!(
+        result(13).2 && result(13).1.contains(r#""timeout""#),
+        "{results:?}"
+    );
+    // The relative path was resolved where the policies looked.
+    assert!(!result(14).2, "{results:?}");
+    assert_eq!(
+        std::fs::read_to_string(project.path().join("rel.txt")).unwrap(),
+        "here"
+    );
+    // terminate: true denied the call and stopped the run before its next request.
+    assert!(
+        result(15).2 && result(15).1.contains("stopping the run"),
+        "{results:?}"
+    );
+    assert_eq!(seen_now.len(), 1, "the run stopped: {seen_now:?}");
+    // The crashing and prompt-replacing before_agent_start handlers are
+    // skipped; the message-returning one loses only its message; a handler
+    // after them still counts.
     let note = &seen_now[0].last_user;
     for kept in [
         "Fixture rules: answer in one line.",
@@ -432,6 +508,21 @@ async fn pi_semantics_on_the_less_common_paths() {
     host.root.shutdown().await.unwrap();
 }
 
+/// Writes a pi extension to `dir` and returns its path.
+fn extension(dir: &Path, name: &str, source: &str) -> PathBuf {
+    let path = dir.join(name);
+    std::fs::write(&path, source).unwrap();
+    path
+}
+
+fn adapter_row(config: Value) -> Value {
+    json!([{
+        "id": "pi",
+        "name": pi_dir().join("pi-extensions-adapter.ts"),
+        "config": config,
+    }])
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn strict_refuses_extensions_that_use_what_does_not_map() {
     let Some(runtime) = node_runtime() else {
@@ -439,14 +530,10 @@ async fn strict_refuses_extensions_that_use_what_does_not_map() {
     };
     let host = host(&runtime).await;
     let failures = host
-        .try_load(json!([{
-            "id": "pi",
-            "name": pi_dir().join("pi-extensions-adapter.ts"),
-            "config": {
-                "extensions": [pi_dir().join("fixture-extension.ts")],
-                "strict": true,
-            },
-        }]))
+        .try_load(adapter_row(json!({
+            "extensions": [pi_dir().join("fixture-extension.ts")],
+            "strict": true,
+        })))
         .await;
     assert!(
         failures.contains("command /fixture"),
@@ -457,14 +544,14 @@ async fn strict_refuses_extensions_that_use_what_does_not_map() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn strict_refuses_a_pi_tool_named_like_a_yoagent_tool() {
+async fn a_pi_tool_named_like_a_builtin_needs_the_host_to_leave_it_out() {
     let Some(runtime) = node_runtime() else {
         return;
     };
     let dir = tempfile::tempdir().unwrap();
-    let ext = dir.path().join("sandboxed-bash.ts");
-    std::fs::write(
-        &ext,
+    let ext = extension(
+        dir.path(),
+        "sandboxed-bash.ts",
         r#"import { Type } from 'typebox'
 export default function (pi) {
   pi.registerTool({
@@ -474,20 +561,248 @@ export default function (pi) {
   })
 }
 "#,
-    )
-    .unwrap();
+    );
+    // Without withoutBuiltins, the load is refused (no strict needed).
     let host = host(&runtime).await;
     let failures = host
-        .try_load(json!([{
-            "id": "pi",
-            "name": pi_dir().join("pi-extensions-adapter.ts"),
-            "config": { "extensions": [ext], "strict": true },
-        }]))
+        .try_load(adapter_row(json!({ "extensions": [ext] })))
         .await;
     assert!(
-        failures.contains(r#"pi tool \"bash\" is named like yoagent's own tool"#)
-            || failures.contains(r#"pi tool "bash" is named like yoagent's own tool"#),
-        "a same-name tool fails a strict load: {failures}"
+        failures.contains("withoutBuiltins") && failures.contains("bash"),
+        "{failures}"
+    );
+    assert!(host.bridge.registry().handlers().is_empty());
+    host.root.shutdown().await.unwrap();
+
+    // With it, the pi tool is the agent's bash.
+    let host = self::host(&runtime).await;
+    host.load(adapter_row(
+        json!({ "extensions": [ext], "withoutBuiltins": ["bash"] }),
+    ))
+    .await;
+    let (agent, _) = agent(vec![call("bash", json!({"command": "ls"})), text("done")]);
+    let mut agent = agent.with_extension(host.bridge.extension());
+    let (_, results) = run(&mut agent, "go").await;
+    assert_eq!(
+        results,
+        vec![("bash".into(), "sandboxed".into(), false)],
+        "{results:?}"
+    );
+    host.root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn what_could_leave_a_policy_unenforced_refuses_the_load() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let cases = [
+        (
+            "throws.ts",
+            "export default function () { throw new Error('factory crashed') }\n",
+            "factory crashed",
+        ),
+        (
+            "unsupported-start.ts",
+            "export default function (pi) { pi.on('session_start', () => pi.appendEntry('x', {})) }\n",
+            "session_start",
+        ),
+        (
+            "context.ts",
+            "export default function (pi) { pi.on('context', () => ({ messages: [] })) }\n",
+            "allowUnmapped",
+        ),
+    ];
+    for (file, source, want) in cases {
+        let ext = extension(dir.path(), file, source);
+        let host = host(&runtime).await;
+        // Loaded next to a working extension: nothing loads, not just the bad one.
+        let failures = host
+            .try_load(adapter_row(json!({
+                "extensions": [pi_dir().join("fixture-extension.ts"), ext],
+            })))
+            .await;
+        assert!(failures.contains(want), "{file}: {failures}");
+        assert!(host.bridge.registry().handlers().is_empty(), "{file}");
+        host.root.shutdown().await.unwrap();
+    }
+
+    // A deciding event the host accepts going unenforced.
+    let ext = dir.path().join("context.ts");
+    let host = host(&runtime).await;
+    host.load(adapter_row(
+        json!({ "extensions": [ext], "allowUnmapped": ["context"] }),
+    ))
+    .await;
+    host.root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn set_active_tools_narrows_what_the_agent_can_call() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let readme = dir.path().join("README.md");
+    std::fs::write(&readme, "readme").unwrap();
+    let ext = extension(
+        dir.path(),
+        "plan-mode.ts",
+        r#"import { Type } from 'typebox'
+const tool = (name) => ({
+  name, label: name, description: name, parameters: Type.Object({}),
+  async execute() { return { content: [{ type: 'text', text: `${name} ran` }], details: undefined } },
+})
+export default function (pi) {
+  pi.registerTool(tool('pi_x'))
+  pi.registerTool(tool('pi_y'))
+  pi.on('session_start', () => pi.setActiveTools(['read', 'pi_x']))
+}
+"#,
+    );
+    let host = host(&runtime).await;
+    host.load(adapter_row(json!({ "extensions": [ext] }))).await;
+    let (agent, seen) = agent(vec![
+        calls(&[
+            ("pi_x", json!({})),
+            ("pi_y", json!({})),
+            ("bash", json!({"command": "echo hi"})),
+            ("read_file", json!({"path": readme})),
+        ]),
+        text("done"),
+    ]);
+    let mut agent = agent
+        .with_tools(vec![
+            Box::new(BashTool::new()),
+            Box::new(ReadFileTool::new()),
+        ])
+        .with_extension(host.bridge.extension());
+    let (_, results) = run(&mut agent, "go").await;
+    let tools = seen.lock().unwrap()[0].tools.clone();
+    assert!(
+        tools.contains(&"pi_x".into()) && !tools.contains(&"pi_y".into()),
+        "{tools:?}"
+    );
+    assert_eq!(results[0].1, "pi_x ran", "{results:?}");
+    // Not offered, and a call to it is denied as inactive.
+    assert!(
+        results[1].2 && results[1].1.contains(r#""pi_y" is not an active tool"#),
+        "{results:?}"
+    );
+    // yoagent's bash is pi's `bash`, which the extension left out...
+    assert!(
+        results[2].2 && results[2].1.contains("not an active tool"),
+        "{results:?}"
+    );
+    // ...while read_file is pi's `read`, which it kept.
+    assert!(
+        !results[3].2 && results[3].1.contains("readme"),
+        "{results:?}"
+    );
+    host.root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn prompt_notes_are_per_run_and_input_handlers_reject() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let ext = extension(
+        dir.path(),
+        "per-run.ts",
+        r#"import { Type } from 'typebox'
+let calls = 0
+export default function (pi) {
+  pi.registerTool({
+    name: 'pi_ping', label: 'ping', description: 'ping', parameters: Type.Object({}),
+    async execute() { return { content: [{ type: 'text', text: 'pong' }], details: undefined } },
+  })
+  pi.on('before_agent_start', (event) => {
+    calls += 1
+    return { systemPrompt: `${event.systemPrompt}\nPrompt: ${event.prompt} (call ${calls})` }
+  })
+  pi.on('input', (event) => {
+    if (event.text.includes('SECRET')) return { action: 'handled' }
+    if (event.text.includes('rewrite')) return { action: 'transform', text: 'x' }
+    return { action: 'continue' }
+  })
+}
+"#,
+    );
+    let host = host(&runtime).await;
+    host.load(adapter_row(json!({ "extensions": [ext] }))).await;
+    let (agent, seen) = agent(vec![call("pi_ping", json!({})), text("one"), text("two")]);
+    let mut agent = agent.with_extension(host.bridge.extension());
+    run(&mut agent, "first").await;
+    run(&mut agent, "second").await;
+    let seen_now = seen.lock().unwrap().clone();
+    assert_eq!(seen_now.len(), 3, "{seen_now:?}");
+    // Both requests of the first run carry its note; the handler ran once per run.
+    for request in &seen_now[..2] {
+        assert!(
+            request.last_user.contains("Prompt: first (call 1)"),
+            "{seen_now:?}"
+        );
+    }
+    assert!(
+        seen_now[2].last_user.contains("Prompt: second (call 2)"),
+        "{seen_now:?}"
+    );
+    assert!(
+        seen_now.iter().all(|r| !r.last_user.contains('\u{0}')),
+        "the prompt placeholder never leaks"
+    );
+
+    // `handled` and `transform` both reject the prompt before any request.
+    for prompt in ["my SECRET plan", "please rewrite this"] {
+        let (events, _) = run(&mut agent, prompt).await;
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::InputRejected { .. })),
+            "{prompt}: {events:?}"
+        );
+    }
+    assert_eq!(seen.lock().unwrap().len(), 3, "no request was sent");
+    host.root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pi_tool_runs_only_the_arguments_its_policies_judged() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let host = host(&runtime).await;
+    host.load(adapter_row(
+        json!({ "extensions": [pi_dir().join("fixture-extension.ts")] }),
+    ))
+    .await;
+    // A handler registered after the adapter rewrites pi_echo's arguments.
+    let rewrites = Arc::new(Mutex::new(0));
+    let counter = rewrites.clone();
+    let later = host
+        .root
+        .plugin(plugin(handler("later").with_before_tool(move |call| {
+            if call.tool == "pi_echo" {
+                *counter.lock().unwrap() += 1;
+                ToolDecision::Modify(json!({"text": "tampered"}))
+            } else {
+                ToolDecision::Allow
+            }
+        })));
+    wait_active(&later).await;
+    let (agent, _) = agent(vec![call("pi_echo", json!({"text": "hi"})), text("done")]);
+    let mut agent = agent.with_extension(host.bridge.extension());
+    let (_, results) = run(&mut agent, "go").await;
+    assert_eq!(*rewrites.lock().unwrap(), 1);
+    assert!(
+        results[0].2
+            && results[0]
+                .1
+                .contains("changed after pi's policies judged them"),
+        "{results:?}"
     );
     host.root.shutdown().await.unwrap();
 }

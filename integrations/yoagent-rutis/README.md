@@ -322,37 +322,60 @@ onto one handler, following pi 1.1.0's own runner and agent loop:
 
 | pi | yoagent |
 |---|---|
-| `pi.registerTool` | a tool, while pi would activate it (exposure `direct` / `model-only`, `defaultActive` not false; the first registration of a name wins). Arguments go through `prepareArguments` and pi's validation before any policy sees them, and `execute` gets what the policies left (as in pi) with the bridge's cancel handle as its signal; a throw or `isError` is an error result. Tools registered at `session_start` are offered too |
-| `on("tool_call")` | `before_tool` for every call, yoagent's built-ins under pi's names (`bash`, `read_file`→`read`, `write_file`→`write`, `edit_file`→`edit` with `edits`, `search`→`grep` with `glob`/`ignoreCase` (yoagent's search is case-insensitive unless asked, pi's grep the reverse; translated), `list_files`→`find`; config `toolNames` overrides): `{ block }` denies, in-place changes to `event.input` rewrite the arguments, a throwing handler blocks |
-| `on("tool_result")` | `after_tool`: content, details and isError edits, chained; only the fields a handler set are applied (a replaced content keeps its text); a throwing handler is reported and skipped |
-| `on("before_agent_start")` | `before_model`, once per run: text added around `event.systemPrompt` becomes a note on the latest user turn. A handler that throws, replaces the prompt or changes `systemPromptOptions` is reported and skipped, the others still count (a warning even under `strict`: a run cannot be refused at load, so a policy that replaces the prompt — a "read-only mode" — silently does not apply); a returned `message` is skipped, the same handler's addition kept |
-| `on("session_start")` / `on("session_shutdown")` | when the adapter loads / unloads |
+| `pi.registerTool` | a tool, while pi would activate it (exposure `direct` / `model-only`, `defaultActive` not false, in the `setActiveTools` allowlist if one was set; the first registration of a name wins). Arguments go through `prepareArguments` and pi's validation before any policy sees them, and `execute` runs only with the arguments the policies left — a call another handler rewrote afterwards is not run. A throw or `isError` is an error result (non-text blocks become `[image block]` text) |
+| `pi.setActiveTools` | an allowlist: other tools are not offered, and calls to them — yoagent's built-ins under pi's names included — are denied; `getActiveTools` / `getAllTools` answer from the same view |
+| `on("tool_call")` | `before_tool` for every call. yoagent's built-ins are judged under pi's names (`bash`, `read_file`→`read`, `write_file`→`write`, `edit_file`→`edit` with `edits`, `search`→`grep` with `glob` / `ignoreCase` (yoagent's search is case-insensitive unless asked, pi's grep the reverse), `list_files`→`find`; config `toolNames` adds more), with a relative `path` resolved against `cwd` first so the tool acts where the policy looked. `{ block }` denies (`terminate: true` also stops the run at its next model request); in-place changes to `event.input` rewrite the arguments, and one the yoagent tool cannot take (a second edit, a `timeout` on `bash`) denies the call; a throwing handler blocks, as in pi |
+| `on("tool_result")` | `after_tool`: content, details and isError edits, chained; only the fields a handler set are applied (a replaced content keeps only its text). A throwing handler **withholds the result** — unlike pi, which skips it: a failed redaction must not let the raw output through |
+| `on("input")` | `on_input`: `handled` rejects the prompt (it never reaches the agent, as in pi); `transform` and a throwing handler reject it too (yoagent cannot rewrite a prompt) |
+| `on("before_agent_start")` | `before_model`: the handlers run once per run, and the text they add around `event.systemPrompt` is a note on the latest user turn of every request of that run. A handler that throws, replaces the prompt or changes `systemPromptOptions` is skipped with a warning — even under `strict` (a run cannot refuse the load), so a policy that replaces the prompt (a "read-only mode") does not apply; the others still count. A returned `message` is dropped, the same handler's addition kept |
+| `on("session_start")` / `on("session_shutdown")` | when the adapter loads / unloads; a `session_start` handler that throws refuses the load (its extension may be missing its policies) |
+
+**What refuses the load** (fail closed, `strict` or not): an extension that
+fails to load (nothing loads, not just the bad one); a `session_start`
+failure; a handler for an event yoagent never fires that would decide or
+rewrite what the agent does (`context`, `context_with_system`,
+`message_end`, `before_provider_request`, `before_provider_headers`) unless
+the host lists it in `allowUnmapped`; and a pi tool named exactly like a
+yoagent built-in (pi's sandboxed `bash`) unless the host left that built-in
+out and says so in `withoutBuiltins` — otherwise yoagent's own tool would
+win the merge and run unsandboxed. Anything of this kind registered after
+load (inside a handler) stops the adapter instead: every later call denied,
+prompt rejected, run stopped.
 
 **Overrides.** An extension tool that replaces one of pi's built-ins under
 another name than yoagent's (`read`, `write`, `edit`, `grep`, `find`) makes
 the adapter deny yoagent's counterpart (`read_file`, ...), so the model
-cannot go around it. One named exactly like a yoagent tool (pi's sandboxed
-`bash`) loses to yoagent's when the host installs both — and the adapter
-would still prepare and validate yoagent's calls with the pi tool's schema:
-it warns at load (fails under `strict`), and the host must leave its own
-tool out (`--without bash` in the example).
+cannot go around it.
 
-The rest does not map and is reported when an extension registers it (a
-warning; config `strict: true` makes it a load failure): events that rewrite
-or continue the conversation (`context`, `message_end`, `turn_end`, ...) or
-steer pi's session tree, commands, shortcuts, flags and renderers (a host
-app's), and model providers, virtual models and MCP servers (checked after
-`session_start`). Runtime actions
-(`pi.sendMessage`, ...) throw pi's own "not initialized" error. There is no
-UI: `ctx.hasUI` is false and `ctx.ui` behaves as in pi's print mode
-(`confirm` answers false), so a policy that would ask the user denies.
+**What is only reported** (a warning on the Node process's stderr; config
+`strict: true` makes it a load failure): every other unfired event —
+observers such as `agent_end` or `tool_execution_*`, pi's session events,
+the boundary events `turn_end` / `agent_before_settle` — commands,
+shortcuts, flags, renderers, model providers, virtual models and MCP
+servers. Other runtime actions (`pi.sendMessage`, `pi.appendEntry`, ...)
+throw "not available in yoagent". There is no UI: `ctx.hasUI` is false and
+`ctx.ui` behaves as in pi's print mode (`confirm` answers false), so a
+policy that would ask the user denies.
 
-Config: `extensions` (files, loaded in order), `cwd` (the project the
-extensions see; default the runtime's), `name`, `toolNames`, `strict`. Load
-it as a row of a Node runtime whose `package.json` is `plugins/pi/`'s
-(pi 1.1.0, pinned exactly: the adapter imports pi's loader by file, since the
-package exports only the variant that also loads `~/.pi`; check it on every
-pi upgrade), with `yoagent` shared in the loader's catalog.
+**Host setup.** Install the bridge's extension with `.require_policy()`, so
+a run that starts before the adapter registered (or after it failed to
+load) has every tool call denied rather than unjudged; and with
+`.rechecks_modified_calls()` when other handlers can rewrite calls after
+the adapter (pi tools are protected by the adapter itself; yoagent's
+built-ins are not). Policies cover what the agent calls under the names pi
+knows: a pi policy for `write` does not see a `bash` command that writes
+the same file (as in pi), nor tools outside `TOOL_NAMES` / `toolNames`
+(MCP tools, sub-agents, your own) under any but their own names.
+
+Config: `extensions` (files, or directories with an `index.ts` /
+`index.js`, loaded in order; relative paths resolve against `cwd`), `cwd`
+(the project the extensions see; default the runtime's), `name`,
+`toolNames`, `withoutBuiltins`, `allowUnmapped`, `strict`. Load it as a
+row of a Node runtime whose `package.json` is `plugins/pi/`'s (pi 1.1.0,
+pinned exactly: the adapter imports pi's loader by file, since the package
+exports only `discoverAndLoadExtensions`, which also loads
+`<cwd>/.pi/extensions` and `~/.pi/agent/extensions`; check it on every pi
+upgrade), with `yoagent` shared in the loader's catalog.
 
 ```sh
 (cd plugins/pi && npm ci)
@@ -364,16 +387,18 @@ cargo run --features node --example pi_extensions -- --live --prompt "..." [--wi
 The example runs yoagent's own tools in the temporary project the
 extensions see (it is the process's working directory).
 
-Tried with eleven of pi's own examples, unchanged, scripted and live with
-DeepSeek: `hello`, `todo`, `tool-override` (`read`; yoagent's `read_file` is
-then denied), `truncated-tool` (`rg`) and `dynamic-tools` offer working
-tools; `protected-paths` and `permission-gate` judge yoagent's own
-`write_file` and `bash`; `claude-rules` loads (its note needs a project with
-`.claude/rules/`, which these runs did not have). `pirate` only acts after its `/pirate` command, and
-`dirty-repo-guard` and `confirm-destructive` only on pi's session events, so
-under the adapter they load and do nothing (reported). `tests/pi_test.rs`
-covers the adapter offline with two fixture extensions
-(`plugins/pi/fixture-extension.ts`, `plugins/pi/fixture-extra.ts`).
+Tried (pi 1.1.0, October 2026) with eleven of pi's own examples, unchanged,
+scripted and live with DeepSeek: `hello`, `todo`, `tool-override` (`read`;
+yoagent's `read_file` is then denied), `truncated-tool` (`rg`) and
+`dynamic-tools` offer working tools; `protected-paths` and
+`permission-gate` judge yoagent's own `write_file` and `bash`;
+`claude-rules` loads (its note needs a project with `.claude/rules/`, which
+these runs did not have). `pirate` only acts after its `/pirate` command,
+and `dirty-repo-guard` and `confirm-destructive` only on pi's session
+events, so under the adapter they load and do nothing (reported).
+`tests/pi_test.rs` covers the adapter offline with the fixture extensions
+(`plugins/pi/fixture-extension.ts`, `plugins/pi/fixture-extra.ts`) and small
+ones written per test.
 
 ## Semantics
 

@@ -17,6 +17,7 @@ exclude = [
     "plugins/node_modules",
     "plugins/.venv",
     "plugins/dsh/node_modules",
+    "plugins/pi/node_modules",
     "examples/rutis-agent-tools",
 ]
 # yoagent's MSRV; rutis 0.6.1 declares 1.85.

@@ -1,5 +1,6 @@
 // A second pi extension for `tests/pi_test.rs`, loaded after
-// `fixture-extension.ts`: the less common paths.
+// `fixture-extension.ts`: the less common paths. Markers in the arguments
+// (`echo bounded`, `echo BREAK`, `echo stop-now`) select a case.
 
 import { type ExtensionAPI } from '@earendil-works/pi-coding-agent'
 import { Type } from 'typebox'
@@ -66,13 +67,28 @@ export default function (pi: ExtensionAPI) {
     if (event.toolName === 'grep' && event.input.glob === '*.md' && event.input.ignoreCase === true) {
       event.input.glob = '*.txt'
     }
+    // yoagent's list_files, as pi's find: the required pattern defaults to '*'.
+    if (event.toolName === 'find' && event.input.pattern === '*') event.input.path = `${event.input.path}/inner`
+    // A field yoagent's bash does not have: denied, not silently dropped.
+    if (event.toolName === 'bash' && event.input.command === 'echo bounded') event.input.timeout = 30
+    if (event.toolName === 'bash' && event.input.command === 'echo stop-now') {
+      return { block: true, reason: 'stopping the run', terminate: true }
+    }
     return undefined
   })
 
   // A details-only edit must keep the content (images included).
   pi.on('tool_result', async (event) => (event.toolName === 'read' ? { details: { seen: true } } : undefined))
+  // A redaction that fails: the result is withheld.
+  pi.on('tool_result', async (event) => {
+    const text = event.content.map((block) => (block.type === 'text' ? block.text : '')).join('')
+    if (text.includes('BREAK')) throw new Error('redaction crashed')
+    return undefined
+  })
 
-  // Each is skipped on its own; the first fixture's addition still counts.
+  // The crashing and the prompt-replacing handlers are skipped; the
+  // message-returning one loses only its message; the first fixture's
+  // addition and the last handler's still count.
   pi.on('before_agent_start', async () => {
     throw new Error('prompt hook crashed')
   })
