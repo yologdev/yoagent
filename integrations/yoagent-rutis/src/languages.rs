@@ -142,6 +142,7 @@ impl HostDispatch for Service {
     fn invoke(&self, method: &str, args: Value) -> Reply {
         match method {
             "register" => self.register(args),
+            "log" => log(args),
             other => Err(invalid(format!(
                 "the yoagent service has no method `{other}`"
             ))),
@@ -151,9 +152,38 @@ impl HostDispatch for Service {
     fn methods(&self) -> Option<Json> {
         // Synchronous: `register` returns the disposer the plugin passes to
         // `ctx.effect`. It reads the handler's members back while the plugin
-        // waits, on the same call chain.
-        Some(json!({ "register": "sync" }))
+        // waits, on the same call chain. `log` is fire-and-forget.
+        Some(json!({ "register": "sync", "log": "async" }))
     }
+}
+
+/// Longest message `log` writes; the rest is cut (a plugin cannot flood the host's logs).
+const MAX_LOG_CHARS: usize = 8 * 1024;
+
+/// `log(level, message)`: a plugin's diagnostic in the host's `tracing`
+/// output (target `yoagent_rutis::plugin`), not on the plugin process's
+/// stderr. Levels `error`, `warn`, `info`, `debug`; any other is `warn`.
+fn log(args: Value) -> Reply {
+    let mut args = args.list()?.into_iter();
+    let mut text = |what: &str| -> Result<String, _> {
+        match args.next() {
+            Some(value) => session::decode::<String>(value.json()?),
+            None => Err(invalid(format!("log(level, message): missing the {what}"))),
+        }
+    };
+    let level = text("level")?;
+    let message = text("message")?;
+    let message: String = match message.char_indices().nth(MAX_LOG_CHARS) {
+        Some((cut, _)) => format!("{}… (cut)", &message[..cut]),
+        None => message,
+    };
+    match level.as_str() {
+        "error" => tracing::error!(target: "yoagent_rutis::plugin", "{message}"),
+        "info" => tracing::info!(target: "yoagent_rutis::plugin", "{message}"),
+        "debug" => tracing::debug!(target: "yoagent_rutis::plugin", "{message}"),
+        _ => tracing::warn!(target: "yoagent_rutis::plugin", "{message}"),
+    }
+    Ok(Value::Undefined)
 }
 
 /// `register`'s third argument.

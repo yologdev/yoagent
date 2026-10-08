@@ -1,0 +1,51 @@
+name: pi latest
+
+# The pi extensions adapter (integrations/yoagent-rutis/plugins/pi) pins pi
+# exactly (1.1.0) and imports pi's extension loader by its internal file path
+# (dist/core/extensions/loader.js), which pi's export map does not promise.
+# This job runs the adapter's end-to-end tests against the LATEST pi packages
+# weekly, so a pi release that breaks the adapter shows up here before anyone
+# bumps the pin. A red run means: check the adapter against that pi release.
+# It never changes the pin or the lockfile.
+on:
+  schedule:
+    # Tuesdays 04:23 UTC.
+    - cron: "23 4 * * 2"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  MANIFEST: integrations/yoagent-rutis/Cargo.toml
+  PI: integrations/yoagent-rutis/plugins/pi
+
+permissions:
+  contents: read
+
+jobs:
+  pi-latest:
+    name: pi adapter vs latest pi
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: integrations/yoagent-rutis
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install the pinned packages, then the latest pi on top
+        run: |
+          npm ci --prefix "$PI"
+          npm install --prefix "$PI" --no-save \
+            @earendil-works/pi-coding-agent@latest \
+            @earendil-works/pi-ai@latest \
+            @earendil-works/pi-tui@latest \
+            typebox@latest
+          echo "pi under test:"
+          npm ls --prefix "$PI" @earendil-works/pi-coding-agent @earendil-works/pi-ai @earendil-works/pi-tui typebox
+      - name: The adapter's tests against it
+        env:
+          YOAGENT_RUTIS_REQUIRE_RUNTIMES: "1"
+        run: cargo test --manifest-path "$MANIFEST" --features node --test pi_test

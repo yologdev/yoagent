@@ -39,6 +39,14 @@ export interface Yoagent {
    * `on_input` rejects, its `after_tool` withholds the result.
    */
   register(name: string, handler: Handler, options?: Options): () => void
+  /**
+   * Write a diagnostic to the host's logs (its `tracing` output, target
+   * `yoagent_rutis::plugin`) rather than this process's stderr, which a
+   * terminal or service host may not show. Levels `error`, `warn`, `info`,
+   * `debug`; messages over 8 KiB are cut. Fire-and-forget. Absent on hosts
+   * older than yoagent-rutis 0.2: fall back to `console.warn`.
+   */
+  log?(level: 'error' | 'warn' | 'info' | 'debug', message: string): Promise<void>
 }
 
 export interface Options {

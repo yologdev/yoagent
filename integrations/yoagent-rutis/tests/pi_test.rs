@@ -389,6 +389,8 @@ async fn pi_semantics_on_the_less_common_paths() {
             ("bash", json!({"command": "echo bounded"})),
             // Relative: resolved against the extensions' cwd, not the test's.
             ("write_file", json!({"path": "rel.txt", "content": "here"})),
+            // Nested calls from a pi tool.
+            ("pi_compose", json!({})),
             // Blocked with terminate: the run stops before its next request.
             ("bash", json!({"command": "echo stop-now"})),
         ]),
@@ -505,9 +507,26 @@ async fn pi_semantics_on_the_less_common_paths() {
         std::fs::read_to_string(project.path().join("rel.txt")).unwrap(),
         "here"
     );
+    // ctx.executeTool: a nested pi tool runs (its result redacted, its id under
+    // the parent's), a policy can block one, and yoagent's tools are out of reach.
+    let (_, text, is_error) = result(15);
+    assert!(!is_error, "{results:?}");
+    assert!(text.contains("callable: true"), "{text}");
+    assert!(
+        text.contains("/1 pi_echo ok: pi echo: nested [redacted]"),
+        "{text}"
+    );
+    assert!(
+        text.contains("/2 pi_echo error:") && text.contains("policy crashed"),
+        "{text}"
+    );
+    assert!(
+        text.contains("/3 bash error: Tool bash not found"),
+        "{text}"
+    );
     // terminate: true denied the call and stopped the run before its next request.
     assert!(
-        result(15).2 && result(15).1.contains("stopping the run"),
+        result(16).2 && result(16).1.contains("stopping the run"),
         "{results:?}"
     );
     assert_eq!(seen_now.len(), 1, "the run stopped: {seen_now:?}");
@@ -851,5 +870,47 @@ async fn a_pi_tool_runs_only_the_arguments_its_policies_judged() {
                 .contains("changed after pi's policies judged them"),
         "{results:?}"
     );
+    host.root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deciding_event_registered_mid_run_stops_that_run() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let ext = extension(
+        dir.path(),
+        "late-context.ts",
+        r#"import { Type } from 'typebox'
+export default function (pi) {
+  pi.registerTool({
+    name: 'pi_arm', label: 'arm', description: 'registers a context handler', parameters: Type.Object({}),
+    async execute() {
+      pi.on('context', () => ({ messages: [] }))
+      return { content: [{ type: 'text', text: 'armed' }], details: undefined }
+    },
+  })
+}
+"#,
+    );
+    let host = host(&runtime).await;
+    host.load(adapter_row(json!({ "extensions": [ext] }))).await;
+    let (agent, seen) = agent(vec![
+        call("pi_arm", json!({})),
+        call("pi_arm", json!({})),
+        text("never requested"),
+    ]);
+    let mut agent = agent.with_extension(host.bridge.extension());
+    let (_, results) = run(&mut agent, "go").await;
+    // The handler appeared during the run: its next model request is stopped.
+    assert_eq!(results.len(), 1, "{results:?}");
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        1,
+        "the second request never went out"
+    );
+    let last = format!("{:?}", agent.messages().last());
+    assert!(last.contains("context"), "{last}");
     host.root.shutdown().await.unwrap();
 }

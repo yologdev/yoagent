@@ -143,7 +143,9 @@ export default definePlugin<Config>({
         return { type: 'image', data: Buffer.from(stored.data).toString('base64'), mimeType: stored.ref.mediaType }
       } catch (error) {
         if (signal.aborted) throw error
-        console.warn(`[dsh] image ${ref.attachmentId} could not be read: ${error}`)
+        const message = `[dsh] image ${ref.attachmentId} could not be read: ${error}`
+        if (typeof yoagent.log === 'function') yoagent.log('warn', message).catch(() => console.warn(message))
+        else console.warn(message)
         return { type: 'text', text: label }
       }
     }

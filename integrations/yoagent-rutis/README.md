@@ -230,6 +230,11 @@ def apply(ctx, config):
     return { content: [{ type: 'text', text: 'the chart' }, { type: 'image', data: png.toString('base64'), mimeType: 'image/png' }] }
   }
   ```
+- **Logs reach the host.** `yoagent.log(level, message)` (`error`,
+  `warn`, `info`, `debug`; fire-and-forget; over 8 KiB cut) writes to the
+  host's `tracing` output under the target `yoagent_rutis::plugin`, where a
+  terminal or service host shows it — a runtime process's own stderr may go
+  nowhere. Absent on older hosts: fall back to `console.warn`.
 - **The bridge never loads plugins**: the host does, typically with
   [rutis-loader](https://crates.io/crates/rutis-loader) rows, and must share
   `yoagent` in the loader's catalog (`catalog.register_shared("yoagent")` or
@@ -351,6 +356,7 @@ onto one handler, following pi 1.1.0's own runner and agent loop:
 | pi | yoagent |
 |---|---|
 | `pi.registerTool` | a tool, while pi would activate it (exposure `direct` / `model-only`, `defaultActive` not false, in the `setActiveTools` allowlist if one was set; the first registration of a name wins). Arguments go through `prepareArguments` and pi's validation before any policy sees them, and `execute` runs only with the arguments the policies left — a call another handler rewrote afterwards is not run. A throw or `isError` is an error result; text and image blocks pass through (pi's shape is yoagent's) |
+| `ctx.executeTool` | another pi tool, the way pi runs a nested call: prepared, validated, judged by `tool_call` (with `parentToolCallId`), its result through `tool_result`; never rejects (an unknown tool, a block or a throw is `isError`). yoagent's own tools are not reachable from it; `ctx.tools` lists the callable ones |
 | `pi.setActiveTools` | an allowlist over the tools pi knows — yoagent's built-ins under pi's names and the extensions' tools: those outside it are not offered and their calls are denied. Tools pi does not know (MCP tools, sub-agents, the host's own) are not affected, as in pi. As in pi, a tool named in it is activated even when `defaultActive` is false (not when hidden), and a tool registered later that pi would activate joins it. `getActiveTools` / `getAllTools` answer from the same view |
 | `on("tool_call")` | `before_tool` for every call. yoagent's built-ins are judged under pi's names (`bash`, `read_file`→`read`, `write_file`→`write`, `edit_file`→`edit` with `edits`, `search`→`grep` with `glob` / `ignoreCase` (yoagent's search is case-insensitive unless asked, pi's grep the reverse), `list_files`→`find`; config `toolNames` adds more), with a relative `path` resolved against `cwd` first so the tool acts where the policy looked (yoagent's built-ins only: another tool's `path` may be a repository's). `{ block }` denies (`terminate: true` also stops the run at its next model request — stricter than pi, which ends only a batch whose results all set it); in-place changes to `event.input` rewrite the arguments, and one the yoagent tool cannot take (a second edit, a `timeout` on `bash`) denies the call; a throwing handler blocks, as in pi |
 | `on("tool_result")` | `after_tool`: content, details and isError edits, chained; only the fields a handler set are applied (a replaced content keeps its text and image blocks). A throwing handler **withholds the result** — unlike pi, which skips it: a failed redaction must not let the raw output through |
@@ -367,15 +373,16 @@ the host lists it in `allowUnmapped`; and a pi tool named exactly like a
 yoagent built-in (pi's sandboxed `bash`) unless the host left that built-in
 out and says so in `withoutBuiltins` — otherwise yoagent's own tool would
 win the merge and run unsandboxed. Anything of this kind registered after
-load (inside a handler) stops the adapter instead: every later call denied,
-prompt rejected, run stopped.
+load (inside a handler or a tool) is caught at the next model request or
+tool call and stops the adapter instead: that run stopped, every later call
+denied, prompt rejected.
 
 **Overrides.** An extension tool that replaces one of pi's built-ins under
 another name than yoagent's (`read`, `write`, `edit`, `grep`, `find`) makes
 the adapter deny yoagent's counterpart (`read_file`, ...), so the model
 cannot go around it.
 
-**What is only reported** (a warning on the Node process's stderr; config
+**What is only reported** (a warning in the host's `tracing` logs, through the bridge's `log`; config
 `strict: true` makes it a load failure): every other unfired event —
 observers such as `agent_end` or `tool_execution_*`, pi's session events,
 the boundary events `turn_end` / `agent_before_settle` — commands,

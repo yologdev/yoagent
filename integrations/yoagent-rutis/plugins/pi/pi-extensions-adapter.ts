@@ -25,6 +25,12 @@
 //                           run. A throw or `isError` is an error result;
 //                           text and image blocks pass through as they are
 //                           (pi's shape is yoagent's).
+//                           `ctx.executeTool` calls another pi tool the way pi
+//                           does (prepared, validated, judged by `tool_call`
+//                           with `parentToolCallId`, results through
+//                           `tool_result`; never rejects); yoagent's own tools
+//                           are not reachable from it. `ctx.tools` lists the
+//                           callable ones.
 //                           A tool that overrides one of pi's built-ins
 //                           (`read`, `edit`, ...) makes the adapter deny
 //                           yoagent's counterpart (`read_file`, ...), so the
@@ -85,10 +91,12 @@
 // `tool_execution_*`, pi's session events, the boundary events `turn_end` /
 // `agent_before_settle`), commands, shortcuts, flags, renderers, model
 // providers, virtual models and MCP servers are reported (a warning, or a
-// load failure with `strict`). One registered after load is reported then,
-// and a deciding one stops the adapter: every later call denied. Other
-// runtime actions (`pi.sendMessage`, `pi.appendEntry`, ...) throw "not
-// available in yoagent". `ctx.hasUI` is false and `ctx.ui` behaves as in
+// load failure with `strict`). One registered after load (in a handler or a
+// tool) is reported at the next model request or tool call, and a deciding
+// one stops the adapter: that run, and every later call, refused. Warnings
+// go to the host's logs (`yoagent.log`, else stderr). Other runtime actions
+// (`pi.sendMessage`, `pi.appendEntry`, ...) throw "not available in
+// yoagent". `ctx.hasUI` is false and `ctx.ui` behaves as in
 // pi's print mode: `confirm` answers false, `select` and `input` nothing, so
 // a policy that would ask the user denies instead.
 
@@ -214,6 +222,11 @@ const PLAIN_THEME = new Proxy({} as Record<string, unknown>, {
     key === 'then' ? undefined : key === 'name' ? 'plain' : (...args: unknown[]) => args[args.length - 1],
 })
 
+/** Where diagnostics go: the host's logs through `yoagent.log` once `apply` has the service, else stderr. */
+let report = (level: 'error' | 'warn' | 'info' | 'debug', message: string) => {
+  console.warn(message)
+}
+
 /** pi's print-mode UI (its `noOpUIContext`): nothing to show, no one to ask. */
 const NO_UI = new Proxy(
   {
@@ -222,7 +235,8 @@ const NO_UI = new Proxy(
     input: async () => undefined,
     editor: async () => undefined,
     custom: async () => undefined,
-    notify: (message: string, level?: string) => console.warn(`[pi ${level ?? 'info'}] ${message}`),
+    notify: (message: string, level?: string) =>
+      report(level === 'error' ? 'error' : level === 'warning' ? 'warn' : 'info', `[pi ${level ?? 'info'}] ${message}`),
     onTerminalInput: () => () => {},
     getEditorText: () => '',
     getAllThemes: () => [],
@@ -347,6 +361,12 @@ export default definePlugin<Config>({
   },
   async apply(ctx, config) {
     const yoagent = ctx.use<Yoagent>('yoagent')
+    if (typeof yoagent.log === 'function') {
+      const log = yoagent.log.bind(yoagent)
+      report = (level, message) => {
+        log(level, message).catch(() => console.warn(message))
+      }
+    }
     const cwd = config.cwd ?? process.cwd()
     const names = new Map(Object.entries({ ...TOOL_NAMES, ...config.toolNames }))
     const withoutBuiltins = new Set(config.withoutBuiltins ?? [])
@@ -358,7 +378,7 @@ export default definePlugin<Config>({
     if (loaded.errors.length > 0) {
       throw new Error(`pi extensions failed to load: ${loaded.errors.map((e) => `${e.path}: ${e.error}`).join('; ')}`)
     }
-    for (const w of loaded.warnings ?? []) console.warn(`[pi] ${short(w.path)}: ${w.warning}`)
+    for (const w of loaded.warnings ?? []) report('warn', `[pi] ${short(w.path)}: ${w.warning}`)
     const extensions = loaded.extensions
     const runtime = loaded.runtime
 
@@ -396,13 +416,121 @@ export default definePlugin<Config>({
         throw new Error('ctx.compact() is not available in yoagent')
       },
     })
-    const toolContext = (signal: AbortSignal) => ({
-      ...context(signal),
-      tools: [],
-      executeTool: async () => {
-        throw new Error('ctx.executeTool() is not available in yoagent')
-      },
-    })
+    /**
+     * The pi tools `ctx.executeTool` can call: pi's callable exposures
+     * (`direct` while available, `codemode`, `deferred`; never `model-only`
+     * or `hidden`). yoagent's own tools are not reachable from here.
+     */
+    const callable = () => {
+      const offered = available()
+      return new Map(
+        [...registered()].filter(([name, tool]) => {
+          const exposure = tool.exposure ?? 'direct'
+          return exposure === 'direct' ? offered.has(name) : exposure === 'codemode' || exposure === 'deferred'
+        }),
+      )
+    }
+
+    type Outcome = {
+      toolCall: { id: string; name: string; arguments: unknown }
+      result: { content: Block[]; details: unknown }
+      isError: boolean
+      durationMs?: number
+    }
+
+    /**
+     * A nested call, as pi's `executeTool` makes it: prepared and validated,
+     * judged by the `tool_call` handlers (with `parentToolCallId`), run, and
+     * passed through the `tool_result` handlers. Never rejects: an unknown
+     * tool, a validation error, a block or a throw is `isError`.
+     */
+    const executeNested = async (
+      runId: string,
+      parentId: string,
+      id: string,
+      name: string,
+      args: unknown,
+      signal: AbortSignal,
+      depth: number,
+    ): Promise<Outcome> => {
+      const failed = (text: string, input: unknown = args): Outcome => ({
+        toolCall: { id, name, arguments: input },
+        result: { content: [{ type: 'text', text }], details: undefined },
+        isError: true,
+      })
+      if (depth > 8) return failed('nested tool calls are limited to 8 levels')
+      const tool = callable().get(name)
+      if (!tool) return failed(`Tool ${name} not found (yoagent's own tools cannot be called from a pi tool)`)
+      let input: Args
+      try {
+        const copy = structuredClone(args)
+        const prepared = tool.prepareArguments ? tool.prepareArguments(copy) : copy
+        input = validateToolArguments(tool as never, { name, arguments: prepared } as never) as Args
+      } catch (error) {
+        return failed(message(error))
+      }
+      for (const { ext, fn } of handlers('tool_call')) {
+        const event = { type: 'tool_call', toolCallId: id, parentToolCallId: parentId, toolName: name, input }
+        let result: { block?: boolean; reason?: string; terminate?: boolean } | undefined
+        try {
+          result = (await fn(event, context(signal))) as typeof result
+        } catch (error) {
+          return failed(`pi extension ${short(ext.path)} failed: ${message(error)}`, input)
+        }
+        if (result?.block) {
+          const reason = result.reason ?? `blocked by pi extension ${short(ext.path)}`
+          if (result.terminate === true) terminated.set(runId, reason)
+          return failed(reason, input)
+        }
+      }
+      const started = performance.now()
+      let out: { content?: Block[]; details?: unknown; isError?: boolean }
+      try {
+        out = await tool.execute(id, input, signal, undefined, toolContext(signal, runId, id, depth + 1))
+      } catch (error) {
+        return { ...failed(message(error), input), durationMs: performance.now() - started }
+      }
+      const event = {
+        type: 'tool_result',
+        toolCallId: id,
+        parentToolCallId: parentId,
+        toolName: name,
+        input,
+        content: out.content ?? [],
+        details: out.details,
+        isError: out.isError === true,
+      }
+      for (const { ext, fn } of handlers('tool_result')) {
+        try {
+          const edit = (await fn(event, context(signal))) as { content?: Block[]; details?: unknown; isError?: boolean } | undefined
+          if (edit?.content !== undefined) event.content = edit.content
+          if (edit?.details !== undefined) event.details = edit.details
+          if (edit?.isError !== undefined) event.isError = edit.isError
+        } catch (error) {
+          // As at the top level: a failed redaction must not let the raw output through.
+          return failed(`pi tool_result handler ${short(ext.path)} failed, the result is withheld: ${message(error)}`, input)
+        }
+      }
+      return {
+        toolCall: { id, name, arguments: input },
+        result: { content: event.content, details: event.details },
+        isError: event.isError,
+        durationMs: performance.now() - started,
+      }
+    }
+
+    /** A tool's `ctx`: the extension context, plus `tools` and `executeTool` for nested calls. */
+    const toolContext = (signal: AbortSignal, runId: string, callId: string, depth = 0) => {
+      let nested = 0
+      return {
+        ...context(signal),
+        get tools() {
+          return [...callable().values()]
+        },
+        executeTool: (name: string, args: unknown, options?: { signal?: AbortSignal }) =>
+          executeNested(runId, callId, `${callId}/${++nested}`, name, args, options?.signal ?? signal, depth),
+      }
+    }
 
     /** Every handler of `event`, in extension load and registration order. */
     const handlers = (event: string) =>
@@ -535,12 +663,12 @@ export default definePlugin<Config>({
           `${newDeciding.join('; ')} (list an event in allowUnmapped to accept that it goes unenforced)`
         if (atLoad) throw new Error(text)
         refusal = `the pi extensions adapter stopped: ${text}`
-        console.warn(`[pi] ${refusal}`)
+        report('warn', `[pi] ${refusal}`)
       }
       if (newIgnored.length > 0) {
         const text = `not available in yoagent, ignored: ${newIgnored.join('; ')}`
         if (atLoad && config.strict) throw new Error(`pi extensions use what does not map — ${text}`)
-        console.warn(`[pi] ${text}`)
+        report('warn', `[pi] ${text}`)
       }
     }
 
@@ -555,7 +683,7 @@ export default definePlugin<Config>({
           `one too, it runs instead of the pi tool. Leave yoagent's out and list it in withoutBuiltins`
         if (atLoad) throw new Error(text)
         refusal = `the pi extensions adapter stopped: ${text}`
-        console.warn(`[pi] ${refusal}`)
+        report('warn', `[pi] ${refusal}`)
       }
     }
 
@@ -582,7 +710,7 @@ export default definePlugin<Config>({
             | { systemPrompt?: unknown; message?: unknown }
             | undefined
           if (result?.message !== undefined) {
-            console.warn(`[pi] ${short(ext.path)} before_agent_start: its message dropped (yoagent cannot inject one)`)
+            report('warn', `[pi] ${short(ext.path)} before_agent_start: its message dropped (yoagent cannot inject one)`)
           }
           if (result?.systemPrompt !== undefined) {
             if (typeof result.systemPrompt !== 'string' || !result.systemPrompt.includes(PROMPT_MARK)) {
@@ -592,7 +720,7 @@ export default definePlugin<Config>({
           }
         } catch (error) {
           // As in pi: one handler's failure is reported, the others still count.
-          console.warn(`[pi] ${short(ext.path)} before_agent_start skipped, so it does not apply: ${message(error)}`)
+          report('warn', `[pi] ${short(ext.path)} before_agent_start skipped, so it does not apply: ${message(error)}`)
         }
       }
       const added = systemPrompt.split(PROMPT_MARK).map((part) => part.trim()).filter(Boolean)
@@ -614,7 +742,7 @@ export default definePlugin<Config>({
         try {
           await fn({ type: 'session_shutdown', reason: 'quit' }, context())
         } catch (error) {
-          console.warn(`[pi] ${short(ext.path)} session_shutdown: ${message(error)}`)
+          report('warn', `[pi] ${short(ext.path)} session_shutdown: ${message(error)}`)
         }
       }
     })
@@ -655,7 +783,7 @@ export default definePlugin<Config>({
             }
           }
           try {
-            const out = await tool.execute(call.call_id, call.args, call.signal, undefined, toolContext(call.signal))
+            const out = await tool.execute(call.call_id, call.args, call.signal, undefined, toolContext(call.signal, call.run_id, call.call_id))
             if (out.isError === true) return { text: text(out.content), details: out.details ?? null, is_error: true }
             return { content: blocks(out.content), details: out.details ?? null }
           } catch (error) {
@@ -664,6 +792,9 @@ export default definePlugin<Config>({
         },
 
         async before_tool(call: ToolCall & Cancellable) {
+          // Registrations made during the run: caught before the next call, not the next run.
+          checkUnmapped(false)
+          checkShadowing(false)
           if (refusal) return { deny: refusal }
           const piTools = available()
           const own = piTools.get(call.tool)
@@ -809,6 +940,8 @@ export default definePlugin<Config>({
         },
 
         async before_model(turn) {
+          checkUnmapped(false)
+          checkShadowing(false)
           if (refusal) return { stop: refusal }
           const stop = terminated.get(turn.run_id)
           if (stop) return { stop }

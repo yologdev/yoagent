@@ -60,6 +60,32 @@ export default function (pi: ExtensionAPI) {
     },
   })
 
+  // Nested calls through ctx.executeTool: a pi tool, one a policy blocks, and
+  // one of yoagent's tools (not reachable). Records each outcome.
+  pi.registerTool({
+    name: 'pi_compose',
+    label: 'Compose',
+    description: 'Calls other tools.',
+    parameters: Type.Object({}),
+    async execute(_id, _params, _signal, _onUpdate, ctx) {
+      const callable = ctx.tools.map((t: { name: string }) => t.name)
+      const outcomes = []
+      for (const [name, args] of [
+        ['pi_echo', { text: 'nested SECRET' }],
+        ['pi_echo', { text: 'boom' }],
+        ['bash', { command: 'echo hi' }],
+      ] as const) {
+        const o = await ctx.executeTool(name, args)
+        const text = o.result.content.map((b: { text?: string }) => b.text ?? '').join('')
+        outcomes.push(`${o.toolCall.id} ${name} ${o.isError ? 'error' : 'ok'}: ${text}`)
+      }
+      return {
+        content: [{ type: 'text', text: `callable: ${callable.includes('pi_echo')}\n${outcomes.join('\n')}` }],
+        details: undefined,
+      }
+    },
+  })
+
   pi.on('tool_call', async (event) => {
     if (event.toolName === 'pi_echo' && event.input.text === 'boom') throw new Error('policy crashed')
     // yoagent's search, as pi's grep: include is pi's glob, and an unset
