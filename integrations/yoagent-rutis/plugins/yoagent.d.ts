@@ -39,6 +39,20 @@ export interface Yoagent {
    * `on_input` rejects, its `after_tool` withholds the result.
    */
   register(name: string, handler: Handler, options?: Options): () => void
+  /**
+   * Write a diagnostic to the host's logs (its `tracing` output, target
+   * `yoagent_rutis::plugin`) rather than this process's stderr, which a
+   * terminal or service host may not show. Levels `error`, `warn`, `info`,
+   * `debug`; messages over 8192 characters are cut. It never rejects: any
+   * message (a non-string is written as JSON) and any context are taken,
+   * other context fields ignored. Pass `{ run_id }` — or a hook argument
+   * itself, which carries it — to attribute the line to its run: it becomes
+   * the event's `run_id` field. Fire-and-forget in JavaScript; in Python it
+   * is a coroutine: `await yoagent.log(...)`, or it is never sent. On a host
+   * without it (yoagent-rutis 0.1.0) rutis's stand-in throws (Python: an
+   * `AttributeError` on access): wrap the call and fall back.
+   */
+  log?(level: 'error' | 'warn' | 'info' | 'debug', message: string, context?: { run_id?: string }): Promise<void>
 }
 
 export interface Options {

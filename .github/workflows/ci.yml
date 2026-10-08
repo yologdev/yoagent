@@ -213,7 +213,7 @@ jobs:
   rutis-bridge:
     name: yoagent-rutis bridge
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     env:
       MANIFEST: integrations/yoagent-rutis/Cargo.toml
     steps:
@@ -223,7 +223,9 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: integrations/yoagent-rutis
+          workspaces: |
+            integrations/yoagent-rutis
+            integrations/yoagent-rutis/examples/rutis-agent-tools
       - name: Format
         run: cargo fmt --manifest-path "$MANIFEST" -- --check
       - name: Clippy
@@ -234,6 +236,11 @@ jobs:
         run: cargo test --manifest-path "$MANIFEST"
       - name: Example
         run: cargo run --manifest-path "$MANIFEST" --example policy_plugin
+      # rutis-agent's tools through the bridge (its own workspace; rutis-agent
+      # from git at rutis v0.7.0): one of the ecosystems the extensions guide
+      # names, kept working here. Scripted, no network beyond the git fetch.
+      - name: rutis-agent example
+        run: cargo run --manifest-path integrations/yoagent-rutis/examples/rutis-agent-tools/Cargo.toml
 
   # The bridge declares rust-version 1.86 (yoagent's MSRV; rutis 0.6.1 and
   # rutis-bridge 0.7 declare 1.85). Mirrors the `msrv` job above, including its

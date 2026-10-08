@@ -161,7 +161,21 @@ The decision features are extensions themselves:
 - **`with_tool_gate`** (a `before_tool`) and **`with_decision_model`** (a `before_model` note) are appended after the agent's own extensions, so the gate judges the final arguments. Installed with `with_tree_extension`, the gate runs first instead and rechecks rewritten calls (a second decision request).
 - **`with_input_guard`** (an `on_input`) is an ordinary extension at its installation position: it screens after every input filter.
 
-So is the [`yoagent-rutis`](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis) bridge (a separate crate, not yet on crates.io): `RutisBridge::extension()` is one extension over the handlers that [rutis](https://crates.io/crates/rutis) plugins register and unregister at runtime, snapshotted at each run's start. The host keeps the decisions plugins must not make: `.required()`, `.filters_tool_output()`, `.rechecks_modified_calls()`.
+So is the [`yoagent-rutis`](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis) bridge (a separate crate, [on crates.io](https://crates.io/crates/yoagent-rutis)): `RutisBridge::extension()` is one extension over the handlers that [rutis](https://crates.io/crates/rutis) plugins register and unregister at runtime, snapshotted at each run's start. The host keeps the decisions plugins must not make: `.required()`, `.filters_tool_output()`, `.rechecks_modified_calls()`.
+
+## One contract, other ecosystems
+
+`Extension` is the whole contract a plugin system needs: tools, policies, notes, verifiers and events go through the same hooks whichever ecosystem a plugin comes from. Through the rutis bridge, two foreign ecosystems plug into yoagent today and a third is in review — all with **no change to yoagent's core**:
+
+| Ecosystem | What its plugins are | How they reach yoagent | What crosses |
+|---|---|---|---|
+| [DSH](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis#dsh-deepseek-harness-tool-plugins) (DeepSeek Harness) | Cordis plugins in Node | a small adapter over DSH's own tool registry (`plugins/dsh/`) | tools (images included), the system-prompt sections plugins add (as a turn note), cancellation |
+| [rutis-agent](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis#rutis-agent-tools) | Rust tools in a rutis registry | a Rust rutis plugin (`examples/rutis-agent-tools/`) | tools (images by convention), hot-added tools, cancellation |
+| [pi](https://github.com/earendil-works/pi) | TypeScript extensions written against pi's `ExtensionAPI` | an adapter that loads them with pi's own loader (experimental, [yologdev/yoagent#265](https://github.com/yologdev/yoagent/pull/265)) | tools, tool policies, input checks, prompt additions, images |
+
+What the bridge gives every ecosystem alike: TypeScript and Python handlers next to Rust ones, one registration order, **image** tool results both ways (`content` blocks), **plugin logs** in the host's `tracing` output (`yoagent.log`, with the run they belong to), and failures that deny rather than allow. What stays outside the loop on purpose — commands, dialogs, session history, a UI — belongs to the app that hosts the agent.
+
+**The adapter contract.** An ecosystem rarely maps one-to-one, so an adapter should follow the same rules ([details](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis#writing-an-ecosystem-adapter)): map only what the host can honour; refuse to load when a plugin would decide or rewrite something the host cannot enforce; deny a call when a policy fails; withhold a result when a redaction fails; report — never silently drop — what is ignored.
 
 ## Order with the older hooks
 

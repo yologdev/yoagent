@@ -142,6 +142,7 @@ impl HostDispatch for Service {
     fn invoke(&self, method: &str, args: Value) -> Reply {
         match method {
             "register" => self.register(args),
+            "log" => log(args),
             other => Err(invalid(format!(
                 "the yoagent service has no method `{other}`"
             ))),
@@ -151,9 +152,54 @@ impl HostDispatch for Service {
     fn methods(&self) -> Option<Json> {
         // Synchronous: `register` returns the disposer the plugin passes to
         // `ctx.effect`. It reads the handler's members back while the plugin
-        // waits, on the same call chain.
-        Some(json!({ "register": "sync" }))
+        // waits, on the same call chain. `log` is fire-and-forget.
+        Some(json!({ "register": "sync", "log": "async" }))
     }
+}
+
+/// Longest message `log` writes, in characters; the rest is cut (a plugin cannot flood the host's logs).
+const MAX_LOG_CHARS: usize = 8 * 1024;
+
+/// `log(level, message, context?)`: a plugin's diagnostic in the host's
+/// `tracing` output (target `yoagent_rutis::plugin`), not on the plugin
+/// process's stderr. Levels `error`, `warn`, `info`, `debug`; anything else
+/// is `warn`. `context.run_id` (the `run_id` every hook argument carries) is
+/// recorded as the event's `run_id` field, so a consumer — a GASP recorder,
+/// a log viewer — can attribute the line to its run.
+///
+/// **Never fails.** A plugin calls it fire-and-forget, and a rejected call
+/// it does not catch would end its runtime process. So any value is taken:
+/// a non-string message is written as JSON, other context fields (a whole
+/// hook argument, say) are ignored, a missing argument is empty.
+fn log(args: Value) -> Reply {
+    let args: Vec<Json> = args
+        .list()
+        .map(|list| list.into_iter().filter_map(|v| v.json().ok()).collect())
+        .unwrap_or_default();
+    let text = |value: Option<&Json>| match value {
+        Some(Json::String(text)) => text.clone(),
+        Some(Json::Null) | None => String::new(),
+        Some(other) => other.to_string(),
+    };
+    let level = text(args.first());
+    let message = text(args.get(1));
+    let run_id = args
+        .get(2)
+        .and_then(|context| context.get("run_id"))
+        .map(|id| text(Some(id)))
+        .unwrap_or_default();
+    let message: String = match message.char_indices().nth(MAX_LOG_CHARS) {
+        Some((cut, _)) => format!("{}… (cut)", &message[..cut]),
+        None => message,
+    };
+    let run_id = run_id.as_str();
+    match level.as_str() {
+        "error" => tracing::error!(target: "yoagent_rutis::plugin", run_id, "{message}"),
+        "info" => tracing::info!(target: "yoagent_rutis::plugin", run_id, "{message}"),
+        "debug" => tracing::debug!(target: "yoagent_rutis::plugin", run_id, "{message}"),
+        _ => tracing::warn!(target: "yoagent_rutis::plugin", run_id, "{message}"),
+    }
+    Ok(Value::Undefined)
 }
 
 /// `register`'s third argument.

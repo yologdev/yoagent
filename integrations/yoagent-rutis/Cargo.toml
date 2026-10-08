@@ -65,6 +65,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"
 # loads plugins itself: that is the host's job.
 rutis-loader = { version = "0.7", features = ["node", "python"] }
 tempfile = "3"
+# Captures the bridge's `log` output in its own test binary (tests/plugin_log_test.rs).
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }
 
 [[test]]
 name = "languages_test"
@@ -72,6 +74,10 @@ required-features = ["node", "python"]
 
 [[test]]
 name = "dsh_test"
+required-features = ["node"]
+
+[[test]]
+name = "plugin_log_test"
 required-features = ["node"]
 
 [[example]]

@@ -143,7 +143,13 @@ export default definePlugin<Config>({
         return { type: 'image', data: Buffer.from(stored.data).toString('base64'), mimeType: stored.ref.mediaType }
       } catch (error) {
         if (signal.aborted) throw error
-        console.warn(`[dsh] image ${ref.attachmentId} could not be read: ${error}`)
+        const message = `[dsh] image ${ref.attachmentId} could not be read: ${error}`
+        // On a host without `log`, rutis's stand-in throws: fall back either way.
+        try {
+          yoagent.log?.('warn', message)?.catch(() => console.warn(message))
+        } catch {
+          console.warn(message)
+        }
         return { type: 'text', text: label }
       }
     }
