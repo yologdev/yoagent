@@ -9,8 +9,8 @@ description = "A yoagent agent in a Cloudflare Worker, its tool calls gated by C
 crate-type = ["cdylib"]
 
 # Paths so CI checks this against the code beside it. Outside this repo:
-#   yoagent = { version = "0.24", default-features = false, features = ["decision"] }
-#   yoagent-workers = "0.1"
+#   yoagent = { version = "0.25", default-features = false, features = ["decision"] }
+#   yoagent-workers = "0.2"
 [dependencies]
 yoagent = { path = "../../../..", default-features = false, features = ["decision"] }
 yoagent-workers = { path = "../.." }
