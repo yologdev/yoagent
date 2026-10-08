@@ -157,7 +157,7 @@ impl HostDispatch for Service {
     }
 }
 
-/// Longest message `log` writes; the rest is cut (a plugin cannot flood the host's logs).
+/// Longest message `log` writes, in characters; the rest is cut (a plugin cannot flood the host's logs).
 const MAX_LOG_CHARS: usize = 8 * 1024;
 
 /// `log(level, message)`: a plugin's diagnostic in the host's `tracing`

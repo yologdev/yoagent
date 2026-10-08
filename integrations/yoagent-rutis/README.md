@@ -231,10 +231,12 @@ def apply(ctx, config):
   }
   ```
 - **Logs reach the host.** `yoagent.log(level, message)` (`error`,
-  `warn`, `info`, `debug`; fire-and-forget; over 8 KiB cut) writes to the
-  host's `tracing` output under the target `yoagent_rutis::plugin`, where a
-  terminal or service host shows it — a runtime process's own stderr may go
-  nowhere. Absent on older hosts: fall back to `console.warn`.
+  `warn`, `info`, `debug`; fire-and-forget; over 8192 characters cut)
+  writes to the host's `tracing` output under the target
+  `yoagent_rutis::plugin`, where a terminal or service host shows it — a
+  runtime process's own stderr may go nowhere. On an older host rutis's
+  stand-in for the method throws: wrap the call and fall back to
+  `console.warn`.
 - **The bridge never loads plugins**: the host does, typically with
   [rutis-loader](https://crates.io/crates/rutis-loader) rows, and must share
   `yoagent` in the loader's catalog (`catalog.register_shared("yoagent")` or
@@ -390,7 +392,12 @@ shortcuts, flags, renderers, model providers, virtual models and MCP
 servers. Other runtime actions (`pi.sendMessage`, `pi.appendEntry`, ...)
 throw "not available in yoagent". There is no UI: `ctx.hasUI` is false and
 `ctx.ui` behaves as in pi's print mode (`confirm` answers false), so a
-policy that would ask the user denies.
+policy that would ask the user denies. Commands, dialogs and session
+history are planned as host-level plugin services — `ui` and `commands`
+provided by the attached client, `session` by the host that owns the
+session — which the adapter would route `ctx.ui.*`, `registerCommand` and
+the session calls to; without them it stays in print mode (design: yo's
+`docs/WEB-UI-DESIGN.md` §7, [yoyo-meme/yo#3](https://github.com/yoyo-meme/yo/pull/3); not built).
 
 **Host setup.** Install the bridge's extension with `.require_policy()`, so
 a run that starts before the adapter registered (or after it failed to

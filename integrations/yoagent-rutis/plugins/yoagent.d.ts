@@ -43,8 +43,9 @@ export interface Yoagent {
    * Write a diagnostic to the host's logs (its `tracing` output, target
    * `yoagent_rutis::plugin`) rather than this process's stderr, which a
    * terminal or service host may not show. Levels `error`, `warn`, `info`,
-   * `debug`; messages over 8 KiB are cut. Fire-and-forget. Absent on hosts
-   * older than yoagent-rutis 0.2: fall back to `console.warn`.
+   * `debug`; messages over 8192 characters are cut. Fire-and-forget. On a
+   * host older than yoagent-rutis 0.2 rutis's stand-in for it throws: wrap
+   * the call (`try { yoagent.log(l, m).catch(f) } catch { f() }`).
    */
   log?(level: 'error' | 'warn' | 'info' | 'debug', message: string): Promise<void>
 }

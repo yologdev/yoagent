@@ -361,10 +361,13 @@ export default definePlugin<Config>({
   },
   async apply(ctx, config) {
     const yoagent = ctx.use<Yoagent>('yoagent')
-    if (typeof yoagent.log === 'function') {
-      const log = yoagent.log.bind(yoagent)
-      report = (level, message) => {
-        log(level, message).catch(() => console.warn(message))
+    // rutis gives every service method a stand-in, one that throws when the
+    // host lacks it: so `log` is called, and a throw or a rejection falls back.
+    report = (level, message) => {
+      try {
+        yoagent.log?.(level, message)?.catch(() => console.warn(message))
+      } catch {
+        console.warn(message)
       }
     }
     const cwd = config.cwd ?? process.cwd()
@@ -455,15 +458,19 @@ export default definePlugin<Config>({
     ): Promise<Outcome> => {
       const failed = (text: string, input: unknown = args): Outcome => ({
         toolCall: { id, name, arguments: input },
-        result: { content: [{ type: 'text', text }], details: undefined },
+        result: { content: [{ type: 'text', text }], details: {} },
         isError: true,
       })
-      if (depth > 8) return failed('nested tool calls are limited to 8 levels')
+      checkUnmapped(false)
+      checkShadowing(false)
+      if (refusal) return failed(refusal)
+      if (depth >= 8) return failed('nested tool calls are limited to 8 levels')
       const tool = callable().get(name)
       if (!tool) return failed(`Tool ${name} not found (yoagent's own tools cannot be called from a pi tool)`)
       let input: Args
       try {
-        const copy = structuredClone(args)
+        // As pi: missing arguments are an empty object.
+        const copy = structuredClone(args ?? {})
         const prepared = tool.prepareArguments ? tool.prepareArguments(copy) : copy
         input = validateToolArguments(tool as never, { name, arguments: prepared } as never) as Args
       } catch (error) {
@@ -488,8 +495,10 @@ export default definePlugin<Config>({
       try {
         out = await tool.execute(id, input, signal, undefined, toolContext(signal, runId, id, depth + 1))
       } catch (error) {
-        return { ...failed(message(error), input), durationMs: performance.now() - started }
+        // As pi: a throw is an error result, and it still goes through the tool_result handlers.
+        out = { content: [{ type: 'text', text: message(error) }], details: {}, isError: true }
       }
+      const durationMs = Math.round(performance.now() - started)
       const event = {
         type: 'tool_result',
         toolCallId: id,
@@ -515,7 +524,7 @@ export default definePlugin<Config>({
         toolCall: { id, name, arguments: input },
         result: { content: event.content, details: event.details },
         isError: event.isError,
-        durationMs: performance.now() - started,
+        durationMs,
       }
     }
 

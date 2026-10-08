@@ -524,6 +524,14 @@ async fn pi_semantics_on_the_less_common_paths() {
         text.contains("/3 bash error: Tool bash not found"),
         "{text}"
     );
+    // A nested tool's throw goes through tool_result too (a handler scoped to
+    // pi_fail rewrote it).
+    assert!(
+        text.contains("/4 pi_fail error: pi_fail error seen"),
+        "{text}"
+    );
+    // Called with no arguments: an empty object.
+    assert!(text.contains("/5 pi_dynamic ok: dynamic ok"), "{text}");
     // terminate: true denied the call and stopped the run before its next request.
     assert!(
         result(16).2 && result(16).1.contains("stopping the run"),

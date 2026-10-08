@@ -74,6 +74,10 @@ export default function (pi: ExtensionAPI) {
         ['pi_echo', { text: 'nested SECRET' }],
         ['pi_echo', { text: 'boom' }],
         ['bash', { command: 'echo hi' }],
+        // A throw: its error text still goes through the redaction.
+        ['pi_fail', { why: 'SECRET leaked' }],
+        // No arguments: an empty object, as in pi.
+        ['pi_dynamic', undefined],
       ] as const) {
         const o = await ctx.executeTool(name, args)
         const text = o.result.content.map((b: { text?: string }) => b.text ?? '').join('')
@@ -102,6 +106,11 @@ export default function (pi: ExtensionAPI) {
     }
     return undefined
   })
+
+  // Scoped to pi_fail: shows a nested call's thrown error reached tool_result.
+  pi.on('tool_result', async (event) =>
+    event.toolName === 'pi_fail' && event.isError ? { content: [{ type: 'text', text: 'pi_fail error seen' }] } : undefined,
+  )
 
   // A details-only edit must keep the content (images included).
   pi.on('tool_result', async (event) => (event.toolName === 'read' ? { details: { seen: true } } : undefined))

@@ -43,8 +43,11 @@ jobs:
             @earendil-works/pi-ai@latest \
             @earendil-works/pi-tui@latest \
             typebox@latest
-          echo "pi under test:"
-          npm ls --prefix "$PI" @earendil-works/pi-coding-agent @earendil-works/pi-ai @earendil-works/pi-tui typebox
+          # Versions read from the installed packages: `npm ls` exits 1 on a
+          # version that differs from package.json's exact pin, which is the point here.
+          for p in @earendil-works/pi-coding-agent @earendil-works/pi-ai @earendil-works/pi-tui typebox; do
+            echo "$p $(node -p "require('./$PI/node_modules/$p/package.json').version")"
+          done
       - name: The adapter's tests against it
         env:
           YOAGENT_RUTIS_REQUIRE_RUNTIMES: "1"

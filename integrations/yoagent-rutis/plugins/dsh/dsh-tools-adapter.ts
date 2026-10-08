@@ -144,8 +144,12 @@ export default definePlugin<Config>({
       } catch (error) {
         if (signal.aborted) throw error
         const message = `[dsh] image ${ref.attachmentId} could not be read: ${error}`
-        if (typeof yoagent.log === 'function') yoagent.log('warn', message).catch(() => console.warn(message))
-        else console.warn(message)
+        // On a host without `log`, rutis's stand-in throws: fall back either way.
+        try {
+          yoagent.log?.('warn', message)?.catch(() => console.warn(message))
+        } catch {
+          console.warn(message)
+        }
         return { type: 'text', text: label }
       }
     }
