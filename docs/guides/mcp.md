@@ -150,7 +150,7 @@ conversation that searches for Rust ownership and fetches a known official Rust
 book page, printing the live tool results. No model key is needed: the example
 shows tool dispatch through the agent loop, not a model-generated answer.
 A real provider can choose its own queries and result URLs using the same tools.
-The example does not read environment keys or saved credentials.
+No credentials are required or sent to the MCP endpoint.
 
 It uses `HttpTransport::new_with_user_agent` to identify the example's requests,
 reuses one `session_id` for both tools, and explicitly closes the MCP client
