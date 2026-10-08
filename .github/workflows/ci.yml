@@ -288,6 +288,10 @@ jobs:
           python-version: "3.12"
       - name: Install the rutis npm packages
         run: npm ci --prefix "$PLUGINS"
+      # The dsh adapter's end-to-end test (tests/dsh_test.rs): dsh-tools,
+      # dsh-system-prompt and the adapter's other pins, in their own install.
+      - name: Install the dsh npm packages
+        run: npm ci --prefix "$PLUGINS/dsh"
       - name: Install the rutis Python package
         run: |
           python -m venv "$PLUGINS/.venv"
