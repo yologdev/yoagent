@@ -20,14 +20,16 @@
 //                           `prepareArguments` and pi's validation before any
 //                           policy sees them; `execute` gets the bridge's
 //                           cancel handle as its signal; a throw or `isError`
-//                           is an error result. Tools registered later (in
-//                           `session_start`, say) are offered from the next
-//                           run on. A tool that overrides one of pi's
-//                           built-ins (`read`, `edit`, ...) makes the adapter
-//                           deny yoagent's counterpart (`read_file`, ...), so
-//                           the model cannot go around it; one named exactly
-//                           like a yoagent tool (`bash`) loses to that tool
-//                           when the host installs it — the host must not.
+//                           is an error result; `execute` gets the arguments
+//                           the policies left, as in pi. Tools registered in
+//                           `session_start` are offered from the first run.
+//                           A tool that overrides one of pi's built-ins
+//                           (`read`, `edit`, ...) makes the adapter deny
+//                           yoagent's counterpart (`read_file`, ...), so the
+//                           model cannot go around it; one named exactly like
+//                           a yoagent tool (`bash`) loses to that tool when
+//                           the host installs it — the host must not (a
+//                           warning at load; a load failure with `strict`).
 //   on("tool_call")         `before_tool`, for every call of the run (the
 //                           agent's own built-ins too, under pi's names: see
 //                           TOOL_NAMES, arguments translated both ways):
@@ -43,9 +45,11 @@
 //                           on the request's latest user turn (yoagent never
 //                           rewrites the system prompt — the prompt cache
 //                           depends on it). A handler that throws, replaces
-//                           the prompt, returns `message` or changes
-//                           `systemPromptOptions` is reported and skipped;
-//                           the others still count.
+//                           the prompt or changes `systemPromptOptions` is
+//                           reported and skipped (a warning even under
+//                           `strict`: a run cannot be refused at load); the
+//                           others still count. A returned `message` is
+//                           skipped, the same handler's addition kept.
 //   on("session_start")     fired once, when the adapter starts;
 //   on("session_shutdown")  when it unloads.
 //
@@ -54,7 +58,7 @@
 // `context` and `message_end` rewrite the conversation, the boundary events
 // continue it, the session events steer pi's session tree — commands,
 // shortcuts, flags and renderers, which belong to the host app, and model
-// providers and MCP servers. Runtime actions (`pi.sendMessage`,
+// providers, virtual models and MCP servers (checked after `session_start`). Runtime actions (`pi.sendMessage`,
 // `pi.setActiveTools`, ...) throw pi's own "not initialized" error.
 // `ctx.hasUI` is false and `ctx.ui` behaves as in pi's print mode: `confirm`
 // answers false, `select` and `input` nothing, so a policy that would ask
@@ -97,7 +101,7 @@ type Args = Record<string, unknown>
  * built-in: only those calls are translated (a pi tool that is itself named
  * `edit` keeps its arguments as they are).
  */
-const ARGS: Record<string, { toPi(args: Args): Args; fromPi(input: Args): Args }> = {
+const ARGS = new Map<string, { toPi(args: Args): Args; fromPi(input: Args): Args }>(Object.entries({
   edit_file: {
     toPi: ({ old_text, new_text, ...rest }) => ({ ...rest, edits: [{ oldText: old_text, newText: new_text }] }),
     fromPi: ({ edits, ...rest }) => {
@@ -112,12 +116,13 @@ const ARGS: Record<string, { toPi(args: Args): Args; fromPi(input: Args): Args }
     toPi: ({ include, case_sensitive, ...rest }) => ({
       ...rest,
       ...(include === undefined ? {} : { glob: include }),
-      ...(case_sensitive === undefined ? {} : { ignoreCase: !case_sensitive }),
+      // yoagent's search is case-insensitive unless asked; pi's grep is case-sensitive unless asked.
+      ignoreCase: !(case_sensitive ?? false),
     }),
     fromPi: ({ glob, ignoreCase, ...rest }) => ({
       ...rest,
       ...(glob === undefined ? {} : { include: glob }),
-      ...(ignoreCase === undefined ? {} : { case_sensitive: !ignoreCase }),
+      case_sensitive: ignoreCase === false,
     }),
   },
   list_files: {
@@ -125,7 +130,7 @@ const ARGS: Record<string, { toPi(args: Args): Args; fromPi(input: Args): Args }
     toPi: ({ pattern, ...rest }) => ({ ...rest, pattern: pattern ?? '*' }),
     fromPi: ({ pattern, ...rest }) => (pattern === '*' ? rest : { ...rest, pattern }),
   },
-}
+} as Record<string, { toPi(args: Args): Args; fromPi(input: Args): Args }>))
 
 /** What `before_agent_start` handlers see as `event.systemPrompt`. */
 const PROMPT_MARK = '\u0000yoagent-system-prompt\u0000'
@@ -195,6 +200,8 @@ interface PiExtension {
 
 interface PiRuntime {
   pendingProviderRegistrations?: { name: string; extensionPath: string }[]
+  pendingNativeProviderRegistrations?: { provider: { id: string }; extensionPath: string }[]
+  pendingVirtualModelRegistrations?: { definition: { provider: string; id: string }; extensionPath: string }[]
   mcpServers?: { list(): { name: string; extensionPath?: string }[] }
 }
 
@@ -233,8 +240,7 @@ export default definePlugin<Config>({
   async apply(ctx, config) {
     const yoagent = ctx.use<Yoagent>('yoagent')
     const cwd = config.cwd ?? process.cwd()
-    const names: Record<string, string> = { ...TOOL_NAMES, ...config.toolNames }
-    const builtinFor = new Map(Object.entries(names).map(([yo, pi]) => [pi, yo]))
+    const names = new Map(Object.entries({ ...TOOL_NAMES, ...config.toolNames }))
 
     const { SessionManager } = await import('@earendil-works/pi-coding-agent')
     const { validateToolArguments } = await import('@earendil-works/pi-ai')
@@ -249,26 +255,6 @@ export default definePlugin<Config>({
       if (config.strict) throw new Error(`pi extensions use what does not map — ${message}`)
       console.warn(`[pi] ${message}`)
     }
-    const unmapped: string[] = []
-    for (const ext of extensions) {
-      const what = [
-        ...[...ext.handlers.keys()].filter((e) => !MAPPED_EVENTS.has(e)).map((e) => `event "${e}"`),
-        ...[...ext.commands.keys()].map((c) => `command /${c}`),
-        ...[...ext.shortcuts.keys()].map((s) => `shortcut ${s}`),
-        ...[...ext.flags.keys()].map((f) => `flag --${f}`),
-        ...(ext.messageRenderers.size + (ext.toolRenderers?.length ?? 0) + (ext.entryRenderers?.size ?? 0) > 0
-          ? ['renderers']
-          : []),
-        ...(loaded.runtime.pendingProviderRegistrations ?? [])
-          .filter((p) => p.extensionPath === ext.path)
-          .map((p) => `model provider ${p.name}`),
-        ...(loaded.runtime.mcpServers?.list() ?? [])
-          .filter((s) => s.extensionPath === ext.path)
-          .map((s) => `MCP server ${s.name}`),
-      ]
-      if (what.length > 0) unmapped.push(`${short(ext.path)}: ${what.join(', ')}`)
-    }
-    if (unmapped.length > 0) report(`not available in yoagent, ignored: ${unmapped.join('; ')}`)
 
     const sessionManager = SessionManager.inMemory(cwd)
     const context = (signal?: AbortSignal, systemPrompt = '') => ({
@@ -337,8 +323,49 @@ export default definePlugin<Config>({
         }),
       )
 
-    /** Overrides of yoagent tools already warned about. */
+    const checkUnmapped = () => {
+      const unmapped: string[] = []
+      for (const ext of extensions) {
+        const what = [
+          ...[...ext.handlers.keys()].filter((e) => !MAPPED_EVENTS.has(e)).map((e) => `event "${e}"`),
+          ...[...ext.commands.keys()].map((c) => `command /${c}`),
+          ...[...ext.shortcuts.keys()].map((s) => `shortcut ${s}`),
+          ...[...ext.flags.keys()].map((f) => `flag --${f}`),
+          ...(ext.messageRenderers.size + (ext.toolRenderers?.length ?? 0) + (ext.entryRenderers?.size ?? 0) > 0
+            ? ['renderers']
+            : []),
+          ...(loaded.runtime.pendingProviderRegistrations ?? [])
+            .filter((p) => p.extensionPath === ext.path)
+            .map((p) => `model provider ${p.name}`),
+          ...(loaded.runtime.pendingNativeProviderRegistrations ?? [])
+            .filter((p) => p.extensionPath === ext.path)
+            .map((p) => `model provider ${p.provider.id}`),
+          ...(loaded.runtime.pendingVirtualModelRegistrations ?? [])
+            .filter((v) => v.extensionPath === ext.path)
+            .map((v) => `virtual model ${v.definition.provider}/${v.definition.id}`),
+          ...(loaded.runtime.mcpServers?.list() ?? [])
+            .filter((s) => s.extensionPath === ext.path)
+            .map((s) => `MCP server ${s.name}`),
+        ]
+        if (what.length > 0) unmapped.push(`${short(ext.path)}: ${what.join(', ')}`)
+      }
+      if (unmapped.length > 0) report(`not available in yoagent, ignored: ${unmapped.join('; ')}`)
+    }
+
+    // A pi tool named exactly like a yoagent tool: checked at load, so `strict` refuses the load.
     const shadowWarned = new Set<string>()
+    const checkShadowing = (strict: boolean) => {
+      for (const name of offered().keys()) {
+        if (!names.has(name) || shadowWarned.has(name)) continue
+        shadowWarned.add(name)
+        const message =
+          `pi tool "${name}" is named like yoagent's own tool. If the host also installs that one, yoagent's runs ` +
+          `and the pi tool never does, while the adapter still prepares and validates those calls with the pi tool's ` +
+          `schema — leave yoagent's out`
+        if (strict) report(message)
+        else console.warn(`[pi] ${message}`)
+      }
+    }
 
     // Notes from `before_agent_start`, computed once per run.
     const notes = new Map<string, Promise<string | undefined>>()
@@ -358,7 +385,7 @@ export default definePlugin<Config>({
             | { systemPrompt?: string; message?: unknown }
             | undefined
           if (result?.message !== undefined) {
-            throw new Error('returned a message, which yoagent cannot inject')
+            console.warn(`[pi] ${short(ext.path)} before_agent_start: its message skipped (yoagent cannot inject one)`)
           }
           if (result?.systemPrompt !== undefined) {
             if (!result.systemPrompt.includes(PROMPT_MARK)) {
@@ -377,20 +404,18 @@ export default definePlugin<Config>({
 
     // Before registering: tools an extension adds at session start are offered from the first run.
     await fire('session_start', { type: 'session_start', reason: 'startup' })
+    // Registered first, so a `strict` refusal below still shuts the extensions down.
     ctx.effect(() => fire('session_shutdown', { type: 'session_shutdown', reason: 'quit' }))
+    // After session_start, so what it registered is checked too.
+    checkUnmapped()
+    checkShadowing(config.strict === true)
 
     ctx.effect(
       yoagent.register(config.name ?? 'pi-extensions', {
         async tools(): Promise<ToolSpec[]> {
+          // Tools registered after load: warned only (a run is not the place to refuse).
+          checkShadowing(false)
           const tools = offered()
-          for (const name of tools.keys()) {
-            if (name in names && !shadowWarned.has(name)) {
-              shadowWarned.add(name)
-              report(
-                `pi tool "${name}" is named like yoagent's own tool: if the host also installs that one, yoagent's wins and the pi tool never runs — leave it out`,
-              )
-            }
-          }
           return [...tools.values()].map((tool) => ({
             name: tool.name,
             label: tool.label ?? null,
@@ -405,9 +430,8 @@ export default definePlugin<Config>({
           const tool = offered().get(call.tool)
           if (!tool) return { text: `pi tool ${call.tool} is no longer registered`, is_error: true }
           try {
-            // Prepared in before_tool; validated again here, in case a later handler rewrote them.
-            const params = validateToolArguments(tool as never, { name: tool.name, arguments: call.args } as never)
-            const out = await tool.execute(call.call_id, params, call.signal, undefined, toolContext(call.signal))
+            // Prepared and validated in before_tool; as in pi, execute gets what the policies left.
+            const out = await tool.execute(call.call_id, call.args, call.signal, undefined, toolContext(call.signal))
             return { text: text(out.content), details: out.details ?? null, is_error: out.isError === true }
           } catch (error) {
             return { text: error instanceof Error ? error.message : String(error), is_error: true }
@@ -418,22 +442,25 @@ export default definePlugin<Config>({
           const piTools = offered()
           const own = piTools.get(call.tool)
           // A yoagent built-in whose pi counterpart an extension overrides: the model must use the override.
-          const counterpart = names[call.tool]
+          const counterpart = names.get(call.tool)
           if (!own && counterpart && counterpart !== call.tool && piTools.has(counterpart)) {
             return { deny: `a pi extension replaces this tool with "${counterpart}"; call "${counterpart}" instead` }
           }
           let input: Args
           let original: Args = call.args
+          const raw = JSON.stringify(call.args)
           if (own) {
             // As pi's agent loop: prepare, validate, then the policies judge the validated arguments.
             try {
-              const prepared = own.prepareArguments ? (own.prepareArguments(call.args) as Args) : call.args
+              // On a copy: pi's own prepareArguments (edit's) mutates its argument in place.
+              const copy = structuredClone(call.args)
+              const prepared = own.prepareArguments ? (own.prepareArguments(copy) as Args) : copy
               input = validateToolArguments(own as never, { name: own.name, arguments: prepared } as never) as Args
             } catch (error) {
               return { deny: error instanceof Error ? error.message : String(error) }
             }
           } else {
-            const shape = ARGS[call.tool]
+            const shape = ARGS.get(call.tool)
             original = shape ? shape.toPi(call.args) : call.args
             input = structuredClone(original)
           }
@@ -452,11 +479,11 @@ export default definePlugin<Config>({
           }
           if (own) {
             // Prepared or coerced arguments count as a rewrite too.
-            return JSON.stringify(input) === JSON.stringify(call.args) ? undefined : { args: input }
+            return JSON.stringify(input) === raw ? undefined : { args: input }
           }
           if (JSON.stringify(input) === before) return
           try {
-            const shape = ARGS[call.tool]
+            const shape = ARGS.get(call.tool)
             return { args: shape ? shape.fromPi(input) : input }
           } catch (error) {
             return { deny: String(error) }
@@ -467,11 +494,11 @@ export default definePlugin<Config>({
           const editors = handlers('tool_result')
           if (editors.length === 0) return
           const own = offered().has(call.tool)
-          const shape = own ? undefined : ARGS[call.tool]
+          const shape = own ? undefined : ARGS.get(call.tool)
           const event = {
             type: 'tool_result',
             toolCallId: call.call_id,
-            toolName: own ? call.tool : (names[call.tool] ?? call.tool),
+            toolName: own ? call.tool : (names.get(call.tool) ?? call.tool),
             input: shape ? shape.toPi(call.args) : call.args,
             // yoagent's text and image blocks have pi's shape.
             content: output.content as Block[],

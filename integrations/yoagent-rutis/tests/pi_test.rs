@@ -25,7 +25,7 @@ use rutis_loader::{
 use serde_json::{json, Value};
 use yoagent::provider::mock::{MockResponse, MockToolCall};
 use yoagent::tools::{BashTool, EditFileTool, ReadFileTool, SearchTool, WriteFileTool};
-use yoagent::{AgentMessage, Content, Message};
+use yoagent::{AgentEvent, AgentMessage, Content, Message};
 use yoagent_rutis::RutisBridge;
 
 fn pi_dir() -> PathBuf {
@@ -331,6 +331,11 @@ async fn pi_semantics_on_the_less_common_paths() {
                 "edit",
                 json!({"path": "x.txt", "edits": "[{\"oldText\":\"a\",\"newText\":\"b\"}]"}),
             ),
+            // Already upper-case: the policy changes nothing, only the preparation does.
+            (
+                "edit",
+                json!({"path": "y.txt", "edits": "[{\"oldText\":\"c\",\"newText\":\"D\"}]"}),
+            ),
             ("read_file", json!({"path": image})),
             (
                 "search",
@@ -346,7 +351,7 @@ async fn pi_semantics_on_the_less_common_paths() {
             Box::new(SearchTool::new()),
         ])
         .with_extension(host.bridge.extension());
-    let (_, results) = tokio::time::timeout(Duration::from_secs(60), run(&mut agent, "go"))
+    let (events, results) = tokio::time::timeout(Duration::from_secs(60), run(&mut agent, "go"))
         .await
         .expect("the run finishes");
     let seen_now = seen.lock().unwrap().clone();
@@ -373,11 +378,18 @@ async fn pi_semantics_on_the_less_common_paths() {
         "{results:?}"
     );
     assert_eq!(std::fs::read_to_string(&notes).unwrap(), "hello world");
-    // The pi `edit` tool: prepared (edits parsed from a string) before the
-    // policy (which upper-cases newText), and never translated as edit_file.
+    // The pi `edit` tool: prepared in place (edits parsed from a string, as
+    // pi's own edit does) before the policy (which upper-cases newText), and
+    // never translated as edit_file.
     let (_, text, is_error) = result(5);
     assert!(
         !is_error && text.contains(r#""edits":[{"oldText":"a","newText":"B"}]"#),
+        "{results:?}"
+    );
+    // Prepared arguments reach the tool even when no policy changes them.
+    let (_, text, is_error) = result(6);
+    assert!(
+        !is_error && text.contains(r#""edits":[{"oldText":"c","newText":"D"}]"#),
         "{results:?}"
     );
     // A details-only tool_result edit keeps the image.
@@ -386,19 +398,37 @@ async fn pi_semantics_on_the_less_common_paths() {
             if tool_name == "read_file" && content.iter().any(|c| matches!(c, Content::Image { .. })))
     });
     assert!(image_kept, "{:?}", agent.messages());
-    // search's include is grep's glob: the policy's rewrite to *.txt reached the tool.
-    let (_, text, _) = result(7);
+    let details = events.iter().find_map(|e| match e {
+        AgentEvent::ToolExecutionEnd {
+            tool_name, result, ..
+        } if tool_name == "read_file" => Some(result.details.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        details,
+        Some(json!({"seen": true})),
+        "the details edit landed"
+    );
+    // search's include is grep's glob, and its default case-insensitivity is
+    // ignoreCase: true: the policy's rewrite to *.txt reached the tool.
+    let (_, text, _) = result(8);
     assert!(
         text.contains("b.txt") && !text.contains("a.md"),
         "{results:?}"
     );
     // The crashing, message-returning and prompt-replacing before_agent_start
     // handlers are skipped; the good one still adds its text.
+    // A message is skipped but its handler's addition kept; a handler after
+    // the failing ones still counts.
     let note = &seen_now[0].last_user;
-    assert!(
-        note.contains("Fixture rules: answer in one line.") && !note.contains("a whole new prompt"),
-        "{note}"
-    );
+    for kept in [
+        "Fixture rules: answer in one line.",
+        "Message-handler rules: kept.",
+        "Extra rules: last.",
+    ] {
+        assert!(note.contains(kept), "{kept} missing: {note}");
+    }
+    assert!(!note.contains("a whole new prompt"), "{note}");
     host.root.shutdown().await.unwrap();
 }
 
@@ -423,5 +453,41 @@ async fn strict_refuses_extensions_that_use_what_does_not_map() {
         "the fixture's command fails a strict load: {failures}"
     );
     assert!(host.bridge.registry().handlers().is_empty());
+    host.root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn strict_refuses_a_pi_tool_named_like_a_yoagent_tool() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let ext = dir.path().join("sandboxed-bash.ts");
+    std::fs::write(
+        &ext,
+        r#"import { Type } from 'typebox'
+export default function (pi) {
+  pi.registerTool({
+    name: 'bash', label: 'bash (sandboxed)', description: 'Run a command in a sandbox.',
+    parameters: Type.Object({ command: Type.String() }),
+    async execute() { return { content: [{ type: 'text', text: 'sandboxed' }], details: undefined } },
+  })
+}
+"#,
+    )
+    .unwrap();
+    let host = host(&runtime).await;
+    let failures = host
+        .try_load(json!([{
+            "id": "pi",
+            "name": pi_dir().join("pi-extensions-adapter.ts"),
+            "config": { "extensions": [ext], "strict": true },
+        }]))
+        .await;
+    assert!(
+        failures.contains(r#"pi tool \"bash\" is named like yoagent's own tool"#)
+            || failures.contains(r#"pi tool "bash" is named like yoagent's own tool"#),
+        "a same-name tool fails a strict load: {failures}"
+    );
     host.root.shutdown().await.unwrap();
 }

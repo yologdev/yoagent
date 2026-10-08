@@ -322,25 +322,27 @@ onto one handler, following pi 1.1.0's own runner and agent loop:
 
 | pi | yoagent |
 |---|---|
-| `pi.registerTool` | a tool, while pi would activate it (exposure `direct` / `model-only`, `defaultActive` not false; the first registration of a name wins). Arguments go through `prepareArguments` and pi's validation before any policy sees them; `execute` gets the bridge's cancel handle as its signal; a throw or `isError` is an error result. Tools registered at `session_start` are offered too |
-| `on("tool_call")` | `before_tool` for every call, yoagent's built-ins under pi's names (`bash`, `read_file`→`read`, `write_file`→`write`, `edit_file`→`edit` with `edits`, `search`→`grep` with `glob`/`ignoreCase`, `list_files`→`find`; config `toolNames` overrides): `{ block }` denies, in-place changes to `event.input` rewrite the arguments, a throwing handler blocks |
+| `pi.registerTool` | a tool, while pi would activate it (exposure `direct` / `model-only`, `defaultActive` not false; the first registration of a name wins). Arguments go through `prepareArguments` and pi's validation before any policy sees them, and `execute` gets what the policies left (as in pi) with the bridge's cancel handle as its signal; a throw or `isError` is an error result. Tools registered at `session_start` are offered too |
+| `on("tool_call")` | `before_tool` for every call, yoagent's built-ins under pi's names (`bash`, `read_file`→`read`, `write_file`→`write`, `edit_file`→`edit` with `edits`, `search`→`grep` with `glob`/`ignoreCase` (yoagent's search is case-insensitive unless asked, pi's grep the reverse; translated), `list_files`→`find`; config `toolNames` overrides): `{ block }` denies, in-place changes to `event.input` rewrite the arguments, a throwing handler blocks |
 | `on("tool_result")` | `after_tool`: content, details and isError edits, chained; only the fields a handler set are applied (a replaced content keeps its text); a throwing handler is reported and skipped |
-| `on("before_agent_start")` | `before_model`, once per run: text added around `event.systemPrompt` becomes a note on the latest user turn. A handler that throws, replaces the prompt, returns `message` or changes `systemPromptOptions` is reported and skipped; the others still count |
+| `on("before_agent_start")` | `before_model`, once per run: text added around `event.systemPrompt` becomes a note on the latest user turn. A handler that throws, replaces the prompt or changes `systemPromptOptions` is reported and skipped, the others still count (a warning even under `strict`: a run cannot be refused at load, so a policy that replaces the prompt — a "read-only mode" — silently does not apply); a returned `message` is skipped, the same handler's addition kept |
 | `on("session_start")` / `on("session_shutdown")` | when the adapter loads / unloads |
 
 **Overrides.** An extension tool that replaces one of pi's built-ins under
 another name than yoagent's (`read`, `write`, `edit`, `grep`, `find`) makes
 the adapter deny yoagent's counterpart (`read_file`, ...), so the model
 cannot go around it. One named exactly like a yoagent tool (pi's sandboxed
-`bash`) loses to yoagent's when the host installs both: the adapter warns
-(fails under `strict`), and the host must leave its own tool out
-(`--without bash` in the example).
+`bash`) loses to yoagent's when the host installs both — and the adapter
+would still prepare and validate yoagent's calls with the pi tool's schema:
+it warns at load (fails under `strict`), and the host must leave its own
+tool out (`--without bash` in the example).
 
 The rest does not map and is reported when an extension registers it (a
 warning; config `strict: true` makes it a load failure): events that rewrite
 or continue the conversation (`context`, `message_end`, `turn_end`, ...) or
 steer pi's session tree, commands, shortcuts, flags and renderers (a host
-app's), and model providers and MCP servers. Runtime actions
+app's), and model providers, virtual models and MCP servers (checked after
+`session_start`). Runtime actions
 (`pi.sendMessage`, ...) throw pi's own "not initialized" error. There is no
 UI: `ctx.hasUI` is false and `ctx.ui` behaves as in pi's print mode
 (`confirm` answers false), so a policy that would ask the user denies.

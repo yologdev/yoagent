@@ -48,9 +48,11 @@ export default function (pi: ExtensionAPI) {
       path: Type.String(),
       edits: Type.Array(Type.Object({ oldText: Type.String(), newText: Type.String() })),
     }),
+    // In place, as pi's own edit tool does.
     prepareArguments(args: unknown) {
       const a = args as { path: string; edits: unknown }
-      return typeof a.edits === 'string' ? { ...a, edits: JSON.parse(a.edits) } : a
+      if (typeof a.edits === 'string') a.edits = JSON.parse(a.edits)
+      return a
     },
     async execute(_id, params) {
       return { content: [{ type: 'text', text: `edit override: ${JSON.stringify(params)}` }], details: undefined }
@@ -59,8 +61,11 @@ export default function (pi: ExtensionAPI) {
 
   pi.on('tool_call', async (event) => {
     if (event.toolName === 'pi_echo' && event.input.text === 'boom') throw new Error('policy crashed')
-    // yoagent's search, as pi's grep: its include is pi's glob.
-    if (event.toolName === 'grep' && event.input.glob === '*.md') event.input.glob = '*.txt'
+    // yoagent's search, as pi's grep: include is pi's glob, and an unset
+    // case_sensitive is pi's ignoreCase: true (yoagent searches case-insensitively).
+    if (event.toolName === 'grep' && event.input.glob === '*.md' && event.input.ignoreCase === true) {
+      event.input.glob = '*.txt'
+    }
     return undefined
   })
 
@@ -71,8 +76,11 @@ export default function (pi: ExtensionAPI) {
   pi.on('before_agent_start', async () => {
     throw new Error('prompt hook crashed')
   })
-  pi.on('before_agent_start', async () => ({
+  pi.on('before_agent_start', async (event) => ({
     message: { customType: 'x', content: 'injected', display: false },
+    systemPrompt: `${event.systemPrompt}\n\nMessage-handler rules: kept.`,
   }))
-  pi.on('before_agent_start', async (event) => ({ systemPrompt: 'a whole new prompt' }))
+  pi.on('before_agent_start', async () => ({ systemPrompt: 'a whole new prompt' }))
+  // After the failing ones: still counts.
+  pi.on('before_agent_start', async (event) => ({ systemPrompt: `${event.systemPrompt}\n\nExtra rules: last.` }))
 }
