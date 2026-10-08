@@ -25,6 +25,7 @@ use rutis_loader::{
 };
 use serde_json::{json, Value};
 use yoagent::provider::mock::{MockResponse, MockToolCall};
+use yoagent::{AgentMessage, Content, Message};
 use yoagent_rutis::RutisBridge;
 
 fn dsh_dir() -> PathBuf {
@@ -234,7 +235,71 @@ async fn dsh_tools_reach_a_yoagent_agent_through_the_adapter() {
     .await
     .expect("the cancelled run ends");
     agent.finish().await;
-    let ended = wait_file(&abort_file, |t| t != "started").await;
+    // Not empty: writeFileSync truncates before it writes.
+    let ended = wait_file(&abort_file, |t| t != "started" && !t.is_empty()).await;
     assert_eq!(ended, "aborted: AbortError");
     host.root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dsh_images_arrive_as_images_when_an_attachment_store_is_loaded() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    for with_store in [true, false] {
+        let host = host(&runtime).await;
+        let mut rows = vec![
+            json!({ "id": "system-prompt", "name": "@deepseek-ai/dsh-system-prompt" }),
+            json!({ "id": "tools", "name": "@deepseek-ai/dsh-tools" }),
+            json!({ "id": "fixture", "name": dsh_dir().join("fixture-tools.ts") }),
+            json!({ "id": "adapter", "name": dsh_dir().join("dsh-tools-adapter.ts") }),
+        ];
+        if with_store {
+            // Loaded after the adapter: it is looked up when an image is read.
+            rows.push(
+                json!({ "id": "attachments", "name": dsh_dir().join("fixture-attachments.ts") }),
+            );
+        }
+        host.load(Value::Array(rows)).await;
+        let (agent, _) = agent(vec![call("fixture_dot", json!({})), text("done")]);
+        let mut agent = agent.with_extension(host.bridge.extension());
+        run(&mut agent, "go").await;
+        let content = agent
+            .messages()
+            .iter()
+            .find_map(|m| match m {
+                AgentMessage::Llm(Message::ToolResult {
+                    tool_name, content, ..
+                }) if tool_name == "fixture_dot" => Some(content.clone()),
+                _ => None,
+            })
+            .expect("fixture_dot ran");
+        assert!(
+            matches!(&content[0], Content::Text { text } if text == "a dot"),
+            "{content:?}"
+        );
+        // dsh's offloaded image and the oversize one stay text, store or not.
+        assert!(
+            matches!(&content[2], Content::Text { text } if text.contains("offloaded.png: offloaded")),
+            "{content:?}"
+        );
+        assert!(
+            matches!(&content[3], Content::Text { text } if text.contains("huge.png: too large")),
+            "{content:?}"
+        );
+        if with_store {
+            // The attachment's bytes, read from the store, as a yoagent image.
+            assert!(
+                matches!(&content[1], Content::Image { data, mime_type }
+                    if mime_type == "image/png" && data.starts_with("iVBORw0KGgo")),
+                "{content:?}"
+            );
+        } else {
+            assert!(
+                matches!(&content[1], Content::Text { text } if text.contains("not available")),
+                "{content:?}"
+            );
+        }
+        host.root.shutdown().await.unwrap();
+    }
 }

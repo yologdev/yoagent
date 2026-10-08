@@ -152,17 +152,37 @@ export interface ToolCall extends RunInfo {
 /** Allow (nothing), deny with a reason the model sees, or rewrite the arguments. */
 export type ToolVerdict = void | null | { deny: string } | { args: Record<string, unknown> }
 
+/**
+ * A content block, in yoagent's JSON shape (also pi's, and MCP's bare
+ * blocks): text, or an image as standard base64 `data` (at most 10 MB
+ * decoded) with a `mimeType` of `image/png`, `image/jpeg`, `image/gif` or
+ * `image/webp` — the types every provider takes. Stay under your provider's
+ * own limit too (Anthropic: 5 MB base64): an image it refuses is in the
+ * history, and fails every later request.
+ */
+export type ContentBlock = { type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }
+
 export interface ToolOutput {
-  /** The text blocks, joined. */
+  /** The text blocks, concatenated with no separator. */
   text: string
   /** yoagent's content blocks (text and images). */
-  content: unknown[]
+  content: ContentBlock[]
   details: unknown
   is_error: boolean
 }
 
-/** Keep the output (nothing), or replace parts of it: `text` replaces every content block with one text block. */
-export type OutputEdit = void | null | { text?: string; details?: unknown; is_error?: boolean }
+/**
+ * Keep the output (nothing), or replace parts of it: `text` replaces every
+ * content block with one text block, `content` with the given blocks (so
+ * images can be kept, added or dropped; a kept image — identical to one in
+ * `output.content` — passes as it is, a new one must meet ContentBlock's
+ * rules). Not both — so do not return the
+ * `output` you were given (`{...output, text}` has both): pick the fields.
+ */
+export type OutputEdit =
+  | void
+  | null
+  | { text?: string; content?: ContentBlock[]; details?: unknown; is_error?: boolean }
 
 export interface Turn extends RunInfo {
   model: string
@@ -213,9 +233,13 @@ export interface ToolSpec {
 
 /**
  * The tool's text, or the text plus details (a missing `text` — `{}` too —
- * is an empty text); `is_error` (or a throw) fails the call.
+ * is an empty text), or `content` blocks instead of `text` (images included;
+ * not both); `is_error` (or a throw) fails the call, with the text blocks,
+ * joined by newlines, as its message.
  */
-export type ToolResult = string | { text?: string; details?: unknown; is_error?: boolean }
+export type ToolResult =
+  | string
+  | { text?: string; content?: ContentBlock[]; details?: unknown; is_error?: boolean }
 
 export type AgentEventType =
   | 'agentStart'

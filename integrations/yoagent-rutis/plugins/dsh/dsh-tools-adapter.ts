@@ -20,14 +20,41 @@
 //   call_tool    `tools.execute({callId, name, arguments, signal})`, with the
 //                bridge's cancel handle as dsh's `signal`: cancelling the
 //                yoagent run aborts the dsh call. `isError` → an error tool
-//                result; text blocks are joined, other blocks named.
+//                result. Text blocks stay text; an image block (a reference
+//                into dsh's attachment store) becomes a yoagent image, read
+//                with the `attachments` service when one is loaded (looked up
+//                per image, not injected: the adapter runs without it). With
+//                none, when a read fails, when dsh marked the image
+//                `offloaded`, or when it is over MAX_IMAGE_BYTES (provider-safe:
+//                Anthropic takes 5 MB base64), the image is a text
+//                placeholder. Other blocks are named. An error result's
+//                images are not read.
 //   before_model the sections dsh plugins added to `systemPrompt` (the
 //                harness identity and persona slots left out), rendered and
 //                capped, as a note on the request's latest user turn.
 
 import { definePlugin } from '@arcships/rutis'
 import { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
-import type { Cancellable, ToolCall, ToolResult, ToolSpec, Yoagent } from '../yoagent.d.ts'
+import type { Cancellable, ContentBlock, ToolCall, ToolResult, ToolSpec, Yoagent } from '../yoagent.d.ts'
+
+/** The slice of `@deepseek-ai/dsh-attachment`'s `AttachmentStore` this adapter uses. */
+interface DshAttachments {
+  readImage(
+    ref: { attachmentId: string; mediaType: string },
+    signal?: AbortSignal,
+  ): Promise<{ ref: { mediaType: string }; data: Uint8Array }>
+}
+
+/** A dsh content block as a tool result carries it. */
+type DshBlock = {
+  type: string
+  text?: string
+  attachment?: { attachmentId: string; mediaType: string; name?: string; bytes?: number }
+  offloaded?: true
+}
+
+/** Largest image sent as an image: under Anthropic's 5 MB once base64-encoded. */
+const MAX_IMAGE_BYTES = 3_750_000
 
 /** The slice of `@deepseek-ai/dsh-tools`' `ToolRuntime` this adapter uses. */
 interface DshTools {
@@ -39,7 +66,7 @@ interface DshTools {
     signal: AbortSignal
   }): Promise<{
     isError: boolean
-    content?: { type: string; text?: string }[]
+    content?: DshBlock[]
     error?: { message?: string; info?: { code?: string } }
   }>
 }
@@ -87,7 +114,39 @@ export default definePlugin<Config>({
     const prompt = ctx.use<DshSystemPrompt>('systemPrompt')
     const yoagent = ctx.use<Yoagent>('yoagent')
     const only = config?.tools ? new Set(config.tools) : undefined
+    /** dsh's attachment store, when one is loaded: optional, so looked up per use rather than injected. */
+    const attachments = (): DshAttachments | undefined => {
+      try {
+        return ctx.use<DshAttachments>('attachments')
+      } catch {
+        return undefined
+      }
+    }
     const maxNote = config?.maxNoteChars ?? 2000
+
+    /** An image reference as a yoagent image: its bytes from dsh's attachment store. */
+    const image = async (
+      ref: { attachmentId: string; mediaType: string; name?: string; bytes?: number },
+      offloaded: boolean,
+      signal: AbortSignal,
+    ): Promise<ContentBlock> => {
+      const named = `image${ref.name ? ` ${ref.name}` : ''}`
+      const label = `[${named}: not available here]`
+      // dsh decided this image goes out as text; and an oversize one would fail the request.
+      if (offloaded) return { type: 'text', text: `[${named}: offloaded]` }
+      if ((ref.bytes ?? 0) > MAX_IMAGE_BYTES) return { type: 'text', text: `[${named}: too large to send]` }
+      const store = attachments()
+      if (!store) return { type: 'text', text: label }
+      try {
+        const stored = await store.readImage(ref, signal)
+        if (stored.data.byteLength > MAX_IMAGE_BYTES) return { type: 'text', text: `[${named}: too large to send]` }
+        return { type: 'image', data: Buffer.from(stored.data).toString('base64'), mimeType: stored.ref.mediaType }
+      } catch (error) {
+        if (signal.aborted) throw error
+        console.warn(`[dsh] image ${ref.attachmentId} could not be read: ${error}`)
+        return { type: 'text', text: label }
+      }
+    }
 
     ctx.effect(
       yoagent.register(config?.name ?? 'dsh-tools', {
@@ -109,13 +168,23 @@ export default definePlugin<Config>({
             arguments: call.args,
             signal: call.signal,
           })
-          const text = (out.content ?? [])
-            .map((block) => (block.type === 'text' ? (block.text ?? '') : `[${block.type} block]`))
-            .join('\n')
           if (out.isError) {
+            const text = (out.content ?? [])
+              .map((block) => (block.type === 'text' ? (block.text ?? '') : `[${block.type} block]`))
+              .join('\n')
             return { text: text || out.error?.message || 'the dsh tool failed', is_error: true }
           }
-          return { text }
+          const content: ContentBlock[] = []
+          for (const block of out.content ?? []) {
+            if (block.type === 'text') {
+              content.push({ type: 'text', text: block.text ?? '' })
+            } else if (block.type === 'image' && block.attachment) {
+              content.push(await image(block.attachment, block.offloaded === true, call.signal))
+            } else {
+              content.push({ type: 'text', text: `[${block.type} block]` })
+            }
+          }
+          return { content }
         },
 
         async before_model(turn: Cancellable) {

@@ -11,6 +11,12 @@
 //! - its schema (name, description, parameters) is the tool's;
 //! - a result is text, a failure (rutis-agent's `ok: false`, its
 //!   `error: ...` text) is a real `ToolError::Failed`;
+//! - images: rutis-agent's results are text (a runner's JSON value is
+//!   serialized). By this adapter's convention a runner that returns
+//!   `{"content": [blocks]}` — yoagent's text and image blocks,
+//!   `{"type": "image", "data": <base64>, "mimeType": "image/…"}` — gives
+//!   yoagent those blocks, images included (rutis-agent's own agent still
+//!   sees the JSON text);
 //! - yoagent's cancel token *is* the token rutis-agent's `execute` watches,
 //!   so cancelling the run stops the runner. The tool returns
 //!   `ToolError::Cancelled`, but the transcript shows yoagent's "Tool result
@@ -25,7 +31,9 @@
 //! 2. while the host runs, a `word_count` tool is registered into
 //!    rutis-agent's `ToolRegistry` — it appears on the agent's next run, with
 //!    no change to the agent or the adapter (hot add);
-//! 3. (scripted only) a slow tool, added the same way, is cancelled with
+//! 3. (scripted only) a `dot_picture` tool, added the same way, returns a
+//!    picture: it reaches yoagent as an image;
+//! 4. (scripted only) a slow tool, added the same way, is cancelled with
 //!    `Agent::abort()`: its runner never finishes.
 //!
 //! The model is scripted by default; `--live` asks DeepSeek instead
@@ -163,10 +171,32 @@ impl AgentTool for RegistryTool {
             return Err(ToolError::Failed(out.output));
         }
         Ok(ToolResult {
-            content: vec![Content::Text { text: out.output }],
+            content: content_of(&out.output)
+                .unwrap_or_else(|| vec![Content::Text { text: out.output }]),
             details: Value::Null,
         })
     }
+}
+
+/// A runner's `{"content": [blocks]}` value (as rutis-agent serialized it),
+/// read back as yoagent content: only text and image blocks, only when the
+/// whole value is that shape, and only with at least one image — so a tool
+/// that prints such JSON as text (`cat result.json`) mostly stays text.
+fn content_of(output: &str) -> Option<Vec<Content>> {
+    if !output.starts_with('{') {
+        return None;
+    }
+    let mut value: serde_json::Map<String, Value> = serde_json::from_str(output).ok()?;
+    if value.len() != 1 {
+        return None;
+    }
+    let blocks: Vec<Content> = serde_json::from_value(value.remove("content")?).ok()?;
+    let image = |b: &Content| matches!(b, Content::Image { data, mime_type } if !data.is_empty() && mime_type.starts_with("image/"));
+    let valid = blocks
+        .iter()
+        .all(|b| matches!(b, Content::Text { .. }) || image(b))
+        && blocks.iter().any(image);
+    valid.then_some(blocks)
 }
 
 // ── The host ────────────────────────────────────────────────────
@@ -188,6 +218,26 @@ fn word_count_tool() -> ToolDef {
                 "{} words",
                 text.split_whitespace().count()
             )))
+        },
+    )
+}
+
+/// A 1×1 PNG, base64.
+const DOT_PNG: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg==";
+
+/// A tool returning a picture: text and an image, in the content-block
+/// convention this adapter reads.
+fn dot_picture_tool() -> ToolDef {
+    ToolDef::new(
+        "dot_picture",
+        "Shows a picture of a dot.",
+        json!({"type": "object", "properties": {}}),
+        |_| async move {
+            Ok(json!({"content": [
+                {"type": "text", "text": "a dot"},
+                {"type": "image", "data": DOT_PNG, "mimeType": "image/png"},
+            ]}))
         },
     )
 }
@@ -348,7 +398,10 @@ async fn main() -> Result<(), BoxError> {
             // Run 2: the tool added while the host ran.
             call("word_count", json!({"path": path})),
             MockResponse::Text("Counted.".into()),
-            // Run 3: cancelled mid-call.
+            // Run 3: a picture.
+            call("dot_picture", json!({})),
+            MockResponse::Text("Seen.".into()),
+            // Run 4: cancelled mid-call.
             call("slow", json!({})),
             MockResponse::Text("never sent".into()),
         ]);
@@ -415,7 +468,19 @@ async fn main() -> Result<(), BoxError> {
             format!("word_count was not hot-added between the runs: {offered:?}"),
         )?;
 
-        // 3. Cancel: yoagent's token stops rutis-agent's runner.
+        // 3. Images: a runner's content blocks reach yoagent as an image.
+        registry.register(dot_picture_tool());
+        let before = agent.messages().len();
+        run(&mut agent, "Show me the dot.").await?;
+        let image = agent.messages()[before..].iter().any(|m| {
+            matches!(m, AgentMessage::Llm(Message::ToolResult { tool_name, content, .. })
+                if tool_name == "dot_picture"
+                    && content.iter().any(|c| matches!(c, Content::Image { data, .. } if data == DOT_PNG)))
+        });
+        println!("  dot_picture returned an image: {image}");
+        check(image, "dot_picture's image did not reach yoagent")?;
+
+        // 4. Cancel: yoagent's token stops rutis-agent's runner.
         let finished = Arc::new(AtomicBool::new(false));
         registry.register(slow_tool(finished.clone()));
         let mut events = agent.prompt("Take your time.").await;

@@ -4,6 +4,13 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### yoagent-rutis
+
+- **Images in tool results, across ecosystems.** TypeScript and Python handlers' `call_tool` results and `after_tool` edits take `content` blocks in yoagent's JSON shape (`{"type": "image", "data": <base64>, "mimeType"}` next to text blocks) instead of `text`, so pictures cross the bridge both ways (`after_tool` already saw `output.content`). The dsh adapter turns dsh image blocks (references into dsh's attachment store) into yoagent images through the `attachments` service when one is loaded; the rutis-agent example reads a runner's `{"content": [...]}` value as blocks (rutis-agent results are otherwise text). Rust handlers already returned full yoagent tool results. Tests: `content_blocks` unit test, TypeScript/Python round trip in `languages_test`, dsh with and without a store in `dsh_test`.
+- Test fix: `dsh_test` no longer reads the abort file mid-write (empty) as the result.
+
 ## 0.25.0 (2026-10-08)
 
 ### Added
