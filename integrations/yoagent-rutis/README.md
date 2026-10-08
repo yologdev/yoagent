@@ -218,7 +218,10 @@ def apply(ctx, config):
   Text and blocks are exclusive in one answer (so return picked fields,
   not the `output` you were given). An image must be standard base64 of at
   most 10 MB, typed `image/png`, `image/jpeg`, `image/gif` or `image/webp`
-  (what every provider takes); anything else in `content` fails the answer.
+  (what every provider takes); anything else in `content` fails the answer
+  — except, in an `after_tool` edit, an image identical to one in
+  `output.content`: keeping what yoagent let in (`read_file` takes bmp, up
+  to 20 MB) never fails the edit.
   Stay under your provider's own limit too (Anthropic: 5 MB base64): an
   image it refuses sits in the history and fails every later request.
 
