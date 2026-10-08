@@ -1,0 +1,18 @@
+{
+  "name": "yoagent-rutis-pi",
+  "private": true,
+  "description": "The pi extensions adapter for yoagent-rutis: pi coding-agent extensions' tools and tool policies as a yoagent handler, in rutis's Node runtime. pi's packages are installed so extensions' imports (helpers, TypeBox) resolve to the real thing.",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@arcships/rutis": "0.7.0",
+    "@arcships/rutis-runtime": "0.7.0",
+    "@earendil-works/pi-ai": "1.1.0",
+    "@earendil-works/pi-coding-agent": "1.1.0",
+    "@earendil-works/pi-tui": "1.1.0",
+    "jiti": "2.7.0",
+    "typebox": "1.3.27"
+  }
+}

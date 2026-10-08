@@ -253,7 +253,7 @@ sits inside every run of every agent using the extension:
 The end-to-end tests cover local Node and Python runtimes; a remote node over
 `wss` is not tested here.
 
-## Tools from other rutis ecosystems
+## Tools from other agent ecosystems
 
 ### dsh (DeepSeek Harness) tool plugins
 
@@ -309,6 +309,56 @@ cargo run --manifest-path examples/rutis-agent-tools/Cargo.toml [-- --live]
 > rutis-agent from git at that tag and patches crates.io's `rutis` to the same
 > tag (`[patch.crates-io]`), leaving one `rutis` in the graph (`cargo tree -d`
 > shows none twice). Move the tag and the patch together.
+
+### pi extensions (tools and tool policies)
+
+[pi](https://github.com/earendil-works/pi) extensions are TypeScript
+modules written against pi's `ExtensionAPI`.
+[`plugins/pi/pi-extensions-adapter.ts`](plugins/pi/pi-extensions-adapter.ts)
+loads them unchanged with pi's own loader (pi's packages are installed in
+`plugins/pi/`, so their imports — TypeBox, `defineTool`, pi's helpers — are
+the real ones) and maps the part of the API that belongs to an agent loop
+onto one handler:
+
+| pi | yoagent |
+|---|---|
+| `pi.registerTool` | a tool; `execute` gets the bridge's cancel handle as its signal; a throw or `isError` is an error result; tools registered at `session_start` are offered too |
+| `on("tool_call")` | `before_tool` for every call, yoagent's built-ins under pi's names (`bash`, `read_file`→`read`, `write_file`→`write`, `edit_file`→`edit` with `edits`, `search`→`grep`, `list_files`→`find`; config `toolNames` overrides): `{ block }` denies, in-place changes to `event.input` rewrite the arguments, a throwing handler blocks |
+| `on("tool_result")` | `after_tool`: content, details and isError edits, chained |
+| `on("before_agent_start")` | `before_model`, once per run: text added around `event.systemPrompt` becomes a note on the latest user turn; replacing the prompt or returning `message` fails the hook |
+| `on("session_start")` / `on("session_shutdown")` | when the adapter loads / unloads |
+
+The rest does not map and is reported when an extension registers it (a
+warning; config `strict: true` makes it a load failure): events that rewrite
+or continue the conversation (`context`, `message_end`, `turn_end`, ...) or
+steer pi's session tree, and commands, shortcuts, flags and renderers, which
+belong to a host app. Runtime actions (`pi.sendMessage`, ...) throw pi's own
+"not initialized" error. There is no UI: `ctx.hasUI` is false and `ctx.ui`
+behaves as in pi's print mode (`confirm` answers false), so a policy that
+would ask the user denies.
+
+Config: `extensions` (files, loaded in order), `cwd` (the project the
+extensions see; default the runtime's), `name`, `toolNames`, `strict`. Load
+it as a row of a Node runtime whose `package.json` is `plugins/pi/`'s
+(pi 1.1.0, pinned exactly: the adapter imports pi's loader by file, since the
+package exports only the variant that also loads `~/.pi`), with `yoagent`
+shared in the loader's catalog.
+
+```sh
+(cd plugins/pi && npm ci)
+cargo run --features node --example pi_extensions                          # the fixture extension, scripted
+cargo run --features node --example pi_extensions -- hello.ts todo.ts ...  # your pi extensions
+cargo run --features node --example pi_extensions -- --live --prompt "..." EXT.ts ...  # DeepSeek
+```
+
+Tried with eleven of pi's own examples, unchanged (`hello`, `todo`,
+`protected-paths`, `permission-gate`, `tool-override`, `truncated-tool`,
+`claude-rules`, `dynamic-tools`, `pirate`, `dirty-repo-guard`,
+`confirm-destructive`): all load; their tools run and their tool policies
+judge yoagent's own tools (live with DeepSeek, too); the commands and
+session events they also register are reported as unavailable.
+`tests/pi_test.rs` covers the adapter offline with a fixture extension
+(`plugins/pi/fixture-extension.ts`).
 
 ## Semantics
 

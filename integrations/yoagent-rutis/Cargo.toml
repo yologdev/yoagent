@@ -72,10 +72,18 @@ required-features = ["node", "python"]
 name = "dsh_test"
 required-features = ["node"]
 
+[[test]]
+name = "pi_test"
+required-features = ["node"]
+
 [[example]]
 name = "language_plugins"
 required-features = ["node", "python"]
 
 [[example]]
 name = "dsh_tools"
+required-features = ["node"]
+
+[[example]]
+name = "pi_extensions"
 required-features = ["node"]

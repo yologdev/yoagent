@@ -292,6 +292,10 @@ jobs:
       # dsh-system-prompt and the adapter's other pins, in their own install.
       - name: Install the dsh npm packages
         run: npm ci --prefix "$PLUGINS/dsh"
+      # The pi adapter's end-to-end test (tests/pi_test.rs): pi's own
+      # packages (its extension loader, TypeBox), in their own install.
+      - name: Install the pi npm packages
+        run: npm ci --prefix "$PLUGINS/pi"
       - name: Install the rutis Python package
         run: |
           python -m venv "$PLUGINS/.venv"
@@ -307,6 +311,8 @@ jobs:
         run: cargo test --manifest-path "$MANIFEST" --features node,python,websocket
       - name: Example
         run: cargo run --manifest-path "$MANIFEST" --features node,python --example language_plugins
+      - name: pi extensions example (scripted, the fixture extension)
+        run: cargo run --manifest-path "$MANIFEST" --features node --example pi_extensions
 
   # yoagent claims to be a tested GASP-conformant runtime — this job is the
   # test: emit an agent repo with the gasp bridge (mock provider, no network)

@@ -4,6 +4,12 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### yoagent-rutis
+
+- **pi extensions** (`plugins/pi/pi-extensions-adapter.ts`): the tools and tool policies of [pi](https://github.com/earendil-works/pi) coding-agent extensions, loaded unchanged with pi's own loader, as one yoagent handler. `registerTool` → tools (cancel handle as the signal), `tool_call` → `before_tool` (yoagent's built-ins under pi's names, arguments translated both ways), `tool_result` → `after_tool`, `before_agent_start` additions → a turn note. What does not map (conversation rewriting, session events, commands, UI) is reported, or fails loading with `strict`. Example `pi_extensions` (any extension files; `--live` with DeepSeek), test `pi_test`.
+
 ## 0.25.0 (2026-10-08)
 
 ### Added
