@@ -389,8 +389,13 @@ cannot go around it.
 observers such as `agent_end` or `tool_execution_*`, pi's session events,
 the boundary events `turn_end` / `agent_before_settle` — commands,
 shortcuts, flags, renderers, model providers, virtual models and MCP
-servers. Other runtime actions (`pi.sendMessage`, `pi.appendEntry`, ...)
-throw "not available in yoagent". There is no UI: `ctx.hasUI` is false and
+servers. `pi.appendEntry` and `pi.sendMessage` are recorded in the
+adapter's in-memory session — readable through `ctx.sessionManager`, a
+displayed message also logged — so a tool that records or shows its result
+this way (pi video tools do, after the paid work) does not fail; a message
+never starts a turn or reaches the model (yoagent's history is written only
+by its host). Other runtime actions (`pi.sendUserMessage`, `pi.setModel`,
+...) throw "not available in yoagent". There is no UI: `ctx.hasUI` is false and
 `ctx.ui` behaves as in pi's print mode (`confirm` answers false), so a
 policy that would ask the user denies. Commands, dialogs and session
 history are planned as host-level plugin services — `ui` and `commands`

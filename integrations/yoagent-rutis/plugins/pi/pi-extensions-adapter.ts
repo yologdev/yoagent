@@ -94,9 +94,11 @@
 // load failure with `strict`). One registered after load (in a handler or a
 // tool) is reported at the next model request or tool call, and a deciding
 // one stops the adapter: that run, and every later call, refused. Warnings
-// go to the host's logs (`yoagent.log`, else stderr). Other runtime actions
-// (`pi.sendMessage`, `pi.appendEntry`, ...) throw "not available in
-// yoagent". `ctx.hasUI` is false and `ctx.ui` behaves as in
+// go to the host's logs (`yoagent.log`, else stderr). `pi.appendEntry` and
+// `pi.sendMessage` are recorded in the adapter's in-memory session (readable
+// through `ctx.sessionManager`; a displayed message is also logged; a message
+// never starts a turn); other runtime actions (`pi.sendUserMessage`,
+// `pi.setModel`, ...) throw "not available in yoagent". `ctx.hasUI` is false and `ctx.ui` behaves as in
 // pi's print mode: `confirm` answers false, `select` and `input` nothing, so
 // a policy that would ask the user denies instead.
 
@@ -204,9 +206,7 @@ const DECIDING_EVENTS = new Set([
 
 /** pi runtime actions with no yoagent counterpart. */
 const UNSUPPORTED_ACTIONS = [
-  'sendMessage',
   'sendUserMessage',
-  'appendEntry',
   'setSessionName',
   'getSessionName',
   'setLabel',
@@ -622,6 +622,23 @@ export default definePlugin<Config>({
           sourceInfo: { path: 'extension', source: 'extension', scope: 'temporary', origin: 'top-level' },
         })),
       ]
+    }
+    // Session writes go to the adapter's in-memory session, so a tool that records or shows its
+    // result this way (pi video tools do, after the paid work) does not fail. They are pi state,
+    // read back through `ctx.sessionManager`; yoagent's own history is written only by its host.
+    runtime.appendEntry = (customType: string, data?: unknown) => {
+      sessionManager.appendCustomEntry(customType, data)
+    }
+    runtime.sendMessage = (
+      message: { customType: string; content: string | Block[]; display?: boolean; details?: unknown },
+      options?: { triggerTurn?: boolean; deliverAs?: string },
+    ) => {
+      sessionManager.appendMessage({ role: 'custom', timestamp: Date.now(), display: true, ...message } as never)
+      const shown = typeof message.content === 'string' ? message.content : text(message.content)
+      if (message.display !== false) report('info', `[pi ${message.customType}] ${shown}`)
+      if (options?.triggerTurn || options?.deliverAs) {
+        report('warn', `[pi] ${message.customType}: a message cannot start or join a turn in yoagent; recorded only`)
+      }
     }
     for (const action of UNSUPPORTED_ACTIONS) {
       runtime[action] = () => {

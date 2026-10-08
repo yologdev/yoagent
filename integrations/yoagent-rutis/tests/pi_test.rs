@@ -391,6 +391,8 @@ async fn pi_semantics_on_the_less_common_paths() {
             ("write_file", json!({"path": "rel.txt", "content": "here"})),
             // Nested calls from a pi tool.
             ("pi_compose", json!({})),
+            // Session calls inside a tool: recorded, not failing the tool.
+            ("pi_render", json!({})),
             // Blocked with terminate: the run stops before its next request.
             ("bash", json!({"command": "echo stop-now"})),
         ]),
@@ -532,9 +534,15 @@ async fn pi_semantics_on_the_less_common_paths() {
     );
     // Called with no arguments: an empty object.
     assert!(text.contains("/5 pi_dynamic ok: dynamic ok"), "{text}");
+    // appendEntry and sendMessage inside a tool are recorded in the adapter's session.
+    let (_, text, is_error) = result(16);
+    assert!(
+        !is_error && text == "rendered; 1 custom entry recorded",
+        "{results:?}"
+    );
     // terminate: true denied the call and stopped the run before its next request.
     assert!(
-        result(16).2 && result(16).1.contains("stopping the run"),
+        result(17).2 && result(17).1.contains("stopping the run"),
         "{results:?}"
     );
     assert_eq!(seen_now.len(), 1, "the run stopped: {seen_now:?}");
@@ -650,7 +658,7 @@ async fn what_could_leave_a_policy_unenforced_refuses_the_load() {
         ),
         (
             "unsupported-start.ts",
-            "export default function (pi) { pi.on('session_start', () => pi.appendEntry('x', {})) }\n",
+            "export default function (pi) { pi.on('session_start', () => pi.sendUserMessage('x')) }\n",
             "session_start",
         ),
         (

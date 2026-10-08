@@ -90,6 +90,20 @@ export default function (pi: ExtensionAPI) {
     },
   })
 
+  // Records and shows its result through pi's session API, as pi video tools do.
+  pi.registerTool({
+    name: 'pi_render',
+    label: 'Render',
+    description: 'Renders, then records the job.',
+    parameters: Type.Object({}),
+    async execute(_id, _params, _signal, _onUpdate, ctx) {
+      pi.appendEntry('render:last-job', { path: '/tmp/out.mp4' })
+      pi.sendMessage({ customType: 'render_result', content: [{ type: 'text', text: 'Rendered /tmp/out.mp4' }], display: true })
+      const entries = ctx.sessionManager.getEntries().filter((e: { type: string }) => e.type === 'custom').length
+      return { content: [{ type: 'text', text: `rendered; ${entries} custom entr${entries === 1 ? 'y' : 'ies'} recorded` }], details: undefined }
+    },
+  })
+
   pi.on('tool_call', async (event) => {
     if (event.toolName === 'pi_echo' && event.input.text === 'boom') throw new Error('policy crashed')
     // yoagent's search, as pi's grep: include is pi's glob, and an unset
