@@ -526,8 +526,8 @@ impl HandlerImpl for RemoteHandler {
             }];
         }
         if let Some(content) = edit.get("content") {
-            output.result.content =
-                content_blocks(content).ok_or_else(|| unexpected("after_tool", &value))?;
+            output.result.content = content_blocks(content, &output.result.content)
+                .ok_or_else(|| unexpected("after_tool", &value))?;
         }
         if let Some(details) = edit.get("details") {
             output.result.details = details.clone();
@@ -916,7 +916,7 @@ impl AgentTool for RemoteTool {
                 let content = match (fields.get("text"), fields.get("content")) {
                     (Some(Json::String(text)), _) => vec![Content::Text { text: text.clone() }],
                     (Some(_), _) => return Err(unexpected()),
-                    (None, Some(blocks)) => content_blocks(blocks).ok_or_else(unexpected)?,
+                    (None, Some(blocks)) => content_blocks(blocks, &[]).ok_or_else(unexpected)?,
                     (None, None) => vec![Content::Text {
                         text: String::new(),
                     }],
@@ -960,8 +960,11 @@ const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 /// pi's, and MCP's bare blocks) — as yoagent content. `None` for anything
 /// else: not an array, an unknown block type, an extra or missing field, an
 /// image whose `mimeType` is not one of IMAGE_TYPES or whose `data` is not
-/// standard base64 of 1 to MAX_IMAGE_BYTES bytes.
-fn content_blocks(blocks: &Json) -> Option<Vec<Content>> {
+/// standard base64 of 1 to MAX_IMAGE_BYTES bytes. An image identical to one
+/// in `kept` (the output an `after_tool` edit was given) passes as it is:
+/// yoagent let it in (`read_file` takes bmp, up to 20 MB), and keeping it
+/// must not fail the edit.
+fn content_blocks(blocks: &Json, kept: &[Content]) -> Option<Vec<Content>> {
     use base64::Engine as _;
     blocks
         .as_array()?
@@ -976,6 +979,15 @@ fn content_blocks(blocks: &Json) -> Option<Vec<Content>> {
                 "image" if fields.len() == 3 => {
                     let data = field("data")?;
                     let mime_type = field("mimeType")?;
+                    let unchanged = kept.iter().any(|c| {
+                        matches!(c, Content::Image { data: d, mime_type: m } if d == data && m == mime_type)
+                    });
+                    if unchanged {
+                        return Some(Content::Image {
+                            data: data.to_string(),
+                            mime_type: mime_type.to_string(),
+                        });
+                    }
                     // A decoded length bound before decoding: 3 bytes per 4 characters.
                     let fits = data.len() / 4 * 3 <= MAX_IMAGE_BYTES + 2;
                     let bytes = fits
@@ -1006,15 +1018,18 @@ mod tests {
 
     #[test]
     fn content_blocks_take_text_and_images_in_yoagents_shape() {
-        let blocks = content_blocks(&json!([
-            {"type": "text", "text": "see"},
-            {"type": "image", "data": "iVBORw0KGgo=", "mimeType": "image/png"},
-        ]))
+        let blocks = content_blocks(
+            &json!([
+                {"type": "text", "text": "see"},
+                {"type": "image", "data": "iVBORw0KGgo=", "mimeType": "image/png"},
+            ]),
+            &[],
+        )
         .unwrap();
         assert!(matches!(&blocks[0], Content::Text { text } if text == "see"));
         assert!(matches!(&blocks[1], Content::Image { data, mime_type }
             if data == "iVBORw0KGgo=" && mime_type == "image/png"));
-        assert!(content_blocks(&json!([])).unwrap().is_empty());
+        assert!(content_blocks(&json!([]), &[]).unwrap().is_empty());
         for bad in [
             json!("text"),
             json!([{"type": "text"}]),
@@ -1023,6 +1038,8 @@ mod tests {
             json!([{"type": "image", "data": "", "mimeType": "image/png"}]),
             json!([{"type": "image", "data": "not base64!", "mimeType": "image/png"}]),
             json!([{"type": "image", "data": "AAAA", "mimeType": "text/plain"}]),
+            json!([{"type": "image", "data": "AAAA"}]),
+            json!([{"type": "file", "data": "AAAA", "mimeType": "image/png"}]),
             // Mis-padded, or padding in the middle: not base64.
             json!([{"type": "image", "data": "AAAAA", "mimeType": "image/png"}]),
             json!([{"type": "image", "data": "A=AA", "mimeType": "image/png"}]),
@@ -1030,13 +1047,28 @@ mod tests {
             // A type providers do not take.
             json!([{"type": "image", "data": "AAAA", "mimeType": "image/svg+xml"}]),
             json!([{"type": "image", "data": "AAAA", "mimeType": "image/"}]),
-            // Over the size limit.
+            // Over the size limit: refused after decoding, and before it.
             json!([{"type": "image", "data": "A".repeat((MAX_IMAGE_BYTES + 3) / 3 * 4), "mimeType": "image/png"}]),
-            json!([{"type": "image", "data": "AAAA"}]),
-            json!([{"type": "file", "data": "AAAA", "mimeType": "image/png"}]),
+            json!([{"type": "image", "data": "A".repeat(MAX_IMAGE_BYTES / 3 * 4 + 8), "mimeType": "image/png"}]),
         ] {
-            assert!(content_blocks(&bad).is_none(), "{bad}");
+            assert!(content_blocks(&bad, &[]).is_none(), "{bad}");
         }
+    }
+
+    #[test]
+    fn an_after_tool_edit_may_keep_an_image_yoagent_let_in() {
+        // read_file returns bmp; MCP tools other types: keeping one is no new image.
+        let kept = [Content::Image {
+            data: "Qk0=".into(),
+            mime_type: "image/bmp".into(),
+        }];
+        let same = json!([{"type": "image", "data": "Qk0=", "mimeType": "image/bmp"}]);
+        assert!(content_blocks(&same, &[]).is_none());
+        let blocks = content_blocks(&same, &kept).unwrap();
+        assert!(matches!(&blocks[0], Content::Image { mime_type, .. } if mime_type == "image/bmp"));
+        // Changed data is a new image, checked as one.
+        let changed = json!([{"type": "image", "data": "Qk1=", "mimeType": "image/bmp"}]);
+        assert!(content_blocks(&changed, &kept).is_none());
     }
 
     /// How the test handler's event delivery goes wrong.

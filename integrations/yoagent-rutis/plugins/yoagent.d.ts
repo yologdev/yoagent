@@ -174,7 +174,9 @@ export interface ToolOutput {
 /**
  * Keep the output (nothing), or replace parts of it: `text` replaces every
  * content block with one text block, `content` with the given blocks (so
- * images can be kept, added or dropped). Not both — so do not return the
+ * images can be kept, added or dropped; a kept image — identical to one in
+ * `output.content` — passes as it is, a new one must meet ContentBlock's
+ * rules). Not both — so do not return the
  * `output` you were given (`{...output, text}` has both): pick the fields.
  */
 export type OutputEdit =
