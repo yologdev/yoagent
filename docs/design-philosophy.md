@@ -14,7 +14,7 @@ An agent sends messages to a model, gets text and tool calls back, runs the tool
 - **Tools that misbehave.** A tool that panics, hangs, floods its output, or escapes its sandbox.
 - **Context that runs out.** History that outgrows the window, compaction that destroys the cached prefix, a summary that loses the one fact that mattered.
 - **Runs that never end, or end silently.** Loops that repeat a failing call forever, limits that are checked once, a cancel that leaves a half-written state.
-- **Cost nobody can account for.** Spend from retries, sub-agents, decision models and summaries that never shows up in the total.
+- **Cost nobody can account for.** Spend from sub-agents, decision models and summaries that never shows up in the total.
 
 yoagent exists so that this loop is written **once, correctly, with every guarantee pinned by a test** — and then reused by every agent built on it. That is why `agent_loop` is a stateless free function, why [`Agent`](concepts/agent-loop.md) is only an optional wrapper around it, and why most of the codebase is the loop's failure handling rather than its happy path.
 
@@ -57,8 +57,8 @@ The same restraint applies to providers. yoagent integrates model APIs — Anthr
 
 Every way to change what the loop does goes through [`Extension`](concepts/extensions.md): offer tools, judge input, add a note before a model request, allow, deny or rewrite a tool call, edit a result, verify an answer, observe events, clean up. The contract has a few properties that matter more than its list of hooks:
 
-- **It is run-scoped.** An extension is a factory; every run gets fresh hooks. A run's state cannot leak into the next one, and a sub-agent's run gets its own.
-- **Failure has a meaning.** An extension is *advisory* (its failure is logged and the run goes on) or *required* (its failure ends the run). The host decides, not the extension.
+- **It is run-scoped.** An extension is a factory; every run gets fresh hooks, so per-run state starts clean and a sub-agent's run gets its own. Anything shared across runs lives in the extension, by choice (a `Budget` can count across runs).
+- **Failure has a meaning.** An extension is *advisory* (a failure is logged and that hook is skipped) or *required* (a failure ends the run). Wrappers such as `ClonedHooks` and the rutis bridge let the host choose.
 - **The loop's own features use it.** The tool gate, the input guard, the decision advisor and the dollar [`Budget`](concepts/extensions.md#budget) are extensions. If the contract were not enough for them, it would not be enough for anyone.
 - **It is not a UI.** A UI must exist before and between runs; an extension exists only inside one. That is why commands, dialogs and history stay with the app.
 
@@ -66,10 +66,10 @@ Every way to change what the loop does goes through [`Extension`](concepts/exten
 
 An agent acts in the world, so an extension point that can fail must fail in the safe direction. The rule is the same everywhere:
 
-- **A policy that cannot run denies.** A `before_tool` hook that panics, times out or answers nonsense denies the call; a cancelled run's pending policy denies too.
+- **A policy that cannot run denies.** A `before_tool` hook that panics denies the call, and so does one still pending when the run is cancelled. Across the plugin bridge, a handler that times out, is unloaded or returns a malformed answer denies too.
 - **A redaction that fails withholds.** An `after_tool` hook that fails never lets the raw output through.
-- **A tool that panics is an error result**, carrying its message, not a crashed loop.
-- **Nothing is enforced that cannot be.** A plugin feature the host cannot honour — rewriting the conversation, say — refuses to load rather than silently not applying. The [adapter contract](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis#writing-an-ecosystem-adapter) writes this down for every ecosystem adapter.
+- **A tool that panics is an error result**, carrying its message, not a crashed loop (where panics unwind; on wasm32 a panic aborts).
+- **Nothing that decides is silently dropped.** A plugin handler that would decide or rewrite something the host never does — rewriting the conversation, say — refuses to load; the rest is reported. The [adapter contract](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis#writing-an-ecosystem-adapter) writes this down for every ecosystem adapter.
 
 Fail-closed costs some convenience: a plugin that would have half-worked elsewhere refuses to load here. That is the intended trade.
 
@@ -82,14 +82,14 @@ That bridge is how other agent ecosystems reach yoagent. DSH's tool plugins, rut
 Two consequences:
 
 - **The contract is the claim, not the adapters.** That three foreign ecosystems fit through one `Extension` is the evidence the contract is general. The adapters themselves follow other projects' releases and need app services (commands, dialogs, sessions) to be complete; they live in the companion crate, marked experimental, and are expected to move to the app that hosts them.
-- **What crosses the bridge is what every ecosystem gets:** images in tool results both ways, plugin logs in the host's `tracing` (and, opt-in, in the [GASP](concepts/gasp.md) record of their run), and the fail-closed rules.
+- **What crosses the bridge is what every ecosystem gets:** images in tool results both ways, plugin logs in the host's `tracing`, tagged with their `run_id` so a recorder such as [GASP](concepts/gasp.md) can attribute them, and the fail-closed rules.
 
 ## 6. Correct over clever — and honest about cost and cache
 
 A few principles run through the whole loop:
 
 - **The prompt cache is a correctness concern.** The cached prefix is what makes long agent runs affordable, so nothing rewrites it behind the user's back: per-turn notes go on the latest user turn, never into the system prompt; sourced tools are sorted by name so an equal set never reorders; compaction is tiered and measured against real usage.
-- **Cost is reported, never guessed.** Pricing is opt-in data, not literals in code; an unpriced call is `None`, not zero; retries, sub-agents, decision models and summaries each have their bucket and roll into one total.
+- **Cost is reported, never guessed.** Pricing is opt-in data, not literals in code; an unpriced call is `None`, not zero; a run's own turns, sub-agents, decision models and summaries each have their bucket and roll into one total.
 - **Everything is testable without a network.** `MockProvider` drives the loop deterministically; every guarantee here has a test, and the important ones are mutation-checked.
 - **It runs where agents run.** The same loop builds for `wasm32` (Cloudflare Workers) through a small runtime shim, so an agent does not have to change when it moves to the edge.
 
