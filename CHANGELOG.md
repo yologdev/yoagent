@@ -89,6 +89,7 @@ adheres to [Semantic Versioning](https://semver.org/).
 - **Responses / Azure, encrypted reasoning:** a reasoning item whose following output item has no id is no longer stored or replayed (warned) — it would 400 every later request — and an unparseable reasoning `output_item.done` ends the previous item's range.
 - **yoagent-rutis: a TypeScript/Python handler's `on_event` delivery no longer fails silently.** A panic during delivery is caught, and a delivery task that ended (seen on `send` or `flush`) is recorded; either is the handler's failure (a required extension fails the run, an advisory one logs it). Before, the remaining events were dropped and the run never failed.
 - **A cancelled run no longer blames an extension for a withheld tool result.** When the run is cancelled while an extension's `after_tool` is still working, the result is still withheld (a redactor may not have run), but the text now says the run was cancelled before the extension finished, instead of "extension '…' did not finish processing it", which reads like the extension failed.
+- **`list_files` reports what it couldn't read** (#260, found by yoyo). `find` skips an unreadable subdirectory, prints the error on stderr and exits non-zero; the tool ignored both, so a partial listing read as complete. The listed files are still returned, now with the errors under `Warnings` in the text and in `details.warnings` (capped); a listing with no files and an error fails, as `search` does.
 
 ## 0.24.3
 

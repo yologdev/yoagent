@@ -132,13 +132,29 @@ impl AgentTool for ListFilesTool {
         let mut lines: Vec<&str> = stdout.lines().collect();
         lines.sort();
 
+        // `find` keeps walking past what it can't read (a subdirectory without
+        // permission, a file removed mid-walk), reports it on stderr and exits
+        // non-zero. The files it did list are the answer, with those errors as
+        // warnings, so a partial listing never reads as complete. Only a
+        // listing with nothing to show is a failure.
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        let stderr = stderr.trim();
+        // Capped on both paths: a wide walk can produce thousands of lines.
+        let warnings = (!stderr.is_empty()).then(|| match stderr.char_indices().nth(2000) {
+            Some((cut, _)) => format!("{}\n... (more warnings not shown)", &stderr[..cut]),
+            None => stderr.to_string(),
+        });
+        if let (false, true, Some(w)) = (result.status.success(), lines.is_empty(), &warnings) {
+            return Err(ToolError::Failed(format!("Listing error: {w}")));
+        }
+
         let total = lines.len();
         let truncated = total > self.max_results;
         if truncated {
             lines.truncate(self.max_results);
         }
 
-        let text = if lines.is_empty() {
+        let mut text = if lines.is_empty() {
             format!("No files found in {}", path)
         } else if truncated {
             format!(
@@ -151,9 +167,19 @@ impl AgentTool for ListFilesTool {
             format!("{}\n\n({} files)", lines.join("\n"), total)
         };
 
+        if let Some(w) = &warnings {
+            text.push_str(&format!(
+                "\nWarnings from find (the listing may be incomplete):\n{w}"
+            ));
+        }
+
         Ok(ToolResult {
             content: vec![Content::Text { text }],
-            details: serde_json::json!({ "total": total, "truncated": truncated }),
+            details: serde_json::json!({
+                "total": total,
+                "truncated": truncated,
+                "warnings": warnings,
+            }),
         })
     }
 }
