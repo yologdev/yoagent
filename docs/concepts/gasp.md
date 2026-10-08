@@ -76,7 +76,7 @@ tracing::subscriber::set_global_default(
 let agent = agent.with_extension(recorder.extension()); // learns each run's id
 ```
 
-The layer forwards lines of the target `yoagent_rutis::plugin` (`gasp::PLUGIN_LOG_TARGET`) whose `run_id` is one of this recorder's runs — another agent's plugins in the same process never land here, and a line without a run stays in your logs only. Each line goes through the summarizer, like tool output, and is recorded as an `observation.created` on the run. Installed with `with_tree_extension`, delegated runs' lines are recorded on the same run.
+`tracing-subscriber` 0.3 must be a dependency of your own crate (the layer implements its `Layer` trait). The layer forwards lines of the target `yoagent_rutis::plugin` (`gasp::PLUGIN_LOG_TARGET`) whose `run_id` is one of this recorder's runs — another agent's plugins in the same process never land here, and a line without a run stays in your logs only. Each line goes through the summarizer, like tool output, and is recorded as an `observation.created` on the run. Installed with `with_tree_extension`, delegated runs' lines are recorded on the same run. Record every run of an agent that has the extension: a run started *without* a recording while one is open is attributed to that recording.
 
 ## Tested conformance
 

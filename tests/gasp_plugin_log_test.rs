@@ -6,7 +6,7 @@
 //! on the subscriber, the line of this run is recorded as an observation on
 //! it; a line of another run, and one without a run, are not.
 //!
-//! Its own test binary with a single test: it installs a global subscriber.
+//! Its own test binary: it installs a global subscriber, once.
 #![cfg(feature = "gasp")]
 
 use std::sync::Arc;
@@ -48,8 +48,16 @@ impl RunHooks for StandInRun {
     }
 }
 
+fn events(dir: &std::path::Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(dir.join("state/events.jsonl"))
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn a_plugin_log_line_is_recorded_on_its_run() {
+async fn plugin_log_lines_are_recorded_on_their_runs() {
     for (k, v) in [
         ("GIT_AUTHOR_NAME", "yoagent-test"),
         ("GIT_AUTHOR_EMAIL", "test@yolog.dev"),
@@ -75,32 +83,41 @@ async fn a_plugin_log_line_is_recorded_on_its_run() {
     .unwrap();
 
     let mut agent = Agent::from_provider(
-        MockProvider::new(vec![MockResponse::Text("done".into())]),
+        MockProvider::new(vec![
+            MockResponse::Text("one".into()),
+            MockResponse::Text("two".into()),
+        ]),
         ModelConfig::mock(),
     )
     .with_extension(Arc::new(PluginStandIn))
     .with_extension(recorder.extension());
-    let (tx, handle) = recorder.recording_sender("go", None);
-    agent.prompt_with_sender("go", tx).await;
-    let run_id = handle.await.unwrap().unwrap().expect("run recorded");
 
-    let events: Vec<serde_json::Value> =
-        std::fs::read_to_string(dir.path().join("state/events.jsonl"))
-            .unwrap()
-            .lines()
-            .map(|l| serde_json::from_str(l).unwrap())
-            .collect();
-    let observations: Vec<&serde_json::Value> = events
+    // Run 1: its own line recorded on it; another run's and a run-less one not.
+    let (tx1, handle1) = recorder.recording_sender("first", None);
+    // Keep the first recording open while the second starts: its end must not
+    // switch off the second's routing.
+    let keep_open = tx1.clone();
+    agent.prompt_with_sender("first", tx1).await;
+    let (tx2, handle2) = recorder.recording_sender("second", None);
+    drop(keep_open);
+    let run1 = handle1.await.unwrap().unwrap().expect("run 1 recorded");
+    agent.prompt_with_sender("second", tx2).await;
+    let run2 = handle2.await.unwrap().unwrap().expect("run 2 recorded");
+
+    let all = events(dir.path());
+    let observations: Vec<&serde_json::Value> = all
         .iter()
         .filter(|e| e["kind"] == "observation.created")
+        .map(|e| &e["payload"])
         .collect();
-    assert_eq!(observations.len(), 1, "{observations:#?}");
-    let payload = &observations[0]["payload"];
-    assert_eq!(
-        payload["summary"], "pi command /todos not available",
-        "{payload}"
-    );
-    assert_eq!(payload["observed_in"], run_id.0.as_str(), "{payload}");
-    assert_eq!(payload["metadata"]["source"], "plugin");
-    assert_eq!(payload["metadata"]["level"], "warn");
+    assert_eq!(observations.len(), 2, "{observations:#?}");
+    for (payload, run) in observations.iter().zip([&run1, &run2]) {
+        assert_eq!(
+            payload["summary"], "pi command /todos not available",
+            "{payload}"
+        );
+        assert_eq!(payload["observed_in"], run.0.as_str(), "{payload}");
+        assert_eq!(payload["metadata"]["source"], "plugin");
+        assert_eq!(payload["metadata"]["level"], "warn");
+    }
 }

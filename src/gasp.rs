@@ -437,13 +437,14 @@ impl GaspRecorder {
         let (log_tx, log_rx) = mpsc::unbounded_channel();
         *self.route.lock().unwrap_or_else(|e| e.into_inner()) = Some(OpenRoute {
             runs: HashSet::new(),
-            tx: log_tx,
+            tx: log_tx.clone(),
         });
         let logs = Logs {
             state: self.state.clone(),
             actor: self.actor.clone(),
             rx: log_rx,
             route: self.route.clone(),
+            own: log_tx,
         };
         let handle = tokio::spawn(consume(
             sink, store, goal, task, summarize, rx, forward, logs,
@@ -458,6 +459,9 @@ struct Logs {
     actor: ActorRef,
     rx: mpsc::UnboundedReceiver<PluginLog>,
     route: Route,
+    /// This recording's own sender: the route is cleared only while it is
+    /// still this recording's (a next recording may have opened its own).
+    own: mpsc::UnboundedSender<PluginLog>,
 }
 
 impl Logs {
@@ -566,6 +570,19 @@ async fn consume(
             due.push(event);
         }
         let starts = due.iter().any(|e| matches!(e, AgentEvent::AgentStart));
+        // Lines already queued when the run ends are recorded before its end,
+        // so they stay inside the run (correlated with it) in the log.
+        if tracking.started
+            && recording_error.is_none()
+            && due.iter().any(|e| matches!(e, AgentEvent::AgentEnd { .. }))
+        {
+            while let Ok(line) = logs.rx.try_recv() {
+                if let Err(e) = logs.record(&summarize, &tracking.run_id, line).await {
+                    recording_error = Some(e);
+                    break;
+                }
+            }
+        }
         for event in &due {
             if let Err(e) = record_event(&sink, &summarize, &mut tracking, event).await {
                 tracing::error!(
@@ -586,8 +603,17 @@ async fn consume(
             }
         }
     }
-    // The recording is over: stop routing, then record lines already queued.
-    *logs.route.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    // The recording is over: stop routing — unless a next recording already
+    // replaced the route with its own — then record lines already queued.
+    {
+        let mut route = logs.route.lock().unwrap_or_else(|e| e.into_inner());
+        if route
+            .as_ref()
+            .is_some_and(|open| open.tx.same_channel(&logs.own))
+        {
+            *route = None;
+        }
+    }
     while let Ok(line) = logs.rx.try_recv() {
         if recording_error.is_some() || !tracking.started {
             break;
