@@ -17,6 +17,9 @@ streaming, cancellation, context management, and multi-provider support — and 
 is an *optional* wrapper that adds message history, a tool registry, and steering queues. You can
 drive the loop yourself without adopting our state model.
 
+The longer version — why yoagent stops at the loop, how extensions and plugin ecosystems fit
+around it, and what that costs — is in [Design Philosophy](design-philosophy.md).
+
 ## Try it without an API key
 
 ```bash
