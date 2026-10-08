@@ -736,7 +736,9 @@ async fn custom_user_agent_covers_session_lifecycle() {
         Mock::given(method("POST"))
             .and(path("/mcp"))
             .and(header("User-Agent", ua))
-            .and(body_string_contains(rpc_method))
+            .and(wiremock::matchers::body_partial_json(serde_json::json!({
+                "method": rpc_method
+            })))
             .respond_with(|request: &Request| {
                 let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
                 ResponseTemplate::new(200)
