@@ -107,7 +107,7 @@ pub struct ListFilesTool {
 }
 ```
 
-Uses `find`, skipping `target/`, `.git/` and `node_modules/`.
+Uses `find`, skipping `target/`, `.git/` and `node_modules/`. Paths `find` can't read (a subdirectory without permission) don't fail the listing: the files it did find are returned, with the errors under `Warnings` and in `details.warnings`, so a partial listing is never presented as complete. A listing with no files and an error is a failure.
 
 ## SearchTool
 

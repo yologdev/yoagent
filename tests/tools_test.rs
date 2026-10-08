@@ -584,6 +584,56 @@ async fn test_list_files_tool() {
     let _ = std::fs::remove_dir_all(tmp_dir);
 }
 
+/// An unreadable subdirectory doesn't make a partial listing look complete
+/// (#260): the readable files are listed, and `find`'s error is reported as a
+/// warning in the text and in `details.warnings`. Control: a fully readable
+/// tree has no warnings.
+#[cfg(unix)]
+#[tokio::test]
+async fn list_files_reports_unreadable_subdirectories() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.rs"), "").unwrap();
+    let locked = dir.path().join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::write(locked.join("hidden.rs"), "").unwrap();
+    let list = |path: std::path::PathBuf| async move {
+        ListFilesTool::new()
+            .execute(
+                serde_json::json!({"path": path.to_str().unwrap()}),
+                ctx("list_files"),
+            )
+            .await
+            .unwrap()
+    };
+
+    // Control: everything readable, no warnings.
+    let ok = list(dir.path().to_path_buf()).await;
+    assert!(ok.details["warnings"].is_null(), "{:?}", ok.details);
+
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    if std::fs::read_dir(&locked).is_ok() {
+        // Running as root: permissions don't apply, nothing to test.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        eprintln!("skipped: permissions are not enforced for this user");
+        return;
+    }
+    let result = list(dir.path().to_path_buf()).await;
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let text = match &result.content[0] {
+        Content::Text { text } => text.clone(),
+        _ => panic!("expected text"),
+    };
+    assert!(text.contains("a.rs"), "{text}");
+    assert!(text.contains("Warnings"), "{text}");
+    assert!(text.contains("locked"), "{text}");
+    assert!(
+        result.details["warnings"].is_string(),
+        "{:?}",
+        result.details
+    );
+}
+
 #[tokio::test]
 async fn test_read_file_line_numbers() {
     let tmp = std::env::temp_dir().join("yoagent-test-lineno2.txt");
