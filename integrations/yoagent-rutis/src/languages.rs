@@ -162,34 +162,37 @@ const MAX_LOG_CHARS: usize = 8 * 1024;
 
 /// `log(level, message, context?)`: a plugin's diagnostic in the host's
 /// `tracing` output (target `yoagent_rutis::plugin`), not on the plugin
-/// process's stderr. Levels `error`, `warn`, `info`, `debug`; any other is
-/// `warn`. `context.run_id` (the `run_id` every hook argument carries) is
+/// process's stderr. Levels `error`, `warn`, `info`, `debug`; anything else
+/// is `warn`. `context.run_id` (the `run_id` every hook argument carries) is
 /// recorded as the event's `run_id` field, so a consumer — a GASP recorder,
 /// a log viewer — can attribute the line to its run.
+///
+/// **Never fails.** A plugin calls it fire-and-forget, and a rejected call
+/// it does not catch would end its runtime process. So any value is taken:
+/// a non-string message is written as JSON, other context fields (a whole
+/// hook argument, say) are ignored, a missing argument is empty.
 fn log(args: Value) -> Reply {
-    let mut args = args.list()?.into_iter();
-    let mut text = |what: &str| -> Result<String, _> {
-        match args.next() {
-            Some(value) => session::decode::<String>(value.json()?),
-            None => Err(invalid(format!(
-                "log(level, message, context?): missing the {what}"
-            ))),
-        }
+    let args: Vec<Json> = args
+        .list()
+        .map(|list| list.into_iter().filter_map(|v| v.json().ok()).collect())
+        .unwrap_or_default();
+    let text = |value: Option<&Json>| match value {
+        Some(Json::String(text)) => text.clone(),
+        Some(Json::Null) | None => String::new(),
+        Some(other) => other.to_string(),
     };
-    let level = text("level")?;
-    let message = text("message")?;
-    let context: LogContext = match args.next() {
-        None | Some(Value::Undefined) => LogContext::default(),
-        Some(value) => match value.json()? {
-            Json::Null => LogContext::default(),
-            json => session::decode(json)?,
-        },
-    };
+    let level = text(args.first());
+    let message = text(args.get(1));
+    let run_id = args
+        .get(2)
+        .and_then(|context| context.get("run_id"))
+        .map(|id| text(Some(id)))
+        .unwrap_or_default();
     let message: String = match message.char_indices().nth(MAX_LOG_CHARS) {
         Some((cut, _)) => format!("{}… (cut)", &message[..cut]),
         None => message,
     };
-    let run_id = context.run_id.as_deref().unwrap_or("");
+    let run_id = run_id.as_str();
     match level.as_str() {
         "error" => tracing::error!(target: "yoagent_rutis::plugin", run_id, "{message}"),
         "info" => tracing::info!(target: "yoagent_rutis::plugin", run_id, "{message}"),
@@ -197,14 +200,6 @@ fn log(args: Value) -> Reply {
         _ => tracing::warn!(target: "yoagent_rutis::plugin", run_id, "{message}"),
     }
     Ok(Value::Undefined)
-}
-
-/// `log`'s third argument.
-#[derive(Default, serde::Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct LogContext {
-    /// The run the line belongs to (empty when none).
-    run_id: Option<String>,
 }
 
 /// `register`'s third argument.

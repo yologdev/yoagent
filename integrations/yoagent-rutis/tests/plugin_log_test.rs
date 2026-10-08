@@ -72,6 +72,9 @@ export default definePlugin({
     const yoagent = ctx.use('yoagent')
     yoagent.log('warn', 'hello from js', { run_id: 'run-7' })
     yoagent.log('error', 'no run here')
+    // Malformed, and not caught: never rejects, so the runtime lives on.
+    yoagent.log('warn', { not: 'a string' }, { run_id: 'run-8', tool: 'bash', args: {} })
+    setTimeout(() => yoagent.log('info', 'still alive'), 500)
   },
 })
 "#;
@@ -129,6 +132,8 @@ async fn a_plugin_log_reaches_the_hosts_tracing_with_its_run() {
     let want = [
         "yoagent_rutis::plugin WARN run_id=run-7 hello from js",
         "yoagent_rutis::plugin ERROR run_id= no run here",
+        r#"yoagent_rutis::plugin WARN run_id=run-8 {"not":"a string"}"#,
+        "yoagent_rutis::plugin INFO run_id= still alive",
     ];
     tokio::time::timeout(Duration::from_secs(60), async {
         loop {

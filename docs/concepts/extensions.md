@@ -165,7 +165,7 @@ So is the [`yoagent-rutis`](https://github.com/yologdev/yoagent/tree/main/integr
 
 ## One contract, other ecosystems
 
-`Extension` is the whole contract a plugin system needs: tools, policies, notes, verifiers and events go through the same hooks whichever ecosystem a plugin comes from. Through the rutis bridge, three foreign ecosystems already plug into yoagent with **no change to yoagent's core**:
+`Extension` is the whole contract a plugin system needs: tools, policies, notes, verifiers and events go through the same hooks whichever ecosystem a plugin comes from. Through the rutis bridge, two foreign ecosystems plug into yoagent today and a third is in review — all with **no change to yoagent's core**:
 
 | Ecosystem | What its plugins are | How they reach yoagent | What crosses |
 |---|---|---|---|
@@ -175,7 +175,7 @@ So is the [`yoagent-rutis`](https://github.com/yologdev/yoagent/tree/main/integr
 
 What the bridge gives every ecosystem alike: TypeScript and Python handlers next to Rust ones, one registration order, **image** tool results both ways (`content` blocks), **plugin logs** in the host's `tracing` output (`yoagent.log`, with the run they belong to), and failures that deny rather than allow. What stays outside the loop on purpose — commands, dialogs, session history, a UI — belongs to the app that hosts the agent.
 
-**The adapter contract.** An ecosystem rarely maps one-to-one, so every adapter follows the same rules ([details](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis#writing-an-ecosystem-adapter)): map only what the host can honour; refuse to load when a plugin would decide or rewrite something the host cannot enforce; deny a call when a policy fails; withhold a result when a redaction fails; report — never silently drop — what is ignored.
+**The adapter contract.** An ecosystem rarely maps one-to-one, so an adapter should follow the same rules ([details](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis#writing-an-ecosystem-adapter)): map only what the host can honour; refuse to load when a plugin would decide or rewrite something the host cannot enforce; deny a call when a policy fails; withhold a result when a redaction fails; report — never silently drop — what is ignored.
 
 ## Order with the older hooks
 

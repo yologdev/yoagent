@@ -231,13 +231,16 @@ def apply(ctx, config):
   }
   ```
 - **Logs reach the host.** `yoagent.log(level, message, { run_id }?)`
-  (`error`, `warn`, `info`, `debug`; fire-and-forget; over 8192 characters
-  cut) writes to the host's `tracing` output under the target
-  `yoagent_rutis::plugin`, where a terminal or service host shows it — a
-  runtime process's own stderr may go nowhere. Pass the hook argument's
-  `run_id` to attribute the line to its run (the event's `run_id` field).
-  On an older host rutis's stand-in for the method throws: wrap the call
-  and fall back to `console.warn`.
+  (`error`, `warn`, `info`, `debug`; over 8192 characters cut) writes to
+  the host's `tracing` output under the target `yoagent_rutis::plugin`,
+  where a terminal or service host shows it — a runtime process's own
+  stderr may go nowhere. Pass `{ run_id }`, or the hook argument itself, to
+  attribute the line to its run (the event's `run_id` field). It never
+  rejects (any message, extra context fields ignored). Fire-and-forget in
+  JavaScript; in Python `await yoagent.log(...)` — an un-awaited coroutine
+  is never sent. On a host without it (yoagent-rutis 0.1.0) rutis's
+  stand-in throws (Python: `AttributeError`): wrap the call and fall back
+  to `console.warn` / `print`.
 - **The bridge never loads plugins**: the host does, typically with
   [rutis-loader](https://crates.io/crates/rutis-loader) rows, and must share
   `yoagent` in the loader's catalog (`catalog.register_shared("yoagent")` or
@@ -350,9 +353,14 @@ cargo run --manifest-path examples/rutis-agent-tools/Cargo.toml [-- --live]
 
 An adapter makes another plugin system's plugins (DSH's, rutis-agent's,
 pi's) into handlers. Their APIs rarely map one-to-one — an ecosystem has
-commands, dialogs, sessions, model routing — so every adapter follows the
-same rules, learned from the three above. The point is that **a plugin's
-safety policy never silently stops applying**:
+commands, dialogs, sessions, model routing — so this is the contract an
+adapter should follow, learned from the DSH and rutis-agent adapters above
+and the pi adapter in review ([#265](https://github.com/yologdev/yoagent/pull/265)).
+The point is that **a plugin's safety policy never silently stops
+applying**. Not every rule arises for every adapter: the DSH adapter maps
+only tools and prompt sections, so it has nothing to refuse (2) or record
+(6), and today relies on yoagent's own handling of a name clash (the host's
+tool wins, with a warning) rather than refusing (4).
 
 1. **Map only what the host can honour.** Tools, `before_tool` /
    `after_tool` policies, input checks, turn notes, verifiers and events
