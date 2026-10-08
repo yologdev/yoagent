@@ -443,7 +443,24 @@ impl HttpTransport {
 
     /// Create a new HTTP transport.
     pub fn new(url: &str) -> Result<Self, McpError> {
+        Self::build(url, None)
+    }
+
+    /// Create an HTTP transport identifying the caller on every request,
+    /// including initialization, notifications, tool calls and session teardown.
+    ///
+    /// The idle timeout and session handling are the same as [`Self::new`].
+    /// An invalid HTTP header value returns an error before any request is sent.
+    pub fn new_with_user_agent(url: &str, user_agent: &str) -> Result<Self, McpError> {
+        Self::build(url, Some(user_agent))
+    }
+
+    fn build(url: &str, user_agent: Option<&str>) -> Result<Self, McpError> {
         let builder = reqwest::Client::builder();
+        let builder = match user_agent {
+            Some(value) => builder.user_agent(value),
+            None => builder,
+        };
         // The fetch-based wasm client has no read timeout; the host's own
         // request limits apply there instead.
         #[cfg(not(target_arch = "wasm32"))]

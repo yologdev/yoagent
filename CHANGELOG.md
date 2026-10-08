@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- Runnable `parallel_search` example: anonymous web search and page fetching through HTTP MCP adapters and a scripted agent loop. `HttpTransport::new_with_user_agent` allows opt-in caller identification without changing transport defaults.
+
 ### yoagent-rutis
 
 - **pi extensions** (`plugins/pi/pi-extensions-adapter.ts`): the tools and tool policies of [pi](https://github.com/earendil-works/pi) coding-agent extensions, loaded unchanged with pi's own loader, as one yoagent handler following pi 1.1.0's semantics. `registerTool` → tools (pi's activation and first-registration-wins, `prepareArguments` and validation before the policies, only the judged arguments run), `setActiveTools` → an enforced allowlist, `tool_call` → `before_tool` (yoagent's built-ins under pi's names, arguments translated both ways, relative paths resolved where the policies look; an override of a built-in is enforced; `terminate` stops the run), `tool_result` → `after_tool` (a failing handler withholds the result), `input` → `on_input`, `before_agent_start` additions → a turn note. Fails closed: a load error, a failing `session_start`, an unfired deciding event (`context`, `message_end`, ...; unless `allowUnmapped`) or a pi tool named like a yoagent built-in (unless `withoutBuiltins`) refuses the load; other unmapped API (observer and session events, commands, renderers, providers, MCP servers) is reported, or refuses with `strict`. Example `pi_extensions` (any extension files; `--live` with DeepSeek; `--without`), test `pi_test`. `ctx.executeTool` runs pi tools as nested calls (pi's pipeline; never rejects); a deciding event registered mid-run stops that run; adapter warnings reach the host's logs. `pi.appendEntry` / `pi.sendMessage` are recorded in the adapter's in-memory session instead of throwing (pi tools that record their result this way no longer fail after the work). CI: a weekly `pi latest` job runs the adapter's tests against the newest pi.

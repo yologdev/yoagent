@@ -130,6 +130,32 @@ Streamable HTTP), which servers generally accept.
 does not call it, so sessions opened that way are released by the server's own
 timeout rather than explicitly.
 
+## Runnable web search example
+
+[Parallel Search MCP](https://docs.parallel.ai/integrations/mcp/search-mcp)
+provides `web_search` and `web_fetch` at `https://search.parallel.ai/mcp` without
+an API key. Anonymous access is intended for exploration and light use and has
+free-tier rate limits.
+
+From a checkout, with Rust 1.86 or newer:
+
+```bash
+cargo run --example parallel_search
+```
+
+The [example](https://github.com/yologdev/yoagent/blob/main/examples/parallel_search.rs)
+connects over HTTP, discovers the tools through `McpToolAdapter::from_client`,
+and registers them with `Agent::with_tools`. It runs a scripted `MockProvider`
+conversation that searches for Rust ownership and fetches a known official Rust
+book page, printing the live tool results. No model key is needed: the example
+shows tool dispatch through the agent loop, not a model-generated answer.
+A real provider can choose its own queries and result URLs using the same tools.
+The example does not read environment keys or saved credentials.
+
+It uses `HttpTransport::new_with_user_agent` to identify the example's requests,
+reuses one `session_id` for both tools, and explicitly closes the MCP client
+after the run. Existing transport and provider defaults are unchanged.
+
 ## How MCP Tools Work
 
 When you call `with_mcp_server_stdio()` or `with_mcp_server_http()`, yoagent:

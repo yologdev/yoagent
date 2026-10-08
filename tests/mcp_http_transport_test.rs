@@ -723,3 +723,96 @@ async fn a_rejected_initialized_notification_fails_the_connect() {
         "{err}"
     );
 }
+
+/// Caller identification must reach every HTTP request, not just discovery.
+#[tokio::test]
+async fn custom_user_agent_covers_session_lifecycle() {
+    use wiremock::matchers::path;
+    use yoagent::mcp::types::JsonRpcNotification;
+
+    let server = MockServer::start().await;
+    let ua = "yoagent/0.25.0 (parallel_search example)";
+    for rpc_method in ["initialize", "tools/list", "tools/call"] {
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .and(header("User-Agent", ua))
+            .and(body_string_contains(rpc_method))
+            .respond_with(|request: &Request| {
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                ResponseTemplate::new(200)
+                    .insert_header("Mcp-Session-Id", "ua-session")
+                    .set_body_json(serde_json::json!({
+                        "jsonrpc": "2.0", "id": body["id"], "result": {}
+                    }))
+            })
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    Mock::given(method("POST"))
+        .and(path("/mcp"))
+        .and(header("User-Agent", ua))
+        .and(header("Mcp-Session-Id", "ua-session"))
+        .and(body_string_contains("notifications/initialized"))
+        .respond_with(ResponseTemplate::new(202))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/mcp"))
+        .and(header("User-Agent", ua))
+        .and(header("Mcp-Session-Id", "ua-session"))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let transport =
+        HttpTransport::new_with_user_agent(&format!("{}/mcp/", server.uri()), ua).unwrap();
+    transport
+        .send(JsonRpcRequest::new("initialize", None))
+        .await
+        .unwrap();
+    transport
+        .notify(JsonRpcNotification::new("notifications/initialized", None))
+        .await
+        .unwrap();
+    transport
+        .send(JsonRpcRequest::new("tools/list", None))
+        .await
+        .unwrap();
+    transport
+        .send(JsonRpcRequest::new("tools/call", None))
+        .await
+        .unwrap();
+    transport.close().await.unwrap();
+    server.verify().await;
+}
+
+#[test]
+fn invalid_user_agent_is_rejected_before_connecting() {
+    assert!(
+        HttpTransport::new_with_user_agent("https://search.parallel.ai/mcp", "bad\r\nheader")
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn default_transport_does_not_add_user_agent() {
+    let server = MockServer::start().await;
+    let request = JsonRpcRequest::new("tools/list", None);
+    Mock::given(method("POST"))
+        .and(HeaderAbsent("user-agent"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "jsonrpc": "2.0", "id": request.id, "result": {"tools": []}
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    HttpTransport::new(&server.uri())
+        .unwrap()
+        .send(request)
+        .await
+        .unwrap();
+    server.verify().await;
+}
