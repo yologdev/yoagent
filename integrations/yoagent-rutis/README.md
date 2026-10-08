@@ -209,6 +209,21 @@ def apply(ctx, config):
     return await res.text()
   }
   ```
+- **Images, both ways.** A tool result and an `after_tool` edit carry
+  `content` blocks in yoagent's JSON shape (pi's and MCP's too) instead of
+  `text` — `{"type": "text", "text"}` and
+  `{"type": "image", "data": <base64>, "mimeType": "image/…"}` — and
+  `after_tool` sees the output's blocks as `output.content`, so a handler
+  can return pictures, and keep, add or drop them when it edits a result.
+  Text and blocks are exclusive in one answer; anything else in `content`
+  (another block type, a non-`image/*` type, data that is not base64) fails
+  the answer.
+
+  ```ts
+  async call_tool(call) {
+    return { content: [{ type: 'text', text: 'the chart' }, { type: 'image', data: png.toString('base64'), mimeType: 'image/png' }] }
+  }
+  ```
 - **The bridge never loads plugins**: the host does, typically with
   [rutis-loader](https://crates.io/crates/rutis-loader) rows, and must share
   `yoagent` in the loader's catalog (`catalog.register_shared("yoagent")` or
@@ -265,7 +280,7 @@ offers every tool in dsh's tool registry (the `tools` service of
 | Hook | What the adapter does |
 |---|---|
 | `tools` | `tools.schemas()` → name, description, parameters (config `tools`: an allowlist) |
-| `call_tool` | `tools.execute({callId, name, arguments, signal})` with the bridge's cancel handle as dsh's `signal`: cancelling the run aborts the dsh call. `isError` → an error tool result; text blocks joined |
+| `call_tool` | `tools.execute({callId, name, arguments, signal})` with the bridge's cancel handle as dsh's `signal`: cancelling the run aborts the dsh call. `isError` → an error tool result. Text blocks stay text; an image block — a reference into dsh's attachment store — becomes a yoagent image, its bytes read with the `attachments` service when one is loaded (looked up per image, so the adapter also runs without it; then, or when a read fails, the image is a text placeholder); other blocks are named |
 | `before_model` | the system-prompt sections dsh plugins added (the harness identity and persona slots left out, sections whose variables are unset skipped), as one note, capped at `maxNoteChars` (2000) |
 
 Load, as rows of one Node runtime whose `package.json` is `plugins/dsh/`'s:
@@ -286,7 +301,8 @@ cargo run --features node --example dsh_tools -- --live  # DeepSeek: DEEPSEEK_AP
 the adapter, runs one search, and checks that a dsh tool answered (and,
 scripted, that free-search's prompt section reached the model).
 `tests/dsh_test.rs` covers the adapter offline with a fixture dsh plugin
-(`plugins/dsh/fixture-tools.ts`).
+(`plugins/dsh/fixture-tools.ts`) and, for images, a stand-in attachment
+store (`plugins/dsh/fixture-attachments.ts`).
 
 ### rutis-agent tools
 
@@ -297,6 +313,11 @@ Rust rutis plugin that maps every `ToolDef` to a yoagent tool per run
 (results as text, failures as `ToolError`s, yoagent's cancel token passed as
 rutis-agent's), shown with rutis-agent's `replace_text` and a tool registered
 into the registry while the host runs, which the next run offers.
+rutis-agent's results are text (a runner's JSON value is serialized), so
+images use a convention of this adapter: a runner returning
+`{"content": [blocks]}` in yoagent's block shape gives yoagent those blocks,
+images included (`dot_picture` in the example); rutis-agent's own agent
+still sees the JSON text.
 
 ```sh
 cargo run --manifest-path examples/rutis-agent-tools/Cargo.toml [-- --live]

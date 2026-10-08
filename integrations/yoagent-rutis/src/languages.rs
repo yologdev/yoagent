@@ -512,7 +512,8 @@ impl HandlerImpl for RemoteHandler {
         };
         if edit
             .keys()
-            .any(|k| !["text", "details", "is_error"].contains(&k.as_str()))
+            .any(|k| !["text", "content", "details", "is_error"].contains(&k.as_str()))
+            || (edit.contains_key("text") && edit.contains_key("content"))
         {
             return Err(unexpected("after_tool", &value));
         }
@@ -523,6 +524,10 @@ impl HandlerImpl for RemoteHandler {
             output.result.content = vec![Content::Text {
                 text: text.to_string(),
             }];
+        }
+        if let Some(content) = edit.get("content") {
+            output.result.content =
+                content_blocks(content).ok_or_else(|| unexpected("after_tool", &value))?;
         }
         if let Some(details) = edit.get("details") {
             output.result.details = details.clone();
@@ -895,18 +900,26 @@ impl AgentTool for RemoteTool {
         .map_err(|e| ToolError::Failed(e.to_string()))?;
         let unexpected =
             || ToolError::Failed(format!("`call_tool` returned an unexpected value: {value}"));
-        let (text, details, is_error) = match &value {
-            Json::String(text) => (text.clone(), Json::Null, false),
+        let (content, details, is_error) = match &value {
+            Json::String(text) => (
+                vec![Content::Text { text: text.clone() }],
+                Json::Null,
+                false,
+            ),
             // `{}` is an empty text, as `after_tool`'s edit reads it.
             Json::Object(fields)
                 if fields
                     .keys()
-                    .all(|k| ["text", "details", "is_error"].contains(&k.as_str())) =>
+                    .all(|k| ["text", "content", "details", "is_error"].contains(&k.as_str()))
+                    && !(fields.contains_key("text") && fields.contains_key("content")) =>
             {
-                let text = match fields.get("text") {
-                    None => String::new(),
-                    Some(Json::String(text)) => text.clone(),
-                    Some(_) => return Err(unexpected()),
+                let content = match (fields.get("text"), fields.get("content")) {
+                    (Some(Json::String(text)), _) => vec![Content::Text { text: text.clone() }],
+                    (Some(_), _) => return Err(unexpected()),
+                    (None, Some(blocks)) => content_blocks(blocks).ok_or_else(unexpected)?,
+                    (None, None) => vec![Content::Text {
+                        text: String::new(),
+                    }],
                 };
                 let is_error = match fields.get("is_error") {
                     None => false,
@@ -914,18 +927,57 @@ impl AgentTool for RemoteTool {
                     Some(_) => return Err(unexpected()),
                 };
                 let details = fields.get("details").cloned().unwrap_or(Json::Null);
-                (text, details, is_error)
+                (content, details, is_error)
             }
             _ => return Err(unexpected()),
         };
         if is_error {
+            let text = content
+                .iter()
+                .filter_map(|c| match c {
+                    Content::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
             return Err(ToolError::Failed(text));
         }
-        Ok(ToolResult {
-            content: vec![Content::Text { text }],
-            details,
-        })
+        Ok(ToolResult { content, details })
     }
+}
+
+/// A handler's content blocks — `{"type": "text", "text"}` and
+/// `{"type": "image", "data", "mimeType"}`, yoagent's own JSON shape (and
+/// pi's, and MCP's) — as yoagent content. `None` for anything else: not an
+/// array, an unknown block type, an extra or missing field, an image whose
+/// `mimeType` is not `image/*` or whose `data` is empty or not base64.
+fn content_blocks(blocks: &Json) -> Option<Vec<Content>> {
+    blocks
+        .as_array()?
+        .iter()
+        .map(|block| {
+            let fields = block.as_object()?;
+            let field = |name: &str| fields.get(name)?.as_str();
+            match field("type")? {
+                "text" if fields.len() == 2 => Some(Content::Text {
+                    text: field("text")?.to_string(),
+                }),
+                "image" if fields.len() == 3 => {
+                    let data = field("data")?;
+                    let mime_type = field("mimeType")?;
+                    let base64 = !data.is_empty()
+                        && data
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='));
+                    (base64 && mime_type.starts_with("image/")).then(|| Content::Image {
+                        data: data.to_string(),
+                        mime_type: mime_type.to_string(),
+                    })
+                }
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -936,6 +988,32 @@ mod tests {
     use yoagent::{Extension, ToolCallRequest};
 
     type Failed = Arc<Mutex<Option<String>>>;
+
+    #[test]
+    fn content_blocks_take_text_and_images_in_yoagents_shape() {
+        let blocks = content_blocks(&json!([
+            {"type": "text", "text": "see"},
+            {"type": "image", "data": "iVBORw0KGgo=", "mimeType": "image/png"},
+        ]))
+        .unwrap();
+        assert!(matches!(&blocks[0], Content::Text { text } if text == "see"));
+        assert!(matches!(&blocks[1], Content::Image { data, mime_type }
+            if data == "iVBORw0KGgo=" && mime_type == "image/png"));
+        assert!(content_blocks(&json!([])).unwrap().is_empty());
+        for bad in [
+            json!("text"),
+            json!([{"type": "text"}]),
+            json!([{"type": "text", "text": 1}]),
+            json!([{"type": "text", "text": "a", "extra": 1}]),
+            json!([{"type": "image", "data": "", "mimeType": "image/png"}]),
+            json!([{"type": "image", "data": "not base64!", "mimeType": "image/png"}]),
+            json!([{"type": "image", "data": "AAAA", "mimeType": "text/plain"}]),
+            json!([{"type": "image", "data": "AAAA"}]),
+            json!([{"type": "file", "data": "AAAA", "mimeType": "image/png"}]),
+        ] {
+            assert!(content_blocks(&bad).is_none(), "{bad}");
+        }
+    }
 
     /// How the test handler's event delivery goes wrong.
     #[derive(Clone, Copy)]

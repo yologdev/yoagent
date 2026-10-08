@@ -152,17 +152,30 @@ export interface ToolCall extends RunInfo {
 /** Allow (nothing), deny with a reason the model sees, or rewrite the arguments. */
 export type ToolVerdict = void | null | { deny: string } | { args: Record<string, unknown> }
 
+/**
+ * A content block, in yoagent's JSON shape (also pi's and MCP's): text, or
+ * an image as base64 `data` with an `image/*` `mimeType`.
+ */
+export type ContentBlock = { type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }
+
 export interface ToolOutput {
   /** The text blocks, joined. */
   text: string
   /** yoagent's content blocks (text and images). */
-  content: unknown[]
+  content: ContentBlock[]
   details: unknown
   is_error: boolean
 }
 
-/** Keep the output (nothing), or replace parts of it: `text` replaces every content block with one text block. */
-export type OutputEdit = void | null | { text?: string; details?: unknown; is_error?: boolean }
+/**
+ * Keep the output (nothing), or replace parts of it: `text` replaces every
+ * content block with one text block, `content` with the given blocks (so
+ * images can be kept, added or dropped). Not both.
+ */
+export type OutputEdit =
+  | void
+  | null
+  | { text?: string; content?: ContentBlock[]; details?: unknown; is_error?: boolean }
 
 export interface Turn extends RunInfo {
   model: string
@@ -213,9 +226,13 @@ export interface ToolSpec {
 
 /**
  * The tool's text, or the text plus details (a missing `text` — `{}` too —
- * is an empty text); `is_error` (or a throw) fails the call.
+ * is an empty text), or `content` blocks instead of `text` (images included;
+ * not both); `is_error` (or a throw) fails the call, with the text blocks as
+ * its message.
  */
-export type ToolResult = string | { text?: string; details?: unknown; is_error?: boolean }
+export type ToolResult =
+  | string
+  | { text?: string; content?: ContentBlock[]; details?: unknown; is_error?: boolean }
 
 export type AgentEventType =
   | 'agentStart'

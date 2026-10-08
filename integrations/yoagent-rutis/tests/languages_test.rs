@@ -30,7 +30,9 @@ use rutis_loader::{
 use serde_json::{json, Value};
 use yoagent::extension::RunContext;
 use yoagent::provider::mock::{MockResponse, MockToolCall};
-use yoagent::{AgentEvent, Extension, ToolCallRequest, ToolDecision};
+use yoagent::{
+    AgentEvent, AgentMessage, Content, Extension, Message, ToolCallRequest, ToolDecision,
+};
 use yoagent_rutis::RutisBridge;
 
 fn plugins_dir() -> PathBuf {
@@ -414,6 +416,54 @@ export default definePlugin({
 })
 "#;
 
+/// A 1×1 PNG, base64.
+const PNG_B64: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg==";
+
+/// Image tool results, both ways: a tool returning text and an image, and an
+/// `after_tool` edit replacing the content with blocks (images kept).
+const JS_IMAGES: &str = r#"
+import { definePlugin } from 'RUTIS'
+export default definePlugin({
+  inject: ['yoagent'],
+  apply(ctx) {
+    const yoagent = ctx.use('yoagent')
+    ctx.effect(yoagent.register('js-images', {
+      async tools() { return [{ name: 'js_image', description: 'returns a picture' }] },
+      async call_tool() {
+        return { content: [{ type: 'text', text: 'a dot' }, { type: 'image', data: 'PNG_B64', mimeType: 'image/png' }] }
+      },
+      async after_tool(call, output) {
+        // Annotates the result, keeping its blocks (the image included).
+        if (call.tool === 'js_image') return { content: [...output.content, { type: 'text', text: 'checked by js' }] }
+      },
+    }))
+  },
+})
+"#;
+
+const PY_IMAGES: &str = r#"
+inject = ["yoagent"]
+
+
+def apply(ctx, config):
+    yoagent = ctx.use("yoagent")
+
+    async def tools(run):
+        return [{"name": "py_image", "description": "returns a picture"}]
+
+    async def call_tool(call):
+        return {"content": [{"type": "text", "text": "a dot"}, {"type": "image", "data": "PNG_B64", "mimeType": "image/png"}], "details": {"px": 1}}
+
+    async def after_tool(call, output):
+        # Drops the text, keeps only the images.
+        if call["tool"] == "py_image":
+            return {"content": [b for b in output["content"] if b["type"] == "image"]}
+        return None
+
+    ctx.effect(yoagent.register("py-images", {"tools": tools, "call_tool": call_tool, "after_tool": after_tool}))
+"#;
+
 /// A dict of functions, in Python, and a tool that kills its runtime.
 const PY_HOOKS: &str = r#"
 import os
@@ -595,6 +645,7 @@ struct Fixtures {
     js: PathBuf,
     strict: PathBuf,
     cancel: PathBuf,
+    images: PathBuf,
     py: PathBuf,
     _dir: tempfile::TempDir,
 }
@@ -612,14 +663,28 @@ fn fixtures() -> Fixtures {
     std::fs::write(&strict, JS_STRICT.replace("RUTIS", &rutis)).unwrap();
     let cancel = dir.path().join("cancel.mjs");
     std::fs::write(&cancel, JS_CANCEL.replace("RUTIS", &rutis)).unwrap();
+    let images = dir.path().join("images.mjs");
+    std::fs::write(
+        &images,
+        JS_IMAGES
+            .replace("RUTIS", &rutis)
+            .replace("PNG_B64", PNG_B64),
+    )
+    .unwrap();
     let py = dir.path().join("py");
     std::fs::create_dir_all(&py).unwrap();
     std::fs::write(py.join("py_hooks.py"), PY_HOOKS).unwrap();
     std::fs::write(py.join("py_cancel.py"), PY_CANCEL).unwrap();
+    std::fs::write(
+        py.join("py_images.py"),
+        PY_IMAGES.replace("PNG_B64", PNG_B64),
+    )
+    .unwrap();
     Fixtures {
         js,
         strict,
         cancel,
+        images,
         py,
         _dir: dir,
     }
@@ -1241,5 +1306,56 @@ async fn a_python_hook_sees_its_signal_set_when_the_run_is_cancelled() {
         "a completed call is never cancelled: {:?}",
         host.probe.lines()
     );
+    host.root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn image_tool_results_cross_both_ways_in_typescript_and_python() {
+    let (Some(node), Some(python)) = (node_runtime(), python()) else {
+        return;
+    };
+    let fx = fixtures();
+    let host = host(Some(&node), Some((&fx.py, &python))).await;
+    host.load(vec![
+        ts_row("images", &fx.images, json!({})),
+        py_row("py-images", "py_images", json!({})),
+    ])
+    .await;
+    host.until_handlers(&["js-images", "py-images"]).await;
+
+    let (agent, _) = agent(vec![
+        call("js_image", json!({})),
+        call("py_image", json!({})),
+        text("done"),
+    ]);
+    let mut agent = agent.with_extension(host.bridge.extension());
+    run(&mut agent, "go").await;
+    let results: Vec<(String, Vec<Content>)> = agent
+        .messages()
+        .iter()
+        .filter_map(|m| match m {
+            AgentMessage::Llm(Message::ToolResult {
+                tool_name, content, ..
+            }) => Some((tool_name.clone(), content.clone())),
+            _ => None,
+        })
+        .collect();
+    let image = |c: &Content| matches!(c, Content::Image { data, mime_type } if data == PNG_B64 && mime_type == "image/png");
+    // js_image: text + image from call_tool, and JS's edit appended a note
+    // keeping both.
+    let (_, js) = &results[0];
+    assert_eq!(js.len(), 3, "{js:?}");
+    assert!(
+        matches!(&js[0], Content::Text { text } if text == "a dot"),
+        "{js:?}"
+    );
+    assert!(image(&js[1]), "{js:?}");
+    assert!(
+        matches!(&js[2], Content::Text { text } if text == "checked by js"),
+        "{js:?}"
+    );
+    // py_image: text + image from call_tool, and Python's edit kept only the image.
+    let (_, py) = &results[1];
+    assert!(py.len() == 1 && image(&py[0]), "{py:?}");
     host.root.shutdown().await.unwrap();
 }
