@@ -1087,13 +1087,22 @@ impl ActiveExtensions {
                 Hooked::Panicked(panic) => Some(panic),
                 Hooked::Cancelled => None,
             };
+            // Withheld either way (a redactor may not have run), but say why:
+            // a cancelled run is not an extension's fault.
+            let text = if reason.is_none() {
+                format!(
+                    "Tool result withheld: the run was cancelled before extension '{}' \
+                     finished processing it.",
+                    a.name
+                )
+            } else {
+                format!(
+                    "Tool result withheld: extension '{}' did not finish processing it.",
+                    a.name
+                )
+            };
             output.result = ToolResult {
-                content: vec![Content::Text {
-                    text: format!(
-                        "Tool result withheld: extension '{}' did not finish processing it.",
-                        a.name
-                    ),
-                }],
+                content: vec![Content::Text { text }],
                 details: serde_json::Value::Null,
             };
             output.is_error = true;
