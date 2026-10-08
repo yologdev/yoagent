@@ -21,13 +21,11 @@ exclude = [
 ]
 # yoagent's MSRV; rutis 0.6.1 declares 1.85.
 rust-version = "1.86"
-# Not published yet. It needs yoagent's `Extension`, which ships in 0.25.
-publish = false
 
 [dependencies]
-# The path's version. Publishing needs the first yoagent release with
-# `Extension` (0.25): raise this to it then.
-yoagent = { path = "../..", version = "0.24.3" }
+# The path's version (0.25 is the first release with `Extension`). yoagent
+# types are in this crate's API: a yoagent minor bump is a minor bump here.
+yoagent = { path = "../..", version = "0.25.0" }
 # 0.x caret: 0.6.x only (0.7 would be breaking). Any rutis minor bump is a
 # yoagent-rutis minor bump — its types are part of this crate's API.
 rutis = "0.6"

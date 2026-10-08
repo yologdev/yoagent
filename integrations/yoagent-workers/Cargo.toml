@@ -1,6 +1,6 @@
 [package]
 name = "yoagent-workers"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 resolver = "3"
 description = "Run yoagent on Cloudflare Workers through the Worker's own bindings: Workers AI decision models (Clef) via env.AI"
@@ -21,8 +21,8 @@ targets = ["wasm32-unknown-unknown"]
 # Everything here exists only on wasm32: a binding is a JavaScript object the
 # Workers runtime hands the Worker. On other targets the crate is empty.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-# 0.24.0 is the first release with `decision::parse_systemone_response`.
-yoagent = { path = "../..", version = "0.24.0", default-features = false, features = ["decision"] }
+# 0.25.0: pricing is opt-in (`prices::global::pricing_enabled`).
+yoagent = { path = "../..", version = "0.25.0", default-features = false, features = ["decision"] }
 async-trait = "0.1"
 js-sys = "0.3"
 serde_json = "1"

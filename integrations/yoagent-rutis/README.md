@@ -393,18 +393,17 @@ the others).
   `Ctx::root_with_sink` — bus listener failures and cleanup errors are
   reported there, not to the agent.
 
-## Publishing
+## Versions
 
-Not yet on crates.io (`publish = false`). It needs the first yoagent release
-with `Extension` (0.25); raise the `yoagent` requirement to it and flip
-`publish`. yoagent types are in its API too, so a yoagent minor bump is a
-yoagent-rutis minor bump. Until then, depend on it by git, and take yoagent
-from the same git source: a crates.io `yoagent` next to a git `yoagent-rutis`
-is two `yoagent` crates whose types do not match.
+yoagent-rutis 0.1 requires yoagent 0.25 (the first release with `Extension`)
+and rutis 0.6. yoagent and rutis types are in its API, so a minor bump of
+either is a minor bump of yoagent-rutis. Take `yoagent` from the same source
+as `yoagent-rutis`: a crates.io `yoagent` next to a git `yoagent-rutis` is two
+`yoagent` crates whose types do not match.
 
 ```toml
-yoagent = { git = "https://github.com/yologdev/yoagent" }
-yoagent-rutis = { git = "https://github.com/yologdev/yoagent" }
+yoagent = "0.25"
+yoagent-rutis = "0.1"
 ```
 
 ## License
