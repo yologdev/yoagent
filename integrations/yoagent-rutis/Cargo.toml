@@ -85,6 +85,10 @@ required-features = ["node"]
 name = "plugin_log_test"
 required-features = ["node"]
 
+[[test]]
+name = "pi_log_test"
+required-features = ["node"]
+
 [[example]]
 name = "language_plugins"
 required-features = ["node", "python"]

@@ -230,13 +230,17 @@ def apply(ctx, config):
     return { content: [{ type: 'text', text: 'the chart' }, { type: 'image', data: png.toString('base64'), mimeType: 'image/png' }] }
   }
   ```
-- **Logs reach the host.** `yoagent.log(level, message)` (`error`,
-  `warn`, `info`, `debug`; fire-and-forget; over 8192 characters cut)
-  writes to the host's `tracing` output under the target
-  `yoagent_rutis::plugin`, where a terminal or service host shows it — a
-  runtime process's own stderr may go nowhere. On an older host rutis's
-  stand-in for the method throws: wrap the call and fall back to
-  `console.warn`.
+- **Logs reach the host.** `yoagent.log(level, message, { run_id }?)`
+  (`error`, `warn`, `info`, `debug`; over 8192 characters cut) writes to
+  the host's `tracing` output under the target `yoagent_rutis::plugin`,
+  where a terminal or service host shows it — a runtime process's own
+  stderr may go nowhere. Pass `{ run_id }`, or the hook argument itself, to
+  attribute the line to its run (the event's `run_id` field). It never
+  rejects (any message, extra context fields ignored). Fire-and-forget in
+  JavaScript; in Python `await yoagent.log(...)` — an un-awaited coroutine
+  is never sent. On a host without it (yoagent-rutis 0.1.0) rutis's
+  stand-in throws (Python: `AttributeError`): wrap the call and fall back
+  to `console.warn` / `print`.
 - **The bridge never loads plugins**: the host does, typically with
   [rutis-loader](https://crates.io/crates/rutis-loader) rows, and must share
   `yoagent` in the loader's catalog (`catalog.register_shared("yoagent")` or
@@ -347,6 +351,11 @@ cargo run --manifest-path examples/rutis-agent-tools/Cargo.toml [-- --live]
 
 ### pi extensions (tools and tool policies)
 
+> **Experimental.** The pi and DSH adapters live here for now, and are
+> expected to move to the yo app (or their own packages) once it hosts
+> plugins: completing them needs app services — commands, dialogs,
+> sessions — that a loop library does not have. The bridge itself stays.
+
 [pi](https://github.com/earendil-works/pi) extensions are TypeScript
 modules written against pi's `ExtensionAPI`.
 [`plugins/pi/pi-extensions-adapter.ts`](plugins/pi/pi-extensions-adapter.ts)
@@ -447,6 +456,45 @@ events, so under the adapter they load and do nothing (reported).
 `tests/pi_test.rs` covers the adapter offline with the fixture extensions
 (`plugins/pi/fixture-extension.ts`, `plugins/pi/fixture-extra.ts`) and small
 ones written per test.
+## Writing an ecosystem adapter
+
+An adapter makes another plugin system's plugins (DSH's, rutis-agent's,
+pi's) into handlers. Their APIs rarely map one-to-one — an ecosystem has
+commands, dialogs, sessions, model routing — so this is the contract an
+adapter should follow, learned from the DSH, rutis-agent and pi adapters
+above.
+The point is that **a plugin's safety policy never silently stops
+applying**. Not every rule arises for every adapter: the DSH adapter maps
+only tools and prompt sections, so it has nothing to refuse (2) or record
+(6), and today relies on yoagent's own handling of a name clash (the host's
+tool wins, with a warning) rather than refusing (4).
+
+1. **Map only what the host can honour.** Tools, `before_tool` /
+   `after_tool` policies, input checks, turn notes, verifiers and events
+   have a yoagent hook; offer those.
+2. **Refuse to load what would decide or rewrite unenforced.** A plugin
+   handler for something the host never does — rewriting the conversation,
+   rewriting provider requests — would be a policy that never runs. Fail
+   the load (the host may accept it explicitly, by name), and when such a
+   registration appears after load, stop: deny every call, reject input.
+3. **A failing policy denies; a failing redaction withholds.** A thrown
+   error, a timeout or a malformed answer in a `before_tool`-like hook is a
+   denial; in an `after_tool`-like hook the result is withheld, never
+   passed through raw. (The bridge already treats a handler's failures
+   this way; an adapter must not catch them into an allow.)
+4. **Name clashes refuse.** A plugin tool named like one of the host's
+   tools would lose to it and leave its policy judging the wrong tool:
+   refuse unless the host says it left its own out.
+5. **Report what is ignored — through the host.** Commands, renderers,
+   notifications and other app-level parts warn (or refuse with a strict
+   option) through `yoagent.log`, never silently.
+6. **Keep plugin state local, don't fail work.** A plugin that records its
+   own state (a session entry, a result card) gets an adapter-local store
+   rather than an error, so a tool does not fail after its work is done;
+   what would inject input or start a turn still throws.
+7. **No UI means "no".** With no one to ask, a dialog answers as a
+   headless run does — a confirmation is declined — so a policy that would
+   ask denies.
 
 ## Semantics
 
