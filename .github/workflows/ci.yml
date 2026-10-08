@@ -283,6 +283,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+          # npm's download cache (~/.npm), keyed on the three lockfiles: the
+          # installs below (pi's alone is ~185 MB) stop re-downloading.
+          cache: npm
+          cache-dependency-path: |
+            integrations/yoagent-rutis/plugins/package-lock.json
+            integrations/yoagent-rutis/plugins/dsh/package-lock.json
+            integrations/yoagent-rutis/plugins/pi/package-lock.json
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
