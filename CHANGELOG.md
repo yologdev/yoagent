@@ -8,7 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### yoagent-rutis
 
-- **pi extensions** (`plugins/pi/pi-extensions-adapter.ts`): the tools and tool policies of [pi](https://github.com/earendil-works/pi) coding-agent extensions, loaded unchanged with pi's own loader, as one yoagent handler. `registerTool` → tools (cancel handle as the signal), `tool_call` → `before_tool` (yoagent's built-ins under pi's names, arguments translated both ways), `tool_result` → `after_tool`, `before_agent_start` additions → a turn note. What does not map (conversation rewriting, session events, commands, UI) is reported, or fails loading with `strict`. Example `pi_extensions` (any extension files; `--live` with DeepSeek), test `pi_test`.
+- **pi extensions** (`plugins/pi/pi-extensions-adapter.ts`): the tools and tool policies of [pi](https://github.com/earendil-works/pi) coding-agent extensions, loaded unchanged with pi's own loader, as one yoagent handler following pi 1.1.0's semantics. `registerTool` → tools (pi's activation and first-registration-wins, `prepareArguments` and validation before policies, cancel handle as the signal), `tool_call` → `before_tool` (yoagent's built-ins under pi's names, arguments translated both ways; an extension's override of a built-in is enforced), `tool_result` → `after_tool`, `before_agent_start` additions → a turn note (a failing handler skipped alone). What does not map (conversation rewriting, session events, commands, UI, providers, MCP servers) is reported, or fails loading with `strict`. Example `pi_extensions` (any extension files; `--live` with DeepSeek; `--without`), test `pi_test`.
 
 ## 0.25.0 (2026-10-08)
 

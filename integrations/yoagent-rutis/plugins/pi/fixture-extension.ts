@@ -91,6 +91,11 @@ export default function (pi: ExtensionAPI) {
     systemPrompt: `${event.systemPrompt}\n\nFixture rules: answer in one line.`,
   }))
 
+  // When the adapter unloads.
+  pi.on('session_shutdown', (_event, ctx) => {
+    writeFileSync(join(ctx.cwd, 'shutdown.txt'), 'bye')
+  })
+
   // App-level: reported by the adapter as not available.
   pi.registerCommand('fixture', { description: 'A command', handler: async () => {} })
 }

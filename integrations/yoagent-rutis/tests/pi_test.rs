@@ -24,7 +24,8 @@ use rutis_loader::{
 };
 use serde_json::{json, Value};
 use yoagent::provider::mock::{MockResponse, MockToolCall};
-use yoagent::tools::{BashTool, EditFileTool, WriteFileTool};
+use yoagent::tools::{BashTool, EditFileTool, ReadFileTool, SearchTool, WriteFileTool};
+use yoagent::{AgentMessage, Content, Message};
 use yoagent_rutis::RutisBridge;
 
 fn pi_dir() -> PathBuf {
@@ -102,14 +103,24 @@ async fn host(runtime: &Path) -> Host {
 }
 
 impl Host {
-    async fn load(&self, rows: Value) {
+    /// Load the rows; the loader's failures, as text (empty when none).
+    async fn try_load(&self, rows: Value) -> String {
         let patches: Vec<Patch> = serde_json::from_value(json!([{ "insert": rows }])).unwrap();
         let report = self
             .loader
             .reconcile(vec![Layer::new("rows", patches)], None)
             .await
             .unwrap();
-        assert!(report.failures.is_empty(), "{report:?}");
+        if report.failures.is_empty() {
+            String::new()
+        } else {
+            format!("{:?}", report.failures)
+        }
+    }
+
+    async fn load(&self, rows: Value) {
+        let failures = self.try_load(rows).await;
+        assert!(failures.is_empty(), "{failures}");
         let registry = self.bridge.registry().clone();
         tokio::time::timeout(Duration::from_secs(60), async {
             while !registry
@@ -268,5 +279,149 @@ async fn pi_extensions_reach_a_yoagent_agent_through_the_adapter() {
     agent.finish().await;
     let ended = wait_file(&slow, |t| t != "started").await;
     assert_eq!(ended, "aborted: AbortError");
+    host.root.shutdown().await.unwrap();
+    // session_shutdown ran when the adapter unloaded.
+    wait_file(&project.path().join("shutdown.txt"), |t| t == "bye").await;
+}
+
+/// A 1×1 PNG.
+const PNG: &[u8] = &[
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+    0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00,
+    0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae,
+    0x42, 0x60, 0x82,
+];
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pi_semantics_on_the_less_common_paths() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let project = tempfile::tempdir().unwrap();
+    let notes = project.path().join("notes.txt");
+    std::fs::write(&notes, "hello world").unwrap();
+    let image = project.path().join("dot.png");
+    std::fs::write(&image, PNG).unwrap();
+    std::fs::write(project.path().join("a.md"), "needle in markdown").unwrap();
+    std::fs::write(project.path().join("b.txt"), "needle in text").unwrap();
+
+    let host = host(&runtime).await;
+    host.load(json!([{
+        "id": "pi",
+        "name": pi_dir().join("pi-extensions-adapter.ts"),
+        "config": {
+            "extensions": [pi_dir().join("fixture-extension.ts"), pi_dir().join("fixture-extra.ts")],
+            "cwd": project.path(),
+        },
+    }]))
+    .await;
+
+    let (agent, seen) = agent(vec![
+        calls(&[
+            ("pi_echo", json!({"text": "first"})),
+            ("pi_echo", json!({"text": "boom"})),
+            ("pi_soft_error", json!({})),
+            ("pi_inactive", json!({})),
+            (
+                "edit_file",
+                json!({"path": notes, "old_text": "world", "new_text": "pi"}),
+            ),
+            (
+                "edit",
+                json!({"path": "x.txt", "edits": "[{\"oldText\":\"a\",\"newText\":\"b\"}]"}),
+            ),
+            ("read_file", json!({"path": image})),
+            (
+                "search",
+                json!({"pattern": "needle", "path": project.path(), "include": "*.md"}),
+            ),
+        ]),
+        text("done"),
+    ]);
+    let mut agent = agent
+        .with_tools(vec![
+            Box::new(ReadFileTool::new()),
+            Box::new(EditFileTool::new()),
+            Box::new(SearchTool::new()),
+        ])
+        .with_extension(host.bridge.extension());
+    let (_, results) = tokio::time::timeout(Duration::from_secs(60), run(&mut agent, "go"))
+        .await
+        .expect("the run finishes");
+    let seen_now = seen.lock().unwrap().clone();
+    let result = |i: usize| results[i].clone();
+
+    // The first registration of a name wins, as in pi.
+    assert_eq!(result(0).1, "pi echo: first", "{results:?}");
+    // A throwing tool_call handler blocks the call, as in pi.
+    assert!(
+        result(1).2 && result(1).1.contains("policy crashed"),
+        "{results:?}"
+    );
+    // A returned isError is an error result.
+    assert!(
+        result(2).2 && result(2).1.contains("soft failure"),
+        "{results:?}"
+    );
+    // defaultActive: false is not offered, so the call fails as unknown.
+    assert!(!seen_now[0].tools.contains(&"pi_inactive".to_string()));
+    assert!(result(3).2 && !result(3).1.contains("inactive ran"));
+    // yoagent's edit_file is denied: an extension overrides pi's `edit`.
+    assert!(
+        result(4).2 && result(4).1.contains(r#"call "edit" instead"#),
+        "{results:?}"
+    );
+    assert_eq!(std::fs::read_to_string(&notes).unwrap(), "hello world");
+    // The pi `edit` tool: prepared (edits parsed from a string) before the
+    // policy (which upper-cases newText), and never translated as edit_file.
+    let (_, text, is_error) = result(5);
+    assert!(
+        !is_error && text.contains(r#""edits":[{"oldText":"a","newText":"B"}]"#),
+        "{results:?}"
+    );
+    // A details-only tool_result edit keeps the image.
+    let image_kept = agent.messages().iter().any(|m| {
+        matches!(m, AgentMessage::Llm(Message::ToolResult { tool_name, content, .. })
+            if tool_name == "read_file" && content.iter().any(|c| matches!(c, Content::Image { .. })))
+    });
+    assert!(image_kept, "{:?}", agent.messages());
+    // search's include is grep's glob: the policy's rewrite to *.txt reached the tool.
+    let (_, text, _) = result(7);
+    assert!(
+        text.contains("b.txt") && !text.contains("a.md"),
+        "{results:?}"
+    );
+    // The crashing, message-returning and prompt-replacing before_agent_start
+    // handlers are skipped; the good one still adds its text.
+    let note = &seen_now[0].last_user;
+    assert!(
+        note.contains("Fixture rules: answer in one line.") && !note.contains("a whole new prompt"),
+        "{note}"
+    );
+    host.root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn strict_refuses_extensions_that_use_what_does_not_map() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let host = host(&runtime).await;
+    let failures = host
+        .try_load(json!([{
+            "id": "pi",
+            "name": pi_dir().join("pi-extensions-adapter.ts"),
+            "config": {
+                "extensions": [pi_dir().join("fixture-extension.ts")],
+                "strict": true,
+            },
+        }]))
+        .await;
+    assert!(
+        failures.contains("command /fixture"),
+        "the fixture's command fails a strict load: {failures}"
+    );
+    assert!(host.bridge.registry().handlers().is_empty());
     host.root.shutdown().await.unwrap();
 }

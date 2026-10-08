@@ -16,9 +16,15 @@
 //! else the key in `~/.dskey`) with `--prompt "<text>"` (a default asks it to
 //! use whatever tools it has).
 //!
+//! The project is also the process's working directory, so yoagent's own
+//! tools (`bash`, relative paths) act there, not where `cargo run` started.
+//! `--without NAME` leaves a yoagent built-in out (repeatable): use it when
+//! an extension replaces one under the same name, e.g. pi's sandboxed
+//! `bash` (yoagent's own tool would otherwise win and run unsandboxed).
+//!
 //! Setup (once): `npm ci` in `plugins/pi/` (Node 24+).
 //!
-//! Run: `cargo run --manifest-path integrations/yoagent-rutis/Cargo.toml --features node --example pi_extensions [-- [--live] [--prompt TEXT] EXT.ts ...]`
+//! Run: `cargo run --manifest-path integrations/yoagent-rutis/Cargo.toml --features node --example pi_extensions [-- [--live] [--prompt TEXT] [--without NAME] EXT.ts ...]`
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -103,6 +109,7 @@ fn deepseek_key() -> Result<String, BoxError> {
 #[tokio::main]
 async fn main() -> Result<(), BoxError> {
     let mut live = false;
+    let mut without = Vec::new();
     let mut prompt = "Use the tools you have to do one small useful thing in this project, then say what you did. Be brief.".to_string();
     let mut extensions = Vec::new();
     let mut args = std::env::args().skip(1);
@@ -110,6 +117,7 @@ async fn main() -> Result<(), BoxError> {
         match arg.as_str() {
             "--live" => live = true,
             "--prompt" => prompt = args.next().ok_or("--prompt needs a value")?,
+            "--without" => without.push(args.next().ok_or("--without needs a tool name")?),
             path => extensions.push(std::fs::canonicalize(path)?),
         }
     }
@@ -126,6 +134,9 @@ async fn main() -> Result<(), BoxError> {
         return Err(format!("run `npm ci` in {} first", pi_dir().display()).into());
     }
     let project = tempfile::tempdir()?;
+    // Extension paths are canonical already; from here on, relative paths and
+    // `bash` act in the project the extensions see as `ctx.cwd`.
+    std::env::set_current_dir(project.path())?;
     std::fs::write(project.path().join("README.md"), "# demo project\n")?;
 
     let root = Ctx::root()?;
@@ -201,7 +212,12 @@ async fn main() -> Result<(), BoxError> {
         "You are a coding agent working in {}. Be brief.",
         project.path().display()
     ))
-    .with_tools(default_tools())
+    .with_tools(
+        default_tools()
+            .into_iter()
+            .filter(|tool| !without.iter().any(|name| name == tool.name()))
+            .collect(),
+    )
     .with_extension(bridge.extension());
 
     let (tx, mut rx) = mpsc::unbounded_channel();
