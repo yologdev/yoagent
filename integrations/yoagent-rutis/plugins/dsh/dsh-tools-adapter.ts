@@ -23,9 +23,12 @@
 //                result. Text blocks stay text; an image block (a reference
 //                into dsh's attachment store) becomes a yoagent image, read
 //                with the `attachments` service when one is loaded (looked up
-//                per image, not injected: the adapter runs without it); with
-//                none, or when a read fails, the image is a text placeholder.
-//                Other blocks are named.
+//                per image, not injected: the adapter runs without it). With
+//                none, when a read fails, when dsh marked the image
+//                `offloaded`, or when it is over MAX_IMAGE_BYTES (provider-safe:
+//                Anthropic takes 5 MB base64), the image is a text
+//                placeholder. Other blocks are named. An error result's
+//                images are not read.
 //   before_model the sections dsh plugins added to `systemPrompt` (the
 //                harness identity and persona slots left out), rendered and
 //                capped, as a note on the request's latest user turn.
@@ -43,7 +46,15 @@ interface DshAttachments {
 }
 
 /** A dsh content block as a tool result carries it. */
-type DshBlock = { type: string; text?: string; attachment?: { attachmentId: string; mediaType: string; name?: string } }
+type DshBlock = {
+  type: string
+  text?: string
+  attachment?: { attachmentId: string; mediaType: string; name?: string; bytes?: number }
+  offloaded?: true
+}
+
+/** Largest image sent as an image: under Anthropic's 5 MB once base64-encoded. */
+const MAX_IMAGE_BYTES = 3_750_000
 
 /** The slice of `@deepseek-ai/dsh-tools`' `ToolRuntime` this adapter uses. */
 interface DshTools {
@@ -115,14 +126,20 @@ export default definePlugin<Config>({
 
     /** An image reference as a yoagent image: its bytes from dsh's attachment store. */
     const image = async (
-      ref: { attachmentId: string; mediaType: string; name?: string },
+      ref: { attachmentId: string; mediaType: string; name?: string; bytes?: number },
+      offloaded: boolean,
       signal: AbortSignal,
     ): Promise<ContentBlock> => {
-      const label = `[image${ref.name ? ` ${ref.name}` : ''}: not available here]`
+      const named = `image${ref.name ? ` ${ref.name}` : ''}`
+      const label = `[${named}: not available here]`
+      // dsh decided this image goes out as text; and an oversize one would fail the request.
+      if (offloaded) return { type: 'text', text: `[${named}: offloaded]` }
+      if ((ref.bytes ?? 0) > MAX_IMAGE_BYTES) return { type: 'text', text: `[${named}: too large to send]` }
       const store = attachments()
       if (!store) return { type: 'text', text: label }
       try {
         const stored = await store.readImage(ref, signal)
+        if (stored.data.byteLength > MAX_IMAGE_BYTES) return { type: 'text', text: `[${named}: too large to send]` }
         return { type: 'image', data: Buffer.from(stored.data).toString('base64'), mimeType: stored.ref.mediaType }
       } catch (error) {
         if (signal.aborted) throw error
@@ -151,19 +168,21 @@ export default definePlugin<Config>({
             arguments: call.args,
             signal: call.signal,
           })
+          if (out.isError) {
+            const text = (out.content ?? [])
+              .map((block) => (block.type === 'text' ? (block.text ?? '') : `[${block.type} block]`))
+              .join('\n')
+            return { text: text || out.error?.message || 'the dsh tool failed', is_error: true }
+          }
           const content: ContentBlock[] = []
           for (const block of out.content ?? []) {
             if (block.type === 'text') {
               content.push({ type: 'text', text: block.text ?? '' })
             } else if (block.type === 'image' && block.attachment) {
-              content.push(await image(block.attachment, call.signal))
+              content.push(await image(block.attachment, block.offloaded === true, call.signal))
             } else {
               content.push({ type: 'text', text: `[${block.type} block]` })
             }
-          }
-          if (out.isError) {
-            const text = content.flatMap((b) => (b.type === 'text' ? [b.text] : [])).join('\n')
-            return { text: text || out.error?.message || 'the dsh tool failed', is_error: true }
           }
           return { content }
         },

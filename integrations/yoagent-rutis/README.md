@@ -215,9 +215,12 @@ def apply(ctx, config):
   `{"type": "image", "data": <base64>, "mimeType": "image/…"}` — and
   `after_tool` sees the output's blocks as `output.content`, so a handler
   can return pictures, and keep, add or drop them when it edits a result.
-  Text and blocks are exclusive in one answer; anything else in `content`
-  (another block type, a non-`image/*` type, data that is not base64) fails
-  the answer.
+  Text and blocks are exclusive in one answer (so return picked fields,
+  not the `output` you were given). An image must be standard base64 of at
+  most 10 MB, typed `image/png`, `image/jpeg`, `image/gif` or `image/webp`
+  (what every provider takes); anything else in `content` fails the answer.
+  Stay under your provider's own limit too (Anthropic: 5 MB base64): an
+  image it refuses sits in the history and fails every later request.
 
   ```ts
   async call_tool(call) {
@@ -280,7 +283,7 @@ offers every tool in dsh's tool registry (the `tools` service of
 | Hook | What the adapter does |
 |---|---|
 | `tools` | `tools.schemas()` → name, description, parameters (config `tools`: an allowlist) |
-| `call_tool` | `tools.execute({callId, name, arguments, signal})` with the bridge's cancel handle as dsh's `signal`: cancelling the run aborts the dsh call. `isError` → an error tool result. Text blocks stay text; an image block — a reference into dsh's attachment store — becomes a yoagent image, its bytes read with the `attachments` service when one is loaded (looked up per image, so the adapter also runs without it; then, or when a read fails, the image is a text placeholder); other blocks are named |
+| `call_tool` | `tools.execute({callId, name, arguments, signal})` with the bridge's cancel handle as dsh's `signal`: cancelling the run aborts the dsh call. `isError` → an error tool result. Text blocks stay text; an image block — a reference into dsh's attachment store — becomes a yoagent image, its bytes read with the `attachments` service when one is loaded (looked up per image, so the adapter also runs without it). Without one, when a read fails, when dsh marked the image `offloaded`, or over 3.75 MB (under Anthropic's 5 MB once base64), the image is a text placeholder; an error result's images are not read; other blocks are named |
 | `before_model` | the system-prompt sections dsh plugins added (the harness identity and persona slots left out, sections whose variables are unset skipped), as one note, capped at `maxNoteChars` (2000) |
 
 Load, as rows of one Node runtime whose `package.json` is `plugins/dsh/`'s:
@@ -315,9 +318,10 @@ rutis-agent's), shown with rutis-agent's `replace_text` and a tool registered
 into the registry while the host runs, which the next run offers.
 rutis-agent's results are text (a runner's JSON value is serialized), so
 images use a convention of this adapter: a runner returning
-`{"content": [blocks]}` in yoagent's block shape gives yoagent those blocks,
-images included (`dot_picture` in the example); rutis-agent's own agent
-still sees the JSON text.
+`{"content": [blocks]}` in yoagent's block shape, with at least one image,
+gives yoagent those blocks (`dot_picture` in the example); rutis-agent's
+own agent still sees the JSON text. A tool that prints exactly such JSON
+(an image included) as its text would be read as blocks too.
 
 ```sh
 cargo run --manifest-path examples/rutis-agent-tools/Cargo.toml [-- --live]

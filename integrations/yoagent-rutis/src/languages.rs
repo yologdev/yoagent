@@ -946,12 +946,23 @@ impl AgentTool for RemoteTool {
     }
 }
 
+/// Image types every provider takes; others (svg, bmp, tiff, ...) are refused
+/// rather than put into history, where they would fail every later request.
+const IMAGE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+
+/// Largest image a plugin may hand over, decoded. Keeps one answer under the
+/// websocket transport's frame limit (16 MiB) once base64-encoded; providers
+/// may take less (Anthropic: 5 MB) — plugins should stay under theirs.
+const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+
 /// A handler's content blocks — `{"type": "text", "text"}` and
 /// `{"type": "image", "data", "mimeType"}`, yoagent's own JSON shape (and
-/// pi's, and MCP's) — as yoagent content. `None` for anything else: not an
-/// array, an unknown block type, an extra or missing field, an image whose
-/// `mimeType` is not `image/*` or whose `data` is empty or not base64.
+/// pi's, and MCP's bare blocks) — as yoagent content. `None` for anything
+/// else: not an array, an unknown block type, an extra or missing field, an
+/// image whose `mimeType` is not one of IMAGE_TYPES or whose `data` is not
+/// standard base64 of 1 to MAX_IMAGE_BYTES bytes.
 fn content_blocks(blocks: &Json) -> Option<Vec<Content>> {
+    use base64::Engine as _;
     blocks
         .as_array()?
         .iter()
@@ -965,11 +976,15 @@ fn content_blocks(blocks: &Json) -> Option<Vec<Content>> {
                 "image" if fields.len() == 3 => {
                     let data = field("data")?;
                     let mime_type = field("mimeType")?;
-                    let base64 = !data.is_empty()
-                        && data
-                            .bytes()
-                            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='));
-                    (base64 && mime_type.starts_with("image/")).then(|| Content::Image {
+                    // A decoded length bound before decoding: 3 bytes per 4 characters.
+                    let fits = data.len() / 4 * 3 <= MAX_IMAGE_BYTES + 2;
+                    let bytes = fits
+                        .then(|| base64::engine::general_purpose::STANDARD.decode(data).ok())
+                        .flatten()?;
+                    let valid = !bytes.is_empty()
+                        && bytes.len() <= MAX_IMAGE_BYTES
+                        && IMAGE_TYPES.contains(&mime_type);
+                    valid.then(|| Content::Image {
                         data: data.to_string(),
                         mime_type: mime_type.to_string(),
                     })
@@ -1008,6 +1023,15 @@ mod tests {
             json!([{"type": "image", "data": "", "mimeType": "image/png"}]),
             json!([{"type": "image", "data": "not base64!", "mimeType": "image/png"}]),
             json!([{"type": "image", "data": "AAAA", "mimeType": "text/plain"}]),
+            // Mis-padded, or padding in the middle: not base64.
+            json!([{"type": "image", "data": "AAAAA", "mimeType": "image/png"}]),
+            json!([{"type": "image", "data": "A=AA", "mimeType": "image/png"}]),
+            json!([{"type": "image", "data": "=", "mimeType": "image/png"}]),
+            // A type providers do not take.
+            json!([{"type": "image", "data": "AAAA", "mimeType": "image/svg+xml"}]),
+            json!([{"type": "image", "data": "AAAA", "mimeType": "image/"}]),
+            // Over the size limit.
+            json!([{"type": "image", "data": "A".repeat((MAX_IMAGE_BYTES + 3) / 3 * 4), "mimeType": "image/png"}]),
             json!([{"type": "image", "data": "AAAA"}]),
             json!([{"type": "file", "data": "AAAA", "mimeType": "image/png"}]),
         ] {
