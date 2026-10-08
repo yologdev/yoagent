@@ -31,17 +31,24 @@
 //                           like a yoagent built-in (pi's sandboxed `bash`)
 //                           refuses the load unless the host says it left
 //                           that built-in out (`withoutBuiltins`).
-//   pi.setActiveTools       an allowlist: tools outside it are not offered
-//                           and their calls (yoagent's built-ins under pi's
-//                           names) are denied. `getActiveTools` /
-//                           `getAllTools` answer from the same view.
+//   pi.setActiveTools       an allowlist over the tools pi knows (yoagent's
+//                           built-ins under pi's names, the extensions'
+//                           tools): those outside it are not offered and
+//                           their calls are denied; tools pi does not know
+//                           (MCP, sub-agents, the host's own) are not
+//                           affected, as in pi. A tool registered later that
+//                           pi would activate joins it, as pi's registry
+//                           refresh does. `getActiveTools` / `getAllTools`
+//                           answer from the same view.
 //   on("tool_call")         `before_tool`, for every call of the run. yoagent's
 //                           built-ins are judged under pi's names (TOOL_NAMES),
 //                           their arguments translated both ways and a
 //                           relative `path` resolved against `cwd` first, so
-//                           the tool acts where the policy looked. `{ block }`
-//                           denies (`terminate: true` also stops the run at
-//                           its next model request); in-place changes to
+//                           the tool acts where the policy looked (built-ins
+//                           only). `{ block }` denies (`terminate: true` also
+//                           stops the run at its next model request — stricter
+//                           than pi, which ends only a batch whose results all
+//                           set it); in-place changes to
 //                           `event.input` rewrite the arguments (a field the
 //                           yoagent tool does not have denies the call); a
 //                           handler that throws blocks, as in pi.
@@ -293,13 +300,18 @@ function text(content: Block[] | undefined): string {
   return (content ?? []).map((block) => (block.type === 'text' ? (block.text ?? '') : `[${block.type} block]`)).join('\n')
 }
 
-/** JSON with object keys sorted: arguments cross serde_json, which may reorder them. */
+/**
+ * JSON with object keys sorted and non-integers at 15 significant digits:
+ * arguments cross serde_json, which may reorder keys and parse a float's
+ * shortest form one unit off.
+ */
 function canon(value: unknown): string {
-  return JSON.stringify(value, (_key, v) =>
-    v && typeof v === 'object' && !Array.isArray(v)
+  return JSON.stringify(value, (_key, v) => {
+    if (typeof v === 'number' && !Number.isInteger(v)) return Number(v.toPrecision(15))
+    return v && typeof v === 'object' && !Array.isArray(v)
       ? Object.fromEntries(Object.entries(v as Args).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
-      : v,
-  )
+      : v
+  })
 }
 
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error))
@@ -393,41 +405,68 @@ export default definePlugin<Config>({
       return byName
     }
 
-    // pi.setActiveTools: an allowlist of pi names (yoagent's built-ins under TOOL_NAMES).
+    // pi.setActiveTools: an allowlist over the tools pi knows — yoagent's built-ins under pi's
+    // names and the extensions' tools. Other tools (MCP, sub-agents, the host's own) are not pi's
+    // to activate and stay outside it, as in pi.
     let active: Set<string> | undefined
-    /** The tools pi would offer: activated on registration, and in the allowlist if one was set. */
-    const available = () =>
-      new Map(
-        [...registered()].filter(([name, tool]) => {
-          const exposure = tool.exposure ?? 'direct'
-          const activated = (exposure === 'direct' || exposure === 'model-only') && tool.defaultActive !== false
-          return activated && (!active || active.has(name))
-        }),
+    /** Tool names registered when the allowlist was set; one registered later joins it as pi's registry refresh does. */
+    let knownAtActivation = new Set<string>()
+    const activatedOnRegistration = (tool: PiTool) => {
+      const exposure = tool.exposure ?? 'direct'
+      return (exposure === 'direct' || exposure === 'model-only') && tool.defaultActive !== false
+    }
+    /** The tools pi would offer (its `_applyToolLoadout`): activated on registration, or named in the allowlist and not hidden. */
+    const available = () => {
+      const tools = registered()
+      if (active) {
+        for (const [name, tool] of tools) {
+          if (!knownAtActivation.has(name) && activatedOnRegistration(tool)) active.add(name)
+          knownAtActivation.add(name)
+        }
+      }
+      return new Map(
+        [...tools].filter(([name, tool]) =>
+          active ? active.has(name) && (tool.exposure ?? 'direct') !== 'hidden' : activatedOnRegistration(tool),
+        ),
       )
+    }
+    /** Whether a call to `toolName` (a pi name) is outside the allowlist. */
+    const inactive = (toolName: string) =>
+      active !== undefined &&
+      !active.has(toolName) &&
+      (registered().has(toolName) || [...names.values()].includes(toolName))
 
     // The runtime actions: tool activation is pi's to decide here; the rest has no counterpart.
     runtime.setActiveTools = (toolNames: string[]) => {
       active = new Set(toolNames)
+      knownAtActivation = new Set(registered().keys())
     }
     runtime.getActiveTools = () =>
       active ? [...active] : [...new Set([...names.values(), ...available().keys()])]
-    runtime.getAllTools = () => [
-      ...[...names].map(([yo, pi]) => ({
-        name: pi,
-        description: `yoagent's ${yo}`,
-        parameters: { type: 'object' },
-        exposure: 'direct',
-        sourceInfo: { path: 'yoagent' },
-      })),
-      ...[...registered().values()].map((tool) => ({
-        name: tool.name,
-        description: tool.description,
-        parameters: tool.parameters,
-        promptGuidelines: tool.promptGuidelines,
-        exposure: tool.exposure ?? 'direct',
-        sourceInfo: { path: 'pi extension' },
-      })),
-    ]
+    runtime.getAllTools = () => {
+      const tools = registered()
+      return [
+        // yoagent's built-ins as pi's (an extension's tool of the same name takes its place; one
+        // the host left out is not listed).
+        ...[...names]
+          .filter(([yo, pi]) => !withoutBuiltins.has(yo) && !tools.has(pi))
+          .map(([yo, pi]) => ({
+            name: pi,
+            description: `yoagent's ${yo}`,
+            parameters: { type: 'object' },
+            exposure: 'direct',
+            sourceInfo: { path: `builtin:${pi}`, source: 'builtin', scope: 'user', origin: 'top-level' },
+          })),
+        ...[...tools.values()].map((tool) => ({
+          name: tool.name,
+          description: tool.description,
+          parameters: tool.parameters,
+          promptGuidelines: tool.promptGuidelines,
+          exposure: tool.exposure ?? 'direct',
+          sourceInfo: { path: 'extension', source: 'extension', scope: 'temporary', origin: 'top-level' },
+        })),
+      ]
+    }
     for (const action of UNSUPPORTED_ACTIONS) {
       runtime[action] = () => {
         throw new Error(`pi.${action}() is not available in yoagent`)
@@ -574,6 +613,7 @@ export default definePlugin<Config>({
           // Registrations made since load: reported now (a run cannot refuse the load).
           checkUnmapped(false)
           checkShadowing(false)
+          if (refusal) return []
           return [...available().values()].map((tool) => ({
             name: tool.name,
             label: tool.label ?? null,
@@ -613,7 +653,7 @@ export default definePlugin<Config>({
             return { deny: `a pi extension replaces this tool with "${counterpart}"; call "${counterpart}" instead` }
           }
           const toolName = own ? call.tool : (counterpart ?? call.tool)
-          if (active && !active.has(toolName)) {
+          if (inactive(toolName)) {
             return { deny: `"${toolName}" is not an active tool (a pi extension narrowed them with setActiveTools)` }
           }
           const policies = handlers('tool_call')
@@ -631,8 +671,10 @@ export default definePlugin<Config>({
               return { deny: message(error) }
             }
           } else {
-            // A relative path is resolved where the extensions look (`ctx.cwd`), so the tool acts there.
-            if (policies.length > 0 && typeof base.path === 'string' && !isAbsolute(base.path)) {
+            // A built-in's relative path is resolved where the extensions look (`ctx.cwd`), so the
+            // tool acts there. Only yoagent's own tools: an MCP tool's `path` may be a repository's.
+            const builtin = YOAGENT_KEYS.has(call.tool)
+            if (builtin && policies.length > 0 && typeof base.path === 'string' && !isAbsolute(base.path)) {
               base = { ...base, path: resolve(cwd, base.path) }
             }
             input = structuredClone(shape ? shape.toPi(base) : base)

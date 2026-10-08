@@ -650,14 +650,22 @@ async fn set_active_tools_narrows_what_the_agent_can_call() {
         dir.path(),
         "plan-mode.ts",
         r#"import { Type } from 'typebox'
-const tool = (name) => ({
+const tool = (name, extra = {}) => ({
   name, label: name, description: name, parameters: Type.Object({}),
   async execute() { return { content: [{ type: 'text', text: `${name} ran` }], details: undefined } },
+  ...extra,
 })
 export default function (pi) {
-  pi.registerTool(tool('pi_x'))
+  pi.registerTool(tool('pi_x', {
+    // Registers a tool after setActiveTools: pi's registry refresh activates it.
+    async execute() { pi.registerTool(tool('pi_late')); return { content: [{ type: 'text', text: 'pi_x ran' }], details: undefined } },
+  }))
   pi.registerTool(tool('pi_y'))
-  pi.on('session_start', () => pi.setActiveTools(['read', 'pi_x']))
+  // Not activated on registration, but named in the allowlist: pi activates it.
+  pi.registerTool(tool('pi_z', { defaultActive: false }))
+  pi.on('session_start', () => pi.setActiveTools(['read', 'pi_x', 'pi_z']))
+  // A policy, so built-in paths are resolved — but not other tools' paths.
+  pi.on('tool_call', () => undefined)
 }
 "#,
     );
@@ -669,21 +677,37 @@ export default function (pi) {
             ("pi_y", json!({})),
             ("bash", json!({"command": "echo hi"})),
             ("read_file", json!({"path": readme})),
+            // A tool pi does not know (an MCP tool, say): untouched by the
+            // allowlist and by the path resolution.
+            ("echo_args", json!({"path": "src/lib.rs"})),
         ]),
         text("done"),
+        text("again"),
     ]);
     let mut agent = agent
         .with_tools(vec![
             Box::new(BashTool::new()),
             Box::new(ReadFileTool::new()),
+            Box::new(EchoArgs),
         ])
         .with_extension(host.bridge.extension());
     let (_, results) = run(&mut agent, "go").await;
     let tools = seen.lock().unwrap()[0].tools.clone();
     assert!(
-        tools.contains(&"pi_x".into()) && !tools.contains(&"pi_y".into()),
+        tools.contains(&"pi_x".into())
+            && tools.contains(&"pi_z".into())
+            && !tools.contains(&"pi_y".into()),
         "{tools:?}"
     );
+    assert_eq!(
+        results[4],
+        ("echo_args".into(), r#"{"path":"src/lib.rs"}"#.into(), false),
+        "{results:?}"
+    );
+    // The tool pi_x registered joins the allowlist from the next run on.
+    run(&mut agent, "again").await;
+    let tools = seen.lock().unwrap()[2].tools.clone();
+    assert!(tools.contains(&"pi_late".into()), "{tools:?}");
     assert_eq!(results[0].1, "pi_x ran", "{results:?}");
     // Not offered, and a call to it is denied as inactive.
     assert!(
