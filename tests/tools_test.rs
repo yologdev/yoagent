@@ -611,15 +611,21 @@ async fn list_files_reports_unreadable_subdirectories() {
     let ok = list(dir.path().to_path_buf()).await;
     assert!(ok.details["warnings"].is_null(), "{:?}", ok.details);
 
+    // Restores the permissions however the test ends, so the temp dir can be removed.
+    struct Unlock(std::path::PathBuf);
+    impl Drop for Unlock {
+        fn drop(&mut self) {
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let _unlock = Unlock(locked.clone());
     if std::fs::read_dir(&locked).is_ok() {
         // Running as root: permissions don't apply, nothing to test.
-        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
         eprintln!("skipped: permissions are not enforced for this user");
         return;
     }
     let result = list(dir.path().to_path_buf()).await;
-    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
     let text = match &result.content[0] {
         Content::Text { text } => text.clone(),
         _ => panic!("expected text"),

@@ -139,13 +139,14 @@ impl AgentTool for ListFilesTool {
         // listing with nothing to show is a failure.
         let stderr = String::from_utf8_lossy(&result.stderr);
         let stderr = stderr.trim();
-        if !result.status.success() && lines.is_empty() && !stderr.is_empty() {
-            return Err(ToolError::Failed(format!("Listing error: {}", stderr)));
-        }
+        // Capped on both paths: a wide walk can produce thousands of lines.
         let warnings = (!stderr.is_empty()).then(|| match stderr.char_indices().nth(2000) {
             Some((cut, _)) => format!("{}\n... (more warnings not shown)", &stderr[..cut]),
             None => stderr.to_string(),
         });
+        if let (false, true, Some(w)) = (result.status.success(), lines.is_empty(), &warnings) {
+            return Err(ToolError::Failed(format!("Listing error: {w}")));
+        }
 
         let total = lines.len();
         let truncated = total > self.max_results;
@@ -168,7 +169,7 @@ impl AgentTool for ListFilesTool {
 
         if let Some(w) = &warnings {
             text.push_str(&format!(
-                "\nWarnings (some paths could not be read; the listing may be incomplete):\n{w}"
+                "\nWarnings from find (the listing may be incomplete):\n{w}"
             ));
         }
 
