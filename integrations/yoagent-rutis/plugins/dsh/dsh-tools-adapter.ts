@@ -137,7 +137,10 @@ export default definePlugin<Config>({
           }
           if (parts.length === 0) return
           let note = `[Guidance from dsh plugins]\n${parts.join('\n\n')}`
-          if (note.length > maxNote) note = `${note.slice(0, Math.max(0, maxNote - 1))}…`
+          // Cut by code points, not UTF-16 units: a lone surrogate would fail the
+          // host's JSON decoding and close the whole runtime session.
+          const chars = [...note]
+          if (chars.length > maxNote) note = `${chars.slice(0, Math.max(0, maxNote - 1)).join('')}…`
           return { note }
         },
       }),
