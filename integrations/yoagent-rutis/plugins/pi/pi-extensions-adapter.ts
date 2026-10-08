@@ -633,9 +633,14 @@ export default definePlugin<Config>({
       message: { customType: string; content: string | Block[]; display?: boolean; details?: unknown },
       options?: { triggerTurn?: boolean; deliverAs?: string },
     ) => {
-      sessionManager.appendMessage({ role: 'custom', timestamp: Date.now(), display: true, ...message } as never)
-      const shown = typeof message.content === 'string' ? message.content : text(message.content)
-      if (message.display !== false) report('info', `[pi ${message.customType}] ${shown}`)
+      // As pi's own runtime stores it: a `custom_message` entry.
+      sessionManager.appendCustomMessageEntry(message.customType, message.content ?? [], message.display, message.details)
+      if (message.display) {
+        const content = message.content
+        const shown =
+          typeof content === 'string' ? content : Array.isArray(content) ? text(content) : JSON.stringify(content)
+        report('info', `[pi ${message.customType}] ${shown}`)
+      }
       if (options?.triggerTurn || options?.deliverAs) {
         report('warn', `[pi] ${message.customType}: a message cannot start or join a turn in yoagent; recorded only`)
       }

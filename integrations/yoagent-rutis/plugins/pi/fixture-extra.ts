@@ -99,8 +99,11 @@ export default function (pi: ExtensionAPI) {
     async execute(_id, _params, _signal, _onUpdate, ctx) {
       pi.appendEntry('render:last-job', { path: '/tmp/out.mp4' })
       pi.sendMessage({ customType: 'render_result', content: [{ type: 'text', text: 'Rendered /tmp/out.mp4' }], display: true })
-      const entries = ctx.sessionManager.getEntries().filter((e: { type: string }) => e.type === 'custom').length
-      return { content: [{ type: 'text', text: `rendered; ${entries} custom entr${entries === 1 ? 'y' : 'ies'} recorded` }], details: undefined }
+      // Read back the way pi stores them: a custom entry and a custom_message entry.
+      const all = ctx.sessionManager.getEntries() as { type: string; customType?: string }[]
+      const entry = all.filter((e) => e.type === 'custom' && e.customType === 'render:last-job').length
+      const message = all.filter((e) => e.type === 'custom_message' && e.customType === 'render_result').length
+      return { content: [{ type: 'text', text: `rendered; entries ${entry}, messages ${message}` }], details: undefined }
     },
   })
 

@@ -537,7 +537,7 @@ async fn pi_semantics_on_the_less_common_paths() {
     // appendEntry and sendMessage inside a tool are recorded in the adapter's session.
     let (_, text, is_error) = result(16);
     assert!(
-        !is_error && text == "rendered; 1 custom entry recorded",
+        !is_error && text == "rendered; entries 1, messages 1",
         "{results:?}"
     );
     // terminate: true denied the call and stopped the run before its next request.

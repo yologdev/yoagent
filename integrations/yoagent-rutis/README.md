@@ -394,7 +394,8 @@ adapter's in-memory session — readable through `ctx.sessionManager`, a
 displayed message also logged — so a tool that records or shows its result
 this way (pi video tools do, after the paid work) does not fail; a message
 never starts a turn or reaches the model (yoagent's history is written only
-by its host). Other runtime actions (`pi.sendUserMessage`, `pi.setModel`,
+by its host). The session lives as long as the adapter: in a long-running
+host it grows until the plugin reloads. Other runtime actions (`pi.sendUserMessage`, `pi.setModel`,
 ...) throw "not available in yoagent". There is no UI: `ctx.hasUI` is false and
 `ctx.ui` behaves as in pi's print mode (`confirm` answers false), so a
 policy that would ask the user denies. Commands, dialogs and session
