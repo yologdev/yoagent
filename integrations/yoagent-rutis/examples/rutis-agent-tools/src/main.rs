@@ -151,10 +151,11 @@ impl AgentTool for RegistryTool {
         // rutis-agent watches the same token: cancelling the run aborts the
         // runner (and kills a `bash` process group).
         let out = self.registry.execute(&call, &ctx.cancel).await;
-        if ctx.cancel.is_cancelled() {
-            return Err(ToolError::Cancelled);
-        }
         if !out.ok {
+            // A finished result stands even if the cancel came right after.
+            if ctx.cancel.is_cancelled() {
+                return Err(ToolError::Cancelled);
+            }
             // rutis-agent already wrote it for the model: `error: ...`.
             return Err(ToolError::Failed(out.output));
         }
