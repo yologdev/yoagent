@@ -49,6 +49,27 @@ export default function (pi: ExtensionAPI) {
     },
   })
 
+  // A picture: text and an image block, pi's shape.
+  pi.registerTool({
+    name: 'pi_picture',
+    label: 'Picture',
+    description: 'Shows a picture of a dot.',
+    parameters: Type.Object({}),
+    async execute() {
+      return {
+        content: [
+          { type: 'text', text: 'a dot' },
+          {
+            type: 'image',
+            data: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg==',
+            mimeType: 'image/png',
+          },
+        ],
+        details: undefined,
+      }
+    },
+  })
+
   // A tool registered when the session starts (pi's dynamic-tools pattern).
   pi.on('session_start', () => {
     pi.registerTool({
@@ -79,6 +100,11 @@ export default function (pi: ExtensionAPI) {
     }
     return undefined
   })
+
+  // A content edit that keeps the picture and adds a caption.
+  pi.on('tool_result', async (event) =>
+    event.toolName === 'pi_picture' ? { content: [...event.content, { type: 'text', text: 'captioned' }] } : undefined,
+  )
 
   // Redaction: results are chained edits.
   pi.on('tool_result', async (event) => {

@@ -201,6 +201,7 @@ async fn pi_extensions_reach_a_yoagent_agent_through_the_adapter() {
             ("pi_echo", json!({"text": "SECRET hi"})),
             ("pi_fail", json!({"why": "nope"})),
             ("pi_dynamic", json!({})),
+            ("pi_picture", json!({})),
             (
                 "write_file",
                 json!({"path": env_file, "content": "TOKEN=1"}),
@@ -255,6 +256,22 @@ async fn pi_extensions_reach_a_yoagent_agent_through_the_adapter() {
     let (_, text, is_error) = result("pi_fail");
     assert!(is_error && text.contains("pi failure: nope"), "{results:?}");
     assert_eq!(result("pi_dynamic").1, "dynamic ok");
+    // ...a picture arrives as an image, and a content edit keeps it...
+    let picture = agent
+        .messages()
+        .iter()
+        .find_map(|m| match m {
+            AgentMessage::Llm(Message::ToolResult {
+                tool_name, content, ..
+            }) if tool_name == "pi_picture" => Some(content.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        matches!(&picture[..], [Content::Text { text: a }, Content::Image { mime_type, .. }, Content::Text { text: b }]
+            if a == "a dot" && mime_type == "image/png" && b == "captioned"),
+        "{picture:?}"
+    );
     // ...yoagent's own write_file is judged as pi's `write` and blocked...
     let (_, text, is_error) = result("write_file");
     assert!(is_error && text.contains("is protected"), "{results:?}");
@@ -296,7 +313,8 @@ async fn pi_extensions_reach_a_yoagent_agent_through_the_adapter() {
     .await
     .expect("the cancelled run ends");
     agent.finish().await;
-    let ended = wait_file(&slow, |t| t != "started").await;
+    // Not empty: writeFileSync truncates before it writes.
+    let ended = wait_file(&slow, |t| t != "started" && !t.is_empty()).await;
     assert_eq!(ended, "aborted: AbortError");
     host.root.shutdown().await.unwrap();
     // session_shutdown ran when the adapter unloaded.

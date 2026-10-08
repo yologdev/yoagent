@@ -22,8 +22,9 @@
 //                           before any policy sees them; `execute` gets the
 //                           arguments the policies left, and only those: a
 //                           call another handler rewrote afterwards is not
-//                           run. A throw or `isError` is an error result
-//                           (non-text blocks become `[image block]` text).
+//                           run. A throw or `isError` is an error result;
+//                           text and image blocks pass through as they are
+//                           (pi's shape is yoagent's).
 //                           A tool that overrides one of pi's built-ins
 //                           (`read`, `edit`, ...) makes the adapter deny
 //                           yoagent's counterpart (`read_file`, ...), so the
@@ -54,8 +55,8 @@
 //                           handler that throws blocks, as in pi.
 //   on("tool_result")       `after_tool`: changes to content, details and
 //                           isError are chained; only the fields a handler
-//                           set are applied (a replaced content keeps only its
-//                           text). A handler that throws withholds the result
+//                           set are applied (a replaced content keeps its text
+//                           and image blocks). A handler that throws withholds the result
 //                           — unlike pi, which skips it: a redaction that
 //                           failed must not let the raw output through.
 //   on("input")             `on_input`: `handled` rejects the prompt (it never
@@ -93,7 +94,7 @@
 
 import { isAbsolute, resolve } from 'node:path'
 import { definePlugin } from '@arcships/rutis'
-import type { Cancellable, ToolCall, ToolOutput, ToolResult, ToolSpec, Yoagent } from '../yoagent.d.ts'
+import type { Cancellable, ContentBlock, ToolCall, ToolOutput, ToolResult, ToolSpec, Yoagent } from '../yoagent.d.ts'
 
 export interface Config {
   /** The handler's name in the bridge (unique across the host's plugins). */
@@ -240,6 +241,8 @@ const NO_UI = new Proxy(
 interface Block {
   type: string
   text?: string
+  data?: string
+  mimeType?: string
 }
 
 interface PiTool {
@@ -298,6 +301,17 @@ const short = (path: string) => path.split('/').pop() ?? path
 
 function text(content: Block[] | undefined): string {
   return (content ?? []).map((block) => (block.type === 'text' ? (block.text ?? '') : `[${block.type} block]`)).join('\n')
+}
+
+/** pi's content blocks as yoagent's (the same shape for text and images); any other block is named in text. */
+function blocks(content: Block[] | undefined): ContentBlock[] {
+  return (content ?? []).map((block): ContentBlock => {
+    if (block.type === 'text') return { type: 'text', text: block.text ?? '' }
+    if (block.type === 'image' && block.data && block.mimeType) {
+      return { type: 'image', data: block.data, mimeType: block.mimeType }
+    }
+    return { type: 'text', text: `[${block.type} block]` }
+  })
 }
 
 /**
@@ -642,7 +656,8 @@ export default definePlugin<Config>({
           }
           try {
             const out = await tool.execute(call.call_id, call.args, call.signal, undefined, toolContext(call.signal))
-            return { text: text(out.content), details: out.details ?? null, is_error: out.isError === true }
+            if (out.isError === true) return { text: text(out.content), details: out.details ?? null, is_error: true }
+            return { content: blocks(out.content), details: out.details ?? null }
           } catch (error) {
             return { text: message(error), is_error: true }
           }
@@ -768,8 +783,8 @@ export default definePlugin<Config>({
           }
           if (!changed.content && !changed.details && !changed.isError) return
           return {
-            // Only a replaced content is sent back, as text: yoagent's edit replaces every block.
-            ...(changed.content ? { text: text(event.content) } : {}),
+            // Only a replaced content is sent back, as blocks (images kept): yoagent's edit replaces every block.
+            ...(changed.content ? { content: blocks(event.content) } : {}),
             ...(changed.details ? { details: event.details ?? null } : {}),
             ...(changed.isError ? { is_error: event.isError } : {}),
           }
