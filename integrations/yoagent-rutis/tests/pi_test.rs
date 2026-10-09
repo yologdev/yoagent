@@ -17,11 +17,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::*;
-use rutis::Ctx;
+use rutis::{Ctx, FiberState};
 use rutis_bridge::runtime::LocalRuntime;
 use rutis_loader::{
-    Chain, Layer, Loader, LoaderOptions, LoaderPlugin, Patch, RuntimeResolver, RuntimeRowsPlugin,
-    ServiceCatalog,
+    Chain, EntryStatus, Layer, Loader, LoaderOptions, LoaderPlugin, Patch, RuntimeResolver,
+    RuntimeRowsPlugin, ServiceCatalog,
 };
 use serde_json::{json, Value};
 use yoagent::provider::mock::{MockResponse, MockToolCall};
@@ -114,11 +114,43 @@ impl Host {
             .reconcile(vec![Layer::new("rows", patches)], None)
             .await
             .unwrap();
-        if report.failures.is_empty() {
-            String::new()
-        } else {
-            format!("{:?}", report.failures)
+        if !report.failures.is_empty() {
+            return format!("{:?}", report.failures);
         }
+        // `reconcile` counts a row still waiting (`Pending`) as settled, so on a
+        // loaded machine the adapter may not have run its `apply` yet: wait
+        // until every row is active or has failed before calling it a success.
+        let ids: Vec<String> = rows
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|row| row["id"].as_str().map(str::to_owned))
+            .collect();
+        tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                let mut failures = Vec::new();
+                let mut settled = true;
+                for id in &ids {
+                    match self.loader.get(id).map(|info| info.status) {
+                        Some(EntryStatus::Unresolved(e)) => failures.push(e.to_string()),
+                        Some(EntryStatus::Running(s)) if s.state == FiberState::Failed => {
+                            failures.push(format!("{:?}", s.error))
+                        }
+                        Some(EntryStatus::Running(s)) if s.state == FiberState::Active => {}
+                        _ => settled = false,
+                    }
+                }
+                if !failures.is_empty() {
+                    return failures.join("; ");
+                }
+                if settled {
+                    return String::new();
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the rows become active or fail")
     }
 
     async fn load(&self, rows: Value) {
