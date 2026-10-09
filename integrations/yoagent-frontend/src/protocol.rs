@@ -47,6 +47,9 @@ pub enum ServerMessage {
         running: bool,
         /// Browser components plugins offer ([`UiPlugin`]).
         ui_plugins: Vec<UiPlugin>,
+        /// Questions still waiting for an answer, oldest first: a frontend
+        /// that connects (or reloads) while one is open can still answer it.
+        ui_requests: Vec<PendingUiRequest>,
     },
     /// A run started. `run` numbers runs within the session.
     RunStarted { run: u64, prompt: String },
@@ -72,6 +75,14 @@ pub enum ServerMessage {
     Closed,
 }
 
+/// A question waiting for an answer, as listed in [`ServerMessage::Hello`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingUiRequest {
+    pub id: u64,
+    pub request: UiRequest,
+}
+
 /// What a plugin asks the user. The answer's shape depends on the kind:
 /// `confirm` → `true`/`false`, `select` → the chosen option (string) or
 /// `null`, `input` → the text or `null`; `notify` needs none.
@@ -95,6 +106,9 @@ pub enum UiRequest {
         title: String,
         #[serde(default)]
         placeholder: String,
+        /// Text the field starts with (an editor's prefill).
+        #[serde(default)]
+        value: String,
     },
     Notify {
         message: String,
@@ -131,4 +145,8 @@ pub struct UiPlugin {
     /// Whether it adds a side panel (`mountPanel`).
     #[serde(default)]
     pub panel: bool,
+    /// Set by the session, new each time the plugin is offered: a frontend
+    /// reloads a module whose version changed.
+    #[serde(default)]
+    pub version: u64,
 }

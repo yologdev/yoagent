@@ -181,7 +181,12 @@ impl PluginHost {
 
     /// Load more plugins, after those already loaded. Fails, naming the
     /// failures, when any plugin fails to load.
+    ///
+    /// Rows are routed by `name`: two rows loading the same name must name
+    /// the same runtime. A batch that fails is dropped again, so a later
+    /// `load` does not keep failing on it.
     pub async fn load(&mut self, rows: impl IntoIterator<Item = Row>) -> Result<(), BoxError> {
+        let kept = self.rows.len();
         for row in rows {
             if let Some(runtime) = &row.runtime {
                 self.routes
@@ -191,6 +196,15 @@ impl PluginHost {
             }
             self.rows.push(row);
         }
+        let result = self.reconcile_all().await;
+        if result.is_err() {
+            self.rows.truncate(kept);
+            let _ = self.reconcile_all().await;
+        }
+        result
+    }
+
+    async fn reconcile_all(&mut self) -> Result<(), BoxError> {
         let insert: Vec<Json> = self.rows.iter().map(Row::json).collect();
         let patches: Vec<Patch> = serde_json::from_value(json!([{ "insert": insert }]))?;
         let report = self

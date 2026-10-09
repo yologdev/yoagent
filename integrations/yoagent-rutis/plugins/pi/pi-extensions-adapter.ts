@@ -259,34 +259,53 @@ const NO_UI = new Proxy(
 /** The host's `ui` service (yoagent-frontend), when it provides one. */
 interface HostUi {
   request(request: Record<string, unknown>, timeoutMs?: number): Promise<unknown>
+  withdraw?(key: string): Promise<void>
 }
+
+let questionKeys = 0
 
 /**
  * pi's RPC-mode UI over the host's `ui` service: dialogs reach whichever
  * frontend answers first; a failure, no frontend or no answer in time gives
  * print mode's answer.
  */
-const hostUi = (ui: HostUi) => {
-  const ask = async (request: Record<string, unknown>, opts?: { timeout?: number }) => {
+const hostUi = (ui: HostUi, contextSignal?: AbortSignal) => {
+  const ask = async (request: Record<string, unknown>, opts?: { timeout?: number; signal?: AbortSignal }) => {
+    // When the hook is cancelled (the run stopped, the policy timed out) the
+    // question is withdrawn: frontends close its dialog. rutis 0.7 cannot
+    // cancel a plugin's call to the host, so the adapter says so by key.
+    const signal = opts?.signal ?? contextSignal
+    if (signal?.aborted) return undefined
+    const key = `pi-${process.pid}-${++questionKeys}`
+    const withdraw = () => {
+      try {
+        ui.withdraw?.(key)?.catch(() => {})
+      } catch {
+        // a host without `withdraw`: its own timeout ends the question
+      }
+    }
+    signal?.addEventListener('abort', withdraw, { once: true })
     try {
-      return await ui.request(request, opts?.timeout)
+      return await ui.request({ ...request, key }, opts?.timeout)
     } catch (error) {
-      report('warn', `[pi] a ui request failed, answering as print mode: ${message(error)}`)
+      if (!signal?.aborted) report('warn', `[pi] a ui request failed, answering as print mode: ${message(error)}`)
       return undefined
+    } finally {
+      signal?.removeEventListener('abort', withdraw)
     }
   }
   const text = (value: unknown) => (typeof value === 'string' ? value : undefined)
   return new Proxy(
     {
       ...(NO_UI as Record<string, unknown>),
-      select: async (title: unknown, options: unknown[], opts?: { timeout?: number }) =>
+      select: async (title: unknown, options: unknown[], opts?: { timeout?: number; signal?: AbortSignal }) =>
         text(await ask({ kind: 'select', title: String(title), options: (options ?? []).map(String) }, opts)),
-      confirm: async (title: unknown, body?: unknown, opts?: { timeout?: number }) =>
+      confirm: async (title: unknown, body?: unknown, opts?: { timeout?: number; signal?: AbortSignal }) =>
         (await ask({ kind: 'confirm', title: String(title), message: String(body ?? '') }, opts)) === true,
-      input: async (title: unknown, placeholder?: unknown, opts?: { timeout?: number }) =>
+      input: async (title: unknown, placeholder?: unknown, opts?: { timeout?: number; signal?: AbortSignal }) =>
         text(await ask({ kind: 'input', title: String(title), placeholder: String(placeholder ?? '') }, opts)),
       editor: async (title: unknown, prefill?: unknown) =>
-        text(await ask({ kind: 'input', title: String(title), placeholder: String(prefill ?? '') })),
+        text(await ask({ kind: 'input', title: String(title), value: String(prefill ?? '') })),
       notify: (body: string, level?: string) => {
         ;(NO_UI as { notify: (m: string, l?: string) => void }).notify(body, level)
         void ask({ kind: 'notify', message: String(body), level: level ?? 'info' })
@@ -453,7 +472,7 @@ export default definePlugin<Config>({
     const context = (signal?: AbortSignal, systemPrompt = '') => {
       const hostUiService = lookupUi()
       return {
-      ui: hostUiService ? hostUi(hostUiService) : NO_UI,
+      ui: hostUiService ? hostUi(hostUiService, signal) : NO_UI,
       mode: hostUiService ? 'rpc' : 'print',
       hasUI: hostUiService !== undefined,
       cwd,

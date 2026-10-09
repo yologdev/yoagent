@@ -15,7 +15,7 @@ use serde_json::Value as Json;
 use tokio::sync::{mpsc, oneshot};
 use yoagent::{Agent, AgentEvent, AgentMessage, Message, SessionStats, StopReason, StreamDelta};
 
-use crate::protocol::{ClientMessage, ServerMessage, UiPlugin, UiRequest};
+use crate::protocol::{ClientMessage, PendingUiRequest, ServerMessage, UiPlugin, UiRequest};
 
 /// How long streamed text is held to merge deltas before it is sent.
 const COALESCE: Duration = Duration::from_millis(30);
@@ -26,7 +26,11 @@ pub const UI_TIMEOUT: Duration = Duration::from_secs(300);
 #[derive(Default)]
 struct UiState {
     next_id: u64,
-    pending: HashMap<u64, oneshot::Sender<Json>>,
+    /// Open questions: who waits for the answer, and the question (replayed
+    /// to frontends that connect while it is open).
+    pending: HashMap<u64, (oneshot::Sender<Json>, UiRequest)>,
+    /// Asker-chosen keys of open questions, for [`Session::withdraw`].
+    keys: HashMap<String, u64>,
 }
 
 struct Inner {
@@ -35,6 +39,7 @@ struct Inner {
     ui: Mutex<UiState>,
     /// Offered browser components, with their module source.
     ui_plugins: Mutex<Vec<(UiPlugin, Arc<str>)>>,
+    plugin_versions: AtomicU64,
     running: AtomicBool,
 }
 
@@ -71,6 +76,7 @@ impl Session {
                 next_client: AtomicU64::new(1),
                 ui: Mutex::default(),
                 ui_plugins: Mutex::default(),
+                plugin_versions: AtomicU64::new(0),
                 running: AtomicBool::new(false),
             }),
             commands: tx,
@@ -87,11 +93,26 @@ impl Session {
     pub fn connect(&self) -> Connection {
         let id = self.inner.next_client.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::unbounded_channel();
+        // Under the clients lock: a run boundary broadcast either reaches
+        // this frontend after its Hello or is already reflected in it.
+        let mut clients = self.inner.clients.lock().unwrap();
+        let mut ui_requests: Vec<PendingUiRequest> = {
+            let ui = self.inner.ui.lock().unwrap();
+            ui.pending
+                .iter()
+                .map(|(id, (_, request))| PendingUiRequest {
+                    id: *id,
+                    request: request.clone(),
+                })
+                .collect()
+        };
+        ui_requests.sort_by_key(|r| r.id);
         let _ = tx.send(ServerMessage::Hello {
             running: self.inner.running.load(Ordering::SeqCst),
             ui_plugins: self.ui_plugins(),
+            ui_requests,
         });
-        self.inner.clients.lock().unwrap().insert(id, tx);
+        clients.insert(id, tx);
         Connection { id, messages: rx }
     }
 
@@ -110,7 +131,7 @@ impl Session {
         match message {
             ClientMessage::UiResponse { id, value } => {
                 let waiter = self.inner.ui.lock().unwrap().pending.remove(&id);
-                if let Some(waiter) = waiter {
+                if let Some((waiter, _)) = waiter {
                     let _ = waiter.send(value);
                 }
             }
@@ -123,38 +144,90 @@ impl Session {
     /// Ask the user through whichever frontend answers first. With no
     /// frontend attached, or no answer within `timeout`, the safe default
     /// ([`UiRequest::default_answer`]). A `notify` is shown and returns at once.
+    ///
+    /// Cancel-safe: dropping the future (the plugin's call was cancelled)
+    /// withdraws the question, and frontends close its dialog.
     pub async fn ask(&self, request: UiRequest, timeout: Duration) -> Json {
+        self.ask_keyed(request, timeout, None).await
+    }
+
+    /// [`Session::ask`], the question findable by `key` for
+    /// [`Session::withdraw`] — for an asker that cannot drop this future
+    /// when it gives up (a plugin in another process).
+    pub async fn ask_keyed(
+        &self,
+        request: UiRequest,
+        timeout: Duration,
+        key: Option<String>,
+    ) -> Json {
         let default = request.default_answer();
         if self.frontends() == 0 {
             return default;
         }
+        let expects = request.expects_answer();
         let (tx, rx) = oneshot::channel();
         let id = {
             let mut ui = self.inner.ui.lock().unwrap();
             ui.next_id += 1;
             let id = ui.next_id;
-            if request.expects_answer() {
-                ui.pending.insert(id, tx);
+            if expects {
+                ui.pending.insert(id, (tx, request.clone()));
+                if let Some(key) = key.clone() {
+                    ui.keys.insert(key, id);
+                }
             }
             id
         };
-        let expects = request.expects_answer();
         self.broadcast(ServerMessage::UiRequest { id, request });
         if !expects {
             return Json::Null;
         }
-        let answer = tokio::time::timeout(timeout, rx).await;
-        self.inner.ui.lock().unwrap().pending.remove(&id);
-        self.broadcast(ServerMessage::UiResolved { id });
-        match answer {
+        /// Withdraws the question however `ask` ends: answered, timed out,
+        /// or dropped.
+        struct Withdraw<'a> {
+            session: &'a Session,
+            id: u64,
+            key: Option<String>,
+        }
+        impl Drop for Withdraw<'_> {
+            fn drop(&mut self) {
+                {
+                    let mut ui = self.session.inner.ui.lock().unwrap();
+                    ui.pending.remove(&self.id);
+                    if let Some(key) = &self.key {
+                        ui.keys.remove(key);
+                    }
+                }
+                self.session
+                    .broadcast(ServerMessage::UiResolved { id: self.id });
+            }
+        }
+        let _withdraw = Withdraw {
+            session: self,
+            id,
+            key,
+        };
+        match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(value)) => value,
             _ => default,
         }
     }
 
+    /// Withdraw the open question asked with `key`: its asker gets the safe
+    /// default, frontends close it. Unknown keys are ignored.
+    pub fn withdraw(&self, key: &str) {
+        let mut ui = self.inner.ui.lock().unwrap();
+        if let Some(id) = ui.keys.remove(key) {
+            // Dropping the waiter ends `ask` with the default; its guard
+            // then tells the frontends.
+            ui.pending.remove(&id);
+        }
+    }
+
     /// Offer a browser component; withdrawn with [`Session::remove_ui_plugin`].
     /// Offering one under a name already taken replaces it.
-    pub fn add_ui_plugin(&self, plugin: UiPlugin, module: impl Into<Arc<str>>) {
+    pub fn add_ui_plugin(&self, mut plugin: UiPlugin, module: impl Into<Arc<str>>) {
+        plugin.version = self.inner.plugin_versions.fetch_add(1, Ordering::Relaxed) + 1;
         {
             let mut plugins = self.inner.ui_plugins.lock().unwrap();
             plugins.retain(|(p, _)| p.name != plugin.name);
@@ -240,15 +313,23 @@ impl Driver {
             let mut text = Coalesced::default();
             let mut stats = SessionStats::default();
             let mut error = None;
+            let mut aborted = false;
+            let mut reset = false;
             let mut quit = false;
             let mut tick = tokio::time::interval(COALESCE);
             loop {
                 tokio::select! {
                     event = events.recv() => {
                         let Some(event) = event else { break };
-                        if let AgentEvent::AgentEnd { messages, stats: s, .. } = &event {
-                            stats = s.clone();
-                            error = run_error(messages);
+                        match &event {
+                            AgentEvent::AgentEnd { messages, stats: s, .. } => {
+                                stats = s.clone();
+                                error = error.take().or_else(|| run_error(messages));
+                            }
+                            AgentEvent::InputRejected { reason } => {
+                                error = Some(format!("input rejected: {reason}"));
+                            }
+                            _ => {}
                         }
                         for event in text.push(event) {
                             self.inner.broadcast(ServerMessage::Event { run, event: Box::new(event) });
@@ -263,10 +344,21 @@ impl Driver {
                         ClientMessage::Prompt { text } => queue.push_back(text),
                         ClientMessage::Steer { text } => agent.steer(user(text)),
                         ClientMessage::FollowUp { text } => agent.follow_up(user(text)),
-                        ClientMessage::Abort => agent.abort(),
-                        ClientMessage::Reset => queue.clear(),
+                        ClientMessage::Abort => {
+                            agent.abort();
+                            aborted = true;
+                        }
+                        // Start over: stop this run, drop what was queued,
+                        // and forget the conversation once the run ends.
+                        ClientMessage::Reset => {
+                            queue.clear();
+                            agent.abort();
+                            aborted = true;
+                            reset = true;
+                        }
                         ClientMessage::Quit if self.accept_quit => {
                             agent.abort();
+                            aborted = true;
                             quit = true;
                         }
                         _ => {}
@@ -280,6 +372,12 @@ impl Driver {
                 });
             }
             agent.finish().await;
+            if reset {
+                agent.clear_messages();
+            }
+            if aborted {
+                error = error.or_else(|| Some("aborted".into()));
+            }
             self.inner.running.store(false, Ordering::SeqCst);
             self.inner.broadcast(ServerMessage::RunEnded {
                 run,
@@ -299,20 +397,22 @@ fn user(text: String) -> AgentMessage {
     AgentMessage::Llm(Message::user(text))
 }
 
-/// The run's error, from its last assistant message.
+/// The run's error, from its last assistant message only (an earlier
+/// message's outcome says nothing about how the run ended).
 fn run_error(messages: &[AgentMessage]) -> Option<String> {
-    messages.iter().rev().find_map(|m| match m {
+    let last = messages.iter().rev().find_map(|m| match m {
         AgentMessage::Llm(Message::Assistant {
             stop_reason,
             error_message,
             ..
-        }) => match stop_reason {
-            StopReason::Error => Some(error_message.clone().unwrap_or_else(|| "error".into())),
-            StopReason::Aborted => Some("aborted".into()),
-            _ => None,
-        },
+        }) => Some((stop_reason, error_message)),
         _ => None,
-    })
+    })?;
+    match last {
+        (StopReason::Error, message) => Some(message.clone().unwrap_or_else(|| "error".into())),
+        (StopReason::Aborted, _) => Some("aborted".into()),
+        _ => None,
+    }
 }
 
 /// Merges consecutive text (and thinking) deltas into one `MessageUpdate`.

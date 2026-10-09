@@ -9,7 +9,11 @@
 //! - `frontend.addUiPlugin(info, module)` — offer a browser component
 //!   ([`UiPlugin`] fields, plus the ES module source). Returns a disposer.
 //! - `ui.request(request, timeoutMs?)` — a [`UiRequest`]; resolves to the
-//!   answer, or the safe default with no frontend or no answer in time.
+//!   answer, or the safe default with no frontend or no answer in time. A
+//!   `key` field in the request makes it withdrawable:
+//! - `ui.withdraw(key)` — the asker gave up (its own call was cancelled):
+//!   the question resolves to the default and frontends close it. (A plugin
+//!   cannot cancel its call to the host itself in rutis 0.7.)
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -144,12 +148,18 @@ impl FrontendService {
                         continue;
                     }
                 };
-                let delivered = client
-                    .call_method_async("receive", Value::List(vec![Value::Data(data)]))
-                    .await;
-                let delivered = match delivered {
-                    Ok(value) => session::settle(value).await.map(|_| ()),
-                    Err(e) => Err(e),
+                // Raced like the wait above: a `receive` that never settles
+                // must not keep the disposer or a closed runtime waiting.
+                let deliver = async {
+                    let value = client
+                        .call_method_async("receive", Value::List(vec![Value::Data(data)]))
+                        .await?;
+                    session::settle(value).await.map(|_| ())
+                };
+                let delivered = tokio::select! {
+                    _ = stop.cancelled() => break,
+                    _ = &mut closed => break,
+                    delivered = deliver => delivered,
                 };
                 if let Err(e) = delivered {
                     tracing::warn!("a frontend plugin's receive failed, disconnecting it: {e}");
@@ -158,7 +168,6 @@ impl FrontendService {
             }
             session.disconnect(id);
         });
-        let _entered = self.runtime.enter();
         Ok(Value::callback(move |_| {
             done.cancel();
             Ok(Value::Undefined)
@@ -172,26 +181,41 @@ struct UiService {
 
 impl HostDispatch for UiService {
     fn invoke(&self, method: &str, value: Value) -> Reply {
+        if method == "withdraw" {
+            let key = args(value)?
+                .into_iter()
+                .next()
+                .map(Value::json)
+                .transpose()?;
+            if let Some(Json::String(key)) = key {
+                self.session.withdraw(&key);
+            }
+            return Ok(Value::Undefined);
+        }
         if method != "request" {
             return Err(invalid(format!("the ui service has no method `{method}`")));
         }
         let mut args = args(value)?.into_iter();
-        let request: UiRequest = session::decode(
-            args.next()
-                .ok_or_else(|| invalid("request(request, timeoutMs?): missing the request"))?
-                .json()?,
-        )?;
+        let mut request = args
+            .next()
+            .ok_or_else(|| invalid("request(request, timeoutMs?): missing the request"))?
+            .json()?;
+        let key = request
+            .as_object_mut()
+            .and_then(|fields| fields.remove("key"))
+            .and_then(|key| key.as_str().map(str::to_owned));
+        let request: UiRequest = session::decode(request)?;
         let timeout = match args.next().map(Value::json).transpose()? {
             Some(Json::Number(ms)) => ms.as_u64().map(Duration::from_millis).unwrap_or(UI_TIMEOUT),
             _ => UI_TIMEOUT,
         };
         let session = self.session.clone();
         Ok(Value::future(async move {
-            Ok(Value::Data(session.ask(request, timeout).await))
+            Ok(Value::Data(session.ask_keyed(request, timeout, key).await))
         }))
     }
 
     fn methods(&self) -> Option<Json> {
-        Some(json!({ "request": "async" }))
+        Some(json!({ "request": "async", "withdraw": "async" }))
     }
 }

@@ -28,7 +28,7 @@ use yoagent::provider::{MockProvider, ModelConfig};
 use yoagent::tools::default_tools;
 use yoagent::Agent;
 use yoagent_frontend::host::{PluginHost, Row};
-use yoagent_frontend::{services, web, Session};
+use yoagent_frontend::{services, session, web, Session};
 use yoagent_rutis::RutisBridge;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -196,12 +196,19 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
         cwd.display()
     ))
     .with_tools(default_tools())
-    .with_extension(bridge.extension());
+    // A pi policy may ask the user: give its hook as long as a question
+    // waits (yoagent-rutis's default policy timeout is 60 s).
+    .with_extension(
+        bridge
+            .extension()
+            .with_policy_timeout(Some(session::UI_TIMEOUT + Duration::from_secs(30))),
+    );
 
     match options.web {
         Some(addr) => {
-            let (bound, server) = web::serve(session.clone(), addr).await?;
-            println!("yoagent web frontend: http://{bound}  (Ctrl+C to stop)");
+            let served = web::serve(session.clone(), addr).await?;
+            println!("yoagent web frontend: {}  (Ctrl+C to stop)", served.url());
+            let server = served.task;
             tokio::select! {
                 _ = driver.run(agent) => {}
                 _ = tokio::signal::ctrl_c() => {}

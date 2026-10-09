@@ -33,13 +33,15 @@ async fn a_browser_runs_a_prompt_and_answers_a_question_over_the_websocket() {
         ModelConfig::mock(),
     );
     tokio::spawn(driver.run(agent));
-    let (addr, server) = web::serve(session.clone(), "127.0.0.1:0".parse().unwrap())
+    let served = web::serve(session.clone(), "127.0.0.1:0".parse().unwrap())
         .await
         .unwrap();
+    let (addr, server) = (served.addr, served.task);
 
-    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws"))
-        .await
-        .unwrap();
+    let (mut ws, _) =
+        tokio_tungstenite::connect_async(format!("ws://{addr}/ws?t={}", served.token))
+            .await
+            .unwrap();
     let hello = tokio::time::timeout(Duration::from_secs(10), ws.next())
         .await
         .expect("a frame in time")
@@ -118,16 +120,41 @@ async fn the_page_and_ui_plugin_modules_are_served() {
             name: "links".into(),
             tools: vec!["search".into()],
             panel: false,
+            version: 0,
         },
         "export function renderTool() {}",
     );
-    let (addr, server) = web::serve(session, "127.0.0.1:0".parse().unwrap())
+    let served = web::serve(session, "127.0.0.1:0".parse().unwrap())
         .await
         .unwrap();
+    assert!(served.url().ends_with(&format!("/?t={}", served.token)));
+    let (addr, server) = (served.addr, served.task);
     assert!(get(addr, "/").await.contains("<title>yoagent</title>"));
     assert!(get(addr, "/app.js").await.contains("text/javascript"));
     let module = get(addr, "/ui-plugins/links.js").await;
     assert!(module.contains("200 OK") && module.contains("renderTool"));
     assert!(get(addr, "/ui-plugins/nope.js").await.contains("404"));
     server.abort();
+}
+
+/// Browsers do not apply cross-origin rules to WebSockets: any page could
+/// connect. Without the server's token, `/ws` refuses.
+#[tokio::test]
+async fn the_websocket_refuses_a_missing_or_wrong_token() {
+    let (session, _driver) = Session::new(false);
+    let served = web::serve(session, "127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    for query in ["", "?t=", "?t=guess", "?x=1"] {
+        let result =
+            tokio_tungstenite::connect_async(format!("ws://{}/ws{query}", served.addr)).await;
+        assert!(result.is_err(), "connected with {query:?}");
+    }
+    assert!(tokio_tungstenite::connect_async(format!(
+        "ws://{}/ws?t={}",
+        served.addr, served.token
+    ))
+    .await
+    .is_ok());
+    served.task.abort();
 }

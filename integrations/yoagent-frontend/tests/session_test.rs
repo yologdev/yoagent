@@ -197,6 +197,7 @@ async fn ui_plugins_are_announced_and_served() {
             name: "links".into(),
             tools: vec!["search".into()],
             panel: false,
+            version: 0,
         },
         "export function renderTool() {}",
     );
@@ -210,4 +211,120 @@ async fn ui_plugins_are_announced_and_served() {
         .contains("renderTool"));
     session.remove_ui_plugin("links");
     assert!(session.ui_plugin_module("links").is_none());
+}
+
+/// A question whose asker goes away (its call cancelled) is withdrawn:
+/// frontends close it, and a late joiner never sees it.
+#[tokio::test]
+async fn a_dropped_question_is_withdrawn() {
+    let (session, _driver) = Session::new(true);
+    let mut ui = session.connect();
+    ui.messages.recv().await;
+    let asking = tokio::spawn({
+        let session = session.clone();
+        async move {
+            session
+                .ask(
+                    UiRequest::Confirm {
+                        title: "Delete?".into(),
+                        message: String::new(),
+                    },
+                    Duration::from_secs(60),
+                )
+                .await
+        }
+    });
+    let Some(ServerMessage::UiRequest { id, .. }) = ui.messages.recv().await else {
+        panic!("a UiRequest")
+    };
+    // A frontend joining now still gets the open question.
+    let mut late = session.connect();
+    let Some(ServerMessage::Hello { ui_requests, .. }) = late.messages.recv().await else {
+        panic!("Hello")
+    };
+    assert_eq!(ui_requests.len(), 1);
+    assert_eq!(ui_requests[0].id, id);
+    asking.abort();
+    let _ = asking.await;
+    assert!(
+        matches!(ui.messages.recv().await, Some(ServerMessage::UiResolved { id: r }) if r == id)
+    );
+    let mut later = session.connect();
+    let Some(ServerMessage::Hello { ui_requests, .. }) = later.messages.recv().await else {
+        panic!("Hello")
+    };
+    assert!(ui_requests.is_empty());
+}
+
+/// An abort mid-run is reported as such, and a reset mid-run forgets the
+/// conversation once the run ends.
+#[tokio::test]
+async fn abort_and_reset_mid_run_are_reported_and_applied() {
+    let (session, driver) = Session::new(true);
+    let mut ui = session.connect();
+    let slow = MockResponse::ToolCalls(vec![MockToolCall {
+        name: "missing_tool".into(),
+        arguments: json!({}),
+        provider_metadata: None,
+    }]);
+    let agent = agent(vec![
+        slow.clone(),
+        MockResponse::Text("never".into()),
+        slow,
+        MockResponse::Text("x".into()),
+    ]);
+    let run = tokio::spawn(driver.run(agent));
+    session.send(ClientMessage::Prompt { text: "one".into() });
+    session.send(ClientMessage::Abort);
+    let first = until_run_ended(&mut ui).await;
+    assert!(
+        matches!(first.last(), Some(ServerMessage::RunEnded { error: Some(e), .. }) if e == "aborted"),
+        "{:?}",
+        first.last()
+    );
+    session.send(ClientMessage::Prompt { text: "two".into() });
+    session.send(ClientMessage::Reset);
+    until_run_ended(&mut ui).await;
+    session.send(ClientMessage::Quit);
+    let agent = tokio::time::timeout(Duration::from_secs(10), run)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        agent.messages().is_empty(),
+        "the reset forgot the conversation"
+    );
+}
+
+/// An asker that cannot drop its future (a plugin in another process)
+/// withdraws by key: it gets the default, frontends close the question.
+#[tokio::test]
+async fn a_question_withdrawn_by_key_resolves_to_the_default() {
+    let (session, _driver) = Session::new(true);
+    let mut ui = session.connect();
+    ui.messages.recv().await;
+    let asking = tokio::spawn({
+        let session = session.clone();
+        async move {
+            session
+                .ask_keyed(
+                    UiRequest::Confirm {
+                        title: "Push?".into(),
+                        message: String::new(),
+                    },
+                    Duration::from_secs(60),
+                    Some("k1".into()),
+                )
+                .await
+        }
+    });
+    let Some(ServerMessage::UiRequest { id, .. }) = ui.messages.recv().await else {
+        panic!("a UiRequest")
+    };
+    session.withdraw("unknown"); // ignored
+    session.withdraw("k1");
+    assert_eq!(asking.await.unwrap(), json!(false));
+    assert!(
+        matches!(ui.messages.recv().await, Some(ServerMessage::UiResolved { id: r }) if r == id)
+    );
 }

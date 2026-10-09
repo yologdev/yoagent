@@ -93,15 +93,45 @@ export default definePlugin<{ demo?: string }>({
     let answer: Markdown | undefined
     let answerText = ''
     const tools = new Map<string, Text>()
-    // The plugin question waiting for an answer from the editor, if any.
-    let question: { id: number; request: Message } | undefined
+    // Plugin questions waiting for an answer, oldest first; the editor
+    // answers the first.
+    const questions: { id: number; request: Message }[] = []
     const say = (text: string) => log.addChild(new Text(text, 1, 0))
     const send = (message: Record<string, unknown>) =>
       frontend.send(message).catch((e: unknown) => say(red(`could not send: ${short(String(e))}`)))
 
+    const showQuestion = () => {
+      const first = questions[0]
+      if (!first) {
+        status.setText(running ? yellow('working…') : idle)
+        return
+      }
+      const r = first.request
+      say(bold(`  ? ${r.title}`) + (r.message ? dim(` — ${r.message}`) : ''))
+      if (r.kind === 'select') r.options.forEach((o: string, i: number) => say(`    ${i + 1}. ${o}`))
+      if (r.kind === 'input' && r.value) editor.setText(r.value)
+      status.setText(
+        yellow(r.kind === 'confirm' ? 'answer y or n' : r.kind === 'select' ? 'answer with a number' : 'type your answer'),
+      )
+    }
+    const askUser = (id: number, r: Message) => {
+      if (r.kind === 'notify') return say(yellow(`  ! ${r.message}`))
+      if (headless) {
+        // Nobody to ask: decline, as a user who walked away would.
+        say(bold(`  ? ${r.title}`) + (r.message ? dim(` — ${r.message}`) : ''))
+        say(dim('  answered: null (headless demo)'))
+        send({ type: 'uiResponse', id, value: r.kind === 'confirm' ? false : null })
+        return
+      }
+      if (questions.some((q) => q.id === id)) return
+      questions.push({ id, request: r })
+      if (questions.length === 1) showQuestion()
+    }
+
     const answerQuestion = (text: string) => {
-      if (!question) return false
-      const { id, request } = question
+      const first = questions[0]
+      if (!first) return false
+      const { id, request } = first
       let value: unknown = null
       if (request.kind === 'confirm') value = /^(y|yes)$/i.test(text.trim())
       else if (request.kind === 'select') {
@@ -109,9 +139,9 @@ export default definePlugin<{ demo?: string }>({
         value = Number.isInteger(n) && n >= 1 && n <= request.options.length ? request.options[n - 1] : null
       } else value = text
       say(dim(`  answered: ${JSON.stringify(value)}`))
-      question = undefined
-      status.setText(running ? yellow('working…') : idle)
+      questions.shift()
       send({ type: 'uiResponse', id, value })
+      showQuestion()
       return true
     }
 
@@ -184,33 +214,21 @@ export default definePlugin<{ demo?: string }>({
             send({ type: 'quit' })
           }
           break
-        case 'uiRequest': {
-          const r = message.request
-          if (r.kind === 'notify') {
-            say(yellow(`  ! ${r.message}`))
-            break
+        case 'hello':
+          for (const { id, request } of message.uiRequests ?? []) askUser(id, request)
+          break
+        case 'uiRequest':
+          askUser(message.id, message.request)
+          break
+        case 'uiResolved': {
+          const index = questions.findIndex((q) => q.id === message.id)
+          if (index >= 0) {
+            questions.splice(index, 1)
+            say(dim('  (answered elsewhere, withdrawn, or timed out)'))
+            if (index === 0) showQuestion()
           }
-          say(bold(`  ? ${r.title}`) + (r.message ? dim(` — ${r.message}`) : ''))
-          if (headless) {
-            // Nobody to ask: decline, as a user who walked away would.
-            say(dim('  answered: null (headless demo)'))
-            send({ type: 'uiResponse', id: message.id, value: r.kind === 'confirm' ? false : null })
-            break
-          }
-          question = { id: message.id, request: r }
-          if (r.kind === 'select') r.options.forEach((o: string, i: number) => say(`    ${i + 1}. ${o}`))
-          status.setText(
-            yellow(r.kind === 'confirm' ? 'answer y or n' : r.kind === 'select' ? 'answer with a number' : 'type your answer'),
-          )
           break
         }
-        case 'uiResolved':
-          if (question?.id === message.id) {
-            question = undefined
-            say(dim('  (answered elsewhere, or timed out)'))
-            status.setText(running ? yellow('working…') : idle)
-          }
-          break
         case 'closed':
           tui.stop()
       }

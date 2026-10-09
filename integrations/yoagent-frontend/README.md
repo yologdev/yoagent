@@ -28,7 +28,7 @@ JSON, tagged by `type`, camelCase — the same over a rutis call and a WebSocket
 
 | To every frontend, in order, none dropped | |
 |---|---|
-| `hello {running, uiPlugins}` | first message on a connection |
+| `hello {running, uiPlugins, uiRequests}` | first message on a connection; open questions included, so a reloaded page can still answer them |
 | `runStarted {run, prompt}` / `runEnded {run, stats, error}` | always paired, whatever happened to the events between |
 | `event {run, event}` | yoagent's `AgentEvent`; text deltas merged (30 ms) |
 | `uiRequest {id, request}` / `uiResolved {id}` | a plugin's question (`confirm`, `select`, `input`, `notify`); resolved = close the dialog |
@@ -36,6 +36,10 @@ JSON, tagged by `type`, camelCase — the same over a rutis call and a WebSocket
 
 With no frontend attached, or no answer in time (5 minutes, or the plugin's
 own timeout), a question gets the safe answer: `false`, no choice, no text.
+Frontends show questions one at a time, oldest first. A question whose asker
+gives up (the run stopped) is withdrawn and its dialog closes: dropped
+in-process, or `ui.withdraw(key)` from a plugin (rutis 0.7 cannot cancel a
+plugin's call to the host).
 
 ## Pieces
 
@@ -47,9 +51,14 @@ own timeout), a question gets the safe answer: `false`, no choice, no text.
   `frontend.send(message)`, `frontend.addUiPlugin(info, module)`, and
   `ui.request(request, timeoutMs?)`.
 - **`web::serve`** — the browser frontend: the page, `/ws`, and
-  `/ui-plugins/<name>.js`. No authentication: bind to localhost.
+  `/ui-plugins/<name>.js`. **`/ws` needs the random token** in the URL it
+  prints (`/?t=…`): browsers do not apply cross-origin rules to WebSockets,
+  so without it any page you have open could drive an agent that has `bash`.
+  Share the URL only with whoever may drive the agent.
 - **`host::PluginHost`** — Node runtimes, a loader and shared services in a
-  few lines; each row names its runtime; `load` waits until plugins run.
+  few lines; each row names its runtime (routing is by row name: two rows
+  loading the same name must name the same runtime); `load` waits until
+  plugins run, and a batch that fails is dropped again.
 
 ## UI plugins
 
@@ -65,7 +74,10 @@ export function renderTool({ toolName, args, result, isError }, element) { /* dr
 export function mountPanel(element, { send }) { /* a side panel; send protocol messages */ }
 ```
 
-See [`plugins/search-links.ts`](plugins/search-links.ts).
+See [`plugins/search-links.ts`](plugins/search-links.ts). **UI plugins are
+trusted code:** a module runs in the page with its privileges — it can send
+any protocol message, answers to questions included. Load only plugins you
+would let drive the agent.
 
 ## pi dialogs
 
@@ -74,7 +86,10 @@ user when the host provides `ui` and loads
 [`yoagent-rutis/plugins/pi/host-ui.ts`](../yoagent-rutis/plugins/pi/host-ui.ts)
 in the pi runtime (rutis shows a host service only to plugins that inject it,
 and the adapter cannot require one). The adapter is then in pi's RPC mode
-(`hasUI` true). Without them it stays in print mode, as before.
+(`hasUI` true). Without them it stays in print mode, as before. A question
+asked from a tool policy waits as long as the policy hook may run:
+yoagent-rutis's default is 60 s, so the example raises it
+(`with_policy_timeout`) to the question timeout.
 
 ## Example
 

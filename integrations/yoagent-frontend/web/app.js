@@ -13,10 +13,14 @@ const status = document.getElementById('status')
 const input = document.getElementById('input')
 const dialog = document.getElementById('dialog')
 
-const socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`)
+// The server's token, from this page's URL: `/ws` refuses connections without it.
+const token = new URLSearchParams(location.search).get('t') ?? ''
+const socket = new WebSocket(
+  `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?t=${encodeURIComponent(token)}`,
+)
 const send = (message) => socket.send(JSON.stringify(message))
 
-const plugins = new Map() // name -> { info, module }
+const plugins = new Map() // name -> { info, module, panel }
 let answer = null
 let answerText = ''
 const tools = new Map() // toolCallId -> { line, args }
@@ -64,17 +68,27 @@ const short = (value, max = 80) => {
   return text.length > max ? `${text.slice(0, max)}…` : text
 }
 
+// The offered plugins, as the server lists them: withdrawn ones leave, new
+// ones and re-offered ones (a new version) are (re)loaded.
 async function loadPlugins(list) {
+  const offered = new Map(list.map((info) => [info.name, info]))
+  for (const [name, loaded] of plugins) {
+    if (offered.get(name)?.version !== loaded.info.version) {
+      loaded.panel?.remove()
+      plugins.delete(name)
+    }
+  }
   for (const info of list) {
     if (plugins.has(info.name)) continue
     try {
-      const module = await import(`/ui-plugins/${encodeURIComponent(info.name)}.js?${Date.now()}`)
-      plugins.set(info.name, { info, module })
+      const module = await import(`/ui-plugins/${encodeURIComponent(info.name)}.js?v=${info.version}`)
+      let panel
       if (info.panel && module.mountPanel) {
-        const panel = document.createElement('section')
+        panel = document.createElement('section')
         panels.append(panel)
         module.mountPanel(panel, { send })
       }
+      plugins.set(info.name, { info, module, panel })
     } catch (error) {
       add('notice', `UI plugin ${info.name} failed to load: ${error}`)
     }
@@ -135,11 +149,32 @@ function onEvent(event) {
   }
 }
 
+// Questions wait in order: one dialog at a time, the next when it closes.
+const questions = []
+
 function ask(id, request) {
   if (request.kind === 'notify') {
     add('notice', request.message)
     return
   }
+  if (questions.some((q) => q.id === id)) return
+  questions.push({ id, request })
+  showNextQuestion()
+}
+
+function resolved(id) {
+  const index = questions.findIndex((q) => q.id === id)
+  if (index < 0) return
+  questions.splice(index, 1)
+  if (dialog.open && dialog.dataset.id === String(id)) {
+    dialog.close()
+    showNextQuestion()
+  }
+}
+
+function showNextQuestion() {
+  if (dialog.open || questions.length === 0) return
+  const { id, request } = questions[0]
   dialog.replaceChildren()
   dialog.dataset.id = id
   const title = document.createElement('h3')
@@ -154,7 +189,7 @@ function ask(id, request) {
   actions.className = 'actions'
   const reply = (value) => {
     send({ type: 'uiResponse', id: Number(id), value })
-    dialog.close()
+    resolved(id)
   }
   const button = (label, value, primary) => {
     const b = document.createElement('button')
@@ -174,6 +209,7 @@ function ask(id, request) {
   } else if (request.kind === 'input') {
     const field = document.createElement('input')
     field.placeholder = request.placeholder || ''
+    field.value = request.value || ''
     dialog.append(field)
     button('Cancel', null)
     button('OK', () => field.value, true)
@@ -187,13 +223,22 @@ function ask(id, request) {
 }
 
 socket.onopen = () => (status.textContent = 'connected')
-socket.onclose = () => (status.textContent = 'disconnected')
-socket.onmessage = async (frame) => {
+socket.onclose = () =>
+  (status.textContent = token ? 'disconnected' : 'not connected: open the URL the server printed (it carries a token)')
+// One message at a time, in order: a message waits for the previous one
+// (a plugin import, say) to finish.
+let handled = Promise.resolve()
+socket.onmessage = (frame) => {
   const message = JSON.parse(frame.data)
+  handled = handled.then(() => handle(message)).catch((error) => console.error(error))
+}
+
+async function handle(message) {
   switch (message.type) {
     case 'hello':
       status.textContent = message.running ? 'working…' : 'ready'
       await loadPlugins(message.uiPlugins)
+      for (const { id, request } of message.uiRequests ?? []) ask(id, request)
       return
     case 'uiPlugins':
       await loadPlugins(message.uiPlugins)
@@ -217,7 +262,7 @@ socket.onmessage = async (frame) => {
       ask(message.id, message.request)
       return
     case 'uiResolved':
-      if (dialog.open && dialog.dataset.id === String(message.id)) dialog.close()
+      resolved(message.id)
       return
     case 'closed':
       status.textContent = 'session closed'
