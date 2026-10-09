@@ -469,7 +469,7 @@ judges tool calls through the pi adapter, and DSH's `dsh-free-search` gives
 the agent web search through the DSH adapter — every plugin unchanged. The UI
 is a plugin too: it renders the run from `on_event` and sends what the user
 types through a `chat` service the host provides (`prompt`, `abort`, `quit`),
-about 30 lines of the host's ~270.
+about 30 lines of the host's ~320.
 
 ```bash
 (cd plugins/pi && npm ci) && (cd plugins/dsh && npm ci)

@@ -109,8 +109,14 @@ fn deepseek_key() -> Result<String, BoxError> {
         .collect())
 }
 
-#[tokio::main]
-async fn main() -> Result<(), BoxError> {
+struct Options {
+    key: Option<String>,
+    demo: Option<String>,
+    dsh: bool,
+    extensions: Vec<PathBuf>,
+}
+
+fn main() -> Result<(), BoxError> {
     let (mut live, mut demo, mut extensions) = (false, None, Vec::new());
     let mut dsh = dsh_dir()
         .join("node_modules/@arcships/rutis-runtime")
@@ -127,31 +133,59 @@ async fn main() -> Result<(), BoxError> {
     if extensions.is_empty() {
         extensions.push(pi_dir().join("fixture-extension.ts"));
     }
-    let runtime = pi_dir().join("node_modules/@arcships/rutis-runtime");
-    if !runtime.exists() {
+    if !pi_dir()
+        .join("node_modules/@arcships/rutis-runtime")
+        .exists()
+    {
         return Err(format!("run `npm ci` in {} first", pi_dir().display()).into());
     }
-    let cwd = std::env::current_dir()?;
+    // Everything that can fail on its own fails here, before the UI owns the
+    // terminal.
+    let key = if live { Some(deepseek_key()?) } else { None };
     // The plugin runtimes share this terminal: Node's warnings (DSH's packages
-    // use the experimental SQLite module) would draw over the UI.
+    // use the experimental SQLite module) would draw over the UI. Set before
+    // any thread starts.
     if std::env::var_os("NODE_OPTIONS").is_none() {
         std::env::set_var("NODE_OPTIONS", "--no-warnings");
     }
+    let options = Options {
+        key,
+        demo,
+        dsh,
+        extensions,
+    };
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async {
+            let root = Ctx::root()?;
+            let result = run(&root, options).await;
+            // On every path, so the UI plugin stops and gives the terminal back.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            root.shutdown().await?;
+            result
+        })
+}
+
+async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
+    let cwd = std::env::current_dir()?;
 
     // rutis: the bridge, the `chat` service, the Node runtimes and a loader.
-    let root = Ctx::root()?;
-    let bridge = RutisBridge::install(&root)?;
+    let bridge = RutisBridge::install(root)?;
     let (tx, mut commands) = mpsc::unbounded_channel();
     root.provide_as::<dyn HostDispatch>(host_key("chat"), Arc::new(Chat(tx)))?;
     let mut catalog = ServiceCatalog::new();
     catalog.register_shared("yoagent");
     catalog.register_shared("chat");
-    let node = LocalRuntime::node(&runtime, pi_dir().join("package.json"));
+    let node = LocalRuntime::node(
+        pi_dir().join("node_modules/@arcships/rutis-runtime"),
+        pi_dir().join("package.json"),
+    );
     let pi_rows = Arc::new(RuntimeResolver::node(node.handle()).with_catalog(&catalog));
     root.plugin(node);
     let mut chain = Chain::new();
     let mut resolvers = vec![pi_rows.clone()];
-    if dsh {
+    if options.dsh {
         let node = LocalRuntime::node(
             dsh_dir().join("node_modules/@arcships/rutis-runtime"),
             dsh_dir().join("package.json"),
@@ -175,21 +209,15 @@ async fn main() -> Result<(), BoxError> {
         root.plugin(RuntimeRowsPlugin::new(rows));
     }
 
-    // The plugins: pi extensions through the pi adapter, the UI, and DSH's
-    // web search through the DSH adapter (DSH's own packages first).
-    let mut rows = vec![
-        json!({
-            "id": "pi",
-            "name": pi_dir().join("pi-extensions-adapter.ts"),
-            "config": { "extensions": extensions, "cwd": cwd },
-        }),
-        json!({
-            "id": "ui",
-            "name": pi_dir().join("tui-frontend.ts"),
-            "config": demo.as_ref().map_or(json!({}), |prompt| json!({ "demo": prompt })),
-        }),
-    ];
-    if dsh {
+    // The plugins: pi extensions through the pi adapter, and DSH's web search
+    // through the DSH adapter (DSH's own packages first). The UI comes last,
+    // once they loaded, so a failure is reported on a normal terminal.
+    let mut rows = vec![json!({
+        "id": "pi",
+        "name": pi_dir().join("pi-extensions-adapter.ts"),
+        "config": { "extensions": options.extensions, "cwd": cwd },
+    })];
+    if options.dsh {
         rows.extend([
             json!({ "id": "dsh-web", "name": "@deepseek-ai/dsh-web" }),
             json!({ "id": "dsh-system-prompt", "name": "@deepseek-ai/dsh-system-prompt" }),
@@ -202,20 +230,32 @@ async fn main() -> Result<(), BoxError> {
             json!({ "id": "dsh", "name": dsh_dir().join("dsh-tools-adapter.ts") }),
         ]);
     }
-    let patches: Vec<Patch> = serde_json::from_value(json!([{ "insert": rows }]))?;
+    let load = |rows: &Vec<serde_json::Value>| -> Result<Vec<Patch>, BoxError> {
+        Ok(serde_json::from_value(json!([{ "insert": rows }]))?)
+    };
     let report = loader
-        .reconcile(vec![Layer::new("app", patches)], None)
+        .reconcile(vec![Layer::new("app", load(&rows)?)], None)
         .await?;
     if !report.failures.is_empty() {
         return Err(format!("a plugin failed to load: {report:?}").into());
     }
+    rows.push(json!({
+        "id": "ui",
+        "name": pi_dir().join("tui-frontend.ts"),
+        "config": options.demo.as_ref().map_or(json!({}), |prompt| json!({ "demo": prompt })),
+    }));
+    let report = loader
+        .reconcile(vec![Layer::new("app", load(&rows)?)], None)
+        .await?;
+    if !report.failures.is_empty() {
+        return Err(format!("the UI failed to load: {report:?}").into());
+    }
 
     // The loop: yoagent's built-in tools plus everything the plugins offer.
-    let mut agent = if live {
-        Agent::from_config(ModelConfig::deepseek("deepseek-flash", "DeepSeek Flash"))
-            .with_api_key(deepseek_key()?)
-    } else {
-        Agent::from_provider(scripted(), ModelConfig::mock())
+    let mut agent = match options.key {
+        Some(key) => Agent::from_config(ModelConfig::deepseek("deepseek-flash", "DeepSeek Flash"))
+            .with_api_key(key),
+        None => Agent::from_provider(scripted(), ModelConfig::mock()),
     }
     .with_system_prompt(format!(
         "You are a coding agent working in {}. Be brief.",
@@ -224,12 +264,15 @@ async fn main() -> Result<(), BoxError> {
     .with_tools(default_tools())
     .with_extension(bridge.extension());
 
-    while let Some(command) = commands.recv().await {
-        let Command::Prompt(text) = command else {
-            if matches!(command, Command::Quit) {
-                break;
-            }
-            continue;
+    let mut pending = None;
+    loop {
+        let text = match pending.take() {
+            Some(text) => text,
+            None => match commands.recv().await {
+                Some(Command::Prompt(text)) => text,
+                Some(Command::Abort) => continue,
+                Some(Command::Quit) | None => return Ok(()),
+            },
         };
         let mut events = agent.prompt(text).await;
         loop {
@@ -237,21 +280,27 @@ async fn main() -> Result<(), BoxError> {
                 event = events.recv() => if event.is_none() { break },
                 Some(command) = commands.recv() => match command {
                     Command::Abort => agent.abort(),
-                    Command::Quit => { agent.abort(); agent.finish().await; return shutdown(root).await }
-                    Command::Prompt(_) => {} // the UI sends one prompt at a time
+                    Command::Quit => {
+                        agent.abort();
+                        agent.finish().await;
+                        return Ok(());
+                    }
+                    // Sent as the run ended: run it next rather than drop it.
+                    Command::Prompt(text) => pending = Some(text),
                 },
             }
         }
         agent.finish().await;
+        if options.demo.is_some() {
+            // The UI prints the screen on `agentEnd` and quits; should that
+            // event not reach it, end the demo from here anyway.
+            let _ = tokio::time::timeout(Duration::from_secs(5), async {
+                while !matches!(commands.recv().await, Some(Command::Quit) | None) {}
+            })
+            .await;
+            return Ok(());
+        }
     }
-    shutdown(root).await
-}
-
-async fn shutdown(root: Ctx) -> Result<(), BoxError> {
-    // Give the UI plugin's last writes a moment, then stop the runtime.
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    root.shutdown().await?;
-    Ok(())
 }
 
 /// Without `--live`: one tool call through the plugin-guarded tools, then an answer.

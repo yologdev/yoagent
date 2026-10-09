@@ -155,8 +155,13 @@ export default definePlugin<Config>({
     }
     tui.addInputListener((data) => {
       if (!matchesKey(data, 'ctrl+c') && !matchesKey(data, 'ctrl+d')) return undefined
-      if (running && matchesKey(data, 'ctrl+c')) chat.abort().catch(() => {})
-      else {
+      if (running && matchesKey(data, 'ctrl+c')) {
+        chat.abort().catch(() => {})
+        // Don't wait on `agentEnd` to unlock the editor: event delivery is
+        // best-effort, and the host queues a prompt sent as a run winds down.
+        running = false
+        status.setText(dim('stopped · Enter to send · Ctrl+C again quits'))
+      } else {
         tui.stop()
         chat.quit().catch(() => {})
       }
