@@ -421,9 +421,14 @@ impl McpTransport for StdioTransport {
 /// the call has already returned by then. A server that blocks awaiting a reply
 /// to a `sampling/createMessage` it sent on this stream will therefore time out
 /// rather than be answered.
+///
+/// Extra request headers — an auth token, a `User-Agent` — are set with
+/// [`with_header`](Self::with_header) and go on every request of the session.
 pub struct HttpTransport {
     client: reqwest::Client,
     base_url: String,
+    /// The caller's headers, on every request. Values are marked sensitive.
+    headers: reqwest::header::HeaderMap,
     /// Session assigned by the server on `initialize`, replayed on subsequent
     /// requests. `Mutex` because [`McpTransport::send`] takes `&self`.
     session_id: Mutex<Option<String>>,
@@ -454,8 +459,72 @@ impl HttpTransport {
         Ok(Self {
             client,
             base_url: url.trim_end_matches('/').to_string(),
+            headers: reqwest::header::HeaderMap::new(),
             session_id: Mutex::new(None),
         })
+    }
+
+    /// Headers the transport or the HTTP client sets itself; a caller's header
+    /// of the same name would break the protocol or the request framing, so
+    /// [`with_header`](Self::with_header) refuses them.
+    const RESERVED_HEADERS: [&'static str; 7] = [
+        "accept",
+        "content-type",
+        "mcp-session-id",
+        "content-length",
+        "transfer-encoding",
+        "connection",
+        "host",
+    ];
+
+    /// Send `name: value` on every request of the session: `initialize`, the
+    /// `initialized` notification, tool calls and the closing `DELETE`.
+    ///
+    /// Setting the same name again replaces the value. The value is marked
+    /// sensitive, so it stays out of debug output. An invalid name, a value
+    /// that is not visible ASCII, or a name the transport or HTTP client sets
+    /// itself (`Accept`, `Content-Type`, `Mcp-Session-Id`, `Content-Length`,
+    /// `Transfer-Encoding`, `Connection`, `Host`) is an error here, before
+    /// anything is sent. The headers are fixed for the transport's lifetime;
+    /// a token that changes during a session needs a new transport.
+    ///
+    /// ```no_run
+    /// # async fn run(token: &str) -> Result<(), yoagent::mcp::McpError> {
+    /// use yoagent::mcp::{HttpTransport, McpClient};
+    /// let transport = HttpTransport::new("https://mcp.example.com/mcp")?
+    ///     .with_header("authorization", format!("Bearer {token}"))?;
+    /// let client = McpClient::connect_http_with(transport).await?;
+    /// # Ok(()) }
+    /// ```
+    pub fn with_header(mut self, name: &str, value: impl AsRef<str>) -> Result<Self, McpError> {
+        let header = reqwest::header::HeaderName::from_bytes(name.as_bytes())
+            .map_err(|e| McpError::Transport(format!("invalid header name {name:?}: {e}")))?;
+        if Self::RESERVED_HEADERS.contains(&header.as_str()) {
+            return Err(McpError::Transport(format!(
+                "header {name:?} is set by the MCP transport or HTTP client and cannot be overridden"
+            )));
+        }
+        // The value may be a secret: name the header, never echo the value.
+        // Visible ASCII only: `HeaderValue` also takes bytes 0x80-0xFF, which
+        // many servers reject and wasm32's fetch-based client refuses on every
+        // request — refuse them here instead.
+        let invalid = || McpError::Transport(format!("invalid value for header {name:?}"));
+        let mut value =
+            reqwest::header::HeaderValue::from_str(value.as_ref()).map_err(|_| invalid())?;
+        if value.to_str().is_err() {
+            return Err(invalid());
+        }
+        value.set_sensitive(true);
+        self.headers.insert(header, value);
+        Ok(self)
+    }
+
+    /// A request to the server with the caller's headers; every request path
+    /// goes through here so none of them misses them.
+    fn request(&self, method: reqwest::Method) -> reqwest::RequestBuilder {
+        self.client
+            .request(method, &self.base_url)
+            .headers(self.headers.clone())
     }
 
     /// Decide whether `payload` is *this request's* JSON-RPC response.
@@ -767,8 +836,7 @@ impl McpTransport for HttpTransport {
         let method = request.method.clone();
 
         let mut builder = self
-            .client
-            .post(&self.base_url)
+            .request(reqwest::Method::POST)
             // Streamable HTTP servers pick their framing from this; JSON-only
             // servers still match `application/json`.
             .header("Accept", "application/json, text/event-stream")
@@ -830,8 +898,7 @@ impl McpTransport for HttpTransport {
     async fn notify(&self, notification: JsonRpcNotification) -> Result<(), McpError> {
         let method = notification.method.clone();
         let mut builder = self
-            .client
-            .post(&self.base_url)
+            .request(reqwest::Method::POST)
             .header("Accept", "application/json, text/event-stream")
             .json(&notification);
         if let Some(session) = self.session_id.lock().await.as_ref() {
@@ -870,8 +937,7 @@ impl McpTransport for HttpTransport {
             // never reached the server leaks the session there, and that only
             // surfaces later as an unrelated connect failure.
             match self
-                .client
-                .delete(&self.base_url)
+                .request(reqwest::Method::DELETE)
                 .header("Mcp-Session-Id", &session)
                 .send()
                 .await
@@ -895,6 +961,16 @@ impl McpTransport for HttpTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn caller_header_values_are_sensitive() {
+        let transport = HttpTransport::new("http://127.0.0.1:9/mcp")
+            .unwrap()
+            .with_header("x-api-key", "s3cret")
+            .unwrap();
+        assert!(transport.headers["x-api-key"].is_sensitive());
+        assert!(!format!("{:?}", transport.headers).contains("s3cret"));
+    }
 
     #[cfg(feature = "native")]
     #[tokio::test]

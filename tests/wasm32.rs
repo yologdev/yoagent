@@ -367,7 +367,7 @@ async fn an_extension_gates_and_observes_a_run_on_the_host() {
 /// test. reqwest's wasm client calls the global `fetch` on every request, as a
 /// Worker's does, so the whole transport (session header, JSON bodies, the
 /// response stream) runs against it. Requests are recorded in
-/// `globalThis.__mcpRequests` as `"<METHOD> <rpc method> <session id>"`.
+/// `globalThis.__mcpRequests` as `"<METHOD> <rpc method> <session id> <auth>"`.
 struct FakeMcpServer;
 
 impl FakeMcpServer {
@@ -384,7 +384,8 @@ impl FakeMcpServer {
               const session = request.headers.get('mcp-session-id') ?? '-';
               const text = request.method === 'POST' ? await request.text() : '';
               const body = text ? JSON.parse(text) : {};
-              globalThis.__mcpRequests.push(`${request.method} ${body.method ?? '-'} ${session}`);
+              const auth = request.headers.get('authorization') ?? '-';
+              globalThis.__mcpRequests.push(`${request.method} ${body.method ?? '-'} ${session} ${auth}`);
               if (request.method === 'DELETE') return reply(null, { status: 204 });
               if (body.id === undefined) return reply(null, { status: 202 });
               const results = {
@@ -447,8 +448,12 @@ async fn an_agent_calls_an_http_mcp_tool_through_the_hosts_fetch() {
         }]),
         MockResponse::Text("done".into()),
     ]);
+    let transport = yoagent::mcp::HttpTransport::new("https://mcp.example.test/mcp")
+        .unwrap()
+        .with_header("authorization", "Bearer edge-token")
+        .unwrap();
     let mut agent = Agent::from_provider(provider, ModelConfig::mock())
-        .with_mcp_server_http("https://mcp.example.test/mcp")
+        .with_mcp_server_http_transport(transport)
         .await
         .expect("connect and discover over fetch");
     let events = drain(agent.prompt("shout it").await).await;
@@ -470,11 +475,12 @@ async fn an_agent_calls_an_http_mcp_tool_through_the_hosts_fetch() {
     assert_eq!(
         server.requests(),
         [
-            "POST initialize -",
-            "POST notifications/initialized edge-session",
-            "POST tools/list edge-session",
-            "POST tools/call edge-session",
+            "POST initialize - Bearer edge-token",
+            "POST notifications/initialized edge-session Bearer edge-token",
+            "POST tools/list edge-session Bearer edge-token",
+            "POST tools/call edge-session Bearer edge-token",
         ],
-        "the handshake, then the session replayed on every later request"
+        "the handshake, then the session replayed on every later request, \
+         each carrying the caller's header"
     );
 }

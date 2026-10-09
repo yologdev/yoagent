@@ -45,7 +45,13 @@ impl McpClient {
 
     /// Connect to an MCP server via HTTP.
     pub async fn connect_http(url: &str) -> Result<Self, McpError> {
-        let transport = HttpTransport::new(url)?;
+        Self::connect_http_with(HttpTransport::new(url)?).await
+    }
+
+    /// Connect over a configured [`HttpTransport`] — with request headers
+    /// ([`HttpTransport::with_header`]), say. The handshake and timeouts are
+    /// those of [`connect_http`](Self::connect_http).
+    pub async fn connect_http_with(transport: HttpTransport) -> Result<Self, McpError> {
         let mut client = Self {
             transport: Arc::new(Mutex::new(Box::new(transport))),
             server_info: None,
