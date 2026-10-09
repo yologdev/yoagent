@@ -1,6 +1,7 @@
 # Summary
 
 [Introduction](introduction.md)
+[Design Philosophy](design-philosophy.md)
 
 # Getting Started
 
