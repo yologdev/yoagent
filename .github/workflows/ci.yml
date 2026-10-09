@@ -328,6 +328,58 @@ jobs:
       - name: pi extensions example (scripted, the fixture extension)
         run: cargo run --manifest-path "$MANIFEST" --features node --example pi_extensions
 
+  # EXPERIMENTAL: integrations/yoagent-frontend (not published). The session
+  # and web tests need no Node; pi_dialog_test needs pi's packages (required
+  # here). The example runs headless with three Node runtimes (the UI's, pi's
+  # and DSH's packages) and checks that a pi extension's question reached the
+  # terminal frontend and blocked `bash`.
+  frontend-experimental:
+    name: yoagent-frontend (experimental)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      MANIFEST: integrations/yoagent-frontend/Cargo.toml
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: integrations/yoagent-frontend
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            integrations/yoagent-frontend/plugins/package-lock.json
+            integrations/yoagent-rutis/plugins/dsh/package-lock.json
+            integrations/yoagent-rutis/plugins/pi/package-lock.json
+      - name: Install the npm packages
+        run: |
+          npm ci --prefix integrations/yoagent-frontend/plugins
+          npm ci --prefix integrations/yoagent-rutis/plugins/pi
+          npm ci --prefix integrations/yoagent-rutis/plugins/dsh
+      - name: Format
+        run: cargo fmt --manifest-path "$MANIFEST" -- --check
+      - name: Clippy
+        run: cargo clippy --manifest-path "$MANIFEST" --all-targets
+      - name: Docs
+        run: RUSTDOCFLAGS="-Dwarnings" cargo doc --manifest-path "$MANIFEST" --no-deps
+      - name: Test (pi's dialogs through the session need the runtimes)
+        run: YOAGENT_RUTIS_REQUIRE_RUNTIMES=1 cargo test --manifest-path "$MANIFEST"
+      - name: Page logic (node --test)
+        run: node --test integrations/yoagent-frontend/web/lib.test.js
+      - name: Example (scripted, headless; a pi dialog reaches the terminal UI)
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          mkdir -p "$RUNNER_TEMP/frontend-project" && cd "$RUNNER_TEMP/frontend-project"
+          cargo run --manifest-path "$GITHUB_WORKSPACE/$MANIFEST" --example coding_agent -- --demo "clean the build" \
+            | sed 's/\x1b\[[0-9;]*m//g' | tee screen.txt
+          grep -q "? Run \`rm -rf build\`?" screen.txt
+          grep -q "bash ✗" screen.txt
+
   # yoagent claims to be a tested GASP-conformant runtime — this job is the
   # test: emit an agent repo with the gasp bridge (mock provider, no network)
   # and run the protocol's conformance checker against it.

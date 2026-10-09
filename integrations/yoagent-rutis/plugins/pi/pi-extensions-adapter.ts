@@ -100,8 +100,13 @@
 // never starts a turn); other runtime actions (`pi.sendUserMessage`,
 // `pi.setModel`, ...) throw "not available in yoagent". `ctx.hasUI` is false and `ctx.ui` behaves as in
 // pi's print mode: `confirm` answers false, `select` and `input` nothing, so
-// a policy that would ask the user denies instead.
+// a policy that would ask the user denies instead. When the host provides a
+// `ui` service (yoagent-frontend, experimental) and loads `host-ui.ts` next
+// to this adapter, the context is pi's RPC mode instead: `hasUI` true, and
+// `select`, `confirm`, `input`, `editor` and `notify` reach the user through
+// it (no frontend or no answer: the same safe defaults).
 
+import { randomUUID } from 'node:crypto'
 import { isAbsolute, resolve } from 'node:path'
 import { definePlugin } from '@arcships/rutis'
 import type { Cancellable, ContentBlock, ToolCall, ToolOutput, ToolResult, ToolSpec, Yoagent } from '../yoagent.d.ts'
@@ -252,6 +257,70 @@ const NO_UI = new Proxy(
   },
 )
 
+/** The host's `ui` service (yoagent-frontend), when it provides one. */
+interface HostUi {
+  request(request: Record<string, unknown>, timeoutMs?: number): Promise<unknown>
+  withdraw?(key: string): Promise<void>
+}
+
+/**
+ * pi's RPC-mode UI over the host's `ui` service: dialogs reach whichever
+ * frontend answers first; a failure, no frontend or no answer in time gives
+ * print mode's answer.
+ */
+const hostUi = (ui: HostUi, contextSignal?: AbortSignal) => {
+  const ask = async (request: Record<string, unknown>, opts?: { timeout?: number; signal?: AbortSignal }) => {
+    // When the hook is cancelled (the run stopped, the policy timed out) the
+    // question is withdrawn: frontends close its dialog. rutis 0.7 cannot
+    // cancel a plugin's call to the host, so the adapter says so by key.
+    const signal = opts?.signal ?? contextSignal
+    if (signal?.aborted) return undefined
+    // Unique across runtimes and restarts: the host withdraws by key.
+    const key = `pi-${randomUUID()}`
+    const failed = (error: unknown) =>
+      report('warn', `[pi] could not withdraw a question (it stays open until its timeout): ${message(error)}`)
+    const withdraw = () => {
+      // A host without `withdraw`: its own timeout ends the question.
+      if (typeof ui.withdraw !== 'function') return
+      try {
+        Promise.resolve(ui.withdraw(key)).catch(failed)
+      } catch (error) {
+        failed(error)
+      }
+    }
+    signal?.addEventListener('abort', withdraw, { once: true })
+    try {
+      return await ui.request({ ...request, key }, opts?.timeout)
+    } catch (error) {
+      if (!signal?.aborted) report('warn', `[pi] a ui request failed, answering as print mode: ${message(error)}`)
+      return undefined
+    } finally {
+      signal?.removeEventListener('abort', withdraw)
+    }
+  }
+  const text = (value: unknown) => (typeof value === 'string' ? value : undefined)
+  return new Proxy(
+    {
+      ...(NO_UI as Record<string, unknown>),
+      select: async (title: unknown, options: unknown[], opts?: { timeout?: number; signal?: AbortSignal }) =>
+        text(await ask({ kind: 'select', title: String(title), options: (options ?? []).map(String) }, opts)),
+      confirm: async (title: unknown, body?: unknown, opts?: { timeout?: number; signal?: AbortSignal }) =>
+        (await ask({ kind: 'confirm', title: String(title), message: String(body ?? '') }, opts)) === true,
+      input: async (title: unknown, placeholder?: unknown, opts?: { timeout?: number; signal?: AbortSignal }) =>
+        text(await ask({ kind: 'input', title: String(title), placeholder: String(placeholder ?? '') }, opts)),
+      editor: async (title: unknown, prefill?: unknown) =>
+        text(await ask({ kind: 'input', title: String(title), value: String(prefill ?? '') })),
+      notify: (body: string, level?: string) => {
+        ;(NO_UI as { notify: (m: string, l?: string) => void }).notify(body, level)
+        void ask({ kind: 'notify', message: String(body), level: level ?? 'info' })
+      },
+    } as Record<string, unknown>,
+    {
+      get: (target, key) => (key in target ? target[key as string] : key === 'then' ? undefined : () => undefined),
+    },
+  )
+}
+
 interface Block {
   type: string
   text?: string
@@ -393,10 +462,29 @@ export default definePlugin<Config>({
     let refusal: string | undefined
 
     const sessionManager = SessionManager.inMemory(cwd)
-    const context = (signal?: AbortSignal, systemPrompt = '') => ({
-      ui: NO_UI,
-      mode: 'print',
-      hasUI: false,
+    // A host `ui` service, re-provided in this runtime as `pi-host-ui` by
+    // `host-ui.ts`, makes this pi's RPC mode. It is looked up when a context
+    // is made, never injected: rutis starts a plugin only once every injected
+    // service exists, and hosts without one keep print mode.
+    let uiMissingReported = false
+    const lookupUi = () => {
+      try {
+        return ctx.use<HostUi>('pi-host-ui')
+      } catch (error) {
+        // The usual case without a frontend: print mode. Said once, at debug.
+        if (!uiMissingReported) {
+          uiMissingReported = true
+          report('debug', `[pi] no host ui (print mode): ${message(error)}`)
+        }
+        return undefined
+      }
+    }
+    const context = (signal?: AbortSignal, systemPrompt = '') => {
+      const hostUiService = lookupUi()
+      return {
+      ui: hostUiService ? hostUi(hostUiService, signal) : NO_UI,
+      mode: hostUiService ? 'rpc' : 'print',
+      hasUI: hostUiService !== undefined,
       cwd,
       sessionManager,
       modelRegistry: undefined,
@@ -418,7 +506,8 @@ export default definePlugin<Config>({
       compact: () => {
         throw new Error('ctx.compact() is not available in yoagent')
       },
-    })
+      }
+    }
     /**
      * The pi tools `ctx.executeTool` can call: pi's callable exposures
      * (`direct` while available, `codemode`, `deferred`; never `model-only`
