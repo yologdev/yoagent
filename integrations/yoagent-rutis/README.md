@@ -4,7 +4,7 @@ Extend [yoagent](https://crates.io/crates/yoagent) agents at runtime with
 [rutis](https://crates.io/crates/rutis) plugins — in Rust, TypeScript or
 Python — through one yoagent `Extension`.
 
-**Status:** 0.1.0, not yet on crates.io; needs yoagent's `Extension` (0.25).
+**Status:** on [crates.io](https://crates.io/crates/yoagent-rutis); needs yoagent's `Extension` (0.25). The ecosystem adapters below (DSH, pi) are experimental.
 
 rutis (a Rust port of the [Cordis](https://github.com/shigma/cordis) plugin
 kernel) loads, unloads, reloads and hot-updates plugins, and tears down
