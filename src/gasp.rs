@@ -43,8 +43,26 @@
 //!
 //! Recording requires a git identity (`user.name`/`user.email`), like any
 //! git workflow.
+//!
+//! # Plugin logs
+//!
+//! A rutis plugin's diagnostics (the `yoagent-rutis` bridge's `log`, written
+//! to `tracing` under [`PLUGIN_LOG_TARGET`] with the run's `run_id`) can be
+//! recorded as observations on the run they belong to — a plugin's "your
+//! policy did not apply" is part of the run's record. Install two things
+//! from the recorder: [`GaspRecorder::extension`] on the agent (it learns each
+//! run's id) and [`GaspRecorder::plugin_log_layer`] on your `tracing`
+//! subscriber (it forwards matching lines). Only lines whose `run_id` is one
+//! of this recorder's runs are recorded, so another agent's plugins in the
+//! same process never land here; lines without a run stay in `tracing` only.
+//! Each line is summarized like tool output (so a redacting summarizer
+//! applies) and recorded as `observation.created`, linked to the run, with
+//! `{source: "plugin", level}` metadata.
 
+use crate::extension::{Extension, ExtensionError, RunContext, RunHooks};
 use crate::types::*;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use yoagent_state::{
@@ -104,6 +122,108 @@ pub struct GaspRecorder {
     actor: ActorRef,
     goal: GoalId,
     summarize: Summarizer,
+    route: Route,
+}
+
+/// The `tracing` target the `yoagent-rutis` bridge writes plugin diagnostics
+/// to (its `log` method), with the run as a `run_id` field.
+pub const PLUGIN_LOG_TARGET: &str = "yoagent_rutis::plugin";
+
+/// Where plugin log lines go while a recording is open: the yoagent run ids
+/// it covers (learned by [`GaspRecorder::extension`]) and its channel.
+type Route = Arc<Mutex<Option<OpenRoute>>>;
+
+struct OpenRoute {
+    runs: HashSet<String>,
+    tx: mpsc::UnboundedSender<PluginLog>,
+}
+
+/// One plugin log line on its way to the recording.
+struct PluginLog {
+    level: tracing::Level,
+    message: String,
+}
+
+/// The extension that links yoagent's run ids to the open recording — see
+/// [`GaspRecorder::extension`].
+#[derive(Clone)]
+pub struct GaspRunLink {
+    route: Route,
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl Extension for GaspRunLink {
+    fn name(&self) -> &str {
+        "gasp-run-link"
+    }
+
+    async fn start_run(&self, run: &RunContext<'_>) -> Result<Box<dyn RunHooks>, ExtensionError> {
+        if let Some(open) = self
+            .route
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
+            open.runs.insert(run.run_id.to_string());
+        }
+        Ok(Box::new(LinkedRun))
+    }
+}
+
+/// No hooks: the link only needs the run's start.
+struct LinkedRun;
+
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl RunHooks for LinkedRun {}
+
+/// The `tracing` layer that forwards plugin log lines to the open recording —
+/// see [`GaspRecorder::plugin_log_layer`].
+#[derive(Clone)]
+pub struct PluginLogLayer {
+    route: Route,
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for PluginLogLayer {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        let meta = event.metadata();
+        if meta.target() != PLUGIN_LOG_TARGET {
+            return;
+        }
+        #[derive(Default)]
+        struct Fields {
+            run_id: String,
+            message: String,
+        }
+        impl tracing::field::Visit for Fields {
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                match field.name() {
+                    "run_id" => self.run_id = value.to_string(),
+                    "message" => self.message = value.to_string(),
+                    _ => {}
+                }
+            }
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                match field.name() {
+                    "run_id" => self.run_id = format!("{value:?}"),
+                    "message" => self.message = format!("{value:?}"),
+                    _ => {}
+                }
+            }
+        }
+        let mut fields = Fields::default();
+        event.record(&mut fields);
+        let route = self.route.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(open) = route.as_ref() {
+            if open.runs.contains(&fields.run_id) {
+                let _ = open.tx.send(PluginLog {
+                    level: *meta.level(),
+                    message: fields.message,
+                });
+            }
+        }
+    }
 }
 
 impl GaspRecorder {
@@ -207,6 +327,7 @@ impl GaspRecorder {
             actor,
             goal,
             summarize: std::sync::Arc::new(|text: &str| summarize(text)),
+            route: Route::default(),
         })
     }
 
@@ -265,6 +386,28 @@ impl GaspRecorder {
         &self.goal
     }
 
+    /// The extension that lets this recorder attribute plugin log lines to
+    /// the run they belong to: install it on the agent
+    /// ([`Agent::with_extension`](crate::Agent::with_extension); as a tree
+    /// extension, delegated runs' lines are recorded on the same run). It
+    /// only learns each run's id; it has no other effect.
+    pub fn extension(&self) -> GaspRunLink {
+        GaspRunLink {
+            route: self.route.clone(),
+        }
+    }
+
+    /// The `tracing` layer that forwards plugin log lines
+    /// ([`PLUGIN_LOG_TARGET`]) of this recorder's runs to the recording, as
+    /// observations. Add it to your subscriber
+    /// (`tracing_subscriber::registry().with(recorder.plugin_log_layer())`)
+    /// and install [`extension`](Self::extension) on the agent.
+    pub fn plugin_log_layer(&self) -> PluginLogLayer {
+        PluginLogLayer {
+            route: self.route.clone(),
+        }
+    }
+
     /// Returns a sender to pass to
     /// [`Agent::prompt_with_sender`](crate::Agent::prompt_with_sender) (or
     /// the raw loop) and a handle resolving to the recorded [`RunId`] —
@@ -290,8 +433,59 @@ impl GaspRecorder {
         let goal = self.goal.clone();
         let task = task.into();
         let summarize = self.summarize.clone();
-        let handle = tokio::spawn(consume(sink, store, goal, task, summarize, rx, forward));
+        // Plugin log lines of this recording's runs (see `extension`).
+        let (log_tx, log_rx) = mpsc::unbounded_channel();
+        *self.route.lock().unwrap_or_else(|e| e.into_inner()) = Some(OpenRoute {
+            runs: HashSet::new(),
+            tx: log_tx.clone(),
+        });
+        let logs = Logs {
+            state: self.state.clone(),
+            actor: self.actor.clone(),
+            rx: log_rx,
+            route: self.route.clone(),
+            own: log_tx,
+        };
+        let handle = tokio::spawn(consume(
+            sink, store, goal, task, summarize, rx, forward, logs,
+        ));
         (tx, handle)
+    }
+}
+
+/// The plugin log lines a recording receives, and where to write them.
+struct Logs {
+    state: YoAgentState<GitEventStore>,
+    actor: ActorRef,
+    rx: mpsc::UnboundedReceiver<PluginLog>,
+    route: Route,
+    /// This recording's own sender: the route is cleared only while it is
+    /// still this recording's (a next recording may have opened its own).
+    own: mpsc::UnboundedSender<PluginLog>,
+}
+
+impl Logs {
+    /// Record one line as an observation on the run.
+    async fn record(
+        &self,
+        summarize: &Summarizer,
+        run_id: &RunId,
+        line: PluginLog,
+    ) -> Result<(), StateError> {
+        let level = line.level.as_str().to_ascii_lowercase();
+        self.state
+            .record_observation(
+                self.actor.clone(),
+                Observation {
+                    id: ObservationId::generate(),
+                    title: format!("plugin {level}"),
+                    summary: summarize(&line.message),
+                    observed_in: Some(run_id.clone()),
+                    metadata: serde_json::json!({ "source": "plugin", "level": level }),
+                },
+            )
+            .await
+            .map(|_| ())
     }
 }
 
@@ -309,6 +503,7 @@ struct RunTracking {
 /// the sender side is dropped (the loop finished, or the caller dropped the
 /// `*_with_sender` future mid-run / the loop task panicked — `AgentEnd` is
 /// otherwise sent unconditionally).
+#[allow(clippy::too_many_arguments)] // each argument is one piece of a recording
 async fn consume(
     sink: YoAgentStateAdapter<GitEventStore>,
     store: GitEventStore,
@@ -317,6 +512,7 @@ async fn consume(
     summarize: Summarizer,
     mut rx: mpsc::UnboundedReceiver<AgentEvent>,
     forward: Option<mpsc::UnboundedSender<AgentEvent>>,
+    mut logs: Logs,
 ) -> Result<Option<RunId>, StateError> {
     let mut tracking = RunTracking {
         run_id: RunId::generate(),
@@ -331,8 +527,28 @@ async fn consume(
     // after it means the attempt was retried, not the turn's result, so it is
     // not recorded as a model call (and does not advance the turn count).
     let mut held: Option<AgentEvent> = None;
+    // Plugin log lines that arrive before the run is recorded as started.
+    let mut early: Vec<PluginLog> = Vec::new();
 
-    while let Some(event) = rx.recv().await {
+    loop {
+        let event = tokio::select! {
+            event = rx.recv() => match event {
+                Some(event) => event,
+                None => break,
+            },
+            Some(line) = logs.rx.recv() => {
+                if recording_error.is_none() {
+                    if tracking.started {
+                        if let Err(e) = logs.record(&summarize, &tracking.run_id, line).await {
+                            recording_error = Some(e);
+                        }
+                    } else {
+                        early.push(line);
+                    }
+                }
+                continue;
+            }
+        };
         // Forward FIRST: the tee observes the loop, not the recorder's disk.
         // It must neither lag behind per-event fsyncs nor die when recording
         // fails.
@@ -353,6 +569,20 @@ async fn consume(
         } else {
             due.push(event);
         }
+        let starts = due.iter().any(|e| matches!(e, AgentEvent::AgentStart));
+        // Lines already queued when the run ends are recorded before its end,
+        // so they stay inside the run (correlated with it) in the log.
+        if tracking.started
+            && recording_error.is_none()
+            && due.iter().any(|e| matches!(e, AgentEvent::AgentEnd { .. }))
+        {
+            while let Ok(line) = logs.rx.try_recv() {
+                if let Err(e) = logs.record(&summarize, &tracking.run_id, line).await {
+                    recording_error = Some(e);
+                    break;
+                }
+            }
+        }
         for event in &due {
             if let Err(e) = record_event(&sink, &summarize, &mut tracking, event).await {
                 tracing::error!(
@@ -363,6 +593,33 @@ async fn consume(
                 recording_error = Some(e);
                 break;
             }
+        }
+        if starts && recording_error.is_none() {
+            for line in early.drain(..) {
+                if let Err(e) = logs.record(&summarize, &tracking.run_id, line).await {
+                    recording_error = Some(e);
+                    break;
+                }
+            }
+        }
+    }
+    // The recording is over: stop routing — unless a next recording already
+    // replaced the route with its own — then record lines already queued.
+    {
+        let mut route = logs.route.lock().unwrap_or_else(|e| e.into_inner());
+        if route
+            .as_ref()
+            .is_some_and(|open| open.tx.same_channel(&logs.own))
+        {
+            *route = None;
+        }
+    }
+    while let Ok(line) = logs.rx.try_recv() {
+        if recording_error.is_some() || !tracking.started {
+            break;
+        }
+        if let Err(e) = logs.record(&summarize, &tracking.run_id, line).await {
+            recording_error = Some(e);
         }
     }
     if let (Some(event), None) = (held.take(), &recording_error) {

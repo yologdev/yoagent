@@ -41,6 +41,7 @@ let run_id = record_handle.await??;   // Option<RunId>: None if no AgentStart ar
 | loop starts | `run.started` (the goal is stamped in the run commit's `Goal:` trailer) |
 | each assistant turn | `model.called` / `model.finished` paired nodes (a retried provider attempt — an error `MessageEnd` followed by `ProviderRetry` — is not recorded) |
 | each tool execution | `tool.called` / `tool.finished` (with success flag) |
+| a plugin logs (opt-in, below) | `observation.created`, linked to the run, `{source: "plugin", level}` metadata |
 | loop ends | `run.finished` with the outcome: `completed` / `truncated` / `error` / `aborted` (a cancelled run) / `refused`, `loop_aborted:<tool>` when loop detection stopped it, `rejected` when an input filter refused the prompt, `interrupted` for a run a crashed process left open |
 
 The semantic log stores bounded one-line summaries — the **task string
@@ -61,6 +62,21 @@ fresh clone is a complete, conformant agent. If recording fails mid-run
 handle — **always await it** — while event forwarding to your UI continues
 uninterrupted. GASP repos are single-writer: don't share one repo between
 live workers, and record one run at a time.
+
+## Plugin logs (opt-in)
+
+A rutis plugin's diagnostics — the [yoagent-rutis](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis) bridge's `log`, such as a pi extension's "command `/todos` not available" or a DSH image that could not be read — can be part of the run's record. Install two things from the recorder:
+
+```rust,ignore
+use tracing_subscriber::layer::SubscriberExt;
+
+tracing::subscriber::set_global_default(
+    tracing_subscriber::registry().with(recorder.plugin_log_layer()),
+)?;
+let agent = agent.with_extension(recorder.extension()); // learns each run's id
+```
+
+`tracing-subscriber` 0.3 must be a dependency of your own crate (the layer implements its `Layer` trait). The layer forwards lines of the target `yoagent_rutis::plugin` (`gasp::PLUGIN_LOG_TARGET`) whose `run_id` is one of this recorder's runs — another agent's plugins in the same process never land here, and a line without a run stays in your logs only. Each line goes through the summarizer, like tool output, and is recorded as an `observation.created` on the run. Installed with `with_tree_extension`, delegated runs' lines are recorded on the same run. Record every run of an agent that has the extension: a run started *without* a recording while one is open is attributed to that recording.
 
 ## Tested conformance
 
