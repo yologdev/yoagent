@@ -723,3 +723,208 @@ async fn a_rejected_initialized_notification_fails_the_connect() {
         "{err}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Caller headers (#275)
+// ---------------------------------------------------------------------------
+
+/// Answers every JSON-RPC request (`initialize`, `tools/list`, `tools/call`)
+/// with a session id and a minimal result, `202` for notifications and `204`
+/// for the closing `DELETE` — but only when both caller headers are present.
+/// A request without them matches nothing and gets wiremock's 404.
+async fn mount_server_requiring(server: &MockServer, auth: &'static str, agent: &'static str) {
+    Mock::given(method("POST"))
+        .and(header("authorization", auth))
+        .and(header("user-agent", agent))
+        .respond_with(|request: &Request| {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            if body.get("id").is_none() {
+                return ResponseTemplate::new(202);
+            }
+            let result = match body["method"].as_str().unwrap() {
+                "initialize" => serde_json::json!({
+                    "protocolVersion": "2024-11-05", "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "auth-fixture", "version": "1"}
+                }),
+                "tools/list" => serde_json::json!({"tools": [
+                    {"name": "whoami", "inputSchema": {"type": "object"}}
+                ]}),
+                _ => serde_json::json!({"content": [{"type": "text", "text": "you"}]}),
+            };
+            ResponseTemplate::new(200)
+                .insert_header("Mcp-Session-Id", "auth-session")
+                .set_body_json(
+                    serde_json::json!({"jsonrpc": "2.0", "id": body["id"], "result": result}),
+                )
+        })
+        .mount(server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(header("authorization", auth))
+        .and(header("user-agent", agent))
+        .and(header("mcp-session-id", "auth-session"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(server)
+        .await;
+}
+
+/// The headers reach every request of a session: the handshake (initialize and
+/// the initialized notification), discovery, a call and the closing DELETE.
+#[tokio::test]
+async fn caller_headers_go_on_every_request_of_the_session() {
+    let server = MockServer::start().await;
+    mount_server_requiring(&server, "Bearer s3cret", "my-app/1.0").await;
+    let transport = HttpTransport::new(&server.uri())
+        .unwrap()
+        .with_header("Authorization", "Bearer s3cret")
+        .unwrap()
+        .with_header("user-agent", "my-app/1.0")
+        .unwrap();
+    let client = McpClient::connect_http_with(transport).await.unwrap();
+    let tools = client.list_tools().await.unwrap();
+    assert_eq!(tools[0].name, "whoami");
+    client
+        .call_tool("whoami", serde_json::json!({}))
+        .await
+        .unwrap();
+    client.close().await.unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    // initialize, notifications/initialized, tools/list, tools/call, DELETE —
+    // each matched the header-requiring mocks (a miss would have been a 404).
+    let methods: Vec<&str> = requests.iter().map(|r| r.method.as_str()).collect();
+    assert_eq!(methods, ["POST", "POST", "POST", "POST", "DELETE"]);
+    // `close` treats a rejected DELETE as best-effort, so check it directly.
+    for r in &requests {
+        assert_eq!(r.headers.get("authorization").unwrap(), "Bearer s3cret");
+        assert_eq!(r.headers.get("user-agent").unwrap(), "my-app/1.0");
+    }
+}
+
+/// An agent connects the same way, and discovers the server's tools.
+#[tokio::test]
+async fn an_agent_connects_through_a_configured_transport() {
+    let server = MockServer::start().await;
+    mount_server_requiring(&server, "Bearer s3cret", "my-app/1.0").await;
+    let transport = HttpTransport::new(&server.uri())
+        .unwrap()
+        .with_header("authorization", "Bearer s3cret")
+        .unwrap()
+        .with_header("user-agent", "my-app/1.0")
+        .unwrap();
+    use yoagent::provider::mock::{MockResponse, MockToolCall};
+    let provider = yoagent::provider::MockProvider::new(vec![
+        MockResponse::ToolCalls(vec![MockToolCall {
+            name: "whoami".into(),
+            arguments: serde_json::json!({}),
+            provider_metadata: None,
+        }]),
+        MockResponse::Text("done".into()),
+    ]);
+    let mut agent = yoagent::Agent::from_provider(provider, yoagent::provider::ModelConfig::mock())
+        .with_mcp_server_http_transport(transport)
+        .await
+        .unwrap();
+    let mut events = agent.prompt("who am I").await;
+    let mut called = false;
+    while let Some(event) = events.recv().await {
+        if let yoagent::AgentEvent::ToolExecutionEnd {
+            tool_name,
+            is_error,
+            ..
+        } = event
+        {
+            called = tool_name == "whoami" && !is_error;
+        }
+    }
+    agent.finish().await;
+    assert!(called, "the discovered tool ran with the caller headers");
+}
+
+/// Without the header the same server refuses the handshake — the header is
+/// what the tests above depend on, not an accident of the fixture.
+#[tokio::test]
+async fn without_the_header_the_server_refuses_the_connect() {
+    let server = MockServer::start().await;
+    mount_server_requiring(&server, "Bearer s3cret", "my-app/1.0").await;
+    let err = McpClient::connect_http(&server.uri()).await.err().unwrap();
+    assert!(err.to_string().contains("404"), "{err}");
+}
+
+#[test]
+fn invalid_or_reserved_headers_are_refused_before_sending() {
+    let new = || HttpTransport::new("http://127.0.0.1:9/mcp").unwrap();
+    assert!(new().with_header("bad header", "x").is_err());
+    let err = new()
+        .with_header("authorization", "Bearer s3cret\r\nInjected: 1")
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(
+        !err.contains("s3cret"),
+        "a refused value is never echoed: {err}"
+    );
+    for reserved in ["Accept", "content-type", "MCP-Session-Id"] {
+        let err = new().with_header(reserved, "x").err().unwrap().to_string();
+        assert!(
+            err.contains("set by the MCP transport"),
+            "{reserved}: {err}"
+        );
+    }
+}
+
+/// Setting a header twice keeps only the second value.
+#[tokio::test]
+async fn setting_a_header_twice_replaces_it() {
+    let server = MockServer::start().await;
+    let request = JsonRpcRequest::new("ping", None);
+    Mock::given(method("POST"))
+        .and(header("authorization", "Bearer new"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"jsonrpc": "2.0", "id": request.id, "result": {}}),
+            ),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    HttpTransport::new(&server.uri())
+        .unwrap()
+        .with_header("authorization", "Bearer old")
+        .unwrap()
+        .with_header("Authorization", "Bearer new")
+        .unwrap()
+        .send(request)
+        .await
+        .unwrap();
+    let received = server.received_requests().await.unwrap();
+    assert_eq!(
+        received[0].headers.get_all("authorization").iter().count(),
+        1
+    );
+    server.verify().await;
+}
+
+/// No headers configured: nothing extra is sent (no User-Agent either).
+#[tokio::test]
+async fn a_plain_transport_sends_no_caller_headers() {
+    let server = MockServer::start().await;
+    let request = JsonRpcRequest::new("ping", None);
+    Mock::given(method("POST"))
+        .and(HeaderAbsent("authorization"))
+        .and(HeaderAbsent("user-agent"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"jsonrpc": "2.0", "id": request.id, "result": {}}),
+            ),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    HttpTransport::new(&server.uri())
+        .unwrap()
+        .send(request)
+        .await
+        .unwrap();
+    server.verify().await;
+}

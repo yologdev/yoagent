@@ -6,13 +6,17 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Added
+
+- **Headers for HTTP MCP servers** (#275). `HttpTransport::with_header(name, value)` sends a header on every request of the session — `initialize`, the `initialized` notification, tool calls and the closing `DELETE` — so servers that need a token, an API key or a `User-Agent` can be reached. Setting a name again replaces it; values are marked sensitive; an invalid name or value, or one the transport sets itself (`Accept`, `Content-Type`, `Mcp-Session-Id`), is an error before anything is sent. Connect with `McpClient::connect_http_with(transport)` or `Agent::with_mcp_server_http_transport(transport)` (same handshake and timeouts as `connect_http` / `with_mcp_server_http`, which are unchanged). Works on wasm32. Tests: every request of a session carries the headers (DELETE included, mutation-checked), an agent connects through a configured transport, refusals, replacement, and a plain transport sends none.
+
 ### Fixed
 
 - **`BashTool` kills what a command started** (#277, suggested by @shahidcodes). On Unix, `bash` now leads its own process group, and a timeout, a cancel or dropping the call kills the whole group: pipeline stages, `&&` lists and background jobs no longer keep running. Only a process that starts its own session (`setsid`) escapes. A command that finishes on its own leaves a background job alone when the job's output is redirected (`cmd >log 2>&1 &`); one still writing to the tool's output keeps the call open until the timeout, which now kills it. **Behaviour change:** the command is no longer in the terminal's foreground group, so the terminal's Ctrl+C does not reach it — cancel or drop the call on Ctrl+C (the `cli` example now aborts the run), and a command prompting on `/dev/tty` (`sudo`, SSH) stops until the timeout. Windows is unchanged (the `bash` process only). Adds `libc` as a Unix-only dependency (already in the tree through tokio). Tests: timeout, cancel, drop and normal completion in `tests/tools_test.rs`, mutation-checked.
 
 ### Tests
 
-- **HTTP MCP on wasm32.** `tests/wasm32.rs` runs an agent that connects to an HTTP MCP server, discovers its tool and calls it from the loop, through the host's `fetch` (a scripted server replaces the global `fetch`): handshake, `Mcp-Session-Id` replay and the tool result. The Workers guide notes that a stalled MCP stream has no idle read timeout of its own on wasm32, and that custom headers are not supported yet (#275).
+- **HTTP MCP on wasm32.** `tests/wasm32.rs` runs an agent that connects to an HTTP MCP server, discovers its tool and calls it from the loop, through the host's `fetch` (a scripted server replaces the global `fetch`): handshake, `Mcp-Session-Id` replay and the tool result. The Workers guide notes that a stalled MCP stream has no idle read timeout of its own on wasm32.
 
 ## 0.25.1 (2026-10-09)
 

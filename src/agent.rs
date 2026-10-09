@@ -6,7 +6,7 @@ use crate::agent_loop::{
     BeforeTurnFn, OnErrorFn,
 };
 use crate::context::{CompactionStrategy, ContextConfig, ExecutionLimits};
-use crate::mcp::{McpClient, McpError, McpToolAdapter};
+use crate::mcp::{HttpTransport, McpClient, McpError, McpToolAdapter};
 use crate::provider::{ModelConfig, StreamProvider};
 use crate::rt::JoinHandle;
 use crate::types::*;
@@ -862,8 +862,19 @@ impl Agent {
     }
 
     /// Connect to an MCP server via HTTP and add its tools to the agent.
-    pub async fn with_mcp_server_http(mut self, url: &str) -> Result<Self, McpError> {
-        let client = McpClient::connect_http(url).await?;
+    pub async fn with_mcp_server_http(self, url: &str) -> Result<Self, McpError> {
+        self.with_mcp_server_http_transport(HttpTransport::new(url)?)
+            .await
+    }
+
+    /// Connect over a configured [`HttpTransport`] — one carrying an auth
+    /// header ([`HttpTransport::with_header`]), say — and add the server's
+    /// tools to the agent.
+    pub async fn with_mcp_server_http_transport(
+        mut self,
+        transport: HttpTransport,
+    ) -> Result<Self, McpError> {
+        let client = McpClient::connect_http_with(transport).await?;
         let client = Arc::new(tokio::sync::Mutex::new(client));
         let adapters = McpToolAdapter::from_client(client).await?;
         for adapter in adapters {

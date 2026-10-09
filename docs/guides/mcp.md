@@ -83,6 +83,32 @@ let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude
     .await?;
 ```
 
+#### Servers that need headers
+
+A server that wants a token, an API key or a `User-Agent` gets them from
+`HttpTransport::with_header`, then connects with
+`Agent::with_mcp_server_http_transport` (or `McpClient::connect_http_with`):
+
+```rust
+use yoagent::mcp::HttpTransport;
+
+let token = std::env::var("MCP_TOKEN")?;
+let transport = HttpTransport::new("https://mcp.example.com/mcp")?
+    .with_header("authorization", format!("Bearer {token}"))?
+    .with_header("user-agent", "my-app/1.0")?;
+let agent = agent.with_mcp_server_http_transport(transport).await?;
+```
+
+- The headers go on every request of the session: `initialize`, the
+  `initialized` notification, tool calls and the closing `DELETE`.
+- Setting a name again replaces its value. Values are marked sensitive, so they
+  stay out of debug output, and a refused value is never echoed in the error.
+- An invalid name or value is an error from `with_header`, before anything is
+  sent. So is a header the transport sets itself: `Accept`, `Content-Type`,
+  `Mcp-Session-Id`.
+- The headers are fixed for the transport's lifetime. A token that expires
+  during a session (OAuth refresh) needs a new transport and client.
+
 `HttpTransport` handles both the plain JSON-RPC-over-POST shape and the
 **request/response subset of Streamable HTTP** — servers that answer a POST with
 an SSE-framed response, whether or not they then close the stream:
