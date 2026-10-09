@@ -132,6 +132,7 @@ impl PluginHostBuilder {
             routes: routes.clone(),
             runtimes: resolvers.clone(),
         };
+        let runtimes = resolvers.clone();
         let loader_plugin = LoaderPlugin::new(
             Chain::new().with(routed),
             LoaderOptions {
@@ -147,6 +148,7 @@ impl PluginHostBuilder {
         Ok(PluginHost {
             loader,
             routes,
+            runtimes,
             rows: Vec::new(),
         })
     }
@@ -156,6 +158,8 @@ impl PluginHostBuilder {
 pub struct PluginHost {
     loader: Loader,
     routes: Arc<Mutex<HashMap<String, String>>>,
+    /// Each runtime's resolver: `reload` makes them forget a module.
+    runtimes: Vec<(String, Arc<RuntimeResolver>)>,
     rows: Vec<Row>,
 }
 
@@ -195,13 +199,16 @@ impl PluginHost {
         let routes = self.routes.lock().unwrap().clone();
         let result = self.add(rows);
         let result = match result {
-            Ok(()) => self.reconcile_all().await,
+            Ok(()) => {
+                let added: Vec<String> = self.rows[kept..].iter().map(|r| r.id.clone()).collect();
+                self.reconcile(&added).await
+            }
             Err(e) => Err(e),
         };
         if result.is_err() {
             self.rows.truncate(kept);
             *self.routes.lock().unwrap() = routes;
-            if let Err(e) = self.reconcile_all().await {
+            if let Err(e) = self.reconcile(&[]).await {
                 tracing::warn!("dropping a plugin batch that failed to load also failed: {e}");
             }
         }
@@ -230,25 +237,108 @@ impl PluginHost {
         Ok(())
     }
 
-    async fn reconcile_all(&mut self) -> Result<(), BoxError> {
+    /// Unload one plugin: its fiber is disposed, and with it what it
+    /// registered (handlers and tools, services, UI plugin offers). A run in
+    /// progress keeps the tools it started with; a call into the plugin after
+    /// it left fails ("no longer available").
+    pub async fn unload(&mut self, id: &str) -> Result<(), BoxError> {
+        let index = self
+            .rows
+            .iter()
+            .position(|row| row.id == id)
+            .ok_or_else(|| format!("no plugin `{id}` is loaded"))?;
+        let routes = self.routes.lock().unwrap().clone();
+        let row = self.rows.remove(index);
+        if !self.rows.iter().any(|other| other.name == row.name) {
+            self.routes.lock().unwrap().remove(&row.name);
+        }
+        let result = self.reconcile(&[]).await;
+        if result.is_err() {
+            self.rows.insert(index, row);
+            *self.routes.lock().unwrap() = routes;
+            if let Err(e) = self.reconcile(&[]).await {
+                tracing::warn!("putting back plugin `{id}` after a failed unload also failed: {e}");
+            }
+        }
+        result
+    }
+
+    /// Whether the plugin `id` is running (started, not failed or stopped).
+    pub fn is_running(&self, id: &str) -> bool {
+        matches!(
+            self.loader.get(id).map(|info| info.status),
+            Some(EntryStatus::Running(s)) if s.state == FiberState::Active
+        )
+    }
+
+    /// Reload one plugin, picking up its edited file, and restart it. The
+    /// runtime imports the plugin's own module again when its file changed
+    /// (not the modules that one imports: an edit there needs the runtime
+    /// restarted). Waits until it runs again — though, as on `load`, a
+    /// TypeScript plugin's async start-up may still be going.
+    ///
+    /// Not all or nothing. New code that does not import (a syntax error) is
+    /// refused before anything stops: the running version stays. New code
+    /// that imports but fails when it starts has replaced the old by then,
+    /// and the plugin stays stopped until a later reload succeeds — so a
+    /// plugin that is a policy should run under a bridge that requires one
+    /// (`RutisExtension::require_policy`). The error says which happened;
+    /// [`PluginHost::is_running`] tells too.
+    pub async fn reload(&mut self, id: &str) -> Result<(), BoxError> {
+        let name = self
+            .rows
+            .iter()
+            .find(|row| row.id == id)
+            .map(|row| row.name.clone())
+            .ok_or_else(|| format!("no plugin `{id}` is loaded"))?;
+        // A runtime resolver keeps a module's description until its package
+        // version changes, and a file has none: forget it, so the row is
+        // described (and imported) again and replaced.
+        for (_, resolver) in &self.runtimes {
+            resolver.invalidate(&name);
+        }
+        let result = match self.loader.reload(id).await {
+            Ok(report) if !report.new_failures.is_empty() => {
+                Err(format!("{:?}", report.new_failures).into())
+            }
+            Ok(_) => self.wait_running(&[id.to_owned()]).await,
+            Err(e) => Err(e.into()),
+        };
+        result.map_err(|e: BoxError| {
+            if self.is_running(id) {
+                format!("`{id}` was not reloaded; its running version stays: {e}").into()
+            } else {
+                format!("`{id}` failed to start with its new code and is stopped until a reload succeeds: {e}").into()
+            }
+        })
+    }
+
+    /// Apply the rows; fail on plugins this newly broke, and wait for
+    /// `started` (the rows just added) to run. A plugin already failing — one
+    /// a reload left stopped — does not fail every later change.
+    async fn reconcile(&mut self, started: &[String]) -> Result<(), BoxError> {
         let insert: Vec<Json> = self.rows.iter().map(Row::json).collect();
         let patches: Vec<Patch> = serde_json::from_value(json!([{ "insert": insert }]))?;
         let report = self
             .loader
             .reconcile(vec![Layer::new("app", patches)], None)
             .await?;
-        if !report.failures.is_empty() {
-            return Err(format!("plugins failed to load: {:?}", report.failures).into());
+        if !report.new_failures.is_empty() {
+            return Err(format!("plugins failed to load: {:?}", report.new_failures).into());
         }
         // `reconcile` counts a row still waiting (for a runtime, or for a
         // service it injects) as settled. A plugin that never starts — a
-        // policy among them — must not pass for loaded: wait until every row
-        // runs, and name the ones that do not.
-        let ids: Vec<String> = self.rows.iter().map(|r| r.id.clone()).collect();
+        // policy among them — must not pass for loaded: wait until the new
+        // rows run, and name the ones that do not.
+        self.wait_running(started).await
+    }
+
+    /// Wait until these rows run; fail naming those that failed or did not.
+    async fn wait_running(&self, ids: &[String]) -> Result<(), BoxError> {
         let deadline = tokio::time::Instant::now() + LOAD_TIMEOUT;
         loop {
             let mut waiting = Vec::new();
-            for id in &ids {
+            for id in ids {
                 match self.loader.get(id).map(|info| info.status) {
                     Some(EntryStatus::Running(s)) if s.state == FiberState::Active => {}
                     Some(EntryStatus::Running(s)) if s.state == FiberState::Failed => {
