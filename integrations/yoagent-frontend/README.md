@@ -73,9 +73,13 @@ overtakes its own question still counts.
   plugins run, and a batch that fails is dropped again. While the agent
   runs, `unload(id)` removes a plugin (its tools, handlers, services and UI
   plugin offers go with it) and `reload(id)` restarts one with its edited
-  file — all or nothing: new code that does not load is refused and the
-  running version stays. A run in progress keeps the tools it started with;
-  the next one sees the change. No rebuild of the host.
+  file. New code that does not import (a syntax error) is refused and the
+  running version stays; new code that fails when it starts leaves the
+  plugin stopped until a later reload works — the error says which, and
+  `is_running(id)` tells too, so run a policy plugin under a bridge that
+  requires one (`require_policy()`, as the example does). A stopped plugin
+  does not block other loads. A run in progress keeps the tools it started
+  with; the next one sees the change. No rebuild of the host.
 
 ## UI plugins
 

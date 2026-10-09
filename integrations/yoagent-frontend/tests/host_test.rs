@@ -41,6 +41,31 @@ fn runtime_installed() -> bool {
 /// a line to `starts` each time it starts. `@arcships/rutis` by file URL: the
 /// plugin lives in a temp dir.
 fn write_plugin(path: &Path, starts: &Path, version: &str) {
+    write_named(path, starts, "reloadable", "version", version)
+}
+
+/// A plugin that imports fine but fails when it starts.
+fn write_failing_plugin(path: &Path) {
+    let rutis = plugins().join("node_modules/@arcships/rutis/src/index.mjs");
+    std::fs::write(
+        path,
+        format!(
+            r#"import {{ definePlugin }} from 'file://{}'
+export default definePlugin({{
+  inject: ['yoagent'],
+  apply() {{
+    throw new Error('this version breaks on start')
+  }},
+}})
+"#,
+            rutis.display()
+        ),
+    )
+    .unwrap();
+}
+
+/// `write_plugin` with its own handler and tool names.
+fn write_named(path: &Path, starts: &Path, handler: &str, tool: &str, version: &str) {
     let rutis = plugins().join("node_modules/@arcships/rutis/src/index.mjs");
     std::fs::write(
         path,
@@ -51,9 +76,9 @@ export default definePlugin({{
   inject: ['yoagent'],
   apply(ctx) {{
     appendFileSync({starts:?}, '{version}\n')
-    ctx.effect(ctx.use('yoagent').register('reloadable', {{
+    ctx.effect(ctx.use('yoagent').register('{handler}', {{
       async tools() {{
-        return [{{ name: 'version', description: 'Which version runs.', parameters: {{ type: 'object', properties: {{}} }} }}]
+        return [{{ name: '{tool}', description: 'Which version runs.', parameters: {{ type: 'object', properties: {{}} }} }}]
       }},
       async call_tool() {{
         return {{ text: '{version}' }}
@@ -148,6 +173,10 @@ async fn a_plugin_reloads_with_its_edited_file_and_unloads() {
             done(),
             call(),
             done(),
+            call(),
+            done(),
+            call(),
+            done(),
         ]),
         ModelConfig::mock(),
     )
@@ -174,9 +203,33 @@ async fn a_plugin_reloads_with_its_edited_file_and_unloads() {
     // New code that does not load: an error, and the old code keeps running.
     tokio::time::sleep(Duration::from_millis(20)).await;
     std::fs::write(&file, "export default definePlugin({ this is not code").unwrap();
-    assert!(host.reload("reloadable").await.is_err());
+    let refused = host.reload("reloadable").await.unwrap_err().to_string();
+    assert!(refused.contains("running version stays"), "{refused}");
+    assert!(host.is_running("reloadable"));
     registered(&bridge, true).await;
     assert_eq!(version(&mut agent).await, "version two");
+
+    // New code that imports but fails when it starts: the old code is gone
+    // by then, so the plugin is stopped — and the error says so.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    write_failing_plugin(&file);
+    let stopped = host.reload("reloadable").await.unwrap_err().to_string();
+    assert!(stopped.contains("is stopped"), "{stopped}");
+    assert!(!host.is_running("reloadable"));
+    registered(&bridge, false).await;
+    assert!(version(&mut agent).await.contains("not found"));
+    // A stopped plugin does not block the others.
+    let other = dir.path().join("other.ts");
+    write_named(&other, &starts, "other", "other_version", "other one");
+    host.load([Row::new("other", other.display()).runtime("ui")])
+        .await
+        .unwrap();
+    // The next good save brings it back.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    write_plugin(&file, &starts, "version three");
+    host.reload("reloadable").await.unwrap();
+    registered(&bridge, true).await;
+    assert_eq!(version(&mut agent).await, "version three");
 
     // Unloaded: the tool is gone.
     host.unload("reloadable").await.unwrap();

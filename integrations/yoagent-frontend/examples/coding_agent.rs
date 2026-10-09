@@ -15,8 +15,11 @@
 //! - `--no-dsh`: skip DSH (web search, `ask_user_question` and its dialogs).
 //! - `--watch`: reload a plugin when its file changes (polled twice a second):
 //!   the UI plugins, the adapters, the pi extension; each reload is told to
-//!   the frontends. New code reaches the next run; a version that does not
-//!   load is refused and the running one stays.
+//!   the frontends. New code reaches the next run. A version that does not
+//!   import is refused and the running one stays; one that fails when it
+//!   starts leaves that plugin stopped until a later save works (the agent
+//!   requires a tool policy, so with the pi extension stopped every call is
+//!   denied).
 //!
 //! Logs (`RUST_LOG`) go to stderr with `--web` / `--demo`, else to
 //! `$TMPDIR/yoagent-coding-agent.log` (the terminal UI owns the screen).
@@ -274,9 +277,13 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
     .with_tools(default_tools())
     // A pi policy may ask the user: give its hook as long as a question
     // waits (yoagent-rutis's default policy timeout is 60 s).
+    // A run that starts with no tool policy — the pi extension's handler
+    // stopped, say by a reload whose new code failed to start — denies every
+    // call instead of running them unguarded.
     .with_extension(
         bridge
             .extension()
+            .require_policy()
             .with_policy_timeout(Some(session::UI_TIMEOUT + Duration::from_secs(30))),
     );
 
@@ -341,8 +348,7 @@ fn scripted() -> MockProvider {
 }
 
 /// `--watch`: poll the plugin files; a changed one reloads its plugin
-/// (`PluginHost::reload`: new code, or the running version kept when the new
-/// one does not load), and the frontends are told either way.
+/// (`PluginHost::reload`), and the frontends are told what came of it.
 fn watch(
     mut host: PluginHost,
     files: Vec<(PathBuf, &'static str)>,
@@ -370,11 +376,17 @@ fn watch(
             if due.is_empty() {
                 continue;
             }
-            // Editors save in steps: let the files settle, and take what
-            // changed meanwhile as part of this reload.
+            // Editors save in steps: let the files settle, and reload what
+            // changed meanwhile too.
             tokio::time::sleep(Duration::from_millis(200)).await;
-            for (i, (path, _)) in files.iter().enumerate() {
-                seen[i] = stamp(path);
+            for (i, (path, id)) in files.iter().enumerate() {
+                let now = stamp(path);
+                if now != seen[i] {
+                    seen[i] = now;
+                    if !due.contains(id) {
+                        due.push(id);
+                    }
+                }
             }
             for id in due {
                 match host.reload(id).await {
@@ -382,14 +394,16 @@ fn watch(
                         tracing::info!(plugin = id, "reloaded");
                         session.notice(NoticeLevel::Info, format!("Reloaded the plugin {id}."));
                     }
+                    // The error says whether the old version still runs.
                     Err(e) => {
-                        tracing::warn!(plugin = id, "not reloaded: {e}");
-                        session.notice(
-                            NoticeLevel::Warning,
-                            format!(
-                                "The plugin {id} was not reloaded; its running version stays: {e}"
-                            ),
-                        );
+                        let running = host.is_running(id);
+                        tracing::warn!(plugin = id, running, "reload failed: {e}");
+                        let level = if running {
+                            NoticeLevel::Warning
+                        } else {
+                            NoticeLevel::Error
+                        };
+                        session.notice(level, format!("Reloading the plugin {id} failed: {e}"));
                     }
                 }
             }
