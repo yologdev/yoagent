@@ -65,3 +65,22 @@ test('only http(s) links', () => {
   assert.equal(safeUrl('http://example.com/'), 'http://example.com/')
   for (const bad of ['javascript:alert(1)', 'data:text/html,x', 'not a url', undefined]) assert.equal(safeUrl(bad), undefined)
 })
+
+import { parseAnswer } from './lib.js'
+
+test('a typed answer fits its question, or is asked again', () => {
+  const one = { kind: 'select', options: ['a', 'b', 'c'] }
+  const many = { ...one, multiple: true }
+  assert.deepEqual(parseAnswer(one, ' 2 '), { value: 'b' })
+  assert.deepEqual(parseAnswer(one, ''), { value: null }, 'blank: no choice')
+  assert.ok(parseAnswer(one, '9').error)
+  assert.ok(parseAnswer(one, '1.5').error)
+  assert.deepEqual(parseAnswer(many, '3, 1,1'), { value: ['c', 'a'] })
+  assert.deepEqual(parseAnswer(many, ''), { value: [] }, 'blank: none')
+  assert.match(parseAnswer(many, '1,5').error, /"5"/)
+  assert.ok(parseAnswer(many, 'x').error)
+  assert.deepEqual(parseAnswer({ kind: 'confirm' }, 'Yes'), { value: true })
+  assert.deepEqual(parseAnswer({ kind: 'confirm' }, 'n'), { value: false })
+  assert.ok(parseAnswer({ kind: 'confirm' }, 'maybe').error)
+  assert.deepEqual(parseAnswer({ kind: 'input' }, '  spaced '), { value: '  spaced ' })
+})

@@ -33,7 +33,7 @@ JSON, tagged by `type`, camelCase — the same over a rutis call and a WebSocket
 | `hello {running, uiPlugins, uiRequests}` | first message on a connection; open questions included, so a reloaded page can still answer them |
 | `runStart {run, prompt}` / `runEnd {run, outcome, error, stats, totalCostUsd}` | always paired, whatever happened between — an agent task or the session's driver failing included; `outcome` is `completed`, `aborted`, `rejected` or `error` |
 | `event {run, event}` | yoagent's `AgentEvent`; text and thinking deltas merged, held at most 30 ms |
-| `uiRequest {id, request}` / `uiResolved {id, reason}` | a plugin's question (`confirm`, `select`, `input` — with an editor's prefill in `value` — or `notify`); resolved = close the dialog, `reason` `answered`, `timedOut` or `withdrawn` |
+| `uiRequest {id, request}` / `uiResolved {id, reason}` | a plugin's question (`confirm`, `select` — `multiple` for several choices; options sent once each —, `input` — with an editor's prefill in `value` — or `notify`; each may carry a `message` shown with its title); resolved = close the dialog, `reason` `answered`, `timedOut` or `withdrawn` |
 | `notice {level, message}` | something outside a run (an agent task that failed, a message the session did not understand) |
 | `uiPlugins {uiPlugins}`, `closed` | browser components changed; the session ended (nothing sent after it is heard) |
 
@@ -93,12 +93,15 @@ would let drive the agent.
 
 ## Tool cards
 
-A tool result whose `details` carries `view = {call?, result?}` is drawn as
-a card in the browser, unless a UI plugin draws that tool: the vocabulary is
-DSH's (`generic`, `terminal`, `diff`, `search`, `read`, `web`; see
-`@deepseek-ai/dsh-tools/presentation`), so DSH tools that present themselves
-show up right, and any other tool can use it. The tool line takes the
-view's title, in the terminal UI too. Links in a card are http(s) only.
+A successful tool result whose `details` carries `view = {call?, result?}`
+is drawn as a card in the browser, unless a UI plugin draws that tool: the
+vocabulary is DSH's (`generic`, `terminal`, `diff`, `search`, `read`, `web`;
+see `@deepseek-ai/dsh-tools/presentation`), so DSH tools that present
+themselves show up right, and any other tool can use it. The tool line takes
+the view's title — in the browser only when no UI plugin draws the tool,
+always in the terminal UI. Links in a card are http(s) only; each block shows
+at most 200 lines, a web card at most 20 sources. Error results carry no
+card (the bridge reports them by their text).
 
 ## pi dialogs
 
@@ -117,11 +120,13 @@ yoagent-rutis's default is 60 s, so the example raises it
 An approval a DSH tool policy asks for, and DSH's `ask_user_question`, reach
 the user when
 [`yoagent-rutis/plugins/dsh/host-dialogs.ts`](../yoagent-rutis/plugins/dsh/host-dialogs.ts)
-is loaded in the DSH runtime (with `@deepseek-ai/dsh-user-questions` and
-`@deepseek-ai/dsh-tool-ask-user` for the tool). An approval is a `confirm`;
-a question is a `select` (plus "Other" for typed text), a `select` with
-`multiple`, or an `input`. Without a frontend attached, DSH answers as on
-its own (an `ask` is denied, the tool finds no answerer).
+is loaded in the DSH runtime with `ui` shared into it (`.share(services::UI)`;
+`@deepseek-ai/dsh-user-questions` and `@deepseek-ai/dsh-tool-ask-user` for
+the tool). An approval is a `confirm` showing the reason and the arguments:
+no, or no answer in time, denies the call. A question is a `select` (plus
+"Other" for typed text), a `select` with `multiple`, or an `input`; one left
+unanswered fails the tool with that reason. Without a frontend attached,
+DSH answers as on its own (an `ask` is denied, the tool finds no answerer).
 
 ## Example
 
@@ -145,8 +150,8 @@ Logs (`RUST_LOG`) go to stderr with `--web` / `--demo`, else to
 
 ```bash
 cargo test                                            # protocol, session, web, services
-YOAGENT_RUTIS_REQUIRE_RUNTIMES=1 cargo test           # pi's dialogs need the pi packages (CI)
-node --test web/lib.test.js                           # the page's Markdown, question queue, run lines
+YOAGENT_RUTIS_REQUIRE_RUNTIMES=1 cargo test           # pi's and DSH's dialogs need their packages (CI)
+node --test web/lib.test.js                           # Markdown, question queue, run lines, tool views, diffs, links, typed answers
 ```
 
 ## Limits

@@ -95,8 +95,9 @@ export function viewTitle(view) {
 }
 
 // A line diff (longest common subsequence): rows of `{op, text}`, op ' ', '-'
-// or '+'. `oldText` null is a new file. Past `max` × `max` lines it does not
-// align: every old line removed, every new one added.
+// or '+'. `oldText` null is a new file. When the old and new line counts
+// multiplied exceed `max`², it does not align: every old line removed, every
+// new one added.
 export function diffRows(oldText, newText, max = 400) {
   const a = oldText == null ? [] : String(oldText).split('\n')
   const b = String(newText ?? '').split('\n')
@@ -133,4 +134,35 @@ export function safeUrl(url) {
   } catch {
     return undefined
   }
+}
+
+// A typed answer (the terminal UI) to a question: `{ value }`, or `{ error }`
+// when it does not fit, so the question is asked again rather than answered
+// with a guess. confirm: y/yes or n/no. select: a number (blank: no choice);
+// with `multiple`, numbers split by commas or spaces, each at most once
+// (blank: none). input: the text.
+export function parseAnswer(request, text) {
+  const trimmed = String(text ?? '').trim()
+  if (request.kind === 'confirm') {
+    if (/^(y|yes)$/i.test(trimmed)) return { value: true }
+    if (/^(n|no)$/i.test(trimmed)) return { value: false }
+    return { error: 'answer y or n' }
+  }
+  if (request.kind === 'select') {
+    const options = request.options ?? []
+    const pick = (token) => {
+      const n = Number(token)
+      return /^\d+$/.test(token) && n >= 1 && n <= options.length ? options[n - 1] : undefined
+    }
+    if (request.multiple) {
+      const tokens = trimmed.split(/[\s,]+/).filter(Boolean)
+      const bad = tokens.find((token) => pick(token) === undefined)
+      if (bad !== undefined) return { error: `"${bad}" is not one of 1–${options.length}` }
+      return { value: [...new Set(tokens.map(pick))] }
+    }
+    if (!trimmed) return { value: null }
+    const choice = pick(trimmed)
+    return choice === undefined ? { error: `answer with a number from 1 to ${options.length}` } : { value: choice }
+  }
+  return { value: String(text ?? '') }
 }

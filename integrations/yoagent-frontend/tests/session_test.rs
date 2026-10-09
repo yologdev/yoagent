@@ -609,3 +609,33 @@ async fn a_reused_key_withdraws_only_the_first_question() {
         (first_id, ResolveReason::Withdrawn)
     );
 }
+
+/// A select's options reach frontends once each: a repeated option could
+/// never be answered (an answer names options, each at most once).
+#[tokio::test]
+async fn a_select_is_asked_with_each_option_once() {
+    let (session, _driver) = Session::new(true);
+    let mut ui = session.connect();
+    next(&mut ui).await;
+    let asking = ask(
+        &session,
+        serde_json::from_value(json!({
+            "kind": "select", "title": "Which?", "options": ["a", "b", "a"], "multiple": true
+        }))
+        .unwrap(),
+        WAIT,
+        None,
+    );
+    let ServerMessage::UiRequest { id, request } = next(&mut ui).await else {
+        panic!("a UiRequest")
+    };
+    assert!(
+        matches!(&request, UiRequest::Select { options, .. } if options == &["a", "b"]),
+        "{request:?}"
+    );
+    session.send(ClientMessage::UiResponse {
+        id,
+        value: json!(["b", "a"]),
+    });
+    assert_eq!(asking.await.unwrap(), json!(["b", "a"]));
+}

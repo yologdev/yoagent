@@ -219,6 +219,7 @@ impl Session {
         timeout: Duration,
         key: Option<String>,
     ) -> Json {
+        let request = request.normalized();
         let default = request.default_answer();
         let expects = request.expects_answer();
         let (tx, rx) = oneshot::channel();

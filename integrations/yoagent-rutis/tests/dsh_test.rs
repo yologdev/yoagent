@@ -2,7 +2,9 @@
 //! adapter `plugins/dsh/dsh-tools-adapter.ts` and a fixture dsh tool plugin
 //! (`plugins/dsh/fixture-tools.ts`, no network) loaded with
 //! `@deepseek-ai/dsh-system-prompt` and `@deepseek-ai/dsh-tools` as
-//! rutis-loader rows of one Node runtime.
+//! rutis-loader rows of one Node runtime; for dialogs, also
+//! `@deepseek-ai/dsh-user-questions`, `@deepseek-ai/dsh-tool-ask-user` and
+//! `plugins/dsh/host-dialogs.ts`, against a scripted host `ui` service.
 //!
 //! Needs Node 24+ and `npm ci` in `plugins/dsh/`. Without them the test
 //! prints `SKIPPED:` and passes; `YOAGENT_RUTIS_REQUIRE_RUNTIMES=1` (CI) makes
@@ -14,13 +16,16 @@ mod common;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::*;
 use rutis::Ctx;
 use rutis_bridge::runtime::LocalRuntime;
-use rutis_bridge::session::{host_key, HostDispatch, Reply, Value as BridgeValue};
+use rutis_bridge::session::{
+    host_key, Error as BridgeError, HostDispatch, Reply, Value as BridgeValue,
+};
 use rutis_loader::{
     Chain, Layer, Loader, LoaderOptions, LoaderPlugin, Patch, RuntimeResolver, RuntimeRowsPlugin,
     ServiceCatalog,
@@ -87,6 +92,8 @@ struct ScriptedUi {
     asked: Mutex<Vec<Value>>,
     /// What `frontends()` reports.
     frontends: usize,
+    /// Every request fails, as a host that broke would.
+    fail: AtomicBool,
 }
 
 impl HostDispatch for ScriptedUi {
@@ -95,6 +102,9 @@ impl HostDispatch for ScriptedUi {
             "request" => {
                 let request = args.list()?.into_iter().next().unwrap().json()?;
                 self.asked.lock().unwrap().push(request);
+                if self.fail.load(Ordering::SeqCst) {
+                    return Err(BridgeError::Value("the host's ui broke".into()));
+                }
                 let answer = self.answers.lock().unwrap().pop_front();
                 Ok(BridgeValue::Data(answer.unwrap_or(Value::Null)))
             }
@@ -367,33 +377,29 @@ async fn dsh_asks_the_user_through_a_host_ui_and_presents_its_calls() {
         frontends: 1,
         ..ScriptedUi::default()
     });
+    const OTHER: &str = "Other (type an answer)";
     ui.answers.lock().unwrap().extend([
         json!(true),
         json!(false),
-        json!("blue"),
-        json!(["b", "c"]),
-        json!("Ada"),
+        json!(OTHER),
+        json!("green"),
+        json!(["c", "zzz", "a"]),
+        json!("   "),
+        json!(OTHER),
+        json!("a"),
     ]);
-    let host = host(&runtime, Some(ui.clone())).await;
-    host.load(json!([
-        { "id": "system-prompt", "name": "@deepseek-ai/dsh-system-prompt" },
-        { "id": "tools", "name": "@deepseek-ai/dsh-tools" },
-        { "id": "questions", "name": "@deepseek-ai/dsh-user-questions" },
-        { "id": "ask-user", "name": "@deepseek-ai/dsh-tool-ask-user" },
-        { "id": "fixture", "name": dsh_dir().join("fixture-tools.ts") },
-        { "id": "adapter", "name": dsh_dir().join("dsh-tools-adapter.ts") },
-        { "id": "host-dialogs", "name": dsh_dir().join("host-dialogs.ts") },
-    ]))
-    .await;
+    let host = dialog_host(&runtime, ui.clone()).await;
 
     let questions = json!({ "questions": [
         { "id": "colour", "question": "Which colour?", "options": [{ "label": "red" }, { "label": "blue", "description": "the sky" }] },
         { "id": "letters", "question": "Which letters?", "multi_select": true, "options": [{ "label": "a" }, { "label": "b" }, { "label": "c" }] },
         { "id": "name", "header": "About you", "question": "Your name?" },
+        { "id": "own", "question": "Own other?", "options": [{ "label": "x" }, { "label": OTHER }] },
+        { "id": "twice", "question": "Twice?", "options": [{ "label": "a" }, { "label": "a" }] },
     ]});
     let (agent, _) = agent(vec![
         call("fixture_guarded", json!({})),
-        call("fixture_guarded", json!({})),
+        call("fixture_guarded", json!({ "path": "notes.txt" })),
         call("ask_user_question", questions),
         call("fixture_echo", json!({ "text": "hi" })),
         text("done"),
@@ -410,44 +416,52 @@ async fn dsh_asks_the_user_through_a_host_ui_and_presents_its_calls() {
         "{results:?}"
     );
     let (_, text, is_error) = &results[1];
-    assert!(*is_error && text.contains("did not allow"), "{results:?}");
-    let asked = ui.asked.lock().unwrap().clone();
-    assert_eq!(asked[0]["kind"], "confirm", "{asked:?}");
     assert!(
-        asked[0]["message"]
-            .as_str()
-            .unwrap()
-            .contains("fixture_guarded needs a yes"),
-        "{asked:?}"
+        *is_error && text.contains("was not approved"),
+        "{results:?}"
     );
+    let asked = ui.asked.lock().unwrap().clone();
+    for confirm in &asked[..2] {
+        assert_eq!(confirm["kind"], "confirm", "{asked:?}");
+        let message = confirm["message"].as_str().unwrap();
+        assert!(message.contains("fixture_guarded needs a yes"), "{message}");
+        assert!(
+            confirm["key"].as_str().unwrap().starts_with("dsh-"),
+            "withdrawable"
+        );
+    }
     assert!(
-        asked[0]["key"].as_str().unwrap().starts_with("dsh-"),
-        "withdrawable"
+        asked[1]["message"].as_str().unwrap().contains("notes.txt"),
+        "the arguments are shown: {asked:?}"
     );
 
-    // ask_user_question: a select (with "Other"), a multiple select, an input.
+    // ask_user_question: "Other" asks for text, a multiple select keeps known
+    // labels in option order, a blank input is a skip, an option already
+    // named like "Other" is not doubled, and labels are asked once each.
     assert_eq!(asked[2]["kind"], "select");
-    assert_eq!(
-        asked[2]["options"],
-        json!(["red", "blue", "Other (type an answer)"])
-    );
+    assert_eq!(asked[2]["options"], json!(["red", "blue", OTHER]));
     assert!(asked[2]["message"]
         .as_str()
         .unwrap()
         .contains("blue: the sky"));
-    assert_eq!(asked[3]["multiple"], true);
-    assert_eq!(asked[4]["kind"], "input");
-    assert_eq!(asked[4]["title"], "About you: Your name?");
+    assert_eq!(asked[3]["kind"], "input", "Other → typed text");
+    assert_eq!(asked[4]["multiple"], true);
+    assert_eq!(asked[5]["title"], "About you: Your name?");
+    assert_eq!(asked[6]["options"], json!(["x", OTHER]));
+    assert_eq!(asked[7]["options"], json!(["a", OTHER]));
+    assert_eq!(asked.len(), 8, "{asked:?}");
     let (name, text, is_error) = &results[2];
     assert_eq!(name, "ask_user_question");
-    let answers: Value = serde_json::from_str(text).expect("the answers as JSON");
     assert!(!is_error, "{text}");
+    let answers: Value = serde_json::from_str(text).expect("the answers as JSON");
     assert_eq!(
         answers["answers"],
         json!([
-            { "id": "colour", "selected": ["blue"] },
-            { "id": "letters", "selected": ["b", "c"] },
-            { "id": "name", "selected": [], "custom": "Ada" },
+            { "id": "colour", "selected": [], "custom": "green" },
+            { "id": "letters", "selected": ["a", "c"] },
+            { "id": "name", "selected": [] },
+            { "id": "own", "selected": [OTHER] },
+            { "id": "twice", "selected": ["a"] },
         ])
     );
 
@@ -461,6 +475,119 @@ async fn dsh_asks_the_user_through_a_host_ui_and_presents_its_calls() {
             "result": { "card": "terminal", "output": "echo: hi", "exitCode": 0 },
         })
     );
+    host.root.shutdown().await.unwrap();
+}
+
+/// The rows a dialog test loads, against `ui`.
+async fn dialog_host(runtime: &Path, ui: Arc<ScriptedUi>) -> Host {
+    let host = host(runtime, Some(ui)).await;
+    host.load(json!([
+        { "id": "system-prompt", "name": "@deepseek-ai/dsh-system-prompt" },
+        { "id": "tools", "name": "@deepseek-ai/dsh-tools" },
+        { "id": "questions", "name": "@deepseek-ai/dsh-user-questions" },
+        { "id": "ask-user", "name": "@deepseek-ai/dsh-tool-ask-user" },
+        { "id": "fixture", "name": dsh_dir().join("fixture-tools.ts") },
+        { "id": "adapter", "name": dsh_dir().join("dsh-tools-adapter.ts") },
+        { "id": "host-dialogs", "name": dsh_dir().join("host-dialogs.ts") },
+    ]))
+    .await;
+    host
+}
+
+/// A host that fails while asking never lets a call through, and a question
+/// nobody answered is reported as such, never as an empty answer.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_or_unanswered_dsh_dialog_is_never_an_answer() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let ui = Arc::new(ScriptedUi {
+        frontends: 1,
+        ..ScriptedUi::default()
+    });
+    ui.fail.store(true, Ordering::SeqCst);
+    let host = dialog_host(&runtime, ui.clone()).await;
+    let question = json!({ "questions": [{ "id": "q", "question": "Which?", "options": [{ "label": "a" }] }] });
+    let (agent, _) = agent(vec![
+        call("fixture_guarded", json!({})),
+        call("ask_user_question", question.clone()),
+        text("one"),
+        call("ask_user_question", question),
+        text("two"),
+    ]);
+    let mut agent = agent.with_extension(host.bridge.extension());
+
+    let (_, results) = run(&mut agent, "the host breaks").await;
+    let (_, text, is_error) = &results[0];
+    assert!(
+        *is_error && text.contains("asking the user failed"),
+        "denied, never allowed: {results:?}"
+    );
+    let (_, text, is_error) = &results[1];
+    assert!(
+        *is_error && text.contains("asking the user failed"),
+        "{results:?}"
+    );
+
+    // Working again, but nobody answers: the asker gets null.
+    ui.fail.store(false, Ordering::SeqCst);
+    let (_, results) = run(&mut agent, "nobody answers").await;
+    let (_, text, is_error) = &results[0];
+    assert!(
+        *is_error && text.contains(r#"did not answer question "q""#),
+        "{results:?}"
+    );
+    host.root.shutdown().await.unwrap();
+}
+
+/// A tool's card never fails its call: a presenter that throws or returns
+/// what JSON cannot carry is cleaned or left out, a card over the cap is
+/// left out, and the runtime goes on.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dsh_card_never_fails_its_call() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let host = host(&runtime, None).await;
+    host.load(json!([
+        { "id": "system-prompt", "name": "@deepseek-ai/dsh-system-prompt" },
+        { "id": "tools", "name": "@deepseek-ai/dsh-tools" },
+        { "id": "fixture", "name": dsh_dir().join("fixture-tools.ts") },
+        { "id": "adapter", "name": dsh_dir().join("dsh-tools-adapter.ts") },
+    ]))
+    .await;
+    let (agent, _) = agent(vec![
+        call("fixture_odd", json!({})),
+        call("fixture_huge", json!({})),
+        call("fixture_fail", json!({ "why": "no card" })),
+        call("fixture_echo", json!({ "text": "still here" })),
+        text("done"),
+    ]);
+    let mut agent = agent.with_extension(host.bridge.extension());
+    let (events, results) = run(&mut agent, "go").await;
+    assert_eq!(results[0], ("fixture_odd".into(), "odd ran".into(), false));
+    assert_eq!(
+        results[1],
+        ("fixture_huge".into(), "huge ran".into(), false)
+    );
+    assert_eq!(results[3].1, "echo: still here", "the runtime went on");
+    let ends = tool_ends(&events);
+    assert_eq!(
+        ends[0].2,
+        json!({ "view": { "result": {
+            "card": "generic",
+            "title": "odd",
+            "big": "12345678901234567890",
+            "nan": null,
+            "surrogate": "x\u{FFFD}",
+            "k\u{FFFD}": 1,
+            "when": "1970-01-01T00:00:00.000Z",
+            "content": [{ "type": "text", "text": "t" }, { "type": "text", "text": "[image block]" }],
+        } } }),
+        "the throwing presentCall left no call card"
+    );
+    assert_eq!(ends[1].2, Value::Null, "over the cap: no card");
+    assert_eq!(ends[2].2, Value::Null, "an error result: no card");
     host.root.shutdown().await.unwrap();
 }
 

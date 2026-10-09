@@ -11,6 +11,8 @@
 import * as fs from 'node:fs'
 import * as tty from 'node:tty'
 import { definePlugin } from '@arcships/rutis'
+// The answer parsing the page's tests cover (`node --test web/`).
+import { parseAnswer } from '../web/lib.js'
 import {
   Container,
   Editor,
@@ -139,7 +141,7 @@ export default definePlugin<{ demo?: string }>({
             : r.kind === 'select'
               ? r.multiple
                 ? 'answer with numbers, e.g. 1,3 (empty for none)'
-                : 'answer with a number'
+                : 'answer with a number (empty for no choice)'
               : 'type your answer',
         ),
       )
@@ -162,20 +164,13 @@ export default definePlugin<{ demo?: string }>({
       const first = questions[0]
       if (!first) return false
       const { id, request } = first
-      let value: unknown = null
-      if (request.kind === 'confirm') value = /^(y|yes)$/i.test(text.trim())
-      else if (request.kind === 'select' && request.multiple) {
-        const picked = text
-          .split(/[\s,]+/)
-          .filter(Boolean)
-          .map(Number)
-          .filter((n) => Number.isInteger(n) && n >= 1 && n <= request.options.length)
-          .map((n) => request.options[n - 1])
-        value = [...new Set(picked)]
-      } else if (request.kind === 'select') {
-        const n = Number(text.trim())
-        value = Number.isInteger(n) && n >= 1 && n <= request.options.length ? request.options[n - 1] : null
-      } else value = text
+      const parsed = parseAnswer(request, text)
+      if ('error' in parsed) {
+        // Not an answer: ask again rather than guess.
+        say(red(`  ${parsed.error}`))
+        return true
+      }
+      const { value } = parsed
       say(dim(`  answered: ${JSON.stringify(value)}`))
       prefilled = undefined
       questions.shift()

@@ -6,7 +6,8 @@
 //
 // `renderTool` draws a tool's result under its line (for the tools the plugin
 // listed); `mountPanel` gets a side panel and a way to send protocol messages.
-// A tool no plugin draws, whose result carries `details.view`, gets a card.
+// A tool no plugin draws, whose result carries `details.view`, gets a card
+// (and its line the view's title).
 
 import { diffRows, markdownParts, Questions, runEndLine, safeUrl, toolView, viewTitle } from './lib.js'
 
@@ -146,7 +147,8 @@ function card(view) {
     }
     case 'diff':
       for (const diff of shown.diffs ?? []) {
-        box.append(el('div', 'head', diff.oldText == null ? `${diff.path} (new)` : diff.path))
+        const path = String(diff.path ?? '(a file)')
+        box.append(el('div', 'head', diff.oldText == null ? `${path} (new)` : path))
         box.append(rows(diffRows(diff.oldText, diff.newText).map((r) => [`${r.op} ${r.text}`, r.op === '+' ? 'add' : r.op === '-' ? 'del' : ''])))
       }
       break
@@ -157,17 +159,18 @@ function card(view) {
           box.append(el('div', 'head', file.path))
           box.append(rows((file.matches ?? []).map((m) => [`${m.lineNumber}: ${m.line}`])))
         }
-      if (shown.truncated) note(`showing part of ${shown.total} results`)
+      if (shown.truncated) note(shown.total !== undefined ? `showing part of ${shown.total} results` : 'showing part of the results')
       break
     case 'read':
-      box.append(el('div', 'head', shown.path))
+      box.append(el('div', 'head', String(shown.path ?? '')))
       box.append(rows((shown.lines ?? []).map((l) => [`${String(l.number).padStart(5)}  ${l.text}`])))
       if (shown.totalLines !== undefined) note(`${(shown.lines ?? []).length} of ${shown.totalLines} lines`)
       break
     case 'web':
       if (shown.kind === 'fetch') {
         const head = el('div', 'head')
-        head.append(link(shown.url), ` · HTTP ${shown.statusCode}`)
+        head.append(link(shown.url))
+        if (shown.statusCode !== undefined) head.append(` · HTTP ${shown.statusCode}`)
         box.append(head)
       } else {
         if (shown.answer) box.append(el('p', '', shown.answer))
@@ -195,16 +198,17 @@ function card(view) {
 function renderView(event, line) {
   const view = toolView(event.result?.details)
   if (!view) return
-  const title = viewTitle(view)
-  if (title) {
-    line.title = `${event.toolName} ${short(tools.get(event.toolCallId)?.args, 400)}`
-    line.firstChild.textContent = `▶ ${title}`
-  }
   try {
+    const title = viewTitle(view)
+    if (title) {
+      line.title = `${event.toolName} ${short(tools.get(event.toolCallId)?.args, 400)}`
+      line.firstChild.textContent = `▶ ${title}`
+    }
     const box = card(view)
     if (box) line.after(box)
   } catch (error) {
     console.warn('a tool card could not be drawn', error)
+    line.after(el('div', 'rendered', '(this tool\'s card could not be drawn)'))
   }
 }
 

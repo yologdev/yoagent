@@ -12,13 +12,13 @@
 //! - `--demo PROMPT`: one prompt, terminal frontend headless, screen printed
 //!   (a question gets "no", as from a user who walked away). CI runs it.
 //! - `--live`: DeepSeek (`DEEPSEEK_API_KEY`); otherwise a scripted model.
-//! - `--no-dsh`: skip DSH's web search.
+//! - `--no-dsh`: skip DSH (web search, `ask_user_question` and its dialogs).
 //!
 //! Logs (`RUST_LOG`) go to stderr with `--web` / `--demo`, else to
 //! `$TMPDIR/yoagent-coding-agent.log` (the terminal UI owns the screen).
 //!
 //! Setup (once): `npm ci` in `integrations/yoagent-frontend/plugins/` and in
-//! `integrations/yoagent-rutis/plugins/pi/` (and `plugins/dsh/` for search).
+//! `integrations/yoagent-rutis/plugins/pi/` (and `plugins/dsh/` for DSH's search and dialogs).
 //!
 //! Run: `cargo run --manifest-path integrations/yoagent-frontend/Cargo.toml --example coding_agent [-- --web]`
 

@@ -155,10 +155,13 @@ pub enum UiRequest {
         message: String,
     },
     /// Answer: one of `options`, or `null` (no choice). With `multiple`, a
-    /// list of them (each at most once, possibly empty), or `null`.
+    /// list of them (each at most once, possibly empty), or `null`. A
+    /// frontend that cannot offer several choices must leave a `multiple`
+    /// question unanswered (it times out to `null`), not send one string.
+    /// The session asks with each option once.
     Select {
         title: String,
-        /// Text under the title.
+        /// Text shown with the title (an explanation, option descriptions).
         #[serde(default)]
         message: String,
         options: Vec<String>,
@@ -168,7 +171,7 @@ pub enum UiRequest {
     /// Answer: a string, or `null` (no text).
     Input {
         title: String,
-        /// Text under the title.
+        /// Text shown with the title (an explanation, option descriptions).
         #[serde(default)]
         message: String,
         #[serde(default)]
@@ -193,6 +196,16 @@ impl UiRequest {
             UiRequest::Confirm { .. } => Json::Bool(false),
             _ => Json::Null,
         }
+    }
+
+    /// The request as frontends get it: a select's options each once (an
+    /// answer names options, so a repeated one could never be picked twice).
+    pub fn normalized(mut self) -> Self {
+        if let UiRequest::Select { options, .. } = &mut self {
+            let mut seen = std::collections::HashSet::new();
+            options.retain(|option| seen.insert(option.clone()));
+        }
+        self
     }
 
     /// Whether the request waits for an answer.

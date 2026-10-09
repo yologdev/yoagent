@@ -31,8 +31,11 @@
 //                images are not read.
 //                The tool's own presenters (`presentCall` / `presentResult`,
 //                dsh's card vocabulary: generic, terminal, diff, search,
-//                read, web) go along as `details.view = {call?, result?}`,
-//                text blocks only, for a frontend to draw.
+//                read, web) go along with a successful result as
+//                `details.view = {call?, result?}`, for a frontend to draw:
+//                content blocks as text (others as `[type block]`), over
+//                100k JSON characters left out. An error result carries no
+//                card (the bridge reports it by its text).
 //   before_model the sections dsh plugins added to `systemPrompt` (the
 //                harness identity and persona slots left out), rendered and
 //                capped, as a note on the request's latest user turn.
@@ -101,8 +104,12 @@ const plain = (value: unknown): unknown => {
   if (typeof value === 'bigint') return value.toString()
   if (Array.isArray(value)) return value.map(plain)
   if (value === null || typeof value !== 'object') return typeof value === 'number' && !Number.isFinite(value) ? null : value
+  // A Date (or anything with its own JSON form) as JSON would write it.
+  if (typeof (value as { toJSON?: unknown }).toJSON === 'function') return plain((value as { toJSON(): unknown }).toJSON())
   const out: Record<string, unknown> = {}
-  for (const [key, field] of Object.entries(value)) {
+  for (const [raw, field] of Object.entries(value)) {
+    // Keys too: a lone surrogate in a key fails the host's decoding just the same.
+    const key = raw.toWellFormed()
     if (key === 'content' && Array.isArray(field)) {
       out.content = field.map((block: DshBlock) =>
         block?.type === 'text' ? { type: 'text', text: String(block.text ?? '').toWellFormed() } : { type: 'text', text: `[${block?.type} block]` },
@@ -176,11 +183,20 @@ export default definePlugin<Config>({
     }
 
     /** The tool's own presentation of this call, when it has presenters. */
+    /** Tools whose presenters already failed once: warned once, then debug. */
+    const presentFailed = new Set<string>()
+    const presenterFailed = (what: string, error: unknown) => {
+      const message = `[dsh] ${what} failed, so the call has no card: ${error}`
+      if (presentFailed.has(what)) return say('debug', message)
+      presentFailed.add(what)
+      say('warn', message)
+    }
     const view = (name: string, args: unknown, out: { isError: boolean; content?: DshBlock[]; meta?: unknown }) => {
       let tool: DshPresenters | undefined
       try {
         tool = dsh.get?.(name)
-      } catch {
+      } catch (error) {
+        presenterFailed(`looking up ${name}`, error)
         return undefined
       }
       const views: { call?: unknown; result?: unknown } = {}
@@ -188,7 +204,7 @@ export default definePlugin<Config>({
         const call = tool?.presentCall?.(args)
         if (call) views.call = plain(call)
       } catch (error) {
-        say('debug', `[dsh] ${name}.presentCall failed: ${error}`)
+        presenterFailed(`${name}.presentCall`, error)
       }
       try {
         const result = tool?.presentResult?.(args, {
@@ -198,7 +214,7 @@ export default definePlugin<Config>({
         })
         if (result) views.result = plain(result)
       } catch (error) {
-        say('debug', `[dsh] ${name}.presentResult failed: ${error}`)
+        presenterFailed(`${name}.presentResult`, error)
       }
       if (views.call === undefined && views.result === undefined) return undefined
       // Never fail a call that already ran over how it is shown.
@@ -258,13 +274,12 @@ export default definePlugin<Config>({
             arguments: call.args,
             signal: call.signal,
           })
-          const shown = view(call.tool, call.args, out)
-          const details = shown ? { view: shown } : undefined
           if (out.isError) {
             const text = (out.content ?? [])
               .map((block) => (block.type === 'text' ? (block.text ?? '') : `[${block.type} block]`))
               .join('\n')
-            return { text: text || out.error?.message || 'the dsh tool failed', is_error: true, details }
+            // No card: the bridge reports an error result by its text alone.
+            return { text: text || out.error?.message || 'the dsh tool failed', is_error: true }
           }
           const content: ContentBlock[] = []
           for (const block of out.content ?? []) {
@@ -276,7 +291,8 @@ export default definePlugin<Config>({
               content.push({ type: 'text', text: `[${block.type} block]` })
             }
           }
-          return { content, details }
+          const shown = view(call.tool, call.args, out)
+          return { content, ...(shown ? { details: { view: shown } } : {}) }
         },
 
         async before_model(turn: Cancellable) {
