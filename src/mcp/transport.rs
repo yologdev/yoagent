@@ -485,9 +485,8 @@ impl HttpTransport {
     /// that is not visible ASCII, or a name the transport or HTTP client sets
     /// itself (`Accept`, `Content-Type`, `Mcp-Session-Id`, `Content-Length`,
     /// `Transfer-Encoding`, `Connection`, `Host`) is an error here, before
-    /// anything is sent. The
-    /// headers are fixed for the transport's lifetime; a token that changes
-    /// during a session needs a new transport.
+    /// anything is sent. The headers are fixed for the transport's lifetime;
+    /// a token that changes during a session needs a new transport.
     ///
     /// ```no_run
     /// # async fn run(token: &str) -> Result<(), yoagent::mcp::McpError> {
@@ -502,7 +501,7 @@ impl HttpTransport {
             .map_err(|e| McpError::Transport(format!("invalid header name {name:?}: {e}")))?;
         if Self::RESERVED_HEADERS.contains(&header.as_str()) {
             return Err(McpError::Transport(format!(
-                "header {name:?} is set by the MCP transport itself and cannot be overridden"
+                "header {name:?} is set by the MCP transport or HTTP client and cannot be overridden"
             )));
         }
         // The value may be a secret: name the header, never echo the value.
