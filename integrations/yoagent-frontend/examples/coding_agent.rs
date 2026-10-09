@@ -13,6 +13,10 @@
 //!   (a question gets "no", as from a user who walked away). CI runs it.
 //! - `--live`: DeepSeek (`DEEPSEEK_API_KEY`); otherwise a scripted model.
 //! - `--no-dsh`: skip DSH (web search, `ask_user_question` and its dialogs).
+//! - `--watch`: reload a plugin when its file changes (polled twice a second):
+//!   the UI plugins, the adapters, the pi extension; each reload is told to
+//!   the frontends. New code reaches the next run; a version that does not
+//!   load is refused and the running one stays.
 //!
 //! Logs (`RUST_LOG`) go to stderr with `--web` / `--demo`, else to
 //! `$TMPDIR/yoagent-coding-agent.log` (the terminal UI owns the screen).
@@ -33,7 +37,7 @@ use yoagent::provider::{MockProvider, ModelConfig};
 use yoagent::tools::default_tools;
 use yoagent::Agent;
 use yoagent_frontend::host::{PluginHost, Row};
-use yoagent_frontend::{services, session, web, Session};
+use yoagent_frontend::{services, session, web, NoticeLevel, Session};
 use yoagent_rutis::RutisBridge;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -50,10 +54,11 @@ struct Options {
     web: Option<SocketAddr>,
     demo: Option<String>,
     dsh: bool,
+    watch: bool,
 }
 
 fn main() -> Result<(), BoxError> {
-    let (mut live, mut web, mut demo) = (false, None, None);
+    let (mut live, mut web, mut demo, mut watch) = (false, None, None, false);
     let mut dsh = rutis_plugins().join("dsh/node_modules").exists();
     let mut args = std::env::args().skip(1).peekable();
     while let Some(arg) = args.next() {
@@ -68,6 +73,7 @@ fn main() -> Result<(), BoxError> {
             }
             "--demo" => demo = Some(args.next().ok_or("--demo needs a prompt")?),
             "--no-dsh" => dsh = false,
+            "--watch" => watch = true,
             other => return Err(format!("unknown argument {other}").into()),
         }
     }
@@ -94,6 +100,7 @@ fn main() -> Result<(), BoxError> {
         web,
         demo,
         dsh,
+        watch,
     };
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -211,6 +218,26 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
         ]);
     }
     host.load(rows).await?;
+    // What `--watch` polls: a file, and the plugin that reloads when it changes.
+    let mut watched: Vec<(PathBuf, &'static str)> = vec![
+        (rutis_plugins().join("pi/pi-extensions-adapter.ts"), "pi"),
+        // pi loads its extensions afresh each time the adapter starts.
+        (
+            here().join("plugins/pi-extensions/confirm-dangerous.ts"),
+            "pi",
+        ),
+        (rutis_plugins().join("pi/host-ui.ts"), "pi-host-ui"),
+        (here().join("plugins/search-links.ts"), "search-links"),
+    ];
+    if options.dsh {
+        watched.extend([
+            (rutis_plugins().join("dsh/dsh-tools-adapter.ts"), "dsh"),
+            (
+                rutis_plugins().join("dsh/host-dialogs.ts"),
+                "dsh-host-dialogs",
+            ),
+        ]);
+    }
     // A TypeScript row reads as running before its own async start-up is
     // done: wait for the handlers the agent depends on — the pi policy above
     // all — before any frontend can send a prompt.
@@ -257,6 +284,7 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
         Some(addr) => {
             let served = web::serve(session.clone(), addr).await?;
             println!("yoagent web frontend: {}  (Ctrl+C to stop)", served.url());
+            let watching = options.watch.then(|| watch(host, watched, session.clone()));
             tokio::select! {
                 _ = driver.run(agent) => {}
                 stop = tokio::signal::ctrl_c() => {
@@ -266,6 +294,9 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
                 }
             }
             served.stop();
+            if let Some(watching) = watching {
+                watching.abort();
+            }
         }
         None => {
             // Last, once everything else loaded: a failure prints on a normal terminal.
@@ -277,8 +308,13 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
             .runtime("ui")
             .config(demo)])
                 .await?;
+            watched.push((here().join("plugins/terminal-ui.ts"), "terminal-ui"));
+            let watching = options.watch.then(|| watch(host, watched, session.clone()));
             agent = driver.run(agent).await;
             drop(agent);
+            if let Some(watching) = watching {
+                watching.abort();
+            }
         }
     }
     Ok(())
@@ -302,4 +338,61 @@ fn scripted() -> MockProvider {
         ]),
         MockResponse::Text("**Scripted** model: run with `--live` for a real one.".into()),
     ])
+}
+
+/// `--watch`: poll the plugin files; a changed one reloads its plugin
+/// (`PluginHost::reload`: new code, or the running version kept when the new
+/// one does not load), and the frontends are told either way.
+fn watch(
+    mut host: PluginHost,
+    files: Vec<(PathBuf, &'static str)>,
+    session: Session,
+) -> tokio::task::JoinHandle<()> {
+    let stamp = |path: &PathBuf| {
+        std::fs::metadata(path)
+            .and_then(|meta| Ok((meta.modified()?, meta.len())))
+            .ok()
+    };
+    tokio::spawn(async move {
+        let mut seen: Vec<_> = files.iter().map(|(path, _)| stamp(path)).collect();
+        loop {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            let mut due: Vec<&str> = Vec::new();
+            for (i, (path, id)) in files.iter().enumerate() {
+                let now = stamp(path);
+                if now != seen[i] {
+                    seen[i] = now;
+                    if !due.contains(id) {
+                        due.push(id);
+                    }
+                }
+            }
+            if due.is_empty() {
+                continue;
+            }
+            // Editors save in steps: let the files settle, and take what
+            // changed meanwhile as part of this reload.
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            for (i, (path, _)) in files.iter().enumerate() {
+                seen[i] = stamp(path);
+            }
+            for id in due {
+                match host.reload(id).await {
+                    Ok(()) => {
+                        tracing::info!(plugin = id, "reloaded");
+                        session.notice(NoticeLevel::Info, format!("Reloaded the plugin {id}."));
+                    }
+                    Err(e) => {
+                        tracing::warn!(plugin = id, "not reloaded: {e}");
+                        session.notice(
+                            NoticeLevel::Warning,
+                            format!(
+                                "The plugin {id} was not reloaded; its running version stays: {e}"
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+    })
 }

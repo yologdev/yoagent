@@ -132,6 +132,7 @@ impl PluginHostBuilder {
             routes: routes.clone(),
             runtimes: resolvers.clone(),
         };
+        let runtimes = resolvers.clone();
         let loader_plugin = LoaderPlugin::new(
             Chain::new().with(routed),
             LoaderOptions {
@@ -147,6 +148,7 @@ impl PluginHostBuilder {
         Ok(PluginHost {
             loader,
             routes,
+            runtimes,
             rows: Vec::new(),
         })
     }
@@ -156,6 +158,8 @@ impl PluginHostBuilder {
 pub struct PluginHost {
     loader: Loader,
     routes: Arc<Mutex<HashMap<String, String>>>,
+    /// Each runtime's resolver: `reload` makes them forget a module.
+    runtimes: Vec<(String, Arc<RuntimeResolver>)>,
     rows: Vec<Row>,
 }
 
@@ -230,6 +234,59 @@ impl PluginHost {
         Ok(())
     }
 
+    /// Unload one plugin: its fiber is disposed, and with it what it
+    /// registered (handlers and tools, services, UI plugin offers). A run in
+    /// progress keeps the tools it started with; a call into the plugin after
+    /// it left fails ("no longer available").
+    pub async fn unload(&mut self, id: &str) -> Result<(), BoxError> {
+        let index = self
+            .rows
+            .iter()
+            .position(|row| row.id == id)
+            .ok_or_else(|| format!("no plugin `{id}` is loaded"))?;
+        let routes = self.routes.lock().unwrap().clone();
+        let row = self.rows.remove(index);
+        if !self.rows.iter().any(|other| other.name == row.name) {
+            self.routes.lock().unwrap().remove(&row.name);
+        }
+        let result = self.reconcile_all().await;
+        if result.is_err() {
+            self.rows.insert(index, row);
+            *self.routes.lock().unwrap() = routes;
+            if let Err(e) = self.reconcile_all().await {
+                tracing::warn!("putting back plugin `{id}` after a failed unload also failed: {e}");
+            }
+        }
+        result
+    }
+
+    /// Reload one plugin, picking up its edited file, and restart it. The
+    /// runtime imports the plugin's own module again when its file changed
+    /// (not the modules that one imports: an edit there needs the runtime
+    /// restarted). All or nothing: when the new code does not load, the old
+    /// one keeps running and the error is returned. Waits until it runs
+    /// again — though, as on `load`, a TypeScript plugin's async start-up
+    /// may still be going.
+    pub async fn reload(&mut self, id: &str) -> Result<(), BoxError> {
+        let name = self
+            .rows
+            .iter()
+            .find(|row| row.id == id)
+            .map(|row| row.name.clone())
+            .ok_or_else(|| format!("no plugin `{id}` is loaded"))?;
+        // A runtime resolver keeps a module's description until its package
+        // version changes, and a file has none: forget it, so the row is
+        // described (and imported) again and replaced.
+        for (_, resolver) in &self.runtimes {
+            resolver.invalidate(&name);
+        }
+        let report = self.loader.reload(id).await?;
+        if !report.failures.is_empty() {
+            return Err(format!("plugins failed to load: {:?}", report.failures).into());
+        }
+        self.wait_running(&[id.to_owned()]).await
+    }
+
     async fn reconcile_all(&mut self) -> Result<(), BoxError> {
         let insert: Vec<Json> = self.rows.iter().map(Row::json).collect();
         let patches: Vec<Patch> = serde_json::from_value(json!([{ "insert": insert }]))?;
@@ -245,10 +302,15 @@ impl PluginHost {
         // policy among them — must not pass for loaded: wait until every row
         // runs, and name the ones that do not.
         let ids: Vec<String> = self.rows.iter().map(|r| r.id.clone()).collect();
+        self.wait_running(&ids).await
+    }
+
+    /// Wait until these rows run; fail naming those that failed or did not.
+    async fn wait_running(&self, ids: &[String]) -> Result<(), BoxError> {
         let deadline = tokio::time::Instant::now() + LOAD_TIMEOUT;
         loop {
             let mut waiting = Vec::new();
-            for id in &ids {
+            for id in ids {
                 match self.loader.get(id).map(|info| info.status) {
                     Some(EntryStatus::Running(s)) if s.state == FiberState::Active => {}
                     Some(EntryStatus::Running(s)) if s.state == FiberState::Failed => {

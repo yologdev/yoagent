@@ -70,7 +70,12 @@ overtakes its own question still counts.
 - **`host::PluginHost`** — Node runtimes, a loader and shared services in a
   few lines; each row names its runtime (routing is by row name: two rows
   loading the same name must name the same runtime); `load` waits until
-  plugins run, and a batch that fails is dropped again.
+  plugins run, and a batch that fails is dropped again. While the agent
+  runs, `unload(id)` removes a plugin (its tools, handlers, services and UI
+  plugin offers go with it) and `reload(id)` restarts one with its edited
+  file — all or nothing: new code that does not load is refused and the
+  running version stays. A run in progress keeps the tools it started with;
+  the next one sees the change. No rebuild of the host.
 
 ## UI plugins
 
@@ -136,6 +141,7 @@ cargo run --example coding_agent                     # terminal frontend, script
 cargo run --example coding_agent -- --live           # DeepSeek (DEEPSEEK_API_KEY)
 cargo run --example coding_agent -- --web --live     # browser: open the printed http://127.0.0.1:8787/?t=… URL
 cargo run --example coding_agent -- --demo "clean the build"   # headless (CI)
+cargo run --example coding_agent -- --web --watch    # edit a plugin file: it reloads, the page is told
 ```
 
 The agent: yoagent's tools, a pi extension asking before dangerous commands
@@ -166,3 +172,9 @@ node --test web/lib.test.js                           # Markdown, question queue
   Host; what crosses from DSH is its approvals, `ask_user_question` and tool
   cards.
 - Three Node runtimes in the example (the UI's, pi's and DSH's packages).
+- `reload` re-imports the plugin's own file, not the modules it imports (an
+  edit there needs its runtime restarted); a pi extension is the exception,
+  since pi loads extensions afresh when the adapter starts. A `.ts` plugin
+  must sit in a `"type": "module"` package (tsx loads it as CommonJS
+  otherwise, and that cache keeps the old code). After a reload, as after
+  `load`, wait for the handlers you depend on before the next run.
