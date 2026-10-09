@@ -464,18 +464,28 @@ impl HttpTransport {
         })
     }
 
-    /// Headers the transport sets itself; a caller's header of the same name
-    /// would break the protocol, so [`with_header`](Self::with_header) refuses
-    /// them.
-    const RESERVED_HEADERS: [&'static str; 3] = ["accept", "content-type", "mcp-session-id"];
+    /// Headers the transport or the HTTP client sets itself; a caller's header
+    /// of the same name would break the protocol or the request framing, so
+    /// [`with_header`](Self::with_header) refuses them.
+    const RESERVED_HEADERS: [&'static str; 7] = [
+        "accept",
+        "content-type",
+        "mcp-session-id",
+        "content-length",
+        "transfer-encoding",
+        "connection",
+        "host",
+    ];
 
     /// Send `name: value` on every request of the session: `initialize`, the
     /// `initialized` notification, tool calls and the closing `DELETE`.
     ///
     /// Setting the same name again replaces the value. The value is marked
-    /// sensitive, so it stays out of debug output. An invalid name or value,
-    /// or a name the transport sets itself (`Accept`, `Content-Type`,
-    /// `Mcp-Session-Id`), is an error here, before anything is sent. The
+    /// sensitive, so it stays out of debug output. An invalid name, a value
+    /// that is not visible ASCII, or a name the transport or HTTP client sets
+    /// itself (`Accept`, `Content-Type`, `Mcp-Session-Id`, `Content-Length`,
+    /// `Transfer-Encoding`, `Connection`, `Host`) is an error here, before
+    /// anything is sent. The
     /// headers are fixed for the transport's lifetime; a token that changes
     /// during a session needs a new transport.
     ///
@@ -495,9 +505,16 @@ impl HttpTransport {
                 "header {name:?} is set by the MCP transport itself and cannot be overridden"
             )));
         }
-        let mut value = reqwest::header::HeaderValue::from_str(value.as_ref())
-            // The value may be a secret: name the header, never echo the value.
-            .map_err(|_| McpError::Transport(format!("invalid value for header {name:?}")))?;
+        // The value may be a secret: name the header, never echo the value.
+        // Visible ASCII only: `HeaderValue` also takes bytes 0x80-0xFF, which
+        // many servers reject and wasm32's fetch-based client refuses on every
+        // request — refuse them here instead.
+        let invalid = || McpError::Transport(format!("invalid value for header {name:?}"));
+        let mut value =
+            reqwest::header::HeaderValue::from_str(value.as_ref()).map_err(|_| invalid())?;
+        if value.to_str().is_err() {
+            return Err(invalid());
+        }
         value.set_sensitive(true);
         self.headers.insert(header, value);
         Ok(self)

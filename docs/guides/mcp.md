@@ -103,9 +103,12 @@ let agent = agent.with_mcp_server_http_transport(transport).await?;
   `initialized` notification, tool calls and the closing `DELETE`.
 - Setting a name again replaces its value. Values are marked sensitive, so they
   stay out of debug output, and a refused value is never echoed in the error.
-- An invalid name or value is an error from `with_header`, before anything is
-  sent. So is a header the transport sets itself: `Accept`, `Content-Type`,
-  `Mcp-Session-Id`.
+- An invalid name, or a value that is not visible ASCII, is an error from
+  `with_header`, before anything is sent. So is a header the transport or the
+  HTTP client sets itself: `Accept`, `Content-Type`, `Mcp-Session-Id`,
+  `Content-Length`, `Transfer-Encoding`, `Connection`, `Host`.
+- On wasm32 the headers ride on the host's `fetch`. Cloudflare Workers send
+  them; a browser may drop some, such as `User-Agent`.
 - The headers are fixed for the transport's lifetime. A token that expires
   during a session (OAuth refresh) needs a new transport and client.
 

@@ -864,7 +864,15 @@ fn invalid_or_reserved_headers_are_refused_before_sending() {
         !err.contains("s3cret"),
         "a refused value is never echoed: {err}"
     );
-    for reserved in ["Accept", "content-type", "MCP-Session-Id"] {
+    // Not visible ASCII: wasm32's client would refuse it on every request.
+    assert!(new().with_header("x-user", "café").is_err());
+    for reserved in [
+        "Accept",
+        "content-type",
+        "MCP-Session-Id",
+        "Content-Length",
+        "host",
+    ] {
         let err = new().with_header(reserved, "x").err().unwrap().to_string();
         assert!(
             err.contains("set by the MCP transport"),
