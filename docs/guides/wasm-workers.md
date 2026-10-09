@@ -41,6 +41,13 @@ a dependency that keeps default features sees no difference.
 
 Only `wasm32-unknown-unknown` is supported. WASI targets are not.
 
+HTTP MCP goes through the host's `fetch` like the providers: the handshake,
+the `Mcp-Session-Id` replay and tool calls are covered by `tests/wasm32.rs`
+against a scripted server. Unlike natively, a stalled MCP stream has no idle
+read timeout of its own; the platform's request limits end it. Custom request
+headers (an auth token for the server) are not supported yet
+([#275](https://github.com/yologdev/yoagent/issues/275)).
+
 ## API keys
 
 There are no environment variables on wasm32, so `Agent::from_config` never
