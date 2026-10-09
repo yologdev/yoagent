@@ -157,7 +157,8 @@ export function apply(ctx: any) {
       for (const question of request.questions) {
         if (signal?.aborted) break
         const options = question.options ?? []
-        const labels = options.map((option) => option.label)
+        // Each label once: an answer names options by label.
+        const labels = [...new Set(options.map((option) => option.label))]
         const title = question.header ? `${question.header}: ${question.question}` : question.question
         const described = options.filter((option) => option.description).map((option) => `${option.label}: ${option.description}`)
         const message = [question.detail, ...described].filter(Boolean).join('\n')

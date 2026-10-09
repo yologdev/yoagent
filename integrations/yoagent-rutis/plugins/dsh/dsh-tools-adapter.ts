@@ -97,6 +97,8 @@ const MAX_VIEW_CHARS = 100_000
  */
 const plain = (value: unknown): unknown => {
   if (typeof value === 'string') return value.toWellFormed()
+  // JSON has no BigInt: a presenter's big number goes as its digits.
+  if (typeof value === 'bigint') return value.toString()
   if (Array.isArray(value)) return value.map(plain)
   if (value === null || typeof value !== 'object') return typeof value === 'number' && !Number.isFinite(value) ? null : value
   const out: Record<string, unknown> = {}
@@ -199,8 +201,14 @@ export default definePlugin<Config>({
         say('debug', `[dsh] ${name}.presentResult failed: ${error}`)
       }
       if (views.call === undefined && views.result === undefined) return undefined
-      if (JSON.stringify(views).length > MAX_VIEW_CHARS) {
-        say('debug', `[dsh] ${name}'s view is over ${MAX_VIEW_CHARS} characters: left out`)
+      // Never fail a call that already ran over how it is shown.
+      try {
+        if (JSON.stringify(views).length > MAX_VIEW_CHARS) {
+          say('debug', `[dsh] ${name}'s view is over ${MAX_VIEW_CHARS} characters: left out`)
+          return undefined
+        }
+      } catch (error) {
+        say('debug', `[dsh] ${name}'s view is not JSON: left out (${error})`)
         return undefined
       }
       return views
