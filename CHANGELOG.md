@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Fixed
+
+- **`BashTool` kills what a command started** (#277, suggested by @shahidcodes). On Unix, `bash` now leads its own process group, and a timeout, a cancel or dropping the call kills the whole group: pipeline stages, `&&` lists and background jobs no longer keep running. Only a process that starts its own session (`setsid`) escapes. A command that finishes on its own leaves its background jobs alone. Windows is unchanged (the `bash` process only). Adds `libc` as a Unix-only dependency (already in the tree through tokio). Tests: timeout, cancel, drop and normal completion in `tests/tools_test.rs`, mutation-checked.
+
 ### Tests
 
 - **HTTP MCP on wasm32.** `tests/wasm32.rs` runs an agent that connects to an HTTP MCP server, discovers its tool and calls it from the loop, through the host's `fetch` (a scripted server replaces the global `fetch`): handshake, `Mcp-Session-Id` replay and the tool result. The Workers guide notes that a stalled MCP stream has no idle read timeout of its own on wasm32, and that custom headers are not supported yet (#275).
