@@ -11,6 +11,8 @@
 import * as fs from 'node:fs'
 import * as tty from 'node:tty'
 import { definePlugin } from '@arcships/rutis'
+// The answer parsing the page's tests cover (`node --test web/`).
+import { parseAnswer } from '../web/lib.js'
 import {
   Container,
   Editor,
@@ -60,6 +62,12 @@ class MemoryTerminal implements Terminal {
   setTitle() {}
   setProgress() {}
   setProgramStatus() {}
+}
+
+/** The title a tool's view (`details.view = {call?, result?}`) gives its call. */
+const viewTitle = (details: any): string | undefined => {
+  const title = details?.view?.result?.title ?? details?.view?.call?.title
+  return typeof title === 'string' && title ? short(title, 60) : undefined
 }
 
 const short = (value: unknown, max = 70) => {
@@ -127,7 +135,15 @@ export default definePlugin<{ demo?: string }>({
         prefilled = r.value
       }
       status.setText(
-        yellow(r.kind === 'confirm' ? 'answer y or n' : r.kind === 'select' ? 'answer with a number' : 'type your answer'),
+        yellow(
+          r.kind === 'confirm'
+            ? 'answer y or n'
+            : r.kind === 'select'
+              ? r.multiple
+                ? 'answer with numbers, e.g. 1,3 (empty for none)'
+                : 'answer with a number (empty for no choice)'
+              : 'type your answer',
+        ),
       )
     }
     const askUser = (id: number, r: Message) => {
@@ -148,12 +164,13 @@ export default definePlugin<{ demo?: string }>({
       const first = questions[0]
       if (!first) return false
       const { id, request } = first
-      let value: unknown = null
-      if (request.kind === 'confirm') value = /^(y|yes)$/i.test(text.trim())
-      else if (request.kind === 'select') {
-        const n = Number(text.trim())
-        value = Number.isInteger(n) && n >= 1 && n <= request.options.length ? request.options[n - 1] : null
-      } else value = text
+      const parsed = parseAnswer(request, text)
+      if ('error' in parsed) {
+        // Not an answer: ask again rather than guess.
+        say(red(`  ${parsed.error}`))
+        return true
+      }
+      const { value } = parsed
       say(dim(`  answered: ${JSON.stringify(value)}`))
       prefilled = undefined
       questions.shift()
@@ -198,7 +215,10 @@ export default definePlugin<{ demo?: string }>({
           return
         }
         case 'toolExecutionEnd':
-          tools.get(e.toolCallId)?.setText(`${e.isError ? red('  ▶ ') : green('  ▶ ')}${e.toolName} ${e.isError ? red('✗') : green('✓')}`)
+          // A tool's view (`details.view`) names the call better than its tool name.
+          tools
+            .get(e.toolCallId)
+            ?.setText(`${e.isError ? red('  ▶ ') : green('  ▶ ')}${viewTitle(e.result?.details) ?? e.toolName} ${e.isError ? red('✗') : green('✓')}`)
           tools.delete(e.toolCallId)
           return
         case 'providerRetry':

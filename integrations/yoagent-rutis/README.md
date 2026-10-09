@@ -299,7 +299,7 @@ offers every tool in dsh's tool registry (the `tools` service of
 | Hook | What the adapter does |
 |---|---|
 | `tools` | `tools.schemas()` → name, description, parameters (config `tools`: an allowlist) |
-| `call_tool` | `tools.execute({callId, name, arguments, signal})` with the bridge's cancel handle as dsh's `signal`: cancelling the run aborts the dsh call. `isError` → an error tool result. Text blocks stay text; an image block — a reference into dsh's attachment store — becomes a yoagent image, its bytes read with the `attachments` service when one is loaded (looked up per image, so the adapter also runs without it). Without one, when a read fails, when dsh marked the image `offloaded`, or over 3.75 MB (under Anthropic's 5 MB once base64), the image is a text placeholder; an error result's images are not read; other blocks are named |
+| `call_tool` | `tools.execute({callId, name, arguments, signal})` with the bridge's cancel handle as dsh's `signal`: cancelling the run aborts the dsh call. `isError` → an error tool result. Text blocks stay text; an image block — a reference into dsh's attachment store — becomes a yoagent image, its bytes read with the `attachments` service when one is loaded (looked up per image, so the adapter also runs without it). Without one, when a read fails, when dsh marked the image `offloaded`, or over 3.75 MB (under Anthropic's 5 MB once base64), the image is a text placeholder; an error result's images are not read; other blocks are named. The tool's own presenters (`presentCall` / `presentResult`, dsh's card vocabulary: generic, terminal, diff, search, read, web) go along with a successful result as `details.view = {call?, result?}`, for a frontend to draw (content blocks as text, other blocks as `[type block]`; over 100k JSON characters, or a presenter that throws, leaves the card out; an error result has none) |
 | `before_model` | the system-prompt sections dsh plugins added (the harness identity and persona slots left out, sections whose variables are unset skipped), as one note, capped at `maxNoteChars` (2000) |
 
 Load, as rows of one Node runtime whose `package.json` is `plugins/dsh/`'s:
@@ -322,6 +322,40 @@ scripted, that free-search's prompt section reached the model).
 `tests/dsh_test.rs` covers the adapter offline with a fixture dsh plugin
 (`plugins/dsh/fixture-tools.ts`) and, for images, a stand-in attachment
 store (`plugins/dsh/fixture-attachments.ts`).
+
+**Asking the user.** On its own, a dsh tool call the adapter makes cannot
+reach a person: an `ask` from a dsh tool policy is denied, and
+`ask_user_question` (`@deepseek-ai/dsh-tool-ask-user`) finds no answerer.
+With a host that provides a `ui` service (yoagent-frontend does), load
+[`plugins/dsh/host-dialogs.ts`](plugins/dsh/host-dialogs.ts) in the same
+runtime **and share `ui` in the loader's catalog** (yoagent-frontend's
+`PluginHost`: `.share(services::UI)`). It is a plain Cordis plugin that
+injects `ui` (and `yoagent`, for the host's log), so without a shared `ui`
+it never starts:
+
+- **approval** — an outermost `tools/pre-execute` listener, for the
+  adapter's calls only: when dsh's guards together decide `ask`, the user
+  confirms, seeing the reason and the arguments (in full up to 4000
+  characters; past that, the head and the end). Yes allows the call. No, or
+  no answer in time, denies it ("not approved"); a cancelled call is
+  cancelled; a host that fails while asking denies it ("asking the user
+  failed"). dsh's own approval service is not used: it needs a dsh agent and
+  session, which these calls do not have (so no dsh audit entry).
+- **questions** — an answerer on `user-questions/request` for requests
+  without an agent, which is what `ask_user_question` sends from these
+  calls. Each question becomes a select (its distinct option labels, plus
+  "Other" — which then asks for typed text — unless an option already has
+  that label), a multiple select, or a text input. A blank input or an empty
+  multiple choice is a skip (`selected: []`); a question left unanswered
+  (dismissed, timed out, no frontend) fails the request with that reason,
+  so the model never sees a made-up answer. Load
+  `@deepseek-ai/dsh-user-questions` and `@deepseek-ai/dsh-tool-ask-user` for
+  the tool itself (its default `legacy` mode: the `timed` one needs a dsh
+  agent).
+
+With no frontend attached when a call starts (`ui.frontends()` is 0), both
+step aside, so the result is dsh's own. A question whose call is cancelled
+is withdrawn.
 
 ### rutis-agent tools
 

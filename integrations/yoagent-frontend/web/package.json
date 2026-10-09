@@ -1,0 +1,5 @@
+{
+  "private": true,
+  "description": "The browser page's scripts are ES modules (the terminal UI plugin imports lib.js too).",
+  "type": "module"
+}

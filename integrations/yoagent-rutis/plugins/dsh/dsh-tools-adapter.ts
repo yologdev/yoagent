@@ -29,9 +29,19 @@
 //                Anthropic takes 5 MB base64), the image is a text
 //                placeholder. Other blocks are named. An error result's
 //                images are not read.
+//                The tool's own presenters (`presentCall` / `presentResult`,
+//                dsh's card vocabulary: generic, terminal, diff, search,
+//                read, web) go along with a successful result as
+//                `details.view = {call?, result?}`, for a frontend to draw:
+//                content blocks as text (others as `[type block]`), over
+//                100k JSON characters left out. An error result carries no
+//                card (the bridge reports it by its text).
 //   before_model the sections dsh plugins added to `systemPrompt` (the
 //                harness identity and persona slots left out), rendered and
 //                capped, as a note on the request's latest user turn.
+//
+// dsh's dialogs (an approval its policy asks for, `ask_user_question`) are
+// `host-dialogs.ts`'s, loaded when the host provides a `ui` service.
 
 import { definePlugin } from '@arcships/rutis'
 import { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
@@ -56,9 +66,16 @@ type DshBlock = {
 /** Largest image sent as an image: under Anthropic's 5 MB once base64-encoded. */
 const MAX_IMAGE_BYTES = 3_750_000
 
+/** A dsh tool definition's presenters (`@deepseek-ai/dsh-tools/presentation`). */
+interface DshPresenters {
+  presentCall?(args: unknown): unknown
+  presentResult?(args: unknown, result: { content: DshBlock[]; isError: boolean; meta?: unknown }): unknown
+}
+
 /** The slice of `@deepseek-ai/dsh-tools`' `ToolRuntime` this adapter uses. */
 interface DshTools {
   schemas(): { name: string; description?: string; parameters?: Record<string, unknown> }[]
+  get?(name: string): DshPresenters | undefined
   execute(exec: {
     callId: string
     name: string
@@ -67,8 +84,41 @@ interface DshTools {
   }): Promise<{
     isError: boolean
     content?: DshBlock[]
+    meta?: unknown
     error?: { message?: string; info?: { code?: string } }
   }>
+}
+
+/** Largest `details.view`, as JSON characters: a bigger one is left out. */
+const MAX_VIEW_CHARS = 100_000
+
+/**
+ * A presenter's view as plain JSON the host can parse: content blocks reduced
+ * to text (an image is an attachment reference, not data), strings made
+ * well-formed (a lone surrogate fails the host's JSON decoding and closes the
+ * runtime session).
+ */
+const plain = (value: unknown): unknown => {
+  if (typeof value === 'string') return value.toWellFormed()
+  // JSON has no BigInt: a presenter's big number goes as its digits.
+  if (typeof value === 'bigint') return value.toString()
+  if (Array.isArray(value)) return value.map(plain)
+  if (value === null || typeof value !== 'object') return typeof value === 'number' && !Number.isFinite(value) ? null : value
+  // A Date (or anything with its own JSON form) as JSON would write it.
+  if (typeof (value as { toJSON?: unknown }).toJSON === 'function') return plain((value as { toJSON(): unknown }).toJSON())
+  const out: Record<string, unknown> = {}
+  for (const [raw, field] of Object.entries(value)) {
+    // Keys too: a lone surrogate in a key fails the host's decoding just the same.
+    const key = raw.toWellFormed()
+    if (key === 'content' && Array.isArray(field)) {
+      out.content = field.map((block: DshBlock) =>
+        block?.type === 'text' ? { type: 'text', text: String(block.text ?? '').toWellFormed() } : { type: 'text', text: `[${block?.type} block]` },
+      )
+    } else if (field !== undefined && typeof field !== 'function') {
+      out[key] = plain(field)
+    }
+  }
+  return out
 }
 
 /** The slice of `@deepseek-ai/dsh-system-prompt`'s `SystemPrompt` this adapter uses. */
@@ -123,6 +173,62 @@ export default definePlugin<Config>({
       }
     }
     const maxNote = config?.maxNoteChars ?? 2000
+    const say = (level: 'warn' | 'debug', message: string) => {
+      // On a host without `log`, rutis's stand-in throws: fall back either way.
+      try {
+        yoagent.log?.(level, message)?.catch(() => console.warn(message))
+      } catch {
+        console.warn(message)
+      }
+    }
+
+    /** The tool's own presentation of this call, when it has presenters. */
+    /** Tools whose presenters already failed once: warned once, then debug. */
+    const presentFailed = new Set<string>()
+    const presenterFailed = (what: string, error: unknown) => {
+      const message = `[dsh] ${what} failed, so the call has no card: ${error}`
+      if (presentFailed.has(what)) return say('debug', message)
+      presentFailed.add(what)
+      say('warn', message)
+    }
+    const view = (name: string, args: unknown, out: { isError: boolean; content?: DshBlock[]; meta?: unknown }) => {
+      let tool: DshPresenters | undefined
+      try {
+        tool = dsh.get?.(name)
+      } catch (error) {
+        presenterFailed(`looking up ${name}`, error)
+        return undefined
+      }
+      const views: { call?: unknown; result?: unknown } = {}
+      try {
+        const call = tool?.presentCall?.(args)
+        if (call) views.call = plain(call)
+      } catch (error) {
+        presenterFailed(`${name}.presentCall`, error)
+      }
+      try {
+        const result = tool?.presentResult?.(args, {
+          content: out.content ?? [],
+          isError: out.isError,
+          ...(out.meta !== undefined ? { meta: out.meta } : {}),
+        })
+        if (result) views.result = plain(result)
+      } catch (error) {
+        presenterFailed(`${name}.presentResult`, error)
+      }
+      if (views.call === undefined && views.result === undefined) return undefined
+      // Never fail a call that already ran over how it is shown.
+      try {
+        if (JSON.stringify(views).length > MAX_VIEW_CHARS) {
+          say('debug', `[dsh] ${name}'s view is over ${MAX_VIEW_CHARS} characters: left out`)
+          return undefined
+        }
+      } catch (error) {
+        say('debug', `[dsh] ${name}'s view is not JSON: left out (${error})`)
+        return undefined
+      }
+      return views
+    }
 
     /** An image reference as a yoagent image: its bytes from dsh's attachment store. */
     const image = async (
@@ -143,13 +249,7 @@ export default definePlugin<Config>({
         return { type: 'image', data: Buffer.from(stored.data).toString('base64'), mimeType: stored.ref.mediaType }
       } catch (error) {
         if (signal.aborted) throw error
-        const message = `[dsh] image ${ref.attachmentId} could not be read: ${error}`
-        // On a host without `log`, rutis's stand-in throws: fall back either way.
-        try {
-          yoagent.log?.('warn', message)?.catch(() => console.warn(message))
-        } catch {
-          console.warn(message)
-        }
+        say('warn', `[dsh] image ${ref.attachmentId} could not be read: ${error}`)
         return { type: 'text', text: label }
       }
     }
@@ -178,6 +278,7 @@ export default definePlugin<Config>({
             const text = (out.content ?? [])
               .map((block) => (block.type === 'text' ? (block.text ?? '') : `[${block.type} block]`))
               .join('\n')
+            // No card: the bridge reports an error result by its text alone.
             return { text: text || out.error?.message || 'the dsh tool failed', is_error: true }
           }
           const content: ContentBlock[] = []
@@ -190,7 +291,8 @@ export default definePlugin<Config>({
               content.push({ type: 'text', text: `[${block.type} block]` })
             }
           }
-          return { content }
+          const shown = view(call.tool, call.args, out)
+          return { content, ...(shown ? { details: { view: shown } } : {}) }
         },
 
         async before_model(turn: Cancellable) {

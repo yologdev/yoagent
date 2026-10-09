@@ -123,7 +123,7 @@ async fn a_pi_question_is_answered_by_a_frontend_and_decides_the_call() {
             match message {
                 ServerMessage::UiRequest {
                     id,
-                    request: UiRequest::Select { title, options },
+                    request: UiRequest::Select { title, options, .. },
                 } => {
                     assert!(title.contains("rm -rf"), "{title}");
                     assert_eq!(options, ["Allow", "Block"]);

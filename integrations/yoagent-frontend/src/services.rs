@@ -17,6 +17,8 @@
 //!   the question resolves to the default and frontends close it. (A plugin
 //!   cannot cancel its call to the host itself in rutis 0.7.) A withdrawal
 //!   that overtakes its request still counts.
+//! - `ui.frontends()` — how many frontends are attached (sync): an asker with
+//!   a fallback of its own uses it when nobody could answer.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -221,6 +223,9 @@ impl HostDispatch for UiService {
             self.session.withdraw(&key);
             return Ok(Value::Undefined);
         }
+        if method == "frontends" {
+            return Ok(Value::Data(json!(self.session.frontends())));
+        }
         if method != "request" {
             return Err(invalid(format!("the ui service has no method `{method}`")));
         }
@@ -246,7 +251,7 @@ impl HostDispatch for UiService {
     }
 
     fn methods(&self) -> Option<Json> {
-        Some(json!({ "request": "async", "withdraw": "async" }))
+        Some(json!({ "request": "async", "withdraw": "async", "frontends": "sync" }))
     }
 }
 

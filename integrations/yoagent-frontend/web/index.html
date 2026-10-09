@@ -54,6 +54,15 @@
   }
   button.primary { background: var(--accent); color: var(--bg); border-color: var(--accent); }
   button:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .card { margin: 2px 0 0 18px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 8px 10px; max-width: 100%; overflow-x: auto; font-size: 13px; }
+  .card .head { font-family: ui-monospace, Menlo, monospace; font-weight: 600; }
+  .card .note, .card .more { color: var(--muted); font-size: 12px; }
+  .card pre { margin: 6px 0; font: 12px/1.45 ui-monospace, Menlo, monospace; white-space: pre; }
+  .card .add { color: var(--ok); } .card .del { color: var(--bad); }
+  .card ol { margin: 4px 0; padding-left: 20px; }
+  .card a { color: var(--accent); }
+  dialog label.choice { display: block; margin: 4px 0; }
+  dialog label.choice input { width: auto; }
   dialog { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--ink); max-width: 420px; width: calc(100% - 32px); }
   dialog h3 { margin: 0 0 6px; font-size: 16px; }
   dialog .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; flex-wrap: wrap; }

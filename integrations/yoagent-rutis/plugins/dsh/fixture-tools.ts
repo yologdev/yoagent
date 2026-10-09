@@ -3,7 +3,16 @@
 // network. The end-to-end test `tests/dsh_test.rs` loads it next to
 // `dsh-tools-adapter.ts`. Not for production use.
 //
-//   fixture_echo  {text}  → "echo: <text>"
+//   fixture_echo  {text}  → "echo: <text>"; presents its call and result
+//                           (dsh's card vocabulary, read by the adapter)
+//   fixture_guarded {}    → "guarded ran", behind a `tools/pre-execute`
+//                           policy that asks before every call
+//   fixture_odd   {}      → "odd ran"; its presentCall throws and its
+//                           presentResult returns values JSON or the host
+//                           cannot take as they are (BigInt, NaN, a lone
+//                           surrogate in a value and a key, a Date, a
+//                           function, an image block)
+//   fixture_huge  {}      → "huge ran"; its card is over the adapter's cap
 //   fixture_fail  {why}   → throws: dsh reports an `isError` result
 //   fixture_dot   {}      → a text block, an image block referring to the
 //                           attachment `fixture-dot` (see fixture-attachments.ts),
@@ -41,6 +50,58 @@ export function apply(ctx: any, config: Config | undefined) {
       output: TEXT_OUTPUT,
       async execute(args: { text: string }) {
         return `echo: ${args.text}`
+      },
+      // Shown as a shell command would be.
+      presentCall: (args: { text: string }) => ({ card: 'terminal' as const, title: `echo ${args.text}`, description: 'Echo a text back' }),
+      presentResult: (_args: unknown, result: { content: { type: string; text?: string }[] }) => ({
+        card: 'terminal' as const,
+        output: result.content.map((block) => block.text ?? '').join(''),
+        exitCode: 0,
+      }),
+    }),
+    defineTool({
+      name: 'fixture_odd',
+      description: 'Presents itself awkwardly.',
+      parameters: {},
+      output: TEXT_OUTPUT,
+      async execute() {
+        return 'odd ran'
+      },
+      presentCall: () => {
+        throw new Error('presentCall broke')
+      },
+      presentResult: () => ({
+        card: 'generic',
+        title: 'odd',
+        big: 12345678901234567890n,
+        nan: Number.NaN,
+        surrogate: 'x\uD800',
+        ['k\uD800']: 1,
+        when: new Date(0),
+        skipped() {},
+        content: [
+          { type: 'text', text: 't' },
+          { type: 'image', attachment: { attachmentId: 'fixture-dot', mediaType: 'image/png' } },
+        ],
+      }),
+    }),
+    defineTool({
+      name: 'fixture_huge',
+      description: 'Presents a card too big to send.',
+      parameters: {},
+      output: TEXT_OUTPUT,
+      async execute() {
+        return 'huge ran'
+      },
+      presentResult: () => ({ card: 'terminal', output: 'x'.repeat(200_000) }),
+    }),
+    defineTool({
+      name: 'fixture_guarded',
+      description: 'Runs only once someone approves it.',
+      parameters: {},
+      output: TEXT_OUTPUT,
+      async execute() {
+        return 'guarded ran'
       },
     }),
     defineTool({
@@ -101,6 +162,10 @@ export function apply(ctx: any, config: Config | undefined) {
     }),
   ]
   for (const tool of tools) ctx.effect(() => ctx.tools.register(tool), `fixture: ${tool.name}`)
+  // A dsh tool policy: ask before every fixture_guarded call.
+  ctx.on('tools/pre-execute', async (exec: { name: string }, next: () => Promise<unknown>) =>
+    exec.name === 'fixture_guarded' ? { kind: 'ask', reason: 'fixture_guarded needs a yes' } : next(),
+  )
   ctx.effect(
     () =>
       ctx.systemPrompt.section({
