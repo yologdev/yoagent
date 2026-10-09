@@ -161,7 +161,12 @@ impl AgentTool for BashTool {
             }
         }
 
-        let mut cmd = Command::new("bash");
+        let mut cmd = std::process::Command::new("bash");
+        // std's `process_group` (Rust 1.64): tokio's own needs tokio 1.40,
+        // newer than the `tokio = "1"` this crate asks for.
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+        let mut cmd = Command::from(cmd);
         cmd.arg("-c").arg(command);
 
         // Keep credentials out of model-authored commands when configured.
@@ -194,8 +199,6 @@ impl AgentTool for BashTool {
         // starts its own session (`setsid`) escapes. Elsewhere this kills the
         // `bash` process only.
         cmd.kill_on_drop(true);
-        #[cfg(unix)]
-        cmd.process_group(0);
 
         let timeout = self.timeout;
         let max_bytes = self.max_output_bytes;

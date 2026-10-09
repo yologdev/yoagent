@@ -188,13 +188,13 @@ inherits = "test"
 debug = false
 opt-level = 1
 
-# wasm32 (e.g. Cloudflare Workers): randomness from the JS host, and a
-# JS-backed executor/timer in place of a Tokio runtime.
 # `BashTool` kills a command's whole process group on timeout or cancel
 # (`killpg`). Already in the tree through tokio.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# wasm32 (e.g. Cloudflare Workers): randomness from the JS host, and a
+# JS-backed executor/timer in place of a Tokio runtime.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }

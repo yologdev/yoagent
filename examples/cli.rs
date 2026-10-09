@@ -151,11 +151,22 @@ async fn main() {
         .with_skills(skills.clone())
         .with_tools(default_tools());
 
-    // Graceful Ctrl+C exit
-    tokio::spawn(async {
-        tokio::signal::ctrl_c().await.ok();
-        println!("\n{DIM}  bye 👋{RESET}\n");
-        std::process::exit(0);
+    // Ctrl+C at the prompt exits. During a run it stops the run instead
+    // (the event loop below aborts it): commands `bash` started are in their
+    // own process group, so the terminal's Ctrl+C does not reach them, and
+    // exiting here would leave them running.
+    let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    tokio::spawn({
+        let running = running.clone();
+        async move {
+            loop {
+                tokio::signal::ctrl_c().await.ok();
+                if !running.load(std::sync::atomic::Ordering::SeqCst) {
+                    println!("\n{DIM}  bye 👋{RESET}\n");
+                    std::process::exit(0);
+                }
+            }
+        }
     });
 
     print_banner();
@@ -210,8 +221,21 @@ async fn main() {
         let mut rx = agent.prompt(input).await;
         let mut session_stats = SessionStats::default();
         let mut in_text = false;
+        running.store(true, std::sync::atomic::Ordering::SeqCst);
 
-        while let Some(event) = rx.recv().await {
+        loop {
+            let event = tokio::select! {
+                event = rx.recv() => match event {
+                    Some(event) => event,
+                    None => break,
+                },
+                _ = tokio::signal::ctrl_c() => {
+                    // Cancels the run, which kills a running command's whole
+                    // process group; the run then ends as aborted.
+                    agent.abort();
+                    continue;
+                }
+            };
             match event {
                 AgentEvent::ToolExecutionStart {
                     tool_name, args, ..
@@ -309,6 +333,7 @@ async fn main() {
                 _ => {}
             }
         }
+        running.store(false, std::sync::atomic::Ordering::SeqCst);
 
         if in_text {
             println!();

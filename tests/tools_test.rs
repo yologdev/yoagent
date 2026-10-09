@@ -1114,14 +1114,25 @@ async fn bash_env_allowlist_hides_other_variables() {
 // BashTool: what a command started goes with it (#277)
 // ---------------------------------------------------------------------------
 
-/// Whether `pid` still exists (`kill -0`).
+/// Whether `pid` still runs. A killed process nobody has reaped yet (no init
+/// in a container, say) is a zombie: `kill -0` still succeeds on it, so a
+/// `Z` state counts as gone.
 #[cfg(unix)]
 fn alive(pid: &str) -> bool {
-    std::process::Command::new("kill")
+    let exists = std::process::Command::new("kill")
         .args(["-0", pid])
         .stderr(std::process::Stdio::null())
         .status()
-        .is_ok_and(|s| s.success())
+        .is_ok_and(|s| s.success());
+    let zombie = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", pid])
+        .output()
+        .is_ok_and(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .trim_start()
+                .starts_with('Z')
+        });
+    exists && !zombie
 }
 
 /// Waits until the command has written its background job's pid.
