@@ -2,7 +2,7 @@
 //! that asks the user something.
 //!
 //! - `frontend.connect(client)` — `client.receive(message)` is called with
-//!   every [`ServerMessage`], in order (the next waits for the previous
+//!   every [`ServerMessage`](crate::ServerMessage), in order (the next waits for the previous
 //!   call). Returns a disposer; the connection also ends when the plugin's
 //!   runtime does.
 //! - `frontend.send(message)` — a [`ClientMessage`] (`{type: "prompt", text}`, …).
@@ -91,7 +91,9 @@ impl HostDispatch for FrontendService {
                     Ok(Value::Undefined)
                 }))
             }
-            other => Err(invalid(format!("the frontend service has no method `{other}`"))),
+            other => Err(invalid(format!(
+                "the frontend service has no method `{other}`"
+            ))),
         }
     }
 
@@ -108,7 +110,9 @@ impl FrontendService {
             .ok_or_else(|| invalid("connect(client): missing the client"))?
             .reference()?;
         if !client.is_object() {
-            return Err(invalid("connect(client): an object with a `receive` method"));
+            return Err(invalid(
+                "connect(client): an object with a `receive` method",
+            ));
         }
         let mut connection = self.session.connect();
         let id = connection.id;
@@ -178,10 +182,7 @@ impl HostDispatch for UiService {
                 .json()?,
         )?;
         let timeout = match args.next().map(Value::json).transpose()? {
-            Some(Json::Number(ms)) => ms
-                .as_u64()
-                .map(Duration::from_millis)
-                .unwrap_or(UI_TIMEOUT),
+            Some(Json::Number(ms)) => ms.as_u64().map(Duration::from_millis).unwrap_or(UI_TIMEOUT),
             _ => UI_TIMEOUT,
         };
         let session = self.session.clone();

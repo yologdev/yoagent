@@ -29,6 +29,36 @@ const add = (className, text) => {
   scroll()
   return el
 }
+// Minimal Markdown for answers: **bold**, `code`, [text](url); everything
+// else stays text. Built as DOM nodes, never as HTML from the model.
+function markdown(text, element) {
+  element.replaceChildren()
+  const pattern = /(\*\*[^*]+\*\*|`[^`]+`|\[[^\]]+\]\(https?:\/\/[^)\s]+\))/g
+  let last = 0
+  for (const match of text.matchAll(pattern)) {
+    element.append(text.slice(last, match.index))
+    const token = match[0]
+    let node
+    if (token.startsWith('**')) {
+      node = document.createElement('strong')
+      node.textContent = token.slice(2, -2)
+    } else if (token.startsWith('`')) {
+      node = document.createElement('code')
+      node.textContent = token.slice(1, -1)
+    } else {
+      const [, label, url] = token.match(/^\[([^\]]+)\]\(([^)]+)\)$/)
+      node = document.createElement('a')
+      node.href = url
+      node.target = '_blank'
+      node.rel = 'noreferrer'
+      node.textContent = label
+    }
+    element.append(node)
+    last = match.index + token.length
+  }
+  element.append(text.slice(last))
+}
+
 const short = (value, max = 80) => {
   const text = typeof value === 'string' ? value : JSON.stringify(value)
   return text.length > max ? `${text.slice(0, max)}…` : text
@@ -77,7 +107,7 @@ function onEvent(event) {
         answer = add('answer')
       }
       answerText += event.delta.delta
-      answer.textContent = answerText
+      markdown(answerText, answer)
       scroll()
       return
     case 'messageEnd':

@@ -34,6 +34,7 @@ pub async fn serve(
     let app = Router::new()
         .route("/", get(|| async { Html(INDEX) }))
         .route("/app.js", get(|| async { javascript(APP.to_owned()) }))
+        .route("/favicon.ico", get(|| async { StatusCode::NO_CONTENT }))
         .route("/ui-plugins/{name}", get(ui_plugin))
         .route("/ws", get(socket))
         .with_state(session);
@@ -48,7 +49,11 @@ pub async fn serve(
 }
 
 fn javascript(source: String) -> Response {
-    ([(header::CONTENT_TYPE, "text/javascript; charset=utf-8")], source).into_response()
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        source,
+    )
+        .into_response()
 }
 
 async fn ui_plugin(State(session): State<Session>, Path(file): Path<String>) -> Response {

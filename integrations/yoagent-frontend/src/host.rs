@@ -2,7 +2,7 @@
 //! services, and plugin rows routed to the runtime each names.
 //!
 //! ```no_run
-//! # async fn run(root: &rutis::Ctx) -> Result<(), Box<dyn std::error::Error>> {
+//! # async fn run(root: &rutis::Ctx) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 //! use yoagent_frontend::host::{PluginHost, Row};
 //! let mut host = PluginHost::builder()
 //!     .node("pi", "plugins/pi")        // package.json + node_modules here
@@ -28,8 +28,8 @@ use rutis::{BoxFuture, Ctx, FiberState};
 pub const LOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 use rutis_bridge::runtime::LocalRuntime;
 use rutis_loader::{
-    Chain, EntryStatus, Layer, Loader, LoaderError, LoaderOptions, LoaderPlugin, Patch, Resolved, Resolver,
-    RuntimeResolver, RuntimeRowsPlugin, ServiceCatalog,
+    Chain, EntryStatus, Layer, Loader, LoaderError, LoaderOptions, LoaderPlugin, Patch, Resolved,
+    Resolver, RuntimeResolver, RuntimeRowsPlugin, ServiceCatalog,
 };
 use serde_json::{json, Value as Json};
 

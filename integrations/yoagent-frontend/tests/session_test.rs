@@ -38,7 +38,10 @@ async fn every_frontend_gets_hello_the_run_and_its_end() {
 
     for connection in [&mut a, &mut b] {
         let seen = until_run_ended(connection).await;
-        assert!(matches!(seen[0], ServerMessage::Hello { running: false, .. }));
+        assert!(matches!(
+            seen[0],
+            ServerMessage::Hello { running: false, .. }
+        ));
         assert!(matches!(&seen[1], ServerMessage::RunStarted { run: 1, prompt } if prompt == "hi"));
         let text: String = seen
             .iter()
@@ -54,11 +57,24 @@ async fn every_frontend_gets_hello_the_run_and_its_end() {
             })
             .collect();
         assert_eq!(text, "hello there");
-        assert!(matches!(seen.last(), Some(ServerMessage::RunEnded { run: 1, error: None, .. })));
+        assert!(matches!(
+            seen.last(),
+            Some(ServerMessage::RunEnded {
+                run: 1,
+                error: None,
+                ..
+            })
+        ));
     }
     session.send(ClientMessage::Quit);
-    tokio::time::timeout(Duration::from_secs(10), run).await.unwrap().unwrap();
-    assert!(matches!(a.messages.recv().await, Some(ServerMessage::Closed)));
+    tokio::time::timeout(Duration::from_secs(10), run)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        a.messages.recv().await,
+        Some(ServerMessage::Closed)
+    ));
 }
 
 /// A prompt sent while a run is in progress runs next instead of being lost.
@@ -85,7 +101,10 @@ async fn a_prompt_sent_mid_run_runs_next() {
         .iter()
         .any(|m| matches!(m, ServerMessage::RunStarted { run: 2, prompt } if prompt == "two")));
     session.send(ClientMessage::Quit);
-    tokio::time::timeout(Duration::from_secs(10), run).await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(10), run)
+        .await
+        .unwrap()
+        .unwrap();
 }
 
 /// Without `accept_quit` (a server), a frontend's Quit is ignored.
@@ -97,14 +116,20 @@ async fn quit_is_ignored_unless_accepted() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(!run.is_finished());
     drop(session);
-    tokio::time::timeout(Duration::from_secs(10), run).await.unwrap().unwrap();
+    tokio::time::timeout(Duration::from_secs(10), run)
+        .await
+        .unwrap()
+        .unwrap();
 }
 
 #[tokio::test]
 async fn questions_go_to_a_frontend_and_the_first_answer_wins() {
     let (session, _driver) = Session::new(true);
     let mut ui = session.connect();
-    assert!(matches!(ui.messages.recv().await, Some(ServerMessage::Hello { .. })));
+    assert!(matches!(
+        ui.messages.recv().await,
+        Some(ServerMessage::Hello { .. })
+    ));
     let asking = tokio::spawn({
         let session = session.clone();
         async move {
@@ -132,7 +157,9 @@ async fn questions_go_to_a_frontend_and_the_first_answer_wins() {
         value: json!(false),
     });
     assert_eq!(asking.await.unwrap(), json!(true));
-    assert!(matches!(ui.messages.recv().await, Some(ServerMessage::UiResolved { id: r }) if r == id));
+    assert!(
+        matches!(ui.messages.recv().await, Some(ServerMessage::UiResolved { id: r }) if r == id)
+    );
 }
 
 #[tokio::test]
@@ -155,7 +182,9 @@ async fn questions_without_a_frontend_or_an_answer_get_the_safe_default() {
     while let Ok(m) = ui.messages.try_recv() {
         kinds.push(m);
     }
-    assert!(kinds.iter().any(|m| matches!(m, ServerMessage::UiResolved { .. })));
+    assert!(kinds
+        .iter()
+        .any(|m| matches!(m, ServerMessage::UiResolved { .. })));
 }
 
 #[tokio::test]
@@ -175,7 +204,10 @@ async fn ui_plugins_are_announced_and_served() {
         panic!("UiPlugins")
     };
     assert_eq!(ui_plugins[0].name, "links");
-    assert!(session.ui_plugin_module("links").unwrap().contains("renderTool"));
+    assert!(session
+        .ui_plugin_module("links")
+        .unwrap()
+        .contains("renderTool"));
     session.remove_ui_plugin("links");
     assert!(session.ui_plugin_module("links").is_none());
 }

@@ -10,7 +10,11 @@ use yoagent::{AgentEvent, SessionStats};
 
 /// From a frontend to the session.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ClientMessage {
     /// Start a run with this prompt; while one runs, it is queued and runs next.
     Prompt { text: String },
@@ -31,7 +35,11 @@ pub enum ClientMessage {
 /// From the session to a frontend. Every message is delivered to every
 /// connected frontend, in order, none dropped.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum ServerMessage {
     /// The first message on a connection.
     Hello {
@@ -68,14 +76,21 @@ pub enum ServerMessage {
 /// `confirm` → `true`/`false`, `select` → the chosen option (string) or
 /// `null`, `input` → the text or `null`; `notify` needs none.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum UiRequest {
     Confirm {
         title: String,
         #[serde(default)]
         message: String,
     },
-    Select { title: String, options: Vec<String> },
+    Select {
+        title: String,
+        options: Vec<String>,
+    },
     Input {
         title: String,
         #[serde(default)]

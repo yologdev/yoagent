@@ -6,8 +6,13 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### yoagent-frontend (experimental, new, not published)
+
+- **One frontend protocol** (`integrations/yoagent-frontend`): a `Session` runs one agent for any number of frontends — a pi-tui terminal UI (a rutis plugin) and browsers over WebSocket — with commands in (prompt, steer, follow-up, abort, reset, quit), and out every event (text deltas merged), a run lifecycle that is always delivered (`runStarted` / `runEnded`), plugins' questions (`uiRequest`: confirm, select, input, notify; first answer wins, safe default without a frontend), and **UI plugins**: a rutis plugin offers the browser an ES module (`renderTool` for a tool's results, `mountPanel` for a side panel). `PluginHost` replaces the rutis setup (runtimes, loader, explicit per-row runtime routing; `load` waits until plugins run). Example `coding_agent` (terminal or `--web`), tried live in Chrome. yoagent's core and yoagent-rutis's API do not depend on it.
+
 ### yoagent-rutis
 
+- **pi dialogs reach a frontend** (optional): with a host `ui` service and `plugins/pi/host-ui.ts` loaded next to the pi adapter, pi extensions' `ctx.ui.select` / `confirm` / `input` / `editor` / `notify` reach the user (pi's RPC mode, `hasUI` true); without them, print mode as before.
 - **A coding agent from three ecosystems** (`examples/pi_tui_agent.rs`, `plugins/pi/tui-frontend.ts`): yoagent's loop and tools, a terminal UI built from pi's UI library (`@earendil-works/pi-tui`) as a rutis plugin, a pi extension's tool policies through the pi adapter, and DSH's web search through the DSH adapter, all plugins unchanged. The UI plugin renders from `on_event` and drives the loop through a host `chat` service (`prompt` / `abort` / `quit`). Interactive on macOS / Linux (the keyboard from `/dev/tty`, since the Node runtime's stdin is closed); `--demo` runs one prompt headless and prints the screen, which CI runs scripted. Two Node runtimes, with a resolver routing DSH's rows to DSH's.
 
 ## 0.25.2 (2026-10-09)

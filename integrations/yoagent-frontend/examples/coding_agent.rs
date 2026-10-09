@@ -122,15 +122,28 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
         .await?;
 
     let mut rows = vec![
-        Row::new("pi", rutis_plugins().join("pi/pi-extensions-adapter.ts").display())
-            .runtime("pi")
-            .config(json!({
-                "extensions": [here().join("plugins/pi-extensions/confirm-dangerous.ts")],
-                "cwd": cwd,
-            })),
+        Row::new(
+            "pi",
+            rutis_plugins()
+                .join("pi/pi-extensions-adapter.ts")
+                .display(),
+        )
+        .runtime("pi")
+        .config(json!({
+            "extensions": [here().join("plugins/pi-extensions/confirm-dangerous.ts")],
+            "cwd": cwd,
+        })),
         // Re-provides the host's `ui` in the pi runtime: pi's dialogs reach the frontend.
-        Row::new("pi-host-ui", rutis_plugins().join("pi/host-ui.ts").display()).runtime("pi"),
-        Row::new("search-links", here().join("plugins/search-links.ts").display()).runtime("ui"),
+        Row::new(
+            "pi-host-ui",
+            rutis_plugins().join("pi/host-ui.ts").display(),
+        )
+        .runtime("pi"),
+        Row::new(
+            "search-links",
+            here().join("plugins/search-links.ts").display(),
+        )
+        .runtime("ui"),
     ];
     if options.dsh {
         let dsh = |id: &str, name: &str| Row::new(id, name).runtime("dsh");
@@ -141,8 +154,11 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
             dsh("dsh-free-search", "dsh-free-search").config(
                 json!({ "provider": "bing", "disabledEngines": [], "bingMarket": "en-US" }),
             ),
-            Row::new("dsh", rutis_plugins().join("dsh/dsh-tools-adapter.ts").display())
-                .runtime("dsh"),
+            Row::new(
+                "dsh",
+                rutis_plugins().join("dsh/dsh-tools-adapter.ts").display(),
+            )
+            .runtime("dsh"),
         ]);
     }
     host.load(rows).await?;
@@ -163,13 +179,16 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
         }
     })
     .await
-    .map_err(|_| format!("plugins did not register their handlers: {:?}", host.status()))?;
+    .map_err(|_| {
+        format!(
+            "plugins did not register their handlers: {:?}",
+            host.status()
+        )
+    })?;
 
     let mut agent = match options.key {
-        Some(key) => {
-            Agent::from_config(ModelConfig::deepseek("deepseek-flash", "DeepSeek Flash"))
-                .with_api_key(key)
-        }
+        Some(key) => Agent::from_config(ModelConfig::deepseek("deepseek-flash", "DeepSeek Flash"))
+            .with_api_key(key),
         None => Agent::from_provider(scripted(), ModelConfig::mock()),
     }
     .with_system_prompt(format!(
@@ -192,12 +211,13 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
         None => {
             // Last, once everything else loaded: a failure prints on a normal terminal.
             let demo = options.demo.map_or(json!({}), |p| json!({ "demo": p }));
-            host.load([
-                Row::new("terminal-ui", here().join("plugins/terminal-ui.ts").display())
-                    .runtime("ui")
-                    .config(demo),
-            ])
-            .await?;
+            host.load([Row::new(
+                "terminal-ui",
+                here().join("plugins/terminal-ui.ts").display(),
+            )
+            .runtime("ui")
+            .config(demo)])
+                .await?;
             agent = driver.run(agent).await;
             drop(agent);
         }
@@ -224,4 +244,3 @@ fn scripted() -> MockProvider {
         MockResponse::Text("**Scripted** model: run with `--live` for a real one.".into()),
     ])
 }
-

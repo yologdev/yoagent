@@ -364,3 +364,47 @@ impl Coalesced {
         self.held.take()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text(delta: &str) -> AgentEvent {
+        AgentEvent::MessageUpdate {
+            message: AgentMessage::Llm(Message::user("")),
+            delta: StreamDelta::Text {
+                delta: delta.into(),
+            },
+        }
+    }
+
+    fn delta_of(event: &AgentEvent) -> &str {
+        match event {
+            AgentEvent::MessageUpdate {
+                delta: StreamDelta::Text { delta },
+                ..
+            } => delta,
+            _ => panic!("a text update"),
+        }
+    }
+
+    #[test]
+    fn consecutive_text_deltas_merge_and_other_events_flush_them_first() {
+        let mut c = Coalesced::default();
+        assert!(c.push(text("Hel")).is_empty());
+        assert!(c.push(text("lo")).is_empty());
+        let out = c.push(AgentEvent::TurnStart);
+        assert_eq!(out.len(), 2, "the merged text, then the event, in order");
+        assert_eq!(delta_of(&out[0]), "Hello");
+        assert!(matches!(out[1], AgentEvent::TurnStart));
+        assert!(c.flush().is_none());
+    }
+
+    #[test]
+    fn a_held_delta_is_flushed_on_the_tick() {
+        let mut c = Coalesced::default();
+        c.push(text("a"));
+        assert_eq!(delta_of(&c.flush().unwrap()), "a");
+        assert!(c.flush().is_none());
+    }
+}

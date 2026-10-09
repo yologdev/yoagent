@@ -15,7 +15,9 @@ use yoagent_frontend::{web, Session, UiPlugin, UiRequest};
 async fn get(addr: std::net::SocketAddr, path: &str) -> String {
     let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     stream
-        .write_all(format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").as_bytes())
+        .write_all(
+            format!("GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").as_bytes(),
+        )
         .await
         .unwrap();
     let mut response = String::new();
@@ -47,7 +49,9 @@ async fn a_browser_runs_a_prompt_and_answers_a_question_over_the_websocket() {
     assert_eq!(hello["type"], "hello");
 
     ws.send(Message::Text(
-        json!({"type": "prompt", "text": "hello"}).to_string().into(),
+        json!({"type": "prompt", "text": "hello"})
+            .to_string()
+            .into(),
     ))
     .await
     .unwrap();
@@ -60,7 +64,11 @@ async fn a_browser_runs_a_prompt_and_answers_a_question_over_the_websocket() {
             .unwrap();
         let message: Json = serde_json::from_str(frame.to_text().unwrap()).unwrap();
         if message["type"] == "event" && message["event"]["type"] == "messageUpdate" {
-            text.push_str(message["event"]["delta"]["delta"].as_str().unwrap_or_default());
+            text.push_str(
+                message["event"]["delta"]["delta"]
+                    .as_str()
+                    .unwrap_or_default(),
+            );
         }
         if message["type"] == "runEnded" {
             break;
