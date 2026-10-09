@@ -5,8 +5,7 @@
 //!
 //! By default the model is scripted (MockProvider) but the tool is real:
 //! **`platform_search` searches the web, so this needs network access.**
-//! `--live` asks DeepSeek instead (`DEEPSEEK_API_KEY`, else the key in
-//! `~/.dskey`). Either way the example checks its outcome and exits non-zero
+//! `--live` asks DeepSeek instead (`DEEPSEEK_API_KEY`). Either way the example checks its outcome and exits non-zero
 //! when the dsh tools were not offered or did not answer.
 //!
 //! Setup (once): `npm ci` in `plugins/dsh/` (Node 24+).
@@ -78,15 +77,10 @@ impl StreamProvider for Scripted {
 }
 
 fn deepseek_key() -> Result<String, BoxError> {
-    if let Ok(key) = std::env::var("DEEPSEEK_API_KEY") {
-        if !key.trim().is_empty() {
-            return Ok(key.trim().to_string());
-        }
+    match std::env::var("DEEPSEEK_API_KEY") {
+        Ok(key) if !key.trim().is_empty() => Ok(key.trim().to_string()),
+        _ => Err("--live needs DEEPSEEK_API_KEY".into()),
     }
-    let path = Path::new(&std::env::var("HOME")?).join(".dskey");
-    let key = std::fs::read_to_string(&path)
-        .map_err(|e| format!("--live needs DEEPSEEK_API_KEY or {}: {e}", path.display()))?;
-    Ok(key.split_whitespace().collect())
 }
 
 #[tokio::main]
