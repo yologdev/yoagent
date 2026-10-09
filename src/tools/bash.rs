@@ -161,6 +161,7 @@ impl AgentTool for BashTool {
             }
         }
 
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut cmd = std::process::Command::new("bash");
         // std's `process_group` (Rust 1.64): tokio's own needs tokio 1.40,
         // newer than the `tokio = "1"` this crate asks for.
