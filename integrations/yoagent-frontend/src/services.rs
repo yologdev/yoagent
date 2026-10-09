@@ -193,7 +193,7 @@ fn timeout(ms: Option<Json>) -> Result<Duration, Error> {
         Some(Json::Number(ms)) => ms
             .as_f64()
             .filter(|ms| ms.is_finite() && *ms >= 0.0)
-            .map(|ms| Duration::from_secs_f64(ms / 1000.0))
+            .and_then(|ms| Duration::try_from_secs_f64(ms / 1000.0).ok())
             .ok_or_else(|| {
                 invalid("request(request, timeoutMs?): timeoutMs is a non-negative number")
             }),
@@ -279,6 +279,10 @@ mod tests {
             Duration::from_micros(2500)
         );
         assert!(timeout(Some(json!(-1))).is_err());
+        assert!(
+            timeout(Some(json!(1e300))).is_err(),
+            "too long for a Duration"
+        );
         assert!(timeout(Some(json!("60s"))).is_err());
     }
 

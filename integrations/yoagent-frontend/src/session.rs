@@ -222,6 +222,9 @@ impl Session {
         let default = request.default_answer();
         let expects = request.expects_answer();
         let (tx, rx) = oneshot::channel();
+        // Before the `ui` lock: `connect` takes `clients` then `ui`, so
+        // taking them the other way round could deadlock.
+        let attached = self.frontends() > 0;
         let (id, key) = {
             let mut ui = self.inner.ui.lock().unwrap();
             ui.early.retain(|_, at| at.elapsed() < EARLY_WITHDRAWAL);
@@ -231,7 +234,7 @@ impl Session {
                     return default;
                 }
             }
-            if self.frontends() == 0 {
+            if !attached {
                 drop(ui);
                 tracing::info!(
                     title = request.title(),
@@ -310,6 +313,7 @@ impl Session {
     /// minute, so a withdrawal that overtakes its question still counts.
     pub fn withdraw(&self, key: &str) {
         let mut ui = self.inner.ui.lock().unwrap();
+        ui.early.retain(|_, at| at.elapsed() < EARLY_WITHDRAWAL);
         match ui.keys.remove(key) {
             // Dropping the waiter ends `ask` with the default; its guard then
             // tells the frontends.
@@ -407,8 +411,11 @@ impl Drop for Ending {
                 total_cost_usd: None,
             });
         }
+        // Under the clients lock: a frontend connecting now gets `Closed`
+        // either from `connect` or from this broadcast, never both.
+        let mut clients = self.inner.clients.lock().unwrap();
         self.inner.closed.store(true, Ordering::SeqCst);
-        self.inner.broadcast(ServerMessage::Closed);
+        clients.retain(|_, tx| tx.send(ServerMessage::Closed).is_ok());
     }
 }
 
