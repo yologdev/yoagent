@@ -161,7 +161,13 @@ impl AgentTool for BashTool {
             }
         }
 
-        let mut cmd = Command::new("bash");
+        #[cfg_attr(not(unix), allow(unused_mut))]
+        let mut cmd = std::process::Command::new("bash");
+        // std's `process_group` (Rust 1.64): tokio's own needs tokio 1.40,
+        // newer than the `tokio = "1"` this crate asks for.
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+        let mut cmd = Command::from(cmd);
         cmd.arg("-c").arg(command);
 
         // Keep credentials out of model-authored commands when configured.
@@ -187,11 +193,12 @@ impl AgentTool for BashTool {
         // Capture output
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
-        // A timeout or cancel must not leave the command running. This kills
-        // the `bash` process only: what it started — pipeline stages,
-        // commands in a `;` / `&&` list, background jobs — is not in that
-        // kill and can keep running. Run the agent in a container if that
-        // matters.
+        // A timeout or cancel must not leave the command running. On Unix
+        // `bash` leads its own process group and `GroupKill` kills the whole
+        // group: non-interactive bash has no job control, so pipeline stages,
+        // `;` / `&&` lists and background jobs stay in it. Only a process that
+        // starts its own session (`setsid`) escapes. Elsewhere this kills the
+        // `bash` process only.
         cmd.kill_on_drop(true);
 
         let timeout = self.timeout;
@@ -203,6 +210,9 @@ impl AgentTool for BashTool {
         let mut child = cmd
             .spawn()
             .map_err(|e| ToolError::Failed(format!("Failed to execute: {}", e)))?;
+        // Declared after `child`, so it is dropped first: the group is killed
+        // while `bash` is not yet reaped, and its id cannot have been reused.
+        let mut group = GroupKill::new(child.id());
         let (Some(child_out), Some(child_err)) = (child.stdout.take(), child.stderr.take()) else {
             return Err(ToolError::Failed("Failed to capture output".into()));
         };
@@ -236,6 +246,9 @@ impl AgentTool for BashTool {
                 )));
             }
             Some(Ok(status)) => {
+                // Finished on its own: what it left running in the background
+                // (a server it started, say) is the command's business.
+                group.disarm();
                 status.map_err(|e| ToolError::Failed(format!("Failed to execute: {}", e)))?
             }
         };
@@ -247,6 +260,44 @@ impl AgentTool for BashTool {
             content: vec![Content::Text { text: output }],
             details: serde_json::json!({ "exit_code": exit_code, "success": exit_code == 0 }),
         })
+    }
+}
+
+/// Kills the command's process group when dropped — on a timeout, a cancel,
+/// or the tool's future being dropped — unless the command finished first.
+struct GroupKill {
+    #[cfg(unix)]
+    pgid: Option<libc::pid_t>,
+}
+
+impl GroupKill {
+    fn new(pid: Option<u32>) -> Self {
+        #[cfg(not(unix))]
+        let _ = pid;
+        Self {
+            #[cfg(unix)]
+            pgid: pid.and_then(|p| libc::pid_t::try_from(p).ok()),
+        }
+    }
+
+    fn disarm(&mut self) {
+        #[cfg(unix)]
+        {
+            self.pgid = None;
+        }
+    }
+}
+
+impl Drop for GroupKill {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(pgid) = self.pgid {
+            // SAFETY: `killpg` takes two integers and touches no memory of
+            // ours; a failure (the group already gone) is fine to ignore.
+            unsafe {
+                libc::killpg(pgid, libc::SIGKILL);
+            }
+        }
     }
 }
 

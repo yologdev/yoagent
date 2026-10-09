@@ -1109,3 +1109,151 @@ async fn bash_env_allowlist_hides_other_variables() {
         std::env::remove_var("YOAGENT_TEST_KEEP");
     }
 }
+
+// ---------------------------------------------------------------------------
+// BashTool: what a command started goes with it (#277)
+// ---------------------------------------------------------------------------
+
+/// Whether `pid` still runs. A killed process nobody has reaped yet (no init
+/// in a container, say) is a zombie: `kill -0` still succeeds on it, so a
+/// `Z` state counts as gone.
+#[cfg(unix)]
+fn alive(pid: &str) -> bool {
+    let exists = std::process::Command::new("kill")
+        .args(["-0", pid])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    let zombie = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", pid])
+        .output()
+        .is_ok_and(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .trim_start()
+                .starts_with('Z')
+        });
+    exists && !zombie
+}
+
+/// Waits until the command has written its background job's pid.
+#[cfg(unix)]
+async fn background_pid(file: &std::path::Path) -> String {
+    for _ in 0..200 {
+        if let Ok(pid) = std::fs::read_to_string(file) {
+            if !pid.trim().is_empty() {
+                return pid.trim().to_owned();
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("the command never wrote its background pid");
+}
+
+/// A SIGKILL is delivered asynchronously and the orphan is reaped by init.
+#[cfg(unix)]
+async fn assert_gone(pid: &str) {
+    for _ in 0..200 {
+        if !alive(pid) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("background job {pid} outlived the command");
+}
+
+#[cfg(unix)]
+fn backgrounding_command(pid_file: &std::path::Path) -> serde_json::Value {
+    serde_json::json!({
+        "command": format!("sleep 30 & echo $! > {}; sleep 30 | cat", pid_file.display())
+    })
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn bash_timeout_kills_background_jobs_and_pipeline_stages() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("pid");
+    // Long enough that `bash` is up and has written the pid even when other
+    // tests load the machine; the pid is read before the timeout fires.
+    let run = tokio::spawn({
+        let args = backgrounding_command(&pid_file);
+        async move {
+            BashTool::new()
+                .with_timeout(std::time::Duration::from_secs(3))
+                .execute(args, ctx("bash"))
+                .await
+        }
+    });
+    let pid = background_pid(&pid_file).await;
+    assert!(alive(&pid));
+    assert!(run
+        .await
+        .unwrap()
+        .unwrap_err()
+        .to_string()
+        .contains("timed out"));
+    assert_gone(&pid).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn bash_cancel_kills_background_jobs() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("pid");
+    let cancel = CancellationToken::new();
+    let run = tokio::spawn({
+        let (cancel, args) = (cancel.clone(), backgrounding_command(&pid_file));
+        async move {
+            BashTool::new()
+                .execute(args, ctx_with_cancel("bash", cancel))
+                .await
+        }
+    });
+    let pid = background_pid(&pid_file).await;
+    assert!(alive(&pid));
+    cancel.cancel();
+    assert!(matches!(run.await.unwrap(), Err(ToolError::Cancelled)));
+    assert_gone(&pid).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn dropping_the_bash_call_kills_background_jobs() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("pid");
+    let run = tokio::spawn({
+        let args = backgrounding_command(&pid_file);
+        async move { BashTool::new().execute(args, ctx("bash")).await }
+    });
+    let pid = background_pid(&pid_file).await;
+    assert!(alive(&pid));
+    // The caller gives up: the call's future is dropped mid-run.
+    run.abort();
+    assert!(run.await.unwrap_err().is_cancelled());
+    assert_gone(&pid).await;
+}
+
+/// A command that finishes on its own may leave a job running on purpose
+/// (a server it started): only a timeout, cancel or drop kills the group.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_finished_command_leaves_its_detached_background_job_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("pid");
+    let result = BashTool::new()
+        .execute(
+            serde_json::json!({
+                "command": format!("sleep 30 >/dev/null 2>&1 & echo $! > {}", pid_file.display())
+            }),
+            ctx("bash"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.details["exit_code"], 0);
+    let pid = background_pid(&pid_file).await;
+    assert!(alive(&pid), "the job outlives a command that finished");
+    std::process::Command::new("kill")
+        .arg(&pid)
+        .status()
+        .unwrap();
+}
