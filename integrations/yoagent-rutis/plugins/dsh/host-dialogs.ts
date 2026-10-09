@@ -176,7 +176,7 @@ export function apply(ctx: any) {
           const title = question.header ? `${question.header}: ${question.question}` : question.question
           const described = options.filter((option) => option.description).map((option) => `${option.label}: ${option.description}`)
           const message = [question.detail, ...described].filter(Boolean).join('\n')
-          const unanswered = () => new Unanswered(`the user did not answer question "${question.id}" (dismissed, timed out, or no frontend)`)
+          const unanswered = () => new Unanswered(`the user did not answer question "${question.id}" (no choice made, dismissed, timed out, or no frontend)`)
           const typed = async (): Promise<AskUserQuestionAnswerItem> => {
             const text = await ask({ kind: 'input', title, message }, signal)
             if (typeof text !== 'string') throw unanswered()
