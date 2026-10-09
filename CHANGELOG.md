@@ -13,7 +13,6 @@ adheres to [Semantic Versioning](https://semver.org/).
 ### yoagent-rutis
 
 - **pi dialogs reach a frontend** (optional): with a host `ui` service and `plugins/pi/host-ui.ts` loaded next to the pi adapter, pi extensions' `ctx.ui.select` / `confirm` / `input` / `editor` / `notify` reach the user (pi's RPC mode, `hasUI` true); a question whose hook is cancelled is withdrawn by its key; without them, print mode as before.
-- **A coding agent from three ecosystems** (`examples/pi_tui_agent.rs`, `plugins/pi/tui-frontend.ts`): yoagent's loop and tools, a terminal UI built from pi's UI library (`@earendil-works/pi-tui`) as a rutis plugin, a pi extension's tool policies through the pi adapter, and DSH's web search through the DSH adapter, all plugins unchanged. The UI plugin renders from `on_event` and drives the loop through a host `chat` service (`prompt` / `abort` / `quit`). Interactive on macOS / Linux (the keyboard from `/dev/tty`, since the Node runtime's stdin is closed); `--demo` runs one prompt headless and prints the screen, which CI runs scripted. Two Node runtimes, with a resolver routing DSH's rows to DSH's.
 
 ## 0.25.2 (2026-10-09)
 

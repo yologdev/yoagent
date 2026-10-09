@@ -327,19 +327,12 @@ jobs:
         run: cargo run --manifest-path "$MANIFEST" --features node,python --example language_plugins
       - name: pi extensions example (scripted, the fixture extension)
         run: cargo run --manifest-path "$MANIFEST" --features node --example pi_extensions
-      - name: pi-tui coding agent example (scripted, headless)
-        shell: bash
-        timeout-minutes: 5
-        run: |
-          mkdir -p "$RUNNER_TEMP/tui-project" && cd "$RUNNER_TEMP/tui-project"
-          cargo run --manifest-path "$GITHUB_WORKSPACE/$MANIFEST" --features node --example pi_tui_agent -- --demo "list the files" \
-            | sed 's/\x1b\[[0-9;]*m//g' | tee screen.txt
-          grep -q "list_files ✓" screen.txt
 
   # EXPERIMENTAL: integrations/yoagent-frontend (not published). The session
-  # and web tests need no Node; the example runs headless with three Node
-  # runtimes (the UI's, pi's and DSH's packages) and checks that a pi
-  # extension's question reached the terminal frontend and blocked `bash`.
+  # and web tests need no Node; pi_dialog_test needs pi's packages (required
+  # here). The example runs headless with three Node runtimes (the UI's, pi's
+  # and DSH's packages) and checks that a pi extension's question reached the
+  # terminal frontend and blocked `bash`.
   frontend-experimental:
     name: yoagent-frontend (experimental)
     runs-on: ubuntu-latest

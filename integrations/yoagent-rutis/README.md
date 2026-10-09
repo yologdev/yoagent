@@ -312,7 +312,7 @@ install, so the language tests' stays small.
 ```sh
 (cd plugins/dsh && npm ci)
 cargo run --features node --example dsh_tools            # scripted model, real web search: needs network
-cargo run --features node --example dsh_tools -- --live  # DeepSeek: DEEPSEEK_API_KEY or ~/.dskey
+cargo run --features node --example dsh_tools -- --live  # DeepSeek: DEEPSEEK_API_KEY
 ```
 
 [`examples/dsh_tools.rs`](examples/dsh_tools.rs) loads `dsh-web`,
@@ -459,42 +459,6 @@ events, so under the adapter they load and do nothing (reported).
 `tests/pi_test.rs` covers the adapter offline with the fixture extensions
 (`plugins/pi/fixture-extension.ts`, `plugins/pi/fixture-extra.ts`) and small
 ones written per test.
-### A coding agent from three ecosystems
-
-[`examples/pi_tui_agent.rs`](examples/pi_tui_agent.rs) puts them together: the
-loop and the built-in tools are yoagent's, the terminal UI is built from pi's
-UI library (`@earendil-works/pi-tui`, in
-[`plugins/pi/tui-frontend.ts`](plugins/pi/tui-frontend.ts)), a pi extension
-judges tool calls through the pi adapter, and DSH's `dsh-free-search` gives
-the agent web search through the DSH adapter — every plugin unchanged. The UI
-is a plugin too: it renders the run from `on_event` and sends what the user
-types through a `chat` service the host provides (`prompt`, `abort`, `quit`),
-about 30 lines of the host's ~320.
-
-```bash
-(cd plugins/pi && npm ci) && (cd plugins/dsh && npm ci)
-cargo run --features node --example pi_tui_agent -- --live           # interactive, DeepSeek
-cargo run --features node --example pi_tui_agent -- --demo "list the files"  # headless, scripted
-```
-
-```
- yoagent · loop in Rust · UI from pi-tui · plugins via rutis
-
- › Search the web for the latest stable Rust version, read src/main.rs, then save
- the version to .env as RUST_VERSION=<version>. Tell me briefly what happened.
-   ▶ advanced_search ✓          ← DSH's web search
-   ▶ read_file ✓                ← yoagent's tool
-   ▶ write_file ✗               ← denied by the pi extension (a protected path)
- Search found stable Rust 1.99.0, and src/main.rs is a one-line stub, but writing
- .env was denied because it's a protected path — so no file was saved.
-```
-
-Limits: interactive mode is macOS / Linux only — rutis starts the Node
-runtime with stdin closed, so the UI reads the keyboard from `/dev/tty`. Two
-Node runtimes run (pi's packages and DSH's are installed separately), and a
-small resolver sends DSH's rows to DSH's. The UI is assembled from pi-tui's
-components; it is not pi's own chat screen, which pi does not export.
-
 ## Writing an ecosystem adapter
 
 An adapter makes another plugin system's plugins (DSH's, rutis-agent's,
