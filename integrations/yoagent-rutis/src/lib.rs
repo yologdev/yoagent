@@ -26,6 +26,14 @@
 //! yoagent itself knows nothing about rutis; the bridge uses only yoagent's
 //! public API.
 //!
+//! TypeScript and Python handlers (features `node`, `python`, `websocket`)
+//! can return images in tool results and write logs into the host's
+//! `tracing` output (target `yoagent_rutis::plugin`). Plugins from other
+//! agent ecosystems — DSH tool plugins, pi extensions — plug in through
+//! adapters shipped in the repository's `plugins/` directory;
+//! see the [README](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis)
+//! and its adapter contract.
+//!
 //! # Host
 //!
 //! ```no_run

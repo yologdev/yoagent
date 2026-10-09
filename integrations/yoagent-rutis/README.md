@@ -4,7 +4,7 @@ Extend [yoagent](https://crates.io/crates/yoagent) agents at runtime with
 [rutis](https://crates.io/crates/rutis) plugins — in Rust, TypeScript or
 Python — through one yoagent `Extension`.
 
-**Status:** 0.1.0, not yet on crates.io; needs yoagent's `Extension` (0.25).
+**Status:** on [crates.io](https://crates.io/crates/yoagent-rutis); needs yoagent's `Extension` (0.25). The DSH and pi adapters below cover tools, tool policies, input checks, prompt additions and images; commands, dialogs and UI belong to the app and are not mapped.
 
 rutis (a Rust port of the [Cordis](https://github.com/shigma/cordis) plugin
 kernel) loads, unloads, reloads and hot-updates plugins, and tears down
@@ -353,10 +353,11 @@ cargo run --manifest-path examples/rutis-agent-tools/Cargo.toml [-- --live]
 
 ### pi extensions (tools and tool policies)
 
-> **Experimental.** The pi and DSH adapters live here for now, and are
-> expected to move to the yo app (or their own packages) once it hosts
-> plugins: completing them needs app services — commands, dialogs,
-> sessions — that a loop library does not have. The bridge itself stays.
+> **Scope.** The adapter maps what an agent loop can honour: tools, tool
+> policies, input checks, prompt additions and images. Commands, dialogs,
+> UI and session history belong to the app hosting the agent and are not
+> mapped (reported, or refused when they would decide something). It is
+> pinned to pi 1.1.0 and tested weekly against the latest pi.
 
 [pi](https://github.com/earendil-works/pi) extensions are TypeScript
 modules written against pi's `ExtensionAPI`.

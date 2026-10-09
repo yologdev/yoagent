@@ -81,7 +81,7 @@ That bridge is how other agent ecosystems reach yoagent. DSH's tool plugins, rut
 
 Two consequences:
 
-- **The contract is the claim, not the adapters.** That three foreign ecosystems fit through one `Extension` is the evidence the contract is general. The adapters themselves follow other projects' releases and need app services (commands, dialogs, sessions) to be complete; they live in the companion crate, marked experimental, and are expected to move to the app that hosts them.
+- **The contract is the claim, not the adapters.** That three foreign ecosystems fit through one `Extension` is the evidence the contract is general. The adapters themselves follow other projects' releases, and the parts of those ecosystems that need app services (commands, dialogs, sessions) are left to the app that hosts the agent.
 - **What crosses the bridge is what every ecosystem gets:** images in tool results both ways, plugin logs in the host's `tracing`, tagged with their `run_id` so a recorder such as [GASP](concepts/gasp.md) can attribute them, and the fail-closed rules.
 
 ## 6. Correct over clever — and honest about cost and cache
