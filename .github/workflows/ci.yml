@@ -327,6 +327,12 @@ jobs:
         run: cargo run --manifest-path "$MANIFEST" --features node,python --example language_plugins
       - name: pi extensions example (scripted, the fixture extension)
         run: cargo run --manifest-path "$MANIFEST" --features node --example pi_extensions
+      - name: pi-tui coding agent example (scripted, headless)
+        run: |
+          mkdir -p "$RUNNER_TEMP/tui-project" && cd "$RUNNER_TEMP/tui-project"
+          cargo run --manifest-path "$GITHUB_WORKSPACE/$MANIFEST" --features node --example pi_tui_agent -- --demo "list the files" \
+            | sed 's/\x1b\[[0-9;]*m//g' | tee screen.txt
+          grep -q "list_files ✓" screen.txt
 
   # yoagent claims to be a tested GASP-conformant runtime — this job is the
   # test: emit an agent repo with the gasp bridge (mock provider, no network)

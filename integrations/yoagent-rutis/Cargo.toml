@@ -100,3 +100,7 @@ required-features = ["node"]
 [[example]]
 name = "pi_extensions"
 required-features = ["node"]
+
+[[example]]
+name = "pi_tui_agent"
+required-features = ["node"]

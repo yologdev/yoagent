@@ -4,6 +4,12 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### yoagent-rutis
+
+- **A coding agent from three ecosystems** (`examples/pi_tui_agent.rs`, `plugins/pi/tui-frontend.ts`): yoagent's loop and tools, a terminal UI built from pi's UI library (`@earendil-works/pi-tui`) as a rutis plugin, a pi extension's tool policies through the pi adapter, and DSH's web search through the DSH adapter, all plugins unchanged. The UI plugin renders from `on_event` and drives the loop through a host `chat` service (`prompt` / `abort` / `quit`). Interactive on macOS / Linux (the keyboard from `/dev/tty`, since the Node runtime's stdin is closed); `--demo` runs one prompt headless and prints the screen, which CI runs scripted. Two Node runtimes, with a resolver routing DSH's rows to DSH's.
+
 ## 0.25.2 (2026-10-09)
 
 Patch release. yoagent-rutis (0.1.1) and yoagent-workers (0.2.0) are unchanged. **Behaviour change on Unix** (`BashTool`, below): a running command no longer receives the terminal's Ctrl+C; hosts should cancel or drop the call on Ctrl+C.
