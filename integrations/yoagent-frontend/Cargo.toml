@@ -1,0 +1,32 @@
+[package]
+name = "yoagent-frontend"
+version = "0.0.1"
+edition = "2021"
+resolver = "3"
+description = "EXPERIMENTAL: one frontend protocol for yoagent agents — terminal and browser UIs, UI plugins, and plugin dialogs, over rutis"
+license = "MIT"
+repository = "https://github.com/yologdev/yoagent"
+rust-version = "1.86"
+# Experimental: not published, no API promise. yoagent's core and
+# yoagent-rutis's API do not depend on it.
+publish = false
+exclude = ["plugins/node_modules"]
+
+[dependencies]
+yoagent = { path = "../.." }
+yoagent-rutis = { path = "../yoagent-rutis", features = ["node"] }
+rutis = "0.6"
+rutis-bridge = { version = "0.7", default-features = false, features = ["node"] }
+rutis-loader = { version = "0.7", features = ["node"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "ws"] }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "sync", "time", "macros", "net"] }
+tokio-util = "0.7"
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
+tokio-tungstenite = "0.28"
+tempfile = "3"
