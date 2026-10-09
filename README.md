@@ -14,7 +14,7 @@
 
 **The agent loop for Rust.** Stream from any of 7 LLM protocols, run tools, loop until done.
 
-A loop library, not an agent: it powers [yoyo](https://github.com/yologdev/yoyo-evolve), a coding agent evolving its own source since March 2026, and runs from a laptop to a Cloudflare Worker.
+[A loop library, not an agent](https://yologdev.github.io/yoagent/design-philosophy.html): it powers [yoyo](https://github.com/yologdev/yoyo-evolve), a coding agent evolving its own source since March 2026, and runs from a laptop to a Cloudflare Worker.
 
 </div>
 
