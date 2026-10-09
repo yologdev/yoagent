@@ -27,6 +27,6 @@ tokio-util = "0.7"
 tracing = "0.1"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net", "signal"] }
 tokio-tungstenite = "0.28"
 tempfile = "3"

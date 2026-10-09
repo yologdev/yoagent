@@ -22,10 +22,13 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use rutis::{BoxFuture, Ctx};
+use rutis::{BoxFuture, Ctx, FiberState};
+
+/// How long [`PluginHost::load`] waits for plugins to start.
+pub const LOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 use rutis_bridge::runtime::LocalRuntime;
 use rutis_loader::{
-    Chain, Layer, Loader, LoaderError, LoaderOptions, LoaderPlugin, Patch, Resolved, Resolver,
+    Chain, EntryStatus, Layer, Loader, LoaderError, LoaderOptions, LoaderPlugin, Patch, Resolved, Resolver,
     RuntimeResolver, RuntimeRowsPlugin, ServiceCatalog,
 };
 use serde_json::{json, Value as Json};
@@ -40,6 +43,7 @@ pub struct Row {
     name: String,
     runtime: Option<String>,
     config: Json,
+    inject: Vec<String>,
 }
 
 impl Row {
@@ -49,6 +53,7 @@ impl Row {
             name: name.to_string(),
             runtime: None,
             config: json!({}),
+            inject: Vec::new(),
         }
     }
 
@@ -64,8 +69,19 @@ impl Row {
         self
     }
 
+    /// Services injected into this plugin beyond those it declares — e.g.
+    /// `ui` for the pi adapter, which looks it up without requiring it.
+    pub fn inject(mut self, services: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.inject = services.into_iter().map(Into::into).collect();
+        self
+    }
+
     fn json(&self) -> Json {
-        json!({ "id": self.id, "name": self.name, "config": self.config })
+        let mut row = json!({ "id": self.id, "name": self.name, "config": self.config });
+        if !self.inject.is_empty() {
+            row["inject"] = json!(self.inject);
+        }
+        row
     }
 }
 
@@ -143,6 +159,26 @@ impl PluginHost {
         PluginHostBuilder::default()
     }
 
+    /// Each loaded row and its state (`Active`, `Pending`, an error, …).
+    pub fn status(&self) -> Vec<(String, String)> {
+        self.rows
+            .iter()
+            .map(|row| {
+                let state = match self.loader.get(&row.id).map(|info| info.status) {
+                    Some(EntryStatus::Running(s)) => match s.error {
+                        Some(e) => format!("{:?}: {e}", s.state),
+                        None => format!("{:?}", s.state),
+                    },
+                    Some(EntryStatus::Unresolved(e)) => format!("unresolved: {e}"),
+                    Some(EntryStatus::Disabled) => "disabled".into(),
+                    Some(EntryStatus::Inactive) => "inactive".into(),
+                    None => "not loaded".into(),
+                };
+                (row.id.clone(), state)
+            })
+            .collect()
+    }
+
     /// Load more plugins, after those already loaded. Fails, naming the
     /// failures, when any plugin fails to load.
     pub async fn load(&mut self, rows: impl IntoIterator<Item = Row>) -> Result<(), BoxError> {
@@ -161,10 +197,44 @@ impl PluginHost {
             .loader
             .reconcile(vec![Layer::new("app", patches)], None)
             .await?;
-        if report.failures.is_empty() {
-            Ok(())
-        } else {
-            Err(format!("plugins failed to load: {:?}", report.failures).into())
+        if !report.failures.is_empty() {
+            return Err(format!("plugins failed to load: {:?}", report.failures).into());
+        }
+        // `reconcile` counts a row still waiting (for a runtime, or for a
+        // service it injects) as settled. A plugin that never starts — a
+        // policy among them — must not pass for loaded: wait until every row
+        // runs, and name the ones that do not.
+        let ids: Vec<String> = self.rows.iter().map(|r| r.id.clone()).collect();
+        let deadline = tokio::time::Instant::now() + LOAD_TIMEOUT;
+        loop {
+            let mut waiting = Vec::new();
+            for id in &ids {
+                match self.loader.get(id).map(|info| info.status) {
+                    Some(EntryStatus::Running(s)) if s.state == FiberState::Active => {}
+                    Some(EntryStatus::Running(s)) if s.state == FiberState::Failed => {
+                        return Err(format!("plugin `{id}` failed: {:?}", s.error).into());
+                    }
+                    Some(EntryStatus::Unresolved(e)) => {
+                        return Err(format!("plugin `{id}` cannot load: {e}").into());
+                    }
+                    other => waiting.push(format!(
+                        "{id} ({})",
+                        match other {
+                            Some(EntryStatus::Running(s)) => format!("{:?}", s.state),
+                            Some(EntryStatus::Disabled) => "disabled".into(),
+                            Some(EntryStatus::Inactive) => "inactive".into(),
+                            _ => "unknown".into(),
+                        }
+                    )),
+                }
+            }
+            if waiting.is_empty() {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(format!("plugins did not start: {}", waiting.join(", ")).into());
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
     }
 }
