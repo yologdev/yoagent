@@ -8,7 +8,7 @@
 //! (`prompt`, `abort`, `quit`).
 //!
 //! Interactive (macOS / Linux; the UI reads the keyboard from `/dev/tty`):
-//! `--live` talks to DeepSeek (`DEEPSEEK_API_KEY`, else `~/.dskey`); without it
+//! `--live` talks to DeepSeek (`DEEPSEEK_API_KEY`); without it
 //! the model is scripted. `--demo "<prompt>"` runs one prompt headless and
 //! prints the rendered screen (no terminal needed; CI runs it scripted).
 //!
@@ -97,16 +97,10 @@ impl HostDispatch for Chat {
 }
 
 fn deepseek_key() -> Result<String, BoxError> {
-    if let Ok(key) = std::env::var("DEEPSEEK_API_KEY") {
-        if !key.trim().is_empty() {
-            return Ok(key.trim().to_owned());
-        }
+    match std::env::var("DEEPSEEK_API_KEY") {
+        Ok(key) if !key.trim().is_empty() => Ok(key.trim().to_owned()),
+        _ => Err("--live needs DEEPSEEK_API_KEY".into()),
     }
-    let path = Path::new(&std::env::var("HOME")?).join(".dskey");
-    Ok(std::fs::read_to_string(&path)
-        .map_err(|e| format!("--live needs DEEPSEEK_API_KEY or {}: {e}", path.display()))?
-        .split_whitespace()
-        .collect())
 }
 
 struct Options {
