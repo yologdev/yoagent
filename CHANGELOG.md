@@ -4,7 +4,9 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.25.1 (2026-10-09)
+
+Patch release: additive only. Ships with **yoagent-rutis 0.1.1** (requires yoagent 0.25.1); yoagent-workers is unchanged (0.2.0).
 
 ### GASP
 
@@ -16,7 +18,7 @@ adheres to [Semantic Versioning](https://semver.org/).
 - **Images in tool results, across ecosystems.** TypeScript and Python handlers' `call_tool` results and `after_tool` edits take `content` blocks in yoagent's JSON shape (`{"type": "image", "data": <base64>, "mimeType"}` next to text blocks) instead of `text`, so pictures cross the bridge both ways (`after_tool` already saw `output.content`). The dsh adapter turns dsh image blocks (references into dsh's attachment store) into yoagent images through the `attachments` service when one is loaded; the rutis-agent example reads a runner's `{"content": [...]}` value as blocks (rutis-agent results are otherwise text). Rust handlers already returned full yoagent tool results. Tests: `content_blocks` unit test, TypeScript/Python round trip in `languages_test`, dsh with and without a store in `dsh_test`.
 - **Plugin logs reach the host.** The `yoagent` service gains `log(level, message, { run_id }?)`: a TypeScript/Python plugin's diagnostics go to the host's `tracing` output (target `yoagent_rutis::plugin`, with the run as a `run_id` field) instead of the runtime process's stderr. It never rejects (a rejected, uncaught call would end the plugin's runtime): any message, extra context fields ignored. In Python it is a coroutine to `await`. The dsh adapter uses it. Test: `tests/plugin_log_test.rs`.
 - **Docs: one contract, other ecosystems.** The extensions guide shows DSH and rutis-agent plugging in through `Extension` and the bridge with no core change (pi too, since #265); the bridge README states the adapter contract (map what the host honours, refuse what would decide unenforced, deny on failing policies, withhold on failing redactions, report what is ignored). CI now also runs the rutis-agent example.
-- Test fix: `dsh_test` no longer reads the abort file mid-write (empty) as the result.
+- Test fixes: `dsh_test` no longer reads the abort file mid-write (empty) as the result; `pi_test`'s refusal checks wait for the adapter to become active or fail (the loader counts a row still waiting for its Node runtime as settled, so on a slow runner a refusal could be read before it happened).
 
 ### Docs
 
