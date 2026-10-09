@@ -151,7 +151,8 @@ What that focus bought:
 - **One plug-in contract for the whole run.** An `Extension` can add tools, check input, allow,
   **modify** or deny each tool call, redact results, and check the final answer, with state
   that starts fresh each run. Install it as host policy and it governs every sub-agent too.
-  Hooks that fail, fail closed: a policy that cannot run denies, a redaction that fails withholds.
+  Hooks that guard a call fail closed: a policy that cannot run denies, an input check rejects,
+  a redaction that fails withholds.
 - **Steer a run that's already going.** Inject guidance mid-flight; it's picked up between tool
   batches without restarting the turn.
 - **History is a tree, not a list.** [`Session`](src/session.rs) forks, checkpoints, and seeks.
@@ -198,17 +199,18 @@ audit logs ([guide](https://yologdev.github.io/yoagent/concepts/extensions.html)
 
 **Plugins and other ecosystems.** [`yoagent-rutis`](integrations/yoagent-rutis/) turns
 [rutis](https://github.com/arcships/rutis) plugins — Rust, TypeScript or Python, loaded,
-reloaded and unloaded at runtime — into one `Extension`. Through small adapters it also runs
+reloaded and unloaded at runtime — into one `Extension`. Through small adapters it also runs many
 [pi](https://github.com/earendil-works/pi) extensions and DSH tool plugins unchanged, with no
 change to yoagent's core: tools, tool policies, input checks, prompt additions and images cross
-over; commands and UI stay with your app.
+over; commands and UI don't. An extension that hooks something the adapter can't enforce is
+refused, not half-run.
 
 ## Runs where agents run
 
-The same loop builds natively and for `wasm32-unknown-unknown`. In a Cloudflare Worker, measured
-on yoyo's edge spike: about **4 ms** to start and a median **~45 ms of CPU per agent run** — an
-agent spends most of a run waiting on the model, which Workers do not bill as CPU. One provider
-(`Agent::from_provider`) is about 330 KiB gzipped. HTTP MCP works over the host's `fetch`;
+The same loop builds natively and for `wasm32-unknown-unknown`. In yoyo's Cloudflare Worker we
+measured about **4 ms** to start and a median of **~45 ms of CPU per agent run** — an agent
+spends most of a run waiting on the model, which Workers do not bill as CPU. A minimal Worker
+(one provider via `Agent::from_provider`, one tool, no decision model) is about 330 KiB gzipped. HTTP MCP works over the host's `fetch`;
 [`yoagent-workers`](integrations/yoagent-workers/) turns the Workers AI binding into a decision
 model. See [WebAssembly & Cloudflare Workers](https://yologdev.github.io/yoagent/guides/wasm-workers.html).
 
@@ -245,14 +247,14 @@ Built something on yoagent? [Open a PR](CONTRIBUTING.md) and add it here — we'
 | **Sessions, skills, structured output** | Branching session trees with JSONL; AgentSkills `SKILL.md`; typed `prompt_structured::<T>()` | [Sessions](https://yologdev.github.io/yoagent/concepts/session-trees.html) · [Skills](https://yologdev.github.io/yoagent/concepts/skills.html) · [Structured outputs](https://yologdev.github.io/yoagent/concepts/structured-outputs.html) |
 | **Decision models** (`decision`) | Typed yes/no, one-of-N and score judgments in a few hundred ms (Jev, Clef, OpenAI Decisions, any logprobs server); a tool gate and an input guard | [Decision models](https://yologdev.github.io/yoagent/concepts/decision-models.html) |
 | **Cost and telemetry** | Opt-in pricing (nothing priced by default); `SessionStats` per run incl. sub-agents; `tracing` spans with tokens and cost | [Pricing](https://yologdev.github.io/yoagent/concepts/pricing.html) · [Telemetry](https://yologdev.github.io/yoagent/concepts/telemetry.html) |
-| **Recording** (`gasp`) | serde on every core type; runs recorded into a [GASP](https://github.com/yologdev/gasp) repo, plugin logs included | [Persistence](https://yologdev.github.io/yoagent/concepts/persistence.html) · [GASP](https://yologdev.github.io/yoagent/concepts/gasp.html) |
+| **Recording** (`gasp`) | serde on every core type; runs recorded into a [GASP](https://github.com/yologdev/gasp) repo, plugin logs too (opt-in) | [Persistence](https://yologdev.github.io/yoagent/concepts/persistence.html) · [GASP](https://yologdev.github.io/yoagent/concepts/gasp.html) |
 | **WebAssembly** | `--no-default-features` for `wasm32-unknown-unknown`, e.g. Cloudflare Workers | [WebAssembly & Workers](https://yologdev.github.io/yoagent/guides/wasm-workers.html) |
 
 ---
 
 ## Examples
 
-Seventeen of the 21 runnable examples in [`examples/`](examples/) are below; ten need no API key at all (eleven counting `cli` with a local model). The rest are live-provider harnesses and offline evaluation sweeps.
+Seventeen of the 22 runnable examples in [`examples/`](examples/) are below; ten need no API key at all (eleven counting `cli` with a local model). The rest are live-provider harnesses and offline evaluation sweeps.
 
 | Example | What it shows | Key needed |
 |---|---|---|
