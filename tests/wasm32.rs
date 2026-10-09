@@ -358,3 +358,123 @@ async fn an_extension_gates_and_observes_a_run_on_the_host() {
     assert_eq!(hooks.events.load(Ordering::SeqCst), events.len());
     assert_eq!(hooks.finished.load(Ordering::SeqCst), 1);
 }
+
+// ---------------------------------------------------------------------------
+// HTTP MCP over the host's fetch
+// ---------------------------------------------------------------------------
+
+/// Replaces the global `fetch` with a scripted MCP server for the length of a
+/// test. reqwest's wasm client calls the global `fetch` on every request, as a
+/// Worker's does, so the whole transport (session header, JSON bodies, the
+/// response stream) runs against it. Requests are recorded in
+/// `globalThis.__mcpRequests` as `"<METHOD> <rpc method> <session id>"`.
+struct FakeMcpServer;
+
+impl FakeMcpServer {
+    fn install() -> Self {
+        js_sys::Function::new_no_args(
+            r#"
+            globalThis.__originalFetch = globalThis.fetch;
+            globalThis.__mcpRequests = [];
+            globalThis.fetch = async (request) => {
+              // A real fetch sets `url` on its response (reqwest reads it); a
+              // constructed Response leaves it empty.
+              const reply = (body, init) =>
+                Object.defineProperty(new Response(body, init), 'url', { value: request.url });
+              const session = request.headers.get('mcp-session-id') ?? '-';
+              const text = request.method === 'POST' ? await request.text() : '';
+              const body = text ? JSON.parse(text) : {};
+              globalThis.__mcpRequests.push(`${request.method} ${body.method ?? '-'} ${session}`);
+              if (request.method === 'DELETE') return reply(null, { status: 204 });
+              if (body.id === undefined) return reply(null, { status: 202 });
+              const results = {
+                'initialize': {
+                  protocolVersion: '2024-11-05',
+                  capabilities: { tools: {} },
+                  serverInfo: { name: 'edge-fixture', version: '1' },
+                },
+                'tools/list': {
+                  tools: [{
+                    name: 'shout',
+                    description: 'Upper-cases text.',
+                    inputSchema: { type: 'object', properties: { text: { type: 'string' } } },
+                  }],
+                },
+                'tools/call': {
+                  content: [{ type: 'text', text: String(body.params?.arguments?.text ?? '').toUpperCase() }],
+                  isError: false,
+                },
+              };
+              return reply(JSON.stringify({ jsonrpc: '2.0', id: body.id, result: results[body.method] }), {
+                status: 200,
+                headers: { 'content-type': 'application/json', 'mcp-session-id': 'edge-session' },
+              });
+            };
+            "#,
+        )
+        .call0(&wasm_bindgen::JsValue::UNDEFINED)
+        .expect("install the fake fetch");
+        FakeMcpServer
+    }
+
+    fn requests(&self) -> Vec<String> {
+        let list = js_sys::Reflect::get(&js_sys::global(), &"__mcpRequests".into()).unwrap();
+        js_sys::Array::from(&list)
+            .iter()
+            .map(|v| v.as_string().unwrap())
+            .collect()
+    }
+}
+
+impl Drop for FakeMcpServer {
+    fn drop(&mut self) {
+        let _ = js_sys::Function::new_no_args("globalThis.fetch = globalThis.__originalFetch;")
+            .call0(&wasm_bindgen::JsValue::UNDEFINED);
+    }
+}
+
+/// An agent on the host connects to an HTTP MCP server, discovers its tool and
+/// calls it from the loop: handshake, session replay and the tool result all
+/// go through the host's `fetch`.
+#[wasm_bindgen_test]
+async fn an_agent_calls_an_http_mcp_tool_through_the_hosts_fetch() {
+    let server = FakeMcpServer::install();
+    let provider = MockProvider::new(vec![
+        MockResponse::ToolCalls(vec![MockToolCall {
+            name: "shout".into(),
+            arguments: serde_json::json!({"text": "hello edge"}),
+            provider_metadata: None,
+        }]),
+        MockResponse::Text("done".into()),
+    ]);
+    let mut agent = Agent::from_provider(provider, ModelConfig::mock())
+        .with_mcp_server_http("https://mcp.example.test/mcp")
+        .await
+        .expect("connect and discover over fetch");
+    let events = drain(agent.prompt("shout it").await).await;
+    agent.finish().await;
+
+    let result = events.iter().find_map(|e| match e {
+        AgentEvent::ToolExecutionEnd {
+            tool_name,
+            result,
+            is_error: false,
+            ..
+        } if tool_name == "shout" => Some(result.content.clone()),
+        _ => None,
+    });
+    assert!(
+        matches!(result.as_deref(), Some([Content::Text { text }]) if text == "HELLO EDGE"),
+        "{result:?}"
+    );
+    assert_eq!(
+        server.requests(),
+        [
+            "POST initialize -",
+            "POST notifications/initialized edge-session",
+            "POST tools/list edge-session",
+            "POST tools/call edge-session",
+        ],
+        "the handshake, then the session replayed on every later request"
+    );
+}

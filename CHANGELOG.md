@@ -4,6 +4,12 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### Tests
+
+- **HTTP MCP on wasm32.** `tests/wasm32.rs` runs an agent that connects to an HTTP MCP server, discovers its tool and calls it from the loop, through the host's `fetch` (a scripted server replaces the global `fetch`): handshake, `Mcp-Session-Id` replay and the tool result. The Workers guide notes that a stalled MCP stream has no idle read timeout of its own on wasm32, and that custom headers are not supported yet (#275).
+
 ## 0.25.1 (2026-10-09)
 
 Patch release: additive only. Ships with **yoagent-rutis 0.1.1** (requires yoagent 0.25.1); yoagent-workers is unchanged (0.2.0).
