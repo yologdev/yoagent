@@ -12,8 +12,7 @@
 //! `.env` and a `sudo` command (only echoed) through yoagent's own tools, so
 //! the policies decide,
 //! and the example prints the tools offered, the prompt note and each
-//! outcome. `--live` gives the agent to DeepSeek instead (`DEEPSEEK_API_KEY`,
-//! else the key in `~/.dskey`) with `--prompt "<text>"` (a default asks it to
+//! outcome. `--live` gives the agent to DeepSeek instead (`DEEPSEEK_API_KEY`) with `--prompt "<text>"` (a default asks it to
 //! use whatever tools it has).
 //!
 //! The project is also the process's working directory, so yoagent's own
@@ -96,15 +95,10 @@ impl StreamProvider for Scripted {
 }
 
 fn deepseek_key() -> Result<String, BoxError> {
-    if let Ok(key) = std::env::var("DEEPSEEK_API_KEY") {
-        if !key.trim().is_empty() {
-            return Ok(key.trim().to_string());
-        }
+    match std::env::var("DEEPSEEK_API_KEY") {
+        Ok(key) if !key.trim().is_empty() => Ok(key.trim().to_string()),
+        _ => Err("--live needs DEEPSEEK_API_KEY".into()),
     }
-    let path = Path::new(&std::env::var("HOME")?).join(".dskey");
-    let key = std::fs::read_to_string(&path)
-        .map_err(|e| format!("--live needs DEEPSEEK_API_KEY or {}: {e}", path.display()))?;
-    Ok(key.split_whitespace().collect())
 }
 
 #[tokio::main]

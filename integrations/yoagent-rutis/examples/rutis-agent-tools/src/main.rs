@@ -37,7 +37,7 @@
 //!    `Agent::abort()`: its runner never finishes.
 //!
 //! The model is scripted by default; `--live` asks DeepSeek instead
-//! (`DEEPSEEK_API_KEY`, else the key in `~/.dskey`). Either way the example
+//! (`DEEPSEEK_API_KEY`). Either way the example
 //! checks its outcome and exits non-zero if something is off.
 //!
 //! **Pinning caveat**: see `Cargo.toml`. rutis-agent comes from git (the
@@ -47,7 +47,6 @@
 //!
 //! Run: `cargo run --manifest-path integrations/yoagent-rutis/examples/rutis-agent-tools/Cargo.toml [-- --live]`
 
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -338,15 +337,10 @@ async fn run(agent: &mut Agent, prompt: &str) -> Result<Vec<(String, String, boo
 }
 
 fn deepseek_key() -> Result<String, BoxError> {
-    if let Ok(key) = std::env::var("DEEPSEEK_API_KEY") {
-        if !key.trim().is_empty() {
-            return Ok(key.trim().to_string());
-        }
+    match std::env::var("DEEPSEEK_API_KEY") {
+        Ok(key) if !key.trim().is_empty() => Ok(key.trim().to_string()),
+        _ => Err("--live needs DEEPSEEK_API_KEY".into()),
     }
-    let path = Path::new(&std::env::var("HOME")?).join(".dskey");
-    let key = std::fs::read_to_string(&path)
-        .map_err(|e| format!("--live needs DEEPSEEK_API_KEY or {}: {e}", path.display()))?;
-    Ok(key.split_whitespace().collect())
 }
 
 fn check(ok: bool, what: impl Into<String>) -> Result<(), BoxError> {

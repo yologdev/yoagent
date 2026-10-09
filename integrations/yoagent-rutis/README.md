@@ -312,7 +312,7 @@ install, so the language tests' stays small.
 ```sh
 (cd plugins/dsh && npm ci)
 cargo run --features node --example dsh_tools            # scripted model, real web search: needs network
-cargo run --features node --example dsh_tools -- --live  # DeepSeek: DEEPSEEK_API_KEY or ~/.dskey
+cargo run --features node --example dsh_tools -- --live  # DeepSeek: DEEPSEEK_API_KEY
 ```
 
 [`examples/dsh_tools.rs`](examples/dsh_tools.rs) loads `dsh-web`,
