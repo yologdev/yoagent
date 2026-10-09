@@ -465,6 +465,16 @@ pi's) into handlers. Their APIs rarely map one-to-one — an ecosystem has
 commands, dialogs, sessions, model routing — so this is the contract an
 adapter should follow, learned from the DSH, rutis-agent and pi adapters
 above.
+
+Why adapters at all: as of 2026-10-09, npm lists about 11.6k packages
+tagged `pi-package` and about 7.3k tagged `dsh-plugin`. Those are tagged
+packages, not plugins that work here: a pi package may be only skills,
+prompts or a theme, and an extension that needs a UI only partly runs
+through the adapter. (Counted with
+`https://registry.npmjs.org/-/v1/search?text=keywords:<tag>`; result pages
+sampled deep into each list all carried the tag, so the totals are not
+loose text matches.)
+
 The point is that **a plugin's safety policy never silently stops
 applying**. Not every rule arises for every adapter: the DSH adapter maps
 only tools and prompt sections, so it has nothing to refuse (2) or record
