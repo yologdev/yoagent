@@ -4,7 +4,9 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.25.1 (2026-10-09)
+
+Patch release: additive only. Ships with **yoagent-rutis 0.1.1** (requires yoagent 0.25.1); yoagent-workers is unchanged (0.2.0).
 
 ### GASP
 
