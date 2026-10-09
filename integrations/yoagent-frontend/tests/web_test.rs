@@ -94,7 +94,9 @@ async fn a_browser_runs_a_prompt_and_answers_a_question_over_the_websocket() {
                 .ask(
                     UiRequest::Select {
                         title: "Which?".into(),
+                        message: String::new(),
                         options: vec!["a".into(), "b".into()],
+                        multiple: false,
                     },
                     Duration::from_secs(10),
                 )

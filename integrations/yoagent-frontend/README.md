@@ -26,7 +26,7 @@ JSON, tagged by `type`, camelCase — the same over a rutis call and a WebSocket
 | `abort` | stop the run in progress |
 | `reset` | stop any run, drop queued prompts, forget the conversation |
 | `quit` | end the session (a host may ignore it; the example's browser mode does) |
-| `uiResponse {id, value}` | the answer to a `uiRequest` — the first one that fits wins (`confirm`: a boolean; `select`: one of the options or `null`; `input`: a string or `null`) |
+| `uiResponse {id, value}` | the answer to a `uiRequest` — the first one that fits wins (`confirm`: a boolean; `select`: one of the options or `null`, with `multiple` a list of distinct options; `input`: a string or `null`) |
 
 | To every frontend, in order, none dropped | |
 |---|---|
@@ -58,7 +58,9 @@ overtakes its own question still counts.
   `receive` that throws disconnects that frontend), `frontend.send(message)`
   (rejects once the session ended), `frontend.addUiPlugin(info, module)`
   (its disposer removes that offer only), `ui.request(request, timeoutMs?)`
-  (a `key` field makes it withdrawable) and `ui.withdraw(key)`.
+  (a `key` field makes it withdrawable), `ui.withdraw(key)` and
+  `ui.frontends()` (how many are attached, for an asker with a fallback of
+  its own).
 - **`web::serve`** — the browser frontend: the page, `/ws`, and
   `/ui-plugins/<name>.js`; serving stops when the returned `Served` is
   stopped or dropped. **`/ws` needs the random token** in the URL it
@@ -89,6 +91,15 @@ trusted code:** a module runs in the page with its privileges — it can send
 any protocol message, answers to questions included. Load only plugins you
 would let drive the agent.
 
+## Tool cards
+
+A tool result whose `details` carries `view = {call?, result?}` is drawn as
+a card in the browser, unless a UI plugin draws that tool: the vocabulary is
+DSH's (`generic`, `terminal`, `diff`, `search`, `read`, `web`; see
+`@deepseek-ai/dsh-tools/presentation`), so DSH tools that present themselves
+show up right, and any other tool can use it. The tool line takes the
+view's title, in the terminal UI too. Links in a card are http(s) only.
+
 ## pi dialogs
 
 pi extensions' `ctx.ui.select`, `confirm`, `input`, `editor` and `notify` reach the
@@ -100,6 +111,17 @@ and the adapter cannot require one). The adapter is then in pi's RPC mode
 asked from a tool policy waits as long as the policy hook may run:
 yoagent-rutis's default is 60 s, so the example raises it
 (`with_policy_timeout`) to the question timeout.
+
+## DSH dialogs
+
+An approval a DSH tool policy asks for, and DSH's `ask_user_question`, reach
+the user when
+[`yoagent-rutis/plugins/dsh/host-dialogs.ts`](../yoagent-rutis/plugins/dsh/host-dialogs.ts)
+is loaded in the DSH runtime (with `@deepseek-ai/dsh-user-questions` and
+`@deepseek-ai/dsh-tool-ask-user` for the tool). An approval is a `confirm`;
+a question is a `select` (plus "Other" for typed text), a `select` with
+`multiple`, or an `input`. Without a frontend attached, DSH answers as on
+its own (an `ask` is denied, the tool finds no answerer).
 
 ## Example
 
@@ -113,7 +135,7 @@ cargo run --example coding_agent -- --demo "clean the build"   # headless (CI)
 
 The agent: yoagent's tools, a pi extension asking before dangerous commands
 (`plugins/pi-extensions/confirm-dangerous.ts`), DSH's web search, and the
-`search-links` UI plugin. Tried live with DeepSeek in Chrome: DSH search,
+`search-links` UI plugin. DSH's `ask_user_question` is loaded too. Tried live with DeepSeek in Chrome: DSH search,
 results rendered as links by the UI plugin, pi's question answered in the page.
 
 Logs (`RUST_LOG`) go to stderr with `--web` / `--demo`, else to
@@ -134,6 +156,8 @@ node --test web/lib.test.js                           # the page's Markdown, que
 - A TypeScript plugin reads as running before its async start-up finishes:
   wait for the handlers you depend on (the example does).
 - pi's dialogs that cross: `select`, `confirm`, `input`, `editor` (an input
-  with a prefill) and `notify`. pi's TUI-only UI (custom components, widgets) does not cross; DSH's web
-  client UI plugins need a shim of DSH's client APIs (not built).
+  with a prefill) and `notify`. pi's TUI-only UI (custom components, widgets) does not cross. DSH's
+  React web client (its `dsh-client-ui-*` plugins) runs only on DSH's own
+  Host; what crosses from DSH is its approvals, `ask_user_question` and tool
+  cards.
 - Three Node runtimes in the example (the UI's, pi's and DSH's packages).

@@ -12,7 +12,9 @@
     "@deepseek-ai/cordis": "4.0.4",
     "@deepseek-ai/dsh-settings": "0.2.0-rc.2",
     "@deepseek-ai/dsh-system-prompt": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-tool-ask-user": "0.2.0-rc.2",
     "@deepseek-ai/dsh-tools": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-user-questions": "0.2.0-rc.2",
     "@deepseek-ai/dsh-web": "0.2.0-rc.2",
     "dsh-free-search": "0.8.1"
   }

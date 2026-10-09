@@ -62,6 +62,12 @@ class MemoryTerminal implements Terminal {
   setProgramStatus() {}
 }
 
+/** The title a tool's view (`details.view = {call?, result?}`) gives its call. */
+const viewTitle = (details: any): string | undefined => {
+  const title = details?.view?.result?.title ?? details?.view?.call?.title
+  return typeof title === 'string' && title ? short(title, 60) : undefined
+}
+
 const short = (value: unknown, max = 70) => {
   const text = typeof value === 'string' ? value : JSON.stringify(value)
   return text.length > max ? `${text.slice(0, max)}…` : text
@@ -127,7 +133,15 @@ export default definePlugin<{ demo?: string }>({
         prefilled = r.value
       }
       status.setText(
-        yellow(r.kind === 'confirm' ? 'answer y or n' : r.kind === 'select' ? 'answer with a number' : 'type your answer'),
+        yellow(
+          r.kind === 'confirm'
+            ? 'answer y or n'
+            : r.kind === 'select'
+              ? r.multiple
+                ? 'answer with numbers, e.g. 1,3 (empty for none)'
+                : 'answer with a number'
+              : 'type your answer',
+        ),
       )
     }
     const askUser = (id: number, r: Message) => {
@@ -150,7 +164,15 @@ export default definePlugin<{ demo?: string }>({
       const { id, request } = first
       let value: unknown = null
       if (request.kind === 'confirm') value = /^(y|yes)$/i.test(text.trim())
-      else if (request.kind === 'select') {
+      else if (request.kind === 'select' && request.multiple) {
+        const picked = text
+          .split(/[\s,]+/)
+          .filter(Boolean)
+          .map(Number)
+          .filter((n) => Number.isInteger(n) && n >= 1 && n <= request.options.length)
+          .map((n) => request.options[n - 1])
+        value = [...new Set(picked)]
+      } else if (request.kind === 'select') {
         const n = Number(text.trim())
         value = Number.isInteger(n) && n >= 1 && n <= request.options.length ? request.options[n - 1] : null
       } else value = text
@@ -198,7 +220,10 @@ export default definePlugin<{ demo?: string }>({
           return
         }
         case 'toolExecutionEnd':
-          tools.get(e.toolCallId)?.setText(`${e.isError ? red('  ▶ ') : green('  ▶ ')}${e.toolName} ${e.isError ? red('✗') : green('✓')}`)
+          // A tool's view (`details.view`) names the call better than its tool name.
+          tools
+            .get(e.toolCallId)
+            ?.setText(`${e.isError ? red('  ▶ ') : green('  ▶ ')}${viewTitle(e.result?.details) ?? e.toolName} ${e.isError ? red('✗') : green('✓')}`)
           tools.delete(e.toolCallId)
           return
         case 'providerRetry':

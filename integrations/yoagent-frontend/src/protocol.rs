@@ -154,11 +154,23 @@ pub enum UiRequest {
         #[serde(default)]
         message: String,
     },
-    /// Answer: one of `options`, or `null` (no choice).
-    Select { title: String, options: Vec<String> },
+    /// Answer: one of `options`, or `null` (no choice). With `multiple`, a
+    /// list of them (each at most once, possibly empty), or `null`.
+    Select {
+        title: String,
+        /// Text under the title.
+        #[serde(default)]
+        message: String,
+        options: Vec<String>,
+        #[serde(default)]
+        multiple: bool,
+    },
     /// Answer: a string, or `null` (no text).
     Input {
         title: String,
+        /// Text under the title.
+        #[serde(default)]
+        message: String,
         #[serde(default)]
         placeholder: String,
         /// Text the field starts with (an editor's prefill).
@@ -199,13 +211,36 @@ impl UiRequest {
     }
 
     /// Whether `answer` fits this question: a boolean for `confirm`, one of
-    /// the options or `null` for `select`, a string or `null` for `input`.
-    /// (The string `"false"` is not a `confirm` answer.)
+    /// the options or `null` for `select` (with `multiple`, a list of
+    /// distinct options), a string or `null` for `input`. (The string
+    /// `"false"` is not a `confirm` answer.)
     pub fn accepts(&self, answer: &Json) -> bool {
         match (self, answer) {
             (UiRequest::Confirm { .. }, Json::Bool(_)) => true,
             (UiRequest::Select { .. } | UiRequest::Input { .. }, Json::Null) => true,
-            (UiRequest::Select { options, .. }, Json::String(choice)) => options.contains(choice),
+            (
+                UiRequest::Select {
+                    options,
+                    multiple: false,
+                    ..
+                },
+                Json::String(choice),
+            ) => options.contains(choice),
+            (
+                UiRequest::Select {
+                    options,
+                    multiple: true,
+                    ..
+                },
+                Json::Array(picked),
+            ) => {
+                let mut seen = std::collections::HashSet::new();
+                picked.iter().all(|choice| {
+                    choice
+                        .as_str()
+                        .is_some_and(|c| options.iter().any(|o| o == c) && seen.insert(c))
+                })
+            }
             (UiRequest::Input { .. }, Json::String(_)) => true,
             _ => false,
         }
@@ -230,4 +265,31 @@ pub struct UiPlugin {
     /// version changed.
     #[serde(default, skip_deserializing)]
     pub version: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn answers_must_fit_their_question() {
+        let one: UiRequest =
+            serde_json::from_value(json!({"kind": "select", "title": "t", "options": ["a", "b"]}))
+                .unwrap();
+        assert!(one.accepts(&json!("a")) && one.accepts(&json!(null)));
+        assert!(!one.accepts(&json!("c")) && !one.accepts(&json!(["a"])));
+        let many: UiRequest = serde_json::from_value(
+            json!({"kind": "select", "title": "t", "options": ["a", "b"], "multiple": true}),
+        )
+        .unwrap();
+        assert!(many.accepts(&json!(["b", "a"])) && many.accepts(&json!([])));
+        assert!(many.accepts(&json!(null)));
+        assert!(!many.accepts(&json!("a")), "a list, not one choice");
+        assert!(!many.accepts(&json!(["a", "a"])), "each at most once");
+        assert!(!many.accepts(&json!(["a", "z"])) && !many.accepts(&json!([1])));
+        let confirm: UiRequest =
+            serde_json::from_value(json!({"kind": "confirm", "title": "t"})).unwrap();
+        assert!(confirm.accepts(&json!(true)) && !confirm.accepts(&json!("false")));
+    }
 }

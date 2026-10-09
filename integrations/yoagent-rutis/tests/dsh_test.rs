@@ -11,21 +11,23 @@
 
 mod common;
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::*;
 use rutis::Ctx;
 use rutis_bridge::runtime::LocalRuntime;
+use rutis_bridge::session::{host_key, HostDispatch, Reply, Value as BridgeValue};
 use rutis_loader::{
     Chain, Layer, Loader, LoaderOptions, LoaderPlugin, Patch, RuntimeResolver, RuntimeRowsPlugin,
     ServiceCatalog,
 };
 use serde_json::{json, Value};
 use yoagent::provider::mock::{MockResponse, MockToolCall};
-use yoagent::{AgentMessage, Content, Message};
+use yoagent::{AgentEvent, AgentMessage, Content, Message};
 use yoagent_rutis::RutisBridge;
 
 fn dsh_dir() -> PathBuf {
@@ -77,11 +79,45 @@ struct Host {
     loader: Loader,
 }
 
-async fn host(runtime: &Path) -> Host {
+/// A host `ui` service (what yoagent-frontend provides) that answers from a
+/// script, in order, and records what it was asked.
+#[derive(Default)]
+struct ScriptedUi {
+    answers: Mutex<VecDeque<Value>>,
+    asked: Mutex<Vec<Value>>,
+    /// What `frontends()` reports.
+    frontends: usize,
+}
+
+impl HostDispatch for ScriptedUi {
+    fn invoke(&self, method: &str, args: BridgeValue) -> Reply {
+        match method {
+            "request" => {
+                let request = args.list()?.into_iter().next().unwrap().json()?;
+                self.asked.lock().unwrap().push(request);
+                let answer = self.answers.lock().unwrap().pop_front();
+                Ok(BridgeValue::Data(answer.unwrap_or(Value::Null)))
+            }
+            "frontends" => Ok(BridgeValue::Data(json!(self.frontends))),
+            _ => Ok(BridgeValue::Undefined),
+        }
+    }
+
+    fn methods(&self) -> Option<Value> {
+        Some(json!({ "request": "async", "withdraw": "async", "frontends": "sync" }))
+    }
+}
+
+async fn host(runtime: &Path, ui: Option<Arc<ScriptedUi>>) -> Host {
     let root = Ctx::root().unwrap();
     let bridge = RutisBridge::install(&root).unwrap();
     let mut catalog = ServiceCatalog::new();
     catalog.register_shared("yoagent");
+    if let Some(ui) = ui {
+        catalog.register_shared("ui");
+        root.provide_as::<dyn HostDispatch>(host_key("ui"), ui)
+            .unwrap();
+    }
     let node = LocalRuntime::node(runtime, dsh_dir().join("package.json"));
     let resolver = Arc::new(RuntimeResolver::node(node.handle()).with_catalog(&catalog));
     root.plugin(node);
@@ -163,7 +199,7 @@ async fn dsh_tools_reach_a_yoagent_agent_through_the_adapter() {
     };
     let scratch = tempfile::tempdir().unwrap();
     let abort_file = scratch.path().join("slow.txt");
-    let host = host(&runtime).await;
+    let host = host(&runtime, None).await;
     host.load(json!([
         { "id": "system-prompt", "name": "@deepseek-ai/dsh-system-prompt" },
         { "id": "tools", "name": "@deepseek-ai/dsh-tools" },
@@ -247,7 +283,7 @@ async fn dsh_images_arrive_as_images_when_an_attachment_store_is_loaded() {
         return;
     };
     for with_store in [true, false] {
-        let host = host(&runtime).await;
+        let host = host(&runtime, None).await;
         let mut rows = vec![
             json!({ "id": "system-prompt", "name": "@deepseek-ai/dsh-system-prompt" }),
             json!({ "id": "tools", "name": "@deepseek-ai/dsh-tools" }),
@@ -298,6 +334,167 @@ async fn dsh_images_arrive_as_images_when_an_attachment_store_is_loaded() {
             assert!(
                 matches!(&content[1], Content::Text { text } if text.contains("not available")),
                 "{content:?}"
+            );
+        }
+        host.root.shutdown().await.unwrap();
+    }
+}
+
+fn tool_ends(events: &[AgentEvent]) -> Vec<(String, bool, Value)> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::ToolExecutionEnd {
+                tool_name,
+                is_error,
+                result,
+                ..
+            } => Some((tool_name.clone(), *is_error, result.details.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// With a host `ui` and `host-dialogs.ts`, dsh asks the user: an approval its
+/// policy requires, and `ask_user_question`. A tool's presenters reach the
+/// result as `details.view`.
+#[tokio::test(flavor = "multi_thread")]
+async fn dsh_asks_the_user_through_a_host_ui_and_presents_its_calls() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let ui = Arc::new(ScriptedUi {
+        frontends: 1,
+        ..ScriptedUi::default()
+    });
+    ui.answers.lock().unwrap().extend([
+        json!(true),
+        json!(false),
+        json!("blue"),
+        json!(["b", "c"]),
+        json!("Ada"),
+    ]);
+    let host = host(&runtime, Some(ui.clone())).await;
+    host.load(json!([
+        { "id": "system-prompt", "name": "@deepseek-ai/dsh-system-prompt" },
+        { "id": "tools", "name": "@deepseek-ai/dsh-tools" },
+        { "id": "questions", "name": "@deepseek-ai/dsh-user-questions" },
+        { "id": "ask-user", "name": "@deepseek-ai/dsh-tool-ask-user" },
+        { "id": "fixture", "name": dsh_dir().join("fixture-tools.ts") },
+        { "id": "adapter", "name": dsh_dir().join("dsh-tools-adapter.ts") },
+        { "id": "host-dialogs", "name": dsh_dir().join("host-dialogs.ts") },
+    ]))
+    .await;
+
+    let questions = json!({ "questions": [
+        { "id": "colour", "question": "Which colour?", "options": [{ "label": "red" }, { "label": "blue", "description": "the sky" }] },
+        { "id": "letters", "question": "Which letters?", "multi_select": true, "options": [{ "label": "a" }, { "label": "b" }, { "label": "c" }] },
+        { "id": "name", "header": "About you", "question": "Your name?" },
+    ]});
+    let (agent, _) = agent(vec![
+        call("fixture_guarded", json!({})),
+        call("fixture_guarded", json!({})),
+        call("ask_user_question", questions),
+        call("fixture_echo", json!({ "text": "hi" })),
+        text("done"),
+    ]);
+    let mut agent = agent.with_extension(host.bridge.extension());
+    let (events, results) = tokio::time::timeout(Duration::from_secs(60), run(&mut agent, "go"))
+        .await
+        .expect("the run finishes");
+
+    // The policy's `ask` reached the user: yes ran the tool, no denied it.
+    assert_eq!(
+        results[0],
+        ("fixture_guarded".into(), "guarded ran".into(), false),
+        "{results:?}"
+    );
+    let (_, text, is_error) = &results[1];
+    assert!(*is_error && text.contains("did not allow"), "{results:?}");
+    let asked = ui.asked.lock().unwrap().clone();
+    assert_eq!(asked[0]["kind"], "confirm", "{asked:?}");
+    assert!(
+        asked[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("fixture_guarded needs a yes"),
+        "{asked:?}"
+    );
+    assert!(
+        asked[0]["key"].as_str().unwrap().starts_with("dsh-"),
+        "withdrawable"
+    );
+
+    // ask_user_question: a select (with "Other"), a multiple select, an input.
+    assert_eq!(asked[2]["kind"], "select");
+    assert_eq!(
+        asked[2]["options"],
+        json!(["red", "blue", "Other (type an answer)"])
+    );
+    assert!(asked[2]["message"]
+        .as_str()
+        .unwrap()
+        .contains("blue: the sky"));
+    assert_eq!(asked[3]["multiple"], true);
+    assert_eq!(asked[4]["kind"], "input");
+    assert_eq!(asked[4]["title"], "About you: Your name?");
+    let (name, text, is_error) = &results[2];
+    assert_eq!(name, "ask_user_question");
+    let answers: Value = serde_json::from_str(text).expect("the answers as JSON");
+    assert!(!is_error, "{text}");
+    assert_eq!(
+        answers["answers"],
+        json!([
+            { "id": "colour", "selected": ["blue"] },
+            { "id": "letters", "selected": ["b", "c"] },
+            { "id": "name", "selected": [], "custom": "Ada" },
+        ])
+    );
+
+    // The echo's own presenters, as details.view.
+    let ends = tool_ends(&events);
+    let (_, _, details) = ends.iter().find(|(n, _, _)| n == "fixture_echo").unwrap();
+    assert_eq!(
+        details["view"],
+        json!({
+            "call": { "card": "terminal", "title": "echo hi", "description": "Echo a text back" },
+            "result": { "card": "terminal", "output": "echo: hi", "exitCode": 0 },
+        })
+    );
+    host.root.shutdown().await.unwrap();
+}
+
+/// Without a host `ui`, or with one but no frontend attached, dsh stays as
+/// it is on its own: an `ask` is denied, and nobody is asked.
+#[tokio::test(flavor = "multi_thread")]
+async fn without_a_frontend_a_dsh_ask_is_denied() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    for ui in [None, Some(Arc::new(ScriptedUi::default()))] {
+        let host = host(&runtime, ui.clone()).await;
+        let mut rows = vec![
+            json!({ "id": "system-prompt", "name": "@deepseek-ai/dsh-system-prompt" }),
+            json!({ "id": "tools", "name": "@deepseek-ai/dsh-tools" }),
+            json!({ "id": "fixture", "name": dsh_dir().join("fixture-tools.ts") }),
+            json!({ "id": "adapter", "name": dsh_dir().join("dsh-tools-adapter.ts") }),
+        ];
+        if ui.is_some() {
+            rows.push(json!({ "id": "host-dialogs", "name": dsh_dir().join("host-dialogs.ts") }));
+        }
+        host.load(Value::Array(rows)).await;
+        let (agent, _) = agent(vec![call("fixture_guarded", json!({})), text("done")]);
+        let mut agent = agent.with_extension(host.bridge.extension());
+        let (_, results) = run(&mut agent, "go").await;
+        let (_, text, is_error) = &results[0];
+        assert!(
+            *is_error && text.contains("fixture_guarded needs a yes"),
+            "{results:?}"
+        );
+        if let Some(ui) = ui {
+            assert!(
+                ui.asked.lock().unwrap().is_empty(),
+                "no frontend: not asked"
             );
         }
         host.root.shutdown().await.unwrap();

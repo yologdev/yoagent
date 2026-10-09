@@ -6,8 +6,9 @@
 //
 // `renderTool` draws a tool's result under its line (for the tools the plugin
 // listed); `mountPanel` gets a side panel and a way to send protocol messages.
+// A tool no plugin draws, whose result carries `details.view`, gets a card.
 
-import { markdownParts, Questions, runEndLine } from './lib.js'
+import { diffRows, markdownParts, Questions, runEndLine, safeUrl, toolView, viewTitle } from './lib.js'
 
 const log = document.getElementById('log')
 const panels = document.getElementById('panels')
@@ -96,21 +97,135 @@ async function loadPlugins(list) {
   }
 }
 
+// Lines a card shows before it says how many more there are.
+const CARD_LINES = 200
+
+const el = (tag, className, text) => {
+  const node = document.createElement(tag)
+  if (className) node.className = className
+  if (text !== undefined) node.textContent = text
+  return node
+}
+
+// A <pre> of rows, each a [text, className?], cut at CARD_LINES.
+function rows(list) {
+  const pre = el('pre')
+  for (const [text, className] of list.slice(0, CARD_LINES)) pre.append(el('span', className, `${text}\n`))
+  if (list.length > CARD_LINES) pre.append(el('span', 'more', `… ${list.length - CARD_LINES} more lines`))
+  return pre
+}
+
+const texts = (content) => (Array.isArray(content) ? content.filter((b) => b?.type === 'text').map((b) => String(b.text ?? '')).join('\n') : '')
+
+function link(url, label) {
+  const href = safeUrl(url)
+  if (!href) return el('span', '', String(label ?? url ?? ''))
+  const a = el('a', '', String(label || href))
+  a.href = href
+  a.target = '_blank'
+  a.rel = 'noreferrer'
+  return a
+}
+
+// The card for a tool's view: what its result shows, else its call.
+function card(view) {
+  const { call, result } = view
+  const shown = result ?? call
+  const box = el('div', `card ${shown.card}`)
+  const note = (text) => box.append(el('div', 'note', text))
+  switch (shown.card) {
+    case 'terminal': {
+      const head = el('div', 'head', `$ ${call?.title ?? result?.title ?? ''}`)
+      if (call?.cwd) head.append(el('span', 'note', `  in ${call.cwd}`))
+      box.append(head)
+      if (call?.description) note(call.description)
+      if (result?.output) box.append(rows(String(result.output).replace(/\n$/, '').split('\n').map((t) => [t])))
+      if (result?.exitCode !== undefined) note(`exit ${result.exitCode}`)
+      else if (result?.signal) note(`killed by ${result.signal}`)
+      break
+    }
+    case 'diff':
+      for (const diff of shown.diffs ?? []) {
+        box.append(el('div', 'head', diff.oldText == null ? `${diff.path} (new)` : diff.path))
+        box.append(rows(diffRows(diff.oldText, diff.newText).map((r) => [`${r.op} ${r.text}`, r.op === '+' ? 'add' : r.op === '-' ? 'del' : ''])))
+      }
+      break
+    case 'search':
+      if (shown.shape === 'paths') box.append(rows((shown.paths ?? []).map((p) => [p])))
+      else
+        for (const file of shown.files ?? []) {
+          box.append(el('div', 'head', file.path))
+          box.append(rows((file.matches ?? []).map((m) => [`${m.lineNumber}: ${m.line}`])))
+        }
+      if (shown.truncated) note(`showing part of ${shown.total} results`)
+      break
+    case 'read':
+      box.append(el('div', 'head', shown.path))
+      box.append(rows((shown.lines ?? []).map((l) => [`${String(l.number).padStart(5)}  ${l.text}`])))
+      if (shown.totalLines !== undefined) note(`${(shown.lines ?? []).length} of ${shown.totalLines} lines`)
+      break
+    case 'web':
+      if (shown.kind === 'fetch') {
+        const head = el('div', 'head')
+        head.append(link(shown.url), ` · HTTP ${shown.statusCode}`)
+        box.append(head)
+      } else {
+        if (shown.answer) box.append(el('p', '', shown.answer))
+        const list = el('ol')
+        for (const source of (shown.sources ?? []).slice(0, 20)) {
+          const item = el('li')
+          item.append(link(source.url, source.title || source.url))
+          if (source.snippet) item.append(el('div', 'note', source.snippet))
+          list.append(item)
+        }
+        box.append(list)
+      }
+      if (shown.truncated) note('cut to the result limit')
+      break
+    default: {
+      const text = texts(result?.content) || texts(call?.content)
+      if (!text) return undefined
+      box.append(rows(text.split('\n').map((t) => [t])))
+    }
+  }
+  return box
+}
+
+// A tool's view, under its line; the line takes the view's title.
+function renderView(event, line) {
+  const view = toolView(event.result?.details)
+  if (!view) return
+  const title = viewTitle(view)
+  if (title) {
+    line.title = `${event.toolName} ${short(tools.get(event.toolCallId)?.args, 400)}`
+    line.firstChild.textContent = `▶ ${title}`
+  }
+  try {
+    const box = card(view)
+    if (box) line.after(box)
+  } catch (error) {
+    console.warn('a tool card could not be drawn', error)
+  }
+}
+
+// UI plugins that draw this tool draw it; otherwise its own view, if any.
 function renderTool(event, line) {
+  let drawn = false
   for (const { info, module } of plugins.values()) {
     if (!info.tools.includes(event.toolName) || !module.renderTool) continue
-    const el = document.createElement('div')
-    el.className = 'rendered'
-    line.after(el)
+    drawn = true
+    const box = el('div', 'rendered')
+    line.after(box)
     try {
       module.renderTool(
         { toolName: event.toolName, args: tools.get(event.toolCallId)?.args, result: event.result, isError: event.isError },
-        el,
+        box,
       )
     } catch (error) {
-      el.textContent = `(${info.name} could not render this: ${error})`
+      box.textContent = `(${info.name} could not render this: ${error})`
     }
   }
+  if (!drawn) renderView(event, line)
 }
 
 function onEvent(event) {
@@ -130,7 +245,7 @@ function onEvent(event) {
       return
     case 'toolExecutionStart': {
       const line = add('tool')
-      line.textContent = `▶ ${event.toolName} ${short(event.args)}`
+      line.append(document.createTextNode(`▶ ${event.toolName} ${short(event.args)}`))
       tools.set(event.toolCallId, { line, args: event.args })
       return
     }
@@ -202,6 +317,17 @@ function showNextQuestion() {
   if (request.kind === 'confirm') {
     button('No', false)
     button('Yes', true, true).autofocus = true
+  } else if (request.kind === 'select' && request.multiple) {
+    const boxes = request.options.map((option) => {
+      const label = el('label', 'choice')
+      const box = el('input')
+      box.type = 'checkbox'
+      label.append(box, ` ${option}`)
+      dialog.append(label)
+      return [option, box]
+    })
+    button('Cancel', null)
+    button('OK', () => boxes.filter(([, box]) => box.checked).map(([option]) => option), true)
   } else if (request.kind === 'select') {
     button('Cancel', null)
     for (const option of request.options) button(option, option, true)

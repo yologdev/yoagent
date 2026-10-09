@@ -446,7 +446,9 @@ async fn questions_go_to_a_frontend_and_the_first_fitting_answer_wins() {
         &session,
         UiRequest::Select {
             title: "Which?".into(),
+            message: String::new(),
             options: vec!["a".into(), "b".into()],
+            multiple: false,
         },
         WAIT,
         None,

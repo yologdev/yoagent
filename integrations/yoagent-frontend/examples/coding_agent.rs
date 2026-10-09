@@ -1,7 +1,8 @@
 //! EXPERIMENTAL. A coding agent with a terminal or a browser frontend, on
 //! the yoagent-frontend layer: yoagent's loop and tools, a pi extension that
 //! asks before dangerous commands (its `ctx.ui.select` reaches the frontend),
-//! DSH's web search, and a UI plugin that renders search results as links in
+//! DSH's web search and `ask_user_question` (its questions and approvals reach
+//! the frontend too), and a UI plugin that renders search results as links in
 //! the browser. The pi extension and DSH's packages are used unchanged; the
 //! frontends are plugins too.
 //!
@@ -190,12 +191,21 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
             dsh("dsh-web", "@deepseek-ai/dsh-web"),
             dsh("dsh-system-prompt", "@deepseek-ai/dsh-system-prompt"),
             dsh("dsh-tools", "@deepseek-ai/dsh-tools"),
+            // `ask_user_question`, answered through the frontends.
+            dsh("dsh-user-questions", "@deepseek-ai/dsh-user-questions"),
+            dsh("dsh-tool-ask-user", "@deepseek-ai/dsh-tool-ask-user"),
             dsh("dsh-free-search", "dsh-free-search").config(
                 json!({ "provider": "bing", "disabledEngines": [], "bingMarket": "en-US" }),
             ),
             Row::new(
                 "dsh",
                 rutis_plugins().join("dsh/dsh-tools-adapter.ts").display(),
+            )
+            .runtime("dsh"),
+            // dsh's approvals and questions reach the frontends (it injects `ui`).
+            Row::new(
+                "dsh-host-dialogs",
+                rutis_plugins().join("dsh/host-dialogs.ts").display(),
             )
             .runtime("dsh"),
         ]);
