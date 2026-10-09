@@ -15,8 +15,11 @@
 //! Not published and without an API promise: yoagent's core and
 //! yoagent-rutis's API do not depend on it.
 
+pub mod host;
 pub mod protocol;
+pub mod services;
 pub mod session;
+pub mod web;
 
 pub use protocol::{ClientMessage, ServerMessage, UiPlugin, UiRequest};
 pub use session::{Connection, Driver, Session};
