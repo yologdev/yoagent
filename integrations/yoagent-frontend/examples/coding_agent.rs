@@ -2,7 +2,8 @@
 //! the yoagent-frontend layer: yoagent's loop and tools, a pi extension that
 //! asks before dangerous commands (its `ctx.ui.select` reaches the frontend),
 //! DSH's web search, and a UI plugin that renders search results as links in
-//! the browser. Every plugin is unchanged; the frontends are plugins too.
+//! the browser. The pi extension and DSH's packages are used unchanged; the
+//! frontends are plugins too.
 //!
 //! - default: the terminal frontend (pi-tui; macOS / Linux).
 //! - `--web [ADDR]`: serve the browser frontend (default 127.0.0.1:8787);
@@ -11,6 +12,9 @@
 //!   (a question gets "no", as from a user who walked away). CI runs it.
 //! - `--live`: DeepSeek (`DEEPSEEK_API_KEY`); otherwise a scripted model.
 //! - `--no-dsh`: skip DSH's web search.
+//!
+//! Logs (`RUST_LOG`) go to stderr with `--web` / `--demo`, else to
+//! `$TMPDIR/yoagent-coding-agent.log` (the terminal UI owns the screen).
 //!
 //! Setup (once): `npm ci` in `integrations/yoagent-frontend/plugins/` and in
 //! `integrations/yoagent-rutis/plugins/pi/` (and `plugins/dsh/` for search).
@@ -83,6 +87,7 @@ fn main() -> Result<(), BoxError> {
     if std::env::var_os("NODE_OPTIONS").is_none() {
         std::env::set_var("NODE_OPTIONS", "--no-warnings");
     }
+    let log = logging(web.is_some() || demo.is_some())?;
     let options = Options {
         key,
         web,
@@ -96,9 +101,43 @@ fn main() -> Result<(), BoxError> {
             let root = Ctx::root()?;
             let result = run(&root, options).await;
             tokio::time::sleep(Duration::from_millis(100)).await;
-            root.shutdown().await?;
+            // A failed shutdown must not hide why the run failed.
+            if let Err(e) = root.shutdown().await {
+                match &result {
+                    Ok(()) => return Err(e.into()),
+                    Err(_) => eprintln!("shutting the plugins down also failed: {e}"),
+                }
+            }
+            if let (Err(_), Some(path)) = (&result, &log) {
+                eprintln!("logs: {}", path.display());
+            }
             result
         })
+}
+
+/// Logs (`RUST_LOG`, default warnings and the frontend layer's info): on
+/// stderr when nothing else draws there, else to a file — the terminal UI
+/// owns the screen. Returns the file's path.
+fn logging(stderr: bool) -> Result<Option<PathBuf>, BoxError> {
+    use tracing_subscriber::EnvFilter;
+    let filter = EnvFilter::try_from_default_env()
+        // The registry's "no API key" warning is about the scripted model's
+        // `mock` provider; `--live` checks its key before starting.
+        .unwrap_or_else(|_| {
+            EnvFilter::new("warn,yoagent::provider::registry=error,yoagent_frontend=info")
+        });
+    let builder = tracing_subscriber::fmt().with_env_filter(filter);
+    if stderr {
+        builder.with_writer(std::io::stderr).init();
+        return Ok(None);
+    }
+    let path = std::env::temp_dir().join("yoagent-coding-agent.log");
+    let file = std::fs::File::create(&path)?;
+    builder
+        .with_ansi(false)
+        .with_writer(std::sync::Mutex::new(file))
+        .init();
+    Ok(Some(path))
 }
 
 async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
@@ -208,12 +247,15 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
         Some(addr) => {
             let served = web::serve(session.clone(), addr).await?;
             println!("yoagent web frontend: {}  (Ctrl+C to stop)", served.url());
-            let server = served.task;
             tokio::select! {
                 _ = driver.run(agent) => {}
-                _ = tokio::signal::ctrl_c() => {}
+                stop = tokio::signal::ctrl_c() => {
+                    if let Err(e) = stop {
+                        eprintln!("cannot listen for Ctrl+C ({e}); stopping");
+                    }
+                }
             }
-            server.abort();
+            served.stop();
         }
         None => {
             // Last, once everything else loaded: a failure prints on a normal terminal.

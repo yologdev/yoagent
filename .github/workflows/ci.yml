@@ -373,8 +373,10 @@ jobs:
         run: cargo clippy --manifest-path "$MANIFEST" --all-targets
       - name: Docs
         run: RUSTDOCFLAGS="-Dwarnings" cargo doc --manifest-path "$MANIFEST" --no-deps
-      - name: Test
-        run: cargo test --manifest-path "$MANIFEST"
+      - name: Test (pi's dialogs through the session need the runtimes)
+        run: YOAGENT_RUTIS_REQUIRE_RUNTIMES=1 cargo test --manifest-path "$MANIFEST"
+      - name: Page logic (node --test)
+        run: node --test integrations/yoagent-frontend/web/lib.test.js
       - name: Example (scripted, headless; a pi dialog reaches the terminal UI)
         shell: bash
         timeout-minutes: 5

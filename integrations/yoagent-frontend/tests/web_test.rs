@@ -25,6 +25,28 @@ async fn get(addr: std::net::SocketAddr, path: &str) -> String {
     response
 }
 
+const WAIT: Duration = Duration::from_secs(10);
+
+type Socket =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+async fn open(served: &web::Served) -> Socket {
+    let (ws, _) =
+        tokio_tungstenite::connect_async(format!("ws://{}/ws?t={}", served.addr(), served.token()))
+            .await
+            .unwrap();
+    ws
+}
+
+async fn receive(ws: &mut Socket) -> Json {
+    let frame = tokio::time::timeout(WAIT, ws.next())
+        .await
+        .expect("a frame in time")
+        .unwrap()
+        .unwrap();
+    serde_json::from_str(frame.to_text().unwrap()).unwrap()
+}
+
 #[tokio::test]
 async fn a_browser_runs_a_prompt_and_answers_a_question_over_the_websocket() {
     let (session, driver) = Session::new(false);
@@ -36,19 +58,8 @@ async fn a_browser_runs_a_prompt_and_answers_a_question_over_the_websocket() {
     let served = web::serve(session.clone(), "127.0.0.1:0".parse().unwrap())
         .await
         .unwrap();
-    let (addr, server) = (served.addr, served.task);
-
-    let (mut ws, _) =
-        tokio_tungstenite::connect_async(format!("ws://{addr}/ws?t={}", served.token))
-            .await
-            .unwrap();
-    let hello = tokio::time::timeout(Duration::from_secs(10), ws.next())
-        .await
-        .expect("a frame in time")
-        .unwrap()
-        .unwrap();
-    let hello: Json = serde_json::from_str(hello.to_text().unwrap()).unwrap();
-    assert_eq!(hello["type"], "hello");
+    let mut ws = open(&served).await;
+    assert_eq!(receive(&mut ws).await["type"], "hello");
 
     ws.send(Message::Text(
         json!({"type": "prompt", "text": "hello"})
@@ -59,12 +70,7 @@ async fn a_browser_runs_a_prompt_and_answers_a_question_over_the_websocket() {
     .unwrap();
     let mut text = String::new();
     loop {
-        let frame = tokio::time::timeout(Duration::from_secs(10), ws.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        let message: Json = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        let message = receive(&mut ws).await;
         if message["type"] == "event" && message["event"]["type"] == "messageUpdate" {
             text.push_str(
                 message["event"]["delta"]["delta"]
@@ -72,7 +78,9 @@ async fn a_browser_runs_a_prompt_and_answers_a_question_over_the_websocket() {
                     .unwrap_or_default(),
             );
         }
-        if message["type"] == "runEnded" {
+        if message["type"] == "runEnd" {
+            assert_eq!(message["outcome"], "completed");
+            assert!(message.get("totalCostUsd").is_some());
             break;
         }
     }
@@ -94,8 +102,7 @@ async fn a_browser_runs_a_prompt_and_answers_a_question_over_the_websocket() {
         }
     });
     let request: Json = loop {
-        let frame = ws.next().await.unwrap().unwrap();
-        let message: Json = serde_json::from_str(frame.to_text().unwrap()).unwrap();
+        let message = receive(&mut ws).await;
         if message["type"] == "uiRequest" {
             break message;
         }
@@ -109,7 +116,32 @@ async fn a_browser_runs_a_prompt_and_answers_a_question_over_the_websocket() {
     .await
     .unwrap();
     assert_eq!(asking.await.unwrap(), json!("b"));
-    server.abort();
+    served.stop();
+}
+
+/// A frame that is not the protocol is answered with a notice, and the
+/// connection carries on; closing the socket detaches the frontend.
+#[tokio::test]
+async fn a_malformed_frame_gets_a_notice_and_a_closed_socket_detaches() {
+    let (session, _driver) = Session::new(false);
+    let served = web::serve(session.clone(), "127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
+    let mut ws = open(&served).await;
+    assert_eq!(receive(&mut ws).await["type"], "hello");
+    assert_eq!(session.frontends(), 1);
+    ws.send(Message::Text(r#"{"type": "dance"}"#.into()))
+        .await
+        .unwrap();
+    let notice = receive(&mut ws).await;
+    assert_eq!(notice["type"], "notice");
+    assert_eq!(notice["level"], "warning");
+    ws.close(None).await.unwrap();
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while session.frontends() != 0 {
+        assert!(tokio::time::Instant::now() < deadline, "still attached");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 #[tokio::test]
@@ -127,14 +159,15 @@ async fn the_page_and_ui_plugin_modules_are_served() {
     let served = web::serve(session, "127.0.0.1:0".parse().unwrap())
         .await
         .unwrap();
-    assert!(served.url().ends_with(&format!("/?t={}", served.token)));
-    let (addr, server) = (served.addr, served.task);
+    assert!(served.url().ends_with(&format!("/?t={}", served.token())));
+    let addr = served.addr();
     assert!(get(addr, "/").await.contains("<title>yoagent</title>"));
     assert!(get(addr, "/app.js").await.contains("text/javascript"));
+    assert!(get(addr, "/lib.js").await.contains("markdownParts"));
     let module = get(addr, "/ui-plugins/links.js").await;
     assert!(module.contains("200 OK") && module.contains("renderTool"));
     assert!(get(addr, "/ui-plugins/nope.js").await.contains("404"));
-    server.abort();
+    served.stop();
 }
 
 /// Browsers do not apply cross-origin rules to WebSockets: any page could
@@ -147,14 +180,14 @@ async fn the_websocket_refuses_a_missing_or_wrong_token() {
         .unwrap();
     for query in ["", "?t=", "?t=guess", "?x=1"] {
         let result =
-            tokio_tungstenite::connect_async(format!("ws://{}/ws{query}", served.addr)).await;
-        assert!(result.is_err(), "connected with {query:?}");
+            tokio_tungstenite::connect_async(format!("ws://{}/ws{query}", served.addr())).await;
+        match result {
+            Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+                assert_eq!(response.status(), 403, "with {query:?}")
+            }
+            other => panic!("with {query:?}: {:?}", other.map(|_| ())),
+        }
     }
-    assert!(tokio_tungstenite::connect_async(format!(
-        "ws://{}/ws?t={}",
-        served.addr, served.token
-    ))
-    .await
-    .is_ok());
-    served.task.abort();
+    open(&served).await;
+    served.stop();
 }

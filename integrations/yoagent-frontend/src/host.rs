@@ -23,15 +23,15 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use rutis::{BoxFuture, Ctx, FiberState};
-
-/// How long [`PluginHost::load`] waits for plugins to start.
-pub const LOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 use rutis_bridge::runtime::LocalRuntime;
 use rutis_loader::{
     Chain, EntryStatus, Layer, Loader, LoaderError, LoaderOptions, LoaderPlugin, Patch, Resolved,
     Resolver, RuntimeResolver, RuntimeRowsPlugin, ServiceCatalog,
 };
 use serde_json::{json, Value as Json};
+
+/// How long [`PluginHost::load`] waits for plugins to start.
+pub const LOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -69,8 +69,13 @@ impl Row {
         self
     }
 
-    /// Services injected into this plugin beyond those it declares — e.g.
-    /// `ui` for the pi adapter, which looks it up without requiring it.
+    /// The services injected into this plugin, in place of those it declares.
+    ///
+    /// Rarely what you want: in rutis 0.7 a TypeScript plugin given a row
+    /// inject list never applies. To hand a plugin a service it only looks
+    /// up (as the pi adapter does with `ui`), load a small plugin that
+    /// injects it and provides it again under the name looked up — see
+    /// `yoagent-rutis/plugins/pi/host-ui.ts`.
     pub fn inject(mut self, services: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.inject = services.into_iter().map(Into::into).collect();
         self
@@ -187,21 +192,42 @@ impl PluginHost {
     /// `load` does not keep failing on it.
     pub async fn load(&mut self, rows: impl IntoIterator<Item = Row>) -> Result<(), BoxError> {
         let kept = self.rows.len();
+        let routes = self.routes.lock().unwrap().clone();
+        let result = self.add(rows);
+        let result = match result {
+            Ok(()) => self.reconcile_all().await,
+            Err(e) => Err(e),
+        };
+        if result.is_err() {
+            self.rows.truncate(kept);
+            *self.routes.lock().unwrap() = routes;
+            if let Err(e) = self.reconcile_all().await {
+                tracing::warn!("dropping a plugin batch that failed to load also failed: {e}");
+            }
+        }
+        result
+    }
+
+    fn add(&mut self, rows: impl IntoIterator<Item = Row>) -> Result<(), BoxError> {
         for row in rows {
             if let Some(runtime) = &row.runtime {
-                self.routes
-                    .lock()
-                    .unwrap()
-                    .insert(row.name.clone(), runtime.clone());
+                let mut routes = self.routes.lock().unwrap();
+                match routes.get(&row.name) {
+                    Some(other) if other != runtime => {
+                        return Err(format!(
+                            "`{}` is loaded by runtime `{other}` already, not `{runtime}`",
+                            row.name
+                        )
+                        .into())
+                    }
+                    _ => {
+                        routes.insert(row.name.clone(), runtime.clone());
+                    }
+                }
             }
             self.rows.push(row);
         }
-        let result = self.reconcile_all().await;
-        if result.is_err() {
-            self.rows.truncate(kept);
-            let _ = self.reconcile_all().await;
-        }
-        result
+        Ok(())
     }
 
     async fn reconcile_all(&mut self) -> Result<(), BoxError> {

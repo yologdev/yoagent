@@ -98,7 +98,20 @@ export default definePlugin<{ demo?: string }>({
     const questions: { id: number; request: Message }[] = []
     const say = (text: string) => log.addChild(new Text(text, 1, 0))
     const send = (message: Record<string, unknown>) =>
-      frontend.send(message).catch((e: unknown) => say(red(`could not send: ${short(String(e))}`)))
+      frontend.send(message).catch((e: unknown) => {
+        say(red(`could not send: ${short(String(e))}`))
+        tui.requestRender()
+      })
+    // The screen is gone by then: a failed quit is told on stderr.
+    const quit = () => {
+      tui.stop()
+      frontend
+        .send({ type: 'quit' })
+        .catch((e: unknown) => process.stderr.write(`yoagent: could not quit the session: ${String(e)}\n`))
+    }
+    // Text an `input` question put in the editor, cleared if the question
+    // closes before the user answers.
+    let prefilled: string | undefined
 
     const showQuestion = () => {
       const first = questions[0]
@@ -109,7 +122,10 @@ export default definePlugin<{ demo?: string }>({
       const r = first.request
       say(bold(`  ? ${r.title}`) + (r.message ? dim(` — ${r.message}`) : ''))
       if (r.kind === 'select') r.options.forEach((o: string, i: number) => say(`    ${i + 1}. ${o}`))
-      if (r.kind === 'input' && r.value) editor.setText(r.value)
+      if (r.kind === 'input' && r.value) {
+        editor.setText(r.value)
+        prefilled = r.value
+      }
       status.setText(
         yellow(r.kind === 'confirm' ? 'answer y or n' : r.kind === 'select' ? 'answer with a number' : 'type your answer'),
       )
@@ -139,6 +155,7 @@ export default definePlugin<{ demo?: string }>({
         value = Number.isInteger(n) && n >= 1 && n <= request.options.length ? request.options[n - 1] : null
       } else value = text
       say(dim(`  answered: ${JSON.stringify(value)}`))
+      prefilled = undefined
       questions.shift()
       send({ type: 'uiResponse', id, value })
       showQuestion()
@@ -155,10 +172,7 @@ export default definePlugin<{ demo?: string }>({
     tui.addInputListener((data) => {
       if (!matchesKey(data, 'ctrl+c') && !matchesKey(data, 'ctrl+d')) return undefined
       if (running && matchesKey(data, 'ctrl+c')) send({ type: 'abort' })
-      else {
-        tui.stop()
-        send({ type: 'quit' })
-      }
+      else quit()
       return { consume: true }
     })
 
@@ -192,9 +206,22 @@ export default definePlugin<{ demo?: string }>({
       }
     }
 
-    const receive = async (message: Message) => {
+    const outcomeLine = (m: Message) => {
+      switch (m.outcome) {
+        case 'completed':
+          return undefined
+        case 'aborted':
+          return yellow('  stopped')
+        case 'rejected':
+          return red(`  refused: ${m.error ?? 'input rejected'}`)
+        default:
+          return red(`  failed: ${m.error ?? 'unknown error'}`)
+      }
+    }
+
+    const handle = (message: Message) => {
       switch (message.type) {
-        case 'runStarted':
+        case 'runStart':
           running = true
           say(cyan('› ') + message.prompt)
           status.setText(yellow('working…') + dim(' Ctrl+C to stop'))
@@ -202,17 +229,21 @@ export default definePlugin<{ demo?: string }>({
         case 'event':
           onEvent(message.event)
           break
-        case 'runEnded':
+        case 'runEnd': {
           running = false
           answer = undefined
-          if (message.error) say(red(`  run ended: ${message.error}`))
+          const line = outcomeLine(message)
+          if (line) say(line)
           status.setText(idle)
           if (headless) {
             const lines = [header, log, status].flatMap((c) => c.render(100))
             process.stdout.write(`${lines.map((l) => l.trimEnd()).join('\n')}\n`)
-            tui.stop()
-            send({ type: 'quit' })
+            quit()
           }
+          break
+        }
+        case 'notice':
+          say(message.level === 'error' ? red(`  ! ${message.message}`) : yellow(`  ! ${message.message}`))
           break
         case 'hello':
           for (const { id, request } of message.uiRequests ?? []) askUser(id, request)
@@ -224,13 +255,33 @@ export default definePlugin<{ demo?: string }>({
           const index = questions.findIndex((q) => q.id === message.id)
           if (index >= 0) {
             questions.splice(index, 1)
-            say(dim('  (answered elsewhere, withdrawn, or timed out)'))
-            if (index === 0) showQuestion()
+            const why: Record<string, string> = {
+              answered: 'answered elsewhere',
+              timedOut: 'timed out: the safe answer was used',
+              withdrawn: 'withdrawn',
+            }
+            say(dim(`  (${why[message.reason] ?? 'closed'})`))
+            if (index === 0) {
+              if (prefilled !== undefined && editor.getText() === prefilled) editor.setText('')
+              prefilled = undefined
+              showQuestion()
+            }
           }
           break
         }
         case 'closed':
           tui.stop()
+          if (!headless) process.stderr.write('yoagent: the session ended\n')
+      }
+    }
+
+    // A message this frontend fails on is shown, not thrown: a throw would
+    // disconnect it from the session.
+    const receive = async (message: Message) => {
+      try {
+        handle(message)
+      } catch (e) {
+        say(red(`  (could not show a ${short(String(message?.type), 20)} message: ${short(String(e))})`))
       }
       tui.requestRender()
     }

@@ -1,9 +1,9 @@
 //! The browser frontend: a page, the UI plugins' modules, and the protocol
 //! over a WebSocket.
 //!
-//! - `GET /` — the page (`web/index.html`, `web/app.js`, built in).
+//! - `GET /` — the page (`web/index.html`, `web/app.js`, `web/lib.js`, built in).
 //! - `GET /ws` — the WebSocket: each text frame is one JSON message,
-//!   [`ClientMessage`] in, [`ServerMessage`](crate::ServerMessage) out.
+//!   [`ClientMessage`] in, [`ServerMessage`] out.
 //! - `GET /ui-plugins/{name}` — a UI plugin's ES module (`{name}` ends in `.js`).
 //!
 //! **The WebSocket needs a token.** Browsers do not apply cross-origin rules
@@ -24,26 +24,44 @@ use axum::routing::get;
 use axum::Router;
 use futures::{SinkExt, StreamExt};
 
-use crate::protocol::ClientMessage;
+use crate::protocol::{ClientMessage, NoticeLevel, ServerMessage};
 use crate::session::Session;
 
 const INDEX: &str = include_str!("../web/index.html");
 const APP: &str = include_str!("../web/app.js");
+const LIB: &str = include_str!("../web/lib.js");
 
-/// A running browser frontend.
+/// A running browser frontend; serving stops with [`Served::stop`] or when
+/// this is dropped.
 pub struct Served {
-    /// The bound address (the one passed may use port 0).
-    pub addr: SocketAddr,
-    /// The token `/ws` requires.
-    pub token: String,
-    /// The server; abort it to stop serving.
-    pub task: tokio::task::JoinHandle<()>,
+    addr: SocketAddr,
+    token: String,
+    task: tokio::task::JoinHandle<()>,
 }
 
 impl Served {
     /// The page's URL, token included: open this one.
     pub fn url(&self) -> String {
         format!("http://{}/?t={}", self.addr, self.token)
+    }
+
+    /// The bound address (the one passed may use port 0).
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    /// The token `/ws` requires.
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
+    /// Stop serving: no new connections (open ones end with their socket).
+    pub fn stop(self) {}
+}
+
+impl Drop for Served {
+    fn drop(&mut self) {
+        self.task.abort();
     }
 }
 
@@ -54,7 +72,7 @@ struct App {
 }
 
 /// Serve the browser frontend for `session` on `addr`, with a new random
-/// token, until [`Served::task`] is aborted.
+/// token, until the returned [`Served`] is stopped or dropped.
 pub async fn serve(session: Session, addr: SocketAddr) -> std::io::Result<Served> {
     let token = uuid::Uuid::new_v4().simple().to_string();
     let state = App {
@@ -64,6 +82,7 @@ pub async fn serve(session: Session, addr: SocketAddr) -> std::io::Result<Served
     let app = Router::new()
         .route("/", get(|| async { Html(INDEX) }))
         .route("/app.js", get(|| async { javascript(APP.to_owned()) }))
+        .route("/lib.js", get(|| async { javascript(LIB.to_owned()) }))
         .route("/favicon.ico", get(|| async { StatusCode::NO_CONTENT }))
         .route("/ui-plugins/{name}", get(ui_plugin))
         .route("/ws", get(socket))
@@ -121,8 +140,12 @@ async fn connection(session: Session, socket: WebSocket) {
     let (mut out, mut incoming) = socket.split();
     let writer = tokio::spawn(async move {
         while let Some(message) = connection.messages.recv().await {
-            let Ok(text) = serde_json::to_string(&message) else {
-                continue;
+            let text = match serde_json::to_string(&message) {
+                Ok(text) => text,
+                Err(e) => {
+                    tracing::warn!("a message for the browser is not serializable, skipped: {e}");
+                    continue;
+                }
             };
             if out.send(Message::Text(text.into())).await.is_err() {
                 break;
@@ -132,8 +155,20 @@ async fn connection(session: Session, socket: WebSocket) {
     while let Some(Ok(frame)) = incoming.next().await {
         let Message::Text(text) = frame else { continue };
         match serde_json::from_str::<ClientMessage>(&text) {
-            Ok(message) => session.send(message),
-            Err(e) => tracing::debug!("ignoring a frontend message that is not the protocol: {e}"),
+            // An ended session already sent this frontend `closed`.
+            Ok(message) => {
+                session.send(message);
+            }
+            Err(e) => {
+                tracing::warn!("a browser message that is not the protocol, ignored: {e}");
+                session.send_to(
+                    id,
+                    ServerMessage::Notice {
+                        level: NoticeLevel::Warning,
+                        message: format!("The session did not understand a message: {e}"),
+                    },
+                );
+            }
         }
     }
     session.disconnect(id);

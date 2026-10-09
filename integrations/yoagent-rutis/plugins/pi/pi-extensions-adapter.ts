@@ -106,6 +106,7 @@
 // `select`, `confirm`, `input`, `editor` and `notify` reach the user through
 // it (no frontend or no answer: the same safe defaults).
 
+import { randomUUID } from 'node:crypto'
 import { isAbsolute, resolve } from 'node:path'
 import { definePlugin } from '@arcships/rutis'
 import type { Cancellable, ContentBlock, ToolCall, ToolOutput, ToolResult, ToolSpec, Yoagent } from '../yoagent.d.ts'
@@ -262,8 +263,6 @@ interface HostUi {
   withdraw?(key: string): Promise<void>
 }
 
-let questionKeys = 0
-
 /**
  * pi's RPC-mode UI over the host's `ui` service: dialogs reach whichever
  * frontend answers first; a failure, no frontend or no answer in time gives
@@ -276,12 +275,17 @@ const hostUi = (ui: HostUi, contextSignal?: AbortSignal) => {
     // cancel a plugin's call to the host, so the adapter says so by key.
     const signal = opts?.signal ?? contextSignal
     if (signal?.aborted) return undefined
-    const key = `pi-${process.pid}-${++questionKeys}`
+    // Unique across runtimes and restarts: the host withdraws by key.
+    const key = `pi-${randomUUID()}`
+    const failed = (error: unknown) =>
+      report('warn', `[pi] could not withdraw a question (it stays open until its timeout): ${message(error)}`)
     const withdraw = () => {
+      // A host without `withdraw`: its own timeout ends the question.
+      if (typeof ui.withdraw !== 'function') return
       try {
-        ui.withdraw?.(key)?.catch(() => {})
-      } catch {
-        // a host without `withdraw`: its own timeout ends the question
+        Promise.resolve(ui.withdraw(key)).catch(failed)
+      } catch (error) {
+        failed(error)
       }
     }
     signal?.addEventListener('abort', withdraw, { once: true })
@@ -462,10 +466,16 @@ export default definePlugin<Config>({
     // `host-ui.ts`, makes this pi's RPC mode. It is looked up when a context
     // is made, never injected: rutis starts a plugin only once every injected
     // service exists, and hosts without one keep print mode.
+    let uiMissingReported = false
     const lookupUi = () => {
       try {
         return ctx.use<HostUi>('pi-host-ui')
-      } catch {
+      } catch (error) {
+        // The usual case without a frontend: print mode. Said once, at debug.
+        if (!uiMissingReported) {
+          uiMissingReported = true
+          report('debug', `[pi] no host ui (print mode): ${message(error)}`)
+        }
         return undefined
       }
     }

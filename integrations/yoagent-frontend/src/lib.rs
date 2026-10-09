@@ -3,7 +3,7 @@
 //! A [`Session`] runs one agent for any number of frontends — a terminal UI
 //! that is a rutis plugin, browsers over WebSocket — through the same
 //! [`protocol`]: commands in (prompt, steer, abort, …), and out every event,
-//! a reliable run lifecycle (`RunStarted` / `RunEnded`), and plugins'
+//! a reliable run lifecycle (`RunStart` / `RunEnd`, with its outcome), and plugins'
 //! questions to the user (`UiRequest`).
 //!
 //! Plugins reach it through two rutis host services ([`services`]):
@@ -21,5 +21,7 @@ pub mod services;
 pub mod session;
 pub mod web;
 
-pub use protocol::{ClientMessage, ServerMessage, UiPlugin, UiRequest};
+pub use protocol::{
+    ClientMessage, NoticeLevel, ResolveReason, RunOutcome, ServerMessage, UiPlugin, UiRequest,
+};
 pub use session::{Connection, Driver, Session};
