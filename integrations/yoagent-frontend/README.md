@@ -151,7 +151,14 @@ DEEPSEEK_API_KEY=… cargo run --example minimal_browser -- --live
 ```
 
 The full one, `coding_agent`: plugins in three Node runtimes, both
-frontends, pi's and DSH's dialogs.
+frontends, pi's and DSH's dialogs. One command from the repository root
+installs what it needs (Node 24+, npm, cargo) and opens it in the browser:
+
+```bash
+scripts/try-coding-agent.sh            # scripted model; --live for DeepSeek, --terminal, --watch
+```
+
+Or by hand, from this directory:
 
 ```bash
 (cd plugins && npm ci) && (cd ../yoagent-rutis/plugins/pi && npm ci) && (cd ../yoagent-rutis/plugins/dsh && npm ci)
