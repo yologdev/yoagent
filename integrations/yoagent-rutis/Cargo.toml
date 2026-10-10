@@ -1,6 +1,6 @@
 [package]
 name = "yoagent-rutis"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2021"
 resolver = "3"
 description = "Extend yoagent agents at runtime with rutis plugins, as one yoagent Extension: tools, tool policy, output filters, turn notes, input checks, verifiers and events"

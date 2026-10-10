@@ -13,12 +13,15 @@ adheres to [Semantic Versioning](https://semver.org/).
 - **Plugins reload while the agent runs**: `PluginHost::unload(id)`, `reload(id)` (the edited file's new code: a version that does not import is refused and the running one stays; one that fails when it starts leaves the plugin stopped, and the error says so) and `is_running(id)`; the example's `--watch` reloads a plugin when its file changes and tells the frontends, and the example now requires a tool policy, so a stopped policy plugin denies calls instead of letting them through. No rebuild of the host.
 - Tool cards: a tool result's `details.view` is drawn as a card in the browser (and titles the tool line: in the browser when no UI plugin draws the tool, always in the terminal UI); questions gain `message` and multiple-choice `select` (options sent once each); the `ui` service gains `frontends()`; the terminal UI asks again on an answer that does not fit.
 
-### yoagent-rutis
+## yoagent-rutis 0.2.0 (2026-10-10)
+
+yoagent-rutis only; yoagent is unchanged (0.25.2). Requires yoagent 0.25 and **rutis 0.8**.
 
 - **rutis 0.8** (breaking: rutis types are in this crate's API, so this is a minor bump): `rutis`, `rutis-bridge` and `rutis-loader` 0.8, and the npm (`@arcships/rutis`, `@arcships/rutis-runtime`) and PyPI (`rutis`) packages the plugins use at 0.8.0 — since 0.8 the packages in rutis's release train share one version. Depend on `rutis = "0.8"` too: a `rutis` 0.6 next to it is a second copy of the core, whose types do not match. (rutis 0.8 runs natively on Windows, but yoagent-rutis is untested there: its runtime tests are Unix-only, and the terminal UIs read the keyboard from `/dev/tty`.)
 - **DSH asks the user** (`plugins/dsh/host-dialogs.ts`, loaded on hosts that provide a `ui` service): an `ask` from a DSH tool policy becomes a confirm showing the reason and the arguments (yes allows; no, no answer in time or a failing host denies), and DSH's `ask_user_question` is answered through the frontends (select, multiple select, typed text; a question left unanswered fails the tool rather than inventing an answer). Without a frontend attached, DSH's own result as before. Load it with `ui` shared into the DSH runtime.
 - **DSH tool cards**: the DSH adapter returns a tool's own presenters with a successful result as `details.view = {call?, result?}` (DSH's card vocabulary: generic, terminal, diff, search, read, web); a card never fails its call.
 - **pi dialogs reach a frontend** (optional): with a host `ui` service and `plugins/pi/host-ui.ts` loaded next to the pi adapter, pi extensions' `ctx.ui.select` / `confirm` / `input` / `editor` / `notify` reach the user (pi's RPC mode, `hasUI` true); a question whose hook is cancelled is withdrawn by its key; without them, print mode as before.
+- The examples read the DeepSeek key from `DEEPSEEK_API_KEY` only (no `~/.dskey` fallback).
 
 ## 0.25.2 (2026-10-09)
 
