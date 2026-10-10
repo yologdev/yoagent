@@ -142,7 +142,8 @@ DSH answers as on its own (an `ask` is denied, the tool finds no answerer).
 
 The smallest start: one agent and the browser page, no plugins and no Node
 ([`examples/minimal_browser.rs`](examples/minimal_browser.rs), about 40
-lines; read-only file tools).
+lines; read-only file tools sandboxed to the directory it runs in, since
+whoever has the page's URL drives the agent).
 
 ```bash
 cargo run --example minimal_browser                     # scripted model

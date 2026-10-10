@@ -1,6 +1,7 @@
 //! EXPERIMENTAL. The smallest browser frontend: one agent, one page that any
 //! number of tabs share. No plugins and no Node — just a `Session`, the web
-//! server and an agent with read-only tools (list, read, search files here).
+//! server and an agent with read-only tools (list, read, search), sandboxed
+//! to the directory it runs in: whoever has the page's URL drives the agent.
 //!
 //! ```bash
 //! cargo run --example minimal_browser                     # scripted model
@@ -24,11 +25,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         Agent::from_provider(scripted(), ModelConfig::mock())
     }
-    .with_system_prompt("You are a helpful assistant. Be brief.")
-    .with_tools(vec![
-        Box::new(ListFilesTool::new()),
-        Box::new(ReadFileTool::new()),
-        Box::new(SearchTool::new()),
+    .with_system_prompt("You are a helpful assistant. Be brief.");
+    // Read-only, and only below the current directory (the built-in tools
+    // allow every path unless given a sandbox).
+    let here = vec![std::env::current_dir()?.display().to_string()];
+    let agent = agent.with_tools(vec![
+        Box::new(ListFilesTool::new().with_allowed_paths(here.clone())),
+        Box::new(ReadFileTool::new().with_allowed_paths(here.clone())),
+        Box::new(SearchTool::new().with_allowed_paths(here)),
     ]);
 
     // One agent; every browser tab that opens the URL is a frontend of it.
