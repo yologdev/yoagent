@@ -70,13 +70,26 @@ fn node_runtime() -> Option<PathBuf> {
         Some(major) => return skip("Node", format!("Node {major} found, 24+ needed")),
         None => return skip("Node", "no `node` on PATH".into()),
     }
-    if !runtime.join("package.json").exists() {
-        return skip(
+    // The version too, as for Python: a stale install would run the 0.8
+    // bridge against an older runtime and pass or fail for the wrong reason.
+    let installed = std::fs::read_to_string(runtime.join("package.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|manifest| manifest["version"].as_str().map(str::to_owned));
+    match installed {
+        Some(version) if version.starts_with("0.8.") => Some(runtime),
+        Some(version) => skip(
+            "Node",
+            format!(
+                "{} is {version}, 0.8 needed: run `npm ci` in plugins/",
+                runtime.display()
+            ),
+        ),
+        None => skip(
             "Node",
             format!("{} missing: run `npm ci` in plugins/", runtime.display()),
-        );
+        ),
     }
-    Some(runtime)
 }
 
 /// A Python 3.12+ interpreter with rutis 0.8.
@@ -95,7 +108,7 @@ fn python() -> Option<PathBuf> {
         Ok(out) if out.status.success() => {
             let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
             match text.split_once(' ') {
-                Some(("True", version)) if version.starts_with("0.8") => Some(python),
+                Some(("True", version)) if version.starts_with("0.8.") => Some(python),
                 _ => skip(
                     "Python",
                     format!(

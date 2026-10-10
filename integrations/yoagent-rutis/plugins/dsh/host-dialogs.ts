@@ -99,7 +99,7 @@ export function apply(ctx: any) {
   /**
    * Ask through the host; `null` is no answer (dismissed, timed out, nobody
    * attached, withdrawn). The call to the host cannot itself be cancelled
-   * (rutis 0.8), so an abort withdraws the question by its key: frontends
+   * (rutis 0.8's JavaScript runtime), so an abort withdraws the question by its key: frontends
    * close it and the asker gets `null`.
    */
   const ask = async (request: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> => {

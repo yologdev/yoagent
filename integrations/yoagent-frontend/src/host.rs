@@ -71,8 +71,9 @@ impl Row {
 
     /// The services injected into this plugin, in place of those it declares.
     ///
-    /// Rarely what you want: in rutis 0.7 and 0.8 (the runtime's row inject handling is unchanged) a TypeScript plugin given a row
-    /// inject list never applies. To hand a plugin a service it only looks
+    /// Rarely what you want: a TypeScript plugin given a row inject list never
+    /// applies (seen on rutis 0.7; the 0.8 JavaScript runtime's row-inject
+    /// handling is unchanged). To hand a plugin a service it only looks
     /// up (as the pi adapter does with `ui`), load a small plugin that
     /// injects it and provides it again under the name looked up — see
     /// `yoagent-rutis/plugins/pi/host-ui.ts`.
@@ -267,6 +268,8 @@ impl PluginHost {
     }
 
     /// Whether the plugin `id` is running (started, not failed or stopped).
+    /// A Node plugin that disposes its own fiber still reads as running: the
+    /// rutis 0.8 runtime does not report that to the loader.
     pub fn is_running(&self, id: &str) -> bool {
         matches!(
             self.loader.get(id).map(|info| info.status),
@@ -342,26 +345,39 @@ impl PluginHost {
         loop {
             let mut waiting = Vec::new();
             for id in ids {
+                let stopped = || -> BoxError { format!("plugin `{id}` stopped itself").into() };
                 match self.loader.get(id).map(|info| info.status) {
                     Some(EntryStatus::Running(s)) if s.state == FiberState::Active => {}
                     Some(EntryStatus::Running(s)) if s.state == FiberState::Failed => {
                         return Err(format!("plugin `{id}` failed: {:?}", s.error).into());
                     }
+                    // States that do not come back on their own: say so now
+                    // rather than at the timeout. (A Node plugin that disposes
+                    // its own fiber is not among them: in rutis 0.8 its row
+                    // keeps reading as running.)
+                    Some(EntryStatus::Running(s)) if s.state == FiberState::Disposed => {
+                        return Err(stopped());
+                    }
                     Some(EntryStatus::Unresolved(e)) => {
                         return Err(format!("plugin `{id}` cannot load: {e}").into());
                     }
-                    Some(EntryStatus::Stopped) => {
-                        return Err(format!("plugin `{id}` stopped itself").into());
+                    // Copies inside instanced groups only (rutis 0.8), which
+                    // `PluginHost` does not create.
+                    Some(EntryStatus::Stopped) => return Err(stopped()),
+                    Some(EntryStatus::Disabled) => {
+                        return Err(format!("plugin `{id}` is disabled").into());
                     }
-                    other => waiting.push(format!(
-                        "{id} ({})",
-                        match other {
-                            Some(EntryStatus::Running(s)) => format!("{:?}", s.state),
-                            Some(EntryStatus::Disabled) => "disabled".into(),
-                            Some(EntryStatus::Inactive) => "inactive".into(),
-                            _ => "unknown".into(),
-                        }
-                    )),
+                    status => {
+                        waiting.push(format!(
+                            "{id} ({})",
+                            match status {
+                                Some(EntryStatus::Running(s)) => format!("{:?}", s.state),
+                                // `EntryStatus` is non-exhaustive.
+                                Some(other) => format!("{other:?}"),
+                                None => "not loaded".into(),
+                            }
+                        ));
+                    }
                 }
             }
             if waiting.is_empty() {

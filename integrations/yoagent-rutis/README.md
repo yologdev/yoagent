@@ -32,10 +32,9 @@ Every event is also published on the rutis bus as `AgentEventEmitted`.
 
 yoagent does not depend on rutis; this crate uses only yoagent's public API.
 It depends on `rutis = "0.8"` (0.x caret: any 0.8.x, never 0.9) and, with a
-language feature, `rutis-bridge = "0.8"` (the same release train: since 0.8
-every rutis package shares one version). rutis
-types are part of this crate's API, so every rutis or rutis-bridge minor bump
-is a yoagent-rutis minor bump.
+language feature, `rutis-bridge = "0.8"`: since 0.8 the packages in rutis's
+release train share one version. rutis types are part of this crate's API,
+so every rutis or rutis-bridge minor bump is a yoagent-rutis minor bump.
 
 ## Host
 
@@ -629,10 +628,10 @@ the others).
 
 ## Versions
 
-yoagent-rutis 0.1 requires yoagent 0.25 (the first release with `Extension`)
-and rutis 0.6; the next release moves to rutis 0.8, where every rutis package
-(`rutis`, `rutis-bridge`, `rutis-loader`, the npm and PyPI runtimes) shares
-one version. yoagent and rutis types are in its API, so a minor bump of
+yoagent-rutis 0.1 (crates.io) requires yoagent 0.25 (the first release with
+`Extension`) and rutis 0.6. From 0.2 it requires rutis 0.8, whose release
+train (`rutis`, `rutis-bridge`, `rutis-loader`, the npm and PyPI runtimes)
+shares one version. yoagent and rutis types are in its API, so a minor bump of
 either is a minor bump of yoagent-rutis. Take `yoagent` from the same source
 as `yoagent-rutis`: a crates.io `yoagent` next to a git `yoagent-rutis` is two
 `yoagent` crates whose types do not match.

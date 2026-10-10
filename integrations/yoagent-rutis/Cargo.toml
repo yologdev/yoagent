@@ -29,7 +29,7 @@ rust-version = "1.86"
 yoagent = { path = "../..", version = "0.25.1" }
 # 0.x caret: 0.8.x only (0.9 would be breaking). Any rutis minor bump is a
 # yoagent-rutis minor bump — its types are part of this crate's API. Since
-# 0.8 every rutis package shares one version (the release train).
+# 0.8 the packages in rutis's release train share one version.
 rutis = "0.8"
 # TypeScript / Python plugins and remote nodes (the `node`, `python` and
 # `websocket` features). Same train version as rutis; any rutis-bridge
