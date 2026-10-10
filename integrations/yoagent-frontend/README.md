@@ -138,7 +138,20 @@ no, or no answer in time, denies the call. A question is a `select` (plus
 unanswered fails the tool with that reason. Without a frontend attached,
 DSH answers as on its own (an `ask` is denied, the tool finds no answerer).
 
-## Example
+## Examples
+
+The smallest start: one agent and the browser page, no plugins and no Node
+([`examples/minimal_browser.rs`](examples/minimal_browser.rs), about 40
+lines; read-only file tools sandboxed to the directory it runs in, since
+whoever has the page's URL drives the agent).
+
+```bash
+cargo run --example minimal_browser                     # scripted model
+DEEPSEEK_API_KEY=… cargo run --example minimal_browser -- --live
+```
+
+The full one, `coding_agent`: plugins in three Node runtimes, both
+frontends, pi's and DSH's dialogs.
 
 ```bash
 (cd plugins && npm ci) && (cd ../yoagent-rutis/plugins/pi && npm ci) && (cd ../yoagent-rutis/plugins/dsh && npm ci)
