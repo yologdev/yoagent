@@ -15,7 +15,7 @@
 //!   `key` field in the request makes it withdrawable:
 //! - `ui.withdraw(key)` — the asker gave up (its own call was cancelled):
 //!   the question resolves to the default and frontends close it. (A plugin
-//!   cannot cancel its call to the host itself in rutis 0.7.) A withdrawal
+//!   cannot cancel its call to the host itself in rutis 0.8.) A withdrawal
 //!   that overtakes its request still counts.
 //! - `ui.frontends()` — how many frontends are attached (sync): an asker with
 //!   a fallback of its own uses it when nobody could answer.

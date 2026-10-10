@@ -1,6 +1,6 @@
 //! rutis-agent's tools as yoagent tools.
 //!
-//! [rutis-agent](https://github.com/arcships/rutis/tree/v0.7.0/crates/rutis-agent)
+//! [rutis-agent](https://github.com/arcships/rutis/tree/v0.8.0/crates/rutis-agent)
 //! keeps its tools in a `ToolRegistry` service (`tools_key()`): `ToolDef`s
 //! (an aimux `FunctionTool` schema plus an async runner), listed by
 //! `schemas()` and run by `execute(call, cancel)`. This example's adapter is
@@ -41,7 +41,7 @@
 //! checks its outcome and exits non-zero if something is off.
 //!
 //! **Pinning caveat**: see `Cargo.toml`. rutis-agent comes from git (the
-//! rutis repository at tag v0.7.0), with a `[patch.crates-io]` for `rutis`, so
+//! rutis repository at tag v0.8.0), with a `[patch.crates-io]` for `rutis`, so
 //! that the graph holds one `rutis` crate — rutis matches services by Rust
 //! type.
 //!

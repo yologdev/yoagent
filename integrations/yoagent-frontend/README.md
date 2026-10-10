@@ -44,7 +44,7 @@ With no frontend attached, or no answer in time (5 minutes, or the plugin's
 own timeout), a question gets the safe answer: `false`, no choice, no text.
 Frontends show questions one at a time, oldest first. A question whose asker
 gives up (the run stopped) is withdrawn and its dialog closes: dropped
-in-process, or `ui.withdraw(key)` from a plugin (rutis 0.7 cannot cancel a
+in-process, or `ui.withdraw(key)` from a plugin (rutis 0.8 cannot cancel a
 plugin's call to the host). Keys must be unique (a UUID); a withdrawal that
 overtakes its own question still counts.
 

@@ -7,8 +7,8 @@
     "node": ">=24"
   },
   "dependencies": {
-    "@arcships/rutis": "0.7.0",
-    "@arcships/rutis-runtime": "0.7.0",
+    "@arcships/rutis": "0.8.0",
+    "@arcships/rutis-runtime": "0.8.0",
     "@earendil-works/pi-ai": "1.1.0",
     "@earendil-works/pi-coding-agent": "1.1.0",
     "@earendil-works/pi-tui": "1.1.0",

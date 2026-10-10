@@ -1,3 +1,3 @@
-# The Python side of the rutis 0.7.0 release train, for the example plugin
+# The Python side of the rutis 0.8.0 release train, for the example plugin
 # and the end-to-end tests (Python 3.12+).
-rutis==0.7.0
+rutis==0.8.0

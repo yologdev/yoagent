@@ -7,7 +7,7 @@
     "node": ">=24"
   },
   "dependencies": {
-    "@arcships/rutis": "0.7.0",
-    "@arcships/rutis-runtime": "0.7.0"
+    "@arcships/rutis": "0.8.0",
+    "@arcships/rutis-runtime": "0.8.0"
   }
 }

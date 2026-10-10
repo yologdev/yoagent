@@ -71,7 +71,7 @@ impl Row {
 
     /// The services injected into this plugin, in place of those it declares.
     ///
-    /// Rarely what you want: in rutis 0.7 a TypeScript plugin given a row
+    /// Rarely what you want: in rutis 0.7 (not re-checked on 0.8) a TypeScript plugin given a row
     /// inject list never applies. To hand a plugin a service it only looks
     /// up (as the pi adapter does with `ui`), load a small plugin that
     /// injects it and provides it again under the name looked up — see
@@ -181,6 +181,9 @@ impl PluginHost {
                     Some(EntryStatus::Unresolved(e)) => format!("unresolved: {e}"),
                     Some(EntryStatus::Disabled) => "disabled".into(),
                     Some(EntryStatus::Inactive) => "inactive".into(),
+                    Some(EntryStatus::Stopped) => "stopped".into(),
+                    // `EntryStatus` is non-exhaustive (rutis 0.8).
+                    Some(other) => format!("{other:?}"),
                     None => "not loaded".into(),
                 };
                 (row.id.clone(), state)
@@ -346,6 +349,9 @@ impl PluginHost {
                     }
                     Some(EntryStatus::Unresolved(e)) => {
                         return Err(format!("plugin `{id}` cannot load: {e}").into());
+                    }
+                    Some(EntryStatus::Stopped) => {
+                        return Err(format!("plugin `{id}` stopped itself").into());
                     }
                     other => waiting.push(format!(
                         "{id} ({})",
