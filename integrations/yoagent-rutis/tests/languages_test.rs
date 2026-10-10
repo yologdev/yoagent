@@ -1,11 +1,11 @@
 //! TypeScript and Python plugins, end to end: real Node and Python runtimes
-//! (rutis-bridge 0.7), loaded as rows by rutis-loader, registering handlers
+//! (rutis-bridge 0.8), loaded as rows by rutis-loader, registering handlers
 //! through the `yoagent` host service.
 //!
 //! Needs Node 24+ with `npm ci` run in `plugins/` (for `@arcships/rutis` and
-//! `@arcships/rutis-runtime` 0.7.0), and Python 3.12+ with `rutis` 0.7 —
+//! `@arcships/rutis-runtime` 0.8.0), and Python 3.12+ with `rutis` 0.8 —
 //! `plugins/.venv/bin/python` (`uv venv plugins/.venv --python 3.12 && uv pip
-//! install --python plugins/.venv/bin/python rutis==0.7.0`), or the
+//! install --python plugins/.venv/bin/python rutis==0.8.0`), or the
 //! interpreter in `YOAGENT_RUTIS_PYTHON`. A test whose runtime is missing
 //! prints why and passes; set `YOAGENT_RUTIS_REQUIRE_RUNTIMES=1` (CI does) to
 //! make a missing runtime fail instead.
@@ -70,16 +70,29 @@ fn node_runtime() -> Option<PathBuf> {
         Some(major) => return skip("Node", format!("Node {major} found, 24+ needed")),
         None => return skip("Node", "no `node` on PATH".into()),
     }
-    if !runtime.join("package.json").exists() {
-        return skip(
+    // The version too, as for Python: a stale install would run the 0.8
+    // bridge against an older runtime and pass or fail for the wrong reason.
+    let installed = std::fs::read_to_string(runtime.join("package.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|manifest| manifest["version"].as_str().map(str::to_owned));
+    match installed {
+        Some(version) if version.starts_with("0.8.") => Some(runtime),
+        Some(version) => skip(
+            "Node",
+            format!(
+                "{} is {version}, 0.8 needed: run `npm ci` in plugins/",
+                runtime.display()
+            ),
+        ),
+        None => skip(
             "Node",
             format!("{} missing: run `npm ci` in plugins/", runtime.display()),
-        );
+        ),
     }
-    Some(runtime)
 }
 
-/// A Python 3.12+ interpreter with rutis 0.7.
+/// A Python 3.12+ interpreter with rutis 0.8.
 fn python() -> Option<PathBuf> {
     let python = std::env::var_os("YOAGENT_RUTIS_PYTHON")
         .map(PathBuf::from)
@@ -95,11 +108,11 @@ fn python() -> Option<PathBuf> {
         Ok(out) if out.status.success() => {
             let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
             match text.split_once(' ') {
-                Some(("True", version)) if version.starts_with("0.7") => Some(python),
+                Some(("True", version)) if version.starts_with("0.8.") => Some(python),
                 _ => skip(
                     "Python",
                     format!(
-                        "{} reports `{text}`: Python 3.12+ and rutis 0.7 needed",
+                        "{} reports `{text}`: Python 3.12+ and rutis 0.8 needed",
                         python.display()
                     ),
                 ),

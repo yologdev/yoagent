@@ -31,10 +31,10 @@ contribute to live agents:
 Every event is also published on the rutis bus as `AgentEventEmitted`.
 
 yoagent does not depend on rutis; this crate uses only yoagent's public API.
-It depends on `rutis = "0.6"` (0.x caret: any 0.6.x, never 0.7) and, with a
-language feature, `rutis-bridge = "0.7"` (the matching release train). rutis
-types are part of this crate's API, so every rutis or rutis-bridge minor bump
-is a yoagent-rutis minor bump.
+It depends on `rutis = "0.8"` (0.x caret: any 0.8.x, never 0.9) and, with a
+language feature, `rutis-bridge = "0.8"`: since 0.8 the packages in rutis's
+release train share one version. rutis types are part of this crate's API,
+so every rutis or rutis-bridge minor bump is a yoagent-rutis minor bump.
 
 ## Host
 
@@ -116,7 +116,7 @@ calls per tool, and a redactor).
 
 With a language feature, `RutisBridge::install` also provides the registry
 to plugins in other languages, through
-[rutis-bridge](https://crates.io/crates/rutis-bridge) 0.7, as the host
+[rutis-bridge](https://crates.io/crates/rutis-bridge) 0.8, as the host
 service `yoagent`:
 
 | Feature | Adds (rutis-bridge feature of the same name) |
@@ -248,7 +248,7 @@ def apply(ctx, config):
   `yoagent` in the loader's catalog (`catalog.register_shared("yoagent")` or
   `share_by_name()`). [`examples/language_plugins.rs`](examples/language_plugins.rs)
   is a complete host: `npm ci` in `plugins/`, a Python 3.12+ with
-  `rutis==0.7.0` in `plugins/.venv`, then
+  `rutis==0.8.0` in `plugins/.venv`, then
   `cargo run --features node,python --example language_plugins`.
 
 ### Remote handlers: latency and trust
@@ -359,7 +359,7 @@ is withdrawn.
 
 ### rutis-agent tools
 
-[rutis-agent](https://github.com/arcships/rutis/tree/v0.7.0/crates/rutis-agent)
+[rutis-agent](https://github.com/arcships/rutis/tree/v0.8.0/crates/rutis-agent)
 keeps its tools in a `ToolRegistry` service.
 [`examples/rutis-agent-tools/`](examples/rutis-agent-tools/src/main.rs) is a
 Rust rutis plugin that maps every `ToolDef` to a yoagent tool per run
@@ -379,8 +379,8 @@ cargo run --manifest-path examples/rutis-agent-tools/Cargo.toml [-- --live]
 
 > **Pinning caveat.** rutis matches services by Rust type, so rutis-agent and
 > this bridge must share one `rutis` crate. crates.io's `rutis-agent` 0.2.0 is
-> built on rutis 0.2; the one on rutis 0.6 (the rutis repository at tag
-> v0.7.0) is unpublished. The example is therefore its own workspace: it takes
+> built on rutis 0.2; the one on rutis 0.8 (the rutis repository at tag
+> v0.8.0) is unpublished. The example is therefore its own workspace: it takes
 > rutis-agent from git at that tag and patches crates.io's `rutis` to the same
 > tag (`[patch.crates-io]`), leaving one `rutis` in the graph (`cargo tree -d`
 > shows none twice). Move the tag and the patch together.
@@ -628,8 +628,10 @@ the others).
 
 ## Versions
 
-yoagent-rutis 0.1 requires yoagent 0.25 (the first release with `Extension`)
-and rutis 0.6. yoagent and rutis types are in its API, so a minor bump of
+yoagent-rutis 0.1 (crates.io) requires yoagent 0.25 (the first release with
+`Extension`) and rutis 0.6. From 0.2 it requires rutis 0.8, whose release
+train (`rutis`, `rutis-bridge`, `rutis-loader`, the npm and PyPI runtimes)
+shares one version. yoagent and rutis types are in its API, so a minor bump of
 either is a minor bump of yoagent-rutis. Take `yoagent` from the same source
 as `yoagent-rutis`: a crates.io `yoagent` next to a git `yoagent-rutis` is two
 `yoagent` crates whose types do not match.

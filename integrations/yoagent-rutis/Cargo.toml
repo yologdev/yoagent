@@ -20,20 +20,21 @@ exclude = [
     "plugins/pi/node_modules",
     "examples/rutis-agent-tools",
 ]
-# yoagent's MSRV; rutis 0.6.1 declares 1.85.
+# yoagent's MSRV; the rutis 0.8 release train declares 1.85.
 rust-version = "1.86"
 
 [dependencies]
 # The path's version (0.25 is the first release with `Extension`). yoagent
 # types are in this crate's API: a yoagent minor bump is a minor bump here.
 yoagent = { path = "../..", version = "0.25.1" }
-# 0.x caret: 0.6.x only (0.7 would be breaking). Any rutis minor bump is a
-# yoagent-rutis minor bump — its types are part of this crate's API.
-rutis = "0.6"
+# 0.x caret: 0.8.x only (0.9 would be breaking). Any rutis minor bump is a
+# yoagent-rutis minor bump — its types are part of this crate's API. Since
+# 0.8 the packages in rutis's release train share one version.
+rutis = "0.8"
 # TypeScript / Python plugins and remote nodes (the `node`, `python` and
-# `websocket` features). The release train matching rutis 0.6.1; any
-# rutis-bridge minor bump is a yoagent-rutis minor bump too.
-rutis-bridge = { version = "0.7", optional = true, default-features = false }
+# `websocket` features). Same train version as rutis; any rutis-bridge
+# minor bump is a yoagent-rutis minor bump too.
+rutis-bridge = { version = "0.8", optional = true, default-features = false }
 async-trait = "0.1"
 # Decodes plugin images to check them (yoagent itself uses 0.22).
 base64 = "0.22"
@@ -64,7 +65,7 @@ websocket = ["rutis-bridge/websocket"]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 # Loads language plugins as rows in the end-to-end tests. The bridge never
 # loads plugins itself: that is the host's job.
-rutis-loader = { version = "0.7", features = ["node", "python"] }
+rutis-loader = { version = "0.8", features = ["node", "python"] }
 tempfile = "3"
 # Captures the bridge's `log` output in its own test binary (tests/plugin_log_test.rs).
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }

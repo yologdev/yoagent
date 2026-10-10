@@ -87,7 +87,7 @@
 //!
 //! # TypeScript and Python plugins
 //!
-//! With the `node`, `python` or `websocket` feature (rutis-bridge 0.7),
+//! With the `node`, `python` or `websocket` feature (rutis-bridge 0.8),
 //! [`RutisBridge::install`] also provides the registry to plugins in other
 //! languages, as the host service `yoagent`. Such a plugin registers an
 //! object (or a Python dict) of async functions, with the same hooks and the
@@ -165,7 +165,7 @@ pub use handler::{Handler, Input, RunInfo, Stop, ToolCall, Turn};
 pub use plugin::{AgentPlugin, PluginCtxExt};
 pub use registry::{HandlerInfo, Registry};
 
-/// The rutis this bridge is built against (`0.6`). Its types are part of this
-/// crate's API, so any rutis minor bump (0.6 → 0.7) is a yoagent-rutis minor
-/// bump.
+/// The rutis this bridge is built against (`0.8`, the release train shared
+/// with `rutis-bridge` and `rutis-loader`). Its types are part of this crate's
+/// API, so any rutis minor bump (0.8 → 0.9) is a yoagent-rutis minor bump.
 pub use rutis;
