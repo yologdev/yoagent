@@ -638,7 +638,7 @@ as `yoagent-rutis`: a crates.io `yoagent` next to a git `yoagent-rutis` is two
 
 ```toml
 yoagent = "0.25"
-yoagent-rutis = "0.1"
+yoagent-rutis = "0.2"
 ```
 
 ## License
