@@ -11,9 +11,10 @@ readme = "README.md"
 keywords = ["agent", "llm", "plugin", "rutis", "yoagent"]
 categories = ["asynchronous", "development-tools"]
 authors = ["Yuanhao <yuanhao@yolog.dev>"]
-# Installed locally for the end-to-end tests, and the rutis-agent example
-# (its own workspace): never packaged.
+# Installed locally for the end-to-end tests, the rutis-agent example (its
+# own workspace) and the notes for coding agents: never packaged.
 exclude = [
+    "CLAUDE.md",
     "plugins/node_modules",
     "plugins/.venv",
     "plugins/dsh/node_modules",

@@ -11,6 +11,8 @@ readme = "README.md"
 keywords = ["agent", "cloudflare", "workers", "wasm", "yoagent"]
 categories = ["wasm", "asynchronous"]
 authors = ["Yuanhao <yuanhao@yolog.dev>"]
+# Notes for contributors' coding agents, not for users of the crate.
+exclude = ["CLAUDE.md"]
 # Mirrors yoagent's MSRV; not checked by CI (the wasm32 test tooling tracks
 # newer compilers).
 rust-version = "1.86"

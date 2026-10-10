@@ -14,6 +14,44 @@ env:
   RUSTFLAGS: "-Dwarnings"
 
 jobs:
+  # Which integration crates a change can affect, so their slow jobs (Node and
+  # Python runtimes, wasm tooling) skip PRs that touch neither them nor the
+  # core they build against. A push to main or a release branch runs them all.
+  # None of these jobs is a required check, so a skipped one blocks nothing.
+  changes:
+    name: Changed paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      workers: ${{ steps.paths.outputs.workers }}
+      rutis: ${{ steps.paths.outputs.rutis }}
+      frontend: ${{ steps.paths.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: paths
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$EVENT" != pull_request ]; then
+            echo "not a pull request: every integration job runs"
+            for c in workers rutis frontend; do echo "$c=true" >> "$GITHUB_OUTPUT"; done
+            exit 0
+          fi
+          changed=$(git diff --name-only "$BASE"...HEAD)
+          printf '%s\n' "$changed"
+          # The core every integration builds against (by path), and CI itself.
+          core='^(src/|Cargo\.toml$|Cargo\.lock$|\.cargo/|\.github/)'
+          touches() { printf '%s\n' "$changed" | grep -Eq "$1"; }
+          out() { if touches "$2"; then echo "$1=true"; else echo "$1=false"; fi >> "$GITHUB_OUTPUT"; }
+          out workers "$core|^integrations/yoagent-workers/"
+          out rutis "$core|^integrations/yoagent-rutis/"
+          # The frontend's tests and example load the rutis plugins and adapters.
+          out frontend "$core|^integrations/yoagent-(rutis|frontend)/"
+          cat "$GITHUB_OUTPUT"
+
   check:
     name: Check & Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -133,6 +171,8 @@ jobs:
   # under Node against fake bindings, like the core's wasm32 suite.
   workers-bindings:
     name: yoagent-workers
+    needs: changes
+    if: needs.changes.outputs.workers == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -212,6 +252,8 @@ jobs:
   # path, so it is built against this checkout; `rutis` is pinned exactly.
   rutis-bridge:
     name: yoagent-rutis bridge
+    needs: changes
+    if: needs.changes.outputs.rutis == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
@@ -247,6 +289,8 @@ jobs:
   # yoke-derive pin; the language features build there too.
   rutis-bridge-msrv:
     name: yoagent-rutis MSRV (1.86)
+    needs: changes
+    if: needs.changes.outputs.rutis == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -273,6 +317,8 @@ jobs:
   # runtime fails the job instead of skipping (YOAGENT_RUTIS_REQUIRE_RUNTIMES).
   rutis-bridge-languages:
     name: yoagent-rutis TypeScript / Python plugins
+    needs: changes
+    if: needs.changes.outputs.rutis == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -335,6 +381,8 @@ jobs:
   # terminal frontend and blocked `bash`.
   frontend-experimental:
     name: yoagent-frontend (experimental)
+    needs: changes
+    if: needs.changes.outputs.frontend == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
