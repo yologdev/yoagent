@@ -58,6 +58,7 @@
 - [LlmCompaction: live evaluation](evals/llm-compaction-live.md)
 - [Compaction defaults: offline sweep](evals/compaction-defaults.md)
 - [Mutation testing: baseline](evals/mutation-baseline.md)
+- [Plugin compatibility: pi and DSH](evals/plugin-compatibility.md)
 
 # Architecture
 

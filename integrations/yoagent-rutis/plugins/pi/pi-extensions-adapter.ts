@@ -453,6 +453,11 @@ export default definePlugin<Config>({
     for (const w of loaded.warnings ?? []) report('warn', `[pi] ${short(w.path)}: ${w.warning}`)
     const extensions = loaded.extensions
     const runtime = loaded.runtime
+    // What each extension registered, for hosts that want to know (debug).
+    for (const ext of extensions) {
+      const list = (keys: Iterable<string>) => [...keys].join(', ') || 'none'
+      report('debug', `[pi] loaded ${short(ext.path)}: events ${list(ext.handlers.keys())}; tools ${list(ext.tools.keys())}`)
+    }
 
     /**
      * Set when something that would have to be enforced turns up after load:

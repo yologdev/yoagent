@@ -508,7 +508,11 @@ prompts or a theme, and an extension that needs a UI only partly runs
 through the adapter. (Counted with
 `https://registry.npmjs.org/-/v1/search?text=keywords:<tag>`; result pages
 sampled deep into each list all carried the tag, so the totals are not
-loose text matches.)
+loose text matches.) How the 20 most-downloaded of each load through these
+adapters is measured in
+[plugin compatibility](../../docs/evals/plugin-compatibility.md)
+(`scripts/ecosystem-matrix.mjs`, which runs `examples/ecosystem_probe.rs`
+per package).
 
 The point is that **a plugin's safety policy never silently stops
 applying**. Not every rule arises for every adapter: the DSH adapter maps

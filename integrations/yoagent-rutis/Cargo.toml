@@ -102,3 +102,7 @@ required-features = ["node"]
 [[example]]
 name = "pi_extensions"
 required-features = ["node"]
+
+[[example]]
+name = "ecosystem_probe"
+required-features = ["node"]

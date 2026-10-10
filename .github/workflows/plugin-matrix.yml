@@ -1,0 +1,47 @@
+name: Plugin compatibility
+
+# Regenerates the plugin compatibility matrix (docs/evals/plugin-compatibility.md):
+# the most-downloaded pi packages and DSH plugins on npm, each installed and
+# loaded unchanged through yoagent-rutis's adapters by
+# scripts/ecosystem-matrix.mjs. Loading a third-party package runs its code,
+# so this runs on a throwaway runner with no secrets and a read-only token.
+# The report is uploaded as an artifact; committing it is a person's call.
+on:
+  workflow_dispatch:
+    inputs:
+      top:
+        description: "Packages per ecosystem"
+        default: "20"
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  matrix:
+    name: pi and DSH plugins
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: integrations/yoagent-rutis
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Install the adapters' runtimes
+        run: |
+          npm ci --prefix integrations/yoagent-rutis/plugins/pi
+          npm ci --prefix integrations/yoagent-rutis/plugins/dsh
+      - name: Run the matrix
+        env:
+          TOP: ${{ inputs.top }}
+        run: node scripts/ecosystem-matrix.mjs --top "$TOP" --out "$RUNNER_TEMP/matrix/plugin-compatibility.md"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin-compatibility
+          path: ${{ runner.temp }}/matrix/
