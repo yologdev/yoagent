@@ -16,7 +16,8 @@ if (!base || !name) {
   process.exit(2)
 }
 const require = createRequire(join(resolve(base), 'package.json'))
-const manifestPath = require.resolve(`${name}/package.json`)
+// Read directly: many packages' `exports` do not list ./package.json.
+const manifestPath = join(resolve(base), 'node_modules', name, 'package.json')
 const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
 const dsh = manifest.dsh ?? {}
 
@@ -26,7 +27,9 @@ const out = {
   client: Boolean(dsh.client),
   rows: [{ id: 'target', name }],
   otherPatchOps: [],
-  inject: null,
+  inject: [],
+  // Rows whose module could not be imported here: what they inject is unknown.
+  importErrors: {},
 }
 
 // The bundle patch: its `insert`s are the rows DSH adds when it installs the
@@ -61,8 +64,9 @@ for (const row of out.rows) {
   try {
     for (const name of await injectOf(row.name)) injected.add(name)
   } catch (error) {
-    // A row naming a package that is not there: the probe reports the row.
-    if (row.name === name) out.importError = String(error?.message ?? error).slice(0, 500)
+    // Not importable here (missing, or its module throws outside its host):
+    // recorded, so the matrix gives no verdict that depends on it.
+    out.importErrors[row.id ?? row.name] = String(error?.message ?? error).slice(0, 300)
   }
 }
 out.inject = [...injected]

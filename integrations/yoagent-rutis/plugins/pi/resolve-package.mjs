@@ -4,7 +4,7 @@
 // Used by the ecosystem probe (examples/ecosystem_probe.rs).
 //
 //   node resolve-package.mjs <package dir>
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { DefaultPackageManager, SettingsManager } from '@earendil-works/pi-coding-agent'
@@ -22,7 +22,12 @@ const manager = new DefaultPackageManager({
   agentDir,
   settingsManager: SettingsManager.inMemory(),
 })
-const resolved = await manager.resolveExtensionSources([resolve(dir)], { temporary: true })
+let resolved
+try {
+  resolved = await manager.resolveExtensionSources([resolve(dir)], { temporary: true })
+} finally {
+  rmSync(agentDir, { recursive: true, force: true })
+}
 const paths = (list) => (list ?? []).filter((r) => r.enabled !== false).map((r) => r.path)
 console.log(
   JSON.stringify({

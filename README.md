@@ -203,9 +203,10 @@ reloaded and unloaded at runtime — into one `Extension`. Through small adapter
 [pi](https://github.com/earendil-works/pi) extensions and DSH tool plugins unchanged, with no
 change to yoagent's core: tools, tool policies, input checks, prompt additions and images cross
 over; commands and UI don't. An extension that hooks something the adapter can't enforce is
-refused, not half-run. How the 20 most-downloaded packages of each ecosystem fare, measured:
+refused, not half-run. How the 20 most-downloaded packages of each ecosystem fare (by monthly
+downloads, among npm's first 1000 search results per keyword), measured:
 [plugin compatibility](https://yologdev.github.io/yoagent/evals/plugin-compatibility.html).
-`scripts/try-coding-agent.sh` runs a coding agent with pi and DSH plugins in your browser.
+`scripts/try-coding-agent.sh` serves a coding agent with pi and DSH plugins for your browser.
 
 ## Runs where agents run
 

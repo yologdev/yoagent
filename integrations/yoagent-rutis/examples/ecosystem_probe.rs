@@ -1,6 +1,6 @@
 //! Loads one third-party plugin package through its adapter, as an agent
 //! would, and prints what yoagent gets from it as one JSON line. The
-//! compatibility matrix (`scripts/ecosystem-matrix.sh`) runs it per package;
+//! compatibility matrix (`scripts/ecosystem-matrix.mjs`) runs it per package;
 //! it installs each package and resolves what is in it first.
 //!
 //! - `pi --cwd DIR [--skill PATH]... EXTENSION...`: pi extension files (as
@@ -126,8 +126,8 @@ fn row_state(loader: &Loader, id: &str) -> (String, Option<String>) {
     }
 }
 
-/// Load the rows as one layer and wait until each is active or failed (or
-/// the wait ends); each row's state.
+/// Load the given layers in one reconcile and wait until each row is
+/// active or failed (or the wait ends); each row's state.
 async fn load(host: &Host, layers: Vec<(&str, Value)>) -> Result<Vec<Value>, BoxError> {
     let mut ids = Vec::new();
     let mut built = Vec::new();
@@ -220,12 +220,23 @@ fn skills(paths: &[PathBuf]) -> Value {
         };
         let Some(parent) = dir.parent() else { continue };
         let (set, errs) = SkillSet::load_dir_resilient(parent, "probe");
+        // The loader keeps canonical paths (on macOS /var is /private/var).
+        let dir = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
         match set.skills().iter().find(|s| s.base_dir == dir) {
             Some(skill) => loaded.push(skill.name.clone()),
-            None => errors.push(match errs.first() {
-                Some(e) => format!("{}: {e}", dir.display()),
-                None => format!("{}: not loaded", dir.display()),
-            }),
+            None => {
+                // The loader's error about this skill, not a sibling's.
+                let name = dir.file_name().map(|n| n.to_string_lossy().into_owned());
+                let error = errs
+                    .iter()
+                    .map(|e| e.to_string())
+                    .find(|e| name.as_deref().is_some_and(|n| e.contains(n)));
+                errors.push(format!(
+                    "{}: {}",
+                    dir.display(),
+                    error.unwrap_or_else(|| "not loaded, no error given".into())
+                ));
+            }
         }
     }
     json!({ "found": paths.len(), "loaded": loaded, "errors": errors })
@@ -276,7 +287,10 @@ async fn probe_pi(
                 return result;
             }
         };
-        let error = rows[0]["error"].as_str().map(str::to_owned);
+        // A TS row reads active before its async `apply` ends: wait for the
+        // adapter's handler, then read the row again (a refusal fails it late).
+        let registered = rows[0]["state"] == "active" && handler(&host, "pi-extensions").await;
+        let (state, error) = row_state(&host.loader, "pi");
         if let Some(name) = error.as_deref().and_then(shadowed) {
             if !without.contains(&name) {
                 without.push(name);
@@ -284,9 +298,9 @@ async fn probe_pi(
                 continue;
             }
         }
-        result["rows"] = json!(rows);
+        result["rows"] = json!([{ "id": "pi", "state": state, "error": error }]);
         result["without"] = json!(without);
-        if rows[0]["state"] == "active" && handler(&host, "pi-extensions").await {
+        if registered && state == "active" {
             match offered(&host).await {
                 Ok((tools, note)) => {
                     result["loaded"] = json!(true);
@@ -300,13 +314,13 @@ async fn probe_pi(
             }
         } else {
             result["loaded"] = json!(false);
-            result["error"] = json!(error.unwrap_or_else(|| format!(
-                "the adapter did not register (row {})",
-                rows[0]["state"]
-            )));
+            result["error"] = json!(
+                error.unwrap_or_else(|| format!("the adapter did not register (row {state})"))
+            );
         }
-        // Let late log lines arrive before the host goes.
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Let late log lines arrive (a warning decides "works, partly"),
+        // then again after shutdown, which flushes the runtime.
+        tokio::time::sleep(Duration::from_millis(500)).await;
         shutdown(host).await;
         result["logs"] = json!(logs.0.lock().unwrap().clone());
         return result;
@@ -326,6 +340,10 @@ fn dsh_file(base: &Path, name: &str) -> PathBuf {
         plugins_dir().join("dsh").join(name)
     }
 }
+
+/// The row id of `plugins/dsh/probe-services.ts`; a failure of it is
+/// reported under `services.error`.
+const SERVICE_CHECK: &str = "probe-services";
 
 /// DSH's base packages and the tools adapter: what every DSH plugin gets.
 fn dsh_base_rows(base: &Path) -> Value {
@@ -369,7 +387,7 @@ async fn probe_dsh(logs: Logs, base: PathBuf, rows: Value, inject: Vec<String>) 
     let _ = std::fs::remove_file(&out);
     let mut plugin_rows = rows.as_array().cloned().unwrap_or_default();
     plugin_rows.push(json!({
-        "id": "base-probe-services",
+        "id": SERVICE_CHECK,
         "name": dsh_file(&base, "probe-services.ts"),
         "config": { "names": inject, "out": out, "waitMs": 3000 },
     }));
@@ -393,7 +411,10 @@ async fn probe_dsh(logs: Logs, base: PathBuf, rows: Value, inject: Vec<String>) 
         }
     })
     .await
-    .unwrap_or(Value::Null);
+    .unwrap_or_else(|_| {
+        let (state, error) = row_state(&host.loader, SERVICE_CHECK);
+        json!({ "error": format!("no report within 20 s (row {state}{})", error.map(|e| format!(": {e}")).unwrap_or_default()) })
+    });
     let _ = std::fs::remove_file(&out);
     result["services"] = services;
     let after = offered(&host).await;
@@ -401,7 +422,10 @@ async fn probe_dsh(logs: Logs, base: PathBuf, rows: Value, inject: Vec<String>) 
         (Ok(state), Ok((tools_before, note_before)), Ok((tools_after, note_after))) => {
             let plugin_rows: Vec<Value> = state
                 .into_iter()
-                .filter(|r| !r["id"].as_str().unwrap_or("").starts_with("base-"))
+                .filter(|r| {
+                    let id = r["id"].as_str().unwrap_or("");
+                    !id.starts_with("base-") && id != SERVICE_CHECK
+                })
                 .collect();
             let tools: Vec<String> = tools_after
                 .into_iter()

@@ -12,7 +12,12 @@
 //        (the report again from earlier raw results: no installs, no probe)
 //
 // Needs Node 24+, npm, cargo, and `npm ci` in the adapters' directories
-// (scripts/try-coding-agent.sh --setup-only does it). Network: npm only.
+// (scripts/try-coding-agent.sh --setup-only does it). Network: npm (search,
+// installs) and, when not cached, crates.io for building the probe.
+//
+// An error of this harness (a failed resolve, a check that did not report)
+// is always classified **failed** with its reason, never as a verdict on
+// the package.
 // Installs run with --ignore-scripts; loading a package still runs its code,
 // as its own host would, so run this where that is acceptable (CI, a VM).
 import { spawnSync } from 'node:child_process'
@@ -95,16 +100,25 @@ const npmInstall = (dir, spec, extra) =>
 
 // ---- pi ------------------------------------------------------------------
 
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`
+
 function classifyPi(r) {
   const warnings = (r.logs ?? []).filter((l) => l.level === 'warn').map((l) => l.message)
   const ignored = warnings.flatMap((w) => (w.match(/ignored: (.*)$/)?.[1] ?? '').split('; ').filter(Boolean)).map((s) => s.replace(/^[^:]+: /, ''))
   const skills = r.skills?.loaded ?? []
+  const skillErrors = r.skills?.errors ?? []
   if (r.install) return { result: 'not installed', detail: r.install }
+  if (r.resolveError) return { result: 'failed', detail: r.resolveError }
   if ((r.resources?.extensions ?? 0) === 0) {
-    if (skills.length > 0) return { result: 'works', detail: `skills only: ${skills.length} loaded by yoagent's skills loader` }
-    const what = Object.entries(r.resources ?? {}).filter(([, n]) => n > 0).map(([k, n]) => `${n} ${k}`).join(', ')
+    if (skillErrors.length > 0 && skills.length === 0) return { result: 'failed', detail: `yoagent's skills loader rejected its skills: ${skillErrors.join('; ').slice(0, 300)}` }
+    if (skills.length > 0) return { result: skillErrors.length > 0 ? 'works, partly' : 'works', detail: `skills only: ${skills.length} loaded by yoagent's skills loader${skillErrors.length > 0 ? `, ${skillErrors.length} rejected` : ''}` }
+    const what = Object.entries(r.resources ?? {}).filter(([k, n]) => n > 0 && k !== 'skills').map(([k, n]) => `${n} ${k}`).join(', ')
     return { result: 'not applicable', detail: `no extensions or skills${what ? ` (${what}: pi's app features)` : ''}` }
   }
+  // The adapter can refuse after load (a deciding event or a same-name tool
+  // registered later): it says so, and denies everything from then on.
+  const stopped = warnings.find((w) => /adapter stopped/.test(w))
+  if (r.loaded && stopped) return { result: 'refused', detail: stopped.replace(/^.*?adapter stopped: /, '') + (skills.length > 0 ? ` Its ${plural(skills.length, 'skill')} still load with yoagent's skills loader.` : '') }
   if (r.loaded) {
     const parts = []
     if (r.tools.length > 0) parts.push(`${r.tools.length} tool${r.tools.length === 1 ? '' : 's'}`)
@@ -112,10 +126,11 @@ function classifyPi(r) {
     if (events.includes('tool_call') || events.includes('tool_result')) parts.push('tool-call hooks')
     if (events.includes('input')) parts.push('input hooks')
     if (r.note_chars > 0) parts.push('prompt additions')
-    if (skills.length > 0) parts.push(`${skills.length} skills`)
+    if (skills.length > 0) parts.push(plural(skills.length, 'skill'))
+    if (skillErrors.length > 0) parts.push(`${skillErrors.length} skills rejected by yoagent's loader`)
     // Loaded, but nothing an agent run would use: often a package that
     // registers its features only once configured (keys, a config file).
-    if (parts.length === 0) {
+    if (parts.length === 0 || (parts.length === 1 && skillErrors.length > 0)) {
       return {
         result: 'nothing to use',
         detail: ignored.length > 0
@@ -126,16 +141,18 @@ function classifyPi(r) {
     }
     if ((r.without ?? []).length > 0) parts.push(`replaces yoagent's ${r.without.join(', ')}`)
     return {
-      result: ignored.length > 0 ? 'works, partly' : 'works',
+      result: ignored.length > 0 || skillErrors.length > 0 ? 'works, partly' : 'works',
       detail: parts.join(', '),
       ignored,
     }
   }
   const error = r.error ?? 'unknown'
-  if (/never fires/.test(error)) return { result: 'refused', detail: error.replace(/^.*?Error: /s, '') }
+  // Its skills do not go through the adapter: yoagent's own loader takes them.
+  const usable = skills.length > 0 ? ` Its ${plural(skills.length, 'skill')} still load with yoagent's skills loader.` : ''
+  if (/never fires/.test(error)) return { result: 'refused', detail: error.replace(/^.*?Error: /s, '') + usable }
   // A throwing session_start refuses the load too (fail closed), typically
   // reaching for pi app internals the adapter's context does not have.
-  if (/failed in session_start/.test(error)) return { result: 'refused', detail: `its session_start failed, so the adapter did not load it: ${error.replace(/^.*?session_start: /s, '')}` }
+  if (/failed in session_start/.test(error)) return { result: 'refused', detail: `its session_start failed, so the adapter did not load it: ${error.replace(/^.*?session_start: /s, '')}${usable}` }
   return { result: 'failed', detail: error.replace(/^.*?Error: /s, '').slice(0, 400) }
 }
 
@@ -154,11 +171,16 @@ async function runPi(packages) {
       r = { install: tail(inst.stderr, 300) || 'npm install failed' }
     } else {
       const res = run('node', [join(piDir, 'resolve-package.mjs'), join(dir, 'node_modules', pkg.name)], { cwd: piDir })
-      const found = res.ok ? JSON.parse(res.stdout) : { extensions: [], skills: [], prompts: [], themes: [] }
-      const cwd = join(dir, 'project')
-      mkdirSync(cwd, { recursive: true })
-      r = probeJson(['pi', '--cwd', cwd, ...found.skills.flatMap((s) => ['--skill', s]), ...found.extensions])
-      r.resources = Object.fromEntries(Object.entries(found).map(([k, v]) => [k, v.length]))
+      let found = null
+      try { found = res.ok ? JSON.parse(res.stdout.trim().split('\n').pop()) : null } catch {}
+      if (!found) {
+        r = { resolveError: `pi's package manager could not resolve it: ${tail(res.stderr || res.stdout, 300) || 'no output'}` }
+      } else {
+        const cwd = join(dir, 'project')
+        mkdirSync(cwd, { recursive: true })
+        r = probeJson(['pi', '--cwd', cwd, ...found.skills.flatMap((s) => ['--skill', s]), ...found.extensions])
+        r.resources = Object.fromEntries(Object.entries(found).map(([k, v]) => [k, v.length]))
+      }
     }
     results.push({ ...pkg, ...r, ...classifyPi(r) })
     log(`  → ${results.at(-1).result}: ${results.at(-1).detail}`)
@@ -171,30 +193,42 @@ async function runPi(packages) {
 function classifyDsh(r) {
   if (r.install) return { result: 'not installed', detail: r.install }
   if (r.inspectError) return { result: 'failed', detail: r.inspectError }
-  const missing = r.services?.missing ?? []
-  const failed = (r.rows ?? []).filter((row) => row.state !== 'active')
-  const ui = r.client ? ' Its web UI needs DSH\'s web client.' : ''
   if (r.error) return { result: 'failed', detail: r.error.slice(0, 400) }
-  if (missing.length > 0) return { result: 'needs a DSH host', detail: `waits for services yoagent's DSH runtime does not run: ${missing.join(', ')}.${ui}` }
+  // The service check must have reported; without it, a plugin waiting on a
+  // missing service would read as started.
+  if (!Array.isArray(r.services?.missing)) return { result: 'failed', detail: `the service check did not report${r.services?.error ? `: ${r.services.error}` : ''}` }
+  const fallback = r.installNote ? ` (${r.installNote})` : ''
+  const ui = r.client ? ' Its web UI needs DSH\'s web client.' : ''
+  const missing = r.services.missing
+  if (missing.length > 0) return { result: 'needs a DSH host', detail: `waits for services yoagent's DSH runtime does not run: ${missing.join(', ')}.${ui}${fallback}` }
   const dshPackages = [...new Set((r.rows ?? []).flatMap((row) =>
     [...(row.error ?? '').matchAll(/(?:no plugin named "|Cannot find package ')(@deepseek-ai\/[^"']+)/g)].map((m) => m[1])))]
-  if (dshPackages.length > 0) return { result: 'needs a DSH host', detail: `loads DSH packages an agent library does not ship: ${dshPackages.join(', ')}.${ui}` }
+  if (dshPackages.length > 0) return { result: 'needs a DSH host', detail: `loads DSH packages an agent library does not ship: ${dshPackages.join(', ')}.${ui}${fallback}` }
+  const failed = (r.rows ?? []).filter((row) => row.state !== 'active')
   if (failed.length > 0) return { result: 'failed', detail: failed.map((row) => `${row.id}: ${row.state} ${row.error ?? ''}`).join('; ').slice(0, 400) }
+  // What its rows inject could not be read, so the check may have missed a
+  // service it waits for: no verdict.
+  const unread = Object.entries(r.importErrors ?? {})
+  if (unread.length > 0) return { result: 'failed', detail: `could not read what it injects (${unread.map(([row, e]) => `${row}: ${e}`).join('; ').slice(0, 300)})` }
   const parts = []
   if ((r.tools ?? []).length > 0) parts.push(`${r.tools.length} tool${r.tools.length === 1 ? '' : 's'}`)
   if (r.guidance_chars > 0) parts.push('prompt guidance')
-  if (parts.length > 0) return { result: 'works', detail: parts.join(', ') + '.' + ui }
-  return { result: 'not applicable', detail: `starts, but adds no tools or guidance (UI, settings or server features).${ui}` }
+  const ignored = r.client ? ["its web UI (DSH's web client)"] : []
+  if (parts.length > 0) return { result: ignored.length > 0 ? 'works, partly' : 'works', detail: parts.join(', ') + fallback, ignored }
+  return { result: 'not applicable', detail: `starts, but adds no tools or guidance (UI, settings or server features).${ui}${fallback}` }
 }
 
 // Each package of `from` (a node_modules) copied into `to`, unless `to`
 // has it: the host's DSH and rutis packages are kept; any other package the
-// base already has at another version goes under the plugin's own
-// node_modules, where only the plugin resolves it.
+// base already has (whatever its version) goes under the plugin's own
+// node_modules, where only the plugin resolves it. The plugin itself
+// replaces a base copy of the same name (the base pins dsh-free-search).
 function mergeInto(from, to, plugin) {
   const names = readdirSync(from).filter((n) => !n.startsWith('.'))
     .flatMap((n) => (n.startsWith('@') ? readdirSync(join(from, n)).map((m) => `${n}/${m}`) : [n]))
-  // The plugin first: nesting a conflicting package creates its directory.
+  // The plugin first, cleanly: nesting a conflicting package creates its
+  // directory, and an older copy's files must not linger.
+  rmSync(join(to, plugin), { recursive: true, force: true })
   cpSync(join(from, plugin), join(to, plugin), { recursive: true, verbatimSymlinks: true })
   for (const name of names.filter((n) => n !== plugin)) {
     const target = join(to, name)
@@ -230,30 +264,38 @@ async function runDsh(packages) {
     cpSync(base, dir, { recursive: true, verbatimSymlinks: true })
     // The adapter and the service check resolve this directory's Cordis.
     for (const f of ['dsh-tools-adapter.ts', 'probe-services.ts']) cpSync(join(dshDir, f), join(dir, f))
-    // The plugin is installed alone, without peers, then merged into the
-    // base copy without npm: npm would re-plan the base's tree (swapping or
-    // pruning DSH's packages). A DSH host supplies DSH's packages, as pi
-    // supplies its own, so the base's win; a peer the base lacks shows as a
-    // failed import, an unknown row, or a missing service.
+    // The plugin is installed in a directory of its own, with its peers, then
+    // merged into the base copy without npm: npm would re-plan the base's
+    // tree (swapping or pruning DSH's packages). The base's DSH and rutis
+    // packages win the merge, as a DSH host supplies its own.
     //
-    // A DSH host has DSH's whole release, so the plugin's DSH peer packages
-    // the base lacks come along at the base's release (libraries it imports);
-    // what still gates it are the DSH services it injects and the DSH plugins
-    // its patch loads, which the probe reports.
+    // A DSH host has DSH's whole release, so the plugin's `@deepseek-ai/dsh-*`
+    // peers come at the base's release (other `@deepseek-ai/` peers at their
+    // declared range); what gates the plugin are the DSH services it injects
+    // and the DSH plugins its patch loads, which the probe reports. Only if
+    // that install fails is it retried without peers, and the row says so.
     const alone = join(work, 'dsh-alone', pkg.name.replace('/', '__'))
     rmSync(alone, { recursive: true, force: true })
     mkdirSync(alone, { recursive: true })
     writeFileSync(join(alone, 'package.json'), '{"private":true}')
     const view = run('npm', ['view', `${pkg.name}@${pkg.version}`, 'peerDependencies', '--json'], { cwd: alone, timeout: 60_000 })
-    let peers = {}
-    try { peers = JSON.parse(view.stdout || '{}') ?? {} } catch {}
-    const extra = Object.keys(peers)
+    let peers = null
+    try { peers = view.ok ? (JSON.parse(view.stdout || '{}') ?? {}) : null } catch {}
+    const notes = []
+    if (!peers) notes.push(`its peers could not be read: ${tail(view.stderr, 150) || 'npm view failed'}`)
+    const extra = Object.keys(peers ?? {})
       .filter((p) => p.startsWith('@deepseek-ai/') && !existsSync(join(dir, 'node_modules', p)))
       .map((p) => (p.startsWith('@deepseek-ai/dsh-') ? `${p}@${dshRelease}` : `${p}@${peers[p]}`))
     const spec = `${pkg.name}@${pkg.version}`
     let inst = npmInstall(alone, spec, [...extra])
-    if (!inst.ok) inst = npmInstall(alone, spec, [...extra, '--legacy-peer-deps'])
-    if (!inst.ok && extra.length > 0) inst = npmInstall(alone, spec, ['--legacy-peer-deps'])
+    if (!inst.ok) {
+      inst = npmInstall(alone, spec, [...extra, '--legacy-peer-deps'])
+      if (inst.ok) notes.push('installed without npm resolving its peers')
+    }
+    if (!inst.ok && extra.length > 0) {
+      inst = npmInstall(alone, spec, ['--legacy-peer-deps'])
+      if (inst.ok) notes.push(`installed without its DSH peers (${extra.join(', ')})`)
+    }
     if (inst.ok) mergeInto(join(alone, 'node_modules'), join(dir, 'node_modules'), pkg.name)
     rmSync(alone, { recursive: true, force: true })
     let r
@@ -267,8 +309,9 @@ async function runDsh(packages) {
         r = { inspectError: `could not read the package: ${tail(ins.stderr, 300)}` }
       } else {
         const inject = (info.inject ?? []).filter((n) => !n.endsWith('?'))
-        r = { ...probeJson(['dsh', '--base', dir, '--rows', JSON.stringify(info.rows), ...inject.flatMap((n) => ['--inject', n])]), client: info.client, peers: info.peers, inject: info.inject, importError: info.importError }
+        r = { ...probeJson(['dsh', '--base', dir, '--rows', JSON.stringify(info.rows), ...inject.flatMap((n) => ['--inject', n])]), client: info.client, peers: info.peers, inject: info.inject, importErrors: info.importErrors }
       }
+      if (notes.length > 0) r.installNote = notes.join('; ')
     }
     results.push({ ...pkg, ...r, ...classifyDsh(r) })
     log(`  → ${results.at(-1).result}: ${results.at(-1).detail}`)
@@ -304,11 +347,28 @@ if (opts.fromJson) {
 } else {
   // With --only, the other ecosystem's earlier results are kept.
   const earlier = opts.only && existsSync(opts.json) ? JSON.parse(readFileSync(opts.json, 'utf8')) : {}
-  raw = { ...earlier, date: new Date().toISOString().slice(0, 10), top: opts.top }
-  if (opts.only !== 'dsh') raw.pi = await runPi(await top('pi-package'))
-  if (opts.only !== 'pi') raw.dsh = await runDsh(await top('dsh-plugin'))
+  raw = { ...earlier }
+  raw.runs ??= {}
+  // When and how each ecosystem's rows were chosen: --only keeps the other's.
+  const runInfo = () => ({ date: new Date().toISOString().slice(0, 10), selection: opts.packages ? 'hand-picked' : `top ${opts.top}` })
+  if (opts.only !== 'dsh') {
+    raw.pi = await runPi(await top('pi-package'))
+    raw.runs.pi = runInfo()
+  }
+  if (opts.only !== 'pi') {
+    raw.dsh = await runDsh(await top('dsh-plugin'))
+    raw.runs.dsh = runInfo()
+  }
 }
-const date = raw.date
+// Results written before per-ecosystem run info had one date for both.
+for (const eco of ['pi', 'dsh']) if (raw[eco] && !raw.runs?.[eco]) (raw.runs ??= {})[eco] = { date: raw.date, selection: `top ${raw.top ?? raw[eco].length}` }
+delete raw.date
+delete raw.top
+const dates = [...new Set(Object.values(raw.runs).map((r) => r.date))].join(' and ')
+const chosen = (eco, keyword) =>
+  raw.runs[eco].selection === 'hand-picked'
+    ? `${raw[eco].length} hand-picked packages with the \`${keyword}\` keyword`
+    : `The ${raw[eco].length} most-downloaded packages (by monthly downloads, among the first 1000 results of npm's search) with the \`${keyword}\` keyword`
 const sections = []
 mkdirSync(dirname(opts.json), { recursive: true })
 writeFileSync(opts.json, JSON.stringify(raw, null, 2) + '\n')
@@ -316,14 +376,14 @@ writeFileSync(opts.json, JSON.stringify(raw, null, 2) + '\n')
 if (raw.pi) {
   sections.push(`## pi packages
 
-The ${raw.pi.length} most-downloaded packages with the \`pi-package\` keyword, through the pi adapter (pi ${pinned(piDir, '@earendil-works/pi-coding-agent')}). ${count(raw.pi)}.
+${chosen('pi', 'pi-package')}, through the pi adapter (pi ${pinned(piDir, '@earendil-works/pi-coding-agent')}), on ${raw.runs.pi.date}. ${count(raw.pi)}.
 
 ${table(raw.pi)}`)
 }
 if (raw.dsh) {
   sections.push(`## DSH plugins
 
-The ${raw.dsh.length} most-downloaded packages with the \`dsh-plugin\` keyword, over DSH's base packages and the tools adapter (DSH ${pinned(dshDir, '@deepseek-ai/dsh-tools')}). ${count(raw.dsh)}.
+${chosen('dsh', 'dsh-plugin')}, over DSH's base packages and the tools adapter (DSH ${pinned(dshDir, '@deepseek-ai/dsh-tools')}), on ${raw.runs.dsh.date}. ${count(raw.dsh)}.
 
 ${table(raw.dsh)}`)
 }
@@ -331,18 +391,26 @@ ${table(raw.dsh)}`)
 // The headline, computed from the rows.
 const n = (rows, ...results) => rows.filter((r) => results.includes(r.result)).length
 const summary = []
+// Skills load through yoagent's own loader, whatever the adapter decides.
+const skillLine = () => {
+  const found = raw.pi.reduce((a, r) => a + (r.skills?.found ?? 0), 0)
+  const loaded = raw.pi.reduce((a, r) => a + (r.skills?.loaded?.length ?? 0), 0)
+  const packages = raw.pi.filter((r) => (r.skills?.found ?? 0) > 0).length
+  if (found === 0) return ''
+  return ` Their skills: ${loaded === found ? 'all' : `${loaded} of`} ${found} (in ${packages} packages) load with yoagent's skills loader.`
+}
 if (raw.pi) {
-  summary.push(`- **pi:** ${n(raw.pi, 'works', 'works, partly')} of ${raw.pi.length} give an agent run tools, tool-call or input hooks, or prompt additions (${n(raw.pi, 'works')} fully). ${n(raw.pi, 'refused')} are refused because they reach into what yoagent cannot enforce (provider requests, the context, pi's model registry); ${n(raw.pi, 'nothing to use')} register nothing usable as installed.`)
+  summary.push(`- **pi:** ${n(raw.pi, 'works', 'works, partly')} of ${raw.pi.length} give an agent run tools, tool-call or input hooks, or prompt additions (${n(raw.pi, 'works')} fully). ${n(raw.pi, 'refused')} are refused because they hook what yoagent cannot enforce, or their startup needs pi app internals; ${n(raw.pi, 'nothing to use')} register nothing usable as installed.${skillLine()}`)
 }
 if (raw.dsh) {
-  summary.push(`- **DSH:** ${n(raw.dsh, 'works')} of ${raw.dsh.length} give an agent tools or prompt guidance. ${n(raw.dsh, 'needs a DSH host')} need DSH's own app (its sessions, web server, model layer); ${n(raw.dsh, 'not applicable')} add nothing an agent uses (UI or settings). DSH's popular plugins mostly extend the DSH app rather than add agent tools.`)
+  summary.push(`- **DSH:** ${n(raw.dsh, 'works', 'works, partly')} of ${raw.dsh.length} give an agent tools or prompt guidance. ${n(raw.dsh, 'needs a DSH host')} need DSH's own app (its sessions, web server, model layer); ${n(raw.dsh, 'not applicable')} add nothing an agent uses (UI or settings). DSH's popular plugins mostly extend the DSH app rather than add agent tools.`)
 }
 
 writeFileSync(opts.out, `# Plugin compatibility
 
 How the most-downloaded third-party plugins of two agent ecosystems load in
 a yoagent agent, unchanged, through yoagent-rutis's adapters. Generated by
-\`scripts/ecosystem-matrix.mjs\` on ${date}; raw results in
+\`scripts/ecosystem-matrix.mjs\` on ${dates}; raw results in
 [\`${opts.json.split('/').pop()}\`](${opts.json.split('/').pop()}).
 
 **What was checked.** Each package is installed on its own from npm and
@@ -357,8 +425,9 @@ ${summary.join('\n')}
 **Results.**
 - **works**: loads; everything it registers maps to yoagent.
 - **works, partly**: loads; some of what it registers is an app feature
-  yoagent's agent loop has no place for (commands, shortcuts, renderers, …),
-  listed as *ignored*. Its tools, policies and prompt additions work.
+  yoagent's agent loop has no place for (commands, shortcuts, renderers, a
+  DSH web UI, …), listed as *ignored*. Its tools, policies and prompt
+  additions work.
 - **refused**: the adapter declined to load it — it handles an event
   yoagent never fires that would decide what the agent does, or its startup
   (\`session_start\`) failed, typically reaching for pi app internals such
@@ -370,7 +439,9 @@ ${summary.join('\n')}
   its web server, its model layer, …) or loads DSH app plugins that an
   agent library does not run.
 - **not applicable**: nothing for an agent: themes, prompt templates, UI.
-- **failed** / **not installed**: an error loading or installing it.
+- **failed** / **not installed**: an error loading or installing it — or
+  of this harness (a check that did not report), with the reason. Never a
+  verdict on the package.
 
 ${sections.join('\n\n')}
 `)

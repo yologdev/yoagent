@@ -1,6 +1,14 @@
 {
-  "date": "2026-10-10",
-  "top": 20,
+  "runs": {
+    "pi": {
+      "date": "2026-10-10",
+      "selection": "top 20"
+    },
+    "dsh": {
+      "date": "2026-10-10",
+      "selection": "top 20"
+    }
+  },
   "pi": [
     {
       "name": "pi-mcp-adapter",
@@ -40,7 +48,7 @@
           "message": "[pi] not available in yoagent, ignored: index.ts: event \"mcp_servers_change\"; index.ts: event \"resources_discover\"; index.ts: event \"session_tree\"; index.ts: command /mcp-adapter; index.ts: command /mcp; index.ts: command /mcp-auth; index.ts: flag --mcp-config"
         }
       ],
-      "stderr": "Turned off Pi's built-in MCP so it doesn't run next to pi-mcp-adapter. If you remove the adapter, turn it back on in `pi config` → Built-in.",
+      "stderr": "",
       "resources": {
         "extensions": 1,
         "skills": 0,
@@ -62,7 +70,7 @@
     {
       "name": "billion-context",
       "version": "0.1.192",
-      "monthly": 864577,
+      "monthly": 936104,
       "description": "A context-compression plugin — small context windows (a 100K context is enough), 5x fewer tokens, month-long single sessions (billions of tokens), and compression quality — for all agents: pi, OpenCode, Codex, Claude Code, and more. billion-context is all",
       "ecosystem": "pi",
       "skills": {
@@ -130,11 +138,11 @@
       "logs": [
         {
           "level": "debug",
-          "message": "[pi] no host ui (print mode): service pi-host-ui is not available"
+          "message": "[pi] loaded index.js: events before_agent_start, agent_settled, session_start, session_tree, session_shutdown, tool_call; tools web_search, source_check, fetch_content, get_search_content, web_enable"
         },
         {
           "level": "debug",
-          "message": "[pi] loaded index.js: events before_agent_start, agent_settled, session_start, session_tree, session_shutdown, tool_call; tools web_search, source_check, fetch_content, get_search_content, web_enable"
+          "message": "[pi] no host ui (print mode): service pi-host-ui is not available"
         },
         {
           "level": "warn",
@@ -169,11 +177,11 @@
       "ecosystem": "pi",
       "skills": {
         "found": 2,
-        "loaded": [],
-        "errors": [
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/pi-subagents/node_modules/pi-subagents/skills/council-mode: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/pi-subagents/node_modules/pi-subagents/skills/pi-subagents: not loaded"
-        ]
+        "loaded": [
+          "council-mode",
+          "pi-subagents"
+        ],
+        "errors": []
       },
       "rows": [
         {
@@ -216,7 +224,7 @@
         "themes": 0
       },
       "result": "works, partly",
-      "detail": "3 tools, tool-call hooks, input hooks",
+      "detail": "3 tools, tool-call hooks, input hooks, 2 skills",
       "ignored": [
         "event \"turn_end\"",
         "event \"model_select\"",
@@ -342,7 +350,7 @@
     {
       "name": "pi-mcp-extension",
       "version": "1.5.1",
-      "monthly": 252500,
+      "monthly": 270009,
       "description": "MCP (Model Context Protocol) client extension for the Pi coding agent — connect Pi to any MCP server",
       "ecosystem": "pi",
       "skills": {
@@ -442,10 +450,10 @@
       "ecosystem": "pi",
       "skills": {
         "found": 1,
-        "loaded": [],
-        "errors": [
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/openwiki/node_modules/openwiki/integrations/openwiki: not loaded"
-        ]
+        "loaded": [
+          "openwiki"
+        ],
+        "errors": []
       },
       "rows": [
         {
@@ -483,7 +491,7 @@
         "themes": 0
       },
       "result": "works",
-      "detail": "6 tools",
+      "detail": "6 tools, 1 skill",
       "ignored": []
     },
     {
@@ -535,90 +543,90 @@
       "ecosystem": "pi",
       "skills": {
         "found": 81,
-        "loaded": [],
-        "errors": [
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/align-grid: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/assess-impact: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/audit-code: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/audit-plan: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/build-epic: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/change-request: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/commit-message: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/compose-workflow: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/context7-mcp: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/craft-skill: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/deepen-architecture: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/define-language: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/define-success: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/delegate-task: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/deploy: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/design-interface: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/develop-tdd: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/diagnose-root: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/diagnose-stall: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/dispatch-agents: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/edit-document: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/elaborate-spec: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/enforce-first: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/evolve-skill: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/execute-plan: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/extract-design: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/find-way: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/fix-bug: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/gate-trace: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/generate-allure-report: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/grill-me: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/grill-with-docs: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/guard-git: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/harden-vps: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/hook-commits: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/inspect-quality: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/investigate-bug: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/kickoff-branch: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/maintain-wiki: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/map-codebase: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/migrate-spec: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/model-domain: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/orchestrate-project: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/organize-workspace: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/plan-refactor: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/plan-release: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/plan-tests: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/plan-work: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/publish-package: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/quick-fix: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/release-branch: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/request-review: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/research-first: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/reset-baseline: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/respond-review: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/run-benchmark: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/run-evals: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/run-planning: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/scope-work: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/search-skills: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/security-review: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/seed-conventions: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/session-state: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/setup-environment: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/simple-english: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/simulate-agents: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/slice-tasks: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/smoke-test: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/spike-prototype: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/stocktake-skills: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/survey-context: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/terse-mode: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/trace-requirement: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/using-bigpowers: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/validate-contracts: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/validate-fix: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/verify-work: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/visual-dashboard: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/wire-ci: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/wire-observability: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/bigpowers/node_modules/bigpowers/.pi/skills/write-document: not loaded"
-        ]
+        "loaded": [
+          "align-grid",
+          "assess-impact",
+          "audit-code",
+          "audit-plan",
+          "build-epic",
+          "change-request",
+          "commit-message",
+          "compose-workflow",
+          "context7-mcp",
+          "craft-skill",
+          "deepen-architecture",
+          "define-language",
+          "define-success",
+          "delegate-task",
+          "deploy",
+          "design-interface",
+          "develop-tdd",
+          "diagnose-root",
+          "diagnose-stall",
+          "dispatch-agents",
+          "edit-document",
+          "elaborate-spec",
+          "enforce-first",
+          "evolve-skill",
+          "execute-plan",
+          "extract-design",
+          "find-way",
+          "fix-bug",
+          "gate-trace",
+          "generate-allure-report",
+          "grill-me",
+          "grill-with-docs",
+          "guard-git",
+          "harden-vps",
+          "hook-commits",
+          "inspect-quality",
+          "investigate-bug",
+          "kickoff-branch",
+          "maintain-wiki",
+          "map-codebase",
+          "migrate-spec",
+          "model-domain",
+          "orchestrate-project",
+          "organize-workspace",
+          "plan-refactor",
+          "plan-release",
+          "plan-tests",
+          "plan-work",
+          "publish-package",
+          "quick-fix",
+          "release-branch",
+          "request-review",
+          "research-first",
+          "reset-baseline",
+          "respond-review",
+          "run-benchmark",
+          "run-evals",
+          "run-planning",
+          "scope-work",
+          "search-skills",
+          "security-review",
+          "seed-conventions",
+          "session-state",
+          "setup-environment",
+          "simple-english",
+          "simulate-agents",
+          "slice-tasks",
+          "smoke-test",
+          "spike-prototype",
+          "stocktake-skills",
+          "survey-context",
+          "terse-mode",
+          "trace-requirement",
+          "using-bigpowers",
+          "validate-contracts",
+          "validate-fix",
+          "verify-work",
+          "visual-dashboard",
+          "wire-ci",
+          "wire-observability",
+          "write-document"
+        ],
+        "errors": []
       },
       "rows": [
         {
@@ -655,7 +663,7 @@
         "themes": 0
       },
       "result": "works",
-      "detail": "1 tool, tool-call hooks",
+      "detail": "1 tool, tool-call hooks, 81 skills",
       "ignored": []
     },
     {
@@ -683,11 +691,11 @@
       "logs": [
         {
           "level": "debug",
-          "message": "[pi] no host ui (print mode): service pi-host-ui is not available"
+          "message": "[pi] loaded pi-extension: events turn_start, turn_end, message_start, message_update, tool_execution_start, agent_end, agent_settled, session_shutdown, session_start, resources_discover, tool_call, before_agent_start, session_compact, session_tree; tools plannotator_mark_done, plannotator_submit_plan"
         },
         {
           "level": "debug",
-          "message": "[pi] loaded pi-extension: events turn_start, turn_end, message_start, message_update, tool_execution_start, agent_end, agent_settled, session_shutdown, session_start, resources_discover, tool_call, before_agent_start, session_compact, session_tree; tools plannotator_mark_done, plannotator_submit_plan"
+          "message": "[pi] no host ui (print mode): service pi-host-ui is not available"
         },
         {
           "level": "warn",
@@ -725,30 +733,30 @@
     {
       "name": "@companion-ai/feynman",
       "version": "0.5.34",
-      "monthly": 127643,
+      "monthly": 120059,
       "description": "Research-first CLI agent built on Pi and alphaXiv",
       "ecosystem": "pi",
       "skills": {
         "found": 16,
-        "loaded": [],
-        "errors": [
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/@companion-ai__feynman/node_modules/@companion-ai/feynman/skills/alpha-research: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/@companion-ai__feynman/node_modules/@companion-ai/feynman/skills/autoresearch: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/@companion-ai__feynman/node_modules/@companion-ai/feynman/skills/deep-research: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/@companion-ai__feynman/node_modules/@companion-ai/feynman/skills/docker: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/@companion-ai__feynman/node_modules/@companion-ai/feynman/skills/eli5: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/@companion-ai__feynman/node_modules/@companion-ai/feynman/skills/literature-review: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/@companion-ai__feynman/node_modules/@companion-ai/feynman/skills/ml-training-recipe: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/@companion-ai__feynman/node_modules/@companion-ai/feynman/skills/paper-code-audit: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/@companion-ai__feynman/node_modules/@companion-ai/feynman/skills/paper-writing: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/@companion-ai__feynman/node_modules/@companion-ai/feynman/skills/pdf-explore: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/@companion-ai__feynman/node_modules/@companion-ai/feynman/skills/preview: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/@companion-ai__feynman/node_modules/@companion-ai/feynman/skills/replication: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/@companion-ai__feynman/node_modules/@companion-ai/feynman/skills/research-review: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/@companion-ai__feynman/node_modules/@companion-ai/feynman/skills/session-log: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/@companion-ai__feynman/node_modules/@companion-ai/feynman/skills/session-search: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/@companion-ai__feynman/node_modules/@companion-ai/feynman/skills/source-comparison: not loaded"
-        ]
+        "loaded": [
+          "alpha-research",
+          "autoresearch",
+          "deep-research",
+          "docker",
+          "eli5",
+          "literature-review",
+          "ml-training-recipe",
+          "paper-code-audit",
+          "paper-writing",
+          "pdf-explore",
+          "preview",
+          "replication",
+          "research-review",
+          "session-log",
+          "session-search",
+          "source-comparison"
+        ],
+        "errors": []
       },
       "rows": [
         {
@@ -763,11 +771,11 @@
       "logs": [
         {
           "level": "debug",
-          "message": "[pi] no host ui (print mode): service pi-host-ui is not available"
+          "message": "[pi] loaded research-tools.ts: events session_start, session_shutdown, before_agent_start, tool_result, before_provider_request; tools alpha_annotate_paper, alpha_list_annotations, hf_dataset_info, hf_repo_files, hf_repo_read_file, feynman_science_database_search"
         },
         {
           "level": "debug",
-          "message": "[pi] loaded research-tools.ts: events session_start, session_shutdown, before_agent_start, tool_result, before_provider_request; tools alpha_annotate_paper, alpha_list_annotations, hf_dataset_info, hf_repo_files, hf_repo_read_file, feynman_science_database_search"
+          "message": "[pi] no host ui (print mode): service pi-host-ui is not available"
         }
       ],
       "stderr": "",
@@ -778,53 +786,7 @@
         "themes": 1
       },
       "result": "refused",
-      "detail": "pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: research-tools.ts: event \"before_provider_request\" (list an event in allowUnmapped to accept that it goes unenforced)"
-    },
-    {
-      "name": "pi-lens",
-      "version": "4.4.2",
-      "monthly": 112830,
-      "description": "Real-time code feedback for pi — LSP, linters, formatters, type-checking, structural analysis & booboo",
-      "ecosystem": "pi",
-      "skills": {
-        "found": 4,
-        "loaded": [],
-        "errors": [
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/pi-lens/node_modules/pi-lens/skills/pi-lens-ast-grep: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/pi-lens/node_modules/pi-lens/skills/pi-lens-lsp-navigation: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/pi-lens/node_modules/pi-lens/skills/pi-lens-write-ast-grep-rule: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/pi-lens/node_modules/pi-lens/skills/pi-lens-write-tree-sitter-rule: not loaded"
-        ]
-      },
-      "rows": [
-        {
-          "id": "pi",
-          "state": "failed",
-          "error": "plugin failed: Error: pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: index.js: event \"message_end\"; index.js: event \"context\" (list an event in allowUnmapped to accept that it goes unenforced)"
-        }
-      ],
-      "without": [],
-      "loaded": false,
-      "error": "plugin failed: Error: pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: index.js: event \"message_end\"; index.js: event \"context\" (list an event in allowUnmapped to accept that it goes unenforced)",
-      "logs": [
-        {
-          "level": "debug",
-          "message": "[pi] loaded index.js: events resources_discover, session_start, session_tree, tool_call, tool_result, tool_execution_end, turn_start, agent_end, turn_end, agent_settled, session_shutdown, message_end, context; tools lens_diagnostics, symbol_search, effective_config, project_report, module_report, read_symbol, read_enclosing, pi_lens_activate_tools, ast_grep_search, ast_grep_replace, ast_grep_outline, lsp_navigation, lens_diagnostic_mark"
-        },
-        {
-          "level": "debug",
-          "message": "[pi] no host ui (print mode): service pi-host-ui is not available"
-        }
-      ],
-      "stderr": "",
-      "resources": {
-        "extensions": 1,
-        "skills": 4,
-        "prompts": 0,
-        "themes": 0
-      },
-      "result": "refused",
-      "detail": "pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: index.js: event \"message_end\"; index.js: event \"context\" (list an event in allowUnmapped to accept that it goes unenforced)"
+      "detail": "pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: research-tools.ts: event \"before_provider_request\" (list an event in allowUnmapped to accept that it goes unenforced) Its 16 skills still load with yoagent's skills loader."
     },
     {
       "name": "pi-background-tasks",
@@ -872,6 +834,52 @@
       "detail": "its session_start failed, so the adapter did not load it: anthropic-attribution.js: Cannot read properties of undefined (reading 'getProvider')"
     },
     {
+      "name": "pi-lens",
+      "version": "4.4.2",
+      "monthly": 108180,
+      "description": "Real-time code feedback for pi — LSP, linters, formatters, type-checking, structural analysis & booboo",
+      "ecosystem": "pi",
+      "skills": {
+        "found": 4,
+        "loaded": [
+          "pi-lens-ast-grep",
+          "pi-lens-lsp-navigation",
+          "pi-lens-write-ast-grep-rule",
+          "pi-lens-write-tree-sitter-rule"
+        ],
+        "errors": []
+      },
+      "rows": [
+        {
+          "id": "pi",
+          "state": "failed",
+          "error": "plugin failed: Error: pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: index.js: event \"message_end\"; index.js: event \"context\" (list an event in allowUnmapped to accept that it goes unenforced)"
+        }
+      ],
+      "without": [],
+      "loaded": false,
+      "error": "plugin failed: Error: pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: index.js: event \"message_end\"; index.js: event \"context\" (list an event in allowUnmapped to accept that it goes unenforced)",
+      "logs": [
+        {
+          "level": "debug",
+          "message": "[pi] loaded index.js: events resources_discover, session_start, session_tree, tool_call, tool_result, tool_execution_end, turn_start, agent_end, turn_end, agent_settled, session_shutdown, message_end, context; tools lens_diagnostics, symbol_search, effective_config, project_report, module_report, read_symbol, read_enclosing, pi_lens_activate_tools, ast_grep_search, ast_grep_replace, ast_grep_outline, lsp_navigation, lens_diagnostic_mark"
+        },
+        {
+          "level": "debug",
+          "message": "[pi] no host ui (print mode): service pi-host-ui is not available"
+        }
+      ],
+      "stderr": "",
+      "resources": {
+        "extensions": 1,
+        "skills": 4,
+        "prompts": 0,
+        "themes": 0
+      },
+      "result": "refused",
+      "detail": "pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: index.js: event \"message_end\"; index.js: event \"context\" (list an event in allowUnmapped to accept that it goes unenforced) Its 4 skills still load with yoagent's skills loader."
+    },
+    {
       "name": "pi-powerline-footer",
       "version": "0.20.0",
       "monthly": 106500,
@@ -915,22 +923,22 @@
     {
       "name": "context-mode",
       "version": "1.0.169",
-      "monthly": 98713,
+      "monthly": 103613,
       "description": "MCP plugin that saves 98% of your context window. Works with Claude Code, Gemini CLI, VS Code Copilot, OpenCode, and Codex CLI. Sandboxed code execution, FTS5 knowledge base, and intent-driven search.",
       "ecosystem": "pi",
       "skills": {
         "found": 8,
-        "loaded": [],
-        "errors": [
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/context-mode/node_modules/context-mode/skills/context-mode: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/context-mode/node_modules/context-mode/skills/ctx-doctor: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/context-mode/node_modules/context-mode/skills/ctx-index: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/context-mode/node_modules/context-mode/skills/ctx-insight: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/context-mode/node_modules/context-mode/skills/ctx-purge: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/context-mode/node_modules/context-mode/skills/ctx-search: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/context-mode/node_modules/context-mode/skills/ctx-stats: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/context-mode/node_modules/context-mode/skills/ctx-upgrade: not loaded"
-        ]
+        "loaded": [
+          "context-mode",
+          "ctx-doctor",
+          "ctx-index",
+          "ctx-insight",
+          "ctx-purge",
+          "ctx-search",
+          "ctx-stats",
+          "ctx-upgrade"
+        ],
+        "errors": []
       },
       "rows": [
         {
@@ -960,25 +968,25 @@
         "themes": 0
       },
       "result": "refused",
-      "detail": "pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: extension.js: event \"context\" (list an event in allowUnmapped to accept that it goes unenforced)"
+      "detail": "pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: extension.js: event \"context\" (list an event in allowUnmapped to accept that it goes unenforced) Its 8 skills still load with yoagent's skills loader."
     },
     {
       "name": "@dietrichgebert/ponytail",
       "version": "5.1.0",
-      "monthly": 94087,
+      "monthly": 97104,
       "description": "Lazy senior dev mode for AI agents. The best code is the code you never wrote.",
       "ecosystem": "pi",
       "skills": {
         "found": 6,
-        "loaded": [],
-        "errors": [
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/@dietrichgebert__ponytail/node_modules/@dietrichgebert/ponytail/skills/ponytail: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/@dietrichgebert__ponytail/node_modules/@dietrichgebert/ponytail/skills/ponytail-audit: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/@dietrichgebert__ponytail/node_modules/@dietrichgebert/ponytail/skills/ponytail-debt: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/@dietrichgebert__ponytail/node_modules/@dietrichgebert/ponytail/skills/ponytail-gain: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/@dietrichgebert__ponytail/node_modules/@dietrichgebert/ponytail/skills/ponytail-help: not loaded",
-          "/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/pi/@dietrichgebert__ponytail/node_modules/@dietrichgebert/ponytail/skills/ponytail-review: not loaded"
-        ]
+        "loaded": [
+          "ponytail",
+          "ponytail-audit",
+          "ponytail-debt",
+          "ponytail-gain",
+          "ponytail-help",
+          "ponytail-review"
+        ],
+        "errors": []
       },
       "rows": [
         {
@@ -1017,7 +1025,7 @@
         "themes": 0
       },
       "result": "works, partly",
-      "detail": "input hooks, prompt additions",
+      "detail": "input hooks, prompt additions, 6 skills",
       "ignored": [
         "event \"session_tree\"",
         "event \"agent_start\"",
@@ -1033,7 +1041,7 @@
     {
       "name": "@langchain/langsmith-pi-extension",
       "version": "0.2.1",
-      "monthly": 90892,
+      "monthly": 91431,
       "description": "LangSmith extension for Pi Coding Agent",
       "ecosystem": "pi",
       "skills": {
@@ -1082,7 +1090,7 @@
     {
       "name": "@narumitw/pi-usage",
       "version": "0.64.3",
-      "monthly": 81496,
+      "monthly": 84271,
       "description": "Pi extension that shows current-account usage and DeepSeek API balance for supported providers.",
       "ecosystem": "pi",
       "skills": {
@@ -1148,6 +1156,7 @@
         "@deepseek-ai/dsh-settings"
       ],
       "inject": [],
+      "importErrors": {},
       "result": "not applicable",
       "detail": "starts, but adds no tools or guidance (UI, settings or server features). Its web UI needs DSH's web client."
     },
@@ -1196,6 +1205,7 @@
         "tools",
         "sessions"
       ],
+      "importErrors": {},
       "result": "needs a DSH host",
       "detail": "waits for services yoagent's DSH runtime does not run: webServer, webRuntime, skills, sessions. Its web UI needs DSH's web client."
     },
@@ -1241,14 +1251,17 @@
         "@deepseek-ai/dsh-workspace"
       ],
       "inject": [],
-      "importError": "Cannot find package '@deepseek-ai/dsh-workspace' imported from /private/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/dsh/@michengai__dsh-archive-manager/node_modules/@michengai/dsh-archive-manager/lib/workspace.js",
+      "importErrors": {
+        "ui-workspace-archive-manager": "Cannot find package '@deepseek-ai/dsh-workspace' imported from /private/var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/dsh/@michengai__dsh-archive-manager/node_modules/@michengai/dsh-archive-manager/lib/workspace.js"
+      },
+      "installNote": "installed without its DSH peers (@deepseek-ai/dsh-workspace@0.2.0-rc.2, @deepseek-ai/dsh-spill-local@0.2.0-rc.2, @deepseek-ai/dsh-client-store@0.2.0-rc.2, @deepseek-ai/dsh-client-locale@0.2.0-rc.2, @deepseek-ai/dsh-client-runtime@0.2.0-rc.2, @deepseek-ai/dsh-host-webserver@0.2.0-rc.2, @deepseek-ai/dsh-storage-domain@0.2.0-rc.2, @deepseek-ai/dsh-typert-registry@0.2.0-rc.2, @deepseek-ai/dsh-client-connection@0.2.0-rc.2, @deepseek-ai/dsh-client-ui-sidebar@0.2.0-rc.2, @deepseek-ai/dsh-client-ui-workspace@0.2.0-rc.2, @deepseek-ai/dsh-client-ui-primitives@0.2.0-rc.2, @deepseek-ai/dsh-client-ui-conversation@0.2.0-rc.2, @deepseek-ai/dsh-session-format-catalog@0.2.0-rc.2, @deepseek-ai/dsh-session-projection-cache@0.2.0-rc.2)",
       "result": "needs a DSH host",
-      "detail": "loads DSH packages an agent library does not ship: @deepseek-ai/dsh-workspace. Its web UI needs DSH's web client."
+      "detail": "loads DSH packages an agent library does not ship: @deepseek-ai/dsh-workspace. Its web UI needs DSH's web client. (installed without its DSH peers (@deepseek-ai/dsh-workspace@0.2.0-rc.2, @deepseek-ai/dsh-spill-local@0.2.0-rc.2, @deepseek-ai/dsh-client-store@0.2.0-rc.2, @deepseek-ai/dsh-client-locale@0.2.0-rc.2, @deepseek-ai/dsh-client-runtime@0.2.0-rc.2, @deepseek-ai/dsh-host-webserver@0.2.0-rc.2, @deepseek-ai/dsh-storage-domain@0.2.0-rc.2, @deepseek-ai/dsh-typert-registry@0.2.0-rc.2, @deepseek-ai/dsh-client-connection@0.2.0-rc.2, @deepseek-ai/dsh-client-ui-sidebar@0.2.0-rc.2, @deepseek-ai/dsh-client-ui-workspace@0.2.0-rc.2, @deepseek-ai/dsh-client-ui-primitives@0.2.0-rc.2, @deepseek-ai/dsh-client-ui-conversation@0.2.0-rc.2, @deepseek-ai/dsh-session-format-catalog@0.2.0-rc.2, @deepseek-ai/dsh-session-projection-cache@0.2.0-rc.2))"
     },
     {
       "name": "dsh-whale-widget",
       "version": "0.3.18",
-      "monthly": 139214,
+      "monthly": 146796,
       "description": "DSH Web 界面右下角的 DeepSeek 余额小鲸鱼挂件:余额/今日已用/峰谷定价、自定义泡泡点击序列(文本/余额/今日/峰谷/图片/随机语句与并列加权选择)、逐行样式与字体、悬浮快捷编辑、音效与每轮消耗、自定义角色/动图/音效、吸附与翻转自定义",
       "ecosystem": "dsh",
       "services": {
@@ -1269,6 +1282,7 @@
       "client": false,
       "peers": [],
       "inject": [],
+      "importErrors": {},
       "result": "not applicable",
       "detail": "starts, but adds no tools or guidance (UI, settings or server features)."
     },
@@ -1304,6 +1318,7 @@
         "settings",
         "llm"
       ],
+      "importErrors": {},
       "result": "needs a DSH host",
       "detail": "waits for services yoagent's DSH runtime does not run: settings, llm. Its web UI needs DSH's web client."
     },
@@ -1334,13 +1349,14 @@
         "@deepseek-ai/dsh-home-paths"
       ],
       "inject": [],
+      "importErrors": {},
       "result": "not applicable",
       "detail": "starts, but adds no tools or guidance (UI, settings or server features). Its web UI needs DSH's web client."
     },
     {
       "name": "@xmanrui/dsh-im",
       "version": "4.38.0",
-      "monthly": 60137,
+      "monthly": 62925,
       "description": "把微信、飞书、企微、钉钉、QQ、Telegram、WhatsApp、Slack、Discord、Matrix接入DSH。 Connect Telegram, WhatsApp, Slack, Discord, Matrix, WeChat, Feishu, WeCom, DingTalk, and QQ to DSH.",
       "ecosystem": "dsh",
       "services": {
@@ -1369,13 +1385,14 @@
         "credentials",
         "typertGateway"
       ],
+      "importErrors": {},
       "result": "needs a DSH host",
       "detail": "waits for services yoagent's DSH runtime does not run: connection, credentials, typertGateway. Its web UI needs DSH's web client."
     },
     {
       "name": "@nanmicoder/dsh-agent-teams",
       "version": "0.1.22",
-      "monthly": 56429,
+      "monthly": 55140,
       "description": "AgentTeams for DeepSeek Harness: multi-agent team collaboration (captain, members, tasks with dependencies, messaging) driven by natural language, with a tree monitor in the web GUI",
       "ecosystem": "dsh",
       "services": {
@@ -1431,6 +1448,7 @@
         "systemPrompt",
         "agents"
       ],
+      "importErrors": {},
       "result": "needs a DSH host",
       "detail": "waits for services yoagent's DSH runtime does not run: llm, subagents, agents. Its web UI needs DSH's web client."
     },
@@ -1489,8 +1507,10 @@
         "sessionPersistence",
         "settings"
       ],
+      "importErrors": {},
+      "installNote": "installed without npm resolving its peers",
       "result": "needs a DSH host",
-      "detail": "waits for services yoagent's DSH runtime does not run: attachments, credentials, fs, skills, sessionPersistence, settings. Its web UI needs DSH's web client."
+      "detail": "waits for services yoagent's DSH runtime does not run: attachments, credentials, fs, skills, sessionPersistence, settings. Its web UI needs DSH's web client. (installed without npm resolving its peers)"
     },
     {
       "name": "dsh-univer-office",
@@ -1538,8 +1558,12 @@
         "@deepseek-ai/dsh-tools"
       ],
       "inject": [],
-      "result": "works",
-      "detail": "13 tools. Its web UI needs DSH's web client."
+      "importErrors": {},
+      "result": "works, partly",
+      "detail": "13 tools",
+      "ignored": [
+        "its web UI (DSH's web client)"
+      ]
     },
     {
       "name": "dsh-mnemon",
@@ -1573,6 +1597,7 @@
       "inject": [
         "loader"
       ],
+      "importErrors": {},
       "result": "needs a DSH host",
       "detail": "waits for services yoagent's DSH runtime does not run: loader. Its web UI needs DSH's web client."
     },
@@ -1606,8 +1631,59 @@
         "tools",
         "web"
       ],
+      "importErrors": {},
       "result": "failed",
       "detail": "modsearch: failed plugin failed: TypeError: Cannot read properties of null (reading 'searchProvider')"
+    },
+    {
+      "name": "dsh-pet",
+      "version": "0.3.6",
+      "monthly": 41822,
+      "description": "吃白饭的蓝色大肥鱼，赖在 DeepSeek Harness 里不走了。平时爱玩魔方、爱吃各种零食、偶尔打个盹，闲不住就在桌面上溜达两圈，被你拖来甩去也照旧赖着；你忙起来它跟着忙前忙后，也会帮你打理余额钱包，闲下来爱碎碎念，还乐意陪你唠两句。",
+      "ecosystem": "dsh",
+      "services": {
+        "present": [],
+        "missing": [
+          "webServer",
+          "agentDefaultModel",
+          "credentials",
+          "llm",
+          "commands"
+        ]
+      },
+      "rows": [
+        {
+          "id": "dsh-pet",
+          "state": "active",
+          "error": null
+        }
+      ],
+      "tools": [],
+      "guidance_chars": 0,
+      "logs": [],
+      "stderr": "",
+      "client": true,
+      "peers": [
+        "@deepseek-ai/dsh-agent-default-model",
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-primitives",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-commands",
+        "@deepseek-ai/dsh-credentials",
+        "@deepseek-ai/dsh-home-paths",
+        "@deepseek-ai/dsh-host-webserver",
+        "@deepseek-ai/dsh-llm"
+      ],
+      "inject": [
+        "webServer",
+        "agentDefaultModel",
+        "credentials",
+        "llm",
+        "commands"
+      ],
+      "importErrors": {},
+      "result": "needs a DSH host",
+      "detail": "waits for services yoagent's DSH runtime does not run: webServer, agentDefaultModel, credentials, llm, commands. Its web UI needs DSH's web client."
     },
     {
       "name": "@dfy-plugins/dsh-bundle",
@@ -1695,62 +1771,14 @@
         "sessionPersistence",
         "agentPresets"
       ],
+      "importErrors": {},
       "result": "needs a DSH host",
       "detail": "waits for services yoagent's DSH runtime does not run: webServer, settings, workspaceRegistry, llm, attachments, agents, credentials, fs, skills, sessionPersistence, agentPresets."
     },
     {
-      "name": "dsh-pet",
-      "version": "0.3.6",
-      "monthly": 40368,
-      "description": "吃白饭的蓝色大肥鱼，赖在 DeepSeek Harness 里不走了。平时爱玩魔方、爱吃各种零食、偶尔打个盹，闲不住就在桌面上溜达两圈，被你拖来甩去也照旧赖着；你忙起来它跟着忙前忙后，也会帮你打理余额钱包，闲下来爱碎碎念，还乐意陪你唠两句。",
-      "ecosystem": "dsh",
-      "services": {
-        "present": [],
-        "missing": [
-          "webServer",
-          "agentDefaultModel",
-          "credentials",
-          "llm",
-          "commands"
-        ]
-      },
-      "rows": [
-        {
-          "id": "dsh-pet",
-          "state": "active",
-          "error": null
-        }
-      ],
-      "tools": [],
-      "guidance_chars": 0,
-      "logs": [],
-      "stderr": "",
-      "client": true,
-      "peers": [
-        "@deepseek-ai/dsh-agent-default-model",
-        "@deepseek-ai/dsh-client-connection",
-        "@deepseek-ai/dsh-client-ui-primitives",
-        "@deepseek-ai/dsh-client-ui-slots",
-        "@deepseek-ai/dsh-commands",
-        "@deepseek-ai/dsh-credentials",
-        "@deepseek-ai/dsh-home-paths",
-        "@deepseek-ai/dsh-host-webserver",
-        "@deepseek-ai/dsh-llm"
-      ],
-      "inject": [
-        "webServer",
-        "agentDefaultModel",
-        "credentials",
-        "llm",
-        "commands"
-      ],
-      "result": "needs a DSH host",
-      "detail": "waits for services yoagent's DSH runtime does not run: webServer, agentDefaultModel, credentials, llm, commands. Its web UI needs DSH's web client."
-    },
-    {
       "name": "dsh-plugin-wallpaper-engine",
       "version": "1.3.1",
-      "monthly": 38751,
+      "monthly": 41148,
       "description": "Wallpaper Engine backgrounds for the DSH web GUI: render your local Wallpaper Engine wallpapers behind the chat — Scene and Web in real time through the bundled WebWallGL engine, Video played directly — with iOS-style liquid glass, adjustable blur/scrim/b",
       "ecosystem": "dsh",
       "services": {
@@ -1779,13 +1807,15 @@
       "inject": [
         "webServer"
       ],
+      "importErrors": {},
+      "installNote": "installed without its DSH peers (@deepseek-ai/dsh-client-runtime@0.2.0-rc.2, @deepseek-ai/dsh-host-webserver@0.2.0-rc.2, @deepseek-ai/dsh-client-ui-slots@0.2.0-rc.2)",
       "result": "needs a DSH host",
-      "detail": "waits for services yoagent's DSH runtime does not run: webServer. Its web UI needs DSH's web client."
+      "detail": "waits for services yoagent's DSH runtime does not run: webServer. Its web UI needs DSH's web client. (installed without its DSH peers (@deepseek-ai/dsh-client-runtime@0.2.0-rc.2, @deepseek-ai/dsh-host-webserver@0.2.0-rc.2, @deepseek-ai/dsh-client-ui-slots@0.2.0-rc.2))"
     },
     {
       "name": "dsh-free-search",
       "version": "0.8.5",
-      "monthly": 38258,
+      "monthly": 40197,
       "description": "Free web search for DeepSeek Harness: 24 engines (Bing/DuckDuckGo/AnySearch/SearXNG/Exa/Tavily/Keenable/Firecrawl/Parallel keyless; Zhihu global/site via MCP and Perplexity/SerpBase/DeepSeek/You.com/Baidu/Kimi/Aliyun/Doubao with key; OpenAI/Gemini/Claude ",
       "ecosystem": "dsh",
       "services": {
@@ -1826,8 +1856,12 @@
       "inject": [
         "web"
       ],
-      "result": "works",
-      "detail": "9 tools, prompt guidance. Its web UI needs DSH's web client."
+      "importErrors": {},
+      "result": "works, partly",
+      "detail": "9 tools, prompt guidance",
+      "ignored": [
+        "its web UI (DSH's web client)"
+      ]
     },
     {
       "name": "@roarpeng/graphflow",
@@ -1858,6 +1892,9 @@
       "client": true,
       "peers": [],
       "inject": [],
+      "importErrors": {
+        "mcp-graphflow": "Cannot find module '@deepseek-ai/dsh-mcp-client'\nRequire stack:\n- /var/folders/3k/_tx8d93x0yd6km99qqlv6qgm0000gn/T/eco/w/dsh/@roarpeng__graphflow/package.json"
+      },
       "result": "needs a DSH host",
       "detail": "loads DSH packages an agent library does not ship: @deepseek-ai/dsh-mcp-client. Its web UI needs DSH's web client."
     },
@@ -1898,8 +1935,10 @@
         "webServer",
         "webRuntime"
       ],
+      "importErrors": {},
+      "installNote": "installed without its DSH peers (@deepseek-ai/dsh-client-store@0.2.0-rc.2, @deepseek-ai/dsh-client-locale@0.2.0-rc.2, @deepseek-ai/dsh-client-runtime@0.2.0-rc.2, @deepseek-ai/dsh-client-ui-theme@0.2.0-rc.2, @deepseek-ai/dsh-client-ui-settings@0.2.0-rc.2, @deepseek-ai/dsh-client-ui-settings-general@0.2.0-rc.2)",
       "result": "needs a DSH host",
-      "detail": "waits for services yoagent's DSH runtime does not run: webServer, webRuntime. Its web UI needs DSH's web client."
+      "detail": "waits for services yoagent's DSH runtime does not run: webServer, webRuntime. Its web UI needs DSH's web client. (installed without its DSH peers (@deepseek-ai/dsh-client-store@0.2.0-rc.2, @deepseek-ai/dsh-client-locale@0.2.0-rc.2, @deepseek-ai/dsh-client-runtime@0.2.0-rc.2, @deepseek-ai/dsh-client-ui-theme@0.2.0-rc.2, @deepseek-ai/dsh-client-ui-settings@0.2.0-rc.2, @deepseek-ai/dsh-client-ui-settings-general@0.2.0-rc.2))"
     },
     {
       "name": "@dfy-plugins/dsh-visualize",
@@ -1944,8 +1983,10 @@
         "skills",
         "sessionPersistence"
       ],
+      "importErrors": {},
+      "installNote": "installed without npm resolving its peers",
       "result": "needs a DSH host",
-      "detail": "waits for services yoagent's DSH runtime does not run: fs, skills, sessionPersistence. Its web UI needs DSH's web client."
+      "detail": "waits for services yoagent's DSH runtime does not run: fs, skills, sessionPersistence. Its web UI needs DSH's web client. (installed without npm resolving its peers)"
     },
     {
       "name": "dsh-find-plugin",
@@ -1979,8 +2020,10 @@
       "inject": [
         "tools"
       ],
+      "importErrors": {},
       "result": "works",
-      "detail": "1 tool."
+      "detail": "1 tool",
+      "ignored": []
     }
   ]
 }

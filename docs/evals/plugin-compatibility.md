@@ -12,14 +12,15 @@ asked. So "works" means it loads and yoagent gets what is listed, not that
 every tool was exercised.
 
 **In short.**
-- **pi:** 9 of 20 give an agent run tools, tool-call or input hooks, or prompt additions (3 fully). 8 are refused because they reach into what yoagent cannot enforce (provider requests, the context, pi's model registry); 3 register nothing usable as installed.
+- **pi:** 9 of 20 give an agent run tools, tool-call or input hooks, or prompt additions (3 fully). 8 are refused because they hook what yoagent cannot enforce, or their startup needs pi app internals; 3 register nothing usable as installed. Their skills: all 118 (in 7 packages) load with yoagent's skills loader.
 - **DSH:** 3 of 20 give an agent tools or prompt guidance. 13 need DSH's own app (its sessions, web server, model layer); 3 add nothing an agent uses (UI or settings). DSH's popular plugins mostly extend the DSH app rather than add agent tools.
 
 **Results.**
 - **works**: loads; everything it registers maps to yoagent.
 - **works, partly**: loads; some of what it registers is an app feature
-  yoagent's agent loop has no place for (commands, shortcuts, renderers, …),
-  listed as *ignored*. Its tools, policies and prompt additions work.
+  yoagent's agent loop has no place for (commands, shortcuts, renderers, a
+  DSH web UI, …), listed as *ignored*. Its tools, policies and prompt
+  additions work.
 - **refused**: the adapter declined to load it — it handles an event
   yoagent never fires that would decide what the agent does, or its startup
   (`session_start`) failed, typically reaching for pi app internals such
@@ -31,58 +32,60 @@ every tool was exercised.
   its web server, its model layer, …) or loads DSH app plugins that an
   agent library does not run.
 - **not applicable**: nothing for an agent: themes, prompt templates, UI.
-- **failed** / **not installed**: an error loading or installing it.
+- **failed** / **not installed**: an error loading or installing it — or
+  of this harness (a check that did not report), with the reason. Never a
+  verdict on the package.
 
 ## pi packages
 
-The 20 most-downloaded packages with the `pi-package` keyword, through the pi adapter (pi 1.1.0). 6 works, partly · 8 refused · 3 nothing to use · 3 works.
+The 20 most-downloaded packages (by monthly downloads, among the first 1000 results of npm's search) with the `pi-package` keyword, through the pi adapter (pi 1.1.0), on 2026-10-10. 6 works, partly · 8 refused · 3 nothing to use · 3 works.
 
 | # | Package | Downloads / month | Result | What yoagent gets |
 |---|---|---:|---|---|
 | 1 | [pi-mcp-adapter](https://www.npmjs.com/package/pi-mcp-adapter) 5.2.0 | 1,606,843 | works, partly | 1 tool, tool-call hooks, input hooks<br><sub>ignored: event "mcp_servers_change"; event "resources_discover"; event "session_tree"; command /mcp-adapter; command /mcp; command /mcp-auth; flag --mcp-config</sub> |
-| 2 | [billion-context](https://www.npmjs.com/package/billion-context) 0.1.192 | 864,577 | refused | pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: pi-native.js: event "before_provider_headers"; pi-native.js: event "before_provider_request" (list an event in allowUnmapped to accept that it goes unenforced) |
+| 2 | [billion-context](https://www.npmjs.com/package/billion-context) 0.1.192 | 936,104 | refused | pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: pi-native.js: event "before_provider_headers"; pi-native.js: event "before_provider_request" (list an event in allowUnmapped to accept that it goes unenforced) |
 | 3 | [pi-web-access](https://www.npmjs.com/package/pi-web-access) 0.38.0 | 693,533 | works, partly | 4 tools, tool-call hooks<br><sub>ignored: event "agent_settled"; event "session_tree"; command /websearch; command /curator; command /google-account; command /search; shortcut ctrl+shift+s; shortcut ctrl+shift+w</sub> |
-| 4 | [pi-subagents](https://www.npmjs.com/package/pi-subagents) 0.77.0 | 622,053 | works, partly | 3 tools, tool-call hooks, input hooks<br><sub>ignored: event "turn_end"; event "model_select"; event "agent_end"; event "session_before_switch"; event "session_before_fork"; event "session_compact"; event "session_tree"; event "agent_start"; event "message_start"; event "agent_settled"; event "session_before_compact"; command /subagents-watchdog; comman</sub> |
+| 4 | [pi-subagents](https://www.npmjs.com/package/pi-subagents) 0.77.0 | 622,053 | works, partly | 3 tools, tool-call hooks, input hooks, 2 skills<br><sub>ignored: event "turn_end"; event "model_select"; event "agent_end"; event "session_before_switch"; event "session_before_fork"; event "session_compact"; event "session_tree"; event "agent_start"; event "message_start"; event "agent_settled"; event "session_before_compact"; command /subagents-watchdog; comman</sub> |
 | 5 | [@langfuse/pi-observability-plugin](https://www.npmjs.com/package/@langfuse/pi-observability-plugin) 0.1.2 | 322,140 | nothing to use | loads but registers only session_start as installed (it may need configuration first) |
 | 6 | [@juicesharp/rpiv-ask-user-question](https://www.npmjs.com/package/@juicesharp/rpiv-ask-user-question) 2.12.0 | 306,198 | works | 1 tool |
-| 7 | [pi-mcp-extension](https://www.npmjs.com/package/pi-mcp-extension) 1.5.1 | 252,500 | nothing to use | loads but registers nothing as installed (it may need configuration first) |
+| 7 | [pi-mcp-extension](https://www.npmjs.com/package/pi-mcp-extension) 1.5.1 | 270,009 | nothing to use | loads but registers nothing as installed (it may need configuration first) |
 | 8 | [@juicesharp/rpiv-todo](https://www.npmjs.com/package/@juicesharp/rpiv-todo) 2.12.0 | 207,529 | works, partly | 1 tool<br><sub>ignored: event "session_compact"; event "session_tree"; event "tool_execution_end"; event "agent_start"; command /todos; shortcut ctrl+shift+t</sub> |
-| 9 | [openwiki](https://www.npmjs.com/package/openwiki) 0.7.2 | 190,350 | works | 6 tools |
+| 9 | [openwiki](https://www.npmjs.com/package/openwiki) 0.7.2 | 190,350 | works | 6 tools, 1 skill |
 | 10 | [pi-goal-x](https://www.npmjs.com/package/pi-goal-x) 0.32.3 | 141,230 | refused | pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: goal.ts: event "before_provider_request"; goal.ts: event "context"; goal.ts: event "message_end" (list an event in allowUnmapped to accept that it goes unenforced) |
-| 11 | [bigpowers](https://www.npmjs.com/package/bigpowers) 2.88.9 | 130,483 | works | 1 tool, tool-call hooks |
+| 11 | [bigpowers](https://www.npmjs.com/package/bigpowers) 2.88.9 | 130,483 | works | 1 tool, tool-call hooks, 81 skills |
 | 12 | [@plannotator/pi-extension](https://www.npmjs.com/package/@plannotator/pi-extension) 0.28.11 | 129,998 | works, partly | tool-call hooks<br><sub>ignored: event "turn_start"; event "turn_end"; event "message_start"; event "message_update"; event "tool_execution_start"; event "agent_end"; event "agent_settled"; event "resources_discover"; event "session_compact"; event "session_tree"; command /plannotator-plan-mode; command /plannotator-review; command</sub> |
-| 13 | [@companion-ai/feynman](https://www.npmjs.com/package/@companion-ai/feynman) 0.5.34 | 127,643 | refused | pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: research-tools.ts: event "before_provider_request" (list an event in allowUnmapped to accept that it goes unenforced) |
-| 14 | [pi-lens](https://www.npmjs.com/package/pi-lens) 4.4.2 | 112,830 | refused | pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: index.js: event "message_end"; index.js: event "context" (list an event in allowUnmapped to accept that it goes unenforced) |
-| 15 | [pi-background-tasks](https://www.npmjs.com/package/pi-background-tasks) 2.6.9 | 108,986 | refused | its session_start failed, so the adapter did not load it: anthropic-attribution.js: Cannot read properties of undefined (reading 'getProvider') |
+| 13 | [@companion-ai/feynman](https://www.npmjs.com/package/@companion-ai/feynman) 0.5.34 | 120,059 | refused | pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: research-tools.ts: event "before_provider_request" (list an event in allowUnmapped to accept that it goes unenforced) Its 16 skills still load with yoagent's skills loader. |
+| 14 | [pi-background-tasks](https://www.npmjs.com/package/pi-background-tasks) 2.6.9 | 108,986 | refused | its session_start failed, so the adapter did not load it: anthropic-attribution.js: Cannot read properties of undefined (reading 'getProvider') |
+| 15 | [pi-lens](https://www.npmjs.com/package/pi-lens) 4.4.2 | 108,180 | refused | pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: index.js: event "message_end"; index.js: event "context" (list an event in allowUnmapped to accept that it goes unenforced) Its 4 skills still load with yoagent's skills loader. |
 | 16 | [pi-powerline-footer](https://www.npmjs.com/package/pi-powerline-footer) 0.20.0 | 106,500 | refused | pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: index.ts: event "message_end" (list an event in allowUnmapped to accept that it goes unenforced) |
-| 17 | [context-mode](https://www.npmjs.com/package/context-mode) 1.0.169 | 98,713 | refused | pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: extension.js: event "context" (list an event in allowUnmapped to accept that it goes unenforced) |
-| 18 | [@dietrichgebert/ponytail](https://www.npmjs.com/package/@dietrichgebert/ponytail) 5.1.0 | 94,087 | works, partly | input hooks, prompt additions<br><sub>ignored: event "session_tree"; event "agent_start"; event "agent_end"; command /ponytail; command /ponytail-review; command /ponytail-audit; command /ponytail-gain; command /ponytail-debt; command /ponytail-help</sub> |
-| 19 | [@langchain/langsmith-pi-extension](https://www.npmjs.com/package/@langchain/langsmith-pi-extension) 0.2.1 | 90,892 | nothing to use | loads; everything it registers is ignored here<br><sub>ignored: command /langsmith-tracing</sub> |
-| 20 | [@narumitw/pi-usage](https://www.npmjs.com/package/@narumitw/pi-usage) 0.64.3 | 81,496 | refused | pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: index.ts: event "before_provider_request"; index.ts: event "message_end" (list an event in allowUnmapped to accept that it goes unenforced) |
+| 17 | [context-mode](https://www.npmjs.com/package/context-mode) 1.0.169 | 103,613 | refused | pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: extension.js: event "context" (list an event in allowUnmapped to accept that it goes unenforced) Its 8 skills still load with yoagent's skills loader. |
+| 18 | [@dietrichgebert/ponytail](https://www.npmjs.com/package/@dietrichgebert/ponytail) 5.1.0 | 97,104 | works, partly | input hooks, prompt additions, 6 skills<br><sub>ignored: event "session_tree"; event "agent_start"; event "agent_end"; command /ponytail; command /ponytail-review; command /ponytail-audit; command /ponytail-gain; command /ponytail-debt; command /ponytail-help</sub> |
+| 19 | [@langchain/langsmith-pi-extension](https://www.npmjs.com/package/@langchain/langsmith-pi-extension) 0.2.1 | 91,431 | nothing to use | loads; everything it registers is ignored here<br><sub>ignored: command /langsmith-tracing</sub> |
+| 20 | [@narumitw/pi-usage](https://www.npmjs.com/package/@narumitw/pi-usage) 0.64.3 | 84,271 | refused | pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: index.ts: event "before_provider_request"; index.ts: event "message_end" (list an event in allowUnmapped to accept that it goes unenforced) |
 
 ## DSH plugins
 
-The 20 most-downloaded packages with the `dsh-plugin` keyword, over DSH's base packages and the tools adapter (DSH 0.2.0-rc.2). 3 not applicable · 13 needs a DSH host · 3 works · 1 failed.
+The 20 most-downloaded packages (by monthly downloads, among the first 1000 results of npm's search) with the `dsh-plugin` keyword, over DSH's base packages and the tools adapter (DSH 0.2.0-rc.2), on 2026-10-10. 3 not applicable · 13 needs a DSH host · 2 works, partly · 1 failed · 1 works.
 
 | # | Package | Downloads / month | Result | What yoagent gets |
 |---|---|---:|---|---|
 | 1 | [dshmarket](https://www.npmjs.com/package/dshmarket) 1.66.15 | 561,135 | not applicable | starts, but adds no tools or guidance (UI, settings or server features). Its web UI needs DSH's web client. |
 | 2 | [@michengai/dsh-skills-manager](https://www.npmjs.com/package/@michengai/dsh-skills-manager) 1.1.13 | 201,182 | needs a DSH host | waits for services yoagent's DSH runtime does not run: webServer, webRuntime, skills, sessions. Its web UI needs DSH's web client. |
-| 3 | [@michengai/dsh-archive-manager](https://www.npmjs.com/package/@michengai/dsh-archive-manager) 1.0.16 | 180,612 | needs a DSH host | loads DSH packages an agent library does not ship: @deepseek-ai/dsh-workspace. Its web UI needs DSH's web client. |
-| 4 | [dsh-whale-widget](https://www.npmjs.com/package/dsh-whale-widget) 0.3.18 | 139,214 | not applicable | starts, but adds no tools or guidance (UI, settings or server features). |
+| 3 | [@michengai/dsh-archive-manager](https://www.npmjs.com/package/@michengai/dsh-archive-manager) 1.0.16 | 180,612 | needs a DSH host | loads DSH packages an agent library does not ship: @deepseek-ai/dsh-workspace. Its web UI needs DSH's web client. (installed without its DSH peers (@deepseek-ai/dsh-workspace@0.2.0-rc.2, @deepseek-ai/dsh-spill-local@0.2.0-rc.2, @deepseek-ai/dsh-client-store@0.2.0-rc.2, @deepseek-ai/dsh-client-locale@0.2.0-rc.2, @deepseek-ai/dsh-client-runtime@0.2.0-rc.2, @deepseek-ai/dsh-host-webserver@0.2.0-rc.2, @deepseek-ai/dsh-storage-domain@0.2.0-rc.2, @deepseek-ai/dsh-typert-registry@0.2.0-rc.2, @deepseek-ai/dsh-client-connection@0.2.0-rc.2, @deepseek-ai/dsh-client-ui-sidebar@0.2.0-rc.2, @deepseek-ai/dsh-client-ui-workspace@0.2.0-rc.2, @deepseek-ai/dsh-client-ui-primitives@0.2.0-rc.2, @deepseek-ai/dsh-client-ui-conversation@0.2.0-rc.2, @deepseek-ai/dsh-session-format-catalog@0.2.0-rc.2, @deepseek-ai/dsh-session-projection-cache@0.2.0-rc.2)) |
+| 4 | [dsh-whale-widget](https://www.npmjs.com/package/dsh-whale-widget) 0.3.18 | 146,796 | not applicable | starts, but adds no tools or guidance (UI, settings or server features). |
 | 5 | [dsh-plugin-model-proxy](https://www.npmjs.com/package/dsh-plugin-model-proxy) 0.1.6 | 131,719 | needs a DSH host | waits for services yoagent's DSH runtime does not run: settings, llm. Its web UI needs DSH's web client. |
 | 6 | [dsh-cost-meter](https://www.npmjs.com/package/dsh-cost-meter) 1.8.20 | 108,950 | not applicable | starts, but adds no tools or guidance (UI, settings or server features). Its web UI needs DSH's web client. |
-| 7 | [@xmanrui/dsh-im](https://www.npmjs.com/package/@xmanrui/dsh-im) 4.38.0 | 60,137 | needs a DSH host | waits for services yoagent's DSH runtime does not run: connection, credentials, typertGateway. Its web UI needs DSH's web client. |
-| 8 | [@nanmicoder/dsh-agent-teams](https://www.npmjs.com/package/@nanmicoder/dsh-agent-teams) 0.1.22 | 56,429 | needs a DSH host | waits for services yoagent's DSH runtime does not run: llm, subagents, agents. Its web UI needs DSH's web client. |
-| 9 | [@dfy-plugins/dsh-image-generation](https://www.npmjs.com/package/@dfy-plugins/dsh-image-generation) 0.1.4 | 52,343 | needs a DSH host | waits for services yoagent's DSH runtime does not run: attachments, credentials, fs, skills, sessionPersistence, settings. Its web UI needs DSH's web client. |
-| 10 | [dsh-univer-office](https://www.npmjs.com/package/dsh-univer-office) 0.3.7 | 49,557 | works | 13 tools. Its web UI needs DSH's web client. |
+| 7 | [@xmanrui/dsh-im](https://www.npmjs.com/package/@xmanrui/dsh-im) 4.38.0 | 62,925 | needs a DSH host | waits for services yoagent's DSH runtime does not run: connection, credentials, typertGateway. Its web UI needs DSH's web client. |
+| 8 | [@nanmicoder/dsh-agent-teams](https://www.npmjs.com/package/@nanmicoder/dsh-agent-teams) 0.1.22 | 55,140 | needs a DSH host | waits for services yoagent's DSH runtime does not run: llm, subagents, agents. Its web UI needs DSH's web client. |
+| 9 | [@dfy-plugins/dsh-image-generation](https://www.npmjs.com/package/@dfy-plugins/dsh-image-generation) 0.1.4 | 52,343 | needs a DSH host | waits for services yoagent's DSH runtime does not run: attachments, credentials, fs, skills, sessionPersistence, settings. Its web UI needs DSH's web client. (installed without npm resolving its peers) |
+| 10 | [dsh-univer-office](https://www.npmjs.com/package/dsh-univer-office) 0.3.7 | 49,557 | works, partly | 13 tools<br><sub>ignored: its web UI (DSH's web client)</sub> |
 | 11 | [dsh-mnemon](https://www.npmjs.com/package/dsh-mnemon) 0.5.27 | 44,342 | needs a DSH host | waits for services yoagent's DSH runtime does not run: loader. Its web UI needs DSH's web client. |
 | 12 | [@liustack/modsearch](https://www.npmjs.com/package/@liustack/modsearch) 5.10.6 | 43,116 | failed | modsearch: failed plugin failed: TypeError: Cannot read properties of null (reading 'searchProvider') |
-| 13 | [@dfy-plugins/dsh-bundle](https://www.npmjs.com/package/@dfy-plugins/dsh-bundle) 0.1.2 | 41,676 | needs a DSH host | waits for services yoagent's DSH runtime does not run: webServer, settings, workspaceRegistry, llm, attachments, agents, credentials, fs, skills, sessionPersistence, agentPresets. |
-| 14 | [dsh-pet](https://www.npmjs.com/package/dsh-pet) 0.3.6 | 40,368 | needs a DSH host | waits for services yoagent's DSH runtime does not run: webServer, agentDefaultModel, credentials, llm, commands. Its web UI needs DSH's web client. |
-| 15 | [dsh-plugin-wallpaper-engine](https://www.npmjs.com/package/dsh-plugin-wallpaper-engine) 1.3.1 | 38,751 | needs a DSH host | waits for services yoagent's DSH runtime does not run: webServer. Its web UI needs DSH's web client. |
-| 16 | [dsh-free-search](https://www.npmjs.com/package/dsh-free-search) 0.8.5 | 38,258 | works | 9 tools, prompt guidance. Its web UI needs DSH's web client. |
+| 13 | [dsh-pet](https://www.npmjs.com/package/dsh-pet) 0.3.6 | 41,822 | needs a DSH host | waits for services yoagent's DSH runtime does not run: webServer, agentDefaultModel, credentials, llm, commands. Its web UI needs DSH's web client. |
+| 14 | [@dfy-plugins/dsh-bundle](https://www.npmjs.com/package/@dfy-plugins/dsh-bundle) 0.1.2 | 41,676 | needs a DSH host | waits for services yoagent's DSH runtime does not run: webServer, settings, workspaceRegistry, llm, attachments, agents, credentials, fs, skills, sessionPersistence, agentPresets. |
+| 15 | [dsh-plugin-wallpaper-engine](https://www.npmjs.com/package/dsh-plugin-wallpaper-engine) 1.3.1 | 41,148 | needs a DSH host | waits for services yoagent's DSH runtime does not run: webServer. Its web UI needs DSH's web client. (installed without its DSH peers (@deepseek-ai/dsh-client-runtime@0.2.0-rc.2, @deepseek-ai/dsh-host-webserver@0.2.0-rc.2, @deepseek-ai/dsh-client-ui-slots@0.2.0-rc.2)) |
+| 16 | [dsh-free-search](https://www.npmjs.com/package/dsh-free-search) 0.8.5 | 40,197 | works, partly | 9 tools, prompt guidance<br><sub>ignored: its web UI (DSH's web client)</sub> |
 | 17 | [@roarpeng/graphflow](https://www.npmjs.com/package/@roarpeng/graphflow) 2.2.0 | 34,657 | needs a DSH host | loads DSH packages an agent library does not ship: @deepseek-ai/dsh-mcp-client. Its web UI needs DSH's web client. |
-| 18 | [dsh-dream-skin](https://www.npmjs.com/package/dsh-dream-skin) 10.10.0 | 33,804 | needs a DSH host | waits for services yoagent's DSH runtime does not run: webServer, webRuntime. Its web UI needs DSH's web client. |
-| 19 | [@dfy-plugins/dsh-visualize](https://www.npmjs.com/package/@dfy-plugins/dsh-visualize) 0.1.5 | 30,262 | needs a DSH host | waits for services yoagent's DSH runtime does not run: fs, skills, sessionPersistence. Its web UI needs DSH's web client. |
-| 20 | [dsh-find-plugin](https://www.npmjs.com/package/dsh-find-plugin) 0.4.0 | 29,744 | works | 1 tool. |
+| 18 | [dsh-dream-skin](https://www.npmjs.com/package/dsh-dream-skin) 10.10.0 | 33,804 | needs a DSH host | waits for services yoagent's DSH runtime does not run: webServer, webRuntime. Its web UI needs DSH's web client. (installed without its DSH peers (@deepseek-ai/dsh-client-store@0.2.0-rc.2, @deepseek-ai/dsh-client-locale@0.2.0-rc.2, @deepseek-ai/dsh-client-runtime@0.2.0-rc.2, @deepseek-ai/dsh-client-ui-theme@0.2.0-rc.2, @deepseek-ai/dsh-client-ui-settings@0.2.0-rc.2, @deepseek-ai/dsh-client-ui-settings-general@0.2.0-rc.2)) |
+| 19 | [@dfy-plugins/dsh-visualize](https://www.npmjs.com/package/@dfy-plugins/dsh-visualize) 0.1.5 | 30,262 | needs a DSH host | waits for services yoagent's DSH runtime does not run: fs, skills, sessionPersistence. Its web UI needs DSH's web client. (installed without npm resolving its peers) |
+| 20 | [dsh-find-plugin](https://www.npmjs.com/package/dsh-find-plugin) 0.4.0 | 29,744 | works | 1 tool |

@@ -508,7 +508,8 @@ prompts or a theme, and an extension that needs a UI only partly runs
 through the adapter. (Counted with
 `https://registry.npmjs.org/-/v1/search?text=keywords:<tag>`; result pages
 sampled deep into each list all carried the tag, so the totals are not
-loose text matches.) How the 20 most-downloaded of each load through these
+loose text matches.) How the 20 most-downloaded of each (by monthly
+downloads, among npm's first 1000 search results) load through these
 adapters is measured in
 [plugin compatibility](../../docs/evals/plugin-compatibility.md)
 (`scripts/ecosystem-matrix.mjs`, which runs `examples/ecosystem_probe.rs`
