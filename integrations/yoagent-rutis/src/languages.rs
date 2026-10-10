@@ -1,5 +1,5 @@
 //! TypeScript / JavaScript and Python plugins, through
-//! [rutis-bridge](https://docs.rs/rutis-bridge) 0.7 (the `node`, `python`
+//! [rutis-bridge](https://docs.rs/rutis-bridge) 0.8 (the `node`, `python`
 //! and `websocket` features).
 //!
 //! With one of those features, [`RutisBridge::install`](crate::RutisBridge::install)

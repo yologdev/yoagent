@@ -31,8 +31,9 @@ contribute to live agents:
 Every event is also published on the rutis bus as `AgentEventEmitted`.
 
 yoagent does not depend on rutis; this crate uses only yoagent's public API.
-It depends on `rutis = "0.6"` (0.x caret: any 0.6.x, never 0.7) and, with a
-language feature, `rutis-bridge = "0.7"` (the matching release train). rutis
+It depends on `rutis = "0.8"` (0.x caret: any 0.8.x, never 0.9) and, with a
+language feature, `rutis-bridge = "0.8"` (the same release train: since 0.8
+every rutis package shares one version). rutis
 types are part of this crate's API, so every rutis or rutis-bridge minor bump
 is a yoagent-rutis minor bump.
 
@@ -116,7 +117,7 @@ calls per tool, and a redactor).
 
 With a language feature, `RutisBridge::install` also provides the registry
 to plugins in other languages, through
-[rutis-bridge](https://crates.io/crates/rutis-bridge) 0.7, as the host
+[rutis-bridge](https://crates.io/crates/rutis-bridge) 0.8, as the host
 service `yoagent`:
 
 | Feature | Adds (rutis-bridge feature of the same name) |

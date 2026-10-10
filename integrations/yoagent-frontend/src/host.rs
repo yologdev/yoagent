@@ -71,7 +71,7 @@ impl Row {
 
     /// The services injected into this plugin, in place of those it declares.
     ///
-    /// Rarely what you want: in rutis 0.7 (not re-checked on 0.8) a TypeScript plugin given a row
+    /// Rarely what you want: in rutis 0.7 and 0.8 (the runtime's row inject handling is unchanged) a TypeScript plugin given a row
     /// inject list never applies. To hand a plugin a service it only looks
     /// up (as the pi adapter does with `ui`), load a small plugin that
     /// injects it and provides it again under the name looked up — see
