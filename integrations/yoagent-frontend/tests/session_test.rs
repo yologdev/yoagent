@@ -639,3 +639,53 @@ async fn a_select_is_asked_with_each_option_once() {
     });
     assert_eq!(asking.await.unwrap(), json!(["b", "a"]));
 }
+
+/// `ask_later`: with no frontend attached the question waits (no default);
+/// a frontend that connects later gets it in its Hello and answers it.
+#[tokio::test]
+async fn a_question_asked_later_waits_for_a_frontend() {
+    let (session, _driver) = Session::new(true);
+    let asking = {
+        let session = session.clone();
+        tokio::spawn(async move { session.ask_later(confirm("Keep the old loader?")).await })
+    };
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!asking.is_finished(), "no frontend: it waits");
+    let mut phone = session.connect();
+    let ServerMessage::Hello { ui_requests, .. } = next(&mut phone).await else {
+        panic!("Hello")
+    };
+    assert_eq!(ui_requests.len(), 1);
+    let id = ui_requests[0].id;
+    assert!(session.send(ClientMessage::UiResponse {
+        id,
+        value: serde_json::json!(true),
+    }));
+    assert_eq!(asking.await.unwrap(), serde_json::json!(true));
+    assert_eq!(resolved(&mut phone).await, (id, ResolveReason::Answered));
+}
+
+/// A question asked later ends with its default when the session ends, and
+/// none is opened after.
+#[tokio::test]
+async fn a_question_asked_later_ends_with_the_session() {
+    let (session, driver) = Session::new(true);
+    let asking = {
+        let session = session.clone();
+        tokio::spawn(async move { session.ask_later(confirm("Keep the old loader?")).await })
+    };
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    drop(driver);
+    let answer = tokio::time::timeout(Duration::from_secs(5), asking)
+        .await
+        .expect("the question ends with the session")
+        .unwrap();
+    assert_eq!(answer, serde_json::json!(false));
+    let late = tokio::time::timeout(
+        Duration::from_secs(5),
+        session.ask_later(confirm("Another?")),
+    )
+    .await
+    .expect("refused at once on an ended session");
+    assert_eq!(late, serde_json::json!(false));
+}

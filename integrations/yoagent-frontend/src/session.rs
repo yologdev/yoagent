@@ -219,6 +219,26 @@ impl Session {
         timeout: Duration,
         key: Option<String>,
     ) -> Json {
+        self.ask_inner(request, Some(timeout), key, false).await
+    }
+
+    /// Ask, and keep the question open until it is answered — however long
+    /// that takes, and with no frontend attached: one that connects later
+    /// gets it in its `Hello`. For an agent working while its owner is away
+    /// (see the `handoff_agent` example). Ends with the default only when
+    /// the future is dropped or the session ends. A `notify` is shown and
+    /// returns at once.
+    pub async fn ask_later(&self, request: UiRequest) -> Json {
+        self.ask_inner(request, None, None, true).await
+    }
+
+    async fn ask_inner(
+        &self,
+        request: UiRequest,
+        timeout: Option<Duration>,
+        key: Option<String>,
+        hold: bool,
+    ) -> Json {
         let request = request.normalized();
         let default = request.default_answer();
         let expects = request.expects_answer();
@@ -235,7 +255,12 @@ impl Session {
                     return default;
                 }
             }
-            if !attached {
+            // Checked under `ui`: the session's end clears `pending` under it
+            // too, so a question is either refused here or cleared there.
+            if self.is_closed() {
+                return default;
+            }
+            if !attached && !hold {
                 drop(ui);
                 tracing::info!(
                     title = request.title(),
@@ -295,7 +320,11 @@ impl Session {
             key,
             reason: ResolveReason::Withdrawn,
         };
-        match tokio::time::timeout(timeout, rx).await {
+        let answered = match timeout {
+            Some(limit) => tokio::time::timeout(limit, rx).await,
+            None => Ok(rx.await),
+        };
+        match answered {
             Ok(Ok(value)) => {
                 close.reason = ResolveReason::Answered;
                 value
@@ -417,6 +446,9 @@ impl Drop for Ending {
         let mut clients = self.inner.clients.lock().unwrap();
         self.inner.closed.store(true, Ordering::SeqCst);
         clients.retain(|_, tx| tx.send(ServerMessage::Closed).is_ok());
+        // Open questions end with their default (a question held for an
+        // absent owner would otherwise wait forever). `clients` then `ui`.
+        self.inner.ui.lock().unwrap().pending.clear();
     }
 }
 
