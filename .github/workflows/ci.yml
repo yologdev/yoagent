@@ -427,6 +427,15 @@ jobs:
             | sed 's/\x1b\[[0-9;]*m//g' | tee screen.txt
           grep -q "? Run \`rm -rf build\`?" screen.txt
           grep -q "bash ✗" screen.txt
+      - name: Handoff example (scripted; asks without waiting, the answer starts the next run)
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          mkdir -p "$RUNNER_TEMP/handoff-project" && cd "$RUNNER_TEMP/handoff-project"
+          git init -q && git -c user.email=ci@ci -c user.name=ci commit -q --allow-empty -m start
+          # The example checks its own outcome and exits non-zero on a regression.
+          cargo run --manifest-path "$GITHUB_WORKSPACE/$MANIFEST" --example handoff_agent -- --demo | tee out.txt
+          grep -q "ok: asked without waiting, answered later, two reports" out.txt
 
   # yoagent claims to be a tested GASP-conformant runtime — this job is the
   # test: emit an agent repo with the gasp bridge (mock provider, no network)

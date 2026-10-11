@@ -178,6 +178,52 @@ results rendered as links by the UI plugin, pi's question answered in the page.
 Logs (`RUST_LOG`) go to stderr with `--web` / `--demo`, else to
 `$TMPDIR/yoagent-coding-agent.log`, since the terminal UI owns the screen.
 
+### `handoff_agent`: hand it a task and walk away
+
+A personal handoff agent. It works in the directory you start it from:
+
+```bash
+cd my-project
+path/to/yoagent/scripts/try-handoff.sh --live "move the config to TOML, keep the tests green"
+path/to/yoagent/scripts/try-handoff.sh --phone --live "…"   # serve on the LAN, for a phone
+cargo run --example handoff_agent -- --demo                  # headless, scripted (CI)
+```
+
+- **It plans** with a pi extension used unchanged, `@juicesharp/rpiv-todo`.
+  The `todo-plan` UI plugin draws the plan as a checklist in the page.
+- **It researches** with DSH's free web search, and works with yoagent's
+  file and shell tools.
+- **It asks without waiting.** `ask_owner` puts a question to every
+  frontend and returns at once, so the agent carries on with what does not
+  depend on it. The question stays open while nobody is connected
+  (`Session::ask_later`), and a phone that connects later gets it. The
+  answer comes back as a steer message: picked up mid-run, or starting a new
+  run if the agent had stopped. A dismissed question comes back as
+  "skipped", and the agent decides itself and says so.
+- **Guardrails:**
+  - A pi extension asks before dangerous commands. Those do wait, and with
+    nobody connected they are refused.
+  - Every run needs that policy (`require_policy`).
+  - Runs are capped in turns and minutes (`--max-minutes`), and in dollars
+    (`--budget-usd`) when the model has a price. DeepSeek has none in the
+    bundled table.
+- **Every run ends with a handoff report** (Done / Waiting on you /
+  Decisions / Next). The agent is sent back until it writes one. The host
+  then adds facts the model cannot make up: the change since the handoff
+  started (`git diff --shortstat` and commits), tokens, tool calls, time,
+  and the questions still open.
+
+Tried live with DeepSeek and a phone-sized Chrome, on a small Python
+project ("move the config from JSON to TOML"). The agent started before any
+browser was attached.
+- **Run 1:** it planned, migrated, verified and committed. It asked two
+  questions along the way without stopping, and reported them open.
+- **The first answer** ("delete config.json") started run 2, which did that.
+- **The second question, dismissed,** started run 3: the agent decided
+  itself and wrote down why.
+- **While nobody was there,** `rm -rf __pycache__` was refused, and the
+  agent worked around it.
+
 ## Tests
 
 ```bash
