@@ -83,7 +83,7 @@ agent 会在真实世界里行动，所以一个可能失败的扩展点，必�
 
 两个推论：
 
-- **主张的是契约，不是适配器。** 三个外部生态都能通过同一个 `Extension` 接入，这证明了契约的通用性。适配器本身跟随其他项目的版本发布；这些生态中需要应用服务的部分（命令、对话框、会话），留给承载 agent 的应用。
+- **要证明的是契约，而不是适配器。** 三个外部生态都能通过同一个 `Extension` 接入，这就是契约具有通用性的证据。适配器本身跟随其他项目的版本发布；这些生态中需要应用服务的部分（命令、对话框、会话），留给承载 agent 的应用。
 - **穿过桥接的，是每个生态都能得到的东西：** 工具结果中双向传递的图片；进入宿主 `tracing` 的插件日志，带有 `run_id` 标记，让 [GASP](concepts/gasp.md) 这样的记录器能把它们归到对应的运行；以及失败即关闭的规则。
 
 ## 6. 正确优先于巧妙——并对成本和缓存保持诚实
@@ -139,4 +139,4 @@ agent 会在真实世界里行动，所以一个可能失败的扩展点，必�
 - [架构概览](architecture/overview.md) · [WebAssembly 与 Cloudflare Workers](guides/wasm-workers.md) · [测试你的 agent](guides/testing.md)
 - [yoagent-rutis](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis) · [rutis 设计哲学](https://github.com/arcships/rutis/blob/main/docs/design-philosophy.md)
 
-（链接的页面为英文。）
+（除 rutis 设计哲学外，链接的页面为英文。）

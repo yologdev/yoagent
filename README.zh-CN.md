@@ -4,7 +4,7 @@
   <img alt="yoagent" src="docs/images/banner.png" width="100%" height="auto">
 </picture>
 
-<a href="#快速开始">快速开始</a> · <a href="docs/design-philosophy.zh-CN.md">设计哲学</a> · <a href="https://yologdev.github.io/yoagent/">文档</a> · <a href="https://docs.rs/yoagent">API</a> · <a href="CHANGELOG.md">更新日志</a> · <a href="README.md">English</a>
+<a href="#快速开始">快速开始</a> · <a href="https://yologdev.github.io/yoagent/design-philosophy.zh-CN.html">设计哲学</a> · <a href="https://yologdev.github.io/yoagent/">文档</a> · <a href="https://docs.rs/yoagent">API</a> · <a href="CHANGELOG.md">更新日志</a> · <a href="README.md">English</a>
 
 [![][crates-shield]][crates-link]
 [![][docsrs-shield]][docsrs-link]
@@ -15,7 +15,7 @@
 
 **Rust 的 agent 循环。** 从 7 种 LLM 协议中任选其一流式输出，执行工具，循环直到完成。
 
-[是循环库，不是 agent](docs/design-philosophy.zh-CN.md)：它驱动着 [yoyo](https://github.com/yologdev/yoyo-evolve)——一个自 2026 年 3 月起不断演化自身源码的编程 agent——从笔记本电脑一直跑到 Cloudflare Worker。
+[是循环库，不是 agent](https://yologdev.github.io/yoagent/design-philosophy.zh-CN.html)：它驱动着 [yoyo](https://github.com/yologdev/yoyo-evolve)——一个自 2026 年 3 月起不断演化自身源码的编程 agent。它可以从笔记本电脑一直跑到 Cloudflare Worker。
 
 </div>
 
@@ -121,7 +121,7 @@ Agent::from_config(ModelConfig::ollama("http://localhost:11434/v1", "llama3.1:8b
 
 ## 为什么是 yoagent
 
-每个 agent 跑的都是同一个循环，而几乎每个手写的循环都在同样的地方出错：流结束得不好，工具 panic 或卡死，上下文用完，运行停不下来，花费没人算得清。yoagent 把这个循环写一次，每项保证都有测试钉住，并用一条规则决定什么能放进来：**是不是每个 agent 都需要它，而且需要的方式相同？** 其余的都是扩展、feature 或配套 crate（[设计哲学](docs/design-philosophy.zh-CN.md)）。
+每个 agent 跑的都是同一个循环，而几乎每个手写的循环都在同样的地方出错：流结束得不好，工具 panic 或卡死，上下文用完，运行停不下来，花费没人算得清。yoagent 把这个循环写一次，每项保证都有测试钉住，并用一条规则决定什么能放进来：**是不是每个 agent 都需要它，而且需要的方式相同？** 其余的都是扩展、feature 或配套 crate（[设计哲学](https://yologdev.github.io/yoagent/design-philosophy.zh-CN.html)）。
 
 所以它**不**附带向量库、embedding 流水线或任务图层——如果你的问题是检索或编排，下面这些更合适：
 
@@ -134,8 +134,8 @@ Agent::from_config(ModelConfig::ollama("http://localhost:11434/v1", "llama3.1:8b
 专注带来了这些：
 
 - **循环是一个自由函数。** [`agent_loop()`](src/agent_loop.rs) 无状态，所需的一切都通过参数传入。`Agent` 只是一层*可选*的包装，增加历史和队列。你可以自己驱动循环，而不必采用我们的状态模型。
-- **7 种原生线路协议**，而不是一个 OpenAI 兼容垫片再拴上适配器。Anthropic Messages、OpenAI Completions、OpenAI Responses、Azure、Gemini、Vertex 和 Bedrock 各有真正的实现，所以提供商特有的功能（思考预算、提示缓存断点、推理增量）得以保留，而不是被抹平。
-- **整个运行只有一份插件契约。** 一个 `Extension` 可以添加工具、审查输入、允许、**修改**或拒绝每次工具调用、对结果脱敏、校验最终回答，状态在每次运行时重新开始。把它作为宿主策略安装，它也会管住所有子 agent。守护调用的钩子失败即关闭：无法执行的策略即拒绝，输入检查即驳回，失败的脱敏即扣留。
+- **7 种原生协议**，而不是一个 OpenAI 兼容垫片再拴上适配器。Anthropic Messages、OpenAI Completions、OpenAI Responses、Azure、Gemini、Vertex 和 Bedrock 各有真正的实现，所以提供商特有的功能（思考预算、提示缓存断点、推理增量）得以保留，而不是被抹平。
+- **整个运行只有一份插件契约。** 一个 `Extension` 可以添加工具、审查输入、允许、**修改**或拒绝每次工具调用、对结果脱敏、校验最终回答，状态在每次运行时重新开始。把它作为宿主策略安装，它也会管住所有子 agent。守护调用的钩子失败即关闭：无法执行的策略即拒绝，无法执行的输入检查即驳回，失败的脱敏即扣留。
 - **引导一个已经在跑的运行。** 中途注入指引；它会在工具批次之间被采纳，无需重新开始这一轮。
 - **历史是一棵树，不是一个列表。** [`Session`](src/session.rs) 可以分叉、设检查点、跳转。修改较早的一轮并重新运行，不会毁掉原来的分支。
 - **运行可以被记录。** 开启 `features = ["gasp"]` 后，一次运行会成为 git 仓库里只追加的语义事件日志——恢复就是 clone 加重放。CI 中有一致性检查。
@@ -145,7 +145,7 @@ Agent::from_config(ModelConfig::ollama("http://localhost:11434/v1", "llama3.1:8b
 
 ## 扩展它
 
-所有改变循环行为的东西都经过一份契约 `Extension`：它的每次运行的 `RunHooks` 能看到 `on_input`、`before_model`、`before_tool`、`after_tool`、`on_stop`、每一个事件，以及 `finish`。一个工具策略只需几行：
+所有改变循环行为的东西都经过一份契约 `Extension`：它为每次运行创建的 `RunHooks` 能看到 `on_input`、`before_model`、`before_tool`、`after_tool`、`on_stop`、每一个事件，以及 `finish`。一个工具策略只需几行：
 
 ```rust
 use yoagent::extension::{ClonedHooks, RunHooks};
@@ -171,7 +171,7 @@ let agent = agent.with_extension(ClonedHooks::new("no-force-push", NoForcePush))
 
 yoagent 自己的预算、工具闸门和输入守卫也是这样构建的。六个可运行的 `extension_*` 示例涵盖策略、脱敏、校验器、预算、子 agent 策略和审计日志（[指南](https://yologdev.github.io/yoagent/concepts/extensions.html)）。
 
-**插件和其他生态。** [`yoagent-rutis`](integrations/yoagent-rutis/) 把 [rutis](https://github.com/arcships/rutis) 插件——Rust、TypeScript 或 Python，可在运行时加载、重载和卸载——变成一个 `Extension`。通过小型适配器，它还能原样运行许多 [pi](https://github.com/earendil-works/pi) 扩展和 DeepSeek harness（DSH）工具插件，yoagent 的核心不做任何改动：工具、工具策略、输入检查、提示补充和图片可以跨过来；命令和 UI 不行。一个钩住了适配器无法兑现之处的扩展会被拒绝，而不是只跑一半。两个生态中下载量最高的各 20 个包（按月下载量，取 npm 每个关键词的前 1000 条搜索结果）表现如何，有实测：[插件兼容性](https://yologdev.github.io/yoagent/evals/plugin-compatibility.html)。
+**插件和其他生态。** [`yoagent-rutis`](integrations/yoagent-rutis/) 把 [rutis](https://github.com/arcships/rutis) 插件——Rust、TypeScript 或 Python，可在运行时加载、重载和卸载——变成一个 `Extension`。通过小型适配器，它还能原样运行许多 [pi](https://github.com/earendil-works/pi) 扩展和 DeepSeek harness（DSH）工具插件，yoagent 的核心不做任何改动：工具、工具策略、输入检查、提示补充和图片可以跨过来；命令和 UI 不行。用到了适配器无法保证执行的钩子的扩展会被拒绝，而不是只跑一半。两个生态中下载量最高的各 20 个包（按月下载量，取 npm 每个关键词的前 1000 条搜索结果）表现如何，有实测：[插件兼容性](https://yologdev.github.io/yoagent/evals/plugin-compatibility.html)。
 `scripts/try-coding-agent.sh` 会为你的浏览器启动一个带 pi 和 DSH 插件的编程 agent；`scripts/try-handoff.sh "<任务>"` 会把任务交给一个提问却不等待、完成后汇报的 agent。
 
 ## agent 在哪里跑，它就在哪里跑
@@ -202,7 +202,7 @@ yoagent 自己的预算、工具闸门和输入守卫也是这样构建的。六
 |---|---|---|
 | **循环** | 完整事件流；并行、顺序或分批执行工具；引导和后续消息；执行限制；带退避和抖动的重试 | [Agent 循环](https://yologdev.github.io/yoagent/concepts/agent-loop.html) · [事件](https://yologdev.github.io/yoagent/concepts/messages-events.html) · [重试](https://yologdev.github.io/yoagent/concepts/retry.html) |
 | **扩展** | 整个运行一份插件契约；`Budget`；旧的钩子（`ToolMiddleware`、输入过滤器、`TurnHook`、回调）仍然可用 | [扩展](https://yologdev.github.io/yoagent/concepts/extensions.html) · [回调](https://yologdev.github.io/yoagent/concepts/callbacks.html) |
-| **提供商** | 7 种原生协议覆盖 20 多家提供商；思考控制；提示缓存提示；统一的上下文溢出分类器 | [提供商](https://yologdev.github.io/yoagent/providers/overview.html) · [提示缓存](https://yologdev.github.io/yoagent/concepts/prompt-caching.html) |
+| **提供商** | 7 种原生协议覆盖 20 多家提供商；思考控制；缓存提示（cache hints）；统一的上下文溢出分类器 | [提供商](https://yologdev.github.io/yoagent/providers/overview.html) · [提示缓存](https://yologdev.github.io/yoagent/concepts/prompt-caching.html) |
 | **工具** | `bash`、文件读写和编辑、`list_files`、`search`；通过一个 trait 自定义工具；经 stdio 或 HTTP 的 MCP；OpenAPI 规范；每次运行的 `ToolSource` | [工具](https://yologdev.github.io/yoagent/concepts/tools.html) · [MCP](https://yologdev.github.io/yoagent/guides/mcp.html) · [OpenAPI](https://yologdev.github.io/yoagent/guides/openapi.html) |
 | **子 agent** | 拥有自己模型和工具的子循环；大件产物按引用传递；花费逐级汇总 | [子 agent](https://yologdev.github.io/yoagent/concepts/sub-agents.html) |
 | **上下文** | 按真实用量校准的跟踪、分级压缩、可选的 `LlmCompaction`、循环检测 | [上下文管理](https://yologdev.github.io/yoagent/concepts/context-management.html) |
@@ -216,7 +216,7 @@ yoagent 自己的预算、工具闸门和输入守卫也是这样构建的。六
 
 ## 示例
 
-[`examples/`](examples/) 里 22 个可运行示例中的 17 个列在下面；其中十个完全不需要 API 密钥（`cli` 配本地模型的话是十一个）。其余是对接真实提供商的测试工具和离线评估。
+[`examples/`](examples/) 里 22 个可运行示例中的 17 个列在下面；其中十个完全不需要 API 密钥（`cli` 配本地模型的话是十一个）。其余是对接真实提供商的测试工具和离线评估扫测。
 
 | 示例 | 展示什么 | 需要密钥 |
 |---|---|---|
@@ -250,7 +250,7 @@ yoagent 自己的预算、工具闸门和输入守卫也是这样构建的。六
 ## 文档
 
 - **[手册](https://yologdev.github.io/yoagent/)**——概念、指南、每个提供商一页，以及[架构和模块地图](https://yologdev.github.io/yoagent/architecture/overview.html)（[源码](docs/)）
-- **[设计哲学](docs/design-philosophy.zh-CN.md)**——为什么 yoagent 是循环库、那一份扩展契约，以及它的代价
+- **[设计哲学](https://yologdev.github.io/yoagent/design-philosophy.zh-CN.html)**——为什么 yoagent 是循环库、那一份扩展契约，以及它的代价
 - **[API 参考](https://docs.rs/yoagent)**——启用全部 feature 构建
 - **[CHANGELOG](CHANGELOG.md)**——每一次发布
 - **[CONTRIBUTING](CONTRIBUTING.md)**——如何构建、测试和提交 PR
