@@ -1,5 +1,7 @@
 # Design Philosophy
 
+**English** · [中文](design-philosophy.zh-CN.md)
+
 Status: current. Date: 2026-10-09.
 
 **yoagent is a loop library: the smallest correct agent loop, and one contract to extend it.** It is not an agent, not a framework and not an app. Agents, frameworks and apps are built on it.
@@ -77,7 +79,7 @@ Fail-closed costs some convenience: a plugin that would have half-worked elsewhe
 
 The core never depends on a plugin system. [yoagent-rutis](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis), a separate crate, makes [rutis](https://github.com/arcships/rutis) plugins — Rust in-process, TypeScript and Python in their own runtimes — into **one** `Extension`. A plugin registers a handler; the bridge turns it into hooks; the loop does not know the difference.
 
-That bridge is how other agent ecosystems reach yoagent. DSH's tool plugins, rutis-agent's tools and pi's extensions plug in through small adapters, with **no change to the loop**. Each adapter maps what the loop can honour (tools, policies, notes, images, logs) and refuses or reports the rest.
+That bridge is how other agent ecosystems reach yoagent. Tool plugins for the DeepSeek harness (DSH), rutis-agent's tools and pi's extensions plug in through small adapters, with **no change to the loop**. Each adapter maps what the loop can honour (tools, policies, notes, images, logs) and refuses or reports the rest.
 
 Two consequences:
 
@@ -135,4 +137,4 @@ If the answer to the first question is no, the answer is almost always "build it
 
 - [The Agent Loop](concepts/agent-loop.md) · [Extensions](concepts/extensions.md) · [Context Management](concepts/context-management.md) · [Prompt Caching](concepts/prompt-caching.md) · [Model Pricing](concepts/pricing.md) · [GASP](concepts/gasp.md)
 - [Architecture overview](architecture/overview.md) · [WebAssembly & Cloudflare Workers](guides/wasm-workers.md) · [Testing Your Agent](guides/testing.md)
-- [yoagent-rutis](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis) · [rutis design philosophy](https://github.com/arcships/rutis/blob/main/docs/design-philosophy.md)
+- [yoagent-rutis](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis) · [rutis design philosophy](https://github.com/arcships/rutis/blob/main/docs/design-philosophy.en.md)

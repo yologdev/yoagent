@@ -4,7 +4,7 @@
   <img alt="yoagent" src="docs/images/banner.png" width="100%" height="auto">
 </picture>
 
-<a href="https://yologdev.github.io/yoagent/">Docs</a> · <a href="CHANGELOG.md">Changelog</a>
+<a href="#quick-start">Getting started</a> · <a href="https://yologdev.github.io/yoagent/design-philosophy.html">Design philosophy</a> · <a href="https://yologdev.github.io/yoagent/">Docs</a> · <a href="https://docs.rs/yoagent">API</a> · <a href="CHANGELOG.md">Changelog</a> · <a href="README.zh-CN.md">中文</a>
 
 [![][crates-shield]][crates-link]
 [![][docsrs-shield]][docsrs-link]
@@ -201,7 +201,7 @@ audit logs ([guide](https://yologdev.github.io/yoagent/concepts/extensions.html)
 **Plugins and other ecosystems.** [`yoagent-rutis`](integrations/yoagent-rutis/) turns
 [rutis](https://github.com/arcships/rutis) plugins — Rust, TypeScript or Python, loaded,
 reloaded and unloaded at runtime — into one `Extension`. Through small adapters it also runs many
-[pi](https://github.com/earendil-works/pi) extensions and DSH tool plugins unchanged, with no
+[pi](https://github.com/earendil-works/pi) extensions and DeepSeek harness (DSH) tool plugins unchanged, with no
 change to yoagent's core: tools, tool policies, input checks, prompt additions and images cross
 over; commands and UI don't. An extension that hooks something the adapter can't enforce is
 refused, not half-run. How the 20 most-downloaded packages of each ecosystem fare (by monthly

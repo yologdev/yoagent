@@ -2,6 +2,7 @@
 
 [Introduction](introduction.md)
 [Design Philosophy](design-philosophy.md)
+[设计哲学](design-philosophy.zh-CN.md)
 
 # Getting Started
 
