@@ -694,8 +694,8 @@ async fn what_could_leave_a_policy_unenforced_refuses_the_load() {
             "session_start",
         ),
         (
-            "context.ts",
-            "export default function (pi) { pi.on('context', () => ({ messages: [] })) }\n",
+            "provider.ts",
+            "export default function (pi) { pi.on('before_provider_request', (e) => e) }\n",
             "allowUnmapped",
         ),
     ];
@@ -714,10 +714,10 @@ async fn what_could_leave_a_policy_unenforced_refuses_the_load() {
     }
 
     // A deciding event the host accepts going unenforced.
-    let ext = dir.path().join("context.ts");
+    let ext = dir.path().join("provider.ts");
     let host = host(&runtime).await;
     host.load(adapter_row(
-        json!({ "extensions": [ext], "allowUnmapped": ["context"] }),
+        json!({ "extensions": [ext], "allowUnmapped": ["before_provider_request"] }),
     ))
     .await;
     host.root.shutdown().await.unwrap();
@@ -961,4 +961,118 @@ export default function (pi) {
     let last = format!("{:?}", agent.messages().last());
     assert!(last.contains("context"), "{last}");
     host.root.shutdown().await.unwrap();
+}
+
+/// `message_end` and `context` handlers present at load are run on copies:
+/// one that only reads works; one that would change what it got stops the
+/// adapter before yoagent acts on the unchanged version.
+#[tokio::test(flavor = "multi_thread")]
+async fn message_end_and_context_handlers_are_checked_at_run_time() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("seen.txt");
+    let ran = dir.path().join("ran.txt");
+    // A tool, and handlers whose behaviour the file name picks.
+    let source = |mode: &str| {
+        format!(
+            r#"import {{ appendFileSync }} from 'node:fs'
+import {{ Type }} from 'typebox'
+const MODE = {mode:?}
+export default function (pi) {{
+  pi.registerTool({{
+    name: 'pi_note', label: 'note', description: 'notes', parameters: Type.Object({{}}),
+    async execute() {{
+      appendFileSync({ran:?}, 'ran\n')
+      return {{ content: [{{ type: 'text', text: 'noted' }}], details: undefined }}
+    }},
+  }})
+  pi.on('message_end', (e) => {{
+    appendFileSync({log:?}, 'end ' + e.message.role + '\n')
+    if (MODE === 'end' && e.message.role === 'assistant') return {{ message: {{ ...e.message, content: [] }} }}
+    // Returning the message unchanged is not a rewrite.
+    if (MODE === 'same') return {{ message: e.message }}
+  }})
+  pi.on('context', (e) => {{
+    appendFileSync({log:?}, 'context ' + e.messages.length + '\n')
+    if (MODE === 'context') e.messages.push({{ role: 'user', content: [{{ type: 'text', text: 'injected' }}], timestamp: 0 }})
+  }})
+}}
+"#,
+            ran = ran.display().to_string(),
+            log = log.display().to_string(),
+        )
+    };
+    let script = || vec![call("pi_note", json!({})), text("done")];
+
+    // Observers (and a handler handing the message back unchanged): the run goes on.
+    for mode in ["observe", "same"] {
+        let _ = std::fs::remove_file(&log);
+        let _ = std::fs::remove_file(&ran);
+        let ext = extension(dir.path(), &format!("{mode}.ts"), &source(mode));
+        let host = host(&runtime).await;
+        host.load(adapter_row(json!({ "extensions": [ext] }))).await;
+        let (agent, seen) = agent(script());
+        let mut agent = agent.with_extension(host.bridge.extension());
+        let (_, results) = run(&mut agent, "go").await;
+        assert_eq!(results.len(), 1, "{mode}: {results:?}");
+        assert!(!results[0].2, "{mode}: the tool ran: {results:?}");
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            2,
+            "{mode}: both requests went out"
+        );
+        let seen = std::fs::read_to_string(&log).unwrap();
+        // Each message once: prompt, the call, its result, the answer; and both requests' context.
+        assert_eq!(
+            seen.lines()
+                .filter(|l| l.starts_with("end "))
+                .collect::<Vec<_>>(),
+            [
+                "end user",
+                "end assistant",
+                "end toolResult",
+                "end assistant"
+            ],
+            "{mode}: {seen}"
+        );
+        assert_eq!(
+            seen.lines().filter(|l| l.starts_with("context ")).count(),
+            2,
+            "{mode}: {seen}"
+        );
+        host.root.shutdown().await.unwrap();
+    }
+
+    // A rewrite of the assistant message: denied before its tool runs.
+    {
+        let _ = std::fs::remove_file(&ran);
+        let ext = extension(dir.path(), "end.ts", &source("end"));
+        let host = host(&runtime).await;
+        host.load(adapter_row(json!({ "extensions": [ext] }))).await;
+        let (agent, _) = agent(script());
+        let mut agent = agent.with_extension(host.bridge.extension());
+        let (_, results) = run(&mut agent, "go").await;
+        assert!(
+            results[0].2 && results[0].1.contains("message_end"),
+            "{results:?}"
+        );
+        assert!(!ran.exists(), "the tool never ran");
+        host.root.shutdown().await.unwrap();
+    }
+
+    // A context changed in place: the first request never goes out.
+    {
+        let ext = extension(dir.path(), "context.ts", &source("context"));
+        let host = host(&runtime).await;
+        host.load(adapter_row(json!({ "extensions": [ext] }))).await;
+        let (agent, seen) = agent(script());
+        let mut agent = agent.with_extension(host.bridge.extension());
+        run(&mut agent, "go").await;
+        assert!(seen.lock().unwrap().is_empty(), "no request went out");
+        let last = format!("{:?}", agent.messages().last());
+        assert!(last.contains("context"), "{last}");
+        host.root.shutdown().await.unwrap();
+    }
 }

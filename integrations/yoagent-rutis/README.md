@@ -411,13 +411,15 @@ onto one handler, following pi 1.1.0's own runner and agent loop:
 | `on("input")` | `on_input`: `handled` rejects the prompt (it never reaches the agent, as in pi); `transform` and a throwing handler reject it too (yoagent cannot rewrite a prompt) |
 | `on("before_agent_start")` | `before_model`: the handlers run once per run, and the text they add around `event.systemPrompt` is a note on the latest user turn of every request of that run. A handler that throws, replaces the prompt or changes `systemPromptOptions` is skipped with a warning — even under `strict` (a run cannot refuse the load), so a policy that replaces the prompt (a "read-only mode") does not apply; the others still count. A returned `message` is dropped, the same handler's addition kept |
 | `on("session_start")` / `on("session_shutdown")` | when the adapter loads / unloads; a `session_start` handler that throws refuses the load (its extension may be missing its policies) |
+| `on("message_end")` / `on("context")` | checked, not applied: each message of the run goes (a copy) to the `message_end` handlers once — the assistant message in `before_tool`, before any of its tools runs; prompts and tool results before the next request; the answer in `on_stop` — and the messages each request sends go to the `context` handlers. A handler that reads (usage meters, footers, indexers) works; one that would change what it got (a returned `message` / `messages`, or an edit in place) stops the adapter, since yoagent cannot apply the change. The adapter asks the bridge for the run's conversation (`options.messages`) only when such handlers exist at load |
 
 **What refuses the load** (fail closed, `strict` or not): an extension that
 fails to load (nothing loads, not just the bad one); a `session_start`
 failure; a handler for an event yoagent never fires that would decide or
-rewrite what the agent does (`context`, `context_with_system`,
-`message_end`, `before_provider_request`, `before_provider_headers`) unless
-the host lists it in `allowUnmapped`; and a pi tool named exactly like a
+rewrite what the agent does (`context_with_system`,
+`before_provider_request`, `before_provider_headers`; `context` and
+`message_end` are checked at run time instead, above) unless the host lists
+it in `allowUnmapped`; and a pi tool named exactly like a
 yoagent built-in (pi's sandboxed `bash`) unless the host left that built-in
 out and says so in `withoutBuiltins` — otherwise yoagent's own tool would
 win the merge and run unsandboxed. Anything of this kind registered after

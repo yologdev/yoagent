@@ -83,11 +83,28 @@
 //                           that throws refuses the load (its extension did
 //                           not finish setting up — its policies included).
 //   on("session_shutdown")  when it unloads.
+//   on("message_end")       checked, not applied: each message of the run is
+//   on("context")           passed (a copy) to the `message_end` handlers
+//                           once — the assistant message in `before_tool`,
+//                           before any of its tools runs; prompts and tool
+//                           results in `before_model`; the answer in
+//                           `on_stop` — and the messages each request sends
+//                           to the `context` handlers in `before_model`. A
+//                           handler that only reads is fine; one that would
+//                           change what it got (a returned `message` /
+//                           `messages`, or an edit in place) stops the
+//                           adapter, as a deciding event registered late
+//                           does: yoagent cannot apply the change. A throw
+//                           is reported and changes nothing, as in pi. Only
+//                           when such handlers exist at load is the run's
+//                           conversation asked for (`options.messages`); one
+//                           registered later is refused like any deciding
+//                           event.
 //
 // What does not map: no other event is ever fired. Events that would decide
-// or rewrite something yoagent does (DECIDING_EVENTS: `context`,
-// `message_end`, `before_provider_request`, ...) refuse the load unless
-// listed in `allowUnmapped`; the rest (observers such as `agent_end` or
+// or rewrite something yoagent does (DECIDING_EVENTS: `context_with_system`,
+// `before_provider_request`, ...; `context` and `message_end` too when
+// registered after load) refuse the load unless listed in `allowUnmapped`; the rest (observers such as `agent_end` or
 // `tool_execution_*`, pi's session events, the boundary events `turn_end` /
 // `agent_before_settle`), commands, shortcuts, flags, renderers, model
 // providers, virtual models and MCP servers are reported (a warning, or a
@@ -109,7 +126,7 @@
 import { randomUUID } from 'node:crypto'
 import { isAbsolute, resolve } from 'node:path'
 import { definePlugin } from '@arcships/rutis'
-import type { Cancellable, ContentBlock, ToolCall, ToolOutput, ToolResult, ToolSpec, Yoagent } from '../yoagent.d.ts'
+import type { Cancellable, ContentBlock, Message, Stop, ToolCall, ToolOutput, ToolResult, ToolSpec, Yoagent } from '../yoagent.d.ts'
 
 export interface Config {
   /** The handler's name in the bridge (unique across the host's plugins). */
@@ -200,7 +217,10 @@ const PROMPT_MARK = '\u0000yoagent-system-prompt\u0000'
 /** The events this adapter fires. */
 const MAPPED_EVENTS = new Set(['tool_call', 'tool_result', 'input', 'before_agent_start', 'session_start', 'session_shutdown'])
 
-/** Unfired events whose handlers would decide or rewrite something yoagent does: they refuse the load. */
+/**
+ * Unfired events whose handlers would decide or rewrite something yoagent does: they refuse the
+ * load. `context` and `message_end` are checked at run time instead when present at load (CHECKED_EVENTS).
+ */
 const DECIDING_EVENTS = new Set([
   'context',
   'context_with_system',
@@ -208,6 +228,13 @@ const DECIDING_EVENTS = new Set([
   'before_provider_request',
   'before_provider_headers',
 ])
+
+/** Events whose handlers run on copies, stopping the adapter if one would change what it got. */
+const CHECKED_EVENTS = new Set(['context', 'message_end'])
+
+/** pi's message shape from yoagent's (they match; pi's assistant messages also name their API). */
+const piMessage = (message: Message) =>
+  structuredClone(message.role === 'assistant' && message.api === undefined ? { ...message, api: 'yoagent' } : message)
 
 /** pi runtime actions with no yoagent counterpart. */
 const UNSUPPORTED_ACTIONS = [
@@ -755,6 +782,7 @@ export default definePlugin<Config>({
         const own = (what: string) => `${short(ext.path)}: ${what}`
         for (const event of ext.handlers.keys()) {
           if (MAPPED_EVENTS.has(event)) continue
+          if (watching && CHECKED_EVENTS.has(event)) continue
           if (DECIDING_EVENTS.has(event) && !allowUnmapped.has(event)) deciding.push(own(`event "${event}"`))
           else ignored.push(own(`event "${event}"`))
         }
@@ -809,6 +837,73 @@ export default definePlugin<Config>({
         if (atLoad) throw new Error(text)
         refusal = `the pi extensions adapter stopped: ${text}`
         report('warn', `[pi] ${refusal}`)
+      }
+    }
+
+    // `message_end` / `context` handlers present at load: their checks need the run's
+    // conversation, asked for at registration (it cannot be asked for later).
+    let watching = false
+    // Per run: the messages (canonical JSON) the `message_end` handlers have seen.
+    const ended = new Map<string, Set<string>>()
+    // Per run: checks in order (parallel tool calls share one assistant message).
+    const queue = new Map<string, Promise<unknown>>()
+    const inOrder = <T>(runId: string, task: () => Promise<T>): Promise<T> => {
+      const next = (queue.get(runId) ?? Promise.resolve()).then(task, task)
+      queue.set(runId, next.catch(() => undefined))
+      return next
+    }
+    const stopWith = (text: string) => {
+      refusal = `the pi extensions adapter stopped: ${text}`
+      report('warn', `[pi] ${refusal}`)
+      return refusal
+    }
+    /** `message_end` for each message of the run not yet seen; the refusal if one would rewrite it. */
+    const checkEnded = (runId: string, messages: Message[] | undefined, signal?: AbortSignal) =>
+      inOrder(runId, async () => {
+        if (refusal) return refusal
+        const listeners = handlers('message_end')
+        if (!messages || listeners.length === 0) return
+        let seen = ended.get(runId)
+        if (!seen) ended.set(runId, (seen = new Set()))
+        for (const original of messages) {
+          const key = canon(original)
+          if (seen.has(key)) continue
+          for (const { ext, fn } of listeners) {
+            const copy = piMessage(original)
+            const before = canon(copy)
+            let result: { message?: unknown } | undefined
+            try {
+              result = (await fn({ type: 'message_end', message: copy }, context(signal))) as typeof result
+            } catch (error) {
+              report('warn', `[pi] ${short(ext.path)} message_end: ${message(error)}`)
+              continue
+            }
+            const replaced = result?.message !== undefined && canon(result.message) !== before
+            if (replaced || canon(copy) !== before) {
+              return stopWith(`${short(ext.path)} rewrites a ${original.role} message in message_end, which yoagent cannot apply`)
+            }
+          }
+          seen.add(key)
+        }
+      })
+    /** `context` on the messages a request sends; the refusal if a handler would change them. */
+    const checkContext = async (messages: Message[] | undefined, signal?: AbortSignal) => {
+      const listeners = handlers('context')
+      if (!messages || listeners.length === 0) return
+      for (const { ext, fn } of listeners) {
+        const copy = messages.map(piMessage)
+        const before = canon(copy)
+        let result: { messages?: unknown } | undefined
+        try {
+          result = (await fn({ type: 'context', messages: copy }, context(signal))) as typeof result
+        } catch (error) {
+          report('warn', `[pi] ${short(ext.path)} context: ${message(error)}`)
+          continue
+        }
+        const replaced = result?.messages !== undefined && canon(result.messages) !== before
+        if (replaced || canon(copy) !== before) {
+          return stopWith(`${short(ext.path)} changes the context in its context handler, which yoagent cannot apply`)
+        }
       }
     }
 
@@ -876,6 +971,7 @@ export default definePlugin<Config>({
       throw new Error(`pi extensions failed in session_start: ${started.join('; ')}`)
     }
     // After session_start, so what it registered is checked too.
+    watching = handlers('context').length + handlers('message_end').length > 0
     checkUnmapped(true)
     checkShadowing(true)
 
@@ -921,6 +1017,11 @@ export default definePlugin<Config>({
           checkUnmapped(false)
           checkShadowing(false)
           if (refusal) return { deny: refusal }
+          // The message making this call ended: its message_end handlers judge it before any tool runs.
+          if (watching) {
+            const stopped = await checkEnded(call.run_id, call.messages, call.signal)
+            if (stopped) return { deny: stopped }
+          }
           const piTools = available()
           const own = piTools.get(call.tool)
           const counterpart = names.get(call.tool)
@@ -1070,6 +1171,12 @@ export default definePlugin<Config>({
           if (refusal) return { stop: refusal }
           const stop = terminated.get(turn.run_id)
           if (stop) return { stop }
+          if (watching) {
+            // Prompts and tool results ended since; then the context this request sends.
+            const stopped =
+              (await checkEnded(turn.run_id, turn.messages, turn.signal)) ?? (await checkContext(turn.messages, turn.signal))
+            if (stopped) return { stop: stopped }
+          }
           if (handlers('before_agent_start').length === 0) return
           let note = notes.get(turn.run_id)
           if (!note) {
@@ -1080,12 +1187,25 @@ export default definePlugin<Config>({
           return added ? { note: added } : undefined
         },
 
+        // Only with message_end / context handlers: the answer's message_end check.
+        ...(watching
+          ? {
+              async on_stop(stop: Stop & Cancellable) {
+                const stopped = await checkEnded(stop.run_id, stop.messages, stop.signal)
+                // The answer stands (it was already given); the run fails, and later ones are refused.
+                if (stopped) return { fail: stopped }
+              },
+            }
+          : {}),
+
         async finish(outcome) {
           notes.delete(outcome.run_id)
           terminated.delete(outcome.run_id)
+          ended.delete(outcome.run_id)
+          queue.delete(outcome.run_id)
           for (const key of judged.keys()) if (key.startsWith(`${outcome.run_id}/`)) judged.delete(key)
         },
-      }),
+      }, watching ? { messages: true } : undefined),
     )
   },
 })

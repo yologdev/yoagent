@@ -1,7 +1,7 @@
 {
   "runs": {
     "pi": {
-      "date": "2026-10-10",
+      "date": "2026-10-11",
       "selection": "top 20"
     },
     "dsh": {
@@ -389,7 +389,7 @@
     {
       "name": "@juicesharp/rpiv-todo",
       "version": "2.12.0",
-      "monthly": 207529,
+      "monthly": 203830,
       "description": "Pi extension. A todo list for the model, rendered as a live overlay that survives /reload and conversation compaction.",
       "ecosystem": "pi",
       "skills": {
@@ -509,12 +509,12 @@
         {
           "id": "pi",
           "state": "failed",
-          "error": "plugin failed: Error: pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: goal.ts: event \"before_provider_request\"; goal.ts: event \"context\"; goal.ts: event \"message_end\" (list an event in allowUnmapped to accept that it goes unenforced)"
+          "error": "plugin failed: Error: pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: goal.ts: event \"before_provider_request\" (list an event in allowUnmapped to accept that it goes unenforced)"
         }
       ],
       "without": [],
       "loaded": false,
-      "error": "plugin failed: Error: pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: goal.ts: event \"before_provider_request\"; goal.ts: event \"context\"; goal.ts: event \"message_end\" (list an event in allowUnmapped to accept that it goes unenforced)",
+      "error": "plugin failed: Error: pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: goal.ts: event \"before_provider_request\" (list an event in allowUnmapped to accept that it goes unenforced)",
       "logs": [
         {
           "level": "debug",
@@ -533,7 +533,71 @@
         "themes": 0
       },
       "result": "refused",
-      "detail": "pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: goal.ts: event \"before_provider_request\"; goal.ts: event \"context\"; goal.ts: event \"message_end\" (list an event in allowUnmapped to accept that it goes unenforced)"
+      "detail": "pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: goal.ts: event \"before_provider_request\" (list an event in allowUnmapped to accept that it goes unenforced)"
+    },
+    {
+      "name": "@plannotator/pi-extension",
+      "version": "0.28.12",
+      "monthly": 132034,
+      "description": "Plannotator Pi extension - interactive plan review with annotations, annotate agent messages, and review code/PRs",
+      "ecosystem": "pi",
+      "skills": {
+        "found": 0,
+        "loaded": [],
+        "errors": []
+      },
+      "rows": [
+        {
+          "id": "pi",
+          "state": "active",
+          "error": null
+        }
+      ],
+      "without": [],
+      "loaded": true,
+      "tools": [],
+      "note_chars": 0,
+      "logs": [
+        {
+          "level": "debug",
+          "message": "[pi] loaded pi-extension: events turn_start, turn_end, message_start, message_update, tool_execution_start, agent_end, agent_settled, session_shutdown, session_start, resources_discover, tool_call, before_agent_start, session_compact, session_tree; tools plannotator_mark_done, plannotator_submit_plan"
+        },
+        {
+          "level": "debug",
+          "message": "[pi] no host ui (print mode): service pi-host-ui is not available"
+        },
+        {
+          "level": "warn",
+          "message": "[pi] not available in yoagent, ignored: pi-extension: event \"turn_start\"; pi-extension: event \"turn_end\"; pi-extension: event \"message_start\"; pi-extension: event \"message_update\"; pi-extension: event \"tool_execution_start\"; pi-extension: event \"agent_end\"; pi-extension: event \"agent_settled\"; pi-extension: event \"resources_discover\"; pi-extension: event \"session_compact\"; pi-extension: event \"session_tree\"; pi-extension: command /plannotator-plan-mode; pi-extension: command /plannotator-review; pi-extension: command /plannotator-annotate; pi-extension: command /plannotator-last; pi-extension: shortcut ctrl+alt+p; pi-extension: flag --plan"
+        }
+      ],
+      "stderr": "",
+      "resources": {
+        "extensions": 1,
+        "skills": 0,
+        "prompts": 0,
+        "themes": 0
+      },
+      "result": "works, partly",
+      "detail": "tool-call hooks",
+      "ignored": [
+        "event \"turn_start\"",
+        "event \"turn_end\"",
+        "event \"message_start\"",
+        "event \"message_update\"",
+        "event \"tool_execution_start\"",
+        "event \"agent_end\"",
+        "event \"agent_settled\"",
+        "event \"resources_discover\"",
+        "event \"session_compact\"",
+        "event \"session_tree\"",
+        "command /plannotator-plan-mode",
+        "command /plannotator-review",
+        "command /plannotator-annotate",
+        "command /plannotator-last",
+        "shortcut ctrl+alt+p",
+        "flag --plan"
+      ]
     },
     {
       "name": "bigpowers",
@@ -667,70 +731,6 @@
       "ignored": []
     },
     {
-      "name": "@plannotator/pi-extension",
-      "version": "0.28.11",
-      "monthly": 129998,
-      "description": "Plannotator Pi extension - interactive plan review with annotations, annotate agent messages, and review code/PRs",
-      "ecosystem": "pi",
-      "skills": {
-        "found": 0,
-        "loaded": [],
-        "errors": []
-      },
-      "rows": [
-        {
-          "id": "pi",
-          "state": "active",
-          "error": null
-        }
-      ],
-      "without": [],
-      "loaded": true,
-      "tools": [],
-      "note_chars": 0,
-      "logs": [
-        {
-          "level": "debug",
-          "message": "[pi] loaded pi-extension: events turn_start, turn_end, message_start, message_update, tool_execution_start, agent_end, agent_settled, session_shutdown, session_start, resources_discover, tool_call, before_agent_start, session_compact, session_tree; tools plannotator_mark_done, plannotator_submit_plan"
-        },
-        {
-          "level": "debug",
-          "message": "[pi] no host ui (print mode): service pi-host-ui is not available"
-        },
-        {
-          "level": "warn",
-          "message": "[pi] not available in yoagent, ignored: pi-extension: event \"turn_start\"; pi-extension: event \"turn_end\"; pi-extension: event \"message_start\"; pi-extension: event \"message_update\"; pi-extension: event \"tool_execution_start\"; pi-extension: event \"agent_end\"; pi-extension: event \"agent_settled\"; pi-extension: event \"resources_discover\"; pi-extension: event \"session_compact\"; pi-extension: event \"session_tree\"; pi-extension: command /plannotator-plan-mode; pi-extension: command /plannotator-review; pi-extension: command /plannotator-annotate; pi-extension: command /plannotator-last; pi-extension: shortcut ctrl+alt+p; pi-extension: flag --plan"
-        }
-      ],
-      "stderr": "",
-      "resources": {
-        "extensions": 1,
-        "skills": 0,
-        "prompts": 0,
-        "themes": 0
-      },
-      "result": "works, partly",
-      "detail": "tool-call hooks",
-      "ignored": [
-        "event \"turn_start\"",
-        "event \"turn_end\"",
-        "event \"message_start\"",
-        "event \"message_update\"",
-        "event \"tool_execution_start\"",
-        "event \"agent_end\"",
-        "event \"agent_settled\"",
-        "event \"resources_discover\"",
-        "event \"session_compact\"",
-        "event \"session_tree\"",
-        "command /plannotator-plan-mode",
-        "command /plannotator-review",
-        "command /plannotator-annotate",
-        "command /plannotator-last",
-        "shortcut ctrl+alt+p",
-        "flag --plan"
-      ]
-    },
-    {
       "name": "@companion-ai/feynman",
       "version": "0.5.34",
       "monthly": 120059,
@@ -771,11 +771,11 @@
       "logs": [
         {
           "level": "debug",
-          "message": "[pi] loaded research-tools.ts: events session_start, session_shutdown, before_agent_start, tool_result, before_provider_request; tools alpha_annotate_paper, alpha_list_annotations, hf_dataset_info, hf_repo_files, hf_repo_read_file, feynman_science_database_search"
+          "message": "[pi] no host ui (print mode): service pi-host-ui is not available"
         },
         {
           "level": "debug",
-          "message": "[pi] no host ui (print mode): service pi-host-ui is not available"
+          "message": "[pi] loaded research-tools.ts: events session_start, session_shutdown, before_agent_start, tool_result, before_provider_request; tools alpha_annotate_paper, alpha_list_annotations, hf_dataset_info, hf_repo_files, hf_repo_read_file, feynman_science_database_search"
         }
       ],
       "stderr": "",
@@ -835,7 +835,7 @@
     },
     {
       "name": "pi-lens",
-      "version": "4.4.2",
+      "version": "4.4.3",
       "monthly": 108180,
       "description": "Real-time code feedback for pi — LSP, linters, formatters, type-checking, structural analysis & booboo",
       "ecosystem": "pi",
@@ -852,13 +852,23 @@
       "rows": [
         {
           "id": "pi",
-          "state": "failed",
-          "error": "plugin failed: Error: pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: index.js: event \"message_end\"; index.js: event \"context\" (list an event in allowUnmapped to accept that it goes unenforced)"
+          "state": "active",
+          "error": null
         }
       ],
       "without": [],
-      "loaded": false,
-      "error": "plugin failed: Error: pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: index.js: event \"message_end\"; index.js: event \"context\" (list an event in allowUnmapped to accept that it goes unenforced)",
+      "loaded": true,
+      "tools": [
+        "effective_config",
+        "lens_diagnostics",
+        "module_report",
+        "pi_lens_activate_tools",
+        "project_report",
+        "read_enclosing",
+        "read_symbol",
+        "symbol_search"
+      ],
+      "note_chars": 0,
       "logs": [
         {
           "level": "debug",
@@ -867,6 +877,10 @@
         {
           "level": "debug",
           "message": "[pi] no host ui (print mode): service pi-host-ui is not available"
+        },
+        {
+          "level": "warn",
+          "message": "[pi] not available in yoagent, ignored: index.js: event \"resources_discover\"; index.js: event \"session_tree\"; index.js: event \"tool_execution_end\"; index.js: event \"turn_start\"; index.js: event \"agent_end\"; index.js: event \"turn_end\"; index.js: event \"agent_settled\"; index.js: command /lens-toggle; index.js: command /lens-context-toggle; index.js: command /lens-widget-toggle; index.js: command /lens-tdi; index.js: command /lens-map; index.js: command /lens-health; index.js: command /lens-perf; index.js: command /lens-tools; index.js: command /lens-allow-edit; index.js: flag --no-lens; index.js: flag --no-lsp; index.js: flag --no-autoformat; index.js: flag --immediate-format; index.js: flag --no-autofix; index.js: flag --no-tests; index.js: flag --no-delta; index.js: flag --lens-guard; index.js: flag --lens-checkout-guard; index.js: flag --no-opengrep; index.js: flag --no-read-guard; index.js: flag --no-lens-context; index.js: flag --lens-turn-summary; index.js: flag --lens-actionable-warnings; index.js: flag --lens-actionable-warning-actions; index.js: flag --lens-actionable-warning-autofix; index.js: flag --lens-actionable-warning-all; index.js: flag --lens-compact-tool-line; index.js: flag --lens-compact-lsp-status; index.js: flag --lens-hide-lsp-status; index.js: flag --lens-compact-widget; index.js: flag --no-lazy-tools; index.js: flag --lens-turn-end-madge; index.js: flag --no-knip; index.js: flag --no-jscpd; index.js: flag --no-madge; index.js: flag --no-gitleaks; index.js: flag --no-govulncheck; index.js: flag --no-dead-code; index.js: flag --no-complexity; index.js: flag --no-tool; index.js: renderers"
         }
       ],
       "stderr": "",
@@ -876,8 +890,58 @@
         "prompts": 0,
         "themes": 0
       },
-      "result": "refused",
-      "detail": "pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: index.js: event \"message_end\"; index.js: event \"context\" (list an event in allowUnmapped to accept that it goes unenforced) Its 4 skills still load with yoagent's skills loader."
+      "result": "works, partly",
+      "detail": "8 tools, tool-call hooks, 4 skills, message_end and context checked each run (a rewrite would stop it)",
+      "ignored": [
+        "event \"resources_discover\"",
+        "event \"session_tree\"",
+        "event \"tool_execution_end\"",
+        "event \"turn_start\"",
+        "event \"agent_end\"",
+        "event \"turn_end\"",
+        "event \"agent_settled\"",
+        "command /lens-toggle",
+        "command /lens-context-toggle",
+        "command /lens-widget-toggle",
+        "command /lens-tdi",
+        "command /lens-map",
+        "command /lens-health",
+        "command /lens-perf",
+        "command /lens-tools",
+        "command /lens-allow-edit",
+        "flag --no-lens",
+        "flag --no-lsp",
+        "flag --no-autoformat",
+        "flag --immediate-format",
+        "flag --no-autofix",
+        "flag --no-tests",
+        "flag --no-delta",
+        "flag --lens-guard",
+        "flag --lens-checkout-guard",
+        "flag --no-opengrep",
+        "flag --no-read-guard",
+        "flag --no-lens-context",
+        "flag --lens-turn-summary",
+        "flag --lens-actionable-warnings",
+        "flag --lens-actionable-warning-actions",
+        "flag --lens-actionable-warning-autofix",
+        "flag --lens-actionable-warning-all",
+        "flag --lens-compact-tool-line",
+        "flag --lens-compact-lsp-status",
+        "flag --lens-hide-lsp-status",
+        "flag --lens-compact-widget",
+        "flag --no-lazy-tools",
+        "flag --lens-turn-end-madge",
+        "flag --no-knip",
+        "flag --no-jscpd",
+        "flag --no-madge",
+        "flag --no-gitleaks",
+        "flag --no-govulncheck",
+        "flag --no-dead-code",
+        "flag --no-complexity",
+        "flag --no-tool",
+        "renderers"
+      ]
     },
     {
       "name": "pi-powerline-footer",
@@ -893,13 +957,14 @@
       "rows": [
         {
           "id": "pi",
-          "state": "failed",
-          "error": "plugin failed: Error: pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: index.ts: event \"message_end\" (list an event in allowUnmapped to accept that it goes unenforced)"
+          "state": "active",
+          "error": null
         }
       ],
       "without": [],
-      "loaded": false,
-      "error": "plugin failed: Error: pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: index.ts: event \"message_end\" (list an event in allowUnmapped to accept that it goes unenforced)",
+      "loaded": true,
+      "tools": [],
+      "note_chars": 0,
       "logs": [
         {
           "level": "debug",
@@ -908,6 +973,10 @@
         {
           "level": "debug",
           "message": "[pi] no host ui (print mode): service pi-host-ui is not available"
+        },
+        {
+          "level": "warn",
+          "message": "[pi] not available in yoagent, ignored: index.ts: event \"user_bash\"; index.ts: event \"model_select\"; index.ts: event \"thinking_level_select\"; index.ts: event \"session_tree\"; index.ts: event \"session_info_changed\"; index.ts: event \"agent_start\"; index.ts: event \"message_update\"; index.ts: event \"message_start\"; index.ts: event \"turn_end\"; index.ts: event \"session_before_compact\"; index.ts: event \"session_compact\"; index.ts: event \"session_compact_failed\"; index.ts: event \"agent_settled\"; index.ts: event \"agent_end\"; index.ts: command /cd; index.ts: command /reply; index.ts: command /queue; index.ts: command /powerline; index.ts: command /stash-history; index.ts: command /bash-mode; index.ts: command /powerline-perf; index.ts: command /bash-reset; index.ts: command /vibe"
         }
       ],
       "stderr": "",
@@ -917,8 +986,33 @@
         "prompts": 0,
         "themes": 0
       },
-      "result": "refused",
-      "detail": "pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: index.ts: event \"message_end\" (list an event in allowUnmapped to accept that it goes unenforced)"
+      "result": "works, partly",
+      "detail": "tool-call hooks, input hooks, message_end checked each run (a rewrite would stop it)",
+      "ignored": [
+        "event \"user_bash\"",
+        "event \"model_select\"",
+        "event \"thinking_level_select\"",
+        "event \"session_tree\"",
+        "event \"session_info_changed\"",
+        "event \"agent_start\"",
+        "event \"message_update\"",
+        "event \"message_start\"",
+        "event \"turn_end\"",
+        "event \"session_before_compact\"",
+        "event \"session_compact\"",
+        "event \"session_compact_failed\"",
+        "event \"agent_settled\"",
+        "event \"agent_end\"",
+        "command /cd",
+        "command /reply",
+        "command /queue",
+        "command /powerline",
+        "command /stash-history",
+        "command /bash-mode",
+        "command /powerline-perf",
+        "command /bash-reset",
+        "command /vibe"
+      ]
     },
     {
       "name": "context-mode",
@@ -943,13 +1037,14 @@
       "rows": [
         {
           "id": "pi",
-          "state": "failed",
-          "error": "plugin failed: Error: pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: extension.js: event \"context\" (list an event in allowUnmapped to accept that it goes unenforced)"
+          "state": "active",
+          "error": null
         }
       ],
       "without": [],
-      "loaded": false,
-      "error": "plugin failed: Error: pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: extension.js: event \"context\" (list an event in allowUnmapped to accept that it goes unenforced)",
+      "loaded": true,
+      "tools": [],
+      "note_chars": 0,
       "logs": [
         {
           "level": "debug",
@@ -958,6 +1053,10 @@
         {
           "level": "debug",
           "message": "[pi] no host ui (print mode): service pi-host-ui is not available"
+        },
+        {
+          "level": "warn",
+          "message": "[pi] not available in yoagent, ignored: extension.js: event \"before_provider_response\"; extension.js: event \"turn_end\"; extension.js: event \"session_before_compact\"; extension.js: event \"session_compact\"; extension.js: command /ctx-stats; extension.js: command /ctx-doctor"
         }
       ],
       "stderr": "",
@@ -967,8 +1066,16 @@
         "prompts": 0,
         "themes": 0
       },
-      "result": "refused",
-      "detail": "pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: extension.js: event \"context\" (list an event in allowUnmapped to accept that it goes unenforced) Its 8 skills still load with yoagent's skills loader."
+      "result": "works, partly",
+      "detail": "tool-call hooks, 8 skills, context checked each run (a rewrite would stop it)",
+      "ignored": [
+        "event \"before_provider_response\"",
+        "event \"turn_end\"",
+        "event \"session_before_compact\"",
+        "event \"session_compact\"",
+        "command /ctx-stats",
+        "command /ctx-doctor"
+      ]
     },
     {
       "name": "@dietrichgebert/ponytail",
@@ -1089,7 +1196,7 @@
     },
     {
       "name": "@narumitw/pi-usage",
-      "version": "0.64.3",
+      "version": "0.65.0",
       "monthly": 84271,
       "description": "Pi extension that shows current-account usage and DeepSeek API balance for supported providers.",
       "ecosystem": "pi",
@@ -1102,12 +1209,12 @@
         {
           "id": "pi",
           "state": "failed",
-          "error": "plugin failed: Error: pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: index.ts: event \"before_provider_request\"; index.ts: event \"message_end\" (list an event in allowUnmapped to accept that it goes unenforced)"
+          "error": "plugin failed: Error: pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: index.ts: event \"before_provider_request\" (list an event in allowUnmapped to accept that it goes unenforced)"
         }
       ],
       "without": [],
       "loaded": false,
-      "error": "plugin failed: Error: pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: index.ts: event \"before_provider_request\"; index.ts: event \"message_end\" (list an event in allowUnmapped to accept that it goes unenforced)",
+      "error": "plugin failed: Error: pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: index.ts: event \"before_provider_request\" (list an event in allowUnmapped to accept that it goes unenforced)",
       "logs": [
         {
           "level": "debug",
@@ -1126,7 +1233,7 @@
         "themes": 0
       },
       "result": "refused",
-      "detail": "pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: index.ts: event \"before_provider_request\"; index.ts: event \"message_end\" (list an event in allowUnmapped to accept that it goes unenforced)"
+      "detail": "pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: index.ts: event \"before_provider_request\" (list an event in allowUnmapped to accept that it goes unenforced)"
     }
   ],
   "dsh": [

@@ -13,6 +13,11 @@ adheres to [Semantic Versioning](https://semver.org/).
 - **Plugins reload while the agent runs**: `PluginHost::unload(id)`, `reload(id)` (the edited file's new code: a version that does not import is refused and the running one stays; one that fails when it starts leaves the plugin stopped, and the error says so) and `is_running(id)`; the example's `--watch` reloads a plugin when its file changes and tells the frontends, and the example now requires a tool policy, so a stopped policy plugin denies calls instead of letting them through. No rebuild of the host.
 - Tool cards: a tool result's `details.view` is drawn as a card in the browser (and titles the tool line: in the browser when no UI plugin draws the tool, always in the terminal UI); questions gain `message` and multiple-choice `select` (options sent once each); the `ui` service gains `frontends()`; the terminal UI asks again on an answer that does not fit.
 
+### yoagent-rutis (unreleased)
+
+- **The run's conversation, on request**: a handler can ask for `messages` (yoagent's LLM messages) on the `Turn`, `ToolCall` (`before_tool`) and `Stop` it sees — `Handler::with_messages()` in Rust, `options.messages: true` for TypeScript / Python plugins. Off by default (it copies the conversation for every call); handlers that did not ask never get it.
+- **pi adapter: `message_end` and `context` handlers are checked, not refused.** Each message goes (a copy) to the `message_end` handlers once — the assistant message before any of its tools runs — and each request's messages to the `context` handlers; a handler that only reads works, one that would change what it got stops the adapter (yoagent cannot apply the change). In the [plugin compatibility](docs/evals/plugin-compatibility.md) matrix this takes pi's top 20 from 9 to 12 usable packages (pi-lens, pi-powerline-footer, context-mode; refused 8 → 5).
+
 ## yoagent-rutis 0.2.0 (2026-10-10)
 
 yoagent-rutis only; yoagent is unchanged (0.25.2). Requires yoagent 0.25 and **rutis 0.8**.

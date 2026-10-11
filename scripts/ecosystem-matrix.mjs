@@ -126,6 +126,8 @@ function classifyPi(r) {
     if (events.includes('tool_call') || events.includes('tool_result')) parts.push('tool-call hooks')
     if (events.includes('input')) parts.push('input hooks')
     if (r.note_chars > 0) parts.push('prompt additions')
+    // Run on copies every run; the probe's one-message turn shows only that they load and read.
+    const checked = ['message_end', 'context'].filter((e) => events.includes(e))
     if (skills.length > 0) parts.push(plural(skills.length, 'skill'))
     if (skillErrors.length > 0) parts.push(`${skillErrors.length} skills rejected by yoagent's loader`)
     // Loaded, but nothing an agent run would use: often a package that
@@ -140,6 +142,7 @@ function classifyPi(r) {
       }
     }
     if ((r.without ?? []).length > 0) parts.push(`replaces yoagent's ${r.without.join(', ')}`)
+    if (checked.length > 0) parts.push(`${checked.join(' and ')} checked each run (a rewrite would stop it)`)
     return {
       result: ignored.length > 0 || skillErrors.length > 0 ? 'works, partly' : 'works',
       detail: parts.join(', '),
@@ -428,6 +431,10 @@ ${summary.join('\n')}
   yoagent's agent loop has no place for (commands, shortcuts, renderers, a
   DSH web UI, …), listed as *ignored*. Its tools, policies and prompt
   additions work.
+- *checked each run*: \`message_end\` / \`context\` handlers get copies on
+  every run; reading is fine, a change stops the adapter (yoagent cannot
+  apply it). The probe sends a single one-message turn, so a handler that
+  rewrites only longer conversations shows up as a stopped run later.
 - **refused**: the adapter declined to load it — it handles an event
   yoagent never fires that would decide what the agent does, or its startup
   (\`session_start\`) failed, typically reaching for pi app internals such
