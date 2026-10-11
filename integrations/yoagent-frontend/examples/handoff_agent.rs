@@ -26,7 +26,8 @@
 //! ```
 //!
 //! `--web ADDR` (default 127.0.0.1:8787), `--no-dsh`, `--max-minutes N`
-//! (30), `--budget-usd X` (2; priced models only). Without a task, give it
+//! (30) and `--max-tokens N` (4M) per run, `--budget-usd X` (2; priced
+//! models only). Without a task, give it
 //! one in the page. `--phone` serves on every interface: anyone on the
 //! network with the printed URL (it carries the token) drives the agent.
 //!
@@ -60,6 +61,9 @@ use yoagent_rutis::RutisBridge;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
+/// Git's empty tree: the base of a repository with no commit yet.
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
 /// The sections every run's last message must have.
 const REPORT: [&str; 4] = ["Done", "Waiting on you", "Decisions", "Next"];
 
@@ -78,6 +82,7 @@ struct Options {
     dsh: bool,
     task: Option<String>,
     max_minutes: u64,
+    max_tokens: usize,
     budget_usd: f64,
 }
 
@@ -90,6 +95,9 @@ fn main() -> Result<(), BoxError> {
         dsh: rutis_plugins().join("dsh/node_modules").exists(),
         task: None,
         max_minutes: 30,
+        // Research reads a lot: yoagent's default (1M per run, the whole
+        // prompt counted each turn) stops a long one before it writes up.
+        max_tokens: 4_000_000,
         budget_usd: 2.0,
     };
     let mut live = false;
@@ -107,6 +115,9 @@ fn main() -> Result<(), BoxError> {
             "--web" => options.addr = args.next().ok_or("--web needs ADDR")?.parse()?,
             "--max-minutes" => {
                 options.max_minutes = args.next().ok_or("--max-minutes needs N")?.parse()?
+            }
+            "--max-tokens" => {
+                options.max_tokens = args.next().ok_or("--max-tokens needs N")?.parse()?
             }
             "--budget-usd" => {
                 options.budget_usd = args.next().ok_or("--budget-usd needs X")?.parse()?
@@ -160,6 +171,9 @@ fn main() -> Result<(), BoxError> {
 
 async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
     let cwd = std::env::current_dir()?;
+    // The agent's own scratch (downloads, helper scripts): not the owner's folder.
+    let scratch = std::env::temp_dir().join(format!("yoagent-handoff-{}", std::process::id()));
+    std::fs::create_dir_all(&scratch)?;
     // The demo ends itself with `Quit`: the agent's own tools hold session
     // handles, so the driver would not end when the demo drops its own.
     let (session, driver) = Session::new(options.demo);
@@ -259,7 +273,7 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
         Some(key) => Agent::from_config(config).with_api_key(key.clone()),
         None => Agent::from_provider(scripted(), config),
     }
-    .with_system_prompt(system_prompt(&cwd))
+    .with_system_prompt(system_prompt(&cwd, &scratch))
     .with_tools({
         // `with_tools` sets the whole list: yoagent's tools and `ask_owner`.
         let mut tools = default_tools();
@@ -272,7 +286,8 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
     })
     .with_execution_limits(
         ExecutionLimits::default()
-            .with_max_turns(60)
+            .with_max_turns(80)
+            .with_max_total_tokens(options.max_tokens)
             .with_max_duration(Duration::from_secs(options.max_minutes * 60)),
     )
     // Questions from pi's approval wait up to the frontends' timeout.
@@ -284,8 +299,10 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
     )
     .with_extension(Handoff {
         session: session.clone(),
-        // Where the handoff started: the facts compare against it, so commits the agent made count.
-        start: git(&cwd, &["rev-parse", "HEAD"]),
+        // Where the handoff started: the facts compare against it, so commits the agent made
+        // count. A repository with no commit yet starts from the empty tree.
+        start: git(&cwd, &["rev-parse", "--git-dir"])
+            .map(|_| git(&cwd, &["rev-parse", "HEAD"]).unwrap_or_else(|| EMPTY_TREE.to_owned())),
         // Untracked files already there are not the agent's.
         untracked: untracked(&cwd),
         cwd: cwd.clone(),
@@ -329,14 +346,19 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
     Ok(())
 }
 
-fn system_prompt(cwd: &std::path::Path) -> String {
+fn system_prompt(cwd: &std::path::Path, scratch: &std::path::Path) -> String {
     format!(
         "You are the owner's handoff agent. The owner handed you a task — research, writing, \
          planning, code, whatever it is — and went away; you finish it on your own. You can \
-         search the web and fetch pages, and read, write and run things in {cwd}.\n\
+         search the web, and read, write and run things in {cwd}.\n\
          - Plan with the `todo` tool: create the steps first, mark each in progress and done.\n\
          - Put what you make in files in {cwd} (notes, reports, plans, code) so the owner finds \
-         it there. For research, cite your sources with links and say how sure you are.\n\
+         it there, and only that: keep your scratch (downloaded pages, helper scripts, notes to \
+         yourself) in {scratch}. Write the deliverable early and update it as you go, so \
+         stopping early still leaves something useful.\n\
+         - For research, use the search tools (they return extracted text) rather than \
+         downloading whole pages; never print a whole page. Cite your sources with links and \
+         say how sure you are.\n\
          - Decide what you can find out or reasonably choose yourself. Ask with `ask_owner` only \
          what is the owner's to decide: preferences, budgets, taste, trade-offs only they can \
          weigh. Never wait for an answer: keep going with work that does not depend on it. It \
@@ -349,6 +371,7 @@ fn system_prompt(cwd: &std::path::Path) -> String {
          - End every run with a handoff report in Markdown, with these sections: {sections}. \
          Under Waiting on you, list the open questions by number.",
         cwd = cwd.display(),
+        scratch = scratch.display(),
         sections = REPORT.map(|s| format!("## {s}")).join(", "),
     )
 }
@@ -529,18 +552,27 @@ impl RunHooks for HandoffRun {
         }
     }
 
-    async fn finish(&mut self, _outcome: &RunOutcome) {
+    async fn finish(&mut self, outcome: &RunOutcome) {
+        // A run a limit stopped has no report: say so, and how to go on.
+        if let yoagent::extension::RunEnd::Stopped { reason } = outcome.end() {
+            self.session.notice(
+                NoticeLevel::Warning,
+                format!("Stopped early: {reason}. Send \"continue\" to pick up where it left off."),
+            );
+        }
         let (tokens_in, tokens_out, tools) = *self.counts.lock().unwrap();
         // Since the handoff started: committed and uncommitted changes alike.
         let changed = match &self.start {
             Some(start) => {
                 let diff = git(&self.cwd, &["diff", "--shortstat", start]).unwrap_or_default();
-                let commits = git(
-                    &self.cwd,
-                    &["rev-list", "--count", &format!("{start}..HEAD")],
-                )
-                .and_then(|n| n.parse::<usize>().ok())
-                .unwrap_or(0);
+                let range = if start == EMPTY_TREE {
+                    "HEAD".to_owned()
+                } else {
+                    format!("{start}..HEAD")
+                };
+                let commits = git(&self.cwd, &["rev-list", "--count", &range])
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .unwrap_or(0);
                 let diff = if diff.is_empty() {
                     "no changes".into()
                 } else {
