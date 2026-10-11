@@ -689,3 +689,76 @@ async fn a_question_asked_later_ends_with_the_session() {
     .expect("refused at once on an ended session");
     assert_eq!(late, serde_json::json!(false));
 }
+
+/// Holds the run's `finish` until released: a window after the loop's last
+/// look at the steering queue, before the run ends.
+struct HoldFinish {
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<Semaphore>,
+}
+
+#[async_trait::async_trait]
+impl yoagent::extension::Extension for HoldFinish {
+    fn name(&self) -> &str {
+        "hold-finish"
+    }
+    async fn start_run(
+        &self,
+        _run: &yoagent::extension::RunContext<'_>,
+    ) -> Result<Box<dyn yoagent::extension::RunHooks>, yoagent::extension::ExtensionError> {
+        Ok(Box::new(HoldFinishRun {
+            entered: self.entered.clone(),
+            release: self.release.clone(),
+        }))
+    }
+}
+
+struct HoldFinishRun {
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<Semaphore>,
+}
+
+#[async_trait::async_trait]
+impl yoagent::extension::RunHooks for HoldFinishRun {
+    async fn finish(&mut self, _outcome: &yoagent::extension::RunOutcome) {
+        self.entered.notify_one();
+        let _ = self.release.acquire().await.map(|p| p.forget());
+    }
+}
+
+/// A steer that arrives after the run's loop last looked (while extensions
+/// finish) starts the next run instead of waiting for some later one.
+#[tokio::test]
+async fn a_steer_arriving_as_a_run_ends_starts_the_next_run() {
+    let (session, driver) = Session::new(true);
+    let mut ui = session.connect();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(Semaphore::new(0));
+    let agent = agent(vec![
+        MockResponse::Text("first".into()),
+        MockResponse::Text("second".into()),
+    ])
+    .with_extension(HoldFinish {
+        entered: entered.clone(),
+        release: release.clone(),
+    });
+    let run = tokio::spawn(driver.run(agent));
+    session.send(ClientMessage::Prompt { text: "go".into() });
+    tokio::time::timeout(WAIT, entered.notified())
+        .await
+        .expect("finish starts");
+    session.send(ClientMessage::Steer {
+        text: "late answer".into(),
+    });
+    // Let the driver hand the steer to the agent before the run ends.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    release.add_permits(2);
+    until_run_end(&mut ui).await;
+    let seen = until_run_end(&mut ui).await;
+    assert!(
+        matches!(&seen[0], ServerMessage::RunStart { run: 2, prompt } if prompt == "late answer"),
+        "{seen:?}"
+    );
+    session.send(ClientMessage::Quit);
+    finished(run).await;
+}

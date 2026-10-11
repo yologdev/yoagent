@@ -550,6 +550,21 @@ impl Driver {
             agent.finish().await;
             if reset {
                 agent.clear_messages();
+                agent.clear_steering_queue();
+                agent.clear_follow_up_queue();
+            } else if !aborted {
+                // Steering or a follow-up that arrived after the loop's last
+                // look (while the answer streamed, or extensions finished):
+                // the next run's prompt, not left for some later run.
+                let late: Vec<String> = agent
+                    .take_steering_queue()
+                    .into_iter()
+                    .chain(agent.take_follow_up_queue())
+                    .filter_map(|m| text_of(&m))
+                    .collect();
+                if !late.is_empty() {
+                    queue.push_front(late.join("\n\n"));
+                }
             }
             let saw_end = end.is_some();
             let (stats, last) = end.unwrap_or_default();
@@ -592,6 +607,21 @@ impl Driver {
 
 fn user(text: String) -> AgentMessage {
     AgentMessage::Llm(Message::user(text))
+}
+
+/// A queued user message's text (the session only queues text).
+fn text_of(message: &AgentMessage) -> Option<String> {
+    let AgentMessage::Llm(Message::User { content, .. }) = message else {
+        return None;
+    };
+    let text: Vec<&str> = content
+        .iter()
+        .filter_map(|c| match c {
+            yoagent::Content::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    (!text.is_empty()).then(|| text.join("\n"))
 }
 
 /// How the run ended, from its last assistant message only (an earlier
