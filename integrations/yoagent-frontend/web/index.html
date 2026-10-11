@@ -64,6 +64,11 @@
   dialog label.choice { display: block; margin: 4px 0; }
   dialog label.choice input { width: auto; }
   dialog { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); color: var(--ink); max-width: 420px; width: calc(100% - 32px); }
+  /* Docked above the composer, not modal: the page stays usable while a question waits. */
+  dialog:not(:modal) { position: fixed; left: 0; right: 0; bottom: 76px; margin: 0 auto; z-index: 10; box-shadow: 0 8px 30px rgba(0, 0, 0, .45); max-height: 60vh; overflow-y: auto; }
+  dialog .count { color: var(--muted); font-size: 12px; }
+  dialog .count:empty { display: none; }
+  body.asking #log { padding-bottom: 45vh; }
   dialog h3 { margin: 0 0 6px; font-size: 16px; }
   dialog .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; flex-wrap: wrap; }
   dialog input { width: 100%; padding: 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--ink); font: inherit; }

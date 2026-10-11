@@ -269,7 +269,9 @@ function onEvent(event) {
   }
 }
 
-// One dialog at a time, the next when it closes.
+// One question at a time, the next when it closes. Docked, not modal: the
+// page stays usable — read what the agent did, scroll, even type to it —
+// and the question is answered when the user is ready.
 const questions = new Questions()
 
 function ask(id, request) {
@@ -277,16 +279,33 @@ function ask(id, request) {
     add(request.level === 'error' ? 'notice error' : 'notice', request.message)
     return
   }
-  if (questions.add(id, request)) showNextQuestion()
+  if (questions.add(id, request)) {
+    showNextQuestion()
+    showCount()
+  }
+}
+
+// "1 of 3 waiting" on the shown question, when more wait behind it.
+function showCount() {
+  const count = dialog.querySelector('.count')
+  if (!count) return
+  const waiting = questions.waiting.length
+  count.textContent = waiting > 1 ? `1 of ${waiting} questions waiting` : ''
+}
+
+function closeQuestion() {
+  if (dialog.open) dialog.close()
+  document.body.classList.remove('asking')
 }
 
 function resolved(id, reason) {
   const shown = questions.remove(id)
   if (reason === 'timedOut') add('notice', 'A question timed out: the safe answer was used.')
   if (shown && dialog.open) {
-    dialog.close()
+    closeQuestion()
     showNextQuestion()
   }
+  showCount()
 }
 
 function showNextQuestion() {
@@ -294,6 +313,7 @@ function showNextQuestion() {
   const { id, request } = questions.current()
   dialog.replaceChildren()
   dialog.dataset.id = id
+  dialog.append(el('div', 'count'))
   const title = document.createElement('h3')
   title.textContent = request.title
   dialog.append(title)
@@ -348,7 +368,9 @@ function showNextQuestion() {
     e.preventDefault()
     reply(request.kind === 'confirm' ? false : null)
   }
-  dialog.showModal()
+  document.body.classList.add('asking')
+  dialog.show()
+  showCount()
 }
 
 socket.onopen = () => (status.textContent = 'connected')
@@ -357,7 +379,7 @@ socket.onclose = () => {
   status.textContent = token ? 'disconnected: reload to reconnect' : 'not connected: open the URL the server printed (it carries a token)'
   // Nothing can be answered from here any more.
   questions.clear()
-  if (dialog.open) dialog.close()
+  closeQuestion()
 }
 // One message at a time, in order: a message waits for the previous one
 // (a plugin import, say) to finish.
@@ -402,7 +424,7 @@ async function handle(message) {
       ended = true
       status.textContent = 'session closed'
       questions.clear()
-      if (dialog.open) dialog.close()
+      closeQuestion()
       return
     default:
       // A newer server's message: nothing to show.

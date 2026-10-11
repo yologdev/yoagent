@@ -31,6 +31,7 @@
 //!
 //! Setup: `scripts/try-coding-agent.sh --setup-only` (Node 24+, npm).
 
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -284,6 +285,8 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
         session: session.clone(),
         // Where the handoff started: the facts compare against it, so commits the agent made count.
         start: git(&cwd, &["rev-parse", "HEAD"]),
+        // Untracked files already there are not the agent's.
+        untracked: untracked(&cwd),
         cwd: cwd.clone(),
         open,
     });
@@ -442,6 +445,8 @@ struct Handoff {
     cwd: PathBuf,
     /// The commit the handoff started from (`None`: not a git repository).
     start: Option<String>,
+    /// The untracked files when the handoff started.
+    untracked: Arc<HashSet<String>>,
     open: Arc<AtomicUsize>,
 }
 
@@ -455,6 +460,7 @@ impl Extension for Handoff {
             session: self.session.clone(),
             cwd: self.cwd.clone(),
             start: self.start.clone(),
+            untracked: self.untracked.clone(),
             open: self.open.clone(),
             started: Instant::now(),
             counts: Mutex::default(),
@@ -466,6 +472,7 @@ struct HandoffRun {
     session: Session,
     cwd: PathBuf,
     start: Option<String>,
+    untracked: Arc<HashSet<String>>,
     open: Arc<AtomicUsize>,
     started: Instant,
     /// Tokens in and out, tool calls.
@@ -535,20 +542,38 @@ impl RunHooks for HandoffRun {
             }
             None => "not a git repository".into(),
         };
-        let new = git(&self.cwd, &["ls-files", "--others", "--exclude-standard"])
-            .map(|s| s.lines().count())
-            .unwrap_or(0);
+        // New since the handoff started, named (a test run's bytecode shows as what it is).
+        let mut new: Vec<String> = untracked(&self.cwd)
+            .iter()
+            .filter(|f| !self.untracked.contains(*f))
+            .cloned()
+            .collect();
+        new.sort();
+        let new = match new.len() {
+            0 => String::new(),
+            n if n <= 3 => format!(", new: {}", new.join(", ")),
+            n => format!(", {n} new files: {}, …", new[..3].join(", ")),
+        };
         let open = self.open.load(Ordering::Relaxed);
         self.session.notice(
             NoticeLevel::Info,
             format!(
                 "Handoff facts: {changed}{}; {tokens_in} tokens in, {tokens_out} out; {tools} tool \
                  call(s); {:.0}s; {open} question(s) waiting on you.",
-                if new > 0 { format!(", {new} new file(s)") } else { String::new() },
+                new,
                 self.started.elapsed().as_secs_f64(),
             ),
         );
     }
+}
+
+/// The untracked files (git's ignore rules apply); empty outside a repository.
+fn untracked(cwd: &std::path::Path) -> Arc<HashSet<String>> {
+    Arc::new(
+        git(cwd, &["ls-files", "--others", "--exclude-standard"])
+            .map(|s| s.lines().map(str::to_owned).collect())
+            .unwrap_or_default(),
+    )
 }
 
 fn git(cwd: &std::path::Path, args: &[&str]) -> Option<String> {
