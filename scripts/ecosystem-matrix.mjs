@@ -104,7 +104,9 @@ const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`
 
 function classifyPi(r) {
   const warnings = (r.logs ?? []).filter((l) => l.level === 'warn').map((l) => l.message)
-  const ignored = warnings.flatMap((w) => (w.match(/ignored: (.*)$/)?.[1] ?? '').split('; ').filter(Boolean)).map((s) => s.replace(/^[^:]+: /, ''))
+  // Reported at info by the adapter now (at warn by older versions).
+  const reports = (r.logs ?? []).filter((l) => l.level === 'warn' || l.level === 'info').map((l) => l.message)
+  const ignored = reports.flatMap((w) => (w.match(/ignored: (.*)$/)?.[1] ?? '').split('; ').filter(Boolean)).map((s) => s.replace(/^[^:]+: /, ''))
   const skills = r.skills?.loaded ?? []
   const skillErrors = r.skills?.errors ?? []
   if (r.install) return { result: 'not installed', detail: r.install }

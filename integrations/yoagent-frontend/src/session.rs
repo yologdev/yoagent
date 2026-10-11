@@ -26,6 +26,11 @@ const COALESCE: Duration = Duration::from_millis(30);
 /// How long a plugin's question waits for an answer before the safe default.
 pub const UI_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// How many of the latest runs' messages (`runStart`, `event`, `runEnd`,
+/// `notice`) the session keeps to replay to a frontend that connects later,
+/// so a page opened mid-run or after it shows what happened.
+pub const HISTORY: usize = 5000;
+
 /// How long a withdrawal for a question not asked yet is remembered: the
 /// asker's `withdraw` can overtake its own `request` on the way to the host.
 const EARLY_WITHDRAWAL: Duration = Duration::from_secs(60);
@@ -52,6 +57,10 @@ struct Inner {
     running: AtomicBool,
     /// The driver ended (or failed): nothing sent is heard any more.
     closed: AtomicBool,
+    /// The latest [`HISTORY`] run messages, oldest first. Written under the
+    /// `clients` lock (then this one), so a frontend connecting gets each
+    /// message once: in its replay, or live.
+    history: Mutex<VecDeque<ServerMessage>>,
 }
 
 /// The session handle.
@@ -92,6 +101,7 @@ impl Session {
                 plugin_versions: AtomicU64::new(0),
                 running: AtomicBool::new(false),
                 closed: AtomicBool::new(false),
+                history: Mutex::default(),
             }),
             commands: tx,
         };
@@ -106,8 +116,10 @@ impl Session {
         (session, driver)
     }
 
-    /// Attach a frontend. Its first message is [`ServerMessage::Hello`]
-    /// (then [`ServerMessage::Closed`] at once, if the session already ended).
+    /// Attach a frontend. Its first message is [`ServerMessage::Hello`], then
+    /// the session's recent runs as they were broadcast (up to [`HISTORY`]
+    /// messages, oldest first: a page opened late shows what happened), then
+    /// [`ServerMessage::Closed`] at once if the session already ended.
     pub fn connect(&self) -> Connection {
         let id = self.inner.next_client.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::unbounded_channel();
@@ -131,6 +143,9 @@ impl Session {
             ui_plugins: self.ui_plugins(),
             ui_requests,
         });
+        for message in self.inner.history.lock().unwrap().iter() {
+            let _ = tx.send(message.clone());
+        }
         if self.inner.closed.load(Ordering::SeqCst) {
             let _ = tx.send(ServerMessage::Closed);
         }
@@ -414,10 +429,23 @@ impl Session {
 
 impl Inner {
     fn broadcast(&self, message: ServerMessage) {
-        self.clients
-            .lock()
-            .unwrap()
-            .retain(|_, tx| tx.send(message.clone()).is_ok());
+        let mut clients = self.clients.lock().unwrap();
+        // Kept for later frontends: what a run showed. Questions are not
+        // (Hello carries the open ones), nor the session's own messages.
+        if matches!(
+            message,
+            ServerMessage::RunStart { .. }
+                | ServerMessage::Event { .. }
+                | ServerMessage::RunEnd { .. }
+                | ServerMessage::Notice { .. }
+        ) {
+            let mut history = self.history.lock().unwrap();
+            if history.len() == HISTORY {
+                history.pop_front();
+            }
+            history.push_back(message.clone());
+        }
+        clients.retain(|_, tx| tx.send(message.clone()).is_ok());
     }
 }
 

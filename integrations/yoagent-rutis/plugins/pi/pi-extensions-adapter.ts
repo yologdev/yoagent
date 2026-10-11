@@ -115,8 +115,8 @@
 // registered after load) refuse the load unless listed in `allowUnmapped`; the rest (observers such as `agent_end` or
 // `tool_execution_*`, pi's session events, the boundary events `turn_end` /
 // `agent_before_settle`), commands, shortcuts, flags, renderers, model
-// providers, virtual models and MCP servers are reported (a warning, or a
-// load failure with `strict`). One registered after load (in a handler or a
+// providers, virtual models and MCP servers are reported (at info: expected,
+// not a fault; a load failure with `strict`). One registered after load (in a handler or a
 // tool) is reported at the next model request or tool call, and a deciding
 // one stops the adapter: that run, and every later call, refused. Warnings
 // go to the host's logs (`yoagent.log`, else stderr). `pi.appendEntry` and
@@ -829,7 +829,9 @@ export default definePlugin<Config>({
       if (newIgnored.length > 0) {
         const text = `not available in yoagent, ignored: ${newIgnored.join('; ')}`
         if (atLoad && config.strict) throw new Error(`pi extensions use what does not map — ${text}`)
-        report('warn', `[pi] ${text}`)
+        // Expected, not a fault: app features (commands, shortcuts, events yoagent never fires)
+        // a library has no place for. Refusals, which are faults, stay warnings.
+        report('info', `[pi] ${text}`)
       }
     }
 

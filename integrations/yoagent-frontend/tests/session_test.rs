@@ -328,10 +328,68 @@ async fn a_driver_that_dies_mid_run_ends_the_run_and_the_session() {
     assert!(error.is_some());
     assert!(matches!(next(&mut ui).await, ServerMessage::Closed));
     assert!(!session.send(ClientMessage::Prompt { text: "x".into() }));
-    // A frontend connecting now learns at once that the session ended.
+    // A frontend connecting now gets the run that died (the replay), then
+    // learns that the session ended.
     let mut late = session.connect();
     assert!(matches!(next(&mut late).await, ServerMessage::Hello { .. }));
-    assert!(matches!(next(&mut late).await, ServerMessage::Closed));
+    let mut replay = Vec::new();
+    loop {
+        match next(&mut late).await {
+            ServerMessage::Closed => break,
+            other => replay.push(other),
+        }
+    }
+    assert!(matches!(
+        replay.first(),
+        Some(ServerMessage::RunStart { .. })
+    ));
+    assert!(matches!(
+        replay.last(),
+        Some(ServerMessage::RunEnd {
+            outcome: RunOutcome::Error,
+            ..
+        })
+    ));
+}
+
+/// A frontend that connects after runs gets them replayed after its Hello,
+/// in order, then live messages — each message once.
+#[tokio::test]
+async fn a_late_frontend_gets_the_runs_so_far() {
+    let (session, driver) = Session::new(true);
+    let mut early = session.connect();
+    next(&mut early).await;
+    let run = tokio::spawn(driver.run(agent(vec![
+        MockResponse::Text("first answer".into()),
+        MockResponse::Text("second answer".into()),
+    ])));
+    session.send(ClientMessage::Prompt { text: "one".into() });
+    let shown = until_run_end(&mut early).await;
+    session.notice(NoticeLevel::Info, "facts");
+    next(&mut early).await;
+
+    let mut late = session.connect();
+    assert!(matches!(
+        next(&mut late).await,
+        ServerMessage::Hello { running: false, .. }
+    ));
+    // The run as the early frontend saw it, and the notice.
+    for message in &shown {
+        assert_eq!(&next(&mut late).await, message);
+    }
+    assert!(
+        matches!(next(&mut late).await, ServerMessage::Notice { message, .. } if message == "facts")
+    );
+    // Then live: the next run reaches both, once.
+    session.send(ClientMessage::Prompt { text: "two".into() });
+    let live = until_run_end(&mut late).await;
+    assert!(
+        matches!(&live[0], ServerMessage::RunStart { run: 2, .. }),
+        "{live:?}"
+    );
+    assert_eq!(live, until_run_end(&mut early).await);
+    session.send(ClientMessage::Quit);
+    finished(run).await;
 }
 
 /// An abort mid-run is reported as such; a reset mid-run also drops the

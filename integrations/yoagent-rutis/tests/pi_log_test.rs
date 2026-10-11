@@ -102,7 +102,8 @@ async fn a_plugin_warning_reaches_the_hosts_logs() {
                 .unwrap()
                 .iter()
                 .find(|l| {
-                    l.starts_with("yoagent_rutis::plugin WARN") && l.contains("command /fixture")
+                    // What does not map is reported at info: expected, not a fault.
+                    l.starts_with("yoagent_rutis::plugin INFO") && l.contains("command /fixture")
                 })
                 .cloned();
             if let Some(line) = hit {
@@ -114,7 +115,7 @@ async fn a_plugin_warning_reaches_the_hosts_logs() {
     .await
     .unwrap_or_else(|_| {
         panic!(
-            "no plugin warning in the host's logs: {:?}",
+            "no plugin report in the host's logs: {:?}",
             logs.0.lock().unwrap()
         )
     });
