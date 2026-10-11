@@ -15,7 +15,7 @@ set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
 for arg in "$@"; do
   case "$arg" in
-    -h|--help) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     --live)
       [ -n "${DEEPSEEK_API_KEY:-}" ] || { echo "error: --live needs DEEPSEEK_API_KEY" >&2; exit 1; } ;;
   esac
