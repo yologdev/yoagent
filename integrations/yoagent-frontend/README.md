@@ -180,11 +180,12 @@ Logs (`RUST_LOG`) go to stderr with `--web` / `--demo`, else to
 
 ### `handoff_agent`: hand it a task and walk away
 
-A personal handoff agent. It works in the directory you start it from:
+A personal handoff agent for any task: research, writing, planning or code.
+It works in the directory you start it from, and puts what it makes there:
 
 ```bash
-cd my-project
-path/to/yoagent/scripts/try-handoff.sh --live "move the config to TOML, keep the tests green"
+mkdir research && cd research && git init
+path/to/yoagent/scripts/try-handoff.sh --live "Research the best noise-cancelling headphones right now; write headphones.md with sources. Ask me my budget, but don't wait."
 path/to/yoagent/scripts/try-handoff.sh --phone --live "…"   # serve on the LAN, for a phone
 cargo run --example handoff_agent -- --demo                  # headless, scripted (CI)
 ```
@@ -213,8 +214,14 @@ cargo run --example handoff_agent -- --demo                  # headless, scripte
   started (`git diff --shortstat` and commits), tokens, tool calls, time,
   and the questions still open.
 
-Tried live with DeepSeek and a phone-sized Chrome, on a small Python
-project ("move the config from JSON to TOML"). The agent started before any
+Tried live with DeepSeek and a phone-sized Chrome on a research task:
+"the best noise-cancelling headphones, ask my budget". It asked about
+budget and comfort vs sound, and kept searching while they waited. It
+folded in the answers as they came, and wrote a 164-line `headphones.md`
+with 33 sources and a pick matched to the answers. It also named the one
+review site it could not read.
+
+And on a small Python project ("move the config from JSON to TOML"). The agent started before any
 browser was attached.
 - **Run 1:** it planned, migrated, verified and committed. It asked two
   questions along the way without stopping, and reported them open.

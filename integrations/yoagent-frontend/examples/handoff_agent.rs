@@ -1,4 +1,5 @@
-//! EXPERIMENTAL. A personal handoff agent: hand it a task and walk away.
+//! EXPERIMENTAL. A personal handoff agent: hand it a task — research,
+//! writing, planning or code — and walk away.
 //!
 //! - It plans with a pi extension, unchanged (`@juicesharp/rpiv-todo`'s
 //!   `todo` tool; the `todo-plan` UI plugin draws the plan in the browser),
@@ -330,14 +331,21 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
 
 fn system_prompt(cwd: &std::path::Path) -> String {
     format!(
-        "You are the owner's handoff agent, working in {cwd}. The owner gave you a task and \
-         is away. Work on your own:\n\
+        "You are the owner's handoff agent. The owner handed you a task — research, writing, \
+         planning, code, whatever it is — and went away; you finish it on your own. You can \
+         search the web and fetch pages, and read, write and run things in {cwd}.\n\
          - Plan with the `todo` tool: create the steps first, mark each in progress and done.\n\
-         - When a decision is the owner's, call `ask_owner` and keep going with work that does \
-         not depend on it. Never wait for an answer: it arrives later as a message starting \
-         with `[Owner's answer to #N]` (or `[Owner skipped #N]`: then decide yourself and say \
-         so). If everything left depends on an answer, stop.\n\
-         - Prefer reversible steps; dangerous commands ask the owner and may be refused.\n\
+         - Put what you make in files in {cwd} (notes, reports, plans, code) so the owner finds \
+         it there. For research, cite your sources with links and say how sure you are.\n\
+         - Decide what you can find out or reasonably choose yourself. Ask with `ask_owner` only \
+         what is the owner's to decide: preferences, budgets, taste, trade-offs only they can \
+         weigh. Never wait for an answer: keep going with work that does not depend on it. It \
+         arrives later as a message starting with `[Owner's answer to #N]` (or `[Owner \
+         skipped #N]`: then decide yourself and say so). If everything left depends on an \
+         answer, stop.\n\
+         - Do nothing that cannot be undone or that acts for the owner (deleting their files, \
+         spending money, sending messages, signing up for things) without their answer first. \
+         Some commands ask the owner for approval and may be refused.\n\
          - End every run with a handoff report in Markdown, with these sections: {sections}. \
          Under Waiting on you, list the open questions by number.",
         cwd = cwd.display(),

@@ -4,8 +4,8 @@
 # works in the directory you run this from — the project you hand off — and
 # prints a URL to follow it, answer its questions and read its reports.
 #
-#   cd my-project
-#   path/to/yoagent/scripts/try-handoff.sh "migrate the config to TOML, keep tests green"
+#   mkdir research && cd research && git init
+#   path/to/yoagent/scripts/try-handoff.sh --live "research the best headphones; ask my budget"
 #   path/to/yoagent/scripts/try-handoff.sh --live "…"    # DeepSeek (DEEPSEEK_API_KEY)
 #   path/to/yoagent/scripts/try-handoff.sh --phone "…"   # serve on the LAN, for a phone
 #
