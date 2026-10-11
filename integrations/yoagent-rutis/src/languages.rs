@@ -48,7 +48,9 @@
 //! is called asynchronously (rutis warns that synchronous calls across
 //! runtimes can deadlock); `on_event` costs one cross-process call per
 //! event, so it is opt-in and filtered by event type
-//! (`options.events: ["toolExecutionEnd", ...]`).
+//! (`options.events: ["toolExecutionEnd", ...]`). The run's conversation is
+//! opt-in the same way (`options.messages: true`): `messages` on the
+//! arguments of `before_model`, `before_tool` and `on_stop`.
 //!
 //! The host must share the name with the loader's catalog
 //! (`ServiceCatalog::register_shared("yoagent")`, or `share_by_name()`), so
@@ -208,6 +210,9 @@ fn log(args: Value) -> Reply {
 struct Options {
     /// The event types (`AgentEvent`'s `type` tag) `on_event` receives.
     events: Vec<String>,
+    /// Send the run's conversation (`messages`) to `before_model`,
+    /// `before_tool` and `on_stop`.
+    messages: bool,
 }
 
 impl Service {
@@ -232,7 +237,13 @@ impl Service {
                 json => session::decode(json)?,
             },
         };
-        let hooks = target.hooks()?;
+        let mut hooks = target.hooks()?;
+        if options.messages && !(hooks.before_model || hooks.before_tool || hooks.on_stop) {
+            return Err(invalid(format!(
+                "register `{name}`: `options.messages` needs `before_model`, `before_tool` or `on_stop`"
+            )));
+        }
+        hooks.messages = options.messages;
         if hooks.tools && !target.has("call_tool")? {
             return Err(invalid(format!(
                 "register `{name}`: a handler with `tools` must implement `call_tool`"
@@ -371,6 +382,7 @@ impl Target {
             on_stop: self.has("on_stop")?,
             finish: self.has("finish")?,
             on_event: self.has("on_event")?,
+            messages: false,
         };
         if hooks == Hooks::default() && !self.has("call_tool")? {
             return Err(invalid(format!(

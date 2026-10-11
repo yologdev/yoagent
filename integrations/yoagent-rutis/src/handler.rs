@@ -22,7 +22,7 @@ use serde_json::Value;
 use yoagent::extension::{
     ExtensionError, InputDecision, RunOutcome, StopDecision, ToolOutput, TurnDecision,
 };
-use yoagent::{AgentEvent, AgentTool, ToolDecision};
+use yoagent::{AgentEvent, AgentMessage, AgentTool, Message, ToolDecision};
 
 /// The run a hook is called for.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -91,6 +91,12 @@ pub struct ToolCall {
     pub user_request: Option<String>,
     /// The text of the user's latest message.
     pub latest_user_text: Option<String>,
+    /// The run's conversation, the assistant message making this call
+    /// last — only for a handler that asked ([`Handler::with_messages`], or
+    /// `options.messages` for a language plugin). Absent from the JSON
+    /// otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub messages: Option<Messages>,
     /// The run (flattened into the JSON object).
     #[serde(flatten)]
     pub run: RunInfo,
@@ -105,6 +111,7 @@ impl ToolCall {
             args,
             user_request: None,
             latest_user_text: None,
+            messages: None,
             run: RunInfo::default(),
         }
     }
@@ -112,6 +119,12 @@ impl ToolCall {
     /// With what the user asked for.
     pub fn with_user_request(mut self, request: impl Into<String>) -> Self {
         self.user_request = Some(request.into());
+        self
+    }
+
+    /// With the run's conversation.
+    pub fn with_messages(mut self, messages: Vec<Message>) -> Self {
+        self.messages = Some(Arc::new(messages));
         self
     }
 
@@ -127,13 +140,19 @@ impl ToolCall {
         self
     }
 
-    pub(crate) fn from_request(call: &yoagent::ToolCallRequest<'_>, run: &RunInfo) -> Self {
+    /// `messages`: whether a handler of the run asked for the conversation.
+    pub(crate) fn from_request(
+        call: &yoagent::ToolCallRequest<'_>,
+        run: &RunInfo,
+        messages: bool,
+    ) -> Self {
         Self {
             tool: call.tool_name.to_string(),
             call_id: call.tool_call_id.to_string(),
             args: call.args.clone(),
             user_request: call.user_request(),
             latest_user_text: call.latest_user_text(),
+            messages: messages.then(|| llm_messages(call.messages.iter())),
             run: run.clone(),
         }
     }
@@ -151,6 +170,10 @@ pub struct Turn {
     pub latest_user_text: Option<String>,
     /// Names of the tools offered on this request.
     pub tools: Vec<String>,
+    /// The messages this request sends (before any note) — only for a
+    /// handler that asked ([`Handler::with_messages`], or `options.messages`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub messages: Option<Messages>,
     #[serde(flatten)]
     pub run: RunInfo,
 }
@@ -163,8 +186,15 @@ impl Turn {
             user_request: None,
             latest_user_text: None,
             tools,
+            messages: None,
             run: RunInfo::default(),
         }
+    }
+
+    /// With the request's messages.
+    pub fn with_messages(mut self, messages: Vec<Message>) -> Self {
+        self.messages = Some(Arc::new(messages));
+        self
     }
 
     /// With what the user asked for.
@@ -173,12 +203,18 @@ impl Turn {
         self
     }
 
-    pub(crate) fn from_context(turn: &yoagent::TurnContext<'_>, run: &RunInfo) -> Self {
+    /// `messages`: whether a handler of the run asked for the conversation.
+    pub(crate) fn from_context(
+        turn: &yoagent::TurnContext<'_>,
+        run: &RunInfo,
+        messages: bool,
+    ) -> Self {
         Self {
             model: turn.model.to_string(),
             user_request: turn.user_request(),
             latest_user_text: turn.latest_user_text(),
             tools: turn.tools.iter().map(|t| t.name.clone()).collect(),
+            messages: messages.then(|| Arc::new(turn.messages.to_vec())),
             run: run.clone(),
         }
     }
@@ -212,6 +248,10 @@ pub struct Stop {
     pub answer: String,
     /// How many times extensions have continued this run already.
     pub continues: usize,
+    /// The run's conversation, the answer last — only for a handler that
+    /// asked ([`Handler::with_messages`], or `options.messages`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub messages: Option<Messages>,
     #[serde(flatten)]
     pub run: RunInfo,
 }
@@ -222,8 +262,15 @@ impl Stop {
         Self {
             answer: answer.into(),
             continues,
+            messages: None,
             run: RunInfo::default(),
         }
+    }
+
+    /// With the run's conversation.
+    pub fn with_messages(mut self, messages: Vec<Message>) -> Self {
+        self.messages = Some(Arc::new(messages));
+        self
     }
 }
 
@@ -269,6 +316,24 @@ pub struct Handler {
     on_stop: Vec<StopFn>,
     finish: Vec<FinishFn>,
     on_event: Vec<EventFn>,
+    messages: bool,
+}
+
+/// A run's conversation as handlers that ask for it see it: yoagent's LLM
+/// messages (custom messages, which never reach the model, left out).
+/// Shared: one copy per hook call, whatever the number of handlers.
+pub type Messages = Arc<Vec<Message>>;
+
+/// The LLM messages of a run's history.
+pub(crate) fn llm_messages<'a>(messages: impl Iterator<Item = &'a AgentMessage>) -> Messages {
+    Arc::new(
+        messages
+            .filter_map(|m| match m {
+                AgentMessage::Llm(m) => Some(m.clone()),
+                _ => None,
+            })
+            .collect(),
+    )
 }
 
 fn ready<T: Send + 'static>(value: T) -> HookFuture<T> {
@@ -290,6 +355,7 @@ impl Handler {
             on_stop: Vec::new(),
             finish: Vec::new(),
             on_event: Vec::new(),
+            messages: false,
         }
     }
 
@@ -479,6 +545,14 @@ impl Handler {
         self.on_event.push(Arc::new(observe));
         self
     }
+
+    /// Give this handler the run's conversation: `messages` on the
+    /// [`Turn`], [`ToolCall`] (for `before_tool`) and [`Stop`] it sees.
+    /// Off by default: it copies the whole conversation for every call.
+    pub fn with_messages(mut self) -> Self {
+        self.messages = true;
+        self
+    }
 }
 
 /// The hooks a registered handler implements.
@@ -492,6 +566,8 @@ pub(crate) struct Hooks {
     pub(crate) on_stop: bool,
     pub(crate) finish: bool,
     pub(crate) on_event: bool,
+    /// Not a hook: the handler asked for the run's conversation.
+    pub(crate) messages: bool,
 }
 
 impl Hooks {
@@ -576,6 +652,7 @@ impl HandlerImpl for Handler {
             on_stop: !self.on_stop.is_empty(),
             finish: !self.finish.is_empty(),
             on_event: !self.on_event.is_empty(),
+            messages: self.messages,
         }
     }
 

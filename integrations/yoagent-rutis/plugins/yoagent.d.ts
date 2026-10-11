@@ -63,7 +63,21 @@ export interface Options {
    * sent. Required with `on_event`, and only with it.
    */
   events?: AgentEventType[]
+  /**
+   * Send the run's conversation as `messages` to `before_model` (the
+   * messages that request sends), `before_tool` (the conversation, the
+   * assistant message making the call last) and `on_stop` (the answer
+   * last). Off by default: the whole conversation crosses the process
+   * boundary on every such call. Needs one of those hooks.
+   */
+  messages?: boolean
 }
+
+/**
+ * yoagent's LLM message JSON (`role`: `user` | `assistant` | `toolResult`,
+ * `content` blocks), the shape pi-ai uses. Custom messages are left out.
+ */
+export type Message = Record<string, unknown> & { role: 'user' | 'assistant' | 'toolResult' }
 
 /**
  * The hooks, every one optional and async. Arguments are plain JSON (copied
@@ -161,6 +175,8 @@ export interface ToolCall extends RunInfo {
   /** What the user asked for (prose; not a stable format). */
   user_request: string | null
   latest_user_text: string | null
+  /** With `options.messages` (`before_tool` only): the conversation, the assistant message making this call last. */
+  messages?: Message[]
 }
 
 /** Allow (nothing), deny with a reason the model sees, or rewrite the arguments. */
@@ -204,6 +220,8 @@ export interface Turn extends RunInfo {
   latest_user_text: string | null
   /** Names of the tools offered on this request. */
   tools: string[]
+  /** With `options.messages`: the messages this request sends. */
+  messages?: Message[]
 }
 
 /** Nothing, a note appended to the request's latest user turn (never stored), or stop the run. */
@@ -221,6 +239,8 @@ export interface Stop extends RunInfo {
   answer: string
   /** How many times extensions have continued this run already. */
   continues: number
+  /** With `options.messages`: the conversation, the answer last. */
+  messages?: Message[]
 }
 
 /** Accept (nothing), send the model back with a message, or fail the answer. */

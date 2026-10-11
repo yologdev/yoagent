@@ -66,7 +66,9 @@ use yoagent::{
     ToolDecision, TurnContext,
 };
 
-use crate::handler::{join_notes, EventSink, Input, RunInfo, Stop, ToolCall, Turn};
+use crate::handler::{
+    join_notes, llm_messages, EventSink, Input, Messages, RunInfo, Stop, ToolCall, Turn,
+};
 use crate::host::{Host, NOT_RUNNING};
 use crate::registry::{LiveTool, Registered, Registry};
 
@@ -427,6 +429,25 @@ impl RunState {
     }
 }
 
+/// Whether any of these handlers asked for the run's conversation (then it
+/// is copied once for the call).
+fn wants_messages(handlers: &[&Registered]) -> bool {
+    handlers.iter().any(|h| h.hooks.messages)
+}
+
+/// The event as `h` sees it: the conversation only if it asked.
+fn for_handler<T: Clone>(
+    h: &Registered,
+    event: &T,
+    messages: impl FnOnce(&mut T) -> &mut Option<Messages>,
+) -> T {
+    let mut event = event.clone();
+    if !h.hooks.messages {
+        *messages(&mut event) = None;
+    }
+    event
+}
+
 fn answer_text(answer: &Message) -> String {
     match answer {
         Message::Assistant { content, .. } => content
@@ -525,14 +546,16 @@ impl RunHooks for RunState {
         if let Some(why) = self.take_failure() {
             return TurnDecision::Fail(why);
         }
-        let event = Turn::from_context(turn, &self.run);
+        let handlers: Vec<&Registered> = self.with(|h| h.hooks.before_model).collect();
+        let event = Turn::from_context(turn, &self.run, wants_messages(&handlers));
         let mut notes = Vec::new();
-        for h in self.with(|h| h.hooks.before_model) {
+        for h in handlers {
             let decision = call(
                 h,
                 "before_model",
                 self.timeouts.turn,
-                h.handler.before_model(event.clone()),
+                h.handler
+                    .before_model(for_handler(h, &event, |e| &mut e.messages)),
             )
             .await;
             match decision {
@@ -569,13 +592,15 @@ impl RunHooks for RunState {
             tracing::warn!(run_id = %self.run.run_id, tool = request.tool_name, "{UNJUDGED}; denying (require_policy)");
             return ToolDecision::Deny(UNJUDGED.into());
         }
-        let mut event = ToolCall::from_request(request, &self.run);
-        for h in self.with(|h| h.hooks.before_tool) {
+        let handlers: Vec<&Registered> = self.with(|h| h.hooks.before_tool).collect();
+        let mut event = ToolCall::from_request(request, &self.run, wants_messages(&handlers));
+        for h in handlers {
             let decision = call(
                 h,
                 "before_tool",
                 self.timeouts.policy,
-                h.handler.before_tool(event.clone()),
+                h.handler
+                    .before_tool(for_handler(h, &event, |e| &mut e.messages)),
             )
             .await;
             match decision {
@@ -603,7 +628,7 @@ impl RunHooks for RunState {
         if let Some(why) = self.pending() {
             return Err(ExtensionError::new(why));
         }
-        let event = ToolCall::from_request(request, &self.run);
+        let event = ToolCall::from_request(request, &self.run, false);
         for h in self.with(|h| h.hooks.after_tool) {
             let edited = call(
                 h,
@@ -641,18 +666,21 @@ impl RunHooks for RunState {
         if let Some(why) = self.take_failure() {
             return StopDecision::Fail(why);
         }
+        let handlers: Vec<&Registered> = self.with(|h| h.hooks.on_stop).collect();
         let event = Stop {
             answer: answer_text(stop.answer),
             continues: stop.continues,
+            messages: wants_messages(&handlers).then(|| llm_messages(stop.messages.iter())),
             run: self.run.clone(),
         };
         let mut messages = Vec::new();
-        for h in self.with(|h| h.hooks.on_stop) {
+        for h in handlers {
             let decision = call(
                 h,
                 "on_stop",
                 self.timeouts.policy,
-                h.handler.on_stop(event.clone()),
+                h.handler
+                    .on_stop(for_handler(h, &event, |e| &mut e.messages)),
             )
             .await;
             match decision {

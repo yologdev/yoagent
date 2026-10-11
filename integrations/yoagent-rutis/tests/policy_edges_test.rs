@@ -751,3 +751,100 @@ async fn a_redactor_unloading_mid_run_withholds_without_failing_a_required_run()
     assert_eq!(run_error(&agent), None);
     root.shutdown().await.unwrap();
 }
+
+/// `with_messages`: only a handler that asked sees the run's conversation, on
+/// `before_model` (the request's messages), `before_tool` (the call's
+/// assistant message last) and `on_stop` (the answer last).
+#[tokio::test(flavor = "multi_thread")]
+async fn only_a_handler_that_asked_gets_the_conversation() {
+    use std::sync::Mutex;
+    use yoagent::extension::{StopContext, StopDecision};
+    use yoagent::{AgentMessage, Content, StopReason, TurnContext};
+
+    let (root, bridge) = setup();
+    let seen: Arc<Mutex<Vec<String>>> = Arc::default();
+    let record = |who: &'static str, hook: &'static str, seen: &Arc<Mutex<Vec<String>>>| {
+        let seen = seen.clone();
+        move |messages: Option<usize>| {
+            seen.lock()
+                .unwrap()
+                .push(format!("{who} {hook} {messages:?}"));
+        }
+    };
+    for (who, asks) in [("asks", true), ("plain", false)] {
+        let (m, t, s) = (
+            record(who, "before_model", &seen),
+            record(who, "before_tool", &seen),
+            record(who, "on_stop", &seen),
+        );
+        let mut h = handler(who)
+            .with_before_model(move |turn| {
+                m(turn.messages.as_ref().map(|m| m.len()));
+                TurnDecision::Continue
+            })
+            .with_before_tool(move |call| {
+                t(call.messages.as_ref().map(|m| m.len()));
+                ToolDecision::Allow
+            })
+            .with_on_stop(move |stop| {
+                s(stop.messages.as_ref().map(|m| m.len()));
+                StopDecision::Accept
+            });
+        if asks {
+            h = h.with_messages();
+        }
+        wait_active(&root.plugin(plugin(h))).await;
+    }
+
+    let prompts = [Message::user("hi")];
+    let mut hooks = start(&bridge.extension(), &prompts).await;
+    let assistant = Message::assistant(
+        vec![Content::tool_call("c1", "act", serde_json::json!({}))],
+        StopReason::ToolUse,
+        "m",
+        "p",
+        Default::default(),
+    );
+    let history: Vec<AgentMessage> = vec![
+        Message::user("hi").into(),
+        AgentMessage::Custom(yoagent::CustomMessage::new("note", serde_json::json!({}))),
+        assistant.clone().into(),
+    ];
+    // The request: the user's message.
+    hooks
+        .before_model(&TurnContext::new("", &prompts, &[], "m").with_run_prompts(&prompts))
+        .await;
+    // The call: the conversation (the custom message left out), the call's message last.
+    let args = serde_json::json!({});
+    hooks
+        .before_tool(&ToolCallRequest::new("c1", "act", &args).with_messages(&history))
+        .await;
+    // The stop: the answer last.
+    let answer = Message::assistant(
+        vec![Content::Text {
+            text: "done".into(),
+        }],
+        StopReason::Stop,
+        "m",
+        "p",
+        Default::default(),
+    );
+    let mut finished = history.clone();
+    finished.push(answer.clone().into());
+    hooks
+        .on_stop(&StopContext::new(&answer, &finished, 0))
+        .await;
+
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(
+        seen,
+        vec![
+            "asks before_model Some(1)",
+            "plain before_model None",
+            "asks before_tool Some(2)",
+            "plain before_tool None",
+            "asks on_stop Some(3)",
+            "plain on_stop None",
+        ],
+    );
+}
