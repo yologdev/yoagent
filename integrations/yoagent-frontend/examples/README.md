@@ -119,7 +119,7 @@ When one model message makes several calls, they are judged concurrently, so eac
 | The model (6 requests, streaming) | 15.7 s |
 | Web search tools (5 calls, run in parallel) | 2.7–6.7 s each |
 
-Per tool call, the loop and the policy round trip take a few milliseconds (above). A model request or a web search takes seconds. No percentage is given: tools ran in parallel and overlap the model's time, so this run's wall time cannot be split exactly.
+Per tool call, the loop and the policy round trip take a few milliseconds (above). A model request or a web search takes seconds. No percentage is given. The loop waits for each model response, then for that response's tools, so model and tools do not overlap. But one response's tool calls run concurrently, so their durations cannot simply be added to split the wall time.
 
 **Memory** during that run:
 

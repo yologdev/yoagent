@@ -72,6 +72,39 @@ test("the agent's own files stay free; a refused command's are not its own", asy
   assert.equal(await run('rm a1.txt'), true, 'a1.txt was never the agent\'s')
 })
 
+test('a cd is followed only where it surely applies', async () => {
+  const { run } = setup()
+  const S = scratch
+  for (const command of [
+    `(cd ${S}); rm -f owner.txt`, // the subshell's cd does not reach the rm
+    `(cd ${S}) && rm -f pages`,
+    `cd ${S} | true; rm -f pages`, // a cd in a pipeline runs in a subshell
+    `cd ${S} || rm -f pages`, // runs only if the cd failed
+    `cd ${S} & rm -f pages`, // backgrounded: a subshell
+    'cd no-such-dir; rm -f pages', // the cd fails, the rm runs here
+  ]) {
+    assert.equal(await run(command), true, `should ask: ${command}`)
+  }
+  for (const command of [`(cd ${S} && rm -rf pages)`, `cd ${S}; rm -rf pages`, `cd ${S} && rm -rf pages && cd -`]) {
+    assert.equal(await run(command), false, `should be free: ${command}`)
+  }
+})
+
+test('heredocs are read as the shell reads them', async () => {
+  const { run } = setup()
+  for (const command of [
+    "echo '<<EOF'\nrm -f owner.txt\nEOF", // quoted: not a heredoc, the rm is a command
+    'echo "<<EOF"; rm -f owner.txt',
+    "cat > x.md <<'EOF'\nsudo things\nEOF\nrm -f owner.txt", // the rm after the body
+    'cat <<EOF > owner.txt\nnew\nEOF', // the redirection is on the opening line
+  ]) {
+    assert.equal(await run(command), true, `should ask: ${JSON.stringify(command)}`)
+  }
+  for (const command of ["cat > notes.md <<'EOF'\nrm -rf /\nsudo reboot\nEOF", 'cat > n2.md <<-EOF\n\tgit reset --hard\n\tEOF']) {
+    assert.equal(await run(command), false, `should be free: ${JSON.stringify(command)}`)
+  }
+})
+
 test('writes and edits', async () => {
   const { write } = setup()
   assert.equal(await write('write', 'owner.txt'), true, 'overwrite an existing file')

@@ -5,8 +5,11 @@
 // terminal or browser.
 //
 // Each shell command is tokenized (quotes, escapes, operators, redirections;
-// heredoc bodies skipped) and read command by command, keeping track of the
-// directory `cd` moves to. What asks:
+// the bodies of unquoted `<<WORD` heredocs skipped) and read command by
+// command, keeping track of the directory `cd` moves to: only where the cd
+// surely applies (a literal directory that exists; `( … )` restores the
+// directory after; a cd in a pipeline, in the background or before `||`, or
+// to a missing directory, makes it unknown). What asks:
 // - `rm`, `unlink`, `rmdir`, `git rm` (not `--cached`), `xargs` running one
 //   of them, `find … -delete` or `-exec rm …`;
 // - git: `reset --hard`, `clean` (not `-n`), `checkout` / `restore` of
@@ -56,31 +59,27 @@ const SCRATCH = process.env.YOAGENT_SCRATCH ? real(resolve(process.env.YOAGENT_S
 
 /** A word as the shell would see it; `known` is false when it holds an expansion. */
 type Word = { text: string; known: boolean }
-/** One simple command: its words and the redirections that truncate a file. */
-type Simple = { words: Word[]; truncates: Word[] }
+/**
+ * One simple command: its words, the redirections that truncate a file, and
+ * the operator after it (`;`, `\n`, `&&`, `||`, `|`, `&`, or `end`).
+ */
+type Simple = { words: Word[]; truncates: Word[]; after: string }
+/** A command, or the start / end of a `( … )` subshell. */
+type Item = Simple | 'open' | 'close'
 
 /**
- * Split a command line into simple commands (on `;`, `&&`, `||`, `|`, `&`,
- * newlines and parentheses), each with its words and truncating
- * redirections. `null` when the line cannot be read (an unclosed quote).
+ * Split a command line into simple commands and subshell markers. Quotes,
+ * escapes and redirections are read as the shell reads them; a heredoc
+ * (an unquoted `<<WORD`) has its body skipped, from the next line to the
+ * delimiter. `null` when the line cannot be read (an unclosed quote).
  */
-function parse(line: string): Simple[] | null {
-  // Heredoc bodies are data, not commands.
-  const lines = line.split('\n')
-  const kept: string[] = []
-  for (let i = 0; i < lines.length; i++) {
-    kept.push(lines[i])
-    const heredoc = lines[i].match(/<<-?\s*['"]?(\w+)['"]?/)
-    if (heredoc) {
-      while (i + 1 < lines.length && lines[i + 1].trim() !== heredoc[1]) i++
-      i++
-    }
-  }
-  const s = kept.join('\n')
-  const out: Simple[] = []
-  let cur: Simple = { words: [], truncates: [] }
+function parse(s: string): Item[] | null {
+  const out: Item[] = []
+  let cur: Simple = { words: [], truncates: [], after: 'end' }
   let word: Word | null = null
   let redirect: 'truncate' | 'skip' | null = null
+  // Heredoc delimiters waiting for the end of the current line.
+  const heredocs: { delimiter: string; strip: boolean }[] = []
   const finishWord = () => {
     if (!word) return
     if (redirect === 'truncate') cur.truncates.push(word)
@@ -88,10 +87,13 @@ function parse(line: string): Simple[] | null {
     redirect = null
     word = null
   }
-  const finishCommand = () => {
+  const finishCommand = (after: string) => {
     finishWord()
-    if (cur.words.length > 0 || cur.truncates.length > 0) out.push(cur)
-    cur = { words: [], truncates: [] }
+    if (cur.words.length > 0 || cur.truncates.length > 0) {
+      cur.after = after
+      out.push(cur)
+    }
+    cur = { words: [], truncates: [], after: 'end' }
   }
   for (let i = 0; i < s.length; i++) {
     const c = s[i]
@@ -111,12 +113,32 @@ function parse(line: string): Simple[] | null {
       i++
       continue
     }
-    if (/\s/.test(c) && c !== '\n') {
+    if (c === '\n') {
+      finishCommand('\n')
+      // Heredoc bodies follow the line that opened them: data, not commands.
+      for (const { delimiter, strip } of heredocs.splice(0)) {
+        let next = s.indexOf('\n', i + 1)
+        for (;;) {
+          const lineEnd = next < 0 ? s.length : next
+          const body = s.slice(i + 1, lineEnd)
+          i = lineEnd
+          if ((strip ? body.replace(/^\t+/, '') : body) === delimiter || next < 0) break
+          next = s.indexOf('\n', i + 1)
+        }
+      }
+      continue
+    }
+    if (/\s/.test(c)) {
       finishWord()
       continue
     }
-    if (c === '\n' || c === ';' || c === '(' || c === ')') {
-      finishCommand()
+    if (c === ';') {
+      finishCommand(';')
+      continue
+    }
+    if (c === '(' || c === ')') {
+      finishCommand(c === '(' ? ';' : 'end')
+      out.push(c === '(' ? 'open' : 'close')
       continue
     }
     if (c === '|' || c === '&') {
@@ -127,14 +149,32 @@ function parse(line: string): Simple[] | null {
         i += s[i + 2] === '>' ? 2 : 1
         continue
       }
-      if (s[i + 1] === c) i++
-      finishCommand()
+      const double = s[i + 1] === c
+      if (double) i++
+      finishCommand(double ? c + c : c)
       continue
     }
     if (c === '<') {
       finishWord()
+      if (s[i + 1] === '<' && s[i + 2] === '<') {
+        // A here-string: its word is data.
+        redirect = 'skip'
+        i += 2
+        continue
+      }
+      if (s[i + 1] === '<') {
+        // A heredoc: read its delimiter (quoted or not); the body comes after this line.
+        i++
+        const strip = s[i + 1] === '-'
+        if (strip) i++
+        while (s[i + 1] === ' ' || s[i + 1] === '\t') i++
+        const m = s.slice(i + 1).match(/^(?:'([^']*)'|"([^"]*)"|([^\s;&|<>()]+))/)
+        if (!m) return null
+        heredocs.push({ delimiter: m[1] ?? m[2] ?? m[3].replace(/\\/g, ''), strip })
+        i += m[0].length
+        continue
+      }
       redirect = 'skip'
-      if (s[i + 1] === '<') i += s[i + 2] === '<' ? 2 : 1
       continue
     }
     if (c === '>') {
@@ -158,7 +198,7 @@ function parse(line: string): Simple[] | null {
     if (c === '~' && word.text === '') word.known = false
     word.text += c
   }
-  finishCommand()
+  finishCommand('end')
   return out
 }
 
@@ -239,15 +279,35 @@ export default function (pi: any) {
     // A path this command would delete: asks unless it is the agent's own.
     const deletes = (w: Word): boolean => !w.known || cwd === null || !free(where(cwd, w.text))
 
-    for (const { words, truncates } of commands) {
+    // Directories to return to when a `( … )` subshell ends.
+    const saved: (string | null)[] = []
+    let before = ';'
+    for (const item of commands) {
+      if (item === 'open') {
+        saved.push(cwd)
+        continue
+      }
+      if (item === 'close') {
+        if (saved.length === 0) return ask
+        cwd = saved.pop()!
+        continue
+      }
+      const { words, truncates, after } = item
+      const piped = before === '|' || after === '|'
+      before = after
       if (truncates.some(target)) return ask
       if (words.length === 0) continue
       const { name, args, viaXargs } = unwrap(words)
       const flags = args.filter((a) => a.text.startsWith('-')).map((a) => a.text)
       const operands = args.filter((a) => !a.text.startsWith('-'))
-      if (name === 'cd') {
+      if (name === 'cd' || name === 'pushd' || name === 'popd') {
+        // Followed only when it surely applies to what comes next: a literal
+        // directory that exists, not in a pipeline or the background (a
+        // subshell), not before `||` (that runs if it failed).
         const to = operands[0]
-        cwd = to && to.known && cwd !== null && to.text !== '-' ? where(cwd, to.text) : null
+        const dir = to && to.known && cwd !== null && name === 'cd' ? where(cwd, to.text) : null
+        const sure = dir !== null && isDir(dir) && !piped && after !== '&' && after !== '||'
+        cwd = sure ? dir : null
         continue
       }
       if (ALWAYS.has(name) || /^mkfs\./.test(name)) return ask
