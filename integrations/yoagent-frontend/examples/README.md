@@ -6,7 +6,7 @@
 mkdir research && cd research && git init
 DEEPSEEK_API_KEY=… path/to/yoagent/scripts/try-handoff.sh --live            # then open the printed URL
 DEEPSEEK_API_KEY=… path/to/yoagent/scripts/try-handoff.sh --live --phone    # open it on your phone too (same Wi-Fi)
-cargo run --example handoff_agent -- --demo                                 # scripted, no key, no browser (CI)
+path/to/yoagent/scripts/try-handoff.sh --demo                               # scripted, no key, no browser (CI)
 ```
 
 The other two examples here are smaller. `minimal_browser.rs` is one agent and the browser page, with no plugins. `coding_agent.rs` is the interactive showcase, with a terminal or browser frontend.
@@ -19,11 +19,15 @@ Most agents assume you are watching them. A handoff agent assumes you are not:
   - The question stays open while nobody is connected, and a page opened later shows it.
   - The answer, whenever it comes, goes in as a steer message. It is picked up mid-run, or it starts the next run if the agent had stopped.
   - Dismissing a question means "decide yourself"; the agent does, and says so.
-- **It cannot do damage while you are away.** Anything that would delete or overwrite what you already have asks first, and with nobody there it is refused:
-  - `rm`, `git reset --hard`, `git clean`, forced pushes;
-  - a write, `mv` or `>` over an existing file.
+- **Approval guardrails for the riskiest operations.** Selected commands that delete, discard or overwrite what you already have ask first, and with nobody there they are refused:
+  - `rm`, `git reset --hard`, `git clean`, `git restore`, forced pushes;
+  - a write, `mv`, `cp`, `tee` or `>` over an existing file.
 
-  Files it created itself, and its own scratch folder, stay free, so it can keep its deliverable up to date.
+  Files it created itself, and its own scratch folder, stay free, so it can keep its deliverable up to date. These are guardrails, not a sandbox:
+  - targeted edits of your existing files (the edit tool) go through;
+  - a script can still delete or overwrite things in ways a command line does not show (`python3 -c …`, a Makefile).
+
+  For a guarantee, run it in a container or on a disposable copy.
 - **What it says is checked.**
   - Every run must end with a four-part report (Done, Waiting on you, Decisions, Next); the agent is sent back until it writes one.
   - The host then adds facts the model cannot make up: what changed since the handoff (against your working tree as it was), commits, new files, tokens, tool calls, time, and open questions.
@@ -76,7 +80,7 @@ What does not map (pi's `/todos` command, a keyboard shortcut) is reported at in
 
 1. The model asks for `write_file` on `notes.md`.
 2. yoagent's loop calls `before_tool` on every extension. The rutis bridge forwards it to the pi adapter in its Node runtime.
-3. The adapter runs pi's `tool_call` handlers. `confirm-dangerous` sees a new file, which it allows; for an existing file it would ask you first.
+3. The adapter runs pi's `tool_call` handlers. `confirm-dangerous` sees a new file, which it allows; for an existing file it would ask you first. `ToolExecutionStart` is sent only after this step.
 4. The loop runs the tool in Rust. The result goes back through `after_tool`, then to the page, then to the next model request.
 
 A pi tool such as `todo` makes the same trip, and then runs in the pi runtime.
@@ -93,15 +97,17 @@ Measured on 2026-10-11 on an Apple M2 (16 GB) with macOS 15.5, Node 24.7, a rele
 | 2 Node runtimes (`--no-dsh`) | 1.5–1.7 s |
 | First run after boot | ~9 s (macOS reading Node's modules from disk) |
 
-**A tool call, as the loop runs it** (scripted model; 5 runs, medians). Times include the trip to the pi adapter's policy in Node and back:
+**A tool call** (scripted model; 5 runs). Two parts, measured apart:
+- *Loop + policy:* from the model's message ending to the tool starting. This is the loop's own steps plus every `before_tool` policy, including the trip to the pi adapter in Node and back (`ToolExecutionStart` is sent after the policies).
+- *Tool:* the tool running.
 
-| Call | Path | Time |
-|---|---|---|
-| `write_file` | Rust tool, judged by the pi policy | 0.7 ms |
-| `todo` (repeat calls) | pi tool: policy + run in the pi runtime | 1.3–1.5 ms |
-| `ask_owner` | Rust tool, judged by the pi policy | 2.0–2.5 ms |
-| `todo` (first call) | the same, first time | 5–6 ms |
-| `list_files` | Rust tool that spawns `find` | ~10 ms |
+| Call | Path | Loop + policy | Tool |
+|---|---|---|---|
+| `todo` (first of a session) | pi tool: policy, then run in the pi runtime | 9–11 ms | ~5.5 ms |
+| `todo` (later) | the same, warm | ~3 ms | 1.2–1.6 ms |
+| `write_file` | Rust tool, judged by the pi policy | ~3 ms | 0.6–1.3 ms |
+| `ask_owner` | Rust tool, judged by the pi policy | 1.4–2.9 ms | ~2 ms |
+| `list_files` | Rust tool that spawns `find`, judged by the pi policy | 2.9–5.7 ms | ~10 ms |
 
 **A live research run.** The task: "the three most-recommended noise-cancelling headphones under $300, written to picks.md":
 
@@ -109,10 +115,9 @@ Measured on 2026-10-11 on an Apple M2 (16 GB) with macOS 15.5, Node 24.7, a rele
 |---|---|
 | Whole run | 30.5 s |
 | The model (6 requests, streaming) | 15.7 s |
-| Web search tools (5 calls) | 2.7–6.7 s each |
-| The agent's own tool calls (`todo`, `write_file`) | 1.7–3.6 ms each |
+| Web search tools (5 calls, run in parallel) | 2.7–6.7 s each |
 
-Tools ran in parallel and overlap the model's time, so subtracting leaves nothing to attribute to the loop at this resolution. Its cost is the few milliseconds per call measured above, against seconds per model request and per web search. For the ten calls in this run that is tens of milliseconds, about 0.1% of the 30.5 s.
+Per tool call, the loop and the policy round trip take a few milliseconds (above). A model request or a web search takes seconds. No percentage is given: tools ran in parallel and overlap the model's time, so this run's wall time cannot be split exactly.
 
 **Memory** during that run:
 
@@ -131,7 +136,7 @@ The Node runtimes are the cost of running other ecosystems' plugins unchanged. A
 - **Safety by contract, not by trust.**
   - An adapter that cannot enforce a plugin's hook refuses it.
   - A policy that fails denies the call.
-  - The approval gate refuses when nobody is there.
+  - The approval gate refuses when nobody is there. It is a guardrail for selected operations, not a sandbox.
   - The facts come from git and the event stream, not from the model.
 - **Walk-away first.** Questions that wait, a page that replays, answers that start the next run, a report on every run. These are what make "hand it off" work. Each is a small, tested piece of yoagent-frontend (`Session::ask_later`, history replay, late steering), not special code in the agent.
 - **Not done yet.**

@@ -10,20 +10,24 @@
 //!   at once, so the agent carries on with what does not depend on it. The
 //!   answer, whenever it comes, is sent in as a steer message: picked up by
 //!   the run in progress, or starting a new run when the agent had stopped.
-//! - Guardrails: a pi extension asks before dangerous commands (those do
+//! - Guardrails, not a sandbox: a pi extension asks before selected
+//!   commands that delete, discard or overwrite existing files (those do
 //!   wait); every run needs that policy (`require_policy`); runs are capped
-//!   in turns and minutes, and in dollars when the model has a price.
+//!   in turns, tokens and minutes, and in dollars when the model has a price.
 //! - Every run ends with a handoff report (Done / Waiting on you /
 //!   Decisions / Next — the agent is sent back until it writes one), and
 //!   the host adds what the model cannot make up: the files changed, the
 //!   tokens, tool calls and time, the questions still open.
 //!
 //! ```bash
-//! scripts/try-handoff.sh "migrate the config to TOML, keep tests green"   # from the repo root
-//! cargo run --example handoff_agent -- --live "…"     # DeepSeek (DEEPSEEK_API_KEY)
-//! cargo run --example handoff_agent -- --phone "…"    # serve on the LAN, for a phone
-//! cargo run --example handoff_agent -- --demo         # headless, scripted (CI)
+//! cd my-project                                       # it works where it starts
+//! path/to/yoagent/scripts/try-handoff.sh --live "…"    # DeepSeek (DEEPSEEK_API_KEY)
+//! path/to/yoagent/scripts/try-handoff.sh --phone "…"   # serve on the LAN, for a phone
+//! path/to/yoagent/scripts/try-handoff.sh --demo        # headless, scripted (CI)
 //! ```
+//!
+//! (`cargo run` needs `--manifest-path path/to/yoagent/integrations/yoagent-frontend/Cargo.toml`
+//! when started from the project directory.)
 //!
 //! `--web ADDR` (default 127.0.0.1:8787), `--no-dsh`, `--max-minutes N`
 //! (30) and `--max-tokens N` (4M) per run, `--budget-usd X` (2; priced
@@ -743,6 +747,8 @@ async fn demo(
     let mut ended = 0;
     let mut facts = Vec::new();
     let mut started = std::collections::HashMap::new();
+    // When the model's last message ended (its tool calls then go through the policies).
+    let mut asked: Option<Instant> = None;
     while ended < 2 {
         let message = tokio::time::timeout(Duration::from_secs(120), owner.messages.recv())
             .await
@@ -751,7 +757,11 @@ async fn demo(
         match message {
             ServerMessage::Event { event, .. } => match *event {
                 AgentEvent::ToolExecutionStart { tool_call_id, .. } => {
-                    started.insert(tool_call_id, Instant::now());
+                    // From the model's message to the tool starting: the loop's
+                    // own steps and every policy (the pi adapter's, across the
+                    // bridge) — `ToolExecutionStart` comes after `before_tool`.
+                    let policy = asked.map(|at| at.elapsed()).unwrap_or_default();
+                    started.insert(tool_call_id, (Instant::now(), policy));
                 }
                 AgentEvent::ToolExecutionEnd {
                     tool_call_id,
@@ -760,11 +770,16 @@ async fn demo(
                     result,
                     ..
                 } => {
-                    // The call as the loop ran it: policies (the pi adapter's,
-                    // across the bridge) and the tool itself.
+                    let ms = |d: Duration| d.as_secs_f64() * 1000.0;
                     let took = started
                         .remove(&tool_call_id)
-                        .map(|at| format!(" ({:.1} ms)", at.elapsed().as_secs_f64() * 1000.0))
+                        .map(|(at, policy)| {
+                            format!(
+                                " (loop + policy {:.1} ms, tool {:.1} ms)",
+                                ms(policy),
+                                ms(at.elapsed())
+                            )
+                        })
                         .unwrap_or_default();
                     let why = if is_error {
                         let text: String = result
@@ -787,6 +802,7 @@ async fn demo(
                 AgentEvent::MessageEnd {
                     message: AgentMessage::Llm(Message::Assistant { content, .. }),
                 } => {
+                    asked = Some(Instant::now());
                     for c in &content {
                         if let Content::Text { text } = c {
                             if !text.trim().is_empty() {

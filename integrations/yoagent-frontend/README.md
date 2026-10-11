@@ -190,7 +190,7 @@ It works in the directory you start it from, and puts what it makes there:
 mkdir research && cd research && git init
 path/to/yoagent/scripts/try-handoff.sh --live "Research the best noise-cancelling headphones right now; write headphones.md with sources. Ask me my budget, but don't wait."
 path/to/yoagent/scripts/try-handoff.sh --phone --live "…"   # serve on the LAN, for a phone
-cargo run --example handoff_agent -- --demo                  # headless, scripted (CI): asks, gets an answer, writes notes.md
+path/to/yoagent/scripts/try-handoff.sh --demo               # headless, scripted (CI): asks, gets an answer, writes notes.md
 ```
 
 - **It plans** with a pi extension used unchanged, `@juicesharp/rpiv-todo`.
@@ -206,12 +206,14 @@ cargo run --example handoff_agent -- --demo                  # headless, scripte
   "skipped", and the agent decides itself and says so. A reset withdraws
   open questions: they belong to the conversation it forgot.
 - **Guardrails:**
-  - A pi extension (`confirm-dangerous.ts`) asks before anything that could
-    destroy or overwrite what you already have: `rm`, `git reset --hard`,
-    `git clean`, a forced push, a write or `>` over an existing file, and
-    more. Files the agent created this session, and its own scratch
-    folder, are exempt. These questions do wait, and with nobody
-    connected they are refused.
+  - A pi extension (`confirm-dangerous.ts`) asks before selected
+    operations that delete, discard or overwrite what you already have:
+    `rm`, `git reset --hard`, `git clean`, `git restore`, a forced push, a
+    write or `>` over an existing file, and more. Files the agent created
+    this session, and its own scratch folder, are exempt. These questions
+    do wait, and with nobody connected they are refused. It is a guardrail,
+    not a sandbox: edits of existing files and what a script does inside
+    are not checked.
   - Every run needs that policy (`require_policy`).
   - Runs are capped in turns and minutes (`--max-minutes`), and in dollars
     (`--budget-usd`) when the model has a price. DeepSeek has none in the
