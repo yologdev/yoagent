@@ -719,7 +719,7 @@ async fn a_question_asked_later_waits_for_a_frontend() {
         id,
         value: serde_json::json!(true),
     }));
-    assert_eq!(asking.await.unwrap(), serde_json::json!(true));
+    assert_eq!(asking.await.unwrap(), Some(serde_json::json!(true)));
     assert_eq!(resolved(&mut phone).await, (id, ResolveReason::Answered));
 }
 
@@ -738,14 +738,15 @@ async fn a_question_asked_later_ends_with_the_session() {
         .await
         .expect("the question ends with the session")
         .unwrap();
-    assert_eq!(answer, serde_json::json!(false));
+    // Nobody will answer: None, not a made-up default.
+    assert_eq!(answer, None);
     let late = tokio::time::timeout(
         Duration::from_secs(5),
         session.ask_later(confirm("Another?")),
     )
     .await
     .expect("refused at once on an ended session");
-    assert_eq!(late, serde_json::json!(false));
+    assert_eq!(late, None);
 }
 
 /// Holds the run's `finish` until released: a window after the loop's last
@@ -817,6 +818,40 @@ async fn a_steer_arriving_as_a_run_ends_starts_the_next_run() {
         matches!(&seen[0], ServerMessage::RunStart { run: 2, prompt } if prompt == "late answer"),
         "{seen:?}"
     );
+    session.send(ClientMessage::Quit);
+    finished(run).await;
+}
+
+/// A reset forgets the conversation, so the questions held for its owner
+/// are withdrawn: the asker gets `None` (no answer to act on) and frontends
+/// close them. A question asked with a timeout is not affected.
+#[tokio::test]
+async fn a_reset_withdraws_the_questions_held_for_the_owner() {
+    let (session, driver) = Session::new(true);
+    let mut ui = session.connect();
+    next(&mut ui).await;
+    let run = tokio::spawn(driver.run(agent(vec![])));
+    let held = {
+        let session = session.clone();
+        tokio::spawn(async move { session.ask_later(confirm("Keep the old loader?")).await })
+    };
+    let held_id = asked(&mut ui).await;
+    let timed = ask(
+        &session,
+        confirm("Delete build?"),
+        Duration::from_secs(60),
+        None,
+    );
+    let timed_id = asked(&mut ui).await;
+    session.send(ClientMessage::Reset);
+    assert_eq!(held.await.unwrap(), None, "withdrawn: nothing to act on");
+    assert_eq!(resolved(&mut ui).await, (held_id, ResolveReason::Withdrawn));
+    // The other question is still open, and answerable.
+    session.send(ClientMessage::UiResponse {
+        id: timed_id,
+        value: json!(true),
+    });
+    assert_eq!(timed.await.unwrap(), json!(true));
     session.send(ClientMessage::Quit);
     finished(run).await;
 }

@@ -187,7 +187,7 @@ It works in the directory you start it from, and puts what it makes there:
 mkdir research && cd research && git init
 path/to/yoagent/scripts/try-handoff.sh --live "Research the best noise-cancelling headphones right now; write headphones.md with sources. Ask me my budget, but don't wait."
 path/to/yoagent/scripts/try-handoff.sh --phone --live "…"   # serve on the LAN, for a phone
-cargo run --example handoff_agent -- --demo                  # headless, scripted (CI)
+cargo run --example handoff_agent -- --demo                  # headless, scripted (CI): asks, gets an answer, writes notes.md
 ```
 
 - **It plans** with a pi extension used unchanged, `@juicesharp/rpiv-todo`.
@@ -200,10 +200,15 @@ cargo run --example handoff_agent -- --demo                  # headless, scripte
   (`Session::ask_later`), and a phone that connects later gets it. The
   answer comes back as a steer message: picked up mid-run, or starting a new
   run if the agent had stopped. A dismissed question comes back as
-  "skipped", and the agent decides itself and says so.
+  "skipped", and the agent decides itself and says so. A reset withdraws
+  open questions: they belong to the conversation it forgot.
 - **Guardrails:**
-  - A pi extension asks before dangerous commands. Those do wait, and with
-    nobody connected they are refused.
+  - A pi extension (`confirm-dangerous.ts`) asks before anything that could
+    destroy or overwrite what you already have: `rm`, `git reset --hard`,
+    `git clean`, a forced push, a write or `>` over an existing file, and
+    more. Files the agent created this session, and its own scratch
+    folder, are exempt. These questions do wait, and with nobody
+    connected they are refused.
   - Every run needs that policy (`require_policy`).
   - Runs are capped in turns and minutes (`--max-minutes`), and in dollars
     (`--budget-usd`) when the model has a price. DeepSeek has none in the
@@ -211,8 +216,9 @@ cargo run --example handoff_agent -- --demo                  # headless, scripte
 - **Every run ends with a handoff report** (Done / Waiting on you /
   Decisions / Next). The agent is sent back until it writes one. The host
   then adds facts the model cannot make up: the change since the handoff
-  started (`git diff --shortstat` and commits), tokens, tool calls, time,
-  and the questions still open.
+  started (against your working tree as it was, so edits you had not
+  committed are not counted), commits, new files, tokens, tool calls,
+  time, and the questions still open.
 
 Tried live with DeepSeek and a phone-sized Chrome on a research task:
 "the best noise-cancelling headphones, ask my budget". It asked about

@@ -6,7 +6,7 @@
 //! channel — in order, none dropped — so `RunEnd` arrives even when a slow
 //! frontend fell behind on streamed text.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -45,6 +45,9 @@ struct UiState {
     keys: HashMap<String, u64>,
     /// Keys withdrawn before their question was asked.
     early: HashMap<String, Instant>,
+    /// Questions asked with [`Session::ask_later`]: they belong to the
+    /// conversation, so a reset withdraws them.
+    held: HashSet<u64>,
 }
 
 struct Inner {
@@ -234,16 +237,21 @@ impl Session {
         timeout: Duration,
         key: Option<String>,
     ) -> Json {
-        self.ask_inner(request, Some(timeout), key, false).await
+        let default = request.default_answer();
+        self.ask_inner(request, Some(timeout), key, false)
+            .await
+            .unwrap_or(default)
     }
 
     /// Ask, and keep the question open until it is answered — however long
     /// that takes, and with no frontend attached: one that connects later
     /// gets it in its `Hello`. For an agent working while its owner is away
-    /// (see the `handoff_agent` example). Ends with the default only when
-    /// the future is dropped or the session ends. A `notify` is shown and
-    /// returns at once.
-    pub async fn ask_later(&self, request: UiRequest) -> Json {
+    /// (see the `handoff_agent` example). `Some(answer)` when a frontend
+    /// answered (`null` when the user dismissed it); `None` when nobody
+    /// will: the question was withdrawn — a reset withdraws these, since
+    /// they belong to the forgotten conversation — or the session ended. A
+    /// `notify` is shown and returns `Some(null)` at once.
+    pub async fn ask_later(&self, request: UiRequest) -> Option<Json> {
         self.ask_inner(request, None, None, true).await
     }
 
@@ -253,9 +261,8 @@ impl Session {
         timeout: Option<Duration>,
         key: Option<String>,
         hold: bool,
-    ) -> Json {
+    ) -> Option<Json> {
         let request = request.normalized();
-        let default = request.default_answer();
         let expects = request.expects_answer();
         let (tx, rx) = oneshot::channel();
         // Before the `ui` lock: `connect` takes `clients` then `ui`, so
@@ -267,13 +274,13 @@ impl Session {
             if let Some(key) = &key {
                 if ui.early.remove(key).is_some() {
                     tracing::debug!(%key, "a question withdrawn before it was asked");
-                    return default;
+                    return None;
                 }
             }
             // Checked under `ui`: the session's end clears `pending` under it
             // too, so a question is either refused here or cleared there.
             if self.is_closed() {
-                return default;
+                return None;
             }
             if !attached && !hold {
                 drop(ui);
@@ -281,13 +288,16 @@ impl Session {
                     title = request.title(),
                     "no frontend to ask: the safe default"
                 );
-                return default;
+                return None;
             }
             ui.next_id += 1;
             let id = ui.next_id;
             let mut owned_key = None;
             if expects {
                 ui.pending.insert(id, (tx, request.clone()));
+                if hold {
+                    ui.held.insert(id);
+                }
                 if let Some(key) = key {
                     if ui.keys.contains_key(&key) {
                         tracing::warn!(%key, "a question key already in use: this one cannot be withdrawn by key");
@@ -302,7 +312,7 @@ impl Session {
         let title = request.title().to_owned();
         self.broadcast(ServerMessage::UiRequest { id, request });
         if !expects {
-            return Json::Null;
+            return Some(Json::Null);
         }
         /// Closes the question however `ask` ends — answered, timed out,
         /// withdrawn by key, or dropped — and tells the frontends why.
@@ -317,6 +327,7 @@ impl Session {
                 {
                     let mut ui = self.session.inner.ui.lock().unwrap();
                     ui.pending.remove(&self.id);
+                    ui.held.remove(&self.id);
                     if let Some(key) = &self.key {
                         if ui.keys.get(key) == Some(&self.id) {
                             ui.keys.remove(key);
@@ -342,13 +353,13 @@ impl Session {
         match answered {
             Ok(Ok(value)) => {
                 close.reason = ResolveReason::Answered;
-                value
+                Some(value)
             }
-            Ok(Err(_)) => default,
+            Ok(Err(_)) => None,
             Err(_) => {
                 close.reason = ResolveReason::TimedOut;
                 tracing::info!(%title, "no answer in time: the safe default");
-                default
+                None
             }
         }
     }
@@ -428,6 +439,17 @@ impl Session {
 }
 
 impl Inner {
+    /// Withdraw every question asked with [`Session::ask_later`] (a reset).
+    fn withdraw_held(&self) {
+        let mut ui = self.ui.lock().unwrap();
+        let held: Vec<u64> = ui.held.drain().collect();
+        for id in held {
+            // Dropping the waiter ends its `ask_later` with `None`; its guard
+            // tells the frontends.
+            ui.pending.remove(&id);
+        }
+    }
+
     fn broadcast(&self, message: ServerMessage) {
         let mut clients = self.clients.lock().unwrap();
         // Kept for later frontends: what a run showed. Questions are not
@@ -500,6 +522,7 @@ impl Driver {
                     ) => text,
                     Some(ClientMessage::Reset) => {
                         agent.clear_messages();
+                        inner.withdraw_held();
                         continue;
                     }
                     Some(ClientMessage::Quit) if self.accept_quit => break,
@@ -578,6 +601,7 @@ impl Driver {
             agent.finish().await;
             if reset {
                 agent.clear_messages();
+                inner.withdraw_held();
                 agent.clear_steering_queue();
                 agent.clear_follow_up_queue();
             } else if !aborted {

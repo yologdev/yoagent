@@ -61,6 +61,30 @@ use yoagent_rutis::RutisBridge;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
+/// Where a handoff started, in git.
+#[derive(Clone)]
+struct Start {
+    /// The commit (git's empty tree when the repository has none yet):
+    /// commits after it are the agent's.
+    head: String,
+    /// The working tree, uncommitted edits included (`git stash create`
+    /// stores them as a commit without touching the files, the index or
+    /// the stash list), else `head`: changes since it are the agent's.
+    tree: String,
+}
+
+impl Start {
+    /// `None` outside a git repository.
+    fn of(cwd: &std::path::Path) -> Option<Self> {
+        git(cwd, &["rev-parse", "--git-dir"])?;
+        let head = git(cwd, &["rev-parse", "HEAD"]).unwrap_or_else(|| EMPTY_TREE.to_owned());
+        let tree = git(cwd, &["stash", "create"])
+            .filter(|snapshot| !snapshot.is_empty())
+            .unwrap_or_else(|| head.clone());
+        Some(Start { head, tree })
+    }
+}
+
 /// Git's empty tree: the base of a repository with no commit yet.
 const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
@@ -84,6 +108,8 @@ struct Options {
     max_minutes: u64,
     max_tokens: usize,
     budget_usd: f64,
+    /// The agent's own scratch (downloads, helper scripts): not the owner's folder.
+    scratch: PathBuf,
 }
 
 fn main() -> Result<(), BoxError> {
@@ -99,6 +125,7 @@ fn main() -> Result<(), BoxError> {
         // prompt counted each turn) stops a long one before it writes up.
         max_tokens: 4_000_000,
         budget_usd: 2.0,
+        scratch: std::env::temp_dir().join(format!("yoagent-handoff-{}", std::process::id())),
     };
     let mut live = false;
     let mut words = Vec::new();
@@ -142,6 +169,11 @@ fn main() -> Result<(), BoxError> {
             _ => return Err("--live needs DEEPSEEK_API_KEY".into()),
         }
     }
+    std::fs::create_dir_all(&options.scratch)?;
+    // Before any thread starts: the plugin runtimes inherit it. The approval
+    // gate (confirm-dangerous.ts) lets the agent delete and overwrite freely
+    // there, and nowhere else it did not create.
+    std::env::set_var("YOAGENT_SCRATCH", &options.scratch);
     if std::env::var_os("NODE_OPTIONS").is_none() {
         std::env::set_var("NODE_OPTIONS", "--no-warnings");
     }
@@ -171,9 +203,7 @@ fn main() -> Result<(), BoxError> {
 
 async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
     let cwd = std::env::current_dir()?;
-    // The agent's own scratch (downloads, helper scripts): not the owner's folder.
-    let scratch = std::env::temp_dir().join(format!("yoagent-handoff-{}", std::process::id()));
-    std::fs::create_dir_all(&scratch)?;
+    let scratch = options.scratch.clone();
     // The demo ends itself with `Quit`: the agent's own tools hold session
     // handles, so the driver would not end when the demo drops its own.
     let (session, driver) = Session::new(options.demo);
@@ -299,10 +329,7 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
     )
     .with_extension(Handoff {
         session: session.clone(),
-        // Where the handoff started: the facts compare against it, so commits the agent made
-        // count. A repository with no commit yet starts from the empty tree.
-        start: git(&cwd, &["rev-parse", "--git-dir"])
-            .map(|_| git(&cwd, &["rev-parse", "HEAD"]).unwrap_or_else(|| EMPTY_TREE.to_owned())),
+        start: Start::of(&cwd),
         // Untracked files already there are not the agent's.
         untracked: untracked(&cwd),
         cwd: cwd.clone(),
@@ -447,6 +474,9 @@ impl AgentTool for AskOwner {
         tokio::spawn(async move {
             let answer = session.ask_later(request).await;
             open.fetch_sub(1, Ordering::Relaxed);
+            // Withdrawn (a reset forgot the conversation it belongs to) or the
+            // session ended: nothing to tell the agent.
+            let Some(answer) = answer else { return };
             let text = match answer.as_str().map(str::trim) {
                 Some(answer) if !answer.is_empty() => {
                     format!("[Owner's answer to #{n}] {question}\n{answer}")
@@ -474,8 +504,8 @@ impl AgentTool for AskOwner {
 struct Handoff {
     session: Session,
     cwd: PathBuf,
-    /// The commit the handoff started from (`None`: not a git repository).
-    start: Option<String>,
+    /// Where the handoff started (`None`: not a git repository).
+    start: Option<Start>,
     /// The untracked files when the handoff started.
     untracked: Arc<HashSet<String>>,
     open: Arc<AtomicUsize>,
@@ -502,7 +532,7 @@ impl Extension for Handoff {
 struct HandoffRun {
     session: Session,
     cwd: PathBuf,
-    start: Option<String>,
+    start: Option<Start>,
     untracked: Arc<HashSet<String>>,
     open: Arc<AtomicUsize>,
     started: Instant,
@@ -564,11 +594,14 @@ impl RunHooks for HandoffRun {
         // Since the handoff started: committed and uncommitted changes alike.
         let changed = match &self.start {
             Some(start) => {
-                let diff = git(&self.cwd, &["diff", "--shortstat", start]).unwrap_or_default();
-                let range = if start == EMPTY_TREE {
+                // Against the working tree as it was: edits the owner had not
+                // committed are not the agent's.
+                let diff =
+                    git(&self.cwd, &["diff", "--shortstat", &start.tree]).unwrap_or_default();
+                let range = if start.head == EMPTY_TREE {
                     "HEAD".to_owned()
                 } else {
-                    format!("{start}..HEAD")
+                    format!("{}..HEAD", start.head)
                 };
                 let commits = git(&self.cwd, &["rev-list", "--count", &range])
                     .and_then(|n| n.parse::<usize>().ok())
@@ -642,38 +675,46 @@ fn call(name: &str, arguments: Json) -> MockToolCall {
     }
 }
 
-/// Without `--live`: a plan, a question, work that does not depend on it, a
-/// report; then, once the owner answered, the rest.
+/// Without `--live`: a scripted model that does what its reports say. Run
+/// 1 plans, asks which format the notes should take (without waiting),
+/// lists the folder, and reports; run 2, once the owner answered, writes
+/// `notes.md` in that format and reports.
 fn scripted() -> MockProvider {
     MockProvider::new(vec![
         MockResponse::ToolCalls(vec![call(
             "todo",
-            json!({ "action": "create", "subject": "Move the config loader to TOML" }),
+            json!({ "action": "create", "subject": "List the folder and write notes.md" }),
         )]),
         MockResponse::ToolCalls(vec![
             call(
                 "ask_owner",
                 json!({
-                    "question": "Keep the old YAML loader for one release?",
-                    "why": "Deleting it breaks configs not yet migrated.",
-                    "options": ["Keep it", "Delete it"]
+                    "question": "Should notes.md be a bullet list or a short paragraph?",
+                    "why": "Only the format of the notes depends on it.",
+                    "options": ["Bullet list", "Short paragraph"]
                 }),
             ),
             call("list_files", json!({ "path": "." })),
         ]),
         MockResponse::Text(
-            "## Done\n- Planned the migration; listed the project.\n\
-             ## Waiting on you\n- #1 Keep the old YAML loader for one release?\n\
-             ## Decisions\n- None yet.\n## Next\n- Finish once #1 is answered."
+            "(scripted) ## Done\n- Listed the folder.\n\
+             ## Waiting on you\n- #1 Should notes.md be a bullet list or a short paragraph?\n\
+             ## Decisions\n- None yet.\n## Next\n- Write notes.md once #1 is answered."
                 .into(),
         ),
-        MockResponse::ToolCalls(vec![call(
-            "todo",
-            json!({ "action": "update", "id": 1, "status": "completed" }),
-        )]),
+        MockResponse::ToolCalls(vec![
+            call(
+                "write_file",
+                json!({
+                    "path": "notes.md",
+                    "content": "# Notes\n\n- Written by the handoff agent's scripted demo.\n- A bullet list, as the owner chose.\n"
+                }),
+            ),
+            call("todo", json!({ "action": "update", "id": 1, "status": "completed" })),
+        ]),
         MockResponse::Text(
-            "## Done\n- Moved the loader to TOML.\n## Waiting on you\n- Nothing.\n\
-             ## Decisions\n- Deleted the YAML loader, as you answered.\n## Next\n- Nothing."
+            "(scripted) ## Done\n- Wrote notes.md as a bullet list.\n## Waiting on you\n- Nothing.\n\
+             ## Decisions\n- A bullet list, as you answered #1.\n## Next\n- Nothing."
                 .into(),
         ),
     ])
@@ -689,8 +730,7 @@ async fn demo(
 ) -> Result<(), BoxError> {
     let mut owner = session.connect();
     let running = tokio::spawn(driver.run(agent));
-    let task =
-        task.unwrap_or_else(|| "Migrate the config loader to TOML; keep tests green.".into());
+    let task = task.unwrap_or_else(|| "Look at this folder and write notes.md about it.".into());
     println!("> {task}");
     session.send(ClientMessage::Prompt { text: task });
     let mut question = None;
@@ -754,10 +794,10 @@ async fn demo(
                 if ended == 1 {
                     // The owner comes back, and answers.
                     let id = question.ok_or("the agent asked the owner nothing")?;
-                    println!("  ! (the owner answers #1) Delete it");
+                    println!("  ! (the owner answers #1) Bullet list");
                     session.send(ClientMessage::UiResponse {
                         id,
-                        value: json!("Delete it"),
+                        value: json!("Bullet list"),
                     });
                 }
             }
@@ -784,6 +824,13 @@ async fn demo(
     {
         return Err(format!("expected the facts after each run: {facts:?}").into());
     }
-    println!("ok: asked without waiting, answered later, two reports");
+    // What the reports claim was done.
+    if !std::path::Path::new("notes.md").exists() {
+        return Err("the second run did not write notes.md".into());
+    }
+    if !facts.last().is_some_and(|f| f.contains("new: notes.md")) {
+        return Err(format!("the facts do not name notes.md: {facts:?}").into());
+    }
+    println!("ok: asked without waiting, answered later, wrote notes.md, two reports");
     Ok(())
 }
