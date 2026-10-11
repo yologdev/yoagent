@@ -25,7 +25,7 @@ Most agents assume you are watching them. A handoff agent assumes you are not:
 
   Files it created itself, and its own scratch folder, stay free, so it can keep its deliverable up to date. These are guardrails, not a sandbox:
   - targeted edits of your existing files (the edit tool) go through;
-  - a script can still delete or overwrite things in ways a command line does not show (`python3 -c …`, a Makefile).
+  - a script or in-place editor can still change files in ways the gate does not read (`sed -i`, `python3 -c …`, a Makefile).
 
   For a guarantee, run it in a container or on a disposable copy.
 - **What it says is checked.**
@@ -99,9 +99,11 @@ Measured on 2026-10-11 on an Apple M2 (16 GB) with macOS 15.5, Node 24.7, a rele
 
 **A tool call** (scripted model; 5 runs). Two parts, measured apart:
 - *Loop + policy:* from the model's message ending to the tool starting. This is the loop's own steps plus every `before_tool` policy, including the trip to the pi adapter in Node and back (`ToolExecutionStart` is sent after the policies).
-- *Tool:* the tool running.
+- *Tool:* the tool running, plus the `after_tool` hooks. The pi adapter always has one, so this includes one more trip to Node.
 
-| Call | Path | Loop + policy | Tool |
+When one model message makes several calls, they are judged concurrently, so each call's "loop + policy" is the wait until *that* call starts. It can include queueing behind a sibling call's handler in Node.
+
+| Call | Path | Loop + policy | Tool + after-tool hooks |
 |---|---|---|---|
 | `todo` (first of a session) | pi tool: policy, then run in the pi runtime | 9–11 ms | ~5.5 ms |
 | `todo` (later) | the same, warm | ~3 ms | 1.2–1.6 ms |

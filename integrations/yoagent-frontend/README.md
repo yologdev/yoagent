@@ -212,8 +212,8 @@ path/to/yoagent/scripts/try-handoff.sh --demo               # headless, scripted
     write or `>` over an existing file, and more. Files the agent created
     this session, and its own scratch folder, are exempt. These questions
     do wait, and with nobody connected they are refused. It is a guardrail,
-    not a sandbox: edits of existing files and what a script does inside
-    are not checked.
+    not a sandbox: edits of existing files, `sed -i`, and what a script
+    does inside are not checked.
   - Every run needs that policy (`require_policy`).
   - Runs are capped in turns and minutes (`--max-minutes`), and in dollars
     (`--budget-usd`) when the model has a price. DeepSeek has none in the
