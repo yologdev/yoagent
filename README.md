@@ -4,13 +4,14 @@
   <img alt="yoagent" src="docs/images/banner.png" width="100%" height="auto">
 </picture>
 
-<a href="https://crates.io/crates/yoagent">crates.io</a> · <a href="https://yologdev.github.io/yoagent/">Docs</a> · <a href="https://docs.rs/yoagent">API</a> · <a href="https://github.com/yologdev/yoagent">GitHub</a> · <a href="https://deepwiki.com/yologdev/yoagent">DeepWiki</a> · <a href="CHANGELOG.md">Changelog</a>
+<a href="https://yologdev.github.io/yoagent/">Docs</a> · <a href="https://docs.rs/yoagent">API</a> · <a href="CHANGELOG.md">Changelog</a>
 
 [![][crates-shield]][crates-link]
 [![][docsrs-shield]][docsrs-link]
 [![][ci-shield]][ci-link]
 [![][msrv-shield]][msrv-link]
 [![][license-shield]][license-link]
+[![][deepwiki-shield]][deepwiki-link]
 
 **The agent loop for Rust.** Stream from any of 7 LLM protocols, run tools, loop until done.
 
@@ -329,5 +330,7 @@ MIT — see [LICENSE](LICENSE).
 [msrv-link]: https://github.com/yologdev/yoagent/blob/main/Cargo.toml
 [license-shield]: https://img.shields.io/badge/license-MIT-white?labelColor=black&style=flat-square
 [license-link]: https://github.com/yologdev/yoagent/blob/main/LICENSE
+[deepwiki-shield]: https://deepwiki.com/badge.svg
+[deepwiki-link]: https://deepwiki.com/yologdev/yoagent
 [yoyo-stars]: https://img.shields.io/github/stars/yologdev/yoyo-evolve?labelColor=black&style=flat-square&color=c4f042
 [yoyo-link]: https://github.com/yologdev/yoyo-evolve
