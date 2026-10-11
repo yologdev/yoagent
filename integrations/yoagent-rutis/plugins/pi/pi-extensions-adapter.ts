@@ -97,9 +97,17 @@
 //                           does: yoagent cannot apply the change. A throw
 //                           is reported and changes nothing, as in pi. Only
 //                           when such handlers exist at load is the run's
-//                           conversation asked for (`options.messages`); one
-//                           registered later is refused like any deciding
-//                           event.
+//                           conversation asked for (`options.messages`):
+//                           then one registered later is checked the same
+//                           way; without any at load, one registered later
+//                           is refused like any deciding event. A check the
+//                           hook's timeout or the run's cancel cuts short
+//                           does not pass (denied / stopped, run again next
+//                           time). "Once" is per message as sent: one that
+//                           compaction truncated or summarized is new. The
+//                           answer's check comes after it was given: a
+//                           rewrite fails the run only for a required bridge,
+//                           and refuses every later run.
 //
 // What does not map: no other event is ever fired. Events that would decide
 // or rewrite something yoagent does (DECIDING_EVENTS: `context_with_system`,
@@ -852,6 +860,8 @@ export default definePlugin<Config>({
       queue.set(runId, next.catch(() => undefined))
       return next
     }
+    /** A check the call's cancellation cut short (the hook timed out or the run stopped): not passed. */
+    const unfinished = (event: string) => `pi's ${event} check did not finish (timed out or cancelled), so this does not go ahead`
     const stopWith = (text: string) => {
       refusal = `the pi extensions adapter stopped: ${text}`
       report('warn', `[pi] ${refusal}`)
@@ -875,9 +885,12 @@ export default definePlugin<Config>({
             try {
               result = (await fn({ type: 'message_end', message: copy }, context(signal))) as typeof result
             } catch (error) {
+              // Cut short: not judged, so not seen; the next check runs it again.
+              if (signal?.aborted) return unfinished('message_end')
               report('warn', `[pi] ${short(ext.path)} message_end: ${message(error)}`)
               continue
             }
+            if (signal?.aborted) return unfinished('message_end')
             const replaced = result?.message !== undefined && canon(result.message) !== before
             if (replaced || canon(copy) !== before) {
               return stopWith(`${short(ext.path)} rewrites a ${original.role} message in message_end, which yoagent cannot apply`)
@@ -897,9 +910,11 @@ export default definePlugin<Config>({
         try {
           result = (await fn({ type: 'context', messages: copy }, context(signal))) as typeof result
         } catch (error) {
+          if (signal?.aborted) return unfinished('context')
           report('warn', `[pi] ${short(ext.path)} context: ${message(error)}`)
           continue
         }
+        if (signal?.aborted) return unfinished('context')
         const replaced = result?.messages !== undefined && canon(result.messages) !== before
         if (replaced || canon(copy) !== before) {
           return stopWith(`${short(ext.path)} changes the context in its context handler, which yoagent cannot apply`)
@@ -1192,7 +1207,8 @@ export default definePlugin<Config>({
           ? {
               async on_stop(stop: Stop & Cancellable) {
                 const stopped = await checkEnded(stop.run_id, stop.messages, stop.signal)
-                // The answer stands (it was already given); the run fails, and later ones are refused.
+                // The answer was already given and stands. `{fail}` fails the run only when the host
+                // made the bridge required (otherwise yoagent logs it); later runs are refused either way.
                 if (stopped) return { fail: stopped }
               },
             }

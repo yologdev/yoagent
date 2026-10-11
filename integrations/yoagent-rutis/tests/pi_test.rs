@@ -1076,3 +1076,68 @@ export default function (pi) {{
         host.root.shutdown().await.unwrap();
     }
 }
+
+/// A `message_end` check cut short by the hook's timeout does not pass: the
+/// message is not marked judged, so the next call on it is checked again
+/// (and here times out again) instead of going ahead unjudged.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_end_check_cut_short_does_not_pass() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let ran = dir.path().join("ran.txt");
+    let ext = extension(
+        dir.path(),
+        "slow.ts",
+        &format!(
+            r#"import {{ appendFileSync }} from 'node:fs'
+import {{ Type }} from 'typebox'
+export default function (pi) {{
+  pi.registerTool({{
+    name: 'pi_note', label: 'note', description: 'notes', parameters: Type.Object({{}}),
+    async execute() {{
+      appendFileSync({ran:?}, 'ran\n')
+      return {{ content: [{{ type: 'text', text: 'noted' }}], details: undefined }}
+    }},
+  }})
+  // Slow, and gives up when its call is cancelled.
+  pi.on('message_end', (e, ctx) => new Promise((_, reject) => {{
+    ctx.signal?.addEventListener('abort', () => reject(new Error('aborted')))
+  }}))
+}}
+"#,
+            ran = ran.display().to_string(),
+        ),
+    );
+    let host = host(&runtime).await;
+    host.load(adapter_row(json!({ "extensions": [ext] }))).await;
+    let two_calls = MockResponse::ToolCalls(vec![
+        MockToolCall {
+            provider_metadata: None,
+            name: "pi_note".into(),
+            arguments: json!({}),
+        },
+        MockToolCall {
+            provider_metadata: None,
+            name: "pi_note".into(),
+            arguments: json!({}),
+        },
+    ]);
+    let (agent, _) = agent(vec![two_calls, text("done")]);
+    let mut agent = agent
+        .with_tool_execution(yoagent::ToolExecutionStrategy::Sequential)
+        .with_extension(
+            host.bridge
+                .extension()
+                .with_policy_timeout(Some(Duration::from_millis(500))),
+        );
+    let (_, results) = run(&mut agent, "go").await;
+    assert_eq!(results.len(), 2, "{results:?}");
+    assert!(
+        results.iter().all(|r| r.2),
+        "both calls denied: {results:?}"
+    );
+    assert!(!ran.exists(), "no tool ran");
+    host.root.shutdown().await.unwrap();
+}
