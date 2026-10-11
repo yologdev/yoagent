@@ -20,7 +20,10 @@
 //   every truncating redirection (`>`, `>|`, `1>`, `2>`, `&>`; not `>>` or
 //   to `/dev/null`) onto a file that exists;
 // - `sudo`, `truncate`, `shred`, `mkfs`, recursive `chmod` / `chown`;
-// - `bash -c` / `sh -c` scripts, read the same way;
+// - `bash -c` / `sh -c` scripts and `eval` of literal text, read the same
+//   way, and what command substitutions run (`$( … )`, backquotes, `<( … )`,
+//   `>( … )`; also inside double quotes and unquoted heredoc bodies, which
+//   the shell expands), each where its command runs; `eval` of unknown text;
 // - a whole-file write over a file that exists, and any change to `.env`
 //   or `.git/`;
 // - any path it cannot know: `$VAR`, `~`, backquotes, globs, or after a
@@ -60,26 +63,108 @@ const SCRATCH = process.env.YOAGENT_SCRATCH ? real(resolve(process.env.YOAGENT_S
 /** A word as the shell would see it; `known` is false when it holds an expansion. */
 type Word = { text: string; known: boolean }
 /**
- * One simple command: its words, the redirections that truncate a file, and
- * the operator after it (`;`, `\n`, `&&`, `||`, `|`, `&`, or `end`).
+ * One simple command: its words, the redirections that truncate a file, the
+ * commands its substitutions run (`$( … )`, backticks, `<( … )`, `>( … )`,
+ * also inside double quotes and unquoted heredoc bodies), and the operator
+ * after it (`;`, `\n`, `&&`, `||`, `|`, `&`, or `end`).
  */
-type Simple = { words: Word[]; truncates: Word[]; after: string }
+type Simple = { words: Word[]; truncates: Word[]; runs: string[]; after: string }
 /** A command, or the start / end of a `( … )` subshell. */
 type Item = Simple | 'open' | 'close'
 
+/** The index of the backquote closing the one at `open`; -1 if none. */
+function endOfBackquote(s: string, open: number): number {
+  for (let i = open + 1; i < s.length; i++) {
+    if (s[i] === '\\') i++
+    else if (s[i] === '`') return i
+  }
+  return -1
+}
+
+/** The index of the `)` closing the `(` at `open`, past quotes and nesting; -1 if none. */
+function closing(s: string, open: number): number {
+  let depth = 0
+  for (let i = open; i < s.length; i++) {
+    const c = s[i]
+    if (c === '\\') i++
+    else if (c === "'") {
+      i = s.indexOf("'", i + 1)
+      if (i < 0) return -1
+    } else if (c === '"') {
+      i = endOfDouble(s, i)
+      if (i < 0) return -1
+    } else if (c === '`') {
+      i = endOfBackquote(s, i)
+      if (i < 0) return -1
+    } else if (c === '(') depth++
+    else if (c === ')' && --depth === 0) return i
+  }
+  return -1
+}
+
+/** The index of the `"` closing the one at `open`, past substitutions inside; -1 if none. */
+function endOfDouble(s: string, open: number): number {
+  for (let i = open + 1; i < s.length; i++) {
+    const c = s[i]
+    if (c === '\\') i++
+    else if (c === '"') return i
+    else if (c === '`') {
+      i = endOfBackquote(s, i)
+      if (i < 0) return -1
+    } else if (c === '$' && s[i + 1] === '(') {
+      i = closing(s, i + 1)
+      if (i < 0) return -1
+    }
+  }
+  return -1
+}
+
+/**
+ * The commands that expanding `text` runs (as in double quotes or an
+ * unquoted heredoc body): every `$( … )` and backquoted command, and those
+ * inside `$(( … ))`. `null` when one is not closed.
+ */
+function substitutions(text: string): string[] | null {
+  const runs: string[] = []
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]
+    if (c === '\\') i++
+    else if (c === '`') {
+      const end = endOfBackquote(text, i)
+      if (end < 0) return null
+      runs.push(text.slice(i + 1, end).replace(/\\`/g, '`'))
+      i = end
+    } else if (c === '$' && text[i + 1] === '(') {
+      const end = closing(text, i + 1)
+      if (end < 0) return null
+      const inner = text.slice(i + 2, end)
+      if (text[i + 2] === '(') {
+        // Arithmetic `$(( … ))`: only what it substitutes runs.
+        const nested = substitutions(inner.slice(1, -1))
+        if (!nested) return null
+        runs.push(...nested)
+      } else runs.push(inner)
+      i = end
+    }
+  }
+  return runs
+}
+
 /**
  * Split a command line into simple commands and subshell markers. Quotes,
- * escapes and redirections are read as the shell reads them; a heredoc
- * (an unquoted `<<WORD`) has its body skipped, from the next line to the
- * delimiter. `null` when the line cannot be read (an unclosed quote).
+ * escapes, substitutions and redirections are read as the shell reads
+ * them; a heredoc (an unquoted `<<WORD`) has its body skipped, from the
+ * next line to the delimiter — unless the delimiter is unquoted, when the
+ * shell expands the body and the commands it substitutes run. `null` when
+ * the line cannot be read (an unclosed quote or substitution).
  */
 function parse(s: string): Item[] | null {
   const out: Item[] = []
-  let cur: Simple = { words: [], truncates: [], after: 'end' }
+  let cur: Simple = { words: [], truncates: [], runs: [], after: 'end' }
   let word: Word | null = null
   let redirect: 'truncate' | 'skip' | null = null
-  // Heredoc delimiters waiting for the end of the current line.
-  const heredocs: { delimiter: string; strip: boolean }[] = []
+  // Heredocs waiting for the end of the current line, with the command they feed.
+  const heredocs: { delimiter: string; strip: boolean; expands: boolean; feeds: Simple }[] = []
   const finishWord = () => {
     if (!word) return
     if (redirect === 'truncate') cur.truncates.push(word)
@@ -89,21 +174,36 @@ function parse(s: string): Item[] | null {
   }
   const finishCommand = (after: string) => {
     finishWord()
-    if (cur.words.length > 0 || cur.truncates.length > 0) {
+    if (cur.words.length > 0 || cur.truncates.length > 0 || cur.runs.length > 0) {
       cur.after = after
       out.push(cur)
     }
-    cur = { words: [], truncates: [], after: 'end' }
+    cur = { words: [], truncates: [], runs: [], after: 'end' }
+  }
+  const unknown = () => {
+    word ??= { text: '', known: true }
+    word.known = false
   }
   for (let i = 0; i < s.length; i++) {
     const c = s[i]
-    if (c === "'" || c === '"') {
-      const end = s.indexOf(c, i + 1)
+    if (c === "'") {
+      const end = s.indexOf("'", i + 1)
+      if (end < 0) return null
+      word ??= { text: '', known: true }
+      word.text += s.slice(i + 1, end)
+      i = end
+      continue
+    }
+    if (c === '"') {
+      const end = endOfDouble(s, i)
       if (end < 0) return null
       const body = s.slice(i + 1, end)
+      const runs = substitutions(body)
+      if (!runs) return null
+      cur.runs.push(...runs)
       word ??= { text: '', known: true }
       word.text += body
-      if (c === '"' && /[$`]/.test(body)) word.known = false
+      if (/[$`]/.test(body)) word.known = false
       i = end
       continue
     }
@@ -113,17 +213,52 @@ function parse(s: string): Item[] | null {
       i++
       continue
     }
+    if (c === '`') {
+      const end = endOfBackquote(s, i)
+      if (end < 0) return null
+      cur.runs.push(s.slice(i + 1, end).replace(/\\`/g, '`'))
+      unknown()
+      i = end
+      continue
+    }
+    if (c === '$' && s[i + 1] === '(') {
+      const end = closing(s, i + 1)
+      if (end < 0) return null
+      const runs = substitutions(s.slice(i, end + 1))
+      if (!runs) return null
+      cur.runs.push(...runs)
+      unknown()
+      i = end
+      continue
+    }
+    if ((c === '<' || c === '>') && s[i + 1] === '(') {
+      // Process substitution: the command runs; the word is a path to its pipe.
+      const end = closing(s, i + 1)
+      if (end < 0) return null
+      cur.runs.push(s.slice(i + 2, end))
+      unknown()
+      i = end
+      continue
+    }
     if (c === '\n') {
       finishCommand('\n')
-      // Heredoc bodies follow the line that opened them: data, not commands.
-      for (const { delimiter, strip } of heredocs.splice(0)) {
+      for (const { delimiter, strip, expands, feeds } of heredocs.splice(0)) {
         let next = s.indexOf('\n', i + 1)
+        const body: string[] = []
         for (;;) {
           const lineEnd = next < 0 ? s.length : next
-          const body = s.slice(i + 1, lineEnd)
+          const line = s.slice(i + 1, lineEnd)
           i = lineEnd
-          if ((strip ? body.replace(/^\t+/, '') : body) === delimiter || next < 0) break
+          if ((strip ? line.replace(/^\t+/, '') : line) === delimiter) break
+          body.push(line)
+          if (next < 0) break
           next = s.indexOf('\n', i + 1)
+        }
+        if (expands) {
+          // An unquoted delimiter: the shell expands the body, running what it substitutes.
+          const runs = substitutions(body.join('\n'))
+          if (!runs) return null
+          feeds.runs.push(...runs)
         }
       }
       continue
@@ -157,20 +292,26 @@ function parse(s: string): Item[] | null {
     if (c === '<') {
       finishWord()
       if (s[i + 1] === '<' && s[i + 2] === '<') {
-        // A here-string: its word is data.
+        // A here-string: its word is data (its substitutions still run).
         redirect = 'skip'
         i += 2
         continue
       }
       if (s[i + 1] === '<') {
-        // A heredoc: read its delimiter (quoted or not); the body comes after this line.
+        // A heredoc: read its delimiter; the body comes after this line.
         i++
         const strip = s[i + 1] === '-'
         if (strip) i++
         while (s[i + 1] === ' ' || s[i + 1] === '\t') i++
         const m = s.slice(i + 1).match(/^(?:'([^']*)'|"([^"]*)"|([^\s;&|<>()]+))/)
         if (!m) return null
-        heredocs.push({ delimiter: m[1] ?? m[2] ?? m[3].replace(/\\/g, ''), strip })
+        const quoted = m[1] !== undefined || m[2] !== undefined || m[3].includes('\\')
+        heredocs.push({
+          delimiter: m[1] ?? m[2] ?? m[3].replace(/\\/g, ''),
+          strip,
+          expands: !quoted,
+          feeds: cur,
+        })
         i += m[0].length
         continue
       }
@@ -194,7 +335,7 @@ function parse(s: string): Item[] | null {
       continue
     }
     word ??= { text: '', known: true }
-    if (c === '$' || c === '`' || c === '*' || c === '?' || c === '{' || c === '[') word.known = false
+    if (c === '$' || c === '*' || c === '?' || c === '{' || c === '[') word.known = false
     if (c === '~' && word.text === '') word.known = false
     word.text += c
   }
@@ -292,9 +433,16 @@ export default function (pi: any) {
         cwd = saved.pop()!
         continue
       }
-      const { words, truncates, after } = item
+      const { words, truncates, runs, after } = item
       const piped = before === '|' || after === '|'
       before = after
+      // What its substitutions run, where it runs (a subshell of this directory).
+      for (const inner of runs) {
+        if (cwd === null) return ask
+        const verdict = check(inner, cwd)
+        if (verdict.ask) return ask
+        creates.push(...verdict.creates)
+      }
       if (truncates.some(target)) return ask
       if (words.length === 0) continue
       const { name, args, viaXargs } = unwrap(words)
@@ -311,6 +459,15 @@ export default function (pi: any) {
         continue
       }
       if (ALWAYS.has(name) || /^mkfs\./.test(name)) return ask
+      if (name === 'eval') {
+        // Read like any command line, when its text is known.
+        if (args.length === 0) continue
+        if (cwd === null || args.some((a) => !a.known)) return ask
+        const verdict = check(args.map((a) => a.text).join(' '), cwd)
+        if (verdict.ask) return ask
+        creates.push(...verdict.creates)
+        continue
+      }
       if (DELETERS.has(name)) {
         if (viaXargs || operands.length === 0 || operands.some(deletes)) return ask
         continue

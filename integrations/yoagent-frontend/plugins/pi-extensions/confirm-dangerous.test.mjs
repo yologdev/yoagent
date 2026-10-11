@@ -105,6 +105,40 @@ test('heredocs are read as the shell reads them', async () => {
   }
 })
 
+test('substitutions run commands: they are read like any command', async () => {
+  const { run } = setup()
+  for (const command of [
+    'cat <<EOF\n$(rm -f owner.txt)\nEOF', // an unquoted heredoc body is expanded
+    'cat <<EOF\n`rm -f owner.txt`\nEOF',
+    'cat <<-EOF > fresh2.md\n\tline $(git reset --hard)\n\tEOF',
+    'echo $(rm -f owner.txt)',
+    'echo "$(rm -f owner.txt)"',
+    'echo `rm -f owner.txt`',
+    'diff <(rm -f owner.txt) a.md',
+    'cat a.md > >(tee owner.txt)',
+    'x=$(git reset --hard)',
+    'echo $(( $(rm -f owner.txt) + 1 ))',
+    'eval "rm -f owner.txt"',
+    'eval $CMD',
+    'cd sub && echo $(rm -f only.txt)', // run where the command runs: sub
+    'echo "$(echo "nested $(rm -f owner.txt)")"',
+  ]) {
+    assert.equal(await run(command), true, `should ask: ${JSON.stringify(command)}`)
+  }
+  for (const command of [
+    "cat <<'EOF'\n$(rm -f owner.txt)\nEOF", // a quoted delimiter: the body is text
+    'cat <<\\EOF\n$(rm -f owner.txt)\nEOF',
+    'echo "built at $(date)"',
+    'echo $(git rev-parse HEAD) > rev.txt',
+    `cd ${scratch} && echo $(rm -rf pages)`,
+    'cat <<EOF > fresh.md\nrev: $(git rev-parse HEAD)\nEOF',
+    'eval "echo hi"',
+    'echo $(( 1 + 2 ))',
+  ]) {
+    assert.equal(await run(command), false, `should be free: ${JSON.stringify(command)}`)
+  }
+})
+
 test('writes and edits', async () => {
   const { write } = setup()
   assert.equal(await write('write', 'owner.txt'), true, 'overwrite an existing file')
