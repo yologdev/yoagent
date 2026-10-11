@@ -202,6 +202,7 @@ fn main() -> Result<(), BoxError> {
 }
 
 async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
+    let launched = Instant::now();
     let cwd = std::env::current_dir()?;
     let scratch = options.scratch.clone();
     // The demo ends itself with `Quit`: the agent's own tools hold session
@@ -289,6 +290,11 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
             host.status()
         )
     })?;
+    println!(
+        "plugins ready in {:.1}s ({} Node runtimes)",
+        launched.elapsed().as_secs_f64(),
+        if options.dsh { 3 } else { 2 }
+    );
 
     // Prices are opt-in; a model with none gets no dollar cap (turns and minutes still apply).
     prices::enable_bundled();
@@ -736,6 +742,7 @@ async fn demo(
     let mut question = None;
     let mut ended = 0;
     let mut facts = Vec::new();
+    let mut started = std::collections::HashMap::new();
     while ended < 2 {
         let message = tokio::time::timeout(Duration::from_secs(120), owner.messages.recv())
             .await
@@ -743,12 +750,22 @@ async fn demo(
             .ok_or("the session ended early")?;
         match message {
             ServerMessage::Event { event, .. } => match *event {
+                AgentEvent::ToolExecutionStart { tool_call_id, .. } => {
+                    started.insert(tool_call_id, Instant::now());
+                }
                 AgentEvent::ToolExecutionEnd {
+                    tool_call_id,
                     tool_name,
                     is_error,
                     result,
                     ..
                 } => {
+                    // The call as the loop ran it: policies (the pi adapter's,
+                    // across the bridge) and the tool itself.
+                    let took = started
+                        .remove(&tool_call_id)
+                        .map(|at| format!(" ({:.1} ms)", at.elapsed().as_secs_f64() * 1000.0))
+                        .unwrap_or_default();
                     let why = if is_error {
                         let text: String = result
                             .content
@@ -762,7 +779,10 @@ async fn demo(
                     } else {
                         String::new()
                     };
-                    println!("  {} {tool_name}{why}", if is_error { "✗" } else { "✓" });
+                    println!(
+                        "  {} {tool_name}{took}{why}",
+                        if is_error { "✗" } else { "✓" }
+                    );
                 }
                 AgentEvent::MessageEnd {
                     message: AgentMessage::Llm(Message::Assistant { content, .. }),

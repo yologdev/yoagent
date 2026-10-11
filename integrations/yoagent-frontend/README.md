@@ -180,6 +180,9 @@ Logs (`RUST_LOG`) go to stderr with `--web` / `--demo`, else to
 
 ### `handoff_agent`: hand it a task and walk away
 
+The stack, the plugins by ecosystem, and measured performance are in
+[`examples/README.md`](examples/README.md).
+
 A personal handoff agent for any task: research, writing, planning or code.
 It works in the directory you start it from, and puts what it makes there:
 
