@@ -6,7 +6,6 @@
 #
 #   mkdir research && cd research && git init
 #   path/to/yoagent/scripts/try-handoff.sh --live "research the best headphones; ask my budget"
-#   path/to/yoagent/scripts/try-handoff.sh --live "…"    # DeepSeek (DEEPSEEK_API_KEY)
 #   path/to/yoagent/scripts/try-handoff.sh --phone "…"   # serve on the LAN, for a phone
 #
 # Other flags go to the example: --demo, --no-dsh, --max-minutes N,
@@ -16,7 +15,7 @@ set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
 for arg in "$@"; do
   case "$arg" in
-    -h|--help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     --live)
       [ -n "${DEEPSEEK_API_KEY:-}" ] || { echo "error: --live needs DEEPSEEK_API_KEY" >&2; exit 1; } ;;
   esac
