@@ -330,7 +330,7 @@ MIT — see [LICENSE](LICENSE).
 [msrv-link]: https://github.com/yologdev/yoagent/blob/main/Cargo.toml
 [license-shield]: https://img.shields.io/badge/license-MIT-white?labelColor=black&style=flat-square
 [license-link]: https://github.com/yologdev/yoagent/blob/main/LICENSE
-[deepwiki-shield]: https://deepwiki.com/badge.svg
+[deepwiki-shield]: https://img.shields.io/badge/DeepWiki-ask-1f6feb?labelColor=black&style=flat-square
 [deepwiki-link]: https://deepwiki.com/yologdev/yoagent
 [yoyo-stars]: https://img.shields.io/github/stars/yologdev/yoyo-evolve?labelColor=black&style=flat-square&color=c4f042
 [yoyo-link]: https://github.com/yologdev/yoyo-evolve
