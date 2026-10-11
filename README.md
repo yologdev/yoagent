@@ -4,7 +4,7 @@
   <img alt="yoagent" src="docs/images/banner.png" width="100%" height="auto">
 </picture>
 
-<a href="https://yologdev.github.io/yoagent/">Docs</a> · <a href="https://docs.rs/yoagent">API</a> · <a href="CHANGELOG.md">Changelog</a>
+<a href="https://yologdev.github.io/yoagent/">Docs</a> · <a href="CHANGELOG.md">Changelog</a>
 
 [![][crates-shield]][crates-link]
 [![][docsrs-shield]][docsrs-link]
