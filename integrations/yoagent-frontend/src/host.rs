@@ -19,11 +19,12 @@
 //! ```
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use rutis::{BoxFuture, Ctx, FiberState};
-use rutis_bridge::runtime::{LocalRuntime, Stdio};
+use rutis_bridge::runtime::{Launcher, LocalRuntime, Stdio};
 use rutis_loader::{
     Chain, EntryStatus, Layer, Loader, LoaderError, LoaderOptions, LoaderPlugin, Patch, Resolved,
     Resolver, RuntimeResolver, RuntimeRowsPlugin, ServiceCatalog,
@@ -91,11 +92,38 @@ impl Row {
     }
 }
 
+/// The rows listed in the JSON file `path` (`[{ "id", "name", "config"? }]`,
+/// such as `yoagent-rutis/plugins/dsh/host-services.json`), each routed to
+/// the runtime `runtime`.
+pub fn rows_from_file(path: &Path, runtime: &str) -> Result<Vec<Row>, BoxError> {
+    #[derive(serde::Deserialize)]
+    struct Listed {
+        id: String,
+        name: String,
+        #[serde(default)]
+        config: Option<Json>,
+    }
+    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let listed: Vec<Listed> =
+        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(listed
+        .into_iter()
+        .map(|row| {
+            let next = Row::new(row.id, row.name).runtime(runtime);
+            match row.config {
+                Some(config) => next.config(config),
+                None => next,
+            }
+        })
+        .collect())
+}
+
 #[derive(Default)]
 pub struct PluginHostBuilder {
     runtimes: Vec<(String, PathBuf)>,
     shared: Vec<String>,
     terminal: Option<String>,
+    env: Vec<(String, OsString, OsString)>,
 }
 
 impl PluginHostBuilder {
@@ -116,6 +144,19 @@ impl PluginHostBuilder {
         self
     }
 
+    /// Set the environment variable `name` for the runtime `runtime`'s
+    /// process (say DSH's `DSH_HOME`, where DSH's own services keep their
+    /// data and read credentials).
+    pub fn env(
+        mut self,
+        runtime: impl Into<String>,
+        name: impl Into<OsString>,
+        value: impl Into<OsString>,
+    ) -> Self {
+        self.env.push((runtime.into(), name.into(), value.into()));
+        self
+    }
+
     /// A host service plugins may inject (`yoagent`, `frontend`, `ui`, …).
     pub fn share(mut self, service: impl Into<String>) -> Self {
         self.shared.push(service.into());
@@ -131,11 +172,16 @@ impl PluginHostBuilder {
         let routes: Arc<Mutex<HashMap<String, String>>> = Arc::default();
         let mut resolvers = Vec::new();
         for (name, dir) in &self.runtimes {
-            let mut runtime = LocalRuntime::node(
-                dir.join("node_modules/@arcships/rutis-runtime"),
-                dir.join("package.json"),
-            )
-            .named(name.clone());
+            let launcher = self
+                .env
+                .iter()
+                .filter(|(runtime, ..)| runtime == name)
+                .fold(
+                    Launcher::node(&dir.join("node_modules/@arcships/rutis-runtime")),
+                    |launcher, (_, key, value)| launcher.env(key, value),
+                );
+            let mut runtime =
+                LocalRuntime::launcher(name.clone(), launcher, dir.join("package.json"));
             if self.terminal.as_ref() == Some(name) {
                 runtime = runtime.stdin(Stdio::Inherit);
             }

@@ -57,7 +57,7 @@ use yoagent::{
     Agent, AgentEvent, AgentMessage, AgentTool, Content, Message, ToolContext, ToolError,
     ToolResult,
 };
-use yoagent_frontend::host::{PluginHost, Row};
+use yoagent_frontend::host::{rows_from_file, PluginHost, Row};
 use yoagent_frontend::{
     services, session, web, ClientMessage, NoticeLevel, ServerMessage, Session, UiRequest,
 };
@@ -219,7 +219,10 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
         .node("ui", here().join("plugins"))
         .node("pi", rutis_plugins().join("pi"));
     if options.dsh {
-        builder = builder.node("dsh", rutis_plugins().join("dsh"));
+        builder =
+            builder
+                .node("dsh", rutis_plugins().join("dsh"))
+                .env("dsh", "DSH_HOME", dsh_home());
     }
     let mut host = builder
         .share("yoagent")
@@ -251,6 +254,11 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
         Row::new("todo-plan", here().join("plugins/todo-plan.ts").display()).runtime("ui"),
     ];
     if options.dsh {
+        // The services a headless DSH host runs, for plugins that need them.
+        rows.extend(rows_from_file(
+            &rutis_plugins().join("dsh/host-services.json"),
+            "dsh",
+        )?);
         let dsh = |id: &str, name: &str| Row::new(id, name).runtime("dsh");
         rows.extend([
             dsh("dsh-web", "@deepseek-ai/dsh-web"),
@@ -869,4 +877,17 @@ async fn demo(
     }
     println!("ok: asked without waiting, answered later, wrote notes.md, two reports");
     Ok(())
+}
+
+/// DSH's home for its own services (fs, attachments, credentials, storage,
+/// session persistence, skills): `YOAGENT_DSH_HOME`, else a directory of
+/// yoagent's own under the temp dir — never the user's `~/.dsh`, whose
+/// credentials and skills DSH plugins would otherwise see. Point
+/// `YOAGENT_DSH_HOME` at `~/.dsh` to share them on purpose.
+fn dsh_home() -> std::path::PathBuf {
+    let home = std::env::var_os("YOAGENT_DSH_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("yoagent-dsh-home"));
+    let _ = std::fs::create_dir_all(&home);
+    home
 }

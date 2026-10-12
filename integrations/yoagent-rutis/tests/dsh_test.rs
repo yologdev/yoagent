@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use common::*;
 use rutis::Ctx;
-use rutis_bridge::runtime::LocalRuntime;
+use rutis_bridge::runtime::{Launcher, LocalRuntime};
 use rutis_bridge::session::{
     host_key, Error as BridgeError, HostDispatch, Reply, Value as BridgeValue,
 };
@@ -122,6 +122,11 @@ impl HostDispatch for ScriptedUi {
 }
 
 async fn host(runtime: &Path, ui: Option<Arc<ScriptedUi>>) -> Host {
+    host_with(runtime, ui, None).await
+}
+
+/// [`host`], the DSH runtime given `DSH_HOME` when `dsh_home` is set.
+async fn host_with(runtime: &Path, ui: Option<Arc<ScriptedUi>>, dsh_home: Option<&Path>) -> Host {
     let root = Ctx::root().unwrap();
     let bridge = RutisBridge::install(&root).unwrap();
     let mut catalog = ServiceCatalog::new();
@@ -131,7 +136,11 @@ async fn host(runtime: &Path, ui: Option<Arc<ScriptedUi>>) -> Host {
         root.provide_as::<dyn HostDispatch>(host_key("ui"), ui)
             .unwrap();
     }
-    let node = LocalRuntime::node(runtime, dsh_dir().join("package.json"));
+    let launcher = match dsh_home {
+        Some(home) => Launcher::node(runtime).env("DSH_HOME", home),
+        None => Launcher::node(runtime),
+    };
+    let node = LocalRuntime::launcher("node", launcher, dsh_dir().join("package.json"));
     let resolver = Arc::new(RuntimeResolver::node(node.handle()).with_catalog(&catalog));
     root.plugin(node);
     let plugin = LoaderPlugin::new(
@@ -629,4 +638,50 @@ async fn without_a_frontend_a_dsh_ask_is_denied() {
         }
         host.root.shutdown().await.unwrap();
     }
+}
+
+/// `plugins/dsh/host-services.json`: DSH's own services start headless, in a
+/// DSH home of the host's choosing, and the services DSH plugins wait for
+/// exist in the runtime (checked from inside it, as a plugin sees them).
+#[tokio::test(flavor = "multi_thread")]
+async fn dsh_host_services_start_headless_in_their_own_dsh_home() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("dsh-home");
+    std::fs::create_dir_all(&home).unwrap();
+    let out = dir.path().join("services.json");
+    let host = host_with(&runtime, None, Some(&home)).await;
+    let services = [
+        "fs",
+        "attachments",
+        "credentials",
+        "storage",
+        "sessionPersistence",
+        "skills",
+    ];
+    let mut rows: Vec<Value> = serde_json::from_str(
+        &std::fs::read_to_string(dsh_dir().join("host-services.json")).unwrap(),
+    )
+    .unwrap();
+    rows.extend([
+        json!({ "id": "system-prompt", "name": "@deepseek-ai/dsh-system-prompt" }),
+        json!({ "id": "tools", "name": "@deepseek-ai/dsh-tools" }),
+        json!({ "id": "adapter", "name": dsh_dir().join("dsh-tools-adapter.ts") }),
+        json!({
+            "id": "probe-services",
+            "name": dsh_dir().join("probe-services.ts"),
+            "config": { "names": services, "out": out, "waitMs": 1000 },
+        }),
+    ]);
+    host.load(Value::Array(rows)).await;
+    let report: Value = serde_json::from_str(&wait_file(&out, |t| !t.is_empty()).await).unwrap();
+    assert_eq!(report["missing"], json!([]), "{report}");
+    assert_eq!(
+        report["present"].as_array().map(Vec::len),
+        Some(services.len()),
+        "{report}"
+    );
+    host.root.shutdown().await.unwrap();
 }
