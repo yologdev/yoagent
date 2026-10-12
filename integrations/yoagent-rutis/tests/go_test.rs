@@ -1,9 +1,10 @@
-//! Go plugins through the bridge: `plugins/go` (a policy, a tool, and a
-//! slow policy that watches its call's context), built with the local Go
-//! toolchain and run as a rutis Go runtime (`go:<plugin>` rows).
+//! Go plugins through the bridge: `plugins/go` (policies, a redaction and
+//! tools; see its doc), built with the local Go toolchain and run as a rutis
+//! Go runtime (`go:<plugin>` rows).
 //!
 //! Needs Go 1.24+ on `PATH`; without it the test prints `SKIPPED:` and
-//! passes, unless `YOAGENT_RUTIS_REQUIRE_RUNTIMES=1`.
+//! passes, unless `YOAGENT_RUTIS_REQUIRE_RUNTIMES=1`. With Go there, a
+//! plugin that does not build fails the test.
 #![cfg(unix)]
 
 mod common;
@@ -54,6 +55,7 @@ fn build(dir: &Path) -> Option<PathBuf> {
     }
     let binary = dir.join("go-policy");
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("plugins/go");
+    // Go is there: a plugin that does not build is a failure, never a skip.
     let built = Command::new("go")
         .arg("build")
         .arg("-o")
@@ -61,16 +63,13 @@ fn build(dir: &Path) -> Option<PathBuf> {
         .arg(".")
         .current_dir(&source)
         .status()
-        .ok()
-        .filter(|status| status.success());
-    match built {
-        Some(_) => Some(binary),
-        None => skip(format!("`go build` failed in {}", source.display())),
-    }
+        .expect("run `go build`");
+    assert!(built.success(), "`go build` failed in {}", source.display());
+    Some(binary)
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_go_plugin_offers_a_tool_denies_and_sees_its_call_cancelled() {
+async fn a_go_plugin_offers_tools_redacts_fails_closed_and_unloads() {
     let dir = tempfile::tempdir().unwrap();
     let Some(binary) = build(dir.path()) else {
         return;
@@ -111,30 +110,65 @@ async fn a_go_plugin_offers_a_tool_denies_and_sees_its_call_cancelled() {
     .await
     .unwrap_or_else(|_| panic!("the Go handler did not register: {}", log()));
 
-    // A tool from Go, and a call Go denies.
-    let shell = Reply::new("bash", "ran");
-    let shell_runs = shell.runs();
+    let until = |line: &'static str| {
+        let log = &log;
+        async move {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                while !log().contains(line) {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("Go never logged {line:?}: {}", log()));
+        }
+    };
+    let blocked: Vec<Reply> = ["bash", "fail_gate", "odd_gate"]
+        .iter()
+        .map(|name| Reply::new(name, "ran"))
+        .collect();
+    let blocked_runs: Vec<_> = blocked.iter().map(Reply::runs).collect();
+
+    // A tool from Go, whose output Go's after_tool redacts; and policies:
+    // Go's denial, Go's error and a malformed answer all deny.
     let (first, _) = agent(vec![
-        call("go_echo", json!({"say": "hi"})),
-        call("bash", json!({"command": "ls"})),
+        calls(&[
+            ("go_echo", json!({"say": "a secret"})),
+            ("bash", json!({"command": "ls"})),
+            ("fail_gate", json!({})),
+            ("odd_gate", json!({})),
+        ]),
         text("done"),
     ]);
     let mut first = first
-        .with_tools(vec![Box::new(shell)])
+        .with_tools(
+            blocked
+                .into_iter()
+                .map(|t| Box::new(t) as Box<dyn yoagent::AgentTool>)
+                .collect(),
+        )
         .with_extension(bridge.extension());
     let (_, results) = run(&mut first, "go").await;
-    assert_eq!(results[0].0, "go_echo");
+    let result = |name: &str| results.iter().find(|(n, ..)| n == name).cloned().unwrap();
+    let (_, echoed, failed) = result("go_echo");
     assert!(
-        results[0].1.contains("go says") && results[0].1.contains("hi"),
+        !failed && echoed.contains("go says") && echoed.contains("a [go redacted]"),
         "{results:?}"
     );
+    assert!(!echoed.contains("secret"), "{echoed}");
+    for (name, reason) in [
+        ("bash", "no shell from Go"),
+        ("fail_gate", "go policy backend down"),
+        ("odd_gate", "unexpected value"),
+    ] {
+        let (_, text, denied) = result(name);
+        assert!(denied && text.contains(reason), "{name}: {results:?}");
+    }
     assert!(
-        results[1].2 && results[1].1.contains("no shell from Go"),
+        blocked_runs.iter().all(|r| r.load(Ordering::SeqCst) == 0),
         "{results:?}"
     );
-    assert_eq!(shell_runs.load(Ordering::SeqCst), 0);
 
-    // A policy the host stops waiting for: Go's call context is cancelled.
+    // A policy the host stops waiting for: denied, and Go's context cancelled.
     let gate = Reply::new("slow_gate", "ran");
     let gate_runs = gate.runs();
     let (gated, _) = agent(vec![call("slow_gate", json!({})), text("done")]);
@@ -144,14 +178,58 @@ async fn a_go_plugin_offers_a_tool_denies_and_sees_its_call_cancelled() {
             .with_policy_timeout(Some(Duration::from_millis(300))),
     );
     let (_, results) = run(&mut gated, "gate").await;
-    assert!(results[0].2, "{results:?}");
+    assert!(
+        results[0].2 && results[0].1.contains("did not answer"),
+        "{results:?}"
+    );
     assert_eq!(gate_runs.load(Ordering::SeqCst), 0);
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while !log().contains("go slow_gate: cancelled") {
+    until("go slow_gate: cancelled").await;
+
+    // Cancelling the run cancels the Go tool call in flight.
+    let (waiting, _) = agent(vec![call("go_wait", json!({})), text("never sent")]);
+    let mut waiting = waiting.with_extension(bridge.extension());
+    let mut events = waiting.prompt("wait").await;
+    until("go wait: started").await;
+    waiting.abort();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while events.recv().await.is_some() {}
+    })
+    .await
+    .expect("the cancelled run ends");
+    waiting.finish().await;
+    until("go wait: cancelled").await;
+
+    // Unloading the plugin removes its handler (its disposer ran): its tools
+    // are gone and its policy no longer denies.
+    loader.reconcile(vec![], None).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while registry.handlers().iter().any(|h| h.name() == "go-policy") {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await
-    .unwrap_or_else(|_| panic!("Go never saw the cancel: {}", log()));
+    .expect("the Go handler is removed on unload");
+    let shell = Reply::new("bash", "ran");
+    let shell_runs = shell.runs();
+    let (after, _) = agent(vec![call("bash", json!({"command": "ls"})), text("done")]);
+    let mut after = after
+        .with_tools(vec![Box::new(shell)])
+        .with_extension(bridge.extension());
+    run(&mut after, "after").await;
+    assert_eq!(shell_runs.load(Ordering::SeqCst), 1, "no Go policy left");
     root.shutdown().await.unwrap();
+}
+
+/// One response calling several tools at once.
+fn calls(names: &[(&str, serde_json::Value)]) -> yoagent::provider::mock::MockResponse {
+    yoagent::provider::mock::MockResponse::ToolCalls(
+        names
+            .iter()
+            .map(|(name, args)| yoagent::provider::mock::MockToolCall {
+                provider_metadata: None,
+                name: (*name).into(),
+                arguments: args.clone(),
+            })
+            .collect(),
+    )
 }

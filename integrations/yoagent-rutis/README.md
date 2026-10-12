@@ -133,7 +133,8 @@ yoagent-rutis = { git = "https://github.com/yologdev/yoagent", features = ["node
 ```
 
 A plugin injects `yoagent` and registers a handler: an object (in Python, a
-class instance or a dict) of async functions, passed by reference — rutis
+class instance or a dict; in Go, a map of functions — see
+[`plugins/go/main.go`](plugins/go/main.go)) of async functions, passed by reference — rutis
 calls them in the plugin's own process. `register(name, handler, options?)`
 returns a function that unregisters it; pass it to `ctx.effect` so the
 handler goes when the plugin unloads.

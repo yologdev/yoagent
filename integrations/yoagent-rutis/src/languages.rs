@@ -1,6 +1,6 @@
-//! Plugins in other languages — TypeScript / JavaScript on Node or Bun, and
-//! Python — through [rutis-bridge](https://docs.rs/rutis-bridge) 0.9 (the
-//! `node`, `bun`, `python` and `websocket` features).
+//! Plugins in other languages — TypeScript / JavaScript on Node or Bun,
+//! Python and Go — through [rutis-bridge](https://docs.rs/rutis-bridge) 0.9
+//! (the `node`, `bun`, `python`, `go` and `websocket` features).
 //!
 //! With one of those features, [`RutisBridge::install`](crate::RutisBridge::install)
 //! also provides the registry to language plugins as the host service

@@ -26,7 +26,7 @@
 //! yoagent itself knows nothing about rutis; the bridge uses only yoagent's
 //! public API.
 //!
-//! TypeScript and Python handlers (features `node`, `bun`, `python`, `websocket`)
+//! TypeScript, Python and Go handlers (features `node`, `bun`, `python`, `go`, `websocket`)
 //! can return images in tool results and write logs into the host's
 //! `tracing` output (target `yoagent_rutis::plugin`). Plugins from other
 //! agent ecosystems — DSH tool plugins, pi extensions — plug in through
@@ -90,7 +90,7 @@
 //! With the `node`, `bun`, `python`, `go` or `websocket` feature (rutis-bridge 0.9),
 //! [`RutisBridge::install`] also provides the registry to plugins in other
 //! languages, as the host service `yoagent`. Such a plugin registers an
-//! object (or a Python dict) of async functions, with the same hooks and the
+//! object (a Python dict, a Go map of functions) of async functions, with the same hooks and the
 //! same plain-JSON arguments as a Rust [`Handler`]:
 //!
 //! ```ts
