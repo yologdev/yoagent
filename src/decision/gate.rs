@@ -283,7 +283,8 @@ impl ToolGate {
             questions.push((id.clone(), Question::noul(q.as_str())));
         }
 
-        let caps = self.model.capabilities();
+        // The strictest limits in a fallback chain, so no member skips the call.
+        let caps = self.model.chain_capabilities();
         let full_views = self.full_views_for(call.tool_name);
         let fits = |view: &View| {
             let chars =

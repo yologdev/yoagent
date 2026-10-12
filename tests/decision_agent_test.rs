@@ -1889,3 +1889,26 @@ async fn a_tree_gate_rechecks_a_rewritten_call() {
     );
     assert_eq!(reqs[1].state["tool_call"]["arguments"]["path"], "/srv/data");
 }
+
+#[tokio::test]
+async fn gate_fits_the_strictest_limits_in_a_fallback_chain() {
+    // An unlimited primary that fails, then a fallback with SystemOne's
+    // 32k-token limit. 46,000 CJK characters are under the character budget
+    // but over the fallback's tokens (3 bytes each): sized to the primary
+    // alone, the fallback would skip the call unsent and the gate deny.
+    let primary = MockBackend::new().push_error(DecisionError::http(503, "unavailable"));
+    let fallback = gate_answers(0.1, 0.9).with_capabilities(
+        Capabilities::new(QuestionKind::all()).with_token_limits(Some(64_000), Some(32_000)),
+    );
+    let chain = DecisionModel::from_backend(primary, "primary").or(model(&fallback));
+    let gate = ToolGate::new(chain);
+    let decision = decide(
+        &gate,
+        "write_file",
+        json!({"path": "a.md", "content": "汉".repeat(46_000)}),
+    )
+    .await;
+    assert!(matches!(decision, ToolDecision::Allow), "{decision:?}");
+    assert_eq!(fallback.request_count(), 1, "the fallback was asked");
+    assert!(fallback.requests()[0].state["tool_call"]["omitted"].is_array());
+}

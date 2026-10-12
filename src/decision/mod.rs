@@ -634,6 +634,26 @@ impl DecisionModel {
         self.backend.get().capabilities()
     }
 
+    /// The primary's capabilities with the strictest token limits of the
+    /// whole chain: a state sized to these is sent to every member, never
+    /// skipped by one with smaller limits.
+    pub(crate) fn chain_capabilities(&self) -> Capabilities {
+        let strictest = |a: Option<usize>, b: Option<usize>| match (a, b) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let mut caps = self.capabilities();
+        for member in &self.fallbacks {
+            let c = member.capabilities();
+            caps.max_request_tokens = strictest(caps.max_request_tokens, c.max_request_tokens);
+            caps.max_state_and_question_tokens = strictest(
+                caps.max_state_and_question_tokens,
+                c.max_state_and_question_tokens,
+            );
+        }
+        caps
+    }
+
     /// The price of `usage` on the model that reported it.
     pub(crate) fn cost_usd(&self, model: &str, usage: &DecisionUsage) -> Option<f64> {
         let cost = match &self.pricing {

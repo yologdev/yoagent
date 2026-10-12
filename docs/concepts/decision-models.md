@@ -527,7 +527,8 @@ backend.
 
 **Arguments.** A call's arguments are sent **whole when they fit**: within
 `with_max_argument_chars` (default 48,000 characters, serialized) and the
-decision backend's own token limits. A full-file rewrite or a large patch is
+decision backend's own token limits (with fallbacks, the strictest in the
+chain, so no fallback skips the call). A full-file rewrite or a large patch is
 judged on all of it.
 
 A call that does not fit is shortened only as far as needed: its longest
