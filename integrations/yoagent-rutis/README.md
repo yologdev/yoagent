@@ -125,6 +125,7 @@ service `yoagent`:
 | `node` | TypeScript / JavaScript plugins in local Node runtimes (Node 22.19+, Linux/macOS) |
 | `bun` | the same TypeScript / JavaScript plugins in local Bun runtimes (Bun 1.4+, Linux/macOS): rows `bun:<module>`, no build step; local only — rutis's Bun runtime cannot listen remotely yet |
 | `python` | Python plugins in local Python runtimes (Python 3.10+, Linux/macOS) |
+| `go` | Go plugins built with the rutis Go SDK (Go 1.24+, Linux/macOS): each binary is a runtime, started when a `go:<plugin>` row needs it (rutis-loader's `GoResolver` / `GoRuntimes`). A handler is a map of Go functions; a hook's `context.Context` is cancelled when the host gives the call up, as a JavaScript hook's `signal` aborts — see [`plugins/go/main.go`](plugins/go/main.go) |
 | `websocket` | runtimes and nodes on other machines, over `wss` |
 
 ```toml

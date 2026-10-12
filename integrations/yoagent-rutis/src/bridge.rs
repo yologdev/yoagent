@@ -48,6 +48,7 @@ impl RutisBridge {
             feature = "node",
             feature = "python",
             feature = "bun",
+            feature = "go",
             feature = "websocket"
         ))]
         crate::languages::provide(ctx, &registry)?;

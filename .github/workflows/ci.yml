@@ -309,7 +309,7 @@ jobs:
       - name: Check
         run: cargo check --manifest-path "$MANIFEST" --all-targets
       - name: Check with the language features (rutis-bridge 0.9)
-        run: cargo check --manifest-path "$MANIFEST" --all-targets --features node,python,bun,websocket
+        run: cargo check --manifest-path "$MANIFEST" --all-targets --features node,python,bun,go,websocket
 
   # TypeScript (Node and Bun 1.4) and Python plugins through rutis-bridge 0.9, end to end: real
   # Node 22 (the floor: pi needs 22.19, rutis 0.9 22; the frontend job runs 24)
@@ -318,7 +318,7 @@ jobs:
   # train (plugins/package-lock.json, plugins/requirements.txt). A missing
   # runtime fails the job instead of skipping (YOAGENT_RUTIS_REQUIRE_RUNTIMES).
   rutis-bridge-languages:
-    name: yoagent-rutis TypeScript / Bun / Python plugins
+    name: yoagent-rutis TypeScript / Bun / Python / Go plugins
     needs: changes
     if: needs.changes.outputs.rutis == 'true'
     runs-on: ubuntu-latest
@@ -352,6 +352,12 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.4"
+      # The Go plugin's test (tests/go_test.rs) builds plugins/go: the rutis
+      # Go SDK's floor.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache-dependency-path: integrations/yoagent-rutis/plugins/go/go.sum
       - name: Install the rutis npm packages
         run: npm ci --prefix "$PLUGINS"
       # The dsh adapter's end-to-end test (tests/dsh_test.rs): dsh-tools,
@@ -368,13 +374,13 @@ jobs:
           "$PLUGINS/.venv/bin/pip" install -r "$PLUGINS/requirements.txt"
       - name: Clippy (each language feature, and all)
         run: |
-          for features in node python bun websocket node,python,bun,websocket; do
+          for features in node python bun go websocket node,python,bun,go,websocket; do
             cargo clippy --manifest-path "$MANIFEST" --all-targets --features "$features"
           done
       - name: Documentation
-        run: RUSTDOCFLAGS="-Dwarnings" cargo doc --manifest-path "$MANIFEST" --no-deps --features node,python,bun,websocket
+        run: RUSTDOCFLAGS="-Dwarnings" cargo doc --manifest-path "$MANIFEST" --no-deps --features node,python,bun,go,websocket
       - name: Test
-        run: cargo test --manifest-path "$MANIFEST" --features node,python,bun,websocket
+        run: cargo test --manifest-path "$MANIFEST" --features node,python,bun,go,websocket
       - name: Example
         run: cargo run --manifest-path "$MANIFEST" --features node,python --example language_plugins
       - name: pi extensions example (scripted, the fixture extension)

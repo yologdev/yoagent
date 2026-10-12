@@ -48,7 +48,7 @@ tokio-util = "0.7"
 tracing = "0.1"
 
 [package.metadata.docs.rs]
-features = ["node", "python", "bun", "websocket"]
+features = ["node", "python", "bun", "go", "websocket"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
@@ -57,6 +57,9 @@ rustdoc-args = ["--cfg", "docsrs"]
 default = []
 # TypeScript / JavaScript plugins in local Node runtimes (Unix).
 node = ["rutis-bridge/node"]
+# Go plugins (Go 1.24+, the rutis Go SDK): one binary per runtime, started
+# when a row needs it (Unix).
+go = ["rutis-bridge/go"]
 # Python plugins in local Python runtimes (Unix).
 python = ["rutis-bridge/python"]
 # TypeScript / JavaScript plugins in local Bun runtimes (Bun 1.4+, Unix).
@@ -68,10 +71,14 @@ websocket = ["rutis-bridge/websocket"]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 # Loads language plugins as rows in the end-to-end tests. The bridge never
 # loads plugins itself: that is the host's job.
-rutis-loader = { version = "0.9", features = ["node", "python", "bun"] }
+rutis-loader = { version = "0.9", features = ["node", "python", "bun", "go"] }
 tempfile = "3"
 # Captures the bridge's `log` output in its own test binary (tests/plugin_log_test.rs).
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }
+
+[[test]]
+name = "go_test"
+required-features = ["go"]
 
 [[test]]
 name = "languages_test"

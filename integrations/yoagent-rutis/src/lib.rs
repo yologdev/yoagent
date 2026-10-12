@@ -87,7 +87,7 @@
 //!
 //! # Plugins in other languages
 //!
-//! With the `node`, `bun`, `python` or `websocket` feature (rutis-bridge 0.9),
+//! With the `node`, `bun`, `python`, `go` or `websocket` feature (rutis-bridge 0.9),
 //! [`RutisBridge::install`] also provides the registry to plugins in other
 //! languages, as the host service `yoagent`. Such a plugin registers an
 //! object (or a Python dict) of async functions, with the same hooks and the
@@ -151,6 +151,7 @@ mod host;
     feature = "node",
     feature = "python",
     feature = "bun",
+    feature = "go",
     feature = "websocket"
 ))]
 #[cfg_attr(
@@ -159,6 +160,7 @@ mod host;
         feature = "node",
         feature = "python",
         feature = "bun",
+        feature = "go",
         feature = "websocket"
     )))
 )]
