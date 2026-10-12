@@ -15,8 +15,8 @@
 //!   `key` field in the request makes it withdrawable:
 //! - `ui.withdraw(key)` — the asker gave up (its own call was cancelled):
 //!   the question resolves to the default and frontends close it. (A
-//!   TypeScript plugin cannot cancel its call to the host itself: rutis 0.8's
-//!   JavaScript runtime sends no cancel. A Python plugin's cancelled call is
+//!   TypeScript plugin cannot cancel its call to the host itself: rutis's
+//!   JavaScript runtime (as of 0.9) sends no cancel. A Python plugin's cancelled call is
 //!   dropped by the host, which withdraws the question too.) A withdrawal
 //!   that overtakes its request still counts.
 //! - `ui.frontends()` — how many frontends are attached (sync): an asker with

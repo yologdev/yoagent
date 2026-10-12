@@ -306,7 +306,7 @@ interface HostUi {
 const hostUi = (ui: HostUi, contextSignal?: AbortSignal) => {
   const ask = async (request: Record<string, unknown>, opts?: { timeout?: number; signal?: AbortSignal }) => {
     // When the hook is cancelled (the run stopped, the policy timed out) the
-    // question is withdrawn: frontends close its dialog. rutis 0.8's JavaScript runtime cannot
+    // question is withdrawn: frontends close its dialog. rutis's JavaScript runtime (as of 0.9) cannot
     // cancel a plugin's call to the host, so the adapter says so by key.
     const signal = opts?.signal ?? contextSignal
     if (signal?.aborted) return undefined

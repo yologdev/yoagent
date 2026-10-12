@@ -243,3 +243,41 @@ async fn a_plugin_reloads_with_its_edited_file_and_unloads() {
     assert!(host.reload("nope").await.is_err());
     root.shutdown().await.unwrap();
 }
+
+/// rutis 0.9: a Node plugin that disposes its own fiber is reported to the
+/// host (rutis 0.8 left it reading as running, arcships/rutis#247), so
+/// `is_running` turns false.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plugin_that_disposes_itself_is_not_running() {
+    if !runtime_installed() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("package.json"), r#"{ "type": "module" }"#).unwrap();
+    let file = dir.path().join("leaves.mjs");
+    // A plain Cordis plugin: it starts, then disposes itself.
+    std::fs::write(
+        &file,
+        "export const name = 'leaves'\n\
+         export function apply(ctx) { setTimeout(() => ctx.fiber.dispose(), 300) }\n",
+    )
+    .unwrap();
+
+    let root = Ctx::root().unwrap();
+    let mut host = PluginHost::builder()
+        .node("ui", plugins())
+        .start(&root)
+        .await
+        .unwrap();
+    host.load([Row::new("leaves", file.display()).runtime("ui")])
+        .await
+        .unwrap();
+    tokio::time::timeout(WAIT, async {
+        while host.is_running("leaves") {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the host sees the plugin end");
+    root.shutdown().await.unwrap();
+}

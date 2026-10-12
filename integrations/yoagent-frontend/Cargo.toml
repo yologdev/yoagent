@@ -6,7 +6,7 @@ resolver = "3"
 description = "EXPERIMENTAL: one frontend protocol for yoagent agents — terminal and browser UIs, UI plugins, and plugin dialogs, over rutis"
 license = "MIT"
 repository = "https://github.com/yologdev/yoagent"
-rust-version = "1.86"
+rust-version = "1.88"
 # Experimental: not published, no API promise. yoagent's core and
 # yoagent-rutis's API do not depend on it.
 publish = false
@@ -15,9 +15,9 @@ exclude = ["plugins/node_modules"]
 [dependencies]
 yoagent = { path = "../.." }
 yoagent-rutis = { path = "../yoagent-rutis", features = ["node"] }
-rutis = "0.8"
-rutis-bridge = { version = "0.8", default-features = false, features = ["node"] }
-rutis-loader = { version = "0.8", features = ["node"] }
+rutis = "0.9"
+rutis-bridge = { version = "0.9", default-features = false, features = ["node"] }
+rutis-loader = { version = "0.9", features = ["node"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "ws"] }
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
