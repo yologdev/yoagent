@@ -743,3 +743,79 @@ async fn dsh_host_services_start_headless_in_their_own_dsh_home() {
     assert!(created.is_empty(), "nothing under HOME: {created:?}");
     host.root.shutdown().await.unwrap();
 }
+
+/// A dsh plugin that needs DSH's host services (most popular ones do) runs
+/// and reaches the agent only with `host-services.json` loaded; without it
+/// the plugin never starts and its tool is never offered.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dsh_plugin_needing_host_services_runs_only_with_them() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    for with_services in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("dsh-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let credentials = home.join(".credentials.yaml");
+        std::fs::write(
+            &credentials,
+            "version: 1\nrefs:\n  YOAGENT_TEST_KEY: from-dsh-home\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            &credentials,
+            std::os::unix::fs::PermissionsExt::from_mode(0o600),
+        )
+        .unwrap();
+        let agents = dir.path().join("agents");
+        let ready = dir.path().join("ready.txt");
+        let host = host_with(
+            &runtime,
+            None,
+            &[("DSH_HOME", &home), ("DSH_AGENTS_HOME", &agents)],
+        )
+        .await;
+        let mut rows: Vec<Value> = if with_services {
+            serde_json::from_str(
+                &std::fs::read_to_string(dsh_dir().join("host-services.json")).unwrap(),
+            )
+            .unwrap()
+        } else {
+            Vec::new()
+        };
+        rows.extend([
+            json!({ "id": "system-prompt", "name": "@deepseek-ai/dsh-system-prompt" }),
+            json!({ "id": "tools", "name": "@deepseek-ai/dsh-tools" }),
+            json!({
+                "id": "needs-services",
+                "name": dsh_dir().join("fixture-needs-services.ts"),
+                "config": { "ready": ready },
+            }),
+            json!({ "id": "adapter", "name": dsh_dir().join("dsh-tools-adapter.ts") }),
+        ]);
+        host.load(Value::Array(rows)).await;
+        if with_services {
+            wait_file(&ready, |t| t == "started").await;
+        } else {
+            // Long enough for a plugin with its services to have started.
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            assert!(
+                !ready.exists(),
+                "without the host services it must not start"
+            );
+        }
+        let (agent, _) = agent(vec![call("fixture_services", json!({})), text("done")]);
+        let mut agent = agent.with_extension(host.bridge.extension());
+        let (_, results) = run(&mut agent, "go").await;
+        let (_, text, is_error) = &results[0];
+        if with_services {
+            assert!(
+                !is_error && text == "credentials: from-dsh-home",
+                "{results:?}"
+            );
+        } else {
+            assert!(*is_error && text.contains("not found"), "{results:?}");
+        }
+        host.root.shutdown().await.unwrap();
+    }
+}

@@ -13,7 +13,7 @@ every tool was exercised.
 
 **In short.**
 - **pi:** 12 of 20 give an agent run tools, tool-call or input hooks, or prompt additions (3 fully). 5 are refused because they hook what yoagent cannot enforce, or their startup needs pi app internals; 3 register nothing usable as installed. Their skills: all 118 (in 7 packages) load with yoagent's skills loader.
-- **DSH:** 4 of 20 give an agent tools or prompt guidance. 12 need DSH's own app (its sessions, web server, model layer); 3 add nothing an agent uses (UI or settings). DSH's popular plugins mostly extend the DSH app rather than add agent tools.
+- **DSH:** 4 of 20 give an agent tools or prompt guidance, with DSH's own host services loaded (files, attachments, credentials, storage, session persistence, skills: `plugins/dsh/host-services.json`). 12 need DSH's own app (its web server, model layer, agents, settings, …); 3 add nothing an agent uses (UI or settings). 1 fails to load or install (the table says why). DSH's popular plugins mostly extend the DSH app rather than add agent tools.
 
 **Results.**
 - **works**: loads; everything it registers maps to yoagent.

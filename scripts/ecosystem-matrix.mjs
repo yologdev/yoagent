@@ -404,11 +404,16 @@ const skillLine = () => {
   if (found === 0) return ''
   return ` Their skills: ${loaded === found ? 'all' : `${loaded} of`} ${found} (in ${packages} packages) load with yoagent's skills loader.`
 }
+// Packages that failed to load or install: never left out of the count.
+const broken = (rows) => {
+  const k = n(rows, 'failed', 'not installed')
+  return k > 0 ? ` ${k} ${k === 1 ? 'fails' : 'fail'} to load or install (the table says why).` : ''
+}
 if (raw.pi) {
-  summary.push(`- **pi:** ${n(raw.pi, 'works', 'works, partly')} of ${raw.pi.length} give an agent run tools, tool-call or input hooks, or prompt additions (${n(raw.pi, 'works')} fully). ${n(raw.pi, 'refused')} are refused because they hook what yoagent cannot enforce, or their startup needs pi app internals; ${n(raw.pi, 'nothing to use')} register nothing usable as installed.${skillLine()}`)
+  summary.push(`- **pi:** ${n(raw.pi, 'works', 'works, partly')} of ${raw.pi.length} give an agent run tools, tool-call or input hooks, or prompt additions (${n(raw.pi, 'works')} fully). ${n(raw.pi, 'refused')} are refused because they hook what yoagent cannot enforce, or their startup needs pi app internals; ${n(raw.pi, 'nothing to use')} register nothing usable as installed.${broken(raw.pi)}${skillLine()}`)
 }
 if (raw.dsh) {
-  summary.push(`- **DSH:** ${n(raw.dsh, 'works', 'works, partly')} of ${raw.dsh.length} give an agent tools or prompt guidance. ${n(raw.dsh, 'needs a DSH host')} need DSH's own app (its sessions, web server, model layer); ${n(raw.dsh, 'not applicable')} add nothing an agent uses (UI or settings). DSH's popular plugins mostly extend the DSH app rather than add agent tools.`)
+  summary.push(`- **DSH:** ${n(raw.dsh, 'works', 'works, partly')} of ${raw.dsh.length} give an agent tools or prompt guidance, with DSH's own host services loaded (files, attachments, credentials, storage, session persistence, skills: \`plugins/dsh/host-services.json\`). ${n(raw.dsh, 'needs a DSH host')} need DSH's own app (its web server, model layer, agents, settings, …); ${n(raw.dsh, 'not applicable')} add nothing an agent uses (UI or settings).${broken(raw.dsh)} DSH's popular plugins mostly extend the DSH app rather than add agent tools.`)
 }
 
 writeFileSync(opts.out, `# Plugin compatibility
