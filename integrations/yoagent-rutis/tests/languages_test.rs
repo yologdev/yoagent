@@ -1372,3 +1372,74 @@ async fn image_tool_results_cross_both_ways_in_typescript_and_python() {
     assert!(py.len() == 1 && image(&py[0]), "{py:?}");
     host.root.shutdown().await.unwrap();
 }
+
+/// A handler that reads the conversation (`messages: true`) and offers a
+/// tool: it records what it saw, and the tool shows its runtime is alive.
+const JS_BIG: &str = r#"
+import { definePlugin } from 'RUTIS'
+export default definePlugin({
+  inject: ['yoagent', 'probe'],
+  apply(ctx) {
+    const probe = ctx.use('probe')
+    ctx.effect(ctx.use('yoagent').register('js-big', {
+      async before_model(turn) {
+        const seen = JSON.stringify(turn.messages)
+        probe.record(`js-big saw ${(seen.match(/too large to send to a plugin/g) ?? []).length} omitted, ${seen.length} chars`)
+      },
+      async tools() { return [{ name: 'still_here', description: 'answers if the runtime lives' }] },
+      async call_tool() { return 'alive' },
+    }, { messages: true }))
+  },
+})
+"#;
+
+/// rutis 0.9 closes a local channel on a message over 16 MiB, ending the
+/// runtime. A conversation holding more than that in images still reaches a
+/// handler that reads it — the images as text — and the runtime lives on.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_conversation_over_the_message_limit_reaches_a_plugin_without_its_images() {
+    let Some(node) = node_runtime() else {
+        return;
+    };
+    let rutis = plugins_dir()
+        .join("node_modules/@arcships/rutis/src/index.mjs")
+        .canonicalize()
+        .map(|p| format!("file://{}", p.display()))
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("big.mjs");
+    std::fs::write(&file, JS_BIG.replace("RUTIS", &rutis)).unwrap();
+    let host = host(Some(&node), None).await;
+    host.load(vec![ts_row("big", &file, json!({}))]).await;
+    host.until_handlers(&["js-big"]).await;
+
+    // Two 8 MB pictures, about 21 MB as base64.
+    let picture = || Content::Image {
+        data: "A".repeat(8 * 1024 * 1024 / 3 * 4),
+        mime_type: "image/png".into(),
+    };
+    let earlier = AgentMessage::Llm(Message::User {
+        content: vec![
+            Content::Text {
+                text: "two screenshots".into(),
+            },
+            picture(),
+            picture(),
+        ],
+        timestamp: 0,
+    });
+    let (agent, _) = agent(vec![call("still_here", json!({})), text("done")]);
+    let mut agent = agent
+        .with_messages(vec![earlier])
+        .with_extension(host.bridge.extension().required());
+    run(&mut agent, "go on").await;
+
+    let saw = host.probe.wait_line(|l| l.starts_with("js-big saw")).await;
+    assert!(saw.starts_with("js-big saw 2 omitted"), "{saw}");
+    let answered = agent.messages().iter().any(|m| {
+        matches!(m, AgentMessage::Llm(Message::ToolResult { content, .. })
+            if matches!(content.as_slice(), [Content::Text { text }] if text == "alive"))
+    });
+    assert!(answered, "the runtime died: {:?}", host.probe.lines());
+    host.root.shutdown().await.unwrap();
+}

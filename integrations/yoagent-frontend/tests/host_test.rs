@@ -280,14 +280,20 @@ async fn a_plugin_that_disposes_itself_is_not_running() {
     })
     .await
     .expect("the host sees the plugin end");
-    // Ended, not failed: the row reads inactive (rutis-loader would disable a
-    // row of its own; this one comes from the host's layer).
-    let status = host.status();
-    assert!(
-        status
+    // Ended, not failed: once it settles (it reads `Unloading` briefly), the
+    // row is inactive (rutis-loader would disable a row of its own; this
+    // one comes from the host's layer).
+    let ended = |host: &PluginHost| {
+        host.status()
             .iter()
-            .any(|(id, state)| id == "leaves" && (state == "inactive" || state == "disabled")),
-        "{status:?}"
-    );
+            .any(|(id, state)| id == "leaves" && (state == "inactive" || state == "disabled"))
+    };
+    tokio::time::timeout(WAIT, async {
+        while !ended(&host) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the row settles as ended: {:?}", host.status()));
     root.shutdown().await.unwrap();
 }

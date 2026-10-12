@@ -224,6 +224,15 @@ def apply(ctx, config):
   to 20 MB) never fails the edit.
   Stay under your provider's own limit too (Anthropic: 5 MB base64): an
   image it refuses sits in the history and fails every later request.
+- **16 MiB per message.** rutis closes a channel on a message over
+  16 MiB, which ends the runtime and every plugin in it. Keep each answer
+  well under it: a result's images together, not only each one (the DSH and
+  pi adapters stop at 12 MiB of base64 and name the rest in text). Going the
+  other way the bridge keeps every call under 15 MiB: a conversation, an
+  event or a call whose arguments would exceed it reaches the plugin with
+  its images as text (`[image/png, 8.0 MB: omitted, …]`); an `after_tool`
+  output that large is not shown at all — the call fails and the output is
+  withheld, so a redaction never edits what it did not see.
 
   ```ts
   async call_tool(call) {

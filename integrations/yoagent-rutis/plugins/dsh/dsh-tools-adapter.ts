@@ -65,6 +65,11 @@ type DshBlock = {
 
 /** Largest image sent as an image: under Anthropic's 5 MB once base64-encoded. */
 const MAX_IMAGE_BYTES = 3_750_000
+/**
+ * Most base64 one result may carry in images: rutis (0.9) closes the channel
+ * on a message over 16 MiB, which would end this runtime and every plugin in it.
+ */
+const MAX_RESULT_IMAGE_CHARS = 12 * 1024 * 1024
 
 /** A dsh tool definition's presenters (`@deepseek-ai/dsh-tools/presentation`). */
 interface DshPresenters {
@@ -282,11 +287,19 @@ export default definePlugin<Config>({
             return { text: text || out.error?.message || 'the dsh tool failed', is_error: true }
           }
           const content: ContentBlock[] = []
+          let imageChars = 0
           for (const block of out.content ?? []) {
             if (block.type === 'text') {
               content.push({ type: 'text', text: block.text ?? '' })
             } else if (block.type === 'image' && block.attachment) {
-              content.push(await image(block.attachment, block.offloaded === true, call.signal))
+              const read = await image(block.attachment, block.offloaded === true, call.signal)
+              if (read.type === 'image' && imageChars + read.data.length > MAX_RESULT_IMAGE_CHARS) {
+                const named = `image${block.attachment.name ? ` ${block.attachment.name}` : ''}`
+                content.push({ type: 'text', text: `[${named}: left out, the result's images are too large together]` })
+              } else {
+                if (read.type === 'image') imageChars += read.data.length
+                content.push(read)
+              }
             } else {
               content.push({ type: 'text', text: `[${block.type} block]` })
             }

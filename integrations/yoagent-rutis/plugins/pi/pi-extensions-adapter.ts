@@ -421,11 +421,25 @@ function text(content: Block[] | undefined): string {
   return (content ?? []).map((block) => (block.type === 'text' ? (block.text ?? '') : `[${block.type} block]`)).join('\n')
 }
 
-/** pi's content blocks as yoagent's (the same shape for text and images); any other block is named in text. */
+/**
+ * Most base64 one result may carry in images: rutis (0.9) closes the channel
+ * on a message over 16 MiB, which would end this runtime and every plugin in it.
+ */
+const MAX_RESULT_IMAGE_CHARS = 12 * 1024 * 1024
+
+/**
+ * pi's content blocks as yoagent's (the same shape for text and images); any other block is named in text,
+ * and images past MAX_RESULT_IMAGE_CHARS together are left out, named.
+ */
 function blocks(content: Block[] | undefined): ContentBlock[] {
+  let imageChars = 0
   return (content ?? []).map((block): ContentBlock => {
     if (block.type === 'text') return { type: 'text', text: block.text ?? '' }
     if (block.type === 'image' && block.data && block.mimeType) {
+      if (imageChars + block.data.length > MAX_RESULT_IMAGE_CHARS) {
+        return { type: 'text', text: `[${block.mimeType}: left out, the result's images are too large together]` }
+      }
+      imageChars += block.data.length
       return { type: 'image', data: block.data, mimeType: block.mimeType }
     }
     return { type: 'text', text: `[${block.type} block]` }
