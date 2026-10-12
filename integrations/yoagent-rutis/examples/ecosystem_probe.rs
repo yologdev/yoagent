@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rutis::{Ctx, FiberState};
-use rutis_bridge::runtime::LocalRuntime;
+use rutis_bridge::runtime::{Launcher, LocalRuntime};
 use rutis_loader::{
     Chain, EntryStatus, Layer, Loader, LoaderOptions, LoaderPlugin, Patch, RuntimeResolver,
     RuntimeRowsPlugin, ServiceCatalog,
@@ -86,11 +86,25 @@ struct Host {
 /// A rutis root with the bridge and one Node runtime whose `package.json` is
 /// `package_json` (where row names resolve).
 async fn host(runtime: &Path, package_json: &Path) -> Result<Host, BoxError> {
+    host_with(runtime, package_json, &[]).await
+}
+
+/// [`host`], the runtime's process given `env` (DSH's `DSH_HOME`).
+async fn host_with(
+    runtime: &Path,
+    package_json: &Path,
+    env: &[(&str, &Path)],
+) -> Result<Host, BoxError> {
     let root = Ctx::root()?;
     let bridge = RutisBridge::install(&root)?;
     let mut catalog = ServiceCatalog::new();
     catalog.register_shared("yoagent");
-    let node = LocalRuntime::node(runtime, package_json);
+    let launcher = env
+        .iter()
+        .fold(Launcher::node(runtime), |launcher, (name, value)| {
+            launcher.env(*name, *value)
+        });
+    let node = LocalRuntime::launcher("node", launcher, package_json);
     let resolver = Arc::new(RuntimeResolver::node(node.handle()).with_catalog(&catalog));
     root.plugin(node);
     let plugin = LoaderPlugin::new(
@@ -348,19 +362,38 @@ const SERVICE_CHECK: &str = "probe-services";
 /// DSH's base packages and the tools adapter: what every DSH plugin gets.
 fn dsh_base_rows(base: &Path) -> Value {
     let adapter = dsh_file(base, "dsh-tools-adapter.ts");
-    json!([
-        { "id": "base-web", "name": "@deepseek-ai/dsh-web" },
-        { "id": "base-system-prompt", "name": "@deepseek-ai/dsh-system-prompt" },
-        { "id": "base-tools", "name": "@deepseek-ai/dsh-tools" },
-        { "id": "base-user-questions", "name": "@deepseek-ai/dsh-user-questions" },
-        { "id": "base-adapter", "name": adapter },
-    ])
+    // The services a headless DSH host runs (fs, attachments, credentials,
+    // storage, session persistence, skills): DSH's own packages, listed in
+    // `plugins/dsh/host-services.json` for every host to load.
+    let services: Vec<Value> =
+        std::fs::read_to_string(plugins_dir().join("dsh/host-services.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .expect("plugins/dsh/host-services.json");
+    let mut rows = services;
+    rows.extend([
+        json!({ "id": "base-web", "name": "@deepseek-ai/dsh-web" }),
+        json!({ "id": "base-system-prompt", "name": "@deepseek-ai/dsh-system-prompt" }),
+        json!({ "id": "base-tools", "name": "@deepseek-ai/dsh-tools" }),
+        json!({ "id": "base-user-questions", "name": "@deepseek-ai/dsh-user-questions" }),
+        json!({ "id": "base-adapter", "name": adapter }),
+    ]);
+    Value::Array(rows)
 }
 
 async fn probe_dsh(logs: Logs, base: PathBuf, rows: Value, inject: Vec<String>) -> Value {
     let mut result = json!({ "ecosystem": "dsh" });
     let runtime = base.join("node_modules/@arcships/rutis-runtime");
-    let host = match host(&runtime, &base.join("package.json")).await {
+    // A DSH home of its own: the user's real one (its credentials) is never
+    // handed to the plugins probed.
+    let dsh_home = tempfile::tempdir().expect("a temp DSH_HOME");
+    let host = match host_with(
+        &runtime,
+        &base.join("package.json"),
+        &[("DSH_HOME", dsh_home.path())],
+    )
+    .await
+    {
         Ok(host) => host,
         Err(e) => {
             result["error"] = json!(format!("host: {e}"));

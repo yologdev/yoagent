@@ -1,0 +1,9 @@
+[
+  { "id": "dsh-fs", "name": "@deepseek-ai/dsh-fs-local" },
+  { "id": "dsh-attachments", "name": "@deepseek-ai/dsh-attachment-local" },
+  { "id": "dsh-credentials", "name": "@deepseek-ai/dsh-credentials-local" },
+  { "id": "dsh-storage", "name": "@deepseek-ai/dsh-storage" },
+  { "id": "dsh-session-persistence", "name": "@deepseek-ai/dsh-session-persistence" },
+  { "id": "dsh-skills", "name": "@deepseek-ai/dsh-skill" },
+  { "id": "dsh-skill-filesystem", "name": "@deepseek-ai/dsh-skill-filesystem" }
+]
