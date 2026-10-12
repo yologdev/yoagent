@@ -6,7 +6,7 @@ description: Use when building, extending or upgrading an agent on the yoagent R
 # yoagent: which feature for which job
 
 Written for **yoagent 0.25.2** (and yoagent-rutis 0.3.0); the recipes
-below are compiled by `tests/skill_test.rs`. Check what you
+below are compiled by `tests/skill_test.rs`, line for line. Check what you
 build against: `cargo tree -p yoagent` or `Cargo.lock`. If you are on an
 older version, read [What changed](#what-changed) first.
 
@@ -21,7 +21,7 @@ Before writing loop code of your own, find the hook below.
 | You want to… | Use | Read |
 |---|---|---|
 | build an agent | `Agent::from_config(ModelConfig::…)` (provider and API key follow the config) | `docs/getting-started/quick-start.md` |
-| give it a tool | `impl AgentTool`, `.with_tools(…)` | `docs/concepts/tools.md` |
+| give it tools | `impl AgentTool`; `.with_tools(…)` (built-ins: `tools::default_tools()`) | `docs/concepts/tools.md` |
 | allow / rewrite / deny tool calls | `RunHooks::before_tool` in an `Extension` | `docs/concepts/extensions.md` |
 | redact or edit a tool's output | `RunHooks::after_tool` (+ `.filters_tool_output()`) | same |
 | refuse an input before the run | `RunHooks::on_input` | same |
@@ -33,7 +33,7 @@ Before writing loop code of your own, find the hook below.
 | delegate to a child agent | `SubAgentTool` (own model, tools, limits) | `docs/concepts/sub-agents.md` |
 | apply one policy to every sub-agent | `.with_tree_extension(…)` | `docs/concepts/extensions.md` |
 | offer tools that change between runs | `ToolSource` (consulted once per run) | `docs/concepts/tools.md` |
-| load plugins at runtime (Rust, TS on Node/Bun, Python, Go), or pi / DeepSeek Harness plugins unchanged | the **yoagent-rutis** crate (`RutisBridge`, one `Extension`) | `integrations/yoagent-rutis/README.md` |
+| load plugins at runtime (Rust, TS on Node/Bun, Python, Go), or pi / DeepSeek Harness plugins unchanged | the **yoagent-rutis** crate (`RutisBridge`, one `Extension`) | [yoagent-rutis README](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis) |
 | use MCP servers | `.with_mcp_server_stdio(…)` / `_http(…)` / `_http_transport(…)` | `docs/guides/mcp.md` |
 | get typed JSON back | `agent.prompt_structured::<T>(text, schema)` | `docs/concepts/structured-outputs.md` |
 | steer a running agent | `agent.steer(msg)` (between tool batches), `follow_up(msg)` | `docs/concepts/agent-loop.md` |
@@ -77,19 +77,36 @@ failure is logged and that hook skipped).
 
 ```rust
 use yoagent::extension::{RunHooks, StopContext, StopDecision};
+use yoagent::{AgentMessage, Content, Message};
 
-async fn on_stop(&mut self, stop: &StopContext<'_>) -> StopDecision {
-    if self.tests_ran {
-        StopDecision::Accept
-    } else {
-        StopDecision::Continue("Run the tests before saying you are done.".into())
+#[derive(Clone)]
+struct RequireTests;
+
+#[async_trait::async_trait]
+impl RunHooks for RequireTests {
+    async fn on_stop(&mut self, stop: &StopContext<'_>) -> StopDecision {
+        let ran_tests = stop.messages.iter().any(|m| match m {
+            AgentMessage::Llm(Message::Assistant { content, .. }) => content.iter().any(|c| {
+                matches!(c, Content::ToolCall { name, arguments, .. }
+                    if name == "bash" && arguments["command"].as_str().is_some_and(|cmd| cmd.contains("cargo test")))
+            }),
+            _ => false,
+        });
+        if ran_tests {
+            StopDecision::Accept
+        } else {
+            StopDecision::Continue("Run `cargo test` before saying you are done.".into())
+        }
     }
 }
 ```
 
-Set `tests_ran` from `on_event` (watch `ToolExecutionEnd`). Continues are
-capped per run (`max_stop_continues`, default 3); a required extension
-that still continues at the cap fails the run.
+Read the evidence from `stop.messages` (the conversation so far). Don't
+try to set a flag from `on_event`: it takes `&self`, and a shared
+`Arc<AtomicBool>` would carry over between runs, since `ClonedHooks`
+clones the `Arc`. Continues are capped per run (`max_stop_continues`,
+default 3); a required extension that still continues at the cap fails the
+run.
 
 ### A dollar budget
 
@@ -98,8 +115,8 @@ use yoagent::extension::Budget;
 
 yoagent::provider::prices::enable_bundled(); // pricing is opt-in since 0.25
 let config = ModelConfig::claude_sonnet_5();
-if let Some(budget) = Budget::for_model(2.00, &config) {   // None when unpriced
-    agent = agent.with_extension(budget.across_runs());     // one total for the session
+if let Some(budget) = Budget::for_model(2.00, &config) { // None when unpriced
+    agent = agent.with_extension(budget.across_runs()); // one total for the session
 }
 ```
 
@@ -127,27 +144,36 @@ pi extensions and DeepSeek Harness (DSH) plugins load unchanged through
 adapters, as far as yoagent can honour them; what it cannot (UI, commands)
 is ignored, and what would decide things yoagent cannot enforce is
 **refused**. Measured: of the 20 most-downloaded packages, pi 12 and DSH 4
-are usable (`docs/evals/plugin-compatibility.md`). Start from
-`integrations/yoagent-rutis/README.md` and its examples.
+are usable (`docs/evals/plugin-compatibility.md`). Start from the
+[yoagent-rutis README](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis)
+and its examples.
 
 ## Tips and pitfalls
 
 - **Pricing is opt-in (0.25).** Call `prices::enable_bundled()` once,
   *before* building configs, on a path tests reach too (tests never run
   `main`). Without it every cost is `None`, `Budget::for_model` is `None`.
-- **`with_tools` replaces the whole list.** To keep the built-ins, start
-  from `tools::default_tools()` and push yours.
-- **Policies fail closed.** A `before_tool` that panics, times out or is
-  cancelled denies; an `after_tool` that fails withholds the output. Design
-  for it: a deny is a normal tool result the model reads and adapts to.
+- **`with_tools` replaces the list.** An agent starts with no tools; the
+  built-ins come from `tools::default_tools()`. `with_mcp_server_*` adds to
+  that list, so call `with_tools` first — a later `with_tools` drops the
+  MCP tools.
+- **Policies fail closed.** A `before_tool` that panics, or is still
+  running when the run is cancelled, denies the call (a plugin policy
+  through yoagent-rutis also denies on an error or its timeout); an
+  `after_tool` that fails withholds the output. A deny is a normal tool
+  result the model reads and adapts to.
 - **`before_tool`, `after_tool`, `on_event` take `&self`** and run
   concurrently for parallel calls; keep shared state in a `Mutex`/atomic.
 - **Never rewrite the system prompt per turn.** It breaks the prompt cache.
   Per-turn context goes in `before_model` notes (added to the latest user
   turn, never stored).
-- **Cancel ends a run as `StopReason::Aborted`** (not `Error`; `on_error`
-  is not called). A cancelled sub-agent is `ToolError::Cancelled`, or
-  `failed: [Agent stopped: cancelled]`.
+- **Cancelling**: a cancel during a model call ends that message as
+  `StopReason::Aborted`; a cancel while tools run or between turns appends
+  `[Agent stopped: cancelled]`. Either way `on_error` is not called. A
+  cancelled sub-agent arrives as `ToolError::Cancelled` (cancelled before
+  its first answer), `Sub-agent '<name>' failed: [Agent stopped: cancelled]`,
+  or `Sub-agent '<name>' failed: Cancelled` (mid-stream) — key on the cancel
+  token, not the text.
 - **`bash` runs in its own process group (0.25.2)**: the terminal's Ctrl+C
   does not reach a running command any more. A terminal host must catch
   Ctrl+C and call `agent.abort()`; the cancel then kills the whole group.
@@ -174,13 +200,22 @@ Newest first; the full list is `CHANGELOG.md`.
 
 - **0.25.2** — MCP `HttpTransport::with_header`; `bash` kills its process
   group (Ctrl+C: see above).
+- **0.25.1** — GASP records plugin log lines on their run
+  (`GaspRecorder::extension()` + `plugin_log_layer()`).
 - **0.25.0** — `Extension` / `RunHooks` (the contract above), `Budget`;
   pricing opt-in (`enable_bundled`); `AgentMessage::Extension` renamed
-  `Custom`; `ToolGate` / `InputGuard` run as extensions; encrypted reasoning
-  opt-in for the Responses API.
-- **0.24.3** — `SubAgentTool::with_execution_limits`.
-- **0.24.x** — 503 / 529 / in-stream overloads retried; `retry_safe_events`;
-  `[Agent stopped: cancelled]` marker; tool sandbox fixes.
+  `Custom`; `ToolGate` / `InputGuard` run as extensions; encrypted
+  reasoning opt-in for the Responses API. **Breaking for event consumers:**
+  every message now gets its `MessageStart` / `MessageEnd` (a cancel during
+  a retry backoff emits an `Aborted` end), every `TurnStart` a `TurnEnd`,
+  and a cancelled run no longer runs its pending tool calls. **Breaking for
+  free-function users:** `AgentLoopConfig` is `#[non_exhaustive]` — build it
+  with `AgentLoopConfig::new(…)`; `provider::sse` is private.
+- **0.24.3** — `SubAgentTool::with_execution_limits`; 503 / 529 and
+  in-stream overloads retried; the `[Agent stopped: cancelled]` marker.
+- **0.24.2** — built-in tool sandbox fixes (path escapes, `search` flag
+  injection, Gemini key out of the URL, tool panics contained).
+- **0.24.1** — `retry_safe_events`.
 - **yoagent-rutis 0.3.0** — rutis 0.9 (Rust 1.88); Bun and Go plugins;
   the 16 MiB guard.
 

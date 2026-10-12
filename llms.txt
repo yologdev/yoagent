@@ -42,9 +42,9 @@ Book: https://yologdev.github.io/yoagent/ · API: https://docs.rs/yoagent · Sou
 
 ## Companion crates
 
-- [yoagent-rutis](integrations/yoagent-rutis/README.md): plugins at runtime (Rust, TypeScript on Node or Bun, Python, Go); pi extensions and DeepSeek Harness plugins unchanged
+- [yoagent-rutis](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis): plugins at runtime (Rust, TypeScript on Node or Bun, Python, Go); pi extensions and DeepSeek Harness plugins unchanged
 - [Plugin compatibility](docs/evals/plugin-compatibility.md): measured, top 20 per ecosystem
-- [yoagent-workers](integrations/yoagent-workers/README.md): Cloudflare Workers bindings
+- [yoagent-workers](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-workers): Cloudflare Workers bindings
 
 ## Optional
 

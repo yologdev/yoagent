@@ -215,7 +215,7 @@ Native dev-dependencies (Tokio `full`, tempfile, wiremock) are under `[target.'c
 
 ### Agent-facing docs
 
-`skills/yoagent/SKILL.md` (AgentSkills format; packaged with the crate, so it is in every user's cargo registry) maps jobs to features with tips and pitfalls; `llms.txt` maps every docs page. `tests/skill_test.rs` loads the skill with `SkillSet`, checks every repository path both cite, and compiles the skill's recipes. **Release PRs update the skill's "What changed" section** (and its "Written for" version line).
+`skills/yoagent/SKILL.md` (AgentSkills format; packaged with the crate, so it is in every user's cargo registry) maps jobs to features with tips and pitfalls; `llms.txt` maps every docs page. `tests/skill_test.rs`: the skill loads with `SkillSet`; every repository path both cite exists **in the published crate** (`integrations/` crates are linked as URLs) and every `#anchor` is a heading; every line of the skill's ```rust recipes appears in the test file, where they are compiled (a recipe edited only in the skill fails); the verifier recipe runs; `prose_names` compiles each API named only in prose. **Release PRs update the skill's "What changed" section** (and its "Written for" version line).
 
 ### Testing
 
