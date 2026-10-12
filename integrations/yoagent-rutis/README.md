@@ -650,7 +650,7 @@ the others).
 ## Versions
 
 yoagent-rutis 0.1 (crates.io) requires yoagent 0.25 (the first release with
-`Extension`) and rutis 0.6; 0.2 requires rutis 0.8; the next release requires
+`Extension`) and rutis 0.6; 0.2 requires rutis 0.8; 0.3 requires
 rutis 0.9 and Rust 1.88. rutis's release train (`rutis`, `rutis-bridge`,
 `rutis-loader`, the npm and PyPI runtimes) shares one version: move the host
 and the language runtimes together. yoagent and rutis types are in its API, so a minor bump of
@@ -660,7 +660,7 @@ as `yoagent-rutis`: a crates.io `yoagent` next to a git `yoagent-rutis` is two
 
 ```toml
 yoagent = "0.25"
-yoagent-rutis = "0.2"
+yoagent-rutis = "0.3"
 ```
 
 ## License
