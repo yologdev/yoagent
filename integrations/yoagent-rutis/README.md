@@ -228,11 +228,13 @@ def apply(ctx, config):
   16 MiB, which ends the runtime and every plugin in it. Keep each answer
   well under it: a result's images together, not only each one (the DSH and
   pi adapters stop at 12 MiB of base64 and name the rest in text). Going the
-  other way the bridge keeps every call under 15 MiB: a conversation, an
-  event or a call whose arguments would exceed it reaches the plugin with
-  its images as text (`[image/png, 8.0 MB: omitted, …]`); an `after_tool`
-  output that large is not shown at all — the call fails and the output is
-  withheld, so a redaction never edits what it did not see.
+  other way the bridge keeps every call under 15 MiB: the conversation
+  (`messages`) and events reach the plugin with their images as text
+  (`[image/png, 8.0 MB: omitted, …]`) when they would exceed it — a call's
+  own `args` never change; an `after_tool` output (sent without its
+  duplicate `text`) or `call_tool` arguments still that large are not sent
+  at all: the output is withheld or the tool call fails, so nothing is
+  redacted or run on what the plugin did not see.
 
   ```ts
   async call_tool(call) {

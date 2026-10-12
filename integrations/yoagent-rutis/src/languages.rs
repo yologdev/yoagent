@@ -401,13 +401,14 @@ impl Target {
     /// future (a timeout, the run cancelled, the plugin unloaded) cancels the
     /// call, which aborts the handle.
     async fn call(&self, hook: &str, args: Vec<Json>) -> Result<Json, ExtensionError> {
-        let args = fit(hook, args, Oversize::OmitImages)?;
+        let args = fit(hook, args, Oversize::OmitImagesInMessages)?;
         self.call_signalled(hook, args).await
     }
 
-    /// [`Target::call`] for `after_tool`: arguments over [`MAX_SEND`] fail
-    /// the call (the bridge then withholds the output) instead of losing
-    /// their images, so a redaction never edits an output it did not see.
+    /// [`Target::call`] for arguments that must arrive whole — `after_tool`'s
+    /// output, `call_tool`'s arguments: over [`MAX_SEND`] the call fails (the
+    /// bridge withholds the output; the tool call fails) rather than lose
+    /// their images, so nothing is redacted or run on what it did not see.
     async fn call_exact(&self, hook: &str, args: Vec<Json>) -> Result<Json, ExtensionError> {
         let args = fit(hook, args, Oversize::Refuse)?;
         self.call_signalled(hook, args).await
@@ -467,10 +468,15 @@ const MAX_SEND: usize = 15 * 1024 * 1024;
 /// What [`fit`] does with arguments over [`MAX_SEND`].
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Oversize {
-    /// Replace image data with a text placeholder (a view: the conversation,
-    /// an event, a call's arguments), then refuse if still over.
+    /// Replace image blocks with a text placeholder in the first argument's
+    /// `messages` (the conversation, a view) only — never in a call's `args`,
+    /// which a policy may hand back as a rewrite — then refuse if still over.
+    OmitImagesInMessages,
+    /// Replace image blocks everywhere (an event: a view, never sent back),
+    /// then refuse if still over.
     OmitImages,
-    /// Refuse.
+    /// Refuse — after dropping `after_tool`'s `text` (the same text is in
+    /// `content`).
     Refuse,
 }
 
@@ -491,23 +497,43 @@ fn fit(hook: &str, mut args: Vec<Json>, oversize: Oversize) -> Result<Vec<Json>,
             mb(MAX_SEND)
         ))
     };
-    if oversize == Oversize::Refuse {
-        return Err(refuse(before));
-    }
     let mut omitted = 0;
-    for arg in &mut args {
-        omit_images(arg, &mut omitted);
+    match oversize {
+        Oversize::Refuse => {
+            // `after_tool`'s output carries its text twice: as `text` and in
+            // `content`. Without `text` nothing is hidden.
+            if let Some(output) = args.get_mut(1).and_then(Json::as_object_mut) {
+                output.remove("text");
+            }
+        }
+        Oversize::OmitImagesInMessages => {
+            if let Some(messages) = args.get_mut(0).and_then(|arg| arg.get_mut("messages")) {
+                omit_images(messages, &mut omitted);
+            }
+        }
+        Oversize::OmitImages => {
+            for arg in &mut args {
+                omit_images(arg, &mut omitted);
+            }
+        }
     }
     let after = size(&args);
     if after > MAX_SEND {
         return Err(refuse(after));
     }
-    tracing::warn!(
-        hook,
-        omitted,
-        "a plugin call's arguments were {:.1} MB; {omitted} image(s) sent as text",
-        mb(before)
-    );
+    if omitted > 0 {
+        // Once per process at warn: a long run over the limit goes on so.
+        static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        let text = format!(
+            "a plugin call's arguments were {:.1} MB; {omitted} image(s) sent as text",
+            mb(before)
+        );
+        if WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            tracing::debug!(hook, omitted, "{text}");
+        } else {
+            tracing::warn!(hook, omitted, "{text} (logged once; later ones at debug)");
+        }
+    }
     Ok(args)
 }
 
@@ -1056,7 +1082,7 @@ impl AgentTool for RemoteTool {
         let call = ToolCall::new(ctx.tool_call_id.clone(), self.spec.name.clone(), params)
             .with_run(self.run.clone());
         let value = tokio::select! {
-            value = self.target.call("call_tool", vec![to_json(&call)]) => value,
+            value = self.target.call_exact("call_tool", vec![to_json(&call)]) => value,
             _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
         }
         .map_err(|e| ToolError::Failed(e.to_string()))?;
@@ -1186,7 +1212,11 @@ mod tests {
     #[test]
     fn arguments_under_the_limit_go_as_they_are() {
         let args = vec![json!({"messages": [{"content": [image(4)]}]})];
-        for oversize in [Oversize::OmitImages, Oversize::Refuse] {
+        for oversize in [
+            Oversize::OmitImagesInMessages,
+            Oversize::OmitImages,
+            Oversize::Refuse,
+        ] {
             assert_eq!(fit("before_model", args.clone(), oversize).unwrap(), args);
         }
     }
@@ -1200,7 +1230,7 @@ mod tests {
                 {"role": "toolResult", "content": [image(8)]},
             ],
         })];
-        let sent = fit("before_tool", args, Oversize::OmitImages).unwrap();
+        let sent = fit("before_tool", args, Oversize::OmitImagesInMessages).unwrap();
         let text = sent[0].to_string();
         assert!(text.len() < MAX_SEND);
         assert_eq!(
@@ -1211,6 +1241,32 @@ mod tests {
         );
         assert!(text.contains("\"look\"") && text.contains("[image/png, 8.0 MB"));
         assert_eq!(sent[0]["tool"], "bash");
+    }
+
+    #[test]
+    fn a_calls_own_arguments_keep_their_images() {
+        // An image in the call's args stays whole: a policy may send the args back.
+        let args = vec![json!({
+            "args": {"attachments": [image(8)]},
+            "messages": [{"content": [image(8)]}],
+        })];
+        let sent = fit("before_tool", args, Oversize::OmitImagesInMessages).unwrap();
+        assert_eq!(sent[0]["args"]["attachments"][0]["type"], "image");
+        assert_eq!(sent[0]["messages"][0]["content"][0]["type"], "text");
+        // Args alone over the limit: refused, never rewritten.
+        let args = vec![json!({"args": {"a": [image(8), image(8)]}})];
+        assert!(fit("before_tool", args, Oversize::OmitImagesInMessages).is_err());
+    }
+
+    #[test]
+    fn an_output_to_redact_sends_its_text_once_when_large() {
+        // 9 MB of text, twice (`text` and `content`): over the limit together,
+        // under it once — sent without `text`, nothing hidden.
+        let big = "x".repeat(9 * 1024 * 1024);
+        let output =
+            json!({"text": big, "content": [{"type": "text", "text": big}], "details": null});
+        let sent = fit("after_tool", vec![json!({}), output], Oversize::Refuse).unwrap();
+        assert!(sent[1].get("text").is_none() && sent[1]["content"][0]["text"] == big);
     }
 
     #[test]

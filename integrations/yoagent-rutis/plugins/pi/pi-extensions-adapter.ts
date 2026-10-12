@@ -447,6 +447,26 @@ function blocks(content: Block[] | undefined): ContentBlock[] {
 }
 
 /**
+ * A message as `message_end`'s seen-set keys it: each image as its type and
+ * size, the same whether it came whole or — over the bridge's message limit —
+ * as the host's placeholder text, so a message is checked once either way.
+ */
+function seenAs(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(seenAs)
+  if (!value || typeof value !== 'object') return value
+  const block = value as Record<string, unknown>
+  if (block.type === 'image' && typeof block.data === 'string') {
+    const mb = ((Math.floor(block.data.length / 4) * 3) / (1024 * 1024)).toFixed(1)
+    return { image: `${block.mimeType ?? 'image'}, ${mb} MB` }
+  }
+  if (block.type === 'text' && typeof block.text === 'string') {
+    const placeholder = /^\[(.+), (\d+\.\d) MB: omitted, too large to send to a plugin\]$/.exec(block.text)
+    if (placeholder) return { image: `${placeholder[1]}, ${placeholder[2]} MB` }
+  }
+  return Object.fromEntries(Object.entries(block).map(([k, v]) => [k, seenAs(v)]))
+}
+
+/**
  * JSON with object keys sorted and non-integers at 15 significant digits:
  * arguments cross serde_json, which may reorder keys and parse a float's
  * shortest form one unit off.
@@ -892,7 +912,7 @@ export default definePlugin<Config>({
         let seen = ended.get(runId)
         if (!seen) ended.set(runId, (seen = new Set()))
         for (const original of messages) {
-          const key = canon(original)
+          const key = canon(seenAs(original))
           if (seen.has(key)) continue
           for (const { ext, fn } of listeners) {
             const copy = piMessage(original)
