@@ -5,7 +5,7 @@ description: Use when building, extending or upgrading an agent on the yoagent R
 
 # yoagent: which feature for which job
 
-Written for **yoagent 0.25.2** (and yoagent-rutis 0.3.0); the recipes
+Written for **yoagent 0.25.3** (and yoagent-rutis 0.3.0); the recipes
 below are compiled by `tests/skill_test.rs`, line for line. Check what you
 build against: `cargo tree -p yoagent` or `Cargo.lock`. If you are on an
 older version, read [What changed](#what-changed) first.
@@ -198,6 +198,7 @@ and its examples.
 
 Newest first; the full list is `CHANGELOG.md`.
 
+- **0.25.3** — this skill and `llms.txt` ship in the crate; no code changes.
 - **0.25.2** — MCP `HttpTransport::with_header`; `bash` kills its process
   group (Ctrl+C: see above).
 - **0.25.1** — GASP records plugin log lines on their run

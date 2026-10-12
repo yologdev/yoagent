@@ -6,10 +6,6 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
-### Docs
-
-- **A skill for agents building on yoagent**: `skills/yoagent/SKILL.md` (AgentSkills; ships in the crate) — which feature for which job, recipes compiled by `tests/skill_test.rs`, tips and pitfalls, what changed per version — and `llms.txt`, a map of every docs page.
-
 ### yoagent-frontend (experimental, new, not published)
 
 - **One frontend protocol** (`integrations/yoagent-frontend`): a `Session` runs one agent for any number of frontends — a pi-tui terminal UI (a rutis plugin) and browsers over WebSocket — with commands in (prompt, steer, follow-up, abort, reset, quit), and out every event (text deltas merged), a run lifecycle that is always delivered (`runStart` / `runEnd` with an `outcome`: completed, aborted, rejected or error — also when the agent's task or the session's driver fails), plugins' questions (`uiRequest`: confirm, select, input, notify; the first answer that fits wins, a safe default without a frontend or in time; `uiResolved` says why it closed), `notice`s, and `closed`, and **UI plugins**: a rutis plugin offers the browser an ES module (`renderTool` for a tool's results, `mountPanel` for a side panel). `PluginHost` replaces the rutis setup (runtimes, loader, explicit per-row runtime routing; `load` waits until plugins run — though a TypeScript plugin reads as running before its async start-up finishes, so wait for the handlers you need — and drops a batch that fails). The browser's WebSocket needs the token in the URL the server prints. Example `coding_agent` (terminal or `--web`), tried live in Chrome. yoagent's core and yoagent-rutis's API do not depend on it.
@@ -25,6 +21,12 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 - **DSH's own host services for dsh plugins**: `plugins/dsh/host-services.json` lists the DSH packages that provide what many dsh plugins wait for — files, attachments, credentials, storage, session persistence, skills — and run headless; the compatibility probe loads them, the frontend examples on request (`--dsh-services`). Attachments, the credentials file and skills live under `DSH_HOME` (else `~/.dsh`) and skills also under `DSH_AGENTS_HOME` (else `~/.agents`), so hosts give the runtime homes of their own; that keeps `~/.dsh` and `~/.agents` out, **not** the inherited environment (DSH's credentials service reads it first), the project's `.env` or its skill folders, nor the filesystem (`dsh-fs-local` has no sandbox). In the [plugin compatibility](docs/evals/plugin-compatibility.md) matrix (re-measured 2026-10-12, on rutis 0.9) DSH's top 20 go from 3 to 4 usable (`@dfy-plugins/dsh-visualize`); what still blocks the rest is DSH's app — its web UI, model layer, agents and settings, among others. pi unchanged at 12/20.
 - yoagent-frontend: `PluginHostBuilder::env(runtime, name, value)` (a runtime not started is an error), `host::DshHome` (`YOAGENT_DSH_HOME`, else a private owner-only directory per run) and `host::rows_from_file`; `coding_agent` / `handoff_agent` take `--dsh-services`.
+
+## 0.25.3 (2026-10-12)
+
+Docs only; no code changes.
+
+- **A skill for agents building on yoagent**: `skills/yoagent/SKILL.md` (AgentSkills format), now **shipped in the crate** — so it sits in every user's cargo registry at the version they build against. Which feature for which job, recipes (compiled by `tests/skill_test.rs`), tips and pitfalls, and what changed per version. Plus `llms.txt`, a map of every docs page for agents that browse instead.
 
 ## yoagent-rutis 0.3.0 (2026-10-12)
 
