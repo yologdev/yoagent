@@ -297,3 +297,72 @@ async fn a_plugin_that_disposes_itself_is_not_running() {
     .unwrap_or_else(|_| panic!("the row settles as ended: {:?}", host.status()));
     root.shutdown().await.unwrap();
 }
+
+/// `PluginHostBuilder::env` reaches its own runtime's process only, and a
+/// runtime that is not started is an error, not silently ignored.
+#[tokio::test(flavor = "multi_thread")]
+async fn env_reaches_only_its_runtime_and_an_unknown_one_is_an_error() {
+    if !runtime_installed() {
+        return;
+    }
+    let root = Ctx::root().unwrap();
+    let wrong = PluginHost::builder()
+        .node("ui", plugins())
+        .env("iu", "YOAGENT_ENV_TEST", "1")
+        .start(&root)
+        .await;
+    assert!(
+        matches!(&wrong, Err(e) if e.to_string().contains("`iu`")),
+        "a typo must not pass"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("package.json"), r#"{ "type": "module" }"#).unwrap();
+    let writer = |name: &str| {
+        let file = dir.path().join(format!("{name}.mjs"));
+        let out = dir.path().join(format!("{name}.txt"));
+        std::fs::write(
+            &file,
+            format!(
+                "import {{ writeFileSync }} from 'node:fs'\n\
+                 export const name = '{name}'\n\
+                 export function apply() {{ writeFileSync({:?}, String(process.env.YOAGENT_ENV_TEST)) }}\n",
+                out.display().to_string()
+            ),
+        )
+        .unwrap();
+        (file, out)
+    };
+    let (a, a_out) = writer("a");
+    let (b, b_out) = writer("b");
+    let mut host = PluginHost::builder()
+        .node("one", plugins())
+        .node("two", plugins())
+        .env("one", "YOAGENT_ENV_TEST", "1")
+        .start(&root)
+        .await
+        .unwrap();
+    host.load([
+        Row::new("a", a.display()).runtime("one"),
+        Row::new("b", b.display()).runtime("two"),
+    ])
+    .await
+    .unwrap();
+    assert_eq!(written(&a_out).await, "1");
+    assert_eq!(written(&b_out).await, "undefined");
+    root.shutdown().await.unwrap();
+}
+
+/// The text of `path` once a plugin wrote it.
+async fn written(path: &Path) -> String {
+    tokio::time::timeout(WAIT, async {
+        loop {
+            if let Ok(text) = std::fs::read_to_string(path) {
+                return text;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the plugin wrote")
+}

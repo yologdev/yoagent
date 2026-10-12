@@ -365,11 +365,11 @@ fn dsh_base_rows(base: &Path) -> Value {
     // The services a headless DSH host runs (fs, attachments, credentials,
     // storage, session persistence, skills): DSH's own packages, listed in
     // `plugins/dsh/host-services.json` for every host to load.
-    let services: Vec<Value> =
-        std::fs::read_to_string(plugins_dir().join("dsh/host-services.json"))
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .expect("plugins/dsh/host-services.json");
+    let path = plugins_dir().join("dsh/host-services.json");
+    let services: Vec<Value> = std::fs::read_to_string(&path)
+        .map_err(|e| e.to_string())
+        .and_then(|text| serde_json::from_str(&text).map_err(|e| e.to_string()))
+        .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     let mut rows = services;
     rows.extend([
         json!({ "id": "base-web", "name": "@deepseek-ai/dsh-web" }),
@@ -384,13 +384,17 @@ fn dsh_base_rows(base: &Path) -> Value {
 async fn probe_dsh(logs: Logs, base: PathBuf, rows: Value, inject: Vec<String>) -> Value {
     let mut result = json!({ "ecosystem": "dsh" });
     let runtime = base.join("node_modules/@arcships/rutis-runtime");
-    // A DSH home of its own: the user's real one (its credentials) is never
-    // handed to the plugins probed.
+    // A DSH home (and skills home) of its own: `~/.dsh` and `~/.agents` are
+    // not handed to the plugins probed (the process environment still is).
     let dsh_home = tempfile::tempdir().expect("a temp DSH_HOME");
+    let agents_home = dsh_home.path().join("agents");
     let host = match host_with(
         &runtime,
         &base.join("package.json"),
-        &[("DSH_HOME", dsh_home.path())],
+        &[
+            ("DSH_HOME", dsh_home.path()),
+            ("DSH_AGENTS_HOME", &agents_home),
+        ],
     )
     .await
     {

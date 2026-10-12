@@ -13,6 +13,9 @@
 //!   (a question gets "no", as from a user who walked away). CI runs it.
 //! - `--live`: DeepSeek (`DEEPSEEK_API_KEY`); otherwise a scripted model.
 //! - `--no-dsh`: skip DSH (web search, `ask_user_question` and its dialogs).
+//! - `--dsh-services`: also load DSH's own host services (files, attachments,
+//!   credentials, storage, session persistence, skills) for DSH plugins that
+//!   need them, in a DSH home of their own (`YOAGENT_DSH_HOME`, else private).
 //! - `--watch`: reload a plugin when its file changes (polled twice a second):
 //!   the UI plugins, the adapters, the pi extension; each reload is told to
 //!   the frontends. New code reaches the next run. A version that does not
@@ -39,7 +42,7 @@ use yoagent::provider::mock::{MockResponse, MockToolCall};
 use yoagent::provider::{MockProvider, ModelConfig};
 use yoagent::tools::default_tools;
 use yoagent::Agent;
-use yoagent_frontend::host::{rows_from_file, PluginHost, Row};
+use yoagent_frontend::host::{rows_from_file, DshHome, PluginHost, Row};
 use yoagent_frontend::{services, session, web, NoticeLevel, Session};
 use yoagent_rutis::RutisBridge;
 
@@ -57,12 +60,15 @@ struct Options {
     web: Option<SocketAddr>,
     demo: Option<String>,
     dsh: bool,
+    /// DSH's own host services (`--dsh-services`), for DSH plugins that need them.
+    dsh_services: bool,
     watch: bool,
 }
 
 fn main() -> Result<(), BoxError> {
     let (mut live, mut web, mut demo, mut watch) = (false, None, None, false);
     let mut dsh = rutis_plugins().join("dsh/node_modules").exists();
+    let mut dsh_services = false;
     let mut args = std::env::args().skip(1).peekable();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -76,6 +82,7 @@ fn main() -> Result<(), BoxError> {
             }
             "--demo" => demo = Some(args.next().ok_or("--demo needs a prompt")?),
             "--no-dsh" => dsh = false,
+            "--dsh-services" => dsh_services = true,
             "--watch" => watch = true,
             other => return Err(format!("unknown argument {other}").into()),
         }
@@ -103,6 +110,7 @@ fn main() -> Result<(), BoxError> {
         web,
         demo,
         dsh,
+        dsh_services,
         watch,
     };
     tokio::runtime::Builder::new_multi_thread()
@@ -161,11 +169,17 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
     let mut builder = PluginHost::builder()
         .node("ui", here().join("plugins"))
         .node("pi", rutis_plugins().join("pi"));
+    // DSH's own host services, on request: in a home of their own, never
+    // the user's `~/.dsh` (see `DshHome` for what that does not cover).
+    let dsh_home = match options.dsh && options.dsh_services {
+        true => Some(DshHome::new()?),
+        false => None,
+    };
     if options.dsh {
-        builder =
-            builder
-                .node("dsh", rutis_plugins().join("dsh"))
-                .env("dsh", "DSH_HOME", dsh_home());
+        builder = builder.node("dsh", rutis_plugins().join("dsh"));
+        for (name, value) in dsh_home.iter().flat_map(DshHome::env) {
+            builder = builder.env("dsh", name, value);
+        }
     }
     if options.web.is_none() && options.demo.is_none() {
         // The terminal UI reads the keyboard: its runtime keeps the terminal.
@@ -203,11 +217,14 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
         .runtime("ui"),
     ];
     if options.dsh {
-        // The services a headless DSH host runs, for plugins that need them.
-        rows.extend(rows_from_file(
-            &rutis_plugins().join("dsh/host-services.json"),
-            "dsh",
-        )?);
+        // The services a headless DSH host runs, for plugins that need them
+        // (none of the rows below does).
+        if options.dsh_services {
+            rows.extend(rows_from_file(
+                &rutis_plugins().join("dsh/host-services.json"),
+                "dsh",
+            )?);
+        }
         let dsh = |id: &str, name: &str| Row::new(id, name).runtime("dsh");
         rows.extend([
             dsh("dsh-web", "@deepseek-ai/dsh-web"),
@@ -421,17 +438,4 @@ fn watch(
             }
         }
     })
-}
-
-/// DSH's home for its own services (fs, attachments, credentials, storage,
-/// session persistence, skills): `YOAGENT_DSH_HOME`, else a directory of
-/// yoagent's own under the temp dir — never the user's `~/.dsh`, whose
-/// credentials and skills DSH plugins would otherwise see. Point
-/// `YOAGENT_DSH_HOME` at `~/.dsh` to share them on purpose.
-fn dsh_home() -> std::path::PathBuf {
-    let home = std::env::var_os("YOAGENT_DSH_HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir().join("yoagent-dsh-home"));
-    let _ = std::fs::create_dir_all(&home);
-    home
 }

@@ -29,7 +29,7 @@
 //! (`cargo run` needs `--manifest-path path/to/yoagent/integrations/yoagent-frontend/Cargo.toml`
 //! when started from the project directory.)
 //!
-//! `--web ADDR` (default 127.0.0.1:8787), `--no-dsh`, `--max-minutes N`
+//! `--web ADDR` (default 127.0.0.1:8787), `--no-dsh`, `--dsh-services` (DSH's own host services, for DSH plugins that need them, in a DSH home of their own), `--max-minutes N`
 //! (30) and `--max-tokens N` (4M) per run, `--budget-usd X` (2; priced
 //! models only). Without a task, give it
 //! one in the page. `--phone` serves on every interface: anyone on the
@@ -57,7 +57,7 @@ use yoagent::{
     Agent, AgentEvent, AgentMessage, AgentTool, Content, Message, ToolContext, ToolError,
     ToolResult,
 };
-use yoagent_frontend::host::{rows_from_file, PluginHost, Row};
+use yoagent_frontend::host::{rows_from_file, DshHome, PluginHost, Row};
 use yoagent_frontend::{
     services, session, web, ClientMessage, NoticeLevel, ServerMessage, Session, UiRequest,
 };
@@ -108,6 +108,8 @@ struct Options {
     phone: bool,
     demo: bool,
     dsh: bool,
+    /// DSH's own host services (`--dsh-services`), for DSH plugins that need them.
+    dsh_services: bool,
     task: Option<String>,
     max_minutes: u64,
     max_tokens: usize,
@@ -123,6 +125,7 @@ fn main() -> Result<(), BoxError> {
         phone: false,
         demo: false,
         dsh: rutis_plugins().join("dsh/node_modules").exists(),
+        dsh_services: false,
         task: None,
         max_minutes: 30,
         // Research reads a lot: yoagent's default (1M per run, the whole
@@ -139,6 +142,7 @@ fn main() -> Result<(), BoxError> {
             "--live" => live = true,
             "--demo" => options.demo = true,
             "--no-dsh" => options.dsh = false,
+            "--dsh-services" => options.dsh_services = true,
             "--phone" => {
                 options.phone = true;
                 options.addr = "0.0.0.0:8787".parse()?;
@@ -218,11 +222,17 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
     let mut builder = PluginHost::builder()
         .node("ui", here().join("plugins"))
         .node("pi", rutis_plugins().join("pi"));
+    // DSH's own host services, on request: in a home of their own, never
+    // the user's `~/.dsh` (see `DshHome` for what that does not cover).
+    let dsh_home = match options.dsh && options.dsh_services {
+        true => Some(DshHome::new()?),
+        false => None,
+    };
     if options.dsh {
-        builder =
-            builder
-                .node("dsh", rutis_plugins().join("dsh"))
-                .env("dsh", "DSH_HOME", dsh_home());
+        builder = builder.node("dsh", rutis_plugins().join("dsh"));
+        for (name, value) in dsh_home.iter().flat_map(DshHome::env) {
+            builder = builder.env("dsh", name, value);
+        }
     }
     let mut host = builder
         .share("yoagent")
@@ -254,11 +264,14 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
         Row::new("todo-plan", here().join("plugins/todo-plan.ts").display()).runtime("ui"),
     ];
     if options.dsh {
-        // The services a headless DSH host runs, for plugins that need them.
-        rows.extend(rows_from_file(
-            &rutis_plugins().join("dsh/host-services.json"),
-            "dsh",
-        )?);
+        // The services a headless DSH host runs, for plugins that need them
+        // (none of the rows below does).
+        if options.dsh_services {
+            rows.extend(rows_from_file(
+                &rutis_plugins().join("dsh/host-services.json"),
+                "dsh",
+            )?);
+        }
         let dsh = |id: &str, name: &str| Row::new(id, name).runtime("dsh");
         rows.extend([
             dsh("dsh-web", "@deepseek-ai/dsh-web"),
@@ -877,17 +890,4 @@ async fn demo(
     }
     println!("ok: asked without waiting, answered later, wrote notes.md, two reports");
     Ok(())
-}
-
-/// DSH's home for its own services (fs, attachments, credentials, storage,
-/// session persistence, skills): `YOAGENT_DSH_HOME`, else a directory of
-/// yoagent's own under the temp dir — never the user's `~/.dsh`, whose
-/// credentials and skills DSH plugins would otherwise see. Point
-/// `YOAGENT_DSH_HOME` at `~/.dsh` to share them on purpose.
-fn dsh_home() -> std::path::PathBuf {
-    let home = std::env::var_os("YOAGENT_DSH_HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir().join("yoagent-dsh-home"));
-    let _ = std::fs::create_dir_all(&home);
-    home
 }

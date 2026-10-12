@@ -92,9 +92,77 @@ impl Row {
     }
 }
 
+/// Where DSH's own services (`yoagent-rutis/plugins/dsh/host-services.json`)
+/// keep their data: the credentials file, attachments, skills. They resolve
+/// it from `DSH_HOME`, else `~/.dsh` — the user's real DSH home, with its
+/// stored keys — and skills also from `DSH_AGENTS_HOME`, else `~/.agents`.
+///
+/// [`DshHome::new`] picks a home that is not the user's: `YOAGENT_DSH_HOME`
+/// when set (non-empty), else a private directory created for this process
+/// (owner-only, removed when the `DshHome` drops). [`DshHome::env`] is what
+/// to give the DSH runtime ([`PluginHostBuilder::env`]).
+///
+/// What this does not keep from DSH plugins: the runtime inherits the host's
+/// environment (an API key there is readable, and DSH's credentials service
+/// ranks it first), the project's `.env` and skill folders (DSH reads them
+/// from the working directory), and the filesystem (`dsh-fs-local` has no
+/// sandbox). A guard against reusing `~/.dsh` by accident, not a sandbox.
+pub struct DshHome {
+    path: PathBuf,
+    /// Set when the directory is ours to remove.
+    _private: Option<tempfile::TempDir>,
+}
+
+impl DshHome {
+    /// `YOAGENT_DSH_HOME` (created if missing), else a new private directory.
+    /// An empty `YOAGENT_DSH_HOME` counts as unset: DSH reads an empty
+    /// `DSH_HOME` as `~/.dsh`.
+    pub fn new() -> std::io::Result<Self> {
+        match std::env::var_os("YOAGENT_DSH_HOME")
+            .filter(|v| !v.to_string_lossy().trim().is_empty())
+        {
+            Some(path) => {
+                let path = PathBuf::from(path);
+                std::fs::create_dir_all(&path)?;
+                Ok(DshHome {
+                    path,
+                    _private: None,
+                })
+            }
+            None => {
+                let mut builder = tempfile::Builder::new();
+                builder.prefix("yoagent-dsh-home-");
+                // Owner-only: what DSH stores here (credentials) is ours alone.
+                #[cfg(unix)]
+                builder.permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700));
+                let dir = builder.tempdir()?;
+                Ok(DshHome {
+                    path: dir.path().to_path_buf(),
+                    _private: Some(dir),
+                })
+            }
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// `DSH_HOME`, and — for a private home — `DSH_AGENTS_HOME` under it, so
+    /// `~/.agents` skills are not read either. A `YOAGENT_DSH_HOME` the user
+    /// chose (`~/.dsh`, to share their keys on purpose) leaves skills alone.
+    pub fn env(&self) -> Vec<(&'static str, PathBuf)> {
+        let mut env = vec![("DSH_HOME", self.path.clone())];
+        if self._private.is_some() {
+            env.push(("DSH_AGENTS_HOME", self.path.join("agents")));
+        }
+        env
+    }
+}
+
 /// The rows listed in the JSON file `path` (`[{ "id", "name", "config"? }]`,
 /// such as `yoagent-rutis/plugins/dsh/host-services.json`), each routed to
-/// the runtime `runtime`.
+/// the runtime `runtime`. Other keys are ignored.
 pub fn rows_from_file(path: &Path, runtime: &str) -> Result<Vec<Row>, BoxError> {
     #[derive(serde::Deserialize)]
     struct Listed {
@@ -145,8 +213,9 @@ impl PluginHostBuilder {
     }
 
     /// Set the environment variable `name` for the runtime `runtime`'s
-    /// process (say DSH's `DSH_HOME`, where DSH's own services keep their
-    /// data and read credentials).
+    /// process, on top of the environment it inherits (say DSH's `DSH_HOME`:
+    /// see [`DshHome`]). A runtime this builder does not start is an error
+    /// at [`start`](Self::start).
     pub fn env(
         mut self,
         runtime: impl Into<String>,
@@ -165,6 +234,17 @@ impl PluginHostBuilder {
 
     /// Start the runtimes and the loader on `root`.
     pub async fn start(self, root: &Ctx) -> Result<PluginHost, BoxError> {
+        if let Some((runtime, name, _)) = self
+            .env
+            .iter()
+            .find(|(runtime, ..)| !self.runtimes.iter().any(|(r, _)| r == runtime))
+        {
+            return Err(format!(
+                "environment variable {} set for runtime `{runtime}`, which is not started",
+                name.to_string_lossy()
+            )
+            .into());
+        }
         let mut catalog = ServiceCatalog::new();
         for service in &self.shared {
             catalog.register_shared(service);
@@ -478,5 +558,74 @@ impl Resolver for Routed {
                 name: name.to_owned(),
             })
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rows_from_file_reads_ids_names_and_configs_and_names_the_file_on_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("rows.json");
+        std::fs::write(
+            &file,
+            r#"[{"id": "a", "name": "pkg-a", "config": {"x": 1}}, {"id": "b", "name": "pkg-b", "note": "ignored"}]"#,
+        )
+        .unwrap();
+        let rows = rows_from_file(&file, "dsh").unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            (
+                rows[0].id.as_str(),
+                rows[0].name.as_str(),
+                rows[0].runtime.as_deref()
+            ),
+            ("a", "pkg-a", Some("dsh"))
+        );
+        assert_eq!(rows[0].config, json!({"x": 1}));
+        assert_eq!(rows[1].config, json!({}));
+
+        std::fs::write(&file, "[{").unwrap();
+        let bad = rows_from_file(&file, "dsh").unwrap_err().to_string();
+        assert!(bad.contains("rows.json"), "{bad}");
+        let missing = rows_from_file(&dir.path().join("none.json"), "dsh")
+            .unwrap_err()
+            .to_string();
+        assert!(missing.contains("none.json"), "{missing}");
+    }
+
+    #[test]
+    fn the_shared_dsh_host_services_list_parses() {
+        let file = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../yoagent-rutis/plugins/dsh/host-services.json");
+        let rows = rows_from_file(&file, "dsh").unwrap();
+        assert_eq!(rows.len(), 7);
+        assert!(rows
+            .iter()
+            .all(|row| row.name.starts_with("@deepseek-ai/dsh-")));
+    }
+
+    #[test]
+    fn a_private_dsh_home_is_removed_and_points_skills_inside_it() {
+        // Not YOAGENT_DSH_HOME: that is the user's choice, tested by hand.
+        if std::env::var_os("YOAGENT_DSH_HOME").is_some() {
+            return;
+        }
+        let home = DshHome::new().unwrap();
+        let path = home.path().to_path_buf();
+        assert!(path.is_dir());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "owner-only");
+        }
+        let env = home.env();
+        assert_eq!(env[0], ("DSH_HOME", path.clone()));
+        assert_eq!(env[1], ("DSH_AGENTS_HOME", path.join("agents")));
+        drop(home);
+        assert!(!path.exists());
     }
 }

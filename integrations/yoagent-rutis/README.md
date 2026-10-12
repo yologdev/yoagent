@@ -329,11 +329,17 @@ session persistence, skills. DSH ships each as a package, and they run
 headless: [`plugins/dsh/host-services.json`](plugins/dsh/host-services.json)
 lists them as rows (`dsh-fs-local`, `dsh-attachment-local`,
 `dsh-credentials-local`, `dsh-storage`, `dsh-session-persistence`,
-`dsh-skill`, `dsh-skill-filesystem`); load them before the plugins. They keep
-their data, and read credentials (`.credentials.yaml`, `.env`), under
-`DSH_HOME`, else `~/.dsh`: **give the runtime a `DSH_HOME` of the host's
-own** (rutis's `Launcher::env`; yoagent-frontend's `PluginHostBuilder::env`)
-unless the plugins should see the user's DSH keys and skills. A plugin that
+`dsh-skill`, `dsh-skill-filesystem`); load them before the plugins, and
+only for plugins that need them. Attachments, the credentials file
+(`.credentials.yaml`, mode 600) and skills live under `DSH_HOME`, else
+`~/.dsh`, and skills also under `DSH_AGENTS_HOME`, else `~/.agents`: **give
+the runtime homes of the host's own** (rutis's `Launcher::env`;
+yoagent-frontend's `PluginHostBuilder::env` and `DshHome`) unless the
+plugins should see the user's DSH keys and skills. That keeps those
+directories out, not everything: the runtime inherits the host's
+environment, which DSH's credentials service reads first (an API key there
+is readable), it reads the project's `.env` and skill folders, and
+`dsh-fs-local` gives plugins the whole filesystem. A plugin that
 needs DSH's app — its web server and UI, its model layer (`llm`), agents,
 `settings` — still does not run; the
 [plugin compatibility](../../docs/evals/plugin-compatibility.md) report
