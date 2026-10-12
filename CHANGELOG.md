@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### Docs
+
+- **A skill for agents building on yoagent**: `skills/yoagent/SKILL.md` (AgentSkills; ships in the crate) — which feature for which job, recipes compiled by `tests/skill_test.rs`, tips and pitfalls, what changed per version — and `llms.txt`, a map of every docs page.
+
 ### yoagent-frontend (experimental, new, not published)
 
 - **One frontend protocol** (`integrations/yoagent-frontend`): a `Session` runs one agent for any number of frontends — a pi-tui terminal UI (a rutis plugin) and browsers over WebSocket — with commands in (prompt, steer, follow-up, abort, reset, quit), and out every event (text deltas merged), a run lifecycle that is always delivered (`runStart` / `runEnd` with an `outcome`: completed, aborted, rejected or error — also when the agent's task or the session's driver fails), plugins' questions (`uiRequest`: confirm, select, input, notify; the first answer that fits wins, a safe default without a frontend or in time; `uiResolved` says why it closed), `notice`s, and `closed`, and **UI plugins**: a rutis plugin offers the browser an ES module (`renderTool` for a tool's results, `mountPanel` for a side panel). `PluginHost` replaces the rutis setup (runtimes, loader, explicit per-row runtime routing; `load` waits until plugins run — though a TypeScript plugin reads as running before its async start-up finishes, so wait for the handlers you need — and drops a batch that fails). The browser's WebSocket needs the token in the URL the server prints. Example `coding_agent` (terminal or `--web`), tried live in Chrome. yoagent's core and yoagent-rutis's API do not depend on it.

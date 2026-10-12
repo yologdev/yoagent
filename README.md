@@ -299,6 +299,7 @@ in [CONTRIBUTING](CONTRIBUTING.md).
 - **[The book](https://yologdev.github.io/yoagent/)** — concepts, guides, a page per provider, and the [architecture and module map](https://yologdev.github.io/yoagent/architecture/overview.html) ([source](docs/))
 - **[Design philosophy](https://yologdev.github.io/yoagent/design-philosophy.html)** — why yoagent is a loop library, the one extension contract, and what that costs
 - **[API reference](https://docs.rs/yoagent)** — built with all features enabled
+- **For coding agents: [the yoagent skill](skills/yoagent/SKILL.md)** — which feature for which job, tips and pitfalls, what changed per version (AgentSkills `SKILL.md`; also in the published crate) — and [`llms.txt`](llms.txt), a map of every docs page
 - **[CHANGELOG](CHANGELOG.md)** — every release
 - **[CONTRIBUTING](CONTRIBUTING.md)** — how to build, test, and send a PR
 

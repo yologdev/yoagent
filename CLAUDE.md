@@ -213,6 +213,10 @@ CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner cargo test -
 
 Native dev-dependencies (Tokio `full`, tempfile, wiremock) are under `[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]` because Cargo builds every dev-dependency for the target under test; only `--test wasm32` is built for wasm32, and a new wasm32 test belongs in that file, not in a native test target.
 
+### Agent-facing docs
+
+`skills/yoagent/SKILL.md` (AgentSkills format; packaged with the crate, so it is in every user's cargo registry) maps jobs to features with tips and pitfalls; `llms.txt` maps every docs page. `tests/skill_test.rs` loads the skill with `SkillSet`, checks every repository path both cite, and compiles the skill's recipes. **Release PRs update the skill's "What changed" section** (and its "Written for" version line).
+
 ### Testing
 
 All unit tests use `MockProvider` (`provider/mock.rs`) to simulate LLM responses without network. Test files are in `tests/` — `agent_test.rs`, `agent_loop_test.rs`, `tools_test.rs`. Follow the existing pattern of constructing a `MockProvider` with predetermined responses.

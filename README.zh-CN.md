@@ -252,6 +252,7 @@ yoagent 自己的预算、工具闸门和输入守卫也是这样构建的。六
 - **[手册](https://yologdev.github.io/yoagent/)**——概念、指南、每个提供商一页，以及[架构和模块地图](https://yologdev.github.io/yoagent/architecture/overview.html)（[源码](docs/)）
 - **[设计哲学](https://yologdev.github.io/yoagent/design-philosophy.zh-CN.html)**——为什么 yoagent 是循环库、那一份扩展契约，以及它的代价
 - **[API 参考](https://docs.rs/yoagent)**——启用全部 feature 构建
+- **给编程 agent 用的：[yoagent skill](skills/yoagent/SKILL.md)**——什么任务用哪个功能、技巧与陷阱、每个版本的变化（AgentSkills `SKILL.md`，也随 crate 发布）；以及 [`llms.txt`](llms.txt)，全部文档页的索引
 - **[CHANGELOG](CHANGELOG.md)**——每一次发布
 - **[CONTRIBUTING](CONTRIBUTING.md)**——如何构建、测试和提交 PR
 

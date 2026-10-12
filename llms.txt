@@ -1,0 +1,52 @@
+# yoagent
+
+> The agent loop for Rust: stream from 7 LLM protocols, run tools, loop until done. A loop library, not an agent: everything that changes what the loop does goes through one contract, `Extension`. For agents building on it, start with the skill: skills/yoagent/SKILL.md (which feature for which job, tips and pitfalls, what changed per version).
+
+Book: https://yologdev.github.io/yoagent/ · API: https://docs.rs/yoagent · Source: https://github.com/yologdev/yoagent
+
+## Start here
+
+- [Skill: which feature for which job](skills/yoagent/SKILL.md): agent-facing map, tips, pitfalls, what changed
+- [Quick start](docs/getting-started/quick-start.md): an agent with tools in a few lines
+- [Installation](docs/getting-started/installation.md): features (`native`, `openapi`, `gasp`, `decision`)
+- [Design philosophy](docs/design-philosophy.md): what belongs in yoagent and what does not
+
+## Concepts
+
+- [The agent loop](docs/concepts/agent-loop.md): turns, steering, follow-ups, cancellation
+- [Extensions](docs/concepts/extensions.md): the plug-in contract (tools, policies, notes, verifiers, events, Budget)
+- [Tools](docs/concepts/tools.md): built-ins, custom tools, ToolSource
+- [Sub-agents](docs/concepts/sub-agents.md): delegation, limits, shared state, spend
+- [Messages and events](docs/concepts/messages-events.md): Message, AgentMessage, AgentEvent
+- [Context management](docs/concepts/context-management.md): limits, compaction
+- [Prompt caching](docs/concepts/prompt-caching.md)
+- [Retry](docs/concepts/retry.md): backoff, ProviderRetry, retry_safe_events
+- [Structured outputs](docs/concepts/structured-outputs.md)
+- [Pricing](docs/concepts/pricing.md): opt-in prices, cost buckets
+- [Skills](docs/concepts/skills.md): AgentSkills SKILL.md loading
+- [Session trees](docs/concepts/session-trees.md)
+- [Persistence](docs/concepts/persistence.md) · [GASP](docs/concepts/gasp.md) · [Telemetry](docs/concepts/telemetry.md)
+- [Callbacks](docs/concepts/callbacks.md): the older hooks
+- [Decision models](docs/concepts/decision-models.md): typed judgments, tool gate, input guard
+
+## Guides
+
+- [Testing your agent](docs/guides/testing.md): MockProvider
+- [MCP](docs/guides/mcp.md) · [OpenAPI](docs/guides/openapi.md)
+- [WebAssembly and Cloudflare Workers](docs/guides/wasm-workers.md)
+
+## Providers
+
+- [Overview](docs/providers/overview.md) · [Model presets](docs/providers/model-presets.md)
+- [Anthropic](docs/providers/anthropic.md) · [OpenAI-compatible](docs/providers/openai-compat.md) · [OpenAI Responses](docs/providers/openai-responses.md) · [Azure OpenAI](docs/providers/azure-openai.md) · [Google](docs/providers/google.md) · [Bedrock](docs/providers/bedrock.md) · [OpenCode](docs/providers/opencode.md)
+
+## Companion crates
+
+- [yoagent-rutis](integrations/yoagent-rutis/README.md): plugins at runtime (Rust, TypeScript on Node or Bun, Python, Go); pi extensions and DeepSeek Harness plugins unchanged
+- [Plugin compatibility](docs/evals/plugin-compatibility.md): measured, top 20 per ecosystem
+- [yoagent-workers](integrations/yoagent-workers/README.md): Cloudflare Workers bindings
+
+## Optional
+
+- [Architecture overview](docs/architecture/overview.md): module map
+- [CHANGELOG](CHANGELOG.md)
