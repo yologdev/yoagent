@@ -311,7 +311,7 @@ jobs:
       - name: Check with the language features (rutis-bridge 0.9)
         run: cargo check --manifest-path "$MANIFEST" --all-targets --features node,python,bun,websocket
 
-  # TypeScript and Python plugins through rutis-bridge 0.9, end to end: real
+  # TypeScript (Node and Bun 1.4) and Python plugins through rutis-bridge 0.9, end to end: real
   # Node 22 (the floor: pi needs 22.19, rutis 0.9 22; the frontend job runs 24)
   # and Python 3.12 runtimes load the example plugins and fixtures as
   # rutis-loader rows. The npm and PyPI packages are pinned to the 0.9.1

@@ -112,7 +112,7 @@ with `--manifest-path integrations/yoagent-rutis/Cargo.toml` from the repo
 root (a tool plugin, a policy plugin that denies a tool by name and caps
 calls per tool, and a redactor).
 
-## TypeScript and Python plugins
+## Plugins in other languages
 
 With a language feature, `RutisBridge::install` also provides the registry
 to plugins in other languages, through

@@ -26,7 +26,7 @@
 //! yoagent itself knows nothing about rutis; the bridge uses only yoagent's
 //! public API.
 //!
-//! TypeScript and Python handlers (features `node`, `python`, `websocket`)
+//! TypeScript and Python handlers (features `node`, `bun`, `python`, `websocket`)
 //! can return images in tool results and write logs into the host's
 //! `tracing` output (target `yoagent_rutis::plugin`). Plugins from other
 //! agent ecosystems — DSH tool plugins, pi extensions — plug in through
@@ -85,7 +85,7 @@
 //!
 //! [`AgentPlugin`] wraps a handler as a plugin in one expression.
 //!
-//! # TypeScript and Python plugins
+//! # Plugins in other languages
 //!
 //! With the `node`, `bun`, `python` or `websocket` feature (rutis-bridge 0.9),
 //! [`RutisBridge::install`] also provides the registry to plugins in other
