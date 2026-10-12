@@ -22,7 +22,7 @@
 //! under the same name, e.g. pi's sandboxed `bash` — the adapter refuses to
 //! load otherwise, since yoagent's own tool would win and run unsandboxed.
 //!
-//! Setup (once): `npm ci` in `plugins/pi/` (Node 24+).
+//! Setup (once): `npm ci` in `plugins/pi/` (Node 22.19+).
 //!
 //! Run: `cargo run --manifest-path integrations/yoagent-rutis/Cargo.toml --features node --example pi_extensions [-- [--live] [--prompt TEXT] [--without NAME] EXT.ts ...]`
 

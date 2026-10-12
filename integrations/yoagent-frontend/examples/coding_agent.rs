@@ -164,6 +164,10 @@ async fn run(root: &Ctx, options: Options) -> Result<(), BoxError> {
     if options.dsh {
         builder = builder.node("dsh", rutis_plugins().join("dsh"));
     }
+    if options.web.is_none() && options.demo.is_none() {
+        // The terminal UI reads the keyboard: its runtime keeps the terminal.
+        builder = builder.terminal("ui");
+    }
     let mut host = builder
         .share("yoagent")
         .share(services::FRONTEND)

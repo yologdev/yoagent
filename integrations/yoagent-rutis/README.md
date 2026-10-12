@@ -122,7 +122,7 @@ service `yoagent`:
 | Feature | Adds (rutis-bridge feature of the same name) |
 |---|---|
 | *(default)* | Rust plugins only |
-| `node` | TypeScript / JavaScript plugins in local Node runtimes (Node 24+, Linux/macOS) |
+| `node` | TypeScript / JavaScript plugins in local Node runtimes (Node 22.19+, Linux/macOS) |
 | `python` | Python plugins in local Python runtimes (Python 3.10+, Linux/macOS) |
 | `websocket` | runtimes and nodes on other machines, over `wss` |
 

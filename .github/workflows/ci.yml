@@ -312,7 +312,8 @@ jobs:
         run: cargo check --manifest-path "$MANIFEST" --all-targets --features node,python,websocket
 
   # TypeScript and Python plugins through rutis-bridge 0.9, end to end: real
-  # Node 24 and Python 3.12 runtimes load the example plugins and fixtures as
+  # Node 22 (the floor: pi needs 22.19, rutis 0.9 22; the frontend job runs 24)
+  # and Python 3.12 runtimes load the example plugins and fixtures as
   # rutis-loader rows. The npm and PyPI packages are pinned to the 0.9.1
   # train (plugins/package-lock.json, plugins/requirements.txt). A missing
   # runtime fails the job instead of skipping (YOAGENT_RUTIS_REQUIRE_RUNTIMES).
@@ -336,7 +337,7 @@ jobs:
           workspaces: integrations/yoagent-rutis
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: 22
           # npm's download cache (~/.npm), keyed on the three lockfiles: the
           # installs below (pi's alone is ~185 MB) stop re-downloading.
           cache: npm
@@ -428,6 +429,17 @@ jobs:
             | sed 's/\x1b\[[0-9;]*m//g' | tee screen.txt
           grep -q "? Run \`rm -rf build\`?" screen.txt
           grep -q "bash ✗" screen.txt
+      # The real terminal mode, on a pseudo-terminal: the headless demo never
+      # reads the keyboard, so it cannot see a UI runtime the OS stops for
+      # touching the terminal from a process group of its own (rutis 0.9).
+      - name: Example (scripted, on a pseudo-terminal; the keyboard reaches the UI)
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          mkdir -p "$RUNNER_TEMP/pty-project" && cd "$RUNNER_TEMP/pty-project"
+          cargo build --manifest-path "$GITHUB_WORKSPACE/$MANIFEST" --example coding_agent
+          python3 "$GITHUB_WORKSPACE/integrations/yoagent-frontend/tests/terminal_pty.py" \
+            "$GITHUB_WORKSPACE/integrations/yoagent-frontend/target/debug/examples/coding_agent"
       - name: Handoff example (scripted; asks without waiting, the answer starts the next run)
         shell: bash
         timeout-minutes: 5

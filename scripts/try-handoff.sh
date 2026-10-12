@@ -9,7 +9,7 @@
 #   path/to/yoagent/scripts/try-handoff.sh --phone "…"   # serve on the LAN, for a phone
 #
 # Other flags go to the example: --demo, --no-dsh, --max-minutes N,
-# --budget-usd X, --web ADDR. Needs Rust (cargo), Node 24+ and npm.
+# --budget-usd X, --web ADDR. Needs Rust (cargo), Node 22.19+ and npm.
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/.." && pwd)

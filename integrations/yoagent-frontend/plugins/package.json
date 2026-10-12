@@ -4,7 +4,7 @@
   "description": "EXPERIMENTAL: the yoagent-frontend plugins — a terminal UI (pi-tui) on the frontend protocol, and a sample browser UI plugin.",
   "type": "module",
   "engines": {
-    "node": ">=24"
+    "node": ">=22.19"
   },
   "dependencies": {
     "@arcships/rutis": "0.9.1",

@@ -35,7 +35,7 @@
 //! one in the page. `--phone` serves on every interface: anyone on the
 //! network with the printed URL (it carries the token) drives the agent.
 //!
-//! Setup: `scripts/try-coding-agent.sh --setup-only` (Node 24+, npm).
+//! Setup: `scripts/try-coding-agent.sh --setup-only` (Node 22.19+, npm).
 
 use std::collections::HashSet;
 use std::net::SocketAddr;

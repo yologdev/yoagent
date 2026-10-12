@@ -8,7 +8,7 @@
 //! `--live` asks DeepSeek instead (`DEEPSEEK_API_KEY`). Either way the example checks its outcome and exits non-zero
 //! when the dsh tools were not offered or did not answer.
 //!
-//! Setup (once): `npm ci` in `plugins/dsh/` (Node 24+).
+//! Setup (once): `npm ci` in `plugins/dsh/` (Node 22.19+).
 //!
 //! Run: `cargo run --manifest-path integrations/yoagent-rutis/Cargo.toml --features node --example dsh_tools [-- --live]`
 

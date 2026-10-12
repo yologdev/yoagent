@@ -2,7 +2,7 @@
 //! (rutis-bridge 0.9), loaded as rows by rutis-loader, registering handlers
 //! through the `yoagent` host service.
 //!
-//! Needs Node 24+ with `npm ci` run in `plugins/` (for `@arcships/rutis` and
+//! Needs Node 22.19+ with `npm ci` run in `plugins/` (for `@arcships/rutis` and
 //! `@arcships/rutis-runtime` 0.9.1), and Python 3.10+ with `rutis` 0.9 —
 //! `plugins/.venv/bin/python` (`uv venv plugins/.venv --python 3.12 && uv pip
 //! install --python plugins/.venv/bin/python rutis==0.9.1`), or the
@@ -52,22 +52,27 @@ fn skip<T>(what: &str, why: String) -> Option<T> {
     None
 }
 
-/// The Node runtime package, if Node 24+ and `npm ci` in `plugins/` are there.
+/// The Node runtime package, if Node 22.19+ and `npm ci` in `plugins/` are there.
 fn node_runtime() -> Option<PathBuf> {
     let runtime = plugins_dir().join("node_modules/@arcships/rutis-runtime");
     let version = Command::new("node").arg("--version").output();
-    let major = match &version {
+    let version = match &version {
         Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
             .trim()
             .trim_start_matches('v')
             .split('.')
-            .next()
-            .and_then(|m| m.parse::<u32>().ok()),
+            .map(|n| n.parse::<u32>().ok())
+            .take(2)
+            .collect::<Option<Vec<u32>>>()
+            .map(|v| (v[0], v.get(1).copied().unwrap_or(0))),
         _ => None,
     };
-    match major {
-        Some(major) if major >= 24 => {}
-        Some(major) => return skip("Node", format!("Node {major} found, 24+ needed")),
+    match version {
+        // pi needs 22.19 (rutis 0.9: 22).
+        Some(version) if version >= (22, 19) => {}
+        Some((major, minor)) => {
+            return skip("Node", format!("Node {major}.{minor} found, 22.19+ needed"))
+        }
         None => return skip("Node", "no `node` on PATH".into()),
     }
     // The version too, as for Python: a stale install would run the 0.9

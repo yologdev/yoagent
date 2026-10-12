@@ -4,7 +4,7 @@
 //! small ones written to a temporary directory; no network — as a
 //! rutis-loader row of a Node runtime.
 //!
-//! Needs Node 24+ and `npm ci` in `plugins/pi/`. Without them the test
+//! Needs Node 22.19+ and `npm ci` in `plugins/pi/`. Without them the test
 //! prints `SKIPPED:` and passes; `YOAGENT_RUTIS_REQUIRE_RUNTIMES=1` (CI) makes
 //! it fail instead.
 #![cfg(unix)]
@@ -35,7 +35,7 @@ fn pi_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("plugins/pi")
 }
 
-/// The Node runtime package, if Node 24+ and `npm ci` in `plugins/pi/` are there.
+/// The Node runtime package, if Node 22.19+ and `npm ci` in `plugins/pi/` are there.
 fn node_runtime() -> Option<PathBuf> {
     let skip = |why: String| -> Option<PathBuf> {
         if std::env::var_os("YOAGENT_RUTIS_REQUIRE_RUNTIMES").is_some_and(|v| v == "1") {
@@ -44,7 +44,7 @@ fn node_runtime() -> Option<PathBuf> {
         eprintln!("SKIPPED: the pi runtime is unavailable: {why}");
         None
     };
-    let major = Command::new("node")
+    let version = Command::new("node")
         .arg("--version")
         .output()
         .ok()
@@ -54,12 +54,15 @@ fn node_runtime() -> Option<PathBuf> {
                 .trim()
                 .trim_start_matches('v')
                 .split('.')
-                .next()
-                .and_then(|m| m.parse::<u32>().ok())
+                .map(|n| n.parse::<u32>().ok())
+                .take(2)
+                .collect::<Option<Vec<u32>>>()
+                .map(|v| (v[0], v.get(1).copied().unwrap_or(0)))
         });
-    match major {
-        Some(major) if major >= 24 => {}
-        Some(major) => return skip(format!("Node {major} found, 24+ needed")),
+    match version {
+        // pi needs 22.19 (rutis 0.9: 22).
+        Some(version) if version >= (22, 19) => {}
+        Some((major, minor)) => return skip(format!("Node {major}.{minor} found, 22.19+ needed")),
         None => return skip("no `node` on PATH".into()),
     }
     let modules = pi_dir().join("node_modules");

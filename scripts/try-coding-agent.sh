@@ -8,7 +8,7 @@
 #   scripts/try-coding-agent.sh --setup-only # install, don't run
 #
 # Other flags go to the example unchanged: --watch, --no-dsh, --demo PROMPT,
-# --web ADDR. Needs Rust (cargo), Node 24+ and npm; macOS or Linux.
+# --web ADDR. Needs Rust (cargo), Node 22.19+ and npm; macOS or Linux.
 set -euo pipefail
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
@@ -39,10 +39,11 @@ case "$(uname -s)" in
   *) fail "macOS or Linux only (the plugin runtimes are Unix processes)" ;;
 esac
 command -v cargo >/dev/null || fail "cargo not found: install Rust from https://rustup.rs"
-command -v node >/dev/null || fail "node not found: install Node 24 or newer"
+command -v node >/dev/null || fail "node not found: install Node 22.19 or newer"
 command -v npm >/dev/null || fail "npm not found (it comes with Node)"
-node_major=$(node -p 'process.versions.node.split(".")[0]')
-[ "$node_major" -ge 24 ] || fail "Node 24 or newer is needed (found $(node --version))"
+# pi needs 22.19 (rutis 0.9: 22).
+node_ok=$(node -p 'const [a, b] = process.versions.node.split(".").map(Number); a > 22 || (a === 22 && b >= 19)')
+[ "$node_ok" = true ] || fail "Node 22.19 or newer is needed (found $(node --version))"
 if $live && [ -z "${DEEPSEEK_API_KEY:-}" ]; then
   fail "--live needs DEEPSEEK_API_KEY in the environment"
 fi

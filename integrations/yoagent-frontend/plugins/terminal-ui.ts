@@ -5,8 +5,10 @@
 //
 // Config: `demo` runs that prompt headless — rendered into memory, the
 // screen printed when the run ends — instead of reading the keyboard.
-// rutis starts Node with stdin closed, so the keyboard comes from /dev/tty
-// (macOS / Linux).
+// The keyboard is stdin when the host hands the runtime its terminal
+// (`PluginHostBuilder::terminal`, which also keeps the runtime in the
+// terminal's process group); otherwise /dev/tty (macOS / Linux) — in a
+// process group of its own that read would stop the runtime.
 
 import * as fs from 'node:fs'
 import * as tty from 'node:tty'
@@ -84,8 +86,10 @@ export default definePlugin<{ demo?: string }>({
     let terminal: Terminal
     if (headless) terminal = new MemoryTerminal()
     else {
-      const keyboard = new tty.ReadStream(fs.openSync('/dev/tty', 'r'))
-      Object.defineProperty(process, 'stdin', { value: keyboard, configurable: true })
+      if (!process.stdin.isTTY) {
+        const keyboard = new tty.ReadStream(fs.openSync('/dev/tty', 'r'))
+        Object.defineProperty(process, 'stdin', { value: keyboard, configurable: true })
+      }
       terminal = new ProcessTerminal()
     }
     const tui = new TuiMainScreen(terminal)

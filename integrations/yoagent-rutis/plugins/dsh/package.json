@@ -4,7 +4,7 @@
   "description": "The dsh tools adapter for yoagent-rutis: DeepSeek Harness tool plugins as yoagent tools, in rutis's Node runtime. Pinned exactly: dsh is a release candidate.",
   "type": "module",
   "engines": {
-    "node": ">=24"
+    "node": ">=22.19"
   },
   "dependencies": {
     "@arcships/rutis": "0.9.1",

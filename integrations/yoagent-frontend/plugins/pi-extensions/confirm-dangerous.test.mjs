@@ -1,5 +1,5 @@
 // The approval gate's decisions on real command lines, run by `node --test`
-// (Node 24 loads the .ts module directly). Each test works in a fresh
+// (Node 22.18+ loads the .ts module directly). Each test works in a fresh
 // temporary project: owner files exist, a scratch folder is named.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'

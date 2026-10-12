@@ -152,7 +152,7 @@ DEEPSEEK_API_KEY=… cargo run --example minimal_browser -- --live
 
 The full one, `coding_agent`: plugins in three Node runtimes, both
 frontends, pi's and DSH's dialogs. One command from the repository root
-(needs Node 24+, npm and cargo) installs the plugin runtimes and serves it
+(needs Node 22.19+, npm and cargo) installs the plugin runtimes and serves it
 for the browser — open the URL it prints:
 
 ```bash

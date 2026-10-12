@@ -11,7 +11,7 @@
 //   node scripts/ecosystem-matrix.mjs --from-json RESULTS.json [--out ...]
 //        (the report again from earlier raw results: no installs, no probe)
 //
-// Needs Node 24+, npm, cargo, and `npm ci` in the adapters' directories
+// Needs Node 22.19+, npm, cargo, and `npm ci` in the adapters' directories
 // (scripts/try-coding-agent.sh --setup-only does it). Network: npm (search,
 // installs) and, when not cached, crates.io for building the probe.
 //

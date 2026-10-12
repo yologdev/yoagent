@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use rutis::{BoxFuture, Ctx, FiberState};
-use rutis_bridge::runtime::LocalRuntime;
+use rutis_bridge::runtime::{LocalRuntime, Stdio};
 use rutis_loader::{
     Chain, EntryStatus, Layer, Loader, LoaderError, LoaderOptions, LoaderPlugin, Patch, Resolved,
     Resolver, RuntimeResolver, RuntimeRowsPlugin, ServiceCatalog,
@@ -71,11 +71,12 @@ impl Row {
 
     /// The services injected into this plugin, in place of those it declares.
     ///
-    /// Rarely what you want: a TypeScript plugin given a row inject list never
-    /// applies (seen on rutis 0.7 and 0.8; not rechecked on 0.9). To hand a plugin a service it only looks
-    /// up (as the pi adapter does with `ui`), load a small plugin that
-    /// injects it and provides it again under the name looked up — see
-    /// `yoagent-rutis/plugins/pi/host-ui.ts`.
+    /// The plugin then waits for every one of them. (On rutis 0.7 and 0.8 a
+    /// TypeScript plugin given a row inject list never applied; 0.9 applies
+    /// it.) To hand a plugin a service it may go without — it only looks it
+    /// up, as the pi adapter does with `ui` — load a small plugin that
+    /// injects it and provides it again under the name looked up instead:
+    /// see `yoagent-rutis/plugins/pi/host-ui.ts`.
     pub fn inject(mut self, services: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.inject = services.into_iter().map(Into::into).collect();
         self
@@ -94,6 +95,7 @@ impl Row {
 pub struct PluginHostBuilder {
     runtimes: Vec<(String, PathBuf)>,
     shared: Vec<String>,
+    terminal: Option<String>,
 }
 
 impl PluginHostBuilder {
@@ -101,6 +103,16 @@ impl PluginHostBuilder {
     /// and `node_modules`, with `@arcships/rutis-runtime` installed).
     pub fn node(mut self, name: impl Into<String>, dir: impl Into<PathBuf>) -> Self {
         self.runtimes.push((name.into(), dir.into()));
+        self
+    }
+
+    /// The runtime `name` reads the terminal (a terminal UI): it gets this
+    /// process's stdin, and so stays in the terminal's process group. Every
+    /// other runtime runs in a group of its own (rutis 0.9), where Ctrl-C does
+    /// not reach it — and where reading or setting up the terminal would
+    /// stop it (SIGTTIN / SIGTTOU).
+    pub fn terminal(mut self, name: impl Into<String>) -> Self {
+        self.terminal = Some(name.into());
         self
     }
 
@@ -119,11 +131,14 @@ impl PluginHostBuilder {
         let routes: Arc<Mutex<HashMap<String, String>>> = Arc::default();
         let mut resolvers = Vec::new();
         for (name, dir) in &self.runtimes {
-            let runtime = LocalRuntime::node(
+            let mut runtime = LocalRuntime::node(
                 dir.join("node_modules/@arcships/rutis-runtime"),
                 dir.join("package.json"),
             )
             .named(name.clone());
+            if self.terminal.as_ref() == Some(name) {
+                runtime = runtime.stdin(Stdio::Inherit);
+            }
             let rows = Arc::new(RuntimeResolver::node(runtime.handle()).with_catalog(&catalog));
             root.plugin(runtime);
             resolvers.push((name.clone(), rows));

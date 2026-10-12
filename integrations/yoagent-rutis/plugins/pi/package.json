@@ -4,7 +4,7 @@
   "description": "The pi extensions adapter for yoagent-rutis: pi coding-agent extensions' tools and tool policies as a yoagent handler, in rutis's Node runtime. pi's packages are installed so extensions' imports (helpers, TypeBox) resolve to the real thing.",
   "type": "module",
   "engines": {
-    "node": ">=24"
+    "node": ">=22.19"
   },
   "dependencies": {
     "@arcships/rutis": "0.9.1",

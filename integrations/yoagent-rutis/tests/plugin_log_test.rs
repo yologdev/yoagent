@@ -4,7 +4,7 @@
 //! plugin says, as a `run_id` field.
 //!
 //! Its own test binary with a single test: it installs a global subscriber
-//! (the bridge logs from Tokio's worker threads). Needs Node 24+ and `npm ci`
+//! (the bridge logs from Tokio's worker threads). Needs Node 22.19+ and `npm ci`
 //! in `plugins/`; without them it prints `SKIPPED:` and passes, or fails
 //! with `YOAGENT_RUTIS_REQUIRE_RUNTIMES=1`.
 #![cfg(unix)]

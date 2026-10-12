@@ -4,7 +4,7 @@
   "description": "Example TypeScript plugins for yoagent-rutis, and the Node runtime the end-to-end tests run them in",
   "type": "module",
   "engines": {
-    "node": ">=24"
+    "node": ">=22.19"
   },
   "dependencies": {
     "@arcships/rutis": "0.9.1",
