@@ -123,6 +123,7 @@ service `yoagent`:
 |---|---|
 | *(default)* | Rust plugins only |
 | `node` | TypeScript / JavaScript plugins in local Node runtimes (Node 22.19+, Linux/macOS) |
+| `bun` | the same TypeScript / JavaScript plugins in local Bun runtimes (Bun 1.4+, Linux/macOS): rows `bun:<module>`, no build step; local only — rutis's Bun runtime cannot listen remotely yet |
 | `python` | Python plugins in local Python runtimes (Python 3.10+, Linux/macOS) |
 | `websocket` | runtimes and nodes on other machines, over `wss` |
 
