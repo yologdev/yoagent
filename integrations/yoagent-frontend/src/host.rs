@@ -72,8 +72,7 @@ impl Row {
     /// The services injected into this plugin, in place of those it declares.
     ///
     /// Rarely what you want: a TypeScript plugin given a row inject list never
-    /// applies (seen on rutis 0.7; the 0.8 JavaScript runtime's row-inject
-    /// handling is unchanged). To hand a plugin a service it only looks
+    /// applies (seen on rutis 0.7 and 0.8; not rechecked on 0.9). To hand a plugin a service it only looks
     /// up (as the pi adapter does with `ui`), load a small plugin that
     /// injects it and provides it again under the name looked up — see
     /// `yoagent-rutis/plugins/pi/host-ui.ts`.
@@ -268,8 +267,8 @@ impl PluginHost {
     }
 
     /// Whether the plugin `id` is running (started, not failed or stopped).
-    /// A plugin that disposes its own fiber is not (since rutis 0.9 the Node
-    /// runtime reports that to the loader, which disables the row).
+    /// A plugin that disposes its own fiber is not: since rutis 0.9 the Node
+    /// runtime reports that to the loader, and its row reads inactive.
     pub fn is_running(&self, id: &str) -> bool {
         matches!(
             self.loader.get(id).map(|info| info.status),
@@ -362,9 +361,8 @@ impl PluginHost {
                     // Copies inside instanced groups only, which `PluginHost`
                     // does not create.
                     Some(EntryStatus::Stopped) => return Err(stopped()),
-                    // Since rutis 0.9 also a plugin that disposed itself.
                     Some(EntryStatus::Disabled) => {
-                        return Err(format!("plugin `{id}` is disabled or stopped itself").into());
+                        return Err(format!("plugin `{id}` is disabled").into());
                     }
                     status => {
                         waiting.push(format!(

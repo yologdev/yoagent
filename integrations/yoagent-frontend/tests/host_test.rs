@@ -255,11 +255,12 @@ async fn a_plugin_that_disposes_itself_is_not_running() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("package.json"), r#"{ "type": "module" }"#).unwrap();
     let file = dir.path().join("leaves.mjs");
-    // A plain Cordis plugin: it starts, then disposes itself.
+    // A plain Cordis plugin: it starts, then disposes itself — late enough
+    // that `load` (polling every 50 ms) has seen it running first.
     std::fs::write(
         &file,
         "export const name = 'leaves'\n\
-         export function apply(ctx) { setTimeout(() => ctx.fiber.dispose(), 300) }\n",
+         export function apply(ctx) { setTimeout(() => ctx.fiber.dispose(), 1500) }\n",
     )
     .unwrap();
 
@@ -279,5 +280,14 @@ async fn a_plugin_that_disposes_itself_is_not_running() {
     })
     .await
     .expect("the host sees the plugin end");
+    // Ended, not failed: the row reads inactive (rutis-loader would disable a
+    // row of its own; this one comes from the host's layer).
+    let status = host.status();
+    assert!(
+        status
+            .iter()
+            .any(|(id, state)| id == "leaves" && (state == "inactive" || state == "disabled")),
+        "{status:?}"
+    );
     root.shutdown().await.unwrap();
 }
