@@ -734,36 +734,45 @@ async fn gate_fails_closed_on_timeout() {
 
 // --- long arguments --------------------------------------------------------
 
+/// The arguments and `omitted` list of the first request the gate sent.
+fn gate_saw(mock: &MockBackend) -> (serde_json::Value, serde_json::Value) {
+    let call = &mock.requests()[0].state["tool_call"];
+    (call["arguments"].clone(), call["omitted"].clone())
+}
+
+/// `decide` on a call outside the loop, with a run prompt to judge against.
+async fn decide(gate: &ToolGate, tool: &str, args: serde_json::Value) -> ToolDecision {
+    let prompts = [Message::user("rewrite the notes")];
+    gate.decide(&ToolCallRequest::new("c1", tool, &args).with_run_prompts(&prompts))
+        .await
+}
+
+fn denied_with(decision: &ToolDecision, needle: &str) -> bool {
+    matches!(decision, ToolDecision::Deny(reason) if reason.contains(needle))
+}
+
 #[tokio::test]
-async fn gate_sees_the_tail_of_a_long_command() {
-    let heredoc = format!(
-        "cat > notes.txt <<'EOF'\n{}\nEOF\nrm -rf /srv/data",
-        "lorem ipsum ".repeat(700)
-    );
-    assert!(heredoc.len() > 8_000);
-    let mock = gate_answers(0.9, 0.1);
+async fn gate_sends_a_large_write_whole_when_it_fits() {
+    // A full-file rewrite of 30k characters: judged on all of it.
+    let content = format!("{}MIDDLE-MARK{}", "x".repeat(15_000), "y".repeat(15_000));
+    let mock = gate_answers(0.1, 0.9);
     let (tools, ran) = make_tools(1);
     let agent = Agent::from_provider(
-        calls_rm_with(json!({"command": heredoc})),
+        calls_rm_with(json!({"path": "notes.md", "content": content})),
         ModelConfig::mock(),
     )
     .with_tools(tools)
     .with_tool_gate(ToolGate::new(model(&mock)));
-    run(agent, "write some notes").await;
-    assert!(ran.lock().unwrap().is_empty());
-    let shown = mock.requests()[0].state["tool_call"]["arguments"]["command"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    assert!(shown.ends_with("rm -rf /srv/data"), "the tail is visible");
-    assert!(shown.starts_with("cat > notes.txt"), "the head is visible");
-    assert!(shown.contains("[truncated "), "the cut is explicit");
-    assert!(shown.len() < heredoc.len());
+    run(agent, "rewrite the notes").await;
+    assert_eq!(ran.lock().unwrap().len(), 1, "allowed");
+    let (args, omitted) = gate_saw(&mock);
+    assert_eq!(args["content"], content.as_str(), "sent whole");
+    assert!(omitted.is_null(), "nothing omitted: {omitted}");
 }
 
 #[tokio::test]
-async fn gate_keeps_short_fields_whole_and_shortens_long_content() {
-    let content = format!("{}END-OF-FILE", "x".repeat(9 * 1024));
+async fn gate_shortens_only_as_needed_and_says_what_it_cut() {
+    let content = format!("{}END-OF-FILE", "x".repeat(100_000));
     let mock = gate_answers(0.1, 0.9);
     let (tools, ran) = make_tools(1);
     let agent = Agent::from_provider(
@@ -774,12 +783,19 @@ async fn gate_keeps_short_fields_whole_and_shortens_long_content() {
     .with_tool_gate(ToolGate::new(model(&mock)));
     run(agent, "update the config").await;
     assert_eq!(ran.lock().unwrap().len(), 1, "allowed");
-    let args = &mock.requests()[0].state["tool_call"]["arguments"];
+    let (args, omitted) = gate_saw(&mock);
     assert_eq!(args["path"], "/etc/app/config.toml");
     assert_eq!(args["append"], false);
     let shown = args["content"].as_str().unwrap();
-    assert!(shown.ends_with("END-OF-FILE"));
-    assert!(shown.contains("[truncated "));
+    assert!(shown.ends_with("END-OF-FILE"), "the tail is visible");
+    assert!(shown.contains("[truncated "), "the cut is explicit");
+    // Cut only as far as the 48,000-character budget needs, not to a fixed size.
+    let sent = serde_json::to_string(&args).unwrap().chars().count();
+    assert!((46_000..=48_000).contains(&sent), "{sent}");
+    let cut = omitted[0]["chars"].as_u64().unwrap() as usize;
+    assert_eq!(omitted[0]["argument"], "/content");
+    assert_eq!(omitted.as_array().unwrap().len(), 1);
+    assert!((50_000..56_000).contains(&cut), "cut {cut}");
     // Positive control: the executed call still got the full content.
     assert_eq!(
         ran.lock().unwrap()[0]["content"].as_str().unwrap().len(),
@@ -788,9 +804,96 @@ async fn gate_keeps_short_fields_whole_and_shortens_long_content() {
 }
 
 #[tokio::test]
+async fn gate_fits_the_backends_token_limits() {
+    // A backend that takes at most 4,000 tokens of state plus question
+    // (about 16,000 bytes): the call is cut to fit it, not refused by it.
+    let mock = gate_answers(0.1, 0.9).with_capabilities(
+        Capabilities::new(QuestionKind::all()).with_token_limits(None, Some(4_000)),
+    );
+    let gate = ToolGate::new(model(&mock));
+    let content = "z".repeat(60_000);
+    let decision = decide(
+        &gate,
+        "write_file",
+        json!({"path": "a.md", "content": content}),
+    )
+    .await;
+    assert!(matches!(decision, ToolDecision::Allow), "{decision:?}");
+    let state = &mock.requests()[0].state;
+    let bytes = serde_json::to_vec(state).unwrap().len();
+    assert!((12_000..16_000).contains(&bytes), "{bytes}");
+    assert_eq!(state["tool_call"]["omitted"][0]["argument"], "/content");
+}
+
+#[tokio::test]
+async fn gate_reads_a_command_whole_or_not_at_all() {
+    // `bash`'s command is a full view by default: a dangerous line can sit
+    // anywhere in it, so it is never judged from its head and tail.
+    let command = |filler: usize| {
+        format!(
+            "echo start\n{}rm -rf ~\n{}echo done",
+            "true\n".repeat(filler),
+            "true\n".repeat(filler)
+        )
+    };
+    let mock = gate_answers(0.9, 0.1);
+    let gate = ToolGate::new(model(&mock));
+
+    // Fits: sent whole, the middle line included.
+    let decision = decide(&gate, "bash", json!({"command": command(2_000)})).await;
+    assert!(denied_with(&decision, "looks destructive"), "{decision:?}");
+    let (args, omitted) = gate_saw(&mock);
+    assert!(args["command"].as_str().unwrap().contains("rm -rf ~"));
+    assert!(omitted.is_null());
+
+    // Does not fit: denied without asking.
+    let decision = decide(&gate, "bash", json!({"command": command(10_000)})).await;
+    assert!(
+        denied_with(&decision, "`bash`'s `/command` argument is"),
+        "{decision:?}"
+    );
+    assert!(denied_with(&decision, "review in full"), "{decision:?}");
+    assert_eq!(
+        mock.request_count(),
+        1,
+        "the oversized command was never sent"
+    );
+
+    // Without the default full view the same call is judged shortened.
+    let gate = ToolGate::new(model(&mock)).without_default_full_views();
+    decide(&gate, "bash", json!({"command": command(10_000)})).await;
+    assert_eq!(mock.request_count(), 2);
+    assert!(mock.requests()[1].state["tool_call"]["omitted"].is_array());
+}
+
+#[tokio::test]
+async fn gate_full_views_cover_custom_tools_and_whole_subtrees() {
+    let mock = gate_answers(0.1, 0.9);
+    let gate = ToolGate::new(model(&mock)).with_full_view("sql", "/queries");
+    let big = "SELECT 1; ".repeat(3_000); // 30k each: the two together do not fit
+                                          // Everything under `/queries` is a full view; `/note` is not.
+    let args = json!({"queries": [big.clone()], "note": big.clone()});
+    let decision = decide(&gate, "sql", args).await;
+    assert!(matches!(decision, ToolDecision::Allow), "{decision:?}");
+    let (args, omitted) = gate_saw(&mock);
+    assert_eq!(args["queries"][0], big.as_str(), "full view kept whole");
+    assert_eq!(omitted[0]["argument"], "/note");
+    // Another tool's arguments of the same name are not full views.
+    let decision = decide(&gate, "other", json!({"queries": [big.clone(), big]})).await;
+    assert!(matches!(decision, ToolDecision::Allow), "{decision:?}");
+}
+
+#[tokio::test]
+#[should_panic(expected = "JSON pointer")]
+async fn gate_full_view_must_be_a_pointer() {
+    let _ = ToolGate::new(model(&MockBackend::new())).with_full_view("bash", "command");
+}
+
+#[tokio::test]
 async fn gate_denies_arguments_too_large_to_read() {
-    let fields: serde_json::Map<String, serde_json::Value> = (0..10)
-        .map(|i| (format!("f{i}"), json!("y".repeat(5_000))))
+    // 200 strings of 500 characters: even cut to 400 each, over the budget.
+    let fields: serde_json::Map<String, serde_json::Value> = (0..200)
+        .map(|i| (format!("f{i}"), json!("y".repeat(500))))
         .collect();
     let mock = gate_answers(0.0, 1.0);
     let (tools, ran) = make_tools(1);
@@ -801,6 +904,22 @@ async fn gate_denies_arguments_too_large_to_read() {
     assert!(ran.lock().unwrap().is_empty());
     assert!(tool_result_text(&agent).unwrap().0.contains("too large"));
     assert_eq!(mock.request_count(), 0, "denied before asking");
+}
+
+#[tokio::test]
+async fn gate_budget_is_configurable() {
+    let mock = gate_answers(0.1, 0.9);
+    let gate = ToolGate::new(model(&mock)).with_max_argument_chars(100_000);
+    let content = "q".repeat(90_000);
+    decide(
+        &gate,
+        "write_file",
+        json!({"path": "a", "content": content}),
+    )
+    .await;
+    let (args, omitted) = gate_saw(&mock);
+    assert_eq!(args["content"], content.as_str());
+    assert!(omitted.is_null());
 }
 
 // --- what the user asked -----------------------------------------------------

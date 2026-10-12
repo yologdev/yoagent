@@ -525,17 +525,49 @@ backend.
 3. Otherwise there is no request to judge against, and the call is denied
    with a reason asking the user to restate it.
 
-**Arguments.** Short values (paths, names, flags) are always sent whole. A
-string over 2,000 characters keeps its head and its tail around an explicit
-`[truncated N chars]` marker — so the `rm -rf` at the end of a long heredoc
-is visible. If the arguments are still over 12,000 characters, the call is
-denied without asking.
+**Arguments.** A call's arguments are sent **whole when they fit**: within
+`with_max_argument_chars` (default 48,000 characters, serialized) and the
+decision backend's own token limits. A full-file rewrite or a large patch is
+judged on all of it.
+
+A call that does not fit is shortened only as far as needed: its longest
+strings are cut first, each to its head and tail around an explicit
+`[truncated N chars]` marker, while short values (paths, names, flags) stay
+whole. The state then says what was cut, so the model knows it is judging a
+partial view:
+
+```json
+"tool_call": {
+  "tool": "write_file",
+  "arguments": { "path": "src/lib.rs", "content": "…[truncated 52310 chars]…" },
+  "omitted": [{ "argument": "/content", "chars": 52310 }]
+}
+```
+
+Some arguments must never be judged in part: a command or a script can hide
+its dangerous line anywhere. Those are **full views**, judged whole or not
+at all — a call whose full-view argument does not fit is denied without
+asking ("more than the gate can review in full"). The built-in `bash` tool's
+`/command` is one by default; add your own with
+`with_full_view(tool, json_pointer)` (a pointer to an array or object covers
+everything under it), and drop the default with `without_default_full_views()`.
+
+```rust,ignore
+let gate = ToolGate::new(model)
+    .with_full_view("run_sql", "/query")      // a query is judged whole or denied
+    .with_max_argument_chars(64_000);         // more room before anything is cut
+```
+
+A call that does not fit even with every other long string cut to 400
+characters is denied too. Calls are never judged in pieces: what one piece
+does can depend on another (a `cd` in one, an `rm` in the next).
 
 **What denies.** A call is denied — with a reason the model sees — when:
 
 - it looks destructive and is not clearly requested (the thresholds above);
 - a custom check (`with_check`) reaches its threshold;
-- its arguments are over the size cap after shortening;
+- a full-view argument (by default `bash`'s command) does not fit whole, or
+  the arguments do not fit even shortened;
 - there is no user request to judge against;
 - the decision model errors, times out (**5 s**), or answers with a missing,
   malformed, non-finite or out-of-range value (**fails closed**).

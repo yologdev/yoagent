@@ -404,33 +404,43 @@ impl Request {
             }
             q.validate(id, caps)?;
         }
-        let state_tokens = estimate_json_tokens(&self.state);
-        let question_tokens: Vec<usize> = self
-            .questions
-            .iter()
-            .map(|(_, q)| estimate_json_tokens(q))
-            .collect();
-        if let Some(max) = caps.max_request_tokens {
-            let total = state_tokens + question_tokens.iter().sum::<usize>();
-            if total > max {
-                return Err(DecisionError::Invalid(format!(
-                    "request: about {total} tokens (estimated) exceeds the backend's \
-                     {max}-token request limit; trim the state or split the questions"
-                )));
-            }
-        }
-        if let Some(max) = caps.max_state_and_question_tokens {
-            let longest = question_tokens.iter().copied().max().unwrap_or(0);
-            if state_tokens + longest > max {
-                return Err(DecisionError::Invalid(format!(
-                    "state: about {} tokens (estimated) for the state plus the longest \
-                     question exceeds the backend's {max}-token limit",
-                    state_tokens + longest
-                )));
-            }
-        }
-        Ok(())
+        check_token_limits(&self.state, &self.questions, caps)
     }
+}
+
+/// The token-limit checks of [`Request::validate`] (on its estimate): the
+/// whole request, and the state plus the longest question. Also used by the
+/// tool gate to fit a call's arguments before asking.
+pub(crate) fn check_token_limits(
+    state: &Value,
+    questions: &[(String, Question)],
+    caps: &Capabilities,
+) -> Result<(), DecisionError> {
+    let state_tokens = estimate_json_tokens(state);
+    let question_tokens: Vec<usize> = questions
+        .iter()
+        .map(|(_, q)| estimate_json_tokens(q))
+        .collect();
+    if let Some(max) = caps.max_request_tokens {
+        let total = state_tokens + question_tokens.iter().sum::<usize>();
+        if total > max {
+            return Err(DecisionError::Invalid(format!(
+                "request: about {total} tokens (estimated) exceeds the backend's \
+                 {max}-token request limit; trim the state or split the questions"
+            )));
+        }
+    }
+    if let Some(max) = caps.max_state_and_question_tokens {
+        let longest = question_tokens.iter().copied().max().unwrap_or(0);
+        if state_tokens + longest > max {
+            return Err(DecisionError::Invalid(format!(
+                "state: about {} tokens (estimated) for the state plus the longest \
+                 question exceeds the backend's {max}-token limit",
+                state_tokens + longest
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn estimate_json_tokens<T: Serialize>(v: &T) -> usize {

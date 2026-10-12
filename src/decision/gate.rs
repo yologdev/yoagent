@@ -3,7 +3,7 @@
 //! it. Blocking, so strictly opt-in, and fail-closed.
 
 use super::advisory::{assert_threshold, truncate_middle};
-use super::question::Question;
+use super::question::{check_token_limits, Question};
 use super::DecisionModel;
 use crate::types::{ToolCallRequest, ToolDecision, ToolMiddleware};
 use serde_json::{json, Value};
@@ -11,11 +11,14 @@ use std::time::Duration;
 
 /// Most characters of the user's request sent as state (head and tail kept).
 const MAX_REQUEST_CHARS: usize = 8_000;
-/// A string argument longer than this is shortened to head and tail.
-const MAX_STRING_CHARS: usize = 2_000;
-/// Most characters of the arguments, serialized, after shortening. Larger
-/// calls are denied: the gate will not approve what it could not read.
-const MAX_ARGS_CHARS: usize = 12_000;
+/// Default for [`ToolGate::with_max_argument_chars`].
+const DEFAULT_MAX_ARGUMENT_CHARS: usize = 48_000;
+/// The least of a long string a shortened call keeps (head and tail). A call
+/// that does not fit with every shortenable string cut to this is denied.
+const MIN_KEPT_CHARS: usize = 400;
+/// Arguments the gate never shortens by default: a command is judged whole
+/// or not at all, since what it does can sit anywhere in it.
+const DEFAULT_FULL_VIEWS: &[(&str, &str)] = &[("bash", "/command")];
 
 const DESTRUCTIVE_ID: &str = "destructive";
 const REQUESTED_ID: &str = "requested";
@@ -47,10 +50,25 @@ const DEFAULT_REQUESTED_QUESTION: &str = "Is `tool_call` something the user aske
 /// request, so a confirmation ("yes, go ahead") carries what it confirms —
 /// else the run's own prompts. When none of these exists (compaction left
 /// no user message and the run has no prompt), the call is denied and the
-/// reason asks for the request to be restated. Small argument
-/// values are sent in full; a string over 2,000 characters is shortened to
-/// its head and tail around an explicit `[truncated N chars]` marker, and a
-/// call whose arguments are still over 12,000 characters is denied.
+/// reason asks for the request to be restated.
+///
+/// **Arguments are sent whole when they fit**: within
+/// [`with_max_argument_chars`](Self::with_max_argument_chars) (default
+/// 48,000 characters, serialized) and the decision backend's own token
+/// limits ([`Capabilities`](super::Capabilities)). A call that does not fit
+/// has its longest strings shortened — only as far as needed, each to its
+/// head and tail around an explicit `[truncated N chars]` marker — and the
+/// state then lists what was cut under `tool_call.omitted`
+/// (`[{"argument": "/content", "chars": N}]`, JSON pointers), so the model
+/// knows it judges a partial view. Paths, names and flags are short and
+/// stay whole. Arguments registered with
+/// [`with_full_view`](Self::with_full_view) — by default the built-in
+/// `bash` tool's `command` — are never shortened: a call whose full-view
+/// argument does not fit is denied ("could not review it in full"), since a
+/// dangerous line can sit anywhere in a command. A call that does not fit
+/// even with every other long string cut to 400 characters is denied too.
+/// Calls are never judged in pieces: what one piece does can depend on
+/// another.
 ///
 /// **Fails closed.** A decision-model error or timeout (default 5 s), a
 /// missing or malformed answer, and a non-finite probability all deny.
@@ -84,6 +102,9 @@ pub struct ToolGate {
     destructive_threshold: f64,
     requested_threshold: f64,
     checks: Vec<(String, String, f64)>,
+    max_argument_chars: usize,
+    default_full_views: bool,
+    full_views: Vec<(String, String)>,
 }
 
 impl ToolGate {
@@ -97,6 +118,9 @@ impl ToolGate {
             destructive_threshold: 0.5,
             requested_threshold: 0.7,
             checks: Vec::new(),
+            max_argument_chars: DEFAULT_MAX_ARGUMENT_CHARS,
+            default_full_views: true,
+            full_views: Vec::new(),
         }
     }
 
@@ -164,24 +188,67 @@ impl ToolGate {
         self
     }
 
+    /// Most characters of a call's arguments, serialized, sent to the
+    /// decision model (default 48,000). Arguments over it — or over the
+    /// backend's token limits, whichever is smaller — are shortened as
+    /// described on [`ToolGate`]. A larger budget means fewer partial views,
+    /// and more input tokens (cost, latency) on large calls.
+    ///
+    /// Panics on 0.
+    pub fn with_max_argument_chars(mut self, chars: usize) -> Self {
+        assert!(chars > 0, "a tool gate's argument budget must be above 0");
+        self.max_argument_chars = chars;
+        self
+    }
+
+    /// Never shorten `argument` of `tool`: it is judged whole, or the call is
+    /// denied. `argument` is a JSON pointer into the arguments (`"/command"`,
+    /// `"/edits"` for everything under it, `""` for all of them). Use it
+    /// for arguments that are executed — a script, a query, a program — and
+    /// whose every line can matter. The built-in `bash` tool's `/command` is
+    /// one by default ([`without_default_full_views`](Self::without_default_full_views)
+    /// removes it).
+    ///
+    /// Panics on a pointer that is neither empty nor starts with `/`.
+    pub fn with_full_view(mut self, tool: impl Into<String>, argument: impl Into<String>) -> Self {
+        let argument = argument.into();
+        assert!(
+            argument.is_empty() || argument.starts_with('/'),
+            "a full-view argument is a JSON pointer (\"/command\", or \"\" for all), \
+             got {argument:?}"
+        );
+        self.full_views.push((tool.into(), argument));
+        self
+    }
+
+    /// Drop the default full view (`bash`'s `/command`); ones added with
+    /// [`with_full_view`](Self::with_full_view) stay, whatever the order.
+    pub fn without_default_full_views(mut self) -> Self {
+        self.default_full_views = false;
+        self
+    }
+
+    /// The full-view pointers for `tool`.
+    fn full_views_for(&self, tool: &str) -> Vec<&str> {
+        let defaults = DEFAULT_FULL_VIEWS
+            .iter()
+            .filter(|_| self.default_full_views)
+            .map(|&(t, a)| (t, a));
+        let custom = self
+            .full_views
+            .iter()
+            .map(|(t, a)| (t.as_str(), a.as_str()));
+        defaults
+            .chain(custom)
+            .filter(|&(t, _)| t == tool)
+            .map(|(_, a)| a)
+            .collect()
+    }
+
     /// Judge one call: what the gate decides when installed. For testing a
     /// gate's settings outside the loop, with a call built by
     /// [`ToolCallRequest::new`].
     pub async fn decide(&self, call: &ToolCallRequest<'_>) -> ToolDecision {
-        let arguments = shorten(call.args);
-        let size = serde_json::to_string(&arguments).map_or(usize::MAX, |s| s.chars().count());
-        if size > MAX_ARGS_CHARS {
-            tracing::warn!(
-                tool = call.tool_name,
-                size,
-                "tool gate denied a call: arguments too large"
-            );
-            return ToolDecision::Deny(format!(
-                "Tool gate: this call's arguments are too large to evaluate ({size} characters \
-                 after shortening long strings; the limit is {MAX_ARGS_CHARS}), so it was not run. \
-                 The gate fails closed; split the work into smaller calls or ask the user."
-            ));
-        }
         let Some(user_request) = call.user_request() else {
             tracing::warn!(
                 tool = call.tool_name,
@@ -194,10 +261,7 @@ impl ToolGate {
                     .into(),
             );
         };
-        let state = json!({
-            "user_request": truncate_middle(&user_request, MAX_REQUEST_CHARS),
-            "tool_call": { "tool": call.tool_name, "arguments": arguments },
-        });
+        let user_request = truncate_middle(&user_request, MAX_REQUEST_CHARS);
 
         let mut questions = vec![
             (
@@ -218,6 +282,59 @@ impl ToolGate {
         for (id, q, _) in &self.checks {
             questions.push((id.clone(), Question::noul(q.as_str())));
         }
+
+        let caps = self.model.capabilities();
+        let full_views = self.full_views_for(call.tool_name);
+        let fits = |view: &View| {
+            let chars =
+                serde_json::to_string(&view.arguments).map_or(usize::MAX, |s| s.chars().count());
+            chars <= self.max_argument_chars
+                && check_token_limits(
+                    &state(&user_request, call.tool_name, view),
+                    &questions,
+                    &caps,
+                )
+                .is_ok()
+        };
+        let view = match fit_arguments(call.args, &full_views, fits) {
+            Ok(view) => view,
+            Err(Unfit::FullView { argument, chars }) => {
+                tracing::warn!(
+                    tool = call.tool_name,
+                    argument,
+                    chars,
+                    "tool gate denied a call: a full-view argument does not fit"
+                );
+                return ToolDecision::Deny(format!(
+                    "Tool gate: `{}`'s `{argument}` argument is {chars} characters, more than \
+                     the gate can review in full, and it does not judge part of it, so this \
+                     call was not run. The gate fails closed; split it into smaller calls or \
+                     ask the user.",
+                    call.tool_name
+                ));
+            }
+            Err(Unfit::TooLarge { chars }) => {
+                tracing::warn!(
+                    tool = call.tool_name,
+                    chars,
+                    "tool gate denied a call: arguments too large"
+                );
+                return ToolDecision::Deny(format!(
+                    "Tool gate: this call's arguments are too large to evaluate ({chars} \
+                     characters even with every long string cut to {MIN_KEPT_CHARS}), so it \
+                     was not run. The gate fails closed; split the work into smaller calls or \
+                     ask the user."
+                ));
+            }
+        };
+        if !view.omitted.is_empty() {
+            tracing::debug!(
+                tool = call.tool_name,
+                omitted = view.omitted.len(),
+                "tool gate judges a shortened call"
+            );
+        }
+        let state = state(&user_request, call.tool_name, &view);
 
         let model = self.model.clone().with_timeout(self.timeout);
         let eval = match model.evaluate(state, questions).await {
@@ -281,21 +398,206 @@ fn fmt_p(p: Option<f64>) -> String {
     p.map_or_else(|| "unknown".into(), |p| format!("{p:.2}"))
 }
 
-/// The arguments as the gate shows them: every value kept, except strings
-/// longer than `MAX_STRING_CHARS`, which keep their head and tail around an
-/// explicit `[truncated N chars]` marker — so a command's last line, and
-/// every short field such as a path, stays visible.
-fn shorten(v: &Value) -> Value {
-    match v {
-        Value::String(s) if s.chars().count() > MAX_STRING_CHARS => {
-            Value::String(truncate_middle(s, MAX_STRING_CHARS))
-        }
-        Value::Array(items) => Value::Array(items.iter().map(shorten).collect()),
-        Value::Object(map) => {
-            Value::Object(map.iter().map(|(k, v)| (k.clone(), shorten(v))).collect())
-        }
-        other => other.clone(),
+/// The arguments as the gate shows them, and what was cut from them.
+#[derive(Debug)]
+struct View {
+    arguments: Value,
+    /// `(JSON pointer, characters cut)` per shortened string.
+    omitted: Vec<(String, usize)>,
+}
+
+#[derive(Debug, PartialEq)]
+enum Unfit {
+    /// A full-view argument is what does not fit.
+    FullView { argument: String, chars: usize },
+    /// Nothing more can be cut.
+    TooLarge { chars: usize },
+}
+
+/// The state the decision model sees.
+fn state(user_request: &str, tool: &str, view: &View) -> Value {
+    let mut call = json!({ "tool": tool, "arguments": view.arguments });
+    if !view.omitted.is_empty() {
+        call["omitted"] = view
+            .omitted
+            .iter()
+            .map(|(argument, chars)| json!({ "argument": argument, "chars": chars }))
+            .collect();
     }
+    json!({ "user_request": user_request, "tool_call": call })
+}
+
+/// The largest view of `args` that `fits`: whole when it fits; else every
+/// string outside `full_views` longer than some cap `c` cut to `c` (head and
+/// tail), with `c` as large as fits (at least `MIN_KEPT_CHARS`).
+fn fit_arguments(
+    args: &Value,
+    full_views: &[&str],
+    fits: impl Fn(&View) -> bool,
+) -> Result<View, Unfit> {
+    let whole = View {
+        arguments: args.clone(),
+        omitted: Vec::new(),
+    };
+    if fits(&whole) {
+        return Ok(whole);
+    }
+    let longest = longest_string(args, &mut String::new(), full_views, false);
+    if longest > MIN_KEPT_CHARS && fits(&cut(args, full_views, MIN_KEPT_CHARS)) {
+        // Binary search the largest cap that fits: `lo` fits, `hi` does not.
+        let (mut lo, mut hi) = (MIN_KEPT_CHARS, longest);
+        while hi - lo > 1 {
+            let mid = lo + (hi - lo) / 2;
+            if fits(&cut(args, full_views, mid)) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        return Ok(cut(args, full_views, lo));
+    }
+    // It does not fit even cut to the minimum. Blame a full-view argument when
+    // cutting it too would have made it fit.
+    let mut views = Vec::new();
+    collect_full_views(args, &mut String::new(), full_views, false, &mut views);
+    if let Some((argument, chars)) = views.into_iter().max_by_key(|&(_, chars)| chars) {
+        if chars > MIN_KEPT_CHARS && fits(&cut(args, &[], MIN_KEPT_CHARS)) {
+            return Err(Unfit::FullView { argument, chars });
+        }
+    }
+    let chars = serde_json::to_string(&cut(args, &[], MIN_KEPT_CHARS).arguments)
+        .map_or(usize::MAX, |s| s.chars().count());
+    Err(Unfit::TooLarge { chars })
+}
+
+fn is_full_view(pointer: &str, full_views: &[&str]) -> bool {
+    full_views.iter().any(|v| {
+        v.is_empty()
+            || pointer == *v
+            || (pointer.starts_with(*v) && pointer.as_bytes().get(v.len()) == Some(&b'/'))
+    })
+}
+
+/// `pointer` extended by one JSON-pointer segment (RFC 6901 escaping).
+fn push_segment(pointer: &mut String, segment: &str) -> usize {
+    let len = pointer.len();
+    pointer.push('/');
+    pointer.push_str(&segment.replace('~', "~0").replace('/', "~1"));
+    len
+}
+
+/// Visit every string in `v` with its pointer and whether it is full-view.
+fn for_each_string(
+    v: &Value,
+    pointer: &mut String,
+    full_views: &[&str],
+    inherited: bool,
+    f: &mut impl FnMut(&str, &str, bool),
+) {
+    let here = inherited || is_full_view(pointer, full_views);
+    match v {
+        Value::String(s) => f(pointer, s, here),
+        Value::Array(items) => {
+            for (i, item) in items.iter().enumerate() {
+                let len = push_segment(pointer, &i.to_string());
+                for_each_string(item, pointer, full_views, here, f);
+                pointer.truncate(len);
+            }
+        }
+        Value::Object(map) => {
+            for (k, item) in map {
+                let len = push_segment(pointer, k);
+                for_each_string(item, pointer, full_views, here, f);
+                pointer.truncate(len);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The longest string outside the full views, in characters.
+fn longest_string(v: &Value, pointer: &mut String, full_views: &[&str], inherited: bool) -> usize {
+    let mut longest = 0;
+    for_each_string(v, pointer, full_views, inherited, &mut |_, s, full| {
+        if !full {
+            longest = longest.max(s.chars().count());
+        }
+    });
+    longest
+}
+
+/// Every string inside a full view, with its pointer and length.
+fn collect_full_views(
+    v: &Value,
+    pointer: &mut String,
+    full_views: &[&str],
+    inherited: bool,
+    out: &mut Vec<(String, usize)>,
+) {
+    for_each_string(v, pointer, full_views, inherited, &mut |p, s, full| {
+        if full {
+            out.push((p.to_string(), s.chars().count()));
+        }
+    });
+}
+
+/// `args` with every string outside `full_views` longer than `cap` cut to
+/// its head and tail.
+fn cut(args: &Value, full_views: &[&str], cap: usize) -> View {
+    fn go(
+        v: &Value,
+        pointer: &mut String,
+        full_views: &[&str],
+        inherited: bool,
+        cap: usize,
+        omitted: &mut Vec<(String, usize)>,
+    ) -> Value {
+        let here = inherited || is_full_view(pointer, full_views);
+        match v {
+            Value::String(s) if !here => {
+                let len = s.chars().count();
+                if len > cap {
+                    omitted.push((pointer.clone(), len - 2 * (cap / 2)));
+                    Value::String(truncate_middle(s, cap))
+                } else {
+                    v.clone()
+                }
+            }
+            Value::Array(items) => Value::Array(
+                items
+                    .iter()
+                    .enumerate()
+                    .map(|(i, item)| {
+                        let len = push_segment(pointer, &i.to_string());
+                        let out = go(item, pointer, full_views, here, cap, omitted);
+                        pointer.truncate(len);
+                        out
+                    })
+                    .collect(),
+            ),
+            Value::Object(map) => Value::Object(
+                map.iter()
+                    .map(|(k, item)| {
+                        let len = push_segment(pointer, k);
+                        let out = go(item, pointer, full_views, here, cap, omitted);
+                        pointer.truncate(len);
+                        (k.clone(), out)
+                    })
+                    .collect(),
+            ),
+            other => other.clone(),
+        }
+    }
+    let mut omitted = Vec::new();
+    let arguments = go(
+        args,
+        &mut String::new(),
+        full_views,
+        false,
+        cap,
+        &mut omitted,
+    );
+    View { arguments, omitted }
 }
 
 /// **Deprecated since 0.25**, to be removed in a later release: install the
@@ -351,5 +653,65 @@ struct GateHooks(ToolGate);
 impl crate::RunHooks for GateHooks {
     async fn before_tool(&self, call: &ToolCallRequest<'_>) -> ToolDecision {
         self.0.decide(call).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn full_views_match_whole_segments_only() {
+        assert!(is_full_view("/command", &["/command"]));
+        assert!(is_full_view("/edits/0/new", &["/edits"]));
+        assert!(!is_full_view("/commands", &["/command"]));
+        assert!(!is_full_view("/command", &["/commands"]));
+        assert!(is_full_view("/anything", &[""]));
+        assert!(!is_full_view("/command", &[]));
+    }
+
+    #[test]
+    fn pointers_escape_tilde_and_slash() {
+        let args = json!({"a/b": "x".repeat(1_000), "c~d": "y".repeat(1_000)});
+        let view = cut(&args, &[], MIN_KEPT_CHARS);
+        let mut cut: Vec<_> = view.omitted.iter().map(|(p, _)| p.as_str()).collect();
+        cut.sort_unstable();
+        assert_eq!(cut, ["/a~1b", "/c~0d"]);
+        // An escaped full view protects its key.
+        let view = super::cut(&args, &["/a~1b"], MIN_KEPT_CHARS);
+        assert_eq!(view.omitted.len(), 1);
+        assert_eq!(view.arguments["a/b"], args["a/b"]);
+    }
+
+    #[test]
+    fn fit_cuts_the_longest_strings_first() {
+        // Budget 3,000: the short string stays whole; the long one takes the cut.
+        let args = json!({"short": "s".repeat(900), "long": "l".repeat(10_000)});
+        let fits = |v: &View| serde_json::to_string(&v.arguments).unwrap().len() <= 3_000;
+        let view = fit_arguments(&args, &[], fits).unwrap();
+        assert_eq!(view.arguments["short"], args["short"]);
+        assert_eq!(view.omitted.len(), 1);
+        assert_eq!(view.omitted[0].0, "/long");
+        let len = serde_json::to_string(&view.arguments).unwrap().len();
+        assert!((2_900..=3_000).contains(&len), "{len}");
+    }
+
+    #[test]
+    fn fit_blames_the_full_view_that_does_not_fit() {
+        let args = json!({"command": "c".repeat(10_000), "note": "n".repeat(10_000)});
+        let fits = |v: &View| serde_json::to_string(&v.arguments).unwrap().len() <= 3_000;
+        assert_eq!(
+            fit_arguments(&args, &["/command"], fits).unwrap_err(),
+            Unfit::FullView {
+                argument: "/command".into(),
+                chars: 10_000
+            }
+        );
+        // With room for nothing at all, it is simply too large.
+        let none = |_: &View| false;
+        assert!(matches!(
+            fit_arguments(&args, &["/command"], none),
+            Err(Unfit::TooLarge { .. })
+        ));
     }
 }
