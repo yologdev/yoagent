@@ -2009,3 +2009,42 @@ async fn gate_never_cuts_a_string_when_cutting_would_grow_the_call() {
     assert_eq!(omitted.as_array().unwrap().len(), 1);
     assert_eq!(omitted[0]["argument"], "/body");
 }
+
+#[tokio::test]
+async fn gate_cuts_whenever_a_cut_shrinks_the_arguments() {
+    // 96 long keys holding 480 characters each: 49.5k, over the budget. A cut
+    // to 400 shortens each by 56 characters, though its `omitted` entry (long
+    // pointer) is about as long. The budget measures the arguments, so the
+    // cuts are made and the call fits — as before the never-grow rule.
+    let args: serde_json::Map<String, serde_json::Value> = (0..96)
+        .map(|i| (format!("{i:02}_{}", "k".repeat(27)), json!("x".repeat(480))))
+        .collect();
+    let mock = gate_answers(0.1, 0.9);
+    let gate = ToolGate::new(model(&mock));
+    let decision = decide(&gate, "write_file", json!(args)).await;
+    assert!(matches!(decision, ToolDecision::Allow), "{decision:?}");
+    let (sent, omitted) = gate_saw(&mock);
+    assert!(serde_json::to_string(&sent).unwrap().chars().count() <= 48_000);
+    assert_eq!(omitted.as_array().unwrap().len(), 96);
+}
+
+#[tokio::test]
+async fn gate_reports_the_shortest_it_could_make_a_call() {
+    // Nothing long enough to cut: the denial must not claim strings were cut
+    // to 400, and reports the size it would have had to send.
+    let args: serde_json::Map<String, serde_json::Value> = (0..200)
+        .map(|i| (format!("f{i:03}"), json!("y".repeat(300))))
+        .collect();
+    let mock = gate_answers(0.1, 0.9);
+    let gate = ToolGate::new(model(&mock));
+    let decision = decide(&gate, "write_file", json!(args)).await;
+    let ToolDecision::Deny(reason) = decision else {
+        panic!("{decision:?}")
+    };
+    let whole = serde_json::to_string(&args).unwrap().chars().count();
+    assert!(
+        reason.contains(&format!("({whole} characters at the shortest")),
+        "{reason}"
+    );
+    assert_eq!(mock.request_count(), 0);
+}
