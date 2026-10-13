@@ -526,7 +526,8 @@ backend.
    with a reason asking the user to restate it.
 
 **Arguments.** A call's arguments are sent **whole when they fit**: within
-`with_max_argument_chars` (default 48,000 characters, serialized) and the
+`with_max_argument_chars` (default 48,000 characters of serialized JSON, so
+a newline counts as two) and the
 decision backend's own token limits (with fallbacks, the strictest in the
 chain, so no fallback skips the call). A full-file rewrite or a large patch is
 judged on all of it.
@@ -540,7 +541,7 @@ partial view:
 ```json
 "tool_call": {
   "tool": "write_file",
-  "arguments": { "path": "src/lib.rs", "content": "…[truncated 52310 chars]…" },
+  "arguments": { "path": "src/lib.rs", "content": "<head>\n[truncated 52310 chars]\n<tail>" },
   "omitted": [{ "argument": "/content", "chars": 52310 }]
 }
 ```
@@ -551,7 +552,7 @@ at all — a call whose full-view argument does not fit is denied without
 asking ("more than the gate can review in full"). The built-in `bash` tool's
 `/command` is one by default; add your own with
 `with_full_view(tool, json_pointer)` (a pointer to an array or object covers
-everything under it), and drop the default with `without_default_full_views()`.
+everything under it; RFC 6901, so the key `a/b` is `"/a~1b"`), and drop the default with `without_default_full_views()`.
 
 ```rust,ignore
 let gate = ToolGate::new(model)

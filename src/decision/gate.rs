@@ -64,7 +64,7 @@ const DEFAULT_REQUESTED_QUESTION: &str = "Is `tool_call` something the user aske
 /// stay whole. Arguments registered with
 /// [`with_full_view`](Self::with_full_view) — by default the built-in
 /// `bash` tool's `command` — are never shortened: a call whose full-view
-/// argument does not fit is denied ("could not review it in full"), since a
+/// argument does not fit is denied ("more than the gate can review in full"), since a
 /// dangerous line can sit anywhere in a command. A call that does not fit
 /// even with every other long string cut to 400 characters is denied too.
 /// Calls are never judged in pieces: what one piece does can depend on
@@ -189,9 +189,9 @@ impl ToolGate {
     }
 
     /// Most characters of a call's arguments, serialized, sent to the
-    /// decision model (default 48,000). Arguments over it — or over the
-    /// backend's token limits, whichever is smaller — are shortened as
-    /// described on [`ToolGate`]. A larger budget means fewer partial views,
+    /// decision model (default 48,000; JSON escapes count, so a newline is
+    /// two). Arguments over it — or whose state would exceed the backend's
+    /// token limits — are shortened as described on [`ToolGate`]. A larger budget means fewer partial views,
     /// and more input tokens (cost, latency) on large calls.
     ///
     /// Panics on 0.
@@ -203,7 +203,9 @@ impl ToolGate {
 
     /// Never shorten `argument` of `tool`: it is judged whole, or the call is
     /// denied. `argument` is a JSON pointer into the arguments (`"/command"`,
-    /// `"/edits"` for everything under it, `""` for all of them). Use it
+    /// `"/edits"` for everything under it, `""` for all of them; RFC 6901, so
+    /// a key containing `/` or `~` is written with `~1` / `~0`: the key
+    /// `a/b` is `"/a~1b"`). Use it
     /// for arguments that are executed — a script, a query, a program — and
     /// whose every line can matter. The built-in `bash` tool's `/command` is
     /// one by default ([`without_default_full_views`](Self::without_default_full_views)
@@ -329,10 +331,13 @@ impl ToolGate {
             }
         };
         if !view.omitted.is_empty() {
-            tracing::debug!(
+            let cut: usize = view.omitted.iter().map(|(_, chars)| chars).sum();
+            let arguments: Vec<&str> = view.omitted.iter().map(|(p, _)| p.as_str()).collect();
+            tracing::info!(
                 tool = call.tool_name,
-                omitted = view.omitted.len(),
-                "tool gate judges a shortened call"
+                ?arguments,
+                chars_cut = cut,
+                "tool gate judges a shortened call: it does not see the cut characters"
             );
         }
         let state = state(&user_request, call.tool_name, &view);
@@ -360,6 +365,12 @@ impl ToolGate {
                 None => true,
             };
             if denied {
+                tracing::info!(
+                    tool = call.tool_name,
+                    check = id.as_str(),
+                    p = fmt_p(p(id)),
+                    "tool gate denied a call: a check reached its threshold"
+                );
                 return ToolDecision::Deny(format!(
                     "Tool gate: check `{id}` (\"{q}\") answered {}, at or above {deny_at:.2}. \
                      Ask the user to confirm before retrying.",
@@ -378,6 +389,12 @@ impl ToolGate {
         };
         if destructive.is_none() || requested.is_none() || (looks_destructive && !clearly_requested)
         {
+            tracing::info!(
+                tool = call.tool_name,
+                destructive = fmt_p(destructive),
+                requested = fmt_p(requested),
+                "tool gate denied a call: destructive and not clearly requested"
+            );
             return ToolDecision::Deny(format!(
                 "Tool gate: this call looks destructive or irreversible (p={}) and not clearly \
                  what the user asked for (p={}). Ask the user to confirm before retrying.",

@@ -1912,3 +1912,76 @@ async fn gate_fits_the_strictest_limits_in_a_fallback_chain() {
     assert_eq!(fallback.request_count(), 1, "the fallback was asked");
     assert!(fallback.requests()[0].state["tool_call"]["omitted"].is_array());
 }
+
+#[tokio::test]
+async fn gate_fits_both_limited_members_of_a_chain() {
+    // Both members limited: the fallback's smaller limit is the one that binds.
+    let primary = MockBackend::new()
+        .push_error(DecisionError::http(503, "unavailable"))
+        .with_capabilities(
+            Capabilities::new(QuestionKind::all()).with_token_limits(None, Some(40_000)),
+        );
+    let fallback = gate_answers(0.1, 0.9).with_capabilities(
+        Capabilities::new(QuestionKind::all()).with_token_limits(Some(9_000), Some(8_000)),
+    );
+    let gate = ToolGate::new(DecisionModel::from_backend(primary, "primary").or(model(&fallback)));
+    let decision = decide(
+        &gate,
+        "write_file",
+        json!({"path": "a", "content": "w".repeat(45_000)}),
+    )
+    .await;
+    assert!(matches!(decision, ToolDecision::Allow), "{decision:?}");
+    assert_eq!(fallback.request_count(), 1, "the fallback was asked");
+    let bytes = serde_json::to_vec(&fallback.requests()[0].state)
+        .unwrap()
+        .len();
+    assert!(bytes <= 32_000, "{bytes}");
+}
+
+#[tokio::test]
+async fn gate_custom_full_views_survive_dropping_the_default() {
+    let command = format!(
+        "{}rm -rf ~\n{}",
+        "true\n".repeat(10_000),
+        "true\n".repeat(10_000)
+    );
+    for gate_of in [
+        |m| {
+            ToolGate::new(m)
+                .with_full_view("bash", "/command")
+                .without_default_full_views()
+        },
+        |m| {
+            ToolGate::new(m)
+                .without_default_full_views()
+                .with_full_view("bash", "/command")
+        },
+    ] {
+        let mock = gate_answers(0.1, 0.9);
+        let gate: ToolGate = gate_of(model(&mock));
+        let decision = decide(&gate, "bash", json!({"command": command})).await;
+        assert!(denied_with(&decision, "review in full"), "{decision:?}");
+        assert_eq!(mock.request_count(), 0);
+    }
+}
+
+#[tokio::test]
+async fn gate_denies_a_command_over_the_backends_token_limit() {
+    // Under the 48k-character budget, over a 4,000-token backend: a full view
+    // that does not fit the backend is denied too, unsent.
+    let mock = gate_answers(0.1, 0.9).with_capabilities(
+        Capabilities::new(QuestionKind::all()).with_token_limits(None, Some(4_000)),
+    );
+    let gate = ToolGate::new(model(&mock));
+    let command = format!("echo {}", "a".repeat(20_000));
+    let decision = decide(&gate, "bash", json!({"command": command})).await;
+    assert!(denied_with(&decision, "review in full"), "{decision:?}");
+    assert_eq!(mock.request_count(), 0);
+}
+
+#[tokio::test]
+#[should_panic(expected = "above 0")]
+async fn gate_budget_must_be_positive() {
+    let _ = ToolGate::new(model(&MockBackend::new())).with_max_argument_chars(0);
+}

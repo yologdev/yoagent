@@ -635,8 +635,8 @@ impl DecisionModel {
     }
 
     /// The primary's capabilities with the strictest token limits of the
-    /// whole chain: a state sized to these is sent to every member, never
-    /// skipped by one with smaller limits.
+    /// whole chain: a state sized to these is never skipped as too large by
+    /// any member that is tried.
     pub(crate) fn chain_capabilities(&self) -> Capabilities {
         let strictest = |a: Option<usize>, b: Option<usize>| match (a, b) {
             (Some(a), Some(b)) => Some(a.min(b)),
@@ -1345,5 +1345,44 @@ mod pricing_tests {
                 Some(2.0)
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod chain_tests {
+    use super::*;
+
+    fn limited(request: Option<usize>, state: Option<usize>) -> DecisionModel {
+        DecisionModel::from_backend(
+            MockBackend::new().with_capabilities(
+                Capabilities::new(QuestionKind::all()).with_token_limits(request, state),
+            ),
+            "m",
+        )
+    }
+
+    fn limits(m: &DecisionModel) -> (Option<usize>, Option<usize>) {
+        let c = m.chain_capabilities();
+        (c.max_request_tokens, c.max_state_and_question_tokens)
+    }
+
+    #[test]
+    fn chain_capabilities_take_the_strictest_limit_of_each_kind() {
+        // Alone: the model's own.
+        assert_eq!(limits(&limited(Some(10), None)), (Some(10), None));
+        // A limit beats no limit, either way round.
+        assert_eq!(
+            limits(&limited(None, None).or(limited(Some(64), Some(32)))),
+            (Some(64), Some(32))
+        );
+        assert_eq!(
+            limits(&limited(Some(64), Some(32)).or(limited(None, None))),
+            (Some(64), Some(32))
+        );
+        // Both limited: the smaller, per kind, across three members.
+        let chain = limited(Some(64), Some(40))
+            .or(limited(Some(100), Some(8)))
+            .or(limited(Some(20), None));
+        assert_eq!(limits(&chain), (Some(20), Some(8)));
     }
 }
