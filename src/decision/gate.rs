@@ -323,9 +323,11 @@ impl ToolGate {
                     "tool gate denied a call: arguments too large"
                 );
                 return ToolDecision::Deny(format!(
-                    "Tool gate: this call's arguments are too large to evaluate ({chars} \
-                     characters at the shortest the gate may make them), so it was not run. The gate fails closed; split the work into smaller calls or \
-                     ask the user."
+                    "Tool gate: this call's arguments are too large to evaluate: at the \
+                     shortest the gate may make them ({chars} characters) they exceed its \
+                     budget ({}) or the decision model's limits, so it was not run. The gate \
+                     fails closed; split the work into smaller calls or ask the user.",
+                    self.max_argument_chars
                 ));
             }
         };
@@ -459,26 +461,45 @@ fn fit_arguments(
     if fits(&whole) {
         return Ok(whole);
     }
-    let longest = longest_string(args, &mut String::new(), full_views, false);
-    if longest > MIN_KEPT_CHARS && fits(&cut(args, full_views, MIN_KEPT_CHARS)) {
-        // Binary search the largest cap that fits: `lo` fits, `hi` does not.
-        let (mut lo, mut hi) = (MIN_KEPT_CHARS, longest);
-        while hi - lo > 1 {
-            let mid = lo + (hi - lo) / 2;
-            if fits(&cut(args, full_views, mid)) {
-                lo = mid;
-            } else {
-                hi = mid;
-            }
+    // At a cap, two views: only the cuts that shrink the whole state, the
+    // `omitted` entries included (what the token limits measure), else every
+    // cut that shrinks the arguments (what the character budget measures). A
+    // marker and entry can outweigh a small cut, so neither rule is right for
+    // both limits; the first that fits wins, the first keeping more text. A
+    // call that fits only with some of the second view's extra cuts, both
+    // limits binding at once, is still denied: no search over subsets.
+    let at = |cap: usize, full_views: &[&str]| -> Option<View> {
+        let lean = cut_by(args, full_views, cap, Rule::State);
+        if fits(&lean) {
+            return Some(lean);
         }
-        return Ok(cut(args, full_views, lo));
+        let all = cut_by(args, full_views, cap, Rule::Arguments);
+        (all.omitted.len() != lean.omitted.len() && fits(&all)).then_some(all)
+    };
+    let longest = longest_string(args, &mut String::new(), full_views, false);
+    if longest > MIN_KEPT_CHARS {
+        if let Some(mut best) = at(MIN_KEPT_CHARS, full_views) {
+            // Binary search the largest cap that fits: `lo` fits, `hi` does not.
+            let (mut lo, mut hi) = (MIN_KEPT_CHARS, longest);
+            while hi - lo > 1 {
+                let mid = lo + (hi - lo) / 2;
+                match at(mid, full_views) {
+                    Some(view) => {
+                        best = view;
+                        lo = mid;
+                    }
+                    None => hi = mid,
+                }
+            }
+            return Ok(best);
+        }
     }
     // It does not fit even cut to the minimum. Blame a full-view argument when
     // cutting it too would have made it fit.
     let mut views = Vec::new();
     collect_full_views(args, &mut String::new(), full_views, false, &mut views);
     if let Some((argument, chars)) = views.into_iter().max_by_key(|&(_, chars)| chars) {
-        if chars > MIN_KEPT_CHARS && fits(&cut(args, &[], MIN_KEPT_CHARS)) {
+        if chars > MIN_KEPT_CHARS && at(MIN_KEPT_CHARS, &[]).is_some() {
             return Err(Unfit::FullView { argument, chars });
         }
     }
@@ -560,19 +581,43 @@ fn collect_full_views(
 
 /// Characters `v` takes serialized.
 fn json_chars(v: &impl serde::Serialize) -> usize {
-    serde_json::to_string(v).map_or(usize::MAX, |s| s.chars().count())
+    json_size(v).0
+}
+
+/// Characters and bytes `v` takes serialized.
+fn json_size(v: &impl serde::Serialize) -> (usize, usize) {
+    serde_json::to_string(v).map_or((usize::MAX, usize::MAX), |s| (s.chars().count(), s.len()))
 }
 
 /// `args` with every string outside `full_views` longer than `cap` cut to
 /// its head and tail — except where the cut, with its marker, would not
 /// make the arguments smaller.
 fn cut(args: &Value, full_views: &[&str], cap: usize) -> View {
+    cut_by(args, full_views, cap, Rule::Arguments)
+}
+
+/// When a cut counts as saving space.
+#[derive(Clone, Copy)]
+enum Rule {
+    /// It shrinks the serialized arguments (the character budget).
+    Arguments,
+    /// It shrinks the whole state, its `omitted` entry included (the token
+    /// limits), in characters and in bytes.
+    State,
+}
+
+/// What a first `omitted` entry adds to the state besides itself.
+const OMITTED_KEY: &str = r#","omitted":[]"#;
+
+/// [`cut`] under `rule`.
+fn cut_by(args: &Value, full_views: &[&str], cap: usize, rule: Rule) -> View {
     fn go(
         v: &Value,
         pointer: &mut String,
         full_views: &[&str],
         inherited: bool,
         cap: usize,
+        rule: Rule,
         omitted: &mut Vec<(String, usize)>,
     ) -> Value {
         let here = inherited || is_full_view(pointer, full_views);
@@ -582,14 +627,31 @@ fn cut(args: &Value, full_views: &[&str], cap: usize) -> View {
                 if len <= cap {
                     return v.clone();
                 }
-                // Only a cut that shrinks the arguments — what the budget
-                // measures: the marker can outweigh the few characters cut
-                // from a string just over `cap`. In serialized characters;
-                // every removed character is at least a byte and the marker
-                // is ASCII, so it shrinks the bytes (the token estimate) too.
+                // Only a cut that saves space under `rule`: the marker (and
+                // the `omitted` entry) can outweigh the few characters cut
+                // from a string just over `cap`. Under `Arguments`, a cut that
+                // saves characters saves bytes too (every removed character
+                // is at least a byte, the marker is ASCII); an entry's pointer
+                // need not be ASCII, so `State` checks both.
                 let chars = len - 2 * (cap / 2);
                 let shortened = truncate_middle(s, cap);
-                if json_chars(&shortened) >= json_chars(s) {
+                let (before, after) = (json_size(s), json_size(&shortened));
+                let extra = match rule {
+                    Rule::Arguments => (0, 0),
+                    Rule::State => {
+                        let entry =
+                            json_size(&json!({ "argument": pointer.as_str(), "chars": chars }));
+                        let opening = if omitted.is_empty() {
+                            OMITTED_KEY.len()
+                        } else {
+                            1
+                        };
+                        (entry.0 + opening, entry.1 + opening)
+                    }
+                };
+                if after.0.saturating_add(extra.0) >= before.0
+                    || after.1.saturating_add(extra.1) > before.1
+                {
                     return v.clone();
                 }
                 omitted.push((pointer.clone(), chars));
@@ -601,7 +663,7 @@ fn cut(args: &Value, full_views: &[&str], cap: usize) -> View {
                     .enumerate()
                     .map(|(i, item)| {
                         let len = push_segment(pointer, &i.to_string());
-                        let out = go(item, pointer, full_views, here, cap, omitted);
+                        let out = go(item, pointer, full_views, here, cap, rule, omitted);
                         pointer.truncate(len);
                         out
                     })
@@ -611,7 +673,7 @@ fn cut(args: &Value, full_views: &[&str], cap: usize) -> View {
                 map.iter()
                     .map(|(k, item)| {
                         let len = push_segment(pointer, k);
-                        let out = go(item, pointer, full_views, here, cap, omitted);
+                        let out = go(item, pointer, full_views, here, cap, rule, omitted);
                         pointer.truncate(len);
                         (k.clone(), out)
                     })
@@ -627,6 +689,7 @@ fn cut(args: &Value, full_views: &[&str], cap: usize) -> View {
         full_views,
         false,
         cap,
+        rule,
         &mut omitted,
     );
     View { arguments, omitted }
@@ -756,6 +819,38 @@ mod tests {
         let view = cut(&args, &[], 400);
         assert_eq!(view.arguments["near"], args["near"]);
         assert!(view.omitted.iter().all(|(p, _)| p != "/near"));
+    }
+
+    #[test]
+    fn a_state_rule_cut_never_grows_the_state() {
+        // Long and non-ASCII keys make the `omitted` entry outweigh a cut
+        // that shortens the arguments: under `Rule::State` it is not made.
+        let args = json!({
+            "near": "n".repeat(450),
+            "键_long_non_ascii_key_键键键键键键": "k".repeat(470),
+            "long": "l".repeat(5_000),
+            "cjk": "汉".repeat(600),
+        });
+        let whole = View {
+            arguments: args.clone(),
+            omitted: Vec::new(),
+        };
+        let size = |v: &View| json_size(&state("go", "t", v));
+        let (chars, bytes) = size(&whole);
+        for cap in [MIN_KEPT_CHARS, 420, 460, 1_000, 4_999] {
+            let view = cut_by(&args, &[], cap, Rule::State);
+            let (c, b) = size(&view);
+            assert!(
+                c <= chars && b <= bytes,
+                "cap {cap}: ({c}, {b}) > ({chars}, {bytes})"
+            );
+        }
+        // The non-ASCII key's cut shortens the arguments but not the state.
+        let lean = cut_by(&args, &[], MIN_KEPT_CHARS, Rule::State);
+        let all = cut_by(&args, &[], MIN_KEPT_CHARS, Rule::Arguments);
+        let key = "/键_long_non_ascii_key_键键键键键键";
+        assert!(all.omitted.iter().any(|(p, _)| p == key));
+        assert!(lean.omitted.iter().all(|(p, _)| p != key));
     }
 
     #[test]

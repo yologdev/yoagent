@@ -2043,8 +2043,36 @@ async fn gate_reports_the_shortest_it_could_make_a_call() {
     };
     let whole = serde_json::to_string(&args).unwrap().chars().count();
     assert!(
-        reason.contains(&format!("({whole} characters at the shortest")),
+        reason.contains(&format!(
+            "shortest the gate may make them ({whole} characters)"
+        )),
+        "{reason}"
+    );
+    assert!(
+        reason.contains("budget (48000) or the decision model's limits"),
         "{reason}"
     );
     assert_eq!(mock.request_count(), 0);
+}
+
+#[tokio::test]
+async fn gate_counts_omission_metadata_against_the_token_limit() {
+    // 100 fields of 450 characters plus a 60k body, under an 11,832-token
+    // backend limit. Cutting the fields shortens the arguments, but their
+    // `omitted` entries cost more state than the cuts save: the call fits
+    // only with the fields whole and the body cut.
+    let mut args: serde_json::Map<String, serde_json::Value> = (0..100)
+        .map(|i| (format!("f{i:03}"), json!("v".repeat(450))))
+        .collect();
+    args.insert("body".into(), json!("b".repeat(60_000)));
+    let mock = gate_answers(0.1, 0.9).with_capabilities(
+        Capabilities::new(QuestionKind::all()).with_token_limits(None, Some(11_832)),
+    );
+    let gate = ToolGate::new(model(&mock));
+    let decision = decide(&gate, "write_file", json!(args)).await;
+    assert!(matches!(decision, ToolDecision::Allow), "{decision:?}");
+    let (sent, omitted) = gate_saw(&mock);
+    assert_eq!(sent["f000"], "v".repeat(450).as_str(), "fields whole");
+    assert_eq!(omitted.as_array().unwrap().len(), 1);
+    assert_eq!(omitted[0]["argument"], "/body");
 }
