@@ -5,7 +5,7 @@ description: Use when building, extending or upgrading an agent on the yoagent R
 
 # yoagent: which feature for which job
 
-Written for **yoagent 0.25.3** (and yoagent-rutis 0.3.0); the recipes
+Written for **yoagent 0.25.4** (and yoagent-rutis 0.3.0); the recipes
 below are compiled by `tests/skill_test.rs`, line for line. Check what you
 build against: `cargo tree -p yoagent` or `Cargo.lock`. If you are on an
 older version, read [What changed](#what-changed) first.
@@ -198,6 +198,13 @@ and its examples.
 
 Newest first; the full list is `CHANGELOG.md`.
 
+- **0.25.4** — `ToolGate` (feature `decision`) sends a call's arguments
+  whole when they fit (`with_max_argument_chars`, default 48,000, and the
+  decision backend's token limits) and otherwise cuts only the longest
+  strings, listing them under `tool_call.omitted`. **Behaviour change:**
+  `bash`'s command is a full view (`with_full_view`; drop it with
+  `without_default_full_views`), so a command too large to review whole is
+  denied instead of judged from its head and tail.
 - **0.25.3** — this skill and `llms.txt` ship in the crate; no code changes.
 - **0.25.2** — MCP `HttpTransport::with_header`; `bash` kills its process
   group (Ctrl+C: see above).

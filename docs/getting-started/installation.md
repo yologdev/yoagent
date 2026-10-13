@@ -9,7 +9,7 @@
 
 ```toml
 [dependencies]
-yoagent = "0.24"
+yoagent = "0.25"
 tokio = { version = "1", features = ["full"] }
 ```
 

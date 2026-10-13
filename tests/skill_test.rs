@@ -303,6 +303,13 @@ fn prose_names() {
     #[cfg(feature = "native")]
     let _ = yoagent::tools::default_tools;
     let _ = yoagent::session::Session::new;
+    #[cfg(feature = "decision")]
+    {
+        use yoagent::decision::ToolGate;
+        let _ = |g: ToolGate| g.with_max_argument_chars(1);
+        let _ = |g: ToolGate| g.with_full_view("bash", "/command");
+        let _ = ToolGate::without_default_full_views;
+    }
     let _ = TurnDecision::Note;
     let _ = StopDecision::Continue;
     let _ = yoagent::ToolError::Cancelled;
