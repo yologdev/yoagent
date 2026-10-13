@@ -559,8 +559,17 @@ fn collect_full_views(
     });
 }
 
+/// What a first `omitted` entry adds to the state besides itself.
+const OMITTED_KEY: &str = r#","omitted":[]"#;
+
+/// Characters `v` takes serialized.
+fn json_chars(v: &impl serde::Serialize) -> usize {
+    serde_json::to_string(v).map_or(usize::MAX, |s| s.chars().count())
+}
+
 /// `args` with every string outside `full_views` longer than `cap` cut to
-/// its head and tail.
+/// its head and tail — except where the cut, with its marker and `omitted`
+/// entry, would not make the state smaller.
 fn cut(args: &Value, full_views: &[&str], cap: usize) -> View {
     fn go(
         v: &Value,
@@ -574,12 +583,28 @@ fn cut(args: &Value, full_views: &[&str], cap: usize) -> View {
         match v {
             Value::String(s) if !here => {
                 let len = s.chars().count();
-                if len > cap {
-                    omitted.push((pointer.clone(), len - 2 * (cap / 2)));
-                    Value::String(truncate_middle(s, cap))
-                } else {
-                    v.clone()
+                if len <= cap {
+                    return v.clone();
                 }
+                // Only a cut that shrinks the state: the marker and the
+                // `omitted` entry (the first one also opens the list) can
+                // outweigh the few characters cut from a string just over
+                // `cap`. Measured in serialized characters; the marker is
+                // ASCII, so a cut that saves characters saves bytes too.
+                let chars = len - 2 * (cap / 2);
+                let shortened = truncate_middle(s, cap);
+                let entry = json!({ "argument": pointer.as_str(), "chars": chars });
+                let entry_cost = json_chars(&entry)
+                    + if omitted.is_empty() {
+                        OMITTED_KEY.len()
+                    } else {
+                        1 // the comma before it
+                    };
+                if json_chars(&shortened).saturating_add(entry_cost) >= json_chars(s) {
+                    return v.clone();
+                }
+                omitted.push((pointer.clone(), chars));
+                Value::String(shortened)
             }
             Value::Array(items) => Value::Array(
                 items
@@ -712,6 +737,38 @@ mod tests {
         assert_eq!(view.omitted[0].0, "/long");
         let len = serde_json::to_string(&view.arguments).unwrap().len();
         assert!((2_900..=3_000).contains(&len), "{len}");
+    }
+
+    #[test]
+    fn a_cut_never_grows_the_state() {
+        // Strings around the cap (where the marker and entry outweigh the
+        // cut), escapes that shrink when cut, and non-ASCII text.
+        let args = json!({
+            "near": "n".repeat(401),
+            "escaped": "\n".repeat(600),
+            "cjk": "汉".repeat(450),
+            "long": "l".repeat(5_000),
+            "nested": [{"deep": "d".repeat(430)}],
+        });
+        let whole = View {
+            arguments: args.clone(),
+            omitted: Vec::new(),
+        };
+        let full = json_chars(&state("go", "t", &whole));
+        for cap in [MIN_KEPT_CHARS, 401, 420, 450, 1_000, 4_999] {
+            let view = cut(&args, &[], cap);
+            let size = json_chars(&state("go", "t", &view));
+            assert!(size <= full, "cap {cap}: {size} > {full}");
+            // Every listed cut really happened, and only those.
+            for (pointer, _) in &view.omitted {
+                let shown = view.arguments.pointer(pointer).unwrap().as_str().unwrap();
+                assert!(shown.contains("[truncated "), "{pointer}");
+            }
+        }
+        // Just over the cap: left whole, not listed.
+        let view = cut(&args, &[], 400);
+        assert_eq!(view.arguments["near"], args["near"]);
+        assert!(view.omitted.iter().all(|(p, _)| p != "/near"));
     }
 
     #[test]

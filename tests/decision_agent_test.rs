@@ -1985,3 +1985,27 @@ async fn gate_denies_a_command_over_the_backends_token_limit() {
 async fn gate_budget_must_be_positive() {
     let _ = ToolGate::new(model(&MockBackend::new())).with_max_argument_chars(0);
 }
+
+#[tokio::test]
+async fn gate_never_cuts_a_string_when_cutting_would_grow_the_call() {
+    // 111 fields just over the 400-character minimum, plus a 60k body. Cutting
+    // a 401-character field adds a marker and an `omitted` entry — it grows.
+    // Those fields must stay whole and the body take the cut; cutting them
+    // all to 400 overshoots the budget and would deny a call that fits.
+    let mut args: serde_json::Map<String, serde_json::Value> = (0..111)
+        .map(|i| (format!("f{i:03}"), json!("v".repeat(401))))
+        .collect();
+    args.insert("body".into(), json!("b".repeat(60_000)));
+    let mock = gate_answers(0.1, 0.9);
+    let gate = ToolGate::new(model(&mock));
+    let decision = decide(&gate, "write_file", json!(args)).await;
+    assert!(matches!(decision, ToolDecision::Allow), "{decision:?}");
+    let (sent, omitted) = gate_saw(&mock);
+    assert_eq!(
+        sent["f000"],
+        "v".repeat(401).as_str(),
+        "short fields stay whole"
+    );
+    assert_eq!(omitted.as_array().unwrap().len(), 1);
+    assert_eq!(omitted[0]["argument"], "/body");
+}
