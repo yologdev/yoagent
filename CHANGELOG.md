@@ -13,7 +13,7 @@ adheres to [Semantic Versioning](https://semver.org/).
   `handoff_agent` and `minimal_browser` examples moved, with their history, to
   [yobuild](https://github.com/yologdev/yobuild), and
   `scripts/try-coding-agent.sh` and `scripts/try-handoff.sh` with them (stubs
-  here say where); which builds them on
+  here say where). yobuild builds them on
   yoagent and yoagent-rutis from crates.io. It was never published; its
   unreleased notes went with it. yoagent stays a loop library.
 
