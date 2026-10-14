@@ -25,7 +25,6 @@ jobs:
     outputs:
       workers: ${{ steps.paths.outputs.workers }}
       rutis: ${{ steps.paths.outputs.rutis }}
-      frontend: ${{ steps.paths.outputs.frontend }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -37,7 +36,7 @@ jobs:
         run: |
           if [ "$EVENT" != pull_request ]; then
             echo "not a pull request: every integration job runs"
-            for c in workers rutis frontend; do echo "$c=true" >> "$GITHUB_OUTPUT"; done
+            for c in workers rutis; do echo "$c=true" >> "$GITHUB_OUTPUT"; done
             exit 0
           fi
           changed=$(git diff --name-only "$BASE"...HEAD)
@@ -48,8 +47,6 @@ jobs:
           out() { if touches "$2"; then echo "$1=true"; else echo "$1=false"; fi >> "$GITHUB_OUTPUT"; }
           out workers "$core|^integrations/yoagent-workers/"
           out rutis "$core|^integrations/yoagent-rutis/"
-          # The frontend's tests and example load the rutis plugins and adapters.
-          out frontend "$core|^integrations/yoagent-(rutis|frontend)/"
           cat "$GITHUB_OUTPUT"
 
   check:
@@ -385,80 +382,6 @@ jobs:
         run: cargo run --manifest-path "$MANIFEST" --features node,python --example language_plugins
       - name: pi extensions example (scripted, the fixture extension)
         run: cargo run --manifest-path "$MANIFEST" --features node --example pi_extensions
-
-  # EXPERIMENTAL: integrations/yoagent-frontend (not published). The session
-  # and web tests need no Node; pi_dialog_test needs pi's packages (required
-  # here). The example runs headless with three Node runtimes (the UI's, pi's
-  # and DSH's packages) and checks that a pi extension's question reached the
-  # terminal frontend and blocked `bash`.
-  frontend-experimental:
-    name: yoagent-frontend (experimental)
-    needs: changes
-    if: needs.changes.outputs.frontend == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      MANIFEST: integrations/yoagent-frontend/Cargo.toml
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: integrations/yoagent-frontend
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: |
-            integrations/yoagent-frontend/plugins/package-lock.json
-            integrations/yoagent-rutis/plugins/dsh/package-lock.json
-            integrations/yoagent-rutis/plugins/pi/package-lock.json
-      - name: Install the npm packages
-        run: |
-          npm ci --prefix integrations/yoagent-frontend/plugins
-          npm ci --prefix integrations/yoagent-rutis/plugins/pi
-          npm ci --prefix integrations/yoagent-rutis/plugins/dsh
-      - name: Format
-        run: cargo fmt --manifest-path "$MANIFEST" -- --check
-      - name: Clippy
-        run: cargo clippy --manifest-path "$MANIFEST" --all-targets
-      - name: Docs
-        run: RUSTDOCFLAGS="-Dwarnings" cargo doc --manifest-path "$MANIFEST" --no-deps
-      - name: Test (pi's dialogs through the session need the runtimes)
-        run: YOAGENT_RUTIS_REQUIRE_RUNTIMES=1 cargo test --manifest-path "$MANIFEST"
-      - name: Page logic and the approval gate (node --test)
-        run: node --test integrations/yoagent-frontend/web/lib.test.js integrations/yoagent-frontend/plugins/pi-extensions/confirm-dangerous.test.mjs
-      - name: Example (scripted, headless; a pi dialog reaches the terminal UI)
-        shell: bash
-        timeout-minutes: 5
-        run: |
-          mkdir -p "$RUNNER_TEMP/frontend-project" && cd "$RUNNER_TEMP/frontend-project"
-          cargo run --manifest-path "$GITHUB_WORKSPACE/$MANIFEST" --example coding_agent -- --demo "clean the build" \
-            | sed 's/\x1b\[[0-9;]*m//g' | tee screen.txt
-          grep -q "? Run \`rm -rf build\`?" screen.txt
-          grep -q "bash ✗" screen.txt
-      # The real terminal mode, on a pseudo-terminal: the headless demo never
-      # reads the keyboard, so it cannot see a UI runtime the OS stops for
-      # touching the terminal from a process group of its own (rutis 0.9).
-      - name: Example (scripted, on a pseudo-terminal; the keyboard reaches the UI)
-        shell: bash
-        timeout-minutes: 5
-        run: |
-          mkdir -p "$RUNNER_TEMP/pty-project" && cd "$RUNNER_TEMP/pty-project"
-          cargo build --manifest-path "$GITHUB_WORKSPACE/$MANIFEST" --example coding_agent
-          python3 "$GITHUB_WORKSPACE/integrations/yoagent-frontend/tests/terminal_pty.py" \
-            "$GITHUB_WORKSPACE/integrations/yoagent-frontend/target/debug/examples/coding_agent"
-      - name: Handoff example (scripted; asks without waiting, the answer starts the next run)
-        shell: bash
-        timeout-minutes: 5
-        run: |
-          mkdir -p "$RUNNER_TEMP/handoff-project" && cd "$RUNNER_TEMP/handoff-project"
-          git init -q && git -c user.email=ci@ci -c user.name=ci commit -q --allow-empty -m start
-          # The example checks its own outcome and exits non-zero on a regression.
-          cargo run --manifest-path "$GITHUB_WORKSPACE/$MANIFEST" --example handoff_agent -- --demo | tee out.txt
-          grep -q "ok: asked without waiting, answered later, wrote notes.md, two reports" out.txt
 
   # yoagent claims to be a tested GASP-conformant runtime — this job is the
   # test: emit an agent repo with the gasp bridge (mock provider, no network)

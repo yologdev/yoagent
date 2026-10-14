@@ -12,7 +12,7 @@
 //        (the report again from earlier raw results: no installs, no probe)
 //
 // Needs Node 22.19+, npm, cargo, and `npm ci` in the adapters' directories
-// (scripts/try-coding-agent.sh --setup-only does it). Network: npm (search,
+// (integrations/yoagent-rutis/plugins/pi and plugins/dsh). Network: npm (search,
 // installs) and, when not cached, crates.io for building the probe.
 //
 // An error of this harness (a failed resolve, a check that did not report)

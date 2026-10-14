@@ -207,8 +207,8 @@ over; commands and UI don't. An extension that hooks something the adapter can't
 refused, not half-run. How the 20 most-downloaded packages of each ecosystem fare (by monthly
 downloads, among npm's first 1000 search results per keyword), measured:
 [plugin compatibility](https://yologdev.github.io/yoagent/evals/plugin-compatibility.html).
-`scripts/try-coding-agent.sh` serves a coding agent with pi and DSH plugins for your browser;
-`scripts/try-handoff.sh "<task>"` hands a task to an agent that asks without waiting and reports back.
+Agents built this way — a coding agent with pi and DSH plugins in your browser, a handoff agent
+that asks without waiting and reports back — live in [yobuild](https://github.com/yologdev/yobuild).
 
 ## Runs where agents run
 

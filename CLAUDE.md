@@ -28,7 +28,7 @@ by default, and some targets exist only behind them: `gasp_emit` and
 will reject. This is not hypothetical — a breaking change to `CostConfig`
 passed local clippy while `llm_compaction_live` no longer compiled.
 
-CI (`RUSTFLAGS="-Dwarnings"`) treats all clippy warnings as errors. On a PR, the integration crates' jobs (`yoagent-workers`, the three `yoagent-rutis` jobs, `yoagent-frontend`) run only when the PR touches that crate (the frontend also follows `yoagent-rutis`), `src/`, `Cargo.toml`/`Cargo.lock`, `.cargo/` or `.github/` — decided by the `changes` job; pushes to main/release run them all. Each integration crate keeps its own notes in a `CLAUDE.md` in its folder. Integration tests in `tests/integration_anthropic.rs` require a live API key and are skipped by default.
+CI (`RUSTFLAGS="-Dwarnings"`) treats all clippy warnings as errors. On a PR, the integration crates' jobs (`yoagent-workers`, the three `yoagent-rutis` jobs) run only when the PR touches that crate, `src/`, `Cargo.toml`/`Cargo.lock`, `.cargo/` or `.github/` — decided by the `changes` job; pushes to main/release run them all. Each integration crate keeps its own notes in a `CLAUDE.md` in its folder. Integration tests in `tests/integration_anthropic.rs` require a live API key and are skipped by default.
 
 ## Architecture
 
@@ -102,9 +102,9 @@ Cloudflare Workers bindings (`env.AI` → Clef `AiBackend`), wasm32-only, publis
 
 yoagent agents extended at runtime by rutis plugins (Rust, TypeScript, Python), as one `Extension`; the DSH and pi adapters live under its `plugins/`. Published as `yoagent-rutis`. yoagent's core must never depend on rutis. Details: `integrations/yoagent-rutis/CLAUDE.md`.
 
-### Frontend layer (`integrations/yoagent-frontend/`, EXPERIMENTAL, separate crate)
+### Frontend (moved)
 
-`publish = false`: a `Session`/`Driver` pair, a frontend protocol, a web server and a `PluginHost`, for terminal and browser frontends. Details: `integrations/yoagent-frontend/CLAUDE.md`.
+The frontend layer (`Session`/`Driver`, the frontend protocol, web server and `PluginHost`) and the `coding_agent` / `handoff_agent` examples moved to [yobuild](https://github.com/yologdev/yobuild), which depends on yoagent and yoagent-rutis from crates.io. yoagent keeps no frontend.
 
 ### OpenAPI Integration (`openapi/`, feature-gated)
 
