@@ -12,4 +12,5 @@ crates.io.
 | `scripts/try-coding-agent.sh`, `scripts/try-handoff.sh` | [`scripts/`](https://github.com/yologdev/yobuild/tree/main/scripts) |
 | `integrations/yoagent-frontend/plugins/pi-extensions/confirm-dangerous.ts` | [`frontend/plugins/pi-extensions/`](https://github.com/yologdev/yobuild/tree/main/frontend/plugins/pi-extensions) |
 
-The last version here is at [`7ca9590`](https://github.com/yologdev/yoagent/tree/7ca9590/integrations/yoagent-frontend).
+The three examples' old file paths keep a one-line pointer to their new
+home. Other files' old links 404; the last version here is at [`7ca9590`](https://github.com/yologdev/yoagent/tree/7ca9590/integrations/yoagent-frontend).
