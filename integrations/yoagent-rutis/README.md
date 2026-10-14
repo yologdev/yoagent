@@ -334,7 +334,7 @@ only for plugins that need them. Attachments, the credentials file
 (`.credentials.yaml`, mode 600) and skills live under `DSH_HOME`, else
 `~/.dsh`, and skills also under `DSH_AGENTS_HOME`, else `~/.agents`: **give
 the runtime homes of the host's own** (rutis's `Launcher::env`;
-yoagent-frontend's `PluginHostBuilder::env` and `DshHome`) unless the
+yobuild's frontend: `PluginHostBuilder::env` and `DshHome`) unless the
 plugins should see the user's DSH keys and skills. That keeps those
 directories out, not everything: the runtime inherits the host's
 environment, which DSH's credentials service reads first (an API key there
@@ -363,9 +363,9 @@ start headless in a `DSH_HOME` of their own.
 **Asking the user.** On its own, a dsh tool call the adapter makes cannot
 reach a person: an `ask` from a dsh tool policy is denied, and
 `ask_user_question` (`@deepseek-ai/dsh-tool-ask-user`) finds no answerer.
-With a host that provides a `ui` service (yoagent-frontend does), load
+With a host that provides a `ui` service ([yobuild](https://github.com/yologdev/yobuild)'s frontend does), load
 [`plugins/dsh/host-dialogs.ts`](plugins/dsh/host-dialogs.ts) in the same
-runtime **and share `ui` in the loader's catalog** (yoagent-frontend's
+runtime **and share `ui` in the loader's catalog** (yobuild's frontend,
 `PluginHost`: `.share(services::UI)`). It is a plain Cordis plugin that
 injects `ui` (and `yoagent`, for the host's log), so without a shared `ui`
 it never starts:

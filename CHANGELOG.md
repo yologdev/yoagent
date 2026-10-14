@@ -9,10 +9,11 @@ adheres to [Semantic Versioning](https://semver.org/).
 ### yoagent-frontend moved to yobuild
 
 - The experimental frontend (`integrations/yoagent-frontend`: sessions, the
-  browser, phone and terminal UIs, the plugin host), its `coding_agent`,
-  `handoff_agent` and `minimal_browser` examples, and `scripts/try-coding-agent.sh`
-  and `scripts/try-handoff.sh` moved, with their history, to
-  [yobuild](https://github.com/yologdev/yobuild), which builds them on
+  browser, phone and terminal UIs, the plugin host) and its `coding_agent`,
+  `handoff_agent` and `minimal_browser` examples moved, with their history, to
+  [yobuild](https://github.com/yologdev/yobuild), and
+  `scripts/try-coding-agent.sh` and `scripts/try-handoff.sh` with them (stubs
+  here say where); which builds them on
   yoagent and yoagent-rutis from crates.io. It was never published; its
   unreleased notes went with it. yoagent stays a loop library.
 
