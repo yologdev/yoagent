@@ -126,6 +126,10 @@ impl AgentTool for SearchTool {
 
         let mut cmd = Command::new(&cmd_name);
         cmd.args(&args);
+        // `--no-config` covers ripgrep; for grep, the old `GREP_OPTIONS`
+        // (ignored by current GNU and BSD grep) is cleared all the same.
+        cmd.env_remove("RIPGREP_CONFIG_PATH");
+        cmd.env_remove("GREP_OPTIONS");
         // `spawn` inherits stdin; the search never needs it.
         cmd.stdin(std::process::Stdio::null());
         cmd.stdout(std::process::Stdio::piped());
@@ -263,7 +267,16 @@ fn build_rg_args(
     include: Option<&str>,
     case_sensitive: bool,
 ) -> (String, Vec<String>) {
-    let mut args = vec!["--line-number".into(), "--no-heading".into()];
+    // `--no-config`: a user's `RIPGREP_CONFIG_PATH` must not reach the tool.
+    // It could change the `path:line:text` output everything here reads
+    // (`--no-filename`, `--json`, `--color=always`), walk out of
+    // `allowed_paths` through a symlink (`--follow`), or run a program on
+    // every file searched (`--pre`).
+    let mut args = vec![
+        "--no-config".into(),
+        "--line-number".into(),
+        "--no-heading".into(),
+    ];
 
     if !case_sensitive {
         args.push("--ignore-case".into());
@@ -317,6 +330,9 @@ mod tests {
         let (_, rg) = build_rg_args("--pre=sh", "-x", Some("*.rs"), false);
         assert_eq!(rg[rg.len() - 3..], ["--regexp=--pre=sh", "--", "-x"]);
         assert!(rg.contains(&"--glob=*.rs".to_string()));
+
+        // A user's ripgrep config never applies (#315).
+        assert_eq!(rg[0], "--no-config");
 
         let (_, grep) = build_grep_args("--pre=sh", "-x", Some("*.rs"), false);
         assert_eq!(grep[grep.len() - 4..], ["-e", "--pre=sh", "--", "-x"]);

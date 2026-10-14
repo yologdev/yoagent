@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### yoagent
+
+- **`search` ignores the user's ripgrep config** ([#315](https://github.com/yologdev/yoagent/issues/315), reported by yoyo). The tool passes `--no-config` to `rg` and clears `RIPGREP_CONFIG_PATH` and `GREP_OPTIONS` for its child. A `RIPGREP_CONFIG_PATH` used to reach every search the agent ran. It could change the `path:line:text` output that the tool and its consumers read (`--no-filename` left a bare `1:…` with no path), and with `--follow` it could walk out of `SearchTool::with_allowed_paths` through a symlink and return a file from outside it. A config's `--pre` would also run a program on every file searched. Your ripgrep settings still apply to `rg` run through `bash`; they no longer apply inside the agent's `search` tool.
+
 ### yoagent-frontend moved to yobuild
 
 - The experimental frontend (`integrations/yoagent-frontend`: sessions, the

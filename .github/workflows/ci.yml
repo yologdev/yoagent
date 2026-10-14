@@ -74,6 +74,14 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features
 
+      - name: Install ripgrep
+        # tests/search_config_test.rs runs the search tool against a real `rg`
+        # (a user's ripgrep config must not reach it, #315); under CI it fails
+        # rather than skips when `rg` is missing.
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then brew install ripgrep; else sudo apt-get install -y ripgrep; fi
+          rg --version
+
       - name: Test
         run: cargo test --all-features
 
