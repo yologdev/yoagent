@@ -20,8 +20,11 @@ fn rg_installed() -> bool {
 #[tokio::test]
 async fn a_ripgrep_config_cannot_change_the_output_or_escape_allowed_paths() {
     if !rg_installed() {
-        // CI installs ripgrep for this test; elsewhere it is optional.
-        assert!(std::env::var_os("CI").is_none(), "CI must install ripgrep");
+        // CI's main test jobs install ripgrep and set this; elsewhere optional.
+        assert!(
+            std::env::var_os("YOAGENT_REQUIRE_RG").is_none(),
+            "YOAGENT_REQUIRE_RG is set but ripgrep is not installed"
+        );
         eprintln!("skipped: ripgrep is not installed (the grep fallback reads no config)");
         return;
     }
