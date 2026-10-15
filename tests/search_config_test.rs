@@ -25,7 +25,7 @@ async fn a_ripgrep_config_cannot_change_the_output_or_escape_allowed_paths() {
             std::env::var_os("YOAGENT_REQUIRE_RG").is_none(),
             "YOAGENT_REQUIRE_RG is set but ripgrep is not installed"
         );
-        eprintln!("skipped: ripgrep is not installed (the grep fallback reads no config)");
+        eprintln!("skipped: ripgrep is not installed (tests/search_engine_test.rs covers grep)");
         return;
     }
     let dir = tempfile::tempdir().unwrap();
@@ -39,6 +39,20 @@ async fn a_ripgrep_config_cannot_change_the_output_or_escape_allowed_paths() {
     // Strips file names from the output and follows symlinks out of `ok/`.
     let rc = root.join("ripgreprc");
     std::fs::write(&rc, "--no-filename\n--follow\n").unwrap();
+    // Canary: the config really bites, so a clean result below means the
+    // tool kept it out, not that this ripgrep ignores it.
+    let raw = std::process::Command::new("rg")
+        .args(["--line-number", "--no-heading", "--regexp=TOKEN", "--"])
+        .arg(&ok)
+        .env("RIPGREP_CONFIG_PATH", &rc)
+        .output()
+        .unwrap();
+    let raw = String::from_utf8_lossy(&raw.stdout);
+    assert!(
+        raw.contains("1:TOKEN=secret"),
+        "the fixture no longer bites: {raw}"
+    );
+
     // SAFETY: this binary holds one test; nothing else reads the environment.
     unsafe { std::env::set_var("RIPGREP_CONFIG_PATH", &rc) };
 
@@ -49,6 +63,7 @@ async fn a_ripgrep_config_cannot_change_the_output_or_escape_allowed_paths() {
         .execute(serde_json::json!({"pattern": "TOKEN"}), ctx())
         .await
         .unwrap();
+    assert_eq!(result.details["engine"], "rg", "the search ran grep");
     let Content::Text { text } = &result.content[0] else {
         panic!("expected text")
     };

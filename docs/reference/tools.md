@@ -134,6 +134,14 @@ matches found elsewhere are still returned, followed by the tool's stderr under 
 (`details.warnings` holds the same text, capped at 2,000 characters, or `null`); only a search
 that found nothing and hit an error fails.
 
+The tool uses ripgrep when an `rg` is on `PATH` (looked up directly, no `which` needed) and
+`grep -r` otherwise; `details.engine` says which ran. Your own options never reach it: `rg` runs
+with `--no-config`, and `RIPGREP_CONFIG_PATH` and `GREP_OPTIONS` are cleared, so neither can change
+the `path:line:text` output or follow a symlink out of `allowed_paths`. They still apply to `rg` or
+`grep` run through `bash`. A search that ends abnormally (killed by a signal, an unexpected exit
+code, an unreadable output) is an error when it found nothing, and its matches carry a warning
+otherwise: it never reads as "No matches".
+
 ## SharedStateTool
 
 Read and write named variables in a shared key-value store. This tool is **not** included in `default_tools()` — it is automatically injected into sub-agents when you call `SubAgentTool::with_shared_state()`, or into the agent itself with `Agent::with_shared_state()`. Unlike the tools above it also works on wasm32.

@@ -118,16 +118,20 @@ impl AgentTool for SearchTool {
             .into_owned();
 
         // Try ripgrep first, fall back to grep
-        let (cmd_name, args) = if which_exists("rg") {
+        let (cmd_name, args) = if on_path("rg") {
             build_rg_args(pattern, &io_path, include, case_sensitive)
         } else {
+            tracing::debug!("search: no rg on PATH, using grep");
             build_grep_args(pattern, &io_path, include, case_sensitive)
         };
 
         let mut cmd = Command::new(&cmd_name);
         cmd.args(&args);
-        // `--no-config` covers ripgrep; for grep, the old `GREP_OPTIONS`
-        // (ignored by current GNU and BSD grep) is cleared all the same.
+        // A user's options must not reach the search (#315): `--no-config`
+        // covers ripgrep, and its variable is cleared too. BSD grep — the
+        // fallback on macOS, which ships no rg — still honours `GREP_OPTIONS`
+        // (`-h` drops the paths, `-S` follows symlinks out of
+        // `allowed_paths`); GNU grep ignores it since 3.6.
         cmd.env_remove("RIPGREP_CONFIG_PATH");
         cmd.env_remove("GREP_OPTIONS");
         // `spawn` inherits stdin; the search never needs it.
@@ -155,8 +159,19 @@ impl AgentTool for SearchTool {
                 let mut reader = tokio::io::BufReader::new(child_out);
                 let mut lines = Vec::new();
                 let mut more = false;
+                let mut read_error = None;
                 let mut line = Vec::new();
-                while matches!(reader.read_until(b'\n', &mut line).await, Ok(n) if n > 0) {
+                loop {
+                    match reader.read_until(b'\n', &mut line).await {
+                        Ok(0) => break,
+                        Ok(_) => {}
+                        // Not the end of the output: what was read so far is
+                        // not the whole answer.
+                        Err(e) => {
+                            read_error = Some(e.to_string());
+                            break;
+                        }
+                    }
                     if lines.len() == max {
                         more = true;
                         break;
@@ -164,7 +179,7 @@ impl AgentTool for SearchTool {
                     lines.push(String::from_utf8_lossy(&line).trim_end().to_string());
                     line.clear();
                 }
-                (lines, more)
+                (lines, more, read_error)
             };
             let read_errors = async {
                 let mut buf = Vec::new();
@@ -183,11 +198,11 @@ impl AgentTool for SearchTool {
                 }
                 found
             };
-            let ((lines, more), stderr) = tokio::join!(read_and_stop, read_errors);
-            (lines, more, stderr, child.wait().await)
+            let ((lines, more, read_error), stderr) = tokio::join!(read_and_stop, read_errors);
+            (lines, more, read_error, stderr, child.wait().await)
         };
 
-        let (lines, more, stderr, status) = tokio::select! {
+        let (lines, more, read_error, mut stderr, status) = tokio::select! {
             _ = cancel.cancelled() => {
                 return Err(ToolError::Cancelled);
             }
@@ -204,8 +219,21 @@ impl AgentTool for SearchTool {
         // (permission denied, a broken symlink, a file removed mid-walk), even
         // with matches found: those matches are the answer, with the errors
         // as warnings. Only a search with nothing to show is a failure.
-        let errored =
-            !more && (status.code() == Some(2) || (!stderr.is_empty() && status.code() != Some(1)));
+        // Any other ending — another exit code, a signal (`code()` is
+        // `None`), a read error — is a failure too, never "No matches".
+        let clean = matches!(status.code(), Some(0) | Some(1));
+        let errored = !more
+            && (!clean || read_error.is_some() || (!stderr.is_empty() && status.code() != Some(1)));
+        if errored && stderr.trim().is_empty() {
+            stderr = match &read_error {
+                Some(e) => {
+                    format!("reading the search's output failed ({e}); results may be incomplete")
+                }
+                None => {
+                    format!("the search ended abnormally ({status}); results may be incomplete")
+                }
+            };
+        }
         if errored && lines.is_empty() {
             return Err(ToolError::Failed(format!("Search error: {}", stderr)));
         }
@@ -224,7 +252,7 @@ impl AgentTool for SearchTool {
                 content: vec![Content::Text {
                     text: format!("No matches found for '{}'", pattern),
                 }],
-                details: serde_json::json!({ "matches": 0 }),
+                details: serde_json::json!({ "matches": 0, "engine": cmd_name }),
             });
         }
 
@@ -248,17 +276,31 @@ impl AgentTool for SearchTool {
                 "matches": shown,
                 "truncated": more,
                 "warnings": warnings,
+                "engine": cmd_name,
             }),
         })
     }
 }
 
-fn which_exists(name: &str) -> bool {
-    std::process::Command::new("which")
-        .arg(name)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+/// Whether an executable `name` is on `PATH`. Looked up here rather than by
+/// running `which`, which minimal containers lack: the search then fell back
+/// to grep with rg installed, and said nothing.
+fn on_path(name: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| is_executable(&dir.join(name)))
+}
+
+#[cfg(unix)]
+fn is_executable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &std::path::Path) -> bool {
+    path.is_file() || path.with_extension("exe").is_file()
 }
 
 fn build_rg_args(
