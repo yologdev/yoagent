@@ -79,7 +79,7 @@ jobs:
         # (a user's ripgrep config must not reach it, #315). With
         # YOAGENT_REQUIRE_RG set below it fails rather than skips without `rg`.
         run: |
-          if [ "$RUNNER_OS" = macOS ]; then brew install ripgrep; else sudo apt-get install -y ripgrep; fi
+          if [ "$RUNNER_OS" = macOS ]; then brew install ripgrep; else sudo apt-get update -q && sudo apt-get install -y ripgrep; fi
           rg --version
 
       - name: Test
