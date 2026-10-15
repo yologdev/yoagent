@@ -5,7 +5,7 @@ description: Use when building, extending or upgrading an agent on the yoagent R
 
 # yoagent: which feature for which job
 
-Written for **yoagent 0.25.4** (and yoagent-rutis 0.3.0); the recipes
+Written for **yoagent 0.25.5** (and yoagent-rutis 0.3.0); the recipes
 below are compiled by `tests/skill_test.rs`, line for line. Check what you
 build against: `cargo tree -p yoagent` or `Cargo.lock`. If you are on an
 older version, read [What changed](#what-changed) first.
@@ -198,6 +198,12 @@ and its examples.
 
 Newest first; the full list is `CHANGELOG.md`.
 
+- **0.25.5** — the built-in `search` tool ignores the user's ripgrep
+  config (`--no-config`) and `GREP_OPTIONS`, finds `rg` without `which`
+  (`details.engine` says `"rg"` or `"grep"`), and reports a search that
+  ended abnormally as an error, never as "No matches". The experimental
+  frontend and its examples moved to
+  [yobuild](https://github.com/yologdev/yobuild).
 - **0.25.4** — `ToolGate` (feature `decision`) sends a call's arguments
   whole when they fit (`with_max_argument_chars`, default 48,000, and the
   decision backend's token limits) and otherwise cuts only the longest
