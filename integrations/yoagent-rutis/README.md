@@ -303,6 +303,27 @@ The end-to-end tests cover local Node and Python runtimes; a remote node over
 
 ## Tools from other agent ecosystems
 
+The adapters below ship in the crate (`plugins/pi`, `plugins/dsh`,
+`plugins/yoagent.d.ts`, without `node_modules`), and
+`yoagent_rutis::adapters::adapters()` says where they are: the crate's own
+files, where it was built (cargo's registry or a path dependency). Copy
+them and run `npm ci` in the copy; never install into the registry's.
+
+With the `probe` feature, `yoagent_rutis::probe` loads a pi or DSH package
+through its adapter and reports what an agent gets — tools, prompt
+additions, the DSH services it needs and whether they exist, skills, and
+what the plugin logged — without calling a tool or a model (loading runs
+the package's code, as its own host would):
+
+```rust,no_run
+# async fn check() {
+use yoagent_rutis::probe;
+let cwd = std::path::Path::new("/path/to/project");
+let report = probe::pi(cwd, &["/path/to/extension.ts".into()], &[], None).await;
+println!("{:?} {:?}", report.loaded, report.tools);
+# }
+```
+
 ### dsh (DeepSeek Harness) tool plugins
 
 dsh plugins are Cordis plugins, and rutis's Node runtime runs them
@@ -552,7 +573,7 @@ downloads, among npm's first 1000 search results) load through these
 adapters is measured in
 [plugin compatibility](../../docs/evals/plugin-compatibility.md)
 (`scripts/ecosystem-matrix.mjs`, which runs `examples/ecosystem_probe.rs`
-per package).
+— `yoagent_rutis::probe` on the command line — per package).
 
 The point is that **a plugin's safety policy never silently stops
 applying**. Not every rule arises for every adapter: the DSH adapter maps

@@ -4,6 +4,13 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### yoagent-rutis (0.4.0)
+
+- **`yoagent_rutis::adapters`: where the pi and DSH adapters are.** `adapters()` returns the folders of the adapter files the crate ships (`plugins/pi`, `plugins/dsh`, `plugins/yoagent.d.ts`), so a host can copy them and `npm ci` the copy instead of keeping its own copy of them in step with the crate's.
+- **`yoagent_rutis::probe` (feature `probe`): vet a plugin package without running it as an agent.** `probe::pi` and `probe::dsh` load a pi extension or DSH plugin rows through the adapter, as an agent would, and report what an agent gets — tools, prompt additions, which DSH services it needs and whether they exist, skills, and what the plugin logged — without calling a tool or a model. It is what `examples/ecosystem_probe.rs` (the compatibility matrix's probe) ran; the example now calls it. The feature adds `rutis-loader`, `tempfile` and `tracing-subscriber`; the default build is unchanged. A DSH report's rows are now only the plugin's (the host-service rows of the base were listed too).
+
 ## 0.25.5 (2026-10-16)
 
 ### yoagent

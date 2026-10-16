@@ -30,9 +30,10 @@
 //! can return images in tool results and write logs into the host's
 //! `tracing` output (target `yoagent_rutis::plugin`). Plugins from other
 //! agent ecosystems — DSH tool plugins, pi extensions — plug in through
-//! adapters shipped in the repository's `plugins/` directory;
-//! see the [README](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis)
-//! and its adapter contract.
+//! adapters shipped in the crate's `plugins/` directory ([`adapters`] says
+//! where); see the [README](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis)
+//! and its adapter contract. With the `probe` feature, `probe` loads such a
+//! package through its adapter and reports what an agent gets from it.
 //!
 //! # Host
 //!
@@ -142,6 +143,7 @@
 //! - **Route rutis's `ErrorSink`** (default: stderr) into your logging with
 //!   `Ctx::root_with_sink`.
 
+pub mod adapters;
 pub mod bridge;
 pub mod events;
 pub mod extension;
@@ -166,6 +168,9 @@ mod host;
 )]
 pub mod languages;
 pub mod plugin;
+#[cfg(feature = "probe")]
+#[cfg_attr(docsrs, doc(cfg(feature = "probe")))]
+pub mod probe;
 pub mod registry;
 
 pub use bridge::RutisBridge;

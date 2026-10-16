@@ -316,7 +316,7 @@ jobs:
       - name: Check
         run: cargo check --manifest-path "$MANIFEST" --all-targets
       - name: Check with the language features (rutis-bridge 0.9)
-        run: cargo check --manifest-path "$MANIFEST" --all-targets --features node,python,bun,go,websocket
+        run: cargo check --manifest-path "$MANIFEST" --all-targets --features node,python,bun,go,websocket,probe
 
   # TypeScript (Node and Bun 1.4), Python and Go (1.24) plugins through rutis-bridge 0.9, end to end: real
   # Node 22 (the floor: pi needs 22.19, rutis 0.9 22)
@@ -381,13 +381,15 @@ jobs:
           "$PLUGINS/.venv/bin/pip" install -r "$PLUGINS/requirements.txt"
       - name: Clippy (each language feature, and all)
         run: |
-          for features in node python bun go websocket node,python,bun,go,websocket; do
+          for features in node python bun go websocket probe node,python,bun,go,websocket,probe; do
             cargo clippy --manifest-path "$MANIFEST" --all-targets --features "$features"
           done
       - name: Documentation
-        run: RUSTDOCFLAGS="-Dwarnings" cargo doc --manifest-path "$MANIFEST" --no-deps --features node,python,bun,go,websocket
+        run: RUSTDOCFLAGS="-Dwarnings" cargo doc --manifest-path "$MANIFEST" --no-deps --features node,python,bun,go,websocket,probe
+      # `probe` adds tests/probe_test.rs: the pi and DSH adapters' fixtures
+      # through `yoagent_rutis::probe`.
       - name: Test
-        run: cargo test --manifest-path "$MANIFEST" --features node,python,bun,go,websocket
+        run: cargo test --manifest-path "$MANIFEST" --features node,python,bun,go,websocket,probe
       - name: Example
         run: cargo run --manifest-path "$MANIFEST" --features node,python --example language_plugins
       - name: pi extensions example (scripted, the fixture extension)

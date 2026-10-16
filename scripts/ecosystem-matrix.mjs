@@ -79,7 +79,7 @@ async function top(keyword) {
 let probe
 if (!opts.fromJson) {
 log('building the probe…')
-const build = run('cargo', ['build', '--quiet', '--manifest-path', join(rutis, 'Cargo.toml'), '--features', 'node', '--example', 'ecosystem_probe', '--message-format=json'], { timeout: 1_800_000 })
+const build = run('cargo', ['build', '--quiet', '--manifest-path', join(rutis, 'Cargo.toml'), '--features', 'probe', '--example', 'ecosystem_probe', '--message-format=json'], { timeout: 1_800_000 })
 if (!build.ok) throw new Error(`cargo build failed:\n${tail(build.stderr, 4000)}`)
 probe = build.stdout.split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l) } catch { return {} } })
   .find((m) => m.reason === 'compiler-artifact' && m.target?.name === 'ecosystem_probe')?.executable

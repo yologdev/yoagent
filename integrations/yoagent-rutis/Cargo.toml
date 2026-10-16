@@ -46,9 +46,14 @@ tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 # Same crate rutis hands its cancellation tokens out as.
 tokio-util = "0.7"
 tracing = "0.1"
+# The `probe` feature: loading plugin rows (the bridge itself never loads
+# plugins), a DSH home per probe, and collecting what plugins log.
+rutis-loader = { version = "0.9", optional = true, features = ["node"] }
+tempfile = { version = "3", optional = true }
+tracing-subscriber = { version = "0.3", optional = true, default-features = false, features = ["registry"] }
 
 [package.metadata.docs.rs]
-features = ["node", "python", "bun", "go", "websocket"]
+features = ["node", "python", "bun", "go", "websocket", "probe"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
@@ -66,6 +71,9 @@ python = ["rutis-bridge/python"]
 bun = ["rutis-bridge/bun"]
 # Remote nodes and runtimes over WebSocket (rustls).
 websocket = ["rutis-bridge/websocket"]
+# `yoagent_rutis::probe`: load a pi or DSH package through its adapter and
+# report what an agent gets, without calling a tool or a model (Unix).
+probe = ["node", "dep:rutis-loader", "dep:tempfile", "dep:tracing-subscriber"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
@@ -100,6 +108,10 @@ required-features = ["node"]
 name = "pi_log_test"
 required-features = ["node"]
 
+[[test]]
+name = "probe_test"
+required-features = ["probe"]
+
 [[example]]
 name = "language_plugins"
 required-features = ["node", "python"]
@@ -114,4 +126,4 @@ required-features = ["node"]
 
 [[example]]
 name = "ecosystem_probe"
-required-features = ["node"]
+required-features = ["probe"]
