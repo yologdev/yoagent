@@ -143,8 +143,8 @@ Plugins register a handler with the bridge; the bridge is one `Extension`.
 pi extensions and DeepSeek Harness (DSH) plugins load unchanged through
 adapters, as far as yoagent can honour them; what it cannot (UI, commands)
 is ignored, and what would decide things yoagent cannot enforce is
-**refused**. Measured: of the 20 most-downloaded packages, pi 12 and DSH 4
-are usable (`docs/evals/plugin-compatibility.md`). Start from the
+**refused**. Measured (2026-10-16): of the 20 most-downloaded packages, pi 12 and
+DSH 3 are usable (`docs/evals/plugin-compatibility.md`). Start from the
 [yoagent-rutis README](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis)
 and its examples.
 

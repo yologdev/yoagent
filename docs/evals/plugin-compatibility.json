@@ -1,26 +1,26 @@
 {
   "runs": {
     "pi": {
-      "date": "2026-10-12",
+      "date": "2026-10-16",
       "selection": "top 20"
     },
     "dsh": {
-      "date": "2026-10-12",
+      "date": "2026-10-16",
       "selection": "top 20"
     }
   },
   "pi": [
     {
       "name": "pi-mcp-adapter",
-      "version": "5.2.0",
-      "monthly": 1608890,
+      "version": "5.3.1",
+      "monthly": 1618815,
       "description": "MCP (Model Context Protocol) adapter extension for Pi coding agent",
-      "ecosystem": "pi",
       "skills": {
         "found": 0,
         "loaded": [],
         "errors": []
       },
+      "loaded": true,
       "rows": [
         {
           "id": "pi",
@@ -29,7 +29,6 @@
         }
       ],
       "without": [],
-      "loaded": true,
       "tools": [
         "mcp"
       ],
@@ -48,6 +47,7 @@
           "message": "[pi] not available in yoagent, ignored: index.ts: event \"mcp_servers_change\"; index.ts: event \"resources_discover\"; index.ts: event \"session_tree\"; index.ts: command /mcp-adapter; index.ts: command /mcp; index.ts: command /mcp-auth; index.ts: flag --mcp-config"
         }
       ],
+      "ecosystem": "pi",
       "stderr": "Turned off Pi's built-in MCP so it doesn't run next to pi-mcp-adapter. If you remove the adapter, turn it back on in `pi config` → Built-in.",
       "resources": {
         "extensions": 1,
@@ -69,15 +69,16 @@
     },
     {
       "name": "billion-context",
-      "version": "0.1.195",
-      "monthly": 1072115,
+      "version": "0.1.197",
+      "monthly": 1304920,
       "description": "A context-compression plugin — small context windows (a 100K context is enough), 5x fewer tokens, month-long single sessions (billions of tokens), and compression quality — for all agents: pi, OpenCode, Codex, Claude Code, and more. billion-context is all",
-      "ecosystem": "pi",
       "skills": {
         "found": 0,
         "loaded": [],
         "errors": []
       },
+      "loaded": false,
+      "error": "plugin failed: Error: pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: pi-native.js: event \"before_provider_headers\"; pi-native.js: event \"before_provider_request\" (list an event in allowUnmapped to accept that it goes unenforced)",
       "rows": [
         {
           "id": "pi",
@@ -86,8 +87,8 @@
         }
       ],
       "without": [],
-      "loaded": false,
-      "error": "plugin failed: Error: pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: pi-native.js: event \"before_provider_headers\"; pi-native.js: event \"before_provider_request\" (list an event in allowUnmapped to accept that it goes unenforced)",
+      "tools": [],
+      "note_chars": 0,
       "logs": [
         {
           "level": "debug",
@@ -98,6 +99,7 @@
           "message": "[pi] no host ui (print mode): service pi-host-ui is not available"
         }
       ],
+      "ecosystem": "pi",
       "stderr": "",
       "resources": {
         "extensions": 1,
@@ -110,15 +112,15 @@
     },
     {
       "name": "pi-web-access",
-      "version": "0.39.0",
-      "monthly": 720509,
+      "version": "0.41.0",
+      "monthly": 762066,
       "description": "Web search, URL fetching, GitHub repo cloning, PDF extraction, YouTube video understanding, and local video analysis for Pi coding agent. Supports OpenAI, Brave, Parallel, TinyFish, Search1API, Searchinfinity, Querit, Tavily, Firecrawl, Crawl4AI, Jina, SE",
-      "ecosystem": "pi",
       "skills": {
         "found": 0,
         "loaded": [],
         "errors": []
       },
+      "loaded": true,
       "rows": [
         {
           "id": "pi",
@@ -127,7 +129,6 @@
         }
       ],
       "without": [],
-      "loaded": true,
       "tools": [
         "fetch_content",
         "get_search_content",
@@ -149,6 +150,7 @@
           "message": "[pi] not available in yoagent, ignored: index.js: event \"agent_settled\"; index.js: event \"session_tree\"; index.js: command /websearch; index.js: command /curator; index.js: command /google-account; index.js: command /search; index.js: shortcut ctrl+shift+s; index.js: shortcut ctrl+shift+w"
         }
       ],
+      "ecosystem": "pi",
       "stderr": "",
       "resources": {
         "extensions": 1,
@@ -171,10 +173,9 @@
     },
     {
       "name": "pi-subagents",
-      "version": "0.77.0",
-      "monthly": 622966,
+      "version": "0.78.0",
+      "monthly": 608963,
       "description": "Pi extension for single-agent delegation and scripted multi-agent workflows",
-      "ecosystem": "pi",
       "skills": {
         "found": 2,
         "loaded": [
@@ -183,6 +184,7 @@
         ],
         "errors": []
       },
+      "loaded": true,
       "rows": [
         {
           "id": "pi",
@@ -191,9 +193,9 @@
         }
       ],
       "without": [],
-      "loaded": true,
       "tools": [
         "bg_wait",
+        "contact_supervisor",
         "subagent",
         "subagent_supervisor"
       ],
@@ -201,7 +203,7 @@
       "logs": [
         {
           "level": "debug",
-          "message": "[pi] loaded index.js: events session_start, before_agent_start, turn_end, input, model_select, tool_result, agent_end, session_before_switch, session_before_fork, session_compact, session_shutdown, session_tree, agent_start, message_start, agent_settled, session_before_compact; tools subagent, bg_wait, subagents_enable"
+          "message": "[pi] loaded index.js: events session_start, session_tree, before_agent_start, turn_end, input, model_select, tool_result, agent_end, session_before_switch, session_before_fork, session_compact, session_shutdown, agent_start, message_start, agent_settled, session_before_compact; tools subagent, contact_supervisor, bg_wait, subagents_enable"
         },
         {
           "level": "debug",
@@ -209,13 +211,14 @@
         },
         {
           "level": "info",
-          "message": "[pi] not available in yoagent, ignored: index.js: event \"turn_end\"; index.js: event \"model_select\"; index.js: event \"agent_end\"; index.js: event \"session_before_switch\"; index.js: event \"session_before_fork\"; index.js: event \"session_compact\"; index.js: event \"session_tree\"; index.js: event \"agent_start\"; index.js: event \"message_start\"; index.js: event \"agent_settled\"; index.js: event \"session_before_compact\"; index.js: command /subagents-watchdog; index.js: command /subagents; index.js: command /run; index.js: command /subagent-cost; index.js: command /subagents-doctor; index.js: command /subagents-inspect-rpc; index.js: command /subagents-guide; index.js: command /subagents-refine; index.js: command /subagents-fleet; index.js: command /subagents-detach; index.js: command /subagents-stop; index.js: command /subagents-steer; index.js: command /prompt-workflow; index.js: command /subagents-models; index.js: command /subagents-profiles; index.js: command /subagents-load-profile; index.js: command /subagents-refresh-provider-models; index.js: command /subagents-generate-profiles; index.js: command /subagents-check-profile; index.js: renderers"
+          "message": "[pi] not available in yoagent, ignored: index.js: event \"session_tree\"; index.js: event \"turn_end\"; index.js: event \"model_select\"; index.js: event \"agent_end\"; index.js: event \"session_before_switch\"; index.js: event \"session_before_fork\"; index.js: event \"session_compact\"; index.js: event \"agent_start\"; index.js: event \"message_start\"; index.js: event \"agent_settled\"; index.js: event \"session_before_compact\"; index.js: command /subagents-watchdog; index.js: command /subagents; index.js: command /run; index.js: command /subagent-cost; index.js: command /subagents-doctor; index.js: command /subagents-inspect-rpc; index.js: command /subagents-guide; index.js: command /subagents-refine; index.js: command /subagents-fleet; index.js: command /subagents-detach; index.js: command /subagents-stop; index.js: command /subagents-steer; index.js: command /prompt-workflow; index.js: command /subagents-models; index.js: command /subagents-profiles; index.js: command /subagents-load-profile; index.js: command /subagents-refresh-provider-models; index.js: command /subagents-generate-profiles; index.js: command /subagents-check-profile; index.js: renderers"
         },
         {
           "level": "warn",
           "message": "[pi] index.js before_agent_start skipped, so it does not apply: Cannot read properties of undefined (reading 'includes')"
         }
       ],
+      "ecosystem": "pi",
       "stderr": "",
       "resources": {
         "extensions": 1,
@@ -224,15 +227,15 @@
         "themes": 0
       },
       "result": "works, partly",
-      "detail": "3 tools, tool-call hooks, input hooks, 2 skills",
+      "detail": "4 tools, tool-call hooks, input hooks, 2 skills",
       "ignored": [
+        "event \"session_tree\"",
         "event \"turn_end\"",
         "event \"model_select\"",
         "event \"agent_end\"",
         "event \"session_before_switch\"",
         "event \"session_before_fork\"",
         "event \"session_compact\"",
-        "event \"session_tree\"",
         "event \"agent_start\"",
         "event \"message_start\"",
         "event \"agent_settled\"",
@@ -260,16 +263,16 @@
       ]
     },
     {
-      "name": "@langfuse/pi-observability-plugin",
-      "version": "0.1.2",
-      "monthly": 322140,
-      "description": "Langfuse observability extension for the pi coding agent — traces prompts, agent turns, model generations, and tool calls to Langfuse.",
-      "ecosystem": "pi",
+      "name": "pi-mcp-extension",
+      "version": "1.5.1",
+      "monthly": 327285,
+      "description": "MCP (Model Context Protocol) client extension for the Pi coding agent — connect Pi to any MCP server",
       "skills": {
         "found": 0,
         "loaded": [],
         "errors": []
       },
+      "loaded": true,
       "rows": [
         {
           "id": "pi",
@@ -278,7 +281,45 @@
         }
       ],
       "without": [],
+      "tools": [],
+      "note_chars": 0,
+      "logs": [
+        {
+          "level": "debug",
+          "message": "[pi] loaded index.ts: events none; tools none"
+        }
+      ],
+      "ecosystem": "pi",
+      "stderr": "",
+      "resources": {
+        "extensions": 1,
+        "skills": 0,
+        "prompts": 0,
+        "themes": 0
+      },
+      "result": "nothing to use",
+      "detail": "loads but registers nothing as installed (it may need configuration first)",
+      "ignored": []
+    },
+    {
+      "name": "@langfuse/pi-observability-plugin",
+      "version": "0.1.2",
+      "monthly": 322140,
+      "description": "Langfuse observability extension for the pi coding agent — traces prompts, agent turns, model generations, and tool calls to Langfuse.",
+      "skills": {
+        "found": 0,
+        "loaded": [],
+        "errors": []
+      },
       "loaded": true,
+      "rows": [
+        {
+          "id": "pi",
+          "state": "active",
+          "error": null
+        }
+      ],
+      "without": [],
       "tools": [],
       "note_chars": 0,
       "logs": [
@@ -291,6 +332,7 @@
           "message": "[pi] no host ui (print mode): service pi-host-ui is not available"
         }
       ],
+      "ecosystem": "pi",
       "stderr": "",
       "resources": {
         "extensions": 1,
@@ -304,15 +346,15 @@
     },
     {
       "name": "@juicesharp/rpiv-ask-user-question",
-      "version": "2.13.5",
-      "monthly": 301013,
+      "version": "2.13.8",
+      "monthly": 300854,
       "description": "Pi extension. A structured questionnaire the model can put to you when it would otherwise guess, with typed options instead of free-form replies.",
-      "ecosystem": "pi",
       "skills": {
         "found": 0,
         "loaded": [],
         "errors": []
       },
+      "loaded": true,
       "rows": [
         {
           "id": "pi",
@@ -321,7 +363,6 @@
         }
       ],
       "without": [],
-      "loaded": true,
       "tools": [
         "ask_user_question"
       ],
@@ -336,6 +377,7 @@
           "message": "[pi] no host ui (print mode): service pi-host-ui is not available"
         }
       ],
+      "ecosystem": "pi",
       "stderr": "",
       "resources": {
         "extensions": 1,
@@ -348,55 +390,16 @@
       "ignored": []
     },
     {
-      "name": "pi-mcp-extension",
-      "version": "1.5.1",
-      "monthly": 285855,
-      "description": "MCP (Model Context Protocol) client extension for the Pi coding agent — connect Pi to any MCP server",
-      "ecosystem": "pi",
-      "skills": {
-        "found": 0,
-        "loaded": [],
-        "errors": []
-      },
-      "rows": [
-        {
-          "id": "pi",
-          "state": "active",
-          "error": null
-        }
-      ],
-      "without": [],
-      "loaded": true,
-      "tools": [],
-      "note_chars": 0,
-      "logs": [
-        {
-          "level": "debug",
-          "message": "[pi] loaded index.ts: events none; tools none"
-        }
-      ],
-      "stderr": "",
-      "resources": {
-        "extensions": 1,
-        "skills": 0,
-        "prompts": 0,
-        "themes": 0
-      },
-      "result": "nothing to use",
-      "detail": "loads but registers nothing as installed (it may need configuration first)",
-      "ignored": []
-    },
-    {
       "name": "@juicesharp/rpiv-todo",
-      "version": "2.13.5",
-      "monthly": 196941,
+      "version": "2.13.8",
+      "monthly": 197874,
       "description": "Pi extension. A todo list for the model, rendered as a live overlay that survives /reload and conversation compaction.",
-      "ecosystem": "pi",
       "skills": {
         "found": 0,
         "loaded": [],
         "errors": []
       },
+      "loaded": true,
       "rows": [
         {
           "id": "pi",
@@ -405,7 +408,6 @@
         }
       ],
       "without": [],
-      "loaded": true,
       "tools": [
         "todo"
       ],
@@ -424,6 +426,7 @@
           "message": "[pi] not available in yoagent, ignored: index.ts: event \"session_compact\"; index.ts: event \"session_tree\"; index.ts: event \"tool_execution_end\"; index.ts: event \"agent_start\"; index.ts: command /todos; index.ts: shortcut ctrl+shift+t"
         }
       ],
+      "ecosystem": "pi",
       "stderr": "",
       "resources": {
         "extensions": 1,
@@ -445,9 +448,8 @@
     {
       "name": "openwiki",
       "version": "0.7.2",
-      "monthly": 193787,
+      "monthly": 197413,
       "description": "A CLI that uses a DeepAgents documentation agent to generate and maintain an OpenWiki for a codebase.",
-      "ecosystem": "pi",
       "skills": {
         "found": 1,
         "loaded": [
@@ -455,6 +457,7 @@
         ],
         "errors": []
       },
+      "loaded": true,
       "rows": [
         {
           "id": "pi",
@@ -463,7 +466,6 @@
         }
       ],
       "without": [],
-      "loaded": true,
       "tools": [
         "openwiki_begin",
         "openwiki_finish",
@@ -483,6 +485,7 @@
           "message": "[pi] no host ui (print mode): service pi-host-ui is not available"
         }
       ],
+      "ecosystem": "pi",
       "stderr": "",
       "resources": {
         "extensions": 1,
@@ -499,12 +502,13 @@
       "version": "0.32.3",
       "monthly": 141230,
       "description": "Adds /goal to pi: conversational goal planning, flexible or ordered goals, persistent progress, and an independent completion auditor.",
-      "ecosystem": "pi",
       "skills": {
         "found": 0,
         "loaded": [],
         "errors": []
       },
+      "loaded": false,
+      "error": "plugin failed: Error: pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: goal.ts: event \"before_provider_request\" (list an event in allowUnmapped to accept that it goes unenforced)",
       "rows": [
         {
           "id": "pi",
@@ -513,8 +517,8 @@
         }
       ],
       "without": [],
-      "loaded": false,
-      "error": "plugin failed: Error: pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: goal.ts: event \"before_provider_request\" (list an event in allowUnmapped to accept that it goes unenforced)",
+      "tools": [],
+      "note_chars": 0,
       "logs": [
         {
           "level": "debug",
@@ -525,6 +529,7 @@
           "message": "[pi] no host ui (print mode): service pi-host-ui is not available"
         }
       ],
+      "ecosystem": "pi",
       "stderr": "",
       "resources": {
         "extensions": 1,
@@ -537,15 +542,15 @@
     },
     {
       "name": "@plannotator/pi-extension",
-      "version": "0.28.17",
-      "monthly": 132677,
+      "version": "0.28.22",
+      "monthly": 133196,
       "description": "Plannotator Pi extension - interactive plan review with annotations, annotate agent messages, and review code/PRs",
-      "ecosystem": "pi",
       "skills": {
         "found": 0,
         "loaded": [],
         "errors": []
       },
+      "loaded": true,
       "rows": [
         {
           "id": "pi",
@@ -554,7 +559,6 @@
         }
       ],
       "without": [],
-      "loaded": true,
       "tools": [],
       "note_chars": 0,
       "logs": [
@@ -571,6 +575,7 @@
           "message": "[pi] not available in yoagent, ignored: pi-extension: event \"turn_start\"; pi-extension: event \"turn_end\"; pi-extension: event \"message_start\"; pi-extension: event \"message_update\"; pi-extension: event \"tool_execution_start\"; pi-extension: event \"agent_end\"; pi-extension: event \"agent_settled\"; pi-extension: event \"resources_discover\"; pi-extension: event \"session_compact\"; pi-extension: event \"session_tree\"; pi-extension: command /plannotator-plan-mode; pi-extension: command /plannotator-review; pi-extension: command /plannotator-annotate; pi-extension: command /plannotator-last; pi-extension: shortcut ctrl+alt+p; pi-extension: flag --plan"
         }
       ],
+      "ecosystem": "pi",
       "stderr": "",
       "resources": {
         "extensions": 1,
@@ -600,11 +605,70 @@
       ]
     },
     {
+      "name": "@companion-ai/feynman",
+      "version": "0.5.47",
+      "monthly": 119524,
+      "description": "The open source AI research agent.",
+      "skills": {
+        "found": 16,
+        "loaded": [
+          "alpha-research",
+          "autoresearch",
+          "deep-research",
+          "docker",
+          "eli5",
+          "literature-review",
+          "ml-training-recipe",
+          "paper-code-audit",
+          "paper-writing",
+          "pdf-explore",
+          "preview",
+          "replication",
+          "research-review",
+          "session-log",
+          "session-search",
+          "source-comparison"
+        ],
+        "errors": []
+      },
+      "loaded": false,
+      "error": "plugin failed: Error: pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: research-tools.ts: event \"before_provider_request\" (list an event in allowUnmapped to accept that it goes unenforced)",
+      "rows": [
+        {
+          "id": "pi",
+          "state": "failed",
+          "error": "plugin failed: Error: pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: research-tools.ts: event \"before_provider_request\" (list an event in allowUnmapped to accept that it goes unenforced)"
+        }
+      ],
+      "without": [],
+      "tools": [],
+      "note_chars": 0,
+      "logs": [
+        {
+          "level": "debug",
+          "message": "[pi] loaded research-tools.ts: events session_start, session_shutdown, before_agent_start, tool_result, message_end, agent_settled, before_provider_request; tools alpha_annotate_paper, alpha_list_annotations, hf_dataset_info, hf_repo_files, hf_repo_read_file, feynman_science_database_search"
+        },
+        {
+          "level": "debug",
+          "message": "[pi] no host ui (print mode): service pi-host-ui is not available"
+        }
+      ],
+      "ecosystem": "pi",
+      "stderr": "",
+      "resources": {
+        "extensions": 1,
+        "skills": 16,
+        "prompts": 11,
+        "themes": 1
+      },
+      "result": "refused",
+      "detail": "pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: research-tools.ts: event \"before_provider_request\" (list an event in allowUnmapped to accept that it goes unenforced) Its 16 skills still load with yoagent's skills loader."
+    },
+    {
       "name": "bigpowers",
       "version": "2.88.9",
-      "monthly": 130483,
+      "monthly": 115055,
       "description": "73 agent skills synthesizing 17 years of software engineering discipline into a prescriptive methodology for solo developers",
-      "ecosystem": "pi",
       "skills": {
         "found": 81,
         "loaded": [
@@ -692,6 +756,7 @@
         ],
         "errors": []
       },
+      "loaded": true,
       "rows": [
         {
           "id": "pi",
@@ -700,7 +765,6 @@
         }
       ],
       "without": [],
-      "loaded": true,
       "tools": [
         "bigpowers_skill"
       ],
@@ -719,6 +783,7 @@
           "message": "[pi info] bigpowers: 81 skills loaded"
         }
       ],
+      "ecosystem": "pi",
       "stderr": "",
       "resources": {
         "extensions": 1,
@@ -731,119 +796,16 @@
       "ignored": []
     },
     {
-      "name": "@companion-ai/feynman",
-      "version": "0.5.38",
-      "monthly": 114542,
-      "description": "The open source AI research agent.",
-      "ecosystem": "pi",
-      "skills": {
-        "found": 16,
-        "loaded": [
-          "alpha-research",
-          "autoresearch",
-          "deep-research",
-          "docker",
-          "eli5",
-          "literature-review",
-          "ml-training-recipe",
-          "paper-code-audit",
-          "paper-writing",
-          "pdf-explore",
-          "preview",
-          "replication",
-          "research-review",
-          "session-log",
-          "session-search",
-          "source-comparison"
-        ],
-        "errors": []
-      },
-      "rows": [
-        {
-          "id": "pi",
-          "state": "failed",
-          "error": "plugin failed: Error: pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: research-tools.ts: event \"before_provider_request\" (list an event in allowUnmapped to accept that it goes unenforced)"
-        }
-      ],
-      "without": [],
-      "loaded": false,
-      "error": "plugin failed: Error: pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: research-tools.ts: event \"before_provider_request\" (list an event in allowUnmapped to accept that it goes unenforced)",
-      "logs": [
-        {
-          "level": "debug",
-          "message": "[pi] loaded research-tools.ts: events session_start, session_shutdown, before_agent_start, tool_result, message_end, before_provider_request; tools alpha_annotate_paper, alpha_list_annotations, hf_dataset_info, hf_repo_files, hf_repo_read_file, feynman_science_database_search"
-        },
-        {
-          "level": "debug",
-          "message": "[pi] no host ui (print mode): service pi-host-ui is not available"
-        }
-      ],
-      "stderr": "",
-      "resources": {
-        "extensions": 1,
-        "skills": 16,
-        "prompts": 11,
-        "themes": 1
-      },
-      "result": "refused",
-      "detail": "pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: research-tools.ts: event \"before_provider_request\" (list an event in allowUnmapped to accept that it goes unenforced) Its 16 skills still load with yoagent's skills loader."
-    },
-    {
-      "name": "pi-background-tasks",
-      "version": "2.6.9",
-      "monthly": 108986,
-      "description": "Pi extension for durable background shell tasks, read-only delegated agents, local attested Pi runs, and fixed-purpose Fusion workflows through child Pi processes.",
-      "ecosystem": "pi",
-      "skills": {
-        "found": 0,
-        "loaded": [],
-        "errors": []
-      },
-      "rows": [
-        {
-          "id": "pi",
-          "state": "failed",
-          "error": "plugin failed: Error: pi extensions failed in session_start: anthropic-attribution.js: Cannot read properties of undefined (reading 'getProvider')"
-        }
-      ],
-      "without": [],
-      "loaded": false,
-      "error": "plugin failed: Error: pi extensions failed in session_start: anthropic-attribution.js: Cannot read properties of undefined (reading 'getProvider')",
-      "logs": [
-        {
-          "level": "debug",
-          "message": "[pi] loaded anthropic-attribution.js: events session_start, session_shutdown; tools none"
-        },
-        {
-          "level": "debug",
-          "message": "[pi] loaded background-tasks.js: events before_agent_start, session_shutdown, session_start; tools fusion_reason, fusion_investigate, fusion_research, fusion_validate, bg_delegate, bg_result, bg_run, bg_run_pi_attested, bg_status, bg_logs, bg_kill"
-        },
-        {
-          "level": "debug",
-          "message": "[pi] no host ui (print mode): service pi-host-ui is not available"
-        }
-      ],
-      "stderr": "",
-      "resources": {
-        "extensions": 2,
-        "skills": 0,
-        "prompts": 0,
-        "themes": 0
-      },
-      "result": "refused",
-      "detail": "its session_start failed, so the adapter did not load it: anthropic-attribution.js: Cannot read properties of undefined (reading 'getProvider')"
-    },
-    {
       "name": "pi-powerline-footer",
-      "version": "0.20.0",
-      "monthly": 106751,
+      "version": "0.20.1",
+      "monthly": 104616,
       "description": "Powerline-style status bar extension for pi coding agent",
-      "ecosystem": "pi",
       "skills": {
         "found": 0,
         "loaded": [],
         "errors": []
       },
+      "loaded": true,
       "rows": [
         {
           "id": "pi",
@@ -852,7 +814,6 @@
         }
       ],
       "without": [],
-      "loaded": true,
       "tools": [],
       "note_chars": 0,
       "logs": [
@@ -869,6 +830,7 @@
           "message": "[pi] not available in yoagent, ignored: index.ts: event \"user_bash\"; index.ts: event \"model_select\"; index.ts: event \"thinking_level_select\"; index.ts: event \"session_tree\"; index.ts: event \"session_info_changed\"; index.ts: event \"agent_start\"; index.ts: event \"message_update\"; index.ts: event \"message_start\"; index.ts: event \"turn_end\"; index.ts: event \"session_before_compact\"; index.ts: event \"session_compact\"; index.ts: event \"session_compact_failed\"; index.ts: event \"agent_settled\"; index.ts: event \"agent_end\"; index.ts: command /cd; index.ts: command /reply; index.ts: command /queue; index.ts: command /powerline; index.ts: command /stash-history; index.ts: command /bash-mode; index.ts: command /powerline-perf; index.ts: command /bash-reset; index.ts: command /vibe"
         }
       ],
+      "ecosystem": "pi",
       "stderr": "",
       "resources": {
         "extensions": 1,
@@ -907,9 +869,8 @@
     {
       "name": "context-mode",
       "version": "1.0.169",
-      "monthly": 104211,
+      "monthly": 102090,
       "description": "MCP plugin that saves 98% of your context window. Works with Claude Code, Gemini CLI, VS Code Copilot, OpenCode, and Codex CLI. Sandboxed code execution, FTS5 knowledge base, and intent-driven search.",
-      "ecosystem": "pi",
       "skills": {
         "found": 8,
         "loaded": [
@@ -924,6 +885,7 @@
         ],
         "errors": []
       },
+      "loaded": true,
       "rows": [
         {
           "id": "pi",
@@ -932,7 +894,6 @@
         }
       ],
       "without": [],
-      "loaded": true,
       "tools": [],
       "note_chars": 0,
       "logs": [
@@ -949,6 +910,7 @@
           "message": "[pi] not available in yoagent, ignored: extension.js: event \"before_provider_response\"; extension.js: event \"turn_end\"; extension.js: event \"session_before_compact\"; extension.js: event \"session_compact\"; extension.js: command /ctx-stats; extension.js: command /ctx-doctor"
         }
       ],
+      "ecosystem": "pi",
       "stderr": "",
       "resources": {
         "extensions": 1,
@@ -970,9 +932,8 @@
     {
       "name": "pi-lens",
       "version": "4.4.3",
-      "monthly": 102007,
+      "monthly": 101483,
       "description": "Real-time code feedback for pi — LSP, linters, formatters, type-checking, structural analysis & booboo",
-      "ecosystem": "pi",
       "skills": {
         "found": 4,
         "loaded": [
@@ -983,6 +944,7 @@
         ],
         "errors": []
       },
+      "loaded": true,
       "rows": [
         {
           "id": "pi",
@@ -991,7 +953,6 @@
         }
       ],
       "without": [],
-      "loaded": true,
       "tools": [
         "effective_config",
         "lens_diagnostics",
@@ -1017,6 +978,7 @@
           "message": "[pi] not available in yoagent, ignored: index.js: event \"resources_discover\"; index.js: event \"session_tree\"; index.js: event \"tool_execution_end\"; index.js: event \"turn_start\"; index.js: event \"agent_end\"; index.js: event \"turn_end\"; index.js: event \"agent_settled\"; index.js: command /lens-toggle; index.js: command /lens-context-toggle; index.js: command /lens-widget-toggle; index.js: command /lens-tdi; index.js: command /lens-map; index.js: command /lens-health; index.js: command /lens-perf; index.js: command /lens-tools; index.js: command /lens-allow-edit; index.js: flag --no-lens; index.js: flag --no-lsp; index.js: flag --no-autoformat; index.js: flag --immediate-format; index.js: flag --no-autofix; index.js: flag --no-tests; index.js: flag --no-delta; index.js: flag --lens-guard; index.js: flag --lens-checkout-guard; index.js: flag --no-opengrep; index.js: flag --no-read-guard; index.js: flag --no-lens-context; index.js: flag --lens-turn-summary; index.js: flag --lens-actionable-warnings; index.js: flag --lens-actionable-warning-actions; index.js: flag --lens-actionable-warning-autofix; index.js: flag --lens-actionable-warning-all; index.js: flag --lens-compact-tool-line; index.js: flag --lens-compact-lsp-status; index.js: flag --lens-hide-lsp-status; index.js: flag --lens-compact-widget; index.js: flag --no-lazy-tools; index.js: flag --lens-turn-end-madge; index.js: flag --no-knip; index.js: flag --no-jscpd; index.js: flag --no-madge; index.js: flag --no-gitleaks; index.js: flag --no-govulncheck; index.js: flag --no-dead-code; index.js: flag --no-complexity; index.js: flag --no-tool; index.js: renderers"
         }
       ],
+      "ecosystem": "pi",
       "stderr": "",
       "resources": {
         "extensions": 1,
@@ -1079,10 +1041,9 @@
     },
     {
       "name": "@dietrichgebert/ponytail",
-      "version": "5.1.0",
-      "monthly": 97477,
+      "version": "5.3.1",
+      "monthly": 101019,
       "description": "Lazy senior dev mode for AI agents. The best code is the code you never wrote.",
-      "ecosystem": "pi",
       "skills": {
         "found": 6,
         "loaded": [
@@ -1095,6 +1056,7 @@
         ],
         "errors": []
       },
+      "loaded": true,
       "rows": [
         {
           "id": "pi",
@@ -1103,13 +1065,12 @@
         }
       ],
       "without": [],
-      "loaded": true,
       "tools": [],
       "note_chars": 2860,
       "logs": [
         {
           "level": "debug",
-          "message": "[pi] loaded index.js: events input, session_start, session_tree, agent_start, agent_end, before_agent_start; tools none"
+          "message": "[pi] loaded index.js: events input, session_start, session_tree, session_switch, session_branch, agent_start, agent_end, before_agent_start; tools none"
         },
         {
           "level": "debug",
@@ -1121,9 +1082,10 @@
         },
         {
           "level": "info",
-          "message": "[pi] not available in yoagent, ignored: index.js: event \"session_tree\"; index.js: event \"agent_start\"; index.js: event \"agent_end\"; index.js: command /ponytail; index.js: command /ponytail-review; index.js: command /ponytail-audit; index.js: command /ponytail-gain; index.js: command /ponytail-debt; index.js: command /ponytail-help"
+          "message": "[pi] not available in yoagent, ignored: index.js: event \"session_tree\"; index.js: event \"session_switch\"; index.js: event \"session_branch\"; index.js: event \"agent_start\"; index.js: event \"agent_end\"; index.js: command /ponytail; index.js: command /ponytail-review; index.js: command /ponytail-audit; index.js: command /ponytail-gain; index.js: command /ponytail-debt; index.js: command /ponytail-help"
         }
       ],
+      "ecosystem": "pi",
       "stderr": "",
       "resources": {
         "extensions": 1,
@@ -1135,6 +1097,8 @@
       "detail": "input hooks, prompt additions, 6 skills",
       "ignored": [
         "event \"session_tree\"",
+        "event \"session_switch\"",
+        "event \"session_branch\"",
         "event \"agent_start\"",
         "event \"agent_end\"",
         "command /ponytail",
@@ -1146,16 +1110,63 @@
       ]
     },
     {
-      "name": "@langchain/langsmith-pi-extension",
-      "version": "0.2.1",
-      "monthly": 91431,
-      "description": "LangSmith extension for Pi Coding Agent",
-      "ecosystem": "pi",
+      "name": "pi-background-tasks",
+      "version": "2.6.10",
+      "monthly": 97554,
+      "description": "Pi extension for durable background shell tasks, read-only delegated agents, local attested Pi runs, and fixed-purpose Fusion workflows through child Pi processes.",
       "skills": {
         "found": 0,
         "loaded": [],
         "errors": []
       },
+      "loaded": false,
+      "error": "plugin failed: Error: pi extensions failed in session_start: anthropic-attribution.js: Cannot read properties of undefined (reading 'getProvider')",
+      "rows": [
+        {
+          "id": "pi",
+          "state": "failed",
+          "error": "plugin failed: Error: pi extensions failed in session_start: anthropic-attribution.js: Cannot read properties of undefined (reading 'getProvider')"
+        }
+      ],
+      "without": [],
+      "tools": [],
+      "note_chars": 0,
+      "logs": [
+        {
+          "level": "debug",
+          "message": "[pi] loaded anthropic-attribution.js: events session_start, session_shutdown; tools none"
+        },
+        {
+          "level": "debug",
+          "message": "[pi] loaded background-tasks.js: events before_agent_start, session_shutdown, session_start; tools fusion_reason, fusion_investigate, fusion_research, fusion_validate, bg_delegate, bg_result, bg_run, bg_run_pi_attested, bg_status, bg_logs, bg_kill"
+        },
+        {
+          "level": "debug",
+          "message": "[pi] no host ui (print mode): service pi-host-ui is not available"
+        }
+      ],
+      "ecosystem": "pi",
+      "stderr": "",
+      "resources": {
+        "extensions": 2,
+        "skills": 0,
+        "prompts": 0,
+        "themes": 0
+      },
+      "result": "refused",
+      "detail": "its session_start failed, so the adapter did not load it: anthropic-attribution.js: Cannot read properties of undefined (reading 'getProvider')"
+    },
+    {
+      "name": "@langchain/langsmith-pi-extension",
+      "version": "0.2.1",
+      "monthly": 89876,
+      "description": "LangSmith extension for Pi Coding Agent",
+      "skills": {
+        "found": 0,
+        "loaded": [],
+        "errors": []
+      },
+      "loaded": true,
       "rows": [
         {
           "id": "pi",
@@ -1164,7 +1175,6 @@
         }
       ],
       "without": [],
-      "loaded": true,
       "tools": [],
       "note_chars": 0,
       "logs": [
@@ -1181,6 +1191,7 @@
           "message": "[pi] not available in yoagent, ignored: index.js: command /langsmith-tracing"
         }
       ],
+      "ecosystem": "pi",
       "stderr": "",
       "resources": {
         "extensions": 1,
@@ -1196,15 +1207,16 @@
     },
     {
       "name": "@narumitw/pi-usage",
-      "version": "0.65.0",
-      "monthly": 84983,
+      "version": "0.66.0",
+      "monthly": 83788,
       "description": "Pi extension that shows current-account usage and DeepSeek API balance for supported providers.",
-      "ecosystem": "pi",
       "skills": {
         "found": 0,
         "loaded": [],
         "errors": []
       },
+      "loaded": false,
+      "error": "plugin failed: Error: pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: index.ts: event \"before_provider_request\" (list an event in allowUnmapped to accept that it goes unenforced)",
       "rows": [
         {
           "id": "pi",
@@ -1213,8 +1225,8 @@
         }
       ],
       "without": [],
-      "loaded": false,
-      "error": "plugin failed: Error: pi extensions handle events yoagent never fires, which would decide or rewrite what the agent does: index.ts: event \"before_provider_request\" (list an event in allowUnmapped to accept that it goes unenforced)",
+      "tools": [],
+      "note_chars": 0,
       "logs": [
         {
           "level": "debug",
@@ -1225,6 +1237,7 @@
           "message": "[pi] no host ui (print mode): service pi-host-ui is not available"
         }
       ],
+      "ecosystem": "pi",
       "stderr": "",
       "resources": {
         "extensions": 1,
@@ -1239,50 +1252,15 @@
   "dsh": [
     {
       "name": "dshmarket",
-      "version": "1.66.17",
-      "monthly": 570846,
+      "version": "1.66.28",
+      "monthly": 596609,
       "description": "Visual plugin market inside DeepSeek Harness — browse, search, and one-click install community plugins. · DSH 可视化插件市场：逛一逛，点一下，装好。",
-      "ecosystem": "dsh",
       "services": {
         "present": [],
-        "missing": []
+        "missing": [],
+        "importErrors": {}
       },
       "rows": [
-        {
-          "id": "dsh-fs",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-attachments",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-credentials",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-storage",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-session-persistence",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skills",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skill-filesystem",
-          "state": "active",
-          "error": null
-        },
         {
           "id": "dsh-market",
           "state": "active",
@@ -1292,6 +1270,7 @@
       "tools": [],
       "guidance_chars": 0,
       "logs": [],
+      "ecosystem": "dsh",
       "stderr": "",
       "client": true,
       "peers": [
@@ -1304,10 +1283,9 @@
     },
     {
       "name": "@michengai/dsh-skills-manager",
-      "version": "1.1.17",
-      "monthly": 202149,
+      "version": "1.1.23",
+      "monthly": 209555,
       "description": "DSH Skills Manager — 在 DeepSeek Harness 中统一加载并安全管理本机 Agent Skills · Load and safely manage local Agent Skills in DSH",
-      "ecosystem": "dsh",
       "services": {
         "present": [
           "skills",
@@ -1316,44 +1294,10 @@
         "missing": [
           "webServer",
           "sessions"
-        ]
+        ],
+        "importErrors": {}
       },
       "rows": [
-        {
-          "id": "dsh-fs",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-attachments",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-credentials",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-storage",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-session-persistence",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skills",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skill-filesystem",
-          "state": "active",
-          "error": null
-        },
         {
           "id": "skills-manager",
           "state": "active",
@@ -1363,6 +1307,7 @@
       "tools": [],
       "guidance_chars": 0,
       "logs": [],
+      "ecosystem": "dsh",
       "stderr": "",
       "client": true,
       "peers": [
@@ -1387,65 +1332,32 @@
     },
     {
       "name": "@michengai/dsh-archive-manager",
-      "version": "1.0.17",
-      "monthly": 182870,
+      "version": "1.0.20",
+      "monthly": 186731,
       "description": "归档、恢复、收藏和永久删除会话，并诊断损坏的会话日志。 · Archive, restore, favorite, and permanently delete sessions, and diagnose damaged session logs.",
-      "ecosystem": "dsh",
       "services": {
         "present": [],
-        "missing": []
+        "missing": [],
+        "importErrors": {
+          "@michengai/dsh-archive-manager": "Cannot find package '@deepseek-ai/dsh-spill' imported from /tmp/yoagent-matrix-byZAX7/dsh/@michengai__dsh-archive-manager/node_modules/@deepseek-ai/dsh-spill-local/lib/index.js"
+        }
       },
       "rows": [
         {
-          "id": "dsh-fs",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-attachments",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-credentials",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-storage",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-session-persistence",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skills",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skill-filesystem",
-          "state": "active",
-          "error": null
-        },
-        {
           "id": "ui-workspace-archive-manager",
           "state": "unresolved",
-          "error": "cannot load \"@michengai/dsh-archive-manager\": Error: Cannot find package '@deepseek-ai/dsh-workspace' imported from /tmp/yoagent-matrix-eqeP5X/dsh/@michengai__dsh-archive-manager/node_modules/@michengai/dsh-archive-manager/lib/workspace.js"
+          "error": "cannot load \"@michengai/dsh-archive-manager\": Error: Cannot find package '@deepseek-ai/dsh-spill' imported from /tmp/yoagent-matrix-byZAX7/dsh/@michengai__dsh-archive-manager/node_modules/@deepseek-ai/dsh-spill-local/lib/index.js"
         }
       ],
       "tools": [],
       "guidance_chars": 0,
       "logs": [],
+      "ecosystem": "dsh",
       "stderr": "",
       "client": true,
       "peers": [
         "@deepseek-ai/dsh-client-connection",
         "@deepseek-ai/dsh-client-locale",
-        "@deepseek-ai/dsh-client-runtime",
         "@deepseek-ai/dsh-client-store",
         "@deepseek-ai/dsh-client-ui-conversation",
         "@deepseek-ai/dsh-client-ui-primitives",
@@ -1463,58 +1375,23 @@
       ],
       "inject": [],
       "importErrors": {
-        "ui-workspace-archive-manager": "Cannot find package '@deepseek-ai/dsh-workspace' imported from /tmp/yoagent-matrix-eqeP5X/dsh/@michengai__dsh-archive-manager/node_modules/@michengai/dsh-archive-manager/lib/workspace.js"
+        "ui-workspace-archive-manager": "Cannot find package '@deepseek-ai/dsh-spill' imported from /tmp/yoagent-matrix-byZAX7/dsh/@michengai__dsh-archive-manager/node_modules/@deepseek-ai/dsh-spill-local/lib/index.js"
       },
-      "installNote": "installed without its DSH peers (@deepseek-ai/dsh-workspace@0.2.0-rc.2, @deepseek-ai/dsh-spill-local@0.2.0-rc.2, @deepseek-ai/dsh-client-store@0.2.0-rc.2, @deepseek-ai/dsh-client-locale@0.2.0-rc.2, @deepseek-ai/dsh-client-runtime@0.2.0-rc.2, @deepseek-ai/dsh-host-webserver@0.2.0-rc.2, @deepseek-ai/dsh-storage-domain@0.2.0-rc.2, @deepseek-ai/dsh-typert-registry@0.2.0-rc.2, @deepseek-ai/dsh-client-connection@0.2.0-rc.2, @deepseek-ai/dsh-client-ui-sidebar@0.2.0-rc.2, @deepseek-ai/dsh-client-ui-workspace@0.2.0-rc.2, @deepseek-ai/dsh-client-ui-primitives@0.2.0-rc.2, @deepseek-ai/dsh-client-ui-conversation@0.2.0-rc.2, @deepseek-ai/dsh-session-format-catalog@0.2.0-rc.2, @deepseek-ai/dsh-session-projection-cache@0.2.0-rc.2)",
+      "installNote": "installed without npm resolving its peers",
       "result": "needs a DSH host",
-      "detail": "loads DSH packages an agent library does not ship: @deepseek-ai/dsh-workspace. Its web UI needs DSH's web client. (installed without its DSH peers (@deepseek-ai/dsh-workspace@0.2.0-rc.2, @deepseek-ai/dsh-spill-local@0.2.0-rc.2, @deepseek-ai/dsh-client-store@0.2.0-rc.2, @deepseek-ai/dsh-client-locale@0.2.0-rc.2, @deepseek-ai/dsh-client-runtime@0.2.0-rc.2, @deepseek-ai/dsh-host-webserver@0.2.0-rc.2, @deepseek-ai/dsh-storage-domain@0.2.0-rc.2, @deepseek-ai/dsh-typert-registry@0.2.0-rc.2, @deepseek-ai/dsh-client-connection@0.2.0-rc.2, @deepseek-ai/dsh-client-ui-sidebar@0.2.0-rc.2, @deepseek-ai/dsh-client-ui-workspace@0.2.0-rc.2, @deepseek-ai/dsh-client-ui-primitives@0.2.0-rc.2, @deepseek-ai/dsh-client-ui-conversation@0.2.0-rc.2, @deepseek-ai/dsh-session-format-catalog@0.2.0-rc.2, @deepseek-ai/dsh-session-projection-cache@0.2.0-rc.2))"
+      "detail": "loads DSH packages an agent library does not ship: @deepseek-ai/dsh-spill. Its web UI needs DSH's web client. (installed without npm resolving its peers)"
     },
     {
       "name": "dsh-whale-widget",
       "version": "0.4.2",
-      "monthly": 154055,
+      "monthly": 186009,
       "description": "DSH Web 界面右下角的 DeepSeek 余额小鲸鱼挂件:余额/今日已用/峰谷定价、自定义泡泡点击序列(文本/余额/今日/峰谷/图片/随机语句与并列加权选择)、逐行样式与字体、悬浮快捷编辑、音效与每轮消耗、自定义角色/动图/音效、吸附与翻转自定义",
-      "ecosystem": "dsh",
       "services": {
         "present": [],
-        "missing": []
+        "missing": [],
+        "importErrors": {}
       },
       "rows": [
-        {
-          "id": "dsh-fs",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-attachments",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-credentials",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-storage",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-session-persistence",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skills",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skill-filesystem",
-          "state": "active",
-          "error": null
-        },
         {
           "id": "dsh-whale-widget",
           "state": "active",
@@ -1524,6 +1401,7 @@
       "tools": [],
       "guidance_chars": 0,
       "logs": [],
+      "ecosystem": "dsh",
       "stderr": "",
       "client": false,
       "peers": [],
@@ -1533,54 +1411,51 @@
       "detail": "starts, but adds no tools or guidance (UI, settings or server features)."
     },
     {
+      "name": "dsh-cost-meter",
+      "version": "1.8.35",
+      "monthly": 111200,
+      "description": "DeepSeek Harness 会话费用统计插件:本会话成本、当日费用、历史记录与官方价格同步,支持多厂商多模型价格计费(内置 170+ 模型 ID 价格目录与自动匹配)、主流 Coding Plan 订阅额度查询与显示(13 家,含 OpenDesign 工作区查询、含小米 MiMo Token Plan 控制台 Cookie 查询、SCNet Token Plan 本地 Credits 计量与火山方舟 Volcano Ark Coding Plan AK/SK 签名查询)、自定义 Provider ",
+      "services": {
+        "present": [],
+        "missing": [],
+        "importErrors": {}
+      },
+      "rows": [
+        {
+          "id": "cost-meter",
+          "state": "active",
+          "error": null
+        }
+      ],
+      "tools": [],
+      "guidance_chars": 0,
+      "logs": [],
+      "ecosystem": "dsh",
+      "stderr": "",
+      "client": true,
+      "peers": [
+        "@deepseek-ai/dsh-credentials",
+        "@deepseek-ai/dsh-home-paths"
+      ],
+      "inject": [],
+      "importErrors": {},
+      "result": "not applicable",
+      "detail": "starts, but adds no tools or guidance (UI, settings or server features). Its web UI needs DSH's web client."
+    },
+    {
       "name": "dsh-plugin-model-proxy",
       "version": "0.1.6",
-      "monthly": 131719,
+      "monthly": 104994,
       "description": "DSH plugin: per-model proxy routing (http/https/socks5) with a settings UI — e.g. opencode/muse-spark-1.2-contributor needs a proxy while sibling models stay direct",
-      "ecosystem": "dsh",
       "services": {
         "present": [],
         "missing": [
           "settings",
           "llm"
-        ]
+        ],
+        "importErrors": {}
       },
       "rows": [
-        {
-          "id": "dsh-fs",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-attachments",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-credentials",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-storage",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-session-persistence",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skills",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skill-filesystem",
-          "state": "active",
-          "error": null
-        },
         {
           "id": "model-proxy",
           "state": "active",
@@ -1590,6 +1465,7 @@
       "tools": [],
       "guidance_chars": 0,
       "logs": [],
+      "ecosystem": "dsh",
       "stderr": "",
       "client": true,
       "peers": [
@@ -1604,77 +1480,10 @@
       "detail": "waits for services yoagent's DSH runtime does not run: settings, llm. Its web UI needs DSH's web client."
     },
     {
-      "name": "dsh-cost-meter",
-      "version": "1.8.22",
-      "monthly": 108645,
-      "description": "DeepSeek Harness 会话费用统计插件:本会话成本、当日费用、历史记录与官方价格同步,支持多厂商多模型价格计费(内置 170+ 模型 ID 价格目录与自动匹配)、主流 Coding Plan 订阅额度查询与显示(11 家,含小米 MiMo Token Plan 控制台 Cookie 查询、SCNet Token Plan 本地 Credits 计量与火山方舟 Volcano Ark Coding Plan AK/SK 签名查询)、自定义 Provider 余额查询(可配任意 HTTP 端点)与",
-      "ecosystem": "dsh",
-      "services": {
-        "present": [],
-        "missing": []
-      },
-      "rows": [
-        {
-          "id": "dsh-fs",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-attachments",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-credentials",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-storage",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-session-persistence",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skills",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skill-filesystem",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "cost-meter",
-          "state": "active",
-          "error": null
-        }
-      ],
-      "tools": [],
-      "guidance_chars": 0,
-      "logs": [],
-      "stderr": "",
-      "client": true,
-      "peers": [
-        "@deepseek-ai/dsh-credentials",
-        "@deepseek-ai/dsh-home-paths"
-      ],
-      "inject": [],
-      "importErrors": {},
-      "result": "not applicable",
-      "detail": "starts, but adds no tools or guidance (UI, settings or server features). Its web UI needs DSH's web client."
-    },
-    {
       "name": "@xmanrui/dsh-im",
-      "version": "4.38.1",
-      "monthly": 62286,
+      "version": "4.39.0",
+      "monthly": 63448,
       "description": "把微信、飞书、企微、钉钉、QQ、Telegram、WhatsApp、Slack、Discord、Matrix接入DSH。 Connect Telegram, WhatsApp, Slack, Discord, Matrix, WeChat, Feishu, WeCom, DingTalk, and QQ to DSH.",
-      "ecosystem": "dsh",
       "services": {
         "present": [
           "credentials"
@@ -1682,44 +1491,10 @@
         "missing": [
           "connection",
           "typertGateway"
-        ]
+        ],
+        "importErrors": {}
       },
       "rows": [
-        {
-          "id": "dsh-fs",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-attachments",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-credentials",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-storage",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-session-persistence",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skills",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skill-filesystem",
-          "state": "active",
-          "error": null
-        },
         {
           "id": "xmanrui-dsh-im",
           "state": "active",
@@ -1729,6 +1504,7 @@
       "tools": [],
       "guidance_chars": 0,
       "logs": [],
+      "ecosystem": "dsh",
       "stderr": "",
       "client": true,
       "peers": [],
@@ -1742,11 +1518,126 @@
       "detail": "waits for services yoagent's DSH runtime does not run: connection, typertGateway. Its web UI needs DSH's web client."
     },
     {
+      "name": "dsh-univer-office",
+      "version": "0.3.7",
+      "monthly": 52360,
+      "description": "DSH × Univer integration with a bundled collaboration Gateway and Viewer: inline previews, live floating Worktree windows, and session-end review actions in DeepSeek Harness.",
+      "services": {
+        "present": [],
+        "missing": [],
+        "importErrors": {}
+      },
+      "rows": [
+        {
+          "id": "univer",
+          "state": "active",
+          "error": null
+        }
+      ],
+      "tools": [
+        "univer_api",
+        "univer_compile_svg",
+        "univer_execute",
+        "univer_export",
+        "univer_import",
+        "univer_inspect",
+        "univer_lint",
+        "univer_new",
+        "univer_print_pdf",
+        "univer_resources",
+        "univer_screenshot",
+        "univer_status",
+        "univer_unit",
+        "univer_worktree"
+      ],
+      "guidance_chars": 0,
+      "logs": [],
+      "ecosystem": "dsh",
+      "stderr": "",
+      "client": true,
+      "peers": [
+        "@deepseek-ai/dsh-attachment",
+        "@deepseek-ai/dsh-host-webserver",
+        "@deepseek-ai/dsh-llm",
+        "@deepseek-ai/dsh-session",
+        "@deepseek-ai/dsh-settings",
+        "@deepseek-ai/dsh-skill",
+        "@deepseek-ai/dsh-tools"
+      ],
+      "inject": [],
+      "importErrors": {},
+      "result": "works, partly",
+      "detail": "14 tools",
+      "ignored": [
+        "its web UI (DSH's web client)"
+      ]
+    },
+    {
+      "name": "@dfy-plugins/dsh-image-generation",
+      "version": "0.1.4",
+      "monthly": 52343,
+      "description": "为 DeepSeek Harness 提供独立的图像生成与编辑 Skill、工具和设置界面。",
+      "services": {
+        "present": [
+          "tools",
+          "attachments",
+          "credentials",
+          "fs",
+          "skills",
+          "sessionPersistence"
+        ],
+        "missing": [
+          "settings"
+        ],
+        "importErrors": {}
+      },
+      "rows": [
+        {
+          "id": "image-generation",
+          "state": "active",
+          "error": null
+        }
+      ],
+      "tools": [],
+      "guidance_chars": 0,
+      "logs": [],
+      "ecosystem": "dsh",
+      "stderr": "",
+      "client": true,
+      "peers": [
+        "@deepseek-ai/dsh-attachment",
+        "@deepseek-ai/dsh-client-ui-primitives",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-plugin-manager",
+        "@deepseek-ai/dsh-client-ui-tool",
+        "@deepseek-ai/dsh-credentials",
+        "@deepseek-ai/dsh-fs",
+        "@deepseek-ai/dsh-host-webserver",
+        "@deepseek-ai/dsh-llm",
+        "@deepseek-ai/dsh-session-persistence",
+        "@deepseek-ai/dsh-settings",
+        "@deepseek-ai/dsh-skill",
+        "@deepseek-ai/dsh-tools"
+      ],
+      "inject": [
+        "tools",
+        "attachments",
+        "credentials",
+        "fs",
+        "skills",
+        "sessionPersistence",
+        "settings"
+      ],
+      "importErrors": {},
+      "installNote": "installed without npm resolving its peers",
+      "result": "needs a DSH host",
+      "detail": "waits for services yoagent's DSH runtime does not run: settings. Its web UI needs DSH's web client. (installed without npm resolving its peers)"
+    },
+    {
       "name": "@nanmicoder/dsh-agent-teams",
       "version": "0.1.23",
-      "monthly": 55140,
+      "monthly": 51849,
       "description": "AgentTeams for DeepSeek Harness: multi-agent team collaboration (captain, members, tasks with dependencies, messaging) driven by natural language, with a tree monitor in the web GUI",
-      "ecosystem": "dsh",
       "services": {
         "present": [
           "tools",
@@ -1756,44 +1647,10 @@
           "llm",
           "subagents",
           "agents"
-        ]
+        ],
+        "importErrors": {}
       },
       "rows": [
-        {
-          "id": "dsh-fs",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-attachments",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-credentials",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-storage",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-session-persistence",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skills",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skill-filesystem",
-          "state": "active",
-          "error": null
-        },
         {
           "id": "agent-teams",
           "state": "active",
@@ -1803,6 +1660,7 @@
       "tools": [],
       "guidance_chars": 0,
       "logs": [],
+      "ecosystem": "dsh",
       "stderr": "",
       "client": true,
       "peers": [
@@ -1840,308 +1698,18 @@
       "detail": "waits for services yoagent's DSH runtime does not run: llm, subagents, agents. Its web UI needs DSH's web client."
     },
     {
-      "name": "@dfy-plugins/dsh-image-generation",
-      "version": "0.1.4",
-      "monthly": 52343,
-      "description": "为 DeepSeek Harness 提供独立的图像生成与编辑 Skill、工具和设置界面。",
-      "ecosystem": "dsh",
-      "services": {
-        "present": [
-          "tools",
-          "attachments",
-          "credentials",
-          "fs",
-          "skills",
-          "sessionPersistence"
-        ],
-        "missing": [
-          "settings"
-        ]
-      },
-      "rows": [
-        {
-          "id": "dsh-fs",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-attachments",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-credentials",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-storage",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-session-persistence",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skills",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skill-filesystem",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "image-generation",
-          "state": "active",
-          "error": null
-        }
-      ],
-      "tools": [],
-      "guidance_chars": 0,
-      "logs": [],
-      "stderr": "",
-      "client": true,
-      "peers": [
-        "@deepseek-ai/dsh-attachment",
-        "@deepseek-ai/dsh-client-ui-primitives",
-        "@deepseek-ai/dsh-client-ui-settings",
-        "@deepseek-ai/dsh-client-ui-plugin-manager",
-        "@deepseek-ai/dsh-client-ui-tool",
-        "@deepseek-ai/dsh-credentials",
-        "@deepseek-ai/dsh-fs",
-        "@deepseek-ai/dsh-host-webserver",
-        "@deepseek-ai/dsh-llm",
-        "@deepseek-ai/dsh-session-persistence",
-        "@deepseek-ai/dsh-settings",
-        "@deepseek-ai/dsh-skill",
-        "@deepseek-ai/dsh-tools"
-      ],
-      "inject": [
-        "tools",
-        "attachments",
-        "credentials",
-        "fs",
-        "skills",
-        "sessionPersistence",
-        "settings"
-      ],
-      "importErrors": {},
-      "installNote": "installed without npm resolving its peers",
-      "result": "needs a DSH host",
-      "detail": "waits for services yoagent's DSH runtime does not run: settings. Its web UI needs DSH's web client. (installed without npm resolving its peers)"
-    },
-    {
-      "name": "dsh-univer-office",
-      "version": "0.3.7",
-      "monthly": 50677,
-      "description": "DSH × Univer integration with a bundled collaboration Gateway and Viewer: inline previews, live floating Worktree windows, and session-end review actions in DeepSeek Harness.",
-      "ecosystem": "dsh",
-      "services": {
-        "present": [],
-        "missing": []
-      },
-      "rows": [
-        {
-          "id": "dsh-fs",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-attachments",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-credentials",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-storage",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-session-persistence",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skills",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skill-filesystem",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "univer",
-          "state": "active",
-          "error": null
-        }
-      ],
-      "tools": [
-        "univer_api",
-        "univer_compile_svg",
-        "univer_execute",
-        "univer_export",
-        "univer_import",
-        "univer_inspect",
-        "univer_lint",
-        "univer_new",
-        "univer_print_pdf",
-        "univer_resources",
-        "univer_screenshot",
-        "univer_status",
-        "univer_unit",
-        "univer_worktree"
-      ],
-      "guidance_chars": 0,
-      "logs": [],
-      "stderr": "",
-      "client": true,
-      "peers": [
-        "@deepseek-ai/dsh-attachment",
-        "@deepseek-ai/dsh-host-webserver",
-        "@deepseek-ai/dsh-llm",
-        "@deepseek-ai/dsh-session",
-        "@deepseek-ai/dsh-settings",
-        "@deepseek-ai/dsh-skill",
-        "@deepseek-ai/dsh-tools"
-      ],
-      "inject": [],
-      "importErrors": {},
-      "result": "works, partly",
-      "detail": "14 tools",
-      "ignored": [
-        "its web UI (DSH's web client)"
-      ]
-    },
-    {
-      "name": "dsh-mnemon",
-      "version": "0.5.28",
-      "monthly": 45540,
-      "description": "Composable, view-based memory for DeepSeek Harness. Pluggable sources and strategies, with layered memory out of the box.",
-      "ecosystem": "dsh",
-      "services": {
-        "present": [],
-        "missing": [
-          "loader"
-        ]
-      },
-      "rows": [
-        {
-          "id": "dsh-fs",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-attachments",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-credentials",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-storage",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-session-persistence",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skills",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skill-filesystem",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "mnemon-bundle",
-          "state": "disabled",
-          "error": null
-        }
-      ],
-      "tools": [],
-      "guidance_chars": 0,
-      "logs": [],
-      "stderr": "",
-      "client": true,
-      "peers": [
-        "@deepseek-ai/dsh-app-boot",
-        "@deepseek-ai/dsh-client-ui-primitives",
-        "@deepseek-ai/dsh-typert-protocol"
-      ],
-      "inject": [
-        "loader"
-      ],
-      "importErrors": {},
-      "result": "needs a DSH host",
-      "detail": "waits for services yoagent's DSH runtime does not run: loader. Its web UI needs DSH's web client."
-    },
-    {
       "name": "dsh-plugin-wallpaper-engine",
-      "version": "1.3.2",
-      "monthly": 43299,
+      "version": "1.3.3",
+      "monthly": 49597,
       "description": "Wallpaper Engine backgrounds for the DSH web GUI: render your local Wallpaper Engine wallpapers behind the chat — Scene and Web in real time through the bundled WebWallGL engine, Video played directly — with iOS-style liquid glass, adjustable blur/scrim/b",
-      "ecosystem": "dsh",
       "services": {
         "present": [],
         "missing": [
           "webServer"
-        ]
+        ],
+        "importErrors": {}
       },
       "rows": [
-        {
-          "id": "dsh-fs",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-attachments",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-credentials",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-storage",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-session-persistence",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skills",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skill-filesystem",
-          "state": "active",
-          "error": null
-        },
         {
           "id": "wallpaper-engine",
           "state": "active",
@@ -2151,6 +1719,7 @@
       "tools": [],
       "guidance_chars": 0,
       "logs": [],
+      "ecosystem": "dsh",
       "stderr": "",
       "client": true,
       "peers": [
@@ -2167,53 +1736,55 @@
       "detail": "waits for services yoagent's DSH runtime does not run: webServer. Its web UI needs DSH's web client. (installed without its DSH peers (@deepseek-ai/dsh-client-runtime@0.2.0-rc.2, @deepseek-ai/dsh-host-webserver@0.2.0-rc.2, @deepseek-ai/dsh-client-ui-slots@0.2.0-rc.2))"
     },
     {
-      "name": "dsh-free-search",
-      "version": "0.8.9",
-      "monthly": 42419,
-      "description": "Free web search for DeepSeek Harness: 24 engines (Bing/DuckDuckGo/AnySearch/SearXNG/Exa/Tavily/Keenable/Firecrawl/Parallel keyless; Zhihu global/site via MCP and Perplexity/SerpBase/DeepSeek/You.com/Baidu/Kimi/Aliyun/Doubao with key; OpenAI/Gemini/Claude ",
+      "name": "dsh-mnemon",
+      "version": "0.5.29",
+      "monthly": 47552,
+      "description": "Composable, view-based memory for DeepSeek Harness. Pluggable sources and strategies, with layered memory out of the box.",
+      "services": {
+        "present": [],
+        "missing": [
+          "loader"
+        ],
+        "importErrors": {}
+      },
+      "rows": [
+        {
+          "id": "mnemon-bundle",
+          "state": "disabled",
+          "error": null
+        }
+      ],
+      "tools": [],
+      "guidance_chars": 0,
+      "logs": [],
       "ecosystem": "dsh",
+      "stderr": "",
+      "client": true,
+      "peers": [
+        "@deepseek-ai/dsh-app-boot",
+        "@deepseek-ai/dsh-client-ui-primitives",
+        "@deepseek-ai/dsh-typert-protocol"
+      ],
+      "inject": [
+        "loader"
+      ],
+      "importErrors": {},
+      "result": "needs a DSH host",
+      "detail": "waits for services yoagent's DSH runtime does not run: loader. Its web UI needs DSH's web client."
+    },
+    {
+      "name": "dsh-free-search",
+      "version": "0.9.1",
+      "monthly": 47543,
+      "description": "Free web search for DeepSeek Harness: 24 engines (Bing/DuckDuckGo/AnySearch/SearXNG/Exa/Tavily/Keenable/Firecrawl/Parallel keyless; Zhihu global/site via MCP and Perplexity/SerpBase/DeepSeek/You.com/Baidu/Kimi/Aliyun/Doubao with key; OpenAI/Gemini/Claude ",
       "services": {
         "present": [
           "web"
         ],
-        "missing": []
+        "missing": [],
+        "importErrors": {}
       },
       "rows": [
-        {
-          "id": "dsh-fs",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-attachments",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-credentials",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-storage",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-session-persistence",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skills",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skill-filesystem",
-          "state": "active",
-          "error": null
-        },
         {
           "id": "web-search-free",
           "state": "active",
@@ -2231,8 +1802,9 @@
         "video_search",
         "weather"
       ],
-      "guidance_chars": 1509,
+      "guidance_chars": 1914,
       "logs": [],
+      "ecosystem": "dsh",
       "stderr": "",
       "client": true,
       "peers": [
@@ -2253,80 +1825,10 @@
       ]
     },
     {
-      "name": "@liustack/modsearch",
-      "version": "5.10.6",
-      "monthly": 42230,
-      "description": "The strongest free web search plugin for coding agents. Plug-in web search, X search, and page fetch for models without native web access. Free out of the box: no signup, no API key (Firecrawl keyless, 1,000 free credits/month)",
-      "ecosystem": "dsh",
-      "services": {
-        "present": [
-          "tools",
-          "web"
-        ],
-        "missing": []
-      },
-      "rows": [
-        {
-          "id": "dsh-fs",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-attachments",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-credentials",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-storage",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-session-persistence",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skills",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skill-filesystem",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "modsearch",
-          "state": "failed",
-          "error": "plugin failed: TypeError: Cannot read properties of null (reading 'searchProvider')"
-        }
-      ],
-      "tools": [],
-      "guidance_chars": 0,
-      "logs": [],
-      "stderr": "",
-      "client": true,
-      "peers": [],
-      "inject": [
-        "tools",
-        "web"
-      ],
-      "importErrors": {},
-      "result": "failed",
-      "detail": "modsearch: failed plugin failed: TypeError: Cannot read properties of null (reading 'searchProvider')"
-    },
-    {
       "name": "dsh-pet",
-      "version": "0.3.6",
-      "monthly": 41822,
+      "version": "0.3.7",
+      "monthly": 47396,
       "description": "吃白饭的蓝色大肥鱼，赖在 DeepSeek Harness 里不走了。平时爱玩魔方、爱吃各种零食、偶尔打个盹，闲不住就在桌面上溜达两圈，被你拖来甩去也照旧赖着；你忙起来它跟着忙前忙后，也会帮你打理余额钱包，闲下来爱碎碎念，还乐意陪你唠两句。",
-      "ecosystem": "dsh",
       "services": {
         "present": [
           "credentials"
@@ -2335,45 +1837,12 @@
           "webServer",
           "agentDefaultModel",
           "llm",
-          "commands"
-        ]
+          "commands",
+          "connection"
+        ],
+        "importErrors": {}
       },
       "rows": [
-        {
-          "id": "dsh-fs",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-attachments",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-credentials",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-storage",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-session-persistence",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skills",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skill-filesystem",
-          "state": "active",
-          "error": null
-        },
         {
           "id": "dsh-pet",
           "state": "active",
@@ -2383,6 +1852,7 @@
       "tools": [],
       "guidance_chars": 0,
       "logs": [],
+      "ecosystem": "dsh",
       "stderr": "",
       "client": true,
       "peers": [
@@ -2401,18 +1871,53 @@
         "agentDefaultModel",
         "credentials",
         "llm",
-        "commands"
+        "commands",
+        "connection"
       ],
       "importErrors": {},
       "result": "needs a DSH host",
-      "detail": "waits for services yoagent's DSH runtime does not run: webServer, agentDefaultModel, llm, commands. Its web UI needs DSH's web client."
+      "detail": "waits for services yoagent's DSH runtime does not run: webServer, agentDefaultModel, llm, commands, connection. Its web UI needs DSH's web client."
+    },
+    {
+      "name": "@liustack/modsearch",
+      "version": "5.10.7",
+      "monthly": 42853,
+      "description": "The strongest free web search plugin for coding agents. Plug-in web search, X search, and page fetch for models without native web access. Free out of the box: no signup, no API key (Firecrawl keyless, 1,000 free credits/month)",
+      "services": {
+        "present": [
+          "tools",
+          "web"
+        ],
+        "missing": [],
+        "importErrors": {}
+      },
+      "rows": [
+        {
+          "id": "modsearch",
+          "state": "failed",
+          "error": "plugin failed: TypeError: Cannot read properties of null (reading 'searchProvider')"
+        }
+      ],
+      "tools": [],
+      "guidance_chars": 0,
+      "logs": [],
+      "ecosystem": "dsh",
+      "stderr": "",
+      "client": true,
+      "peers": [],
+      "inject": [
+        "tools",
+        "web"
+      ],
+      "importErrors": {},
+      "result": "failed",
+      "detail": "modsearch: failed plugin failed: TypeError: Cannot read properties of null (reading 'searchProvider')"
     },
     {
       "name": "@dfy-plugins/dsh-bundle",
       "version": "0.1.2",
-      "monthly": 41676,
+      "monthly": 41764,
       "description": "DFY 插件组合包：壁纸、外观、归档管理、媒体内容、图像生成、交互可视化、任务守卫和 Codex 连接。",
-      "ecosystem": "dsh",
       "services": {
         "present": [
           "attachments",
@@ -2429,44 +1934,10 @@
           "llm",
           "agents",
           "agentPresets"
-        ]
+        ],
+        "importErrors": {}
       },
       "rows": [
-        {
-          "id": "dsh-fs",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-attachments",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-credentials",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-storage",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-session-persistence",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skills",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skill-filesystem",
-          "state": "active",
-          "error": null
-        },
         {
           "id": "wallpaper",
           "state": "active",
@@ -2513,6 +1984,7 @@
       ],
       "guidance_chars": 0,
       "logs": [],
+      "ecosystem": "dsh",
       "stderr": "",
       "client": false,
       "peers": [],
@@ -2535,124 +2007,19 @@
       "detail": "waits for services yoagent's DSH runtime does not run: webServer, settings, workspaceRegistry, llm, agents, agentPresets."
     },
     {
-      "name": "@roarpeng/graphflow",
-      "version": "2.3.0",
-      "monthly": 36397,
-      "description": "Local-first memory & context harness for coding agents",
-      "ecosystem": "dsh",
-      "services": {
-        "present": [],
-        "missing": []
-      },
-      "rows": [
-        {
-          "id": "dsh-fs",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-attachments",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-credentials",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-storage",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-session-persistence",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skills",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skill-filesystem",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "mcp-graphflow",
-          "state": "unresolved",
-          "error": "no plugin named \"@deepseek-ai/dsh-mcp-client\""
-        },
-        {
-          "id": "graphflow-dsh",
-          "state": "active",
-          "error": null
-        }
-      ],
-      "tools": [],
-      "guidance_chars": 0,
-      "logs": [],
-      "stderr": "",
-      "client": true,
-      "peers": [],
-      "inject": [],
-      "importErrors": {
-        "mcp-graphflow": "Cannot find module '@deepseek-ai/dsh-mcp-client'\nRequire stack:\n- /tmp/yoagent-matrix-eqeP5X/dsh/@roarpeng__graphflow/package.json"
-      },
-      "result": "needs a DSH host",
-      "detail": "loads DSH packages an agent library does not ship: @deepseek-ai/dsh-mcp-client. Its web UI needs DSH's web client."
-    },
-    {
       "name": "dsh-dream-skin",
-      "version": "10.12.1",
-      "monthly": 35393,
+      "version": "10.16.0",
+      "monthly": 36365,
       "description": "DeepSeek Harness 换肤插件（Dream Skin for DSH）：8 套 iOS / Linear 式清透冷调的高质感主题 + 弥散光壁纸 + 每皮肤智能背景 + 强调色 + 主题包分享，把换肤做成材质与配色克制的高级感工艺，而非贴图。Works in native DSH Web and third-party desktop clients (DSH Desktop): 8 original premium themes, glass materials, wallpaper 2.0",
-      "ecosystem": "dsh",
       "services": {
         "present": [],
         "missing": [
           "webServer",
           "webRuntime"
-        ]
+        ],
+        "importErrors": {}
       },
       "rows": [
-        {
-          "id": "dsh-fs",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-attachments",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-credentials",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-storage",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-session-persistence",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skills",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skill-filesystem",
-          "state": "active",
-          "error": null
-        },
         {
           "id": "dream-skin",
           "state": "active",
@@ -2662,6 +2029,7 @@
       "tools": [],
       "guidance_chars": 0,
       "logs": [],
+      "ecosystem": "dsh",
       "stderr": "",
       "client": true,
       "peers": [
@@ -2684,9 +2052,8 @@
     {
       "name": "@dfy-plugins/dsh-visualize",
       "version": "0.1.5",
-      "monthly": 30262,
+      "monthly": 30311,
       "description": "在 DeepSeek Harness 对话中以会话级 artifact 安全展示交互式 HTML 可视化。",
-      "ecosystem": "dsh",
       "services": {
         "present": [
           "tools",
@@ -2694,44 +2061,10 @@
           "skills",
           "sessionPersistence"
         ],
-        "missing": []
+        "missing": [],
+        "importErrors": {}
       },
       "rows": [
-        {
-          "id": "dsh-fs",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-attachments",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-credentials",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-storage",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-session-persistence",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skills",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skill-filesystem",
-          "state": "active",
-          "error": null
-        },
         {
           "id": "visualize",
           "state": "active",
@@ -2743,6 +2076,7 @@
       ],
       "guidance_chars": 0,
       "logs": [],
+      "ecosystem": "dsh",
       "stderr": "",
       "client": true,
       "peers": [
@@ -2769,76 +2103,72 @@
       ]
     },
     {
-      "name": "dsh-find-plugin",
-      "version": "0.4.0",
-      "monthly": 29744,
-      "description": "Find DeepSeek Harness plugins inside the agent — live GitHub dsh-plugin topic search, ranked by stars.",
-      "ecosystem": "dsh",
+      "name": "@tt-a1i/archify-dsh",
+      "version": "1.0.0",
+      "monthly": 30098,
+      "description": "Opt-in DeepSeek Harness Skill-only bundle for the Archify architecture-diagram skill.",
       "services": {
         "present": [
-          "tools"
+          "skills"
         ],
-        "missing": []
+        "missing": [],
+        "importErrors": {}
       },
       "rows": [
         {
-          "id": "dsh-fs",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-attachments",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-credentials",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-storage",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-session-persistence",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skills",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "dsh-skill-filesystem",
-          "state": "active",
-          "error": null
-        },
-        {
-          "id": "find-dsh-plugin",
+          "id": "archify-skill-filesystem",
           "state": "active",
           "error": null
         }
       ],
-      "tools": [
-        "find_dsh_plugin"
-      ],
+      "tools": [],
       "guidance_chars": 0,
       "logs": [],
+      "ecosystem": "dsh",
       "stderr": "",
       "client": false,
-      "peers": [
-        "@deepseek-ai/dsh-tools"
-      ],
+      "peers": [],
       "inject": [
-        "tools"
+        "skills"
       ],
       "importErrors": {},
-      "result": "works",
-      "detail": "1 tool",
-      "ignored": []
+      "result": "not applicable",
+      "detail": "starts, but adds no tools or guidance (UI, settings or server features)."
+    },
+    {
+      "name": "@iasiv5/dsh-obmc-web",
+      "version": "0.1.3",
+      "monthly": 29214,
+      "description": "OpenBMC 控制台入口：设置一级菜单「BMC 控制台」面板一键在顶层标签页打开 BMC Web UI，同源代理经 SSH 本地转发 relay（obmc-web-relay）抵达 BMC，BMC IP 变化自动探测并重定向隧道；需 SSH 跳板机可达 BMC。",
+      "services": {
+        "present": [],
+        "missing": [
+          "webServer",
+          "webRuntime"
+        ],
+        "importErrors": {}
+      },
+      "rows": [
+        {
+          "id": "obmc-web",
+          "state": "active",
+          "error": null
+        }
+      ],
+      "tools": [],
+      "guidance_chars": 0,
+      "logs": [],
+      "ecosystem": "dsh",
+      "stderr": "",
+      "client": true,
+      "peers": [],
+      "inject": [
+        "webServer",
+        "webRuntime"
+      ],
+      "importErrors": {},
+      "result": "needs a DSH host",
+      "detail": "waits for services yoagent's DSH runtime does not run: webServer, webRuntime. Its web UI needs DSH's web client."
     }
   ]
 }
