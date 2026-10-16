@@ -188,7 +188,7 @@ The loop and the `Extension` contract build for every target yoagent supports, s
 | Decision models: `ToolGate`, `InputGuard`, the advisor (`decision` feature) | yes | yes, over HTTP or the [`yoagent-workers`](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-workers) binding to Workers AI |
 | Built-in tools: shell, files, search | yes | no: there is no operating system |
 | MCP servers | stdio and HTTP | HTTP only |
-| Plugins through [`yoagent-rutis`](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis): TypeScript (Node or Bun), Python, Go, pi extensions, DSH plugins | yes | no: each plugin runtime is a process the host starts, and a Worker cannot start one |
+| Plugins through [`yoagent-rutis`](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis): TypeScript (Node or Bun), Python, Go, pi extensions, DSH plugins | yes | no: the crate does not build for `wasm32` (rutis's host needs Tokio's networking), so not even a runtime on another machine over `wss` (its `websocket` feature) can be reached from a Worker |
 
 A VM is a local machine as far as yoagent is concerned: the same build and the same features; only who runs it differs.
 

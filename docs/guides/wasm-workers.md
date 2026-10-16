@@ -32,7 +32,7 @@ build for wasm32.
 | `AgentTool`s you write; HTTP MCP (`with_mcp_server_http`) | `FileBackend` for `SharedState` |
 | `SharedState` (in memory, or your own `SharedStateBackend`), sub-agents | `SkillSet` loading (compiles, but finds no directories: there is no filesystem) |
 | The `decision` feature | `PriceTable::fetch_cached` (its disk cache) |
-| `Extension`s written in Rust (`Budget`, `ToolGate`, `InputGuard`, your own) | Plugins through `yoagent-rutis` (TypeScript, Python, Go, pi, DSH): each runtime is a process, and a Worker cannot start one |
+| `Extension`s written in Rust (`Budget`, `ToolGate`, `InputGuard`, your own) | Plugins through `yoagent-rutis` (TypeScript, Python, Go, pi, DSH): the crate does not build for `wasm32`, remote runtimes over `wss` included |
 | Compaction: `LlmCompaction` runs only its deterministic tiers and never summarises | reqwest's default features (rustls TLS, HTTP/2, system proxy settings, charset decoding); SOCKS proxies |
 | | The `openapi` and `gasp` features (they need the filesystem and a full Tokio) |
 
