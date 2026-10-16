@@ -177,6 +177,23 @@ What the bridge gives every ecosystem alike: TypeScript and Python handlers next
 
 **The adapter contract.** An ecosystem rarely maps one-to-one, so an adapter should follow the same rules ([details](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis#writing-an-ecosystem-adapter)): map only what the host can honour; refuse to load when a plugin would decide or rewrite something the host cannot enforce; deny a call when a policy fails; withhold a result when a redaction fails; report — never silently drop — what is ignored.
 
+## Where extensions run
+
+The loop and the `Extension` contract build for every target yoagent supports, so an extension written in Rust runs wherever the agent does. What changes from one place to another is what *else* is there: an operating system to run tools and plugin processes on, or only the host's `fetch`.
+
+| | Local machine or VM | Cloudflare Worker (`wasm32`) |
+|---|---|---|
+| Build | default features (`native`) | `--no-default-features` ([guide](../guides/wasm-workers.md)) |
+| `Extension`s written in Rust: your own, `Budget` | yes | yes (`tests/wasm32.rs` runs an extension that gates and observes a whole run) |
+| Decision models: `ToolGate`, `InputGuard`, the advisor (`decision` feature) | yes | yes, over HTTP or the [`yoagent-workers`](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-workers) binding to Workers AI |
+| Built-in tools: shell, files, search | yes | no: there is no operating system |
+| MCP servers | stdio and HTTP | HTTP only |
+| Plugins through [`yoagent-rutis`](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis): TypeScript (Node or Bun), Python, Go, pi extensions, DSH plugins | yes | no: each plugin runtime is a process the host starts, and a Worker cannot start one |
+
+A VM is a local machine as far as yoagent is concerned: the same build and the same features; only who runs it differs.
+
+So an agent meant to run in a Worker gets its policies, budgets and checks from Rust extensions (and decision models), and its tools from `AgentTool`s you write or HTTP MCP servers. The same extensions work unchanged when that agent runs locally, where the plugin ecosystems are also available.
+
 ## Order with the older hooks
 
 `ToolMiddleware`, `InputFilter`, `TurnHook`, `ToolSource` and the `on_*` closures keep working unchanged. Input filters run before `on_input`, and middleware before `before_tool`. Notes from `before_model` come before a `TurnHook`'s (turn hooks run inside the provider call, once per attempt).

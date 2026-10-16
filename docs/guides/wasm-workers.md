@@ -32,11 +32,15 @@ build for wasm32.
 | `AgentTool`s you write; HTTP MCP (`with_mcp_server_http`) | `FileBackend` for `SharedState` |
 | `SharedState` (in memory, or your own `SharedStateBackend`), sub-agents | `SkillSet` loading (compiles, but finds no directories: there is no filesystem) |
 | The `decision` feature | `PriceTable::fetch_cached` (its disk cache) |
+| `Extension`s written in Rust (`Budget`, `ToolGate`, `InputGuard`, your own) | Plugins through `yoagent-rutis` (TypeScript, Python, Go, pi, DSH): each runtime is a process, and a Worker cannot start one |
 | Compaction: `LlmCompaction` runs only its deterministic tiers and never summarises | reqwest's default features (rustls TLS, HTTP/2, system proxy settings, charset decoding); SOCKS proxies |
 | | The `openapi` and `gasp` features (they need the filesystem and a full Tokio) |
 
-Everything in the right-hand column except `SkillSet` and the `openapi` /
-`gasp` features is gated by the `native` feature, which is on by default, so
+See [Where extensions run](../concepts/extensions.md#where-extensions-run)
+for the same comparison from the extensions' side.
+
+Everything in the right-hand column except `SkillSet`, `yoagent-rutis` and
+the `openapi` / `gasp` features is gated by the `native` feature, which is on by default, so
 a dependency that keeps default features sees no difference.
 
 Only `wasm32-unknown-unknown` is supported. WASI targets are not.
