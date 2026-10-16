@@ -170,6 +170,24 @@ When you call `with_mcp_server_stdio()` or `with_mcp_server_http()`, yoagent:
 
 MCP tools appear alongside built-in tools. The LLM sees them with their original names, descriptions, and JSON Schema parameters — it can call them just like any other tool.
 
+**Two servers with the same tool name.** The agent's tools are not de-duplicated, and a provider rejects two tools with one name — so two servers that both offer `search`, or a server tool named like a built-in (`bash`, `read_file`), break the request. Give such a server's tools a prefix by wrapping them yourself (the `with_mcp_server_*` helpers add none):
+
+```rust
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use yoagent::mcp::{McpClient, McpToolAdapter};
+use yoagent::AgentTool;
+
+let docs = Arc::new(Mutex::new(McpClient::connect_stdio("docs-server", &[], None).await?));
+let mut tools = yoagent::tools::default_tools();
+for tool in McpToolAdapter::from_client_with_prefix(docs, "docs").await? {
+    // The model sees `docs__search`; the server is still called with `search`.
+    tools.push(Box::new(tool) as Box<dyn AgentTool>);
+}
+// `with_tools` replaces the agent's list: pass every tool in one call.
+let agent = agent.with_tools(tools);
+```
+
 Each call ends when the run is cancelled. Over **stdio** it is also bounded at
 five minutes (`McpToolAdapter::DEFAULT_CALL_TIMEOUT`), counted from when the
 call is sent, not while it waits behind another call to the same server. Over
@@ -212,6 +230,8 @@ let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude
     .await?;
 // Agent now has both built-in coding tools AND MCP database tools
 ```
+
+If a server's tools are named like the built-ins (`bash`, `read_file`, `search`, …), prefix them (see above).
 
 ## Using the MCP Client Directly
 

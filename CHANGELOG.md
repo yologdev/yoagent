@@ -8,7 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### yoagent
 
-- **`McpToolAdapter::with_prefix` / `from_client_with_prefix` now name the tool** `<prefix>__<tool>` (as the OpenAPI adapter's `with_name_prefix` does). The prefix was stored but never used, so two servers offering a tool of the same name, or a server tool named like a built-in, still gave the agent duplicate tool names, which a provider rejects. The server is still called with its own tool name. Reported by the yobuild session.
+- **`McpToolAdapter::with_prefix` / `from_client_with_prefix` now name the tool** `<prefix>__<tool>` (as `OpenApiConfig::with_name_prefix` does for OpenAPI tools). The prefix was stored but never used, so two servers offering a tool of the same name, or a server tool named like a built-in, still gave the agent duplicate tool names, which a provider rejects. The server is still called with its own tool name. The MCP guide now shows how (the `with_mcp_server_*` helpers add no prefix). Reported by the yobuild session.
 
 ## 0.25.6 (2026-10-16)
 

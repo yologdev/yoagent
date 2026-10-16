@@ -514,7 +514,10 @@ The contract:
   one survives: the agent's own tools (including the injected `shared_state`
   tool) win, then earlier sources in installation order, then the earlier
   tool within one source. Each dropped duplicate is logged with
-  `tracing::warn!`; the run is never refused.
+  `tracing::warn!`; the run is never refused. (The agent's own tools —
+  `with_tools`, MCP adapters included — are not de-duplicated: give clashing
+  MCP or OpenAPI tools a prefix with `McpToolAdapter::with_prefix` or
+  `OpenApiConfig::with_name_prefix`.)
 - **Failures.** A source that panics — while building its future or while it
   runs — is contained, logged with the panic message, and contributes no
   tools to that run.

@@ -44,12 +44,14 @@ impl McpToolAdapter {
         self
     }
 
-    /// Name the tool `<prefix>__<tool>` for the agent and the model (as the
-    /// OpenAPI adapter's `with_name_prefix` does), so two servers offering a
-    /// tool of the same name, or a server tool named like a built-in, do not
-    /// collide. The server is still called with its own tool name. Provider
-    /// limits on tool names apply to the result (letters, digits, `_` and
-    /// `-`; 64 characters on most providers).
+    /// Name the tool `<prefix>__<tool>` for the agent and the model (as
+    /// `OpenApiConfig::with_name_prefix` does for OpenAPI tools), so two
+    /// servers offering a tool of the same name, or a server tool named like
+    /// a built-in, do not collide. The server is still called with its own
+    /// tool name. A second call replaces the prefix. Provider limits on tool
+    /// names apply to the result: keep the prefix to letters, digits, `_` and
+    /// `-`, and short (several providers cap names at 64 characters); neither
+    /// the prefix nor the server's name is checked here.
     pub fn with_prefix(mut self, prefix: impl Into<String>) -> Self {
         self.name = format!("{}__{}", prefix.into(), self.tool.name);
         self
@@ -388,9 +390,10 @@ mod tests {
                     ),
                 ]),
             };
-            let client = Arc::new(Mutex::new(McpClient::from_transport(Box::new(transport))));
+            let client = McpClient::from_transport(Box::new(transport))
+                .with_call_timeout(Some(Duration::from_secs(7)));
             adapters.extend(
-                McpToolAdapter::from_client_with_prefix(client, server)
+                McpToolAdapter::from_client_with_prefix(Arc::new(Mutex::new(client)), server)
                     .await
                     .unwrap(),
             );
@@ -398,6 +401,10 @@ mod tests {
         }
         let names: Vec<&str> = adapters.iter().map(|a| a.name()).collect();
         assert_eq!(names, ["docs__search", "web__search"]);
+        // The client's call timeout is carried over, prefix or not.
+        assert!(adapters
+            .iter()
+            .all(|a| a.call_timeout == Some(Duration::from_secs(7))));
         assert_eq!(adapters[1].label(), "web__search");
 
         let ctx = ToolContext::new("tc-1", "web__search");
@@ -413,6 +420,12 @@ mod tests {
             .find(|r| r.method == "tools/call")
             .expect("a tools/call");
         assert_eq!(call.params.as_ref().unwrap()["name"], "search");
+        // ...and only the server it belongs to.
+        assert!(!sent[0]
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|r| r.method == "tools/call"));
 
         // Without a prefix, the server's name.
         let tool = McpToolInfo {
@@ -423,6 +436,9 @@ mod tests {
         let client = Arc::new(Mutex::new(McpClient::from_transport(Box::new(
             MockTransport::new(vec![]),
         ))));
-        assert_eq!(McpToolAdapter::new(client, tool).name(), "search");
+        let plain = McpToolAdapter::new(client, tool);
+        assert_eq!(plain.name(), "search");
+        // A second prefix replaces the first; prefixes never stack.
+        assert_eq!(plain.with_prefix("a").with_prefix("b").name(), "b__search");
     }
 }
