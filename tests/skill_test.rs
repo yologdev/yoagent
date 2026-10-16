@@ -288,6 +288,11 @@ fn prose_names() {
     let _ = Agent::with_mcp_server_stdio;
     let _ = Agent::with_mcp_server_http;
     let _ = Agent::with_mcp_server_http_transport;
+    let _ = |a: yoagent::mcp::McpToolAdapter| a.with_prefix("docs");
+    async fn prefixed(client: std::sync::Arc<tokio::sync::Mutex<yoagent::mcp::McpClient>>) {
+        let _ = yoagent::mcp::McpToolAdapter::from_client_with_prefix(client, "docs").await;
+    }
+    let _ = prefixed;
     async fn structured(a: &mut Agent) {
         let _ = a
             .prompt_structured::<serde_json::Value>("x", serde_json::json!({}))

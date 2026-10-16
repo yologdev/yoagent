@@ -4,11 +4,11 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
-
-### yoagent
+## 0.25.7 (2026-10-16)
 
 - **`McpToolAdapter::with_prefix` / `from_client_with_prefix` now name the tool** `<prefix>__<tool>` (as `OpenApiConfig::with_name_prefix` does for OpenAPI tools). The prefix was stored but never used, so two servers offering a tool of the same name, or a server tool named like a built-in, still gave the agent duplicate tool names, which a provider rejects. The server is still called with its own tool name. The MCP guide now shows how (the `with_mcp_server_*` helpers add no prefix). Reported by the yobuild session.
+
+- Docs: the agent skill's plugin numbers follow the re-measured compatibility matrix (2026-10-16: pi 12 of 20, DSH 3 of 20; no verdict changed, a usable DSH plugin left the npm top 20), and the moved examples' stubs link to yobuild's `examples/`.
 
 ## 0.25.6 (2026-10-16)
 

@@ -5,7 +5,7 @@ description: Use when building, extending or upgrading an agent on the yoagent R
 
 # yoagent: which feature for which job
 
-Written for **yoagent 0.25.6** (and yoagent-rutis 0.4.0); the recipes
+Written for **yoagent 0.25.7** (and yoagent-rutis 0.4.0); the recipes
 below are compiled by `tests/skill_test.rs`, line for line. Check what you
 build against: `cargo tree -p yoagent` or `Cargo.lock`. If you are on an
 older version, read [What changed](#what-changed) first.
@@ -198,6 +198,10 @@ and its examples.
 
 Newest first; the full list is `CHANGELOG.md`.
 
+- **0.25.7** — `McpToolAdapter::with_prefix` / `from_client_with_prefix`
+  name the tool `<prefix>__<tool>` (the prefix was ignored); the server is
+  still called with its own name. The `with_mcp_server_*` helpers add no
+  prefix: wrap a server yourself when two offer the same tool name.
 - **0.25.6** — DeepSeek is priced (after `prices::enable_bundled()`):
   `deepseek-flash`, `deepseek-v4-pro`, `deepseek-v4-flash`, at the **peak**
   rate (off-peak is half; a flat price has no time of day), so its costs are
