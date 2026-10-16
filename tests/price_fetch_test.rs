@@ -723,3 +723,44 @@ async fn an_unreadable_cache_is_reported() {
     assert!(problem.is_none());
     assert_eq!(logged, 0);
 }
+
+/// A models.dev cache written before DeepSeek was priced by time of day
+/// holds its off-peak rates: they must not come back through the cache,
+/// fresh or stale, any more than through a fetch.
+#[tokio::test]
+async fn a_cached_models_dev_table_never_brings_back_off_peak_deepseek() {
+    let _g = serial().await;
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("prices.json");
+    let down = serve("/api.json", ResponseTemplate::new(500)).await;
+    let source = PriceSource::ModelsDevAt(format!("{}/api.json", down.uri()));
+    let old = r#"{"schema": 1, "providers": {
+        "anthropic": {"claude-sonnet-5": {"input": 1.5, "output": 7.5}},
+        "deepseek": {"deepseek-flash": {"input": 0.15, "output": 0.6, "cache_read": 0.003}}}}"#;
+    write_cache(&cache, &source, old);
+
+    // Fresh: used without a request, DeepSeek dropped.
+    let got = PriceTable::fetch_cached(&source, &cache, opts(DAY, DAY)).await;
+    assert!(
+        matches!(got.origin, PriceOrigin::Cache { .. }),
+        "{:?}",
+        got.origin
+    );
+    assert!(got.table.cost("deepseek", "deepseek-flash").is_none());
+    assert!(got.table.cost("anthropic", "claude-sonnet-5").is_some());
+
+    // Stale, the fetch failing: the same.
+    let got = PriceTable::fetch_cached(&source, &cache, opts(Duration::ZERO, Duration::MAX)).await;
+    assert!(
+        matches!(got.origin, PriceOrigin::StaleCache { .. }),
+        "{:?}",
+        got.origin
+    );
+    assert!(got.table.cost("deepseek", "deepseek-flash").is_none());
+
+    // A source that is not models.dev keeps whatever it lists.
+    let mine = url_source(&down);
+    write_cache(&cache, &mine, old);
+    let got = PriceTable::fetch_cached(&mine, &cache, opts(DAY, DAY)).await;
+    assert!(got.table.cost("deepseek", "deepseek-flash").is_some());
+}

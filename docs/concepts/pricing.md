@@ -210,8 +210,14 @@ override (`install_override` or `YOAGENT_PRICES`, below):
 
 ```json
 { "schema": 1, "providers": { "deepseek": {
-  "deepseek-flash": { "input": 0.15, "output": 0.6, "cache_read": 0.003 } } } }
+  "deepseek-flash":    { "input": 0.15, "output": 0.6,  "cache_read": 0.003, "cache_write": 0.15 },
+  "deepseek-v4-flash": { "input": 0.15, "output": 0.6,  "cache_read": 0.003, "cache_write": 0.15 },
+  "deepseek-v4-pro":   { "input": 0.66, "output": 1.98, "cache_read": 0.022, "cache_write": 0.66 } } } }
 ```
+
+Each model needs its own entry (one left out keeps the peak rate), and
+`cache_write` is stated as the input rate: DeepSeek reports no cache-write
+tokens, and leaving it out makes the override report a warning.
 
 ## Overriding prices at runtime
 

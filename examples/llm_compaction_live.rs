@@ -34,9 +34,7 @@ use std::sync::Arc;
 use yoagent::context::ContextConfig;
 use yoagent::gasp::{GaspRecorder, GoalRef};
 use yoagent::llm_compaction::SUMMARY_MARKER;
-use yoagent::provider::{
-    CostConfig, ModelConfig, ProviderError, StreamConfig, StreamEvent, StreamProvider,
-};
+use yoagent::provider::{ModelConfig, ProviderError, StreamConfig, StreamEvent, StreamProvider};
 use yoagent::*;
 
 /// Dry-run double (`YO_DRY_RUN=1`): bulky deterministic text, so the harness's
@@ -110,18 +108,12 @@ fn priced(id: &str) -> ModelConfig {
         // maps `prompt_cache_hit_tokens` onto `Usage::cache_read`. So a hit
         // rate here measures *their* caching, not yoagent's placement.
         //
-        // Rates live here rather than in `ModelConfig::deepseek` because
-        // DeepSeek prices by time of day — off-peak is exactly half of peak
-        // (peak = 01:00-04:00 and 06:00-10:00 UTC). A crate-level preset would
-        // be wrong half the day. These are the **peak** rates, so the cost
-        // column over-reports rather than under-reports off-peak runs.
-        // DeepSeek has no cache-write category at all: populating its cache
-        // is free, which is the asymmetry the provider comparison turns on.
-        // `deepseek-v4-flash` is a legacy name DeepSeek still accepts, served
-        // by V4.1 Flash and billed at the Flash price.
-        "deepseek-flash" => deepseek_priced("deepseek-flash", 0.30, 1.20, 0.006),
-        "deepseek-v4-flash" => deepseek_priced("deepseek-v4-flash", 0.30, 1.20, 0.006),
-        "deepseek-v4-pro" => deepseek_priced("deepseek-v4-pro", 1.32, 3.96, 0.044),
+        // Priced from the bundled snapshot (`prices::enable_bundled()` in
+        // `main`) at DeepSeek's **peak** rate: off-peak is exactly half, and a
+        // `CostConfig` has no time of day, so the cost column over-reports
+        // rather than under-reports off-peak runs. DeepSeek has no cache-write
+        // category: populating its cache is free (a miss is plain input), which
+        // is the asymmetry the provider comparison turns on.
         other if other.starts_with("deepseek") => {
             noting_unpriced(ModelConfig::deepseek(other, other))
         }
@@ -140,15 +132,6 @@ fn note_unpriced(model: &str) {
     eprintln!(
         "note: the bundled prices.json does not list '{model}' — the cost column will be blank"
     );
-}
-
-/// A DeepSeek config carrying peak-window rates. `cache_write` is left unset
-/// because DeepSeek has no write category (it would bill at the input rate,
-/// but DeepSeek never reports cache-write tokens — a miss is plain input).
-fn deepseek_priced(id: &str, input: f64, output: f64, cache_read: f64) -> ModelConfig {
-    let mut config = ModelConfig::deepseek(id, id);
-    config.cost = Some(CostConfig::new(input, output).with_cache_read(cache_read));
-    config
 }
 
 fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {

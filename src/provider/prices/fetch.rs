@@ -520,6 +520,16 @@ impl PriceTable {
             CacheRead::Problem(problem) => (None, Some(problem)),
             CacheRead::Found(cached) => (Some(cached), None),
         };
+        // A cache written before a provider was priced by time of day still
+        // holds models.dev's off-peak rates: drop them as the mapping does.
+        let cached = cached.map(|mut c| {
+            if matches!(source, PriceSource::ModelsDev | PriceSource::ModelsDevAt(_)) {
+                c.table
+                    .entries
+                    .retain(|provider, _| !TIME_OF_DAY_PRICED.contains(&provider.as_str()));
+            }
+            c
+        });
         if let Some(Cached {
             table,
             age: Some(age),
@@ -706,8 +716,6 @@ async fn write_cache(path: &Path, url: &str, table: &PriceTable) -> Result<(), P
     })
 }
 
-/// One models.dev `cost` object as a [`CostConfig`], or why it cannot be
-/// expressed as one.
 /// Providers whose rates depend on the time of day (DeepSeek: half price
 /// off-peak). models.dev lists one of the two rates and a flat `CostConfig`
 /// cannot express both, so their models are skipped: the bundled snapshot
@@ -718,6 +726,8 @@ const TIME_OF_DAY_PRICED: &[&str] = &["deepseek"];
 const TIME_OF_DAY_REASON: &str = "priced by time of day (peak and off-peak): a flat \
      CostConfig cannot express it; the bundled snapshot carries the peak rate";
 
+/// One models.dev `cost` object as a [`CostConfig`], or why it cannot be
+/// expressed as one.
 fn map_models_dev_cost(cost: &Value) -> Result<CostConfig, String> {
     let obj = cost.as_object().ok_or("cost is not an object")?;
     let (input, output, cache_read, cache_write) = map_band(obj, &["tiers", "context_over_200k"])?;
