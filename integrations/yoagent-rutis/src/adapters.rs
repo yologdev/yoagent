@@ -4,8 +4,10 @@
 //!
 //! The files are this crate's own, in cargo's registry (or the path
 //! dependency's folder): read them, or copy them to install their npm
-//! dependencies (`npm ci`) — never install into them. They are where the
-//! crate was built: a binary run on another machine must ship a copy.
+//! dependencies — never install into them. Copy the whole `root` (the
+//! adapters import `../yoagent.d.ts`) and run `npm ci` in the copy's `pi/`
+//! and `dsh/`; that copy is what [`probe`](crate) takes. The paths are where
+//! the crate was built: a binary run on another machine must ship a copy.
 //!
 //! ```no_run
 //! let adapters = yoagent_rutis::adapters::adapters();
@@ -54,7 +56,11 @@ mod tests {
             a.pi.join("pi-extensions-adapter.ts"),
             a.pi.join("package.json"),
             a.dsh.join("dsh-tools-adapter.ts"),
+            a.pi.join("package-lock.json"),
             a.dsh.join("host-services.json"),
+            a.dsh.join("probe-services.ts"),
+            a.dsh.join("package.json"),
+            a.dsh.join("package-lock.json"),
             a.types.clone(),
         ] {
             assert!(file.is_file(), "{}", file.display());

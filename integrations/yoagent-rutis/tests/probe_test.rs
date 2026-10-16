@@ -47,14 +47,30 @@ async fn pi_extensions_are_loaded_and_their_tools_listed() {
     }
     let cwd = tempfile::tempdir().unwrap();
     let extension = pi.join("fixture-extension.ts").display().to_string();
-    let report = probe::pi(cwd.path(), &[extension], &[], Some(logs())).await;
+    let report = probe::pi(
+        &adapters().root,
+        cwd.path(),
+        &[extension],
+        &[],
+        Some(logs()),
+    )
+    .await;
     assert_eq!(report.loaded, Some(true), "{report:?}");
     assert!(report.tools.iter().any(|t| t == "pi_echo"), "{report:?}");
     assert_eq!(report.rows.len(), 1);
     assert_eq!(report.rows[0].state, "active");
+    assert_eq!(report.problem(), None);
+    // The adapter's load line, which the matrix reads the events from.
+    assert!(
+        report.logs.iter().any(|l| l.level == "debug"
+            && l.message.contains("[pi] loaded")
+            && l.message.contains("events")),
+        "{:?}",
+        report.logs
+    );
 
     // No extensions: only skills (none here), nothing loaded.
-    let report = probe::pi(cwd.path(), &[], &[], None).await;
+    let report = probe::pi(&adapters().root, cwd.path(), &[], &[], None).await;
     assert_eq!(report.loaded, None);
     assert_eq!(report.skills.found, 0);
 }
@@ -71,7 +87,7 @@ async fn a_pi_extension_that_does_not_load_says_why() {
         .join("no-such-extension.ts")
         .display()
         .to_string();
-    let report = probe::pi(cwd.path(), &[missing], &[], None).await;
+    let report = probe::pi(&adapters().root, cwd.path(), &[missing], &[], None).await;
     assert_eq!(report.loaded, Some(false), "{report:?}");
     assert!(report.error.is_some(), "{report:?}");
 }
@@ -83,7 +99,7 @@ async fn dsh_rows_report_the_tools_they_add_and_the_services_they_need() {
         return;
     }
     let rows = json!([{ "id": "fx", "name": dsh.join("fixture-tools.ts") }]);
-    let report = probe::dsh(&dsh, &rows, &[], None).await;
+    let report = probe::dsh(&adapters().root, &dsh, &rows, &[], None).await;
     assert_eq!(report.error, None, "{report:?}");
     assert!(
         report.tools.iter().any(|t| t == "fixture_echo"),
@@ -91,12 +107,85 @@ async fn dsh_rows_report_the_tools_they_add_and_the_services_they_need() {
     );
     assert_eq!(report.rows.len(), 1);
     assert_eq!(report.services["missing"], json!([]), "{report:?}");
+    assert_eq!(report.problem(), None, "{report:?}");
 
     // A service nobody provides is reported missing.
-    let report = probe::dsh(&dsh, &rows, &["no-such-service".into()], None).await;
+    let report = probe::dsh(
+        &adapters().root,
+        &dsh,
+        &rows,
+        &["no-such-service".into()],
+        None,
+    )
+    .await;
     assert_eq!(
         report.services["missing"],
         json!(["no-such-service"]),
         "{report:?}"
     );
+    assert!(report.problem().unwrap().contains("no-such-service"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_dsh_plugin_missing_a_service_it_injects_is_not_clean() {
+    let dsh = adapters().dsh;
+    if !installed(&dsh) {
+        return;
+    }
+    // Its module injects a service no host provides: it never starts, though
+    // its row reads as started. `inject` is empty: the probe reads what the
+    // module injects itself.
+    let rows = json!([{ "id": "needs", "name": dsh.join("fixture-missing-service.ts") }]);
+    let report = probe::dsh(&adapters().root, &dsh, &rows, &[], None).await;
+    assert_eq!(
+        report.services["missing"],
+        json!(["yoagentNoSuchService"]),
+        "{report:?}"
+    );
+    assert!(report.problem().is_some(), "{report:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dsh_rows_must_be_an_array_with_ids() {
+    let dsh = adapters().dsh;
+    let report = probe::dsh(&adapters().root, &dsh, &json!({ "id": "x" }), &[], None).await;
+    assert!(report.error.is_some(), "{report:?}");
+    let report = probe::dsh(&adapters().root, &dsh, &json!([{ "name": "x" }]), &[], None).await;
+    assert!(report.error.is_some(), "{report:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pi_extension_that_refuses_after_load_is_not_clean() {
+    let pi = adapters().pi;
+    if !installed(&pi) {
+        return;
+    }
+    let cwd = tempfile::tempdir().unwrap();
+    let extension = pi.join("fixture-late-refusal.ts").display().to_string();
+    let report = probe::pi(
+        &adapters().root,
+        cwd.path(),
+        &[extension],
+        &[],
+        Some(logs()),
+    )
+    .await;
+    assert_eq!(report.loaded, Some(false), "{report:?}");
+    let error = report.error.as_deref().unwrap_or_default();
+    assert!(error.contains("adapter stopped"), "{report:?}");
+    assert!(report.problem().is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tool_named_like_a_built_in_is_retried_without_it() {
+    let pi = adapters().pi;
+    if !installed(&pi) {
+        return;
+    }
+    let cwd = tempfile::tempdir().unwrap();
+    let extension = pi.join("fixture-shadow.ts").display().to_string();
+    let report = probe::pi(&adapters().root, cwd.path(), &[extension], &[], None).await;
+    assert_eq!(report.loaded, Some(true), "{report:?}");
+    assert_eq!(report.without, ["read_file"], "{report:?}");
+    assert!(report.tools.iter().any(|t| t == "read_file"), "{report:?}");
 }

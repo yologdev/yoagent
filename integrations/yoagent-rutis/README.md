@@ -307,20 +307,29 @@ The adapters below ship in the crate (`plugins/pi`, `plugins/dsh`,
 `plugins/yoagent.d.ts`, without `node_modules`), and
 `yoagent_rutis::adapters::adapters()` says where they are: the crate's own
 files, where it was built (cargo's registry or a path dependency). Copy
-them and run `npm ci` in the copy; never install into the registry's.
+the whole `root` (the adapters import `../yoagent.d.ts`) and run `npm ci`
+in the copy's `pi/` and `dsh/`; never install into the registry's.
 
 With the `probe` feature, `yoagent_rutis::probe` loads a pi or DSH package
 through its adapter and reports what an agent gets — tools, prompt
 additions, the DSH services it needs and whether they exist, skills, and
 what the plugin logged — without calling a tool or a model (loading runs
-the package's code, as its own host would):
+the package's code, as its own host would). Each report's `problem()` is
+the verdict: `None` for a clean load, else what kept the package from
+giving an agent what it offers (a refusal after load included). Probes in
+one process run one at a time.
 
 ```rust,no_run
 # async fn check() {
 use yoagent_rutis::probe;
+// A copy of `adapters().root`, with `npm ci` run in its `pi/` and `dsh/`.
+let plugins = std::path::Path::new("/path/to/plugins");
 let cwd = std::path::Path::new("/path/to/project");
-let report = probe::pi(cwd, &["/path/to/extension.ts".into()], &[], None).await;
-println!("{:?} {:?}", report.loaded, report.tools);
+let report = probe::pi(plugins, cwd, &["/path/to/extension.ts".into()], &[], None).await;
+match report.problem() {
+    None => println!("usable: {:?}", report.tools),
+    Some(why) => println!("not usable: {why}"),
+}
 # }
 ```
 

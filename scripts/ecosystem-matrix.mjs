@@ -154,6 +154,8 @@ function classifyPi(r) {
   const error = r.error ?? 'unknown'
   // Its skills do not go through the adapter: yoagent's own loader takes them.
   const usable = skills.length > 0 ? ` Its ${plural(skills.length, 'skill')} still load with yoagent's skills loader.` : ''
+  // Refused after load (the probe reports the stop a run would meet).
+  if (/adapter stopped/.test(error)) return { result: 'refused', detail: error.replace(/^.*?adapter stopped: /s, '') + usable }
   if (/never fires/.test(error)) return { result: 'refused', detail: error.replace(/^.*?Error: /s, '') + usable }
   // A throwing session_start refuses the load too (fail closed), typically
   // reaching for pi app internals the adapter's context does not have.

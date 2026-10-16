@@ -9,7 +9,16 @@ adheres to [Semantic Versioning](https://semver.org/).
 ### yoagent-rutis (0.4.0)
 
 - **`yoagent_rutis::adapters`: where the pi and DSH adapters are.** `adapters()` returns the folders of the adapter files the crate ships (`plugins/pi`, `plugins/dsh`, `plugins/yoagent.d.ts`), so a host can copy them and `npm ci` the copy instead of keeping its own copy of them in step with the crate's.
-- **`yoagent_rutis::probe` (feature `probe`): vet a plugin package without running it as an agent.** `probe::pi` and `probe::dsh` load a pi extension or DSH plugin rows through the adapter, as an agent would, and report what an agent gets — tools, prompt additions, which DSH services it needs and whether they exist, skills, and what the plugin logged — without calling a tool or a model. It is what `examples/ecosystem_probe.rs` (the compatibility matrix's probe) ran; the example now calls it. The feature adds `rutis-loader`, `tempfile` and `tracing-subscriber`; the default build is unchanged. A DSH report's rows are now only the plugin's (the host-service rows of the base were listed too).
+- **`yoagent_rutis::probe` (feature `probe`): vet a plugin package without running it as an agent.** `probe::pi` and `probe::dsh` load a pi extension or DSH plugin rows through the adapter, as an agent would, and report what an agent gets — tools, prompt additions, which DSH services it needs and whether they exist, skills, and what the plugin logged — without calling a tool or a model. Both take `plugins`, a copy of `adapters().root` with `npm ci` run in its `pi/` and `dsh/`. Each report's `problem()` is the verdict (`None` = a clean load). Probes in one process run one at a time, so each report carries its own plugin logs. It is what `examples/ecosystem_probe.rs` (the compatibility matrix's probe, now with `--plugins`) ran; the example now calls it, with the same verdicts. The feature adds `rutis-loader`, `tempfile` and `tracing-subscriber`; the default build is unchanged.
+- **The probe reports what used to read as clean.**
+  - A pi extension the adapter refuses after load (a handler for an event yoagent never fires, or a same-name tool added later) is `loaded: false` with the refusal, where it read as loaded with no tools. A late same-name tool is retried with `withoutBuiltins`, like one at load.
+  - A DSH plugin's injected services are read from its modules inside the runtime, so a missing one is found without the caller listing it (`inject` adds to them).
+  - DSH rows that are not an array of rows with string ids are an error.
+  - A bare `SKILL.md` path is a skill in the current folder (it was dropped).
+  - pi's early failures keep their logs.
+  - Logs include the bridge's reports of failed hooks (`yoagent_rutis::extension`).
+  - A DSH report's rows are only the plugin's (the base's host-service rows were listed too).
+  - On error paths the reports now carry empty fields (`rows: []`, `services: null`) where the old example printed nothing, and an unreadable `host-services.json` is an error, not a panic.
 
 ## 0.25.5 (2026-10-16)
 
