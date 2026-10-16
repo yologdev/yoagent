@@ -55,7 +55,7 @@ const injectOf = async (spec) => {
   return Array.isArray(inject)
     ? inject
     : inject && typeof inject === 'object'
-      ? Object.entries(inject).map(([key, value]) => (value?.required === false ? `${key}?` : key))
+      ? Object.keys(inject) // Cordis treats every key as required
       : []
 }
 const injected = new Set()

@@ -189,3 +189,50 @@ async fn a_tool_named_like_a_built_in_is_retried_without_it() {
     assert_eq!(report.without, ["read_file"], "{report:?}");
     assert!(report.tools.iter().any(|t| t == "read_file"), "{report:?}");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_service_declared_required_false_is_still_required() {
+    let dsh = adapters().dsh;
+    if !installed(&dsh) {
+        return;
+    }
+    let rows = json!([{ "id": "opt", "name": dsh.join("fixture-optional-service.ts") }]);
+    let report = probe::dsh(&adapters().root, &dsh, &rows, &[], None).await;
+    assert_eq!(
+        report.services["missing"],
+        json!(["yoagentNoSuchOptional"]),
+        "{report:?}"
+    );
+    assert!(report.problem().is_some(), "{report:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_late_tool_named_like_a_built_in_is_retried_without_it() {
+    let pi = adapters().pi;
+    if !installed(&pi) {
+        return;
+    }
+    let cwd = tempfile::tempdir().unwrap();
+    let extension = pi.join("fixture-late-shadow.ts").display().to_string();
+    let report = probe::pi(&adapters().root, cwd.path(), &[extension], &[], None).await;
+    assert_eq!(report.loaded, Some(true), "{report:?}");
+    assert_eq!(report.without, ["read_file"], "{report:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_base_of_its_own_gets_the_probe_files_copied_in() {
+    let dsh = adapters().dsh;
+    if !installed(&dsh) {
+        return;
+    }
+    // A base like a host's: DSH's packages and a package.json, without the
+    // probe's two files. Node follows the symlink, so one Cordis.
+    let base = tempfile::tempdir().unwrap();
+    std::fs::copy(dsh.join("package.json"), base.path().join("package.json")).unwrap();
+    std::os::unix::fs::symlink(dsh.join("node_modules"), base.path().join("node_modules")).unwrap();
+    let rows = json!([{ "id": "fx", "name": dsh.join("fixture-tools.ts") }]);
+    let report = probe::dsh(&adapters().root, base.path(), &rows, &[], None).await;
+    assert_eq!(report.problem(), None, "{report:?}");
+    assert!(base.path().join("probe-services.ts").is_file());
+    assert!(base.path().join("dsh-tools-adapter.ts").is_file());
+}

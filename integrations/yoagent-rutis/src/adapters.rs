@@ -6,7 +6,7 @@
 //! dependency's folder): read them, or copy them to install their npm
 //! dependencies — never install into them. Copy the whole `root` (the
 //! adapters import `../yoagent.d.ts`) and run `npm ci` in the copy's `pi/`
-//! and `dsh/`; that copy is what [`probe`](crate) takes. The paths are where
+//! and `dsh/`; that copy is what the `probe` module (feature `probe`) takes. The paths are where
 //! the crate was built: a binary run on another machine must ship a copy.
 //!
 //! ```no_run

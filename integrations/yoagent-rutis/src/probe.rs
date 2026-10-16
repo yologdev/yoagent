@@ -215,6 +215,14 @@ impl DshReport {
         if self.services["missing"].is_null() {
             return Some("the service check did not report".into());
         }
+        if let Some(errors) = self.services["importErrors"].as_object() {
+            if !errors.is_empty() {
+                return Some(format!(
+                    "could not read what these rows inject: {}",
+                    Value::Object(errors.clone())
+                ));
+            }
+        }
         self.rows
             .iter()
             .find(|r| r.state != "active")
@@ -561,15 +569,16 @@ async fn pi_load(
 /// `services.error`.
 const SERVICE_CHECK: &str = "probe-services";
 
-/// A file of the DSH adapter folder, its copy in `base` when there is one:
-/// it must resolve the base's Cordis.
-fn dsh_file(dsh_dir: &Path, base: &Path, name: &str) -> PathBuf {
+/// A file of the DSH adapter folder, as loaded from `base`: it must resolve
+/// the base's Cordis (a copy elsewhere resolves another one, and the runtime
+/// refuses it), so it is copied into `base` when not there yet.
+fn dsh_file(dsh_dir: &Path, base: &Path, name: &str) -> Result<PathBuf, BoxError> {
     let copy = base.join(name);
-    if copy.exists() {
-        copy
-    } else {
-        dsh_dir.join(name)
+    if !copy.exists() {
+        std::fs::copy(dsh_dir.join(name), &copy)
+            .map_err(|e| format!("copying {name} into {}: {e}", base.display()))?;
     }
+    Ok(copy)
 }
 
 /// DSH's base packages and the tools adapter: what every DSH plugin gets.
@@ -586,7 +595,7 @@ fn dsh_base_rows(dsh_dir: &Path, base: &Path) -> Result<Value, BoxError> {
         json!({ "id": "base-system-prompt", "name": "@deepseek-ai/dsh-system-prompt" }),
         json!({ "id": "base-tools", "name": "@deepseek-ai/dsh-tools" }),
         json!({ "id": "base-user-questions", "name": "@deepseek-ai/dsh-user-questions" }),
-        json!({ "id": "base-adapter", "name": dsh_file(dsh_dir, base, "dsh-tools-adapter.ts") }),
+        json!({ "id": "base-adapter", "name": dsh_file(dsh_dir, base, "dsh-tools-adapter.ts")? }),
     ]);
     Ok(Value::Array(rows))
 }
@@ -594,11 +603,12 @@ fn dsh_base_rows(dsh_dir: &Path, base: &Path) -> Result<Value, BoxError> {
 /// Loads DSH plugin `rows` (its bundle patch, or one row naming the
 /// package; an array of rows, each with a string `id`) over DSH's base
 /// packages and the tools adapter, in a Node runtime whose `package.json`
-/// is `base`'s (`base` holds DSH's base packages and the plugin; with a copy
-/// of `dsh-tools-adapter.ts` when it is not `plugins`' `dsh/`, so both
-/// resolve one Cordis), and checks which of the services the rows' plugins
-/// inject exist — read from their modules inside the runtime, plus any named
-/// in `inject`. `plugins`: the adapters, installed (see the module's doc).
+/// is `base`'s (`base` holds DSH's base packages and the plugin), and checks
+/// which of the services the rows' plugins inject exist — read from their
+/// modules inside the runtime (every key: Cordis requires them all), plus any
+/// named in `inject`. The probe's two DSH files (`dsh-tools-adapter.ts`,
+/// `probe-services.ts`) must resolve `base`'s Cordis, so they are copied
+/// into `base` when they are not there. `plugins`: the adapters, installed (see the module's doc).
 /// Each probe gets a DSH home of its own: `~/.dsh` and `~/.agents` are not
 /// handed to the plugins (the process environment still is).
 pub async fn dsh(
@@ -667,7 +677,7 @@ async fn dsh_load(
     let mut plugin_rows = rows.as_array().cloned().unwrap_or_default();
     plugin_rows.push(json!({
         "id": SERVICE_CHECK,
-        "name": dsh_file(dsh_dir, base, "probe-services.ts"),
+        "name": dsh_file(dsh_dir, base, "probe-services.ts")?,
         "config": { "names": inject, "modules": modules, "base": base, "out": out, "waitMs": 3000 },
     }));
     let state = load(
@@ -845,6 +855,14 @@ mod tests {
             DshReport::default().problem().as_deref(),
             Some("the service check did not report")
         );
+        let unread = DshReport {
+            services: json!({ "missing": [], "importErrors": { "fx": "cannot import" } }),
+            ..clean.clone()
+        };
+        assert!(unread
+            .problem()
+            .unwrap()
+            .contains("could not read what these rows inject"));
 
         let pi = PiReport {
             loaded: Some(false),

@@ -7,7 +7,8 @@
 // `{ present, missing, importErrors }` to `config.out` after `config.waitMs`
 // (default 3000), giving late providers their chance. A module that cannot
 // be imported here is listed in `importErrors`: what it injects is unknown.
-// An optional service (`name?`) is not checked: the plugin starts without it.
+// Every injected service is checked: Cordis requires them all, even one
+// declared `required: false`.
 //
 // A plain Cordis plugin, injecting nothing, so it always starts.
 import { writeFileSync } from 'node:fs'
@@ -27,7 +28,8 @@ export interface Config {
   waitMs?: number
 }
 
-/** What a module's plugin injects (`inject` as a list, or an object whose optional keys get a `?`). */
+/** What a module's plugin injects: `inject` as a list, or the keys of an object. Cordis treats every key as
+ * required (`required: false` included): a plugin missing any of them never starts. */
 async function injectOf(spec: string, base: string): Promise<string[]> {
   const require = createRequire(join(resolve(base), 'package.json'))
   const mod = await import(pathToFileURL(require.resolve(spec)).href)
@@ -36,7 +38,7 @@ async function injectOf(spec: string, base: string): Promise<string[]> {
   return Array.isArray(inject)
     ? inject
     : inject && typeof inject === 'object'
-      ? Object.entries(inject).map(([key, value]: [string, any]) => (value?.required === false ? `${key}?` : key))
+      ? Object.keys(inject)
       : []
 }
 
@@ -57,7 +59,6 @@ export function apply(ctx: any, config: Config) {
     const present: string[] = []
     const missing: string[] = []
     for (const entry of names) {
-      if (entry.endsWith('?')) continue
       let found = false
       try {
         found = ctx.get(entry) !== undefined

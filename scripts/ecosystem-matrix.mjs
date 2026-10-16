@@ -315,7 +315,8 @@ async function runDsh(packages) {
       if (!info) {
         r = { inspectError: `could not read the package: ${tail(ins.stderr, 300)}` }
       } else {
-        const inject = (info.inject ?? []).filter((n) => !n.endsWith('?'))
+        // Every key is required in Cordis, `required: false` included.
+        const inject = info.inject ?? []
         r = { ...probeJson(['dsh', '--base', dir, '--rows', JSON.stringify(info.rows), ...inject.flatMap((n) => ['--inject', n])]), client: info.client, peers: info.peers, inject: info.inject, importErrors: info.importErrors }
       }
       if (notes.length > 0) r.installNote = notes.join('; ')
