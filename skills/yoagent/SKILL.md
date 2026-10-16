@@ -5,7 +5,7 @@ description: Use when building, extending or upgrading an agent on the yoagent R
 
 # yoagent: which feature for which job
 
-Written for **yoagent 0.25.5** (and yoagent-rutis 0.3.0); the recipes
+Written for **yoagent 0.25.6** (and yoagent-rutis 0.4.0); the recipes
 below are compiled by `tests/skill_test.rs`, line for line. Check what you
 build against: `cargo tree -p yoagent` or `Cargo.lock`. If you are on an
 older version, read [What changed](#what-changed) first.
@@ -198,6 +198,11 @@ and its examples.
 
 Newest first; the full list is `CHANGELOG.md`.
 
+- **0.25.6** — DeepSeek is priced (after `prices::enable_bundled()`):
+  `deepseek-flash`, `deepseek-v4-pro`, `deepseek-v4-flash`, at the **peak**
+  rate (off-peak is half; a flat price has no time of day), so its costs are
+  an upper bound and a `Budget` stops early rather than late. Install the
+  off-peak rates as an override to count those (`docs/concepts/pricing.md`).
 - **0.25.5** — the built-in `search` tool ignores the user's ripgrep
   config (`--no-config`) and `GREP_OPTIONS`, finds `rg` without `which`
   (`details.engine` says `"rg"` or `"grep"`), and reports a search that
@@ -230,6 +235,10 @@ Newest first; the full list is `CHANGELOG.md`.
 - **0.24.2** — built-in tool sandbox fixes (path escapes, `search` flag
   injection, Gemini key out of the URL, tool panics contained).
 - **0.24.1** — `retry_safe_events`.
+- **yoagent-rutis 0.4.0** — `adapters()` (the pi and DSH adapter files the
+  crate ships: copy `root`, `npm ci` the copy) and the `probe` feature: vet
+  a pi extension or DSH plugin without running it as an agent; each
+  report's `problem()` is the verdict.
 - **yoagent-rutis 0.3.0** — rutis 0.9 (Rust 1.88); Bun and Go plugins;
   the 16 MiB guard.
 

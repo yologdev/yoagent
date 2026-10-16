@@ -4,13 +4,13 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
-
-### yoagent
+## 0.25.6 (2026-10-16)
 
 - **DeepSeek is priced** (after `prices::enable_bundled()`): `deepseek-flash`, `deepseek-v4-pro` and the legacy `deepseek-v4-flash` (billed as Flash), from DeepSeek's pricing page. **At the peak rate:** DeepSeek bills half of it off-peak (all hours but 01:00–04:00 and 06:00–10:00 UTC on weekdays), and a `CostConfig` has no time of day, so costs are an upper bound — off-peak they read up to twice the bill, and a `Budget` stops early rather than late. Install the off-peak rates as an override to count those instead (`docs/concepts/pricing.md`). `ModelConfig::deepseek(..)` for those ids now has a `cost`; `Budget::for_model` works for them. The price audit checks the rates as exactly twice models.dev's off-peak ones, and models.dev data (`enable_live`, a fetch or a price cache written by an earlier version) never brings DeepSeek's off-peak rates back over the bundled peak ones. `examples/llm_compaction_live.rs` reads DeepSeek's rates from the snapshot instead of its own literals.
 
-### yoagent-rutis (0.4.0)
+## yoagent-rutis 0.4.0 (2026-10-16)
+
+yoagent-rutis only; requires yoagent 0.25, rutis 0.9 and Rust 1.88. A minor bump: new public API (`adapters`, the `probe` feature).
 
 - **`yoagent_rutis::adapters`: where the pi and DSH adapters are.** `adapters()` returns the folders of the adapter files the crate ships (`plugins/pi`, `plugins/dsh`, `plugins/yoagent.d.ts`), so a host can copy them and `npm ci` the copy instead of keeping its own copy of them in step with the crate's.
 - **`yoagent_rutis::probe` (feature `probe`): vet a plugin package without running it as an agent.** `probe::pi` and `probe::dsh` load a pi extension or DSH plugin rows through the adapter, as an agent would, and report what an agent gets — tools, prompt additions, which DSH services it needs and whether they exist, skills, and what the plugin logged — without calling a tool or a model. Both take `plugins`, a copy of `adapters().root` with `npm ci` run in its `pi/` and `dsh/`. Each report's `problem()` is the verdict (`None` = a clean load). Probes in one process run one at a time, so each report carries its own plugin logs. It is what `examples/ecosystem_probe.rs` (the compatibility matrix's probe, now with `--plugins`) ran; the example now calls it, with the same verdicts. The feature adds `rutis-loader`, `tempfile` and `tracing-subscriber`; the default build is unchanged.
