@@ -28,7 +28,7 @@ fn sonnet_override() -> PriceTable {
     table(
         r#"{"schema": 1, "providers": {
             "anthropic": {"claude-sonnet-5": {"input": 1.8, "output": 9.0, "cache_read": 0.18, "cache_write": 2.25}},
-            "deepseek": {"deepseek-flash": {"input": 0.3, "output": 1.2, "cache_read": 0.006}}}}"#,
+            "mistral": {"mistral-large-latest": {"input": 0.3, "output": 1.2, "cache_read": 0.006}}}}"#,
     )
 }
 
@@ -91,7 +91,9 @@ fn user_override_beats_builtin_per_model() {
     let builtin_sonnet = ModelConfig::claude_sonnet_5().cost;
     assert_eq!(builtin_sonnet.as_ref().unwrap().input_per_million, 2.0);
     // Positive control: unlisted before the override.
-    assert!(ModelConfig::deepseek("deepseek-flash", "D").cost.is_none());
+    assert!(ModelConfig::mistral("mistral-large-latest", "M")
+        .cost
+        .is_none());
 
     let _ = global::install_override(sonnet_override());
 
@@ -113,7 +115,10 @@ fn user_override_beats_builtin_per_model() {
         PriceTable::builtin().cost("anthropic", "claude-opus-5")
     );
     // And can price a model the built-in data does not know.
-    assert_eq!(input(ModelConfig::deepseek("deepseek-flash", "D")), 0.3);
+    assert_eq!(
+        input(ModelConfig::mistral("mistral-large-latest", "M")),
+        0.3
+    );
     // Gateways still never look up, whatever the table says.
     assert!(ModelConfig::opencode_zen("claude-sonnet-5").cost.is_none());
     assert_eq!(
@@ -126,7 +131,9 @@ fn user_override_beats_builtin_per_model() {
 
     global::clear_override();
     assert_eq!(ModelConfig::claude_sonnet_5().cost, builtin_sonnet);
-    assert!(ModelConfig::deepseek("deepseek-flash", "D").cost.is_none());
+    assert!(ModelConfig::mistral("mistral-large-latest", "M")
+        .cost
+        .is_none());
 }
 
 /// A cost set on a config is not touched by later installs (only
@@ -162,13 +169,13 @@ fn install_override_reports_changes_reverts_and_inert_entries() {
         global::install_override(table(
             r#"{"schema": 1, "providers": {
                 "anthropic": {"claude-sonnet-5": {"input": 1.8, "output": 9.0, "cache_read": 0.18, "cache_write": 2.25}},
-                "deepseek": {"deepseek-flash": {"input": 0.3, "output": 1.2}},
+                "mistral": {"mistral-large-latest": {"input": 0.3, "output": 1.2}},
                 "openrouter": {"x/y": {"input": 1, "output": 2}}}}"#,
         ))
     });
     assert_eq!(
         names(&report.changes),
-        ["anthropic/claude-sonnet-5", "deepseek/deepseek-flash"]
+        ["anthropic/claude-sonnet-5", "mistral/mistral-large-latest"]
     );
     // An inert entry is reported, never as a change.
     assert_eq!(report.inert, ["openrouter/x/y"]);
@@ -180,7 +187,7 @@ fn install_override_reports_changes_reverts_and_inert_entries() {
     assert_eq!(sonnet.before.as_ref().unwrap().input_per_million, 2.0);
     assert!(report.reverted.is_empty());
 
-    // Replacing it: deepseek-flash reverts to unpriced, sonnet reverts to
+    // Replacing it: mistral-large-latest reverts to unpriced, sonnet reverts to
     // its built-in price, and the replacement is warned about.
     let (report, warns) = warns_of(|| {
         global::install_override(table(
@@ -194,14 +201,14 @@ fn install_override_reports_changes_reverts_and_inert_entries() {
         names(&report.reverted),
         [
             "anthropic/claude-sonnet-5",
-            "deepseek/deepseek-flash",
+            "mistral/mistral-large-latest",
             "openrouter/x/y"
         ]
     );
     let flash = report
         .reverted
         .iter()
-        .find(|c| c.model == "deepseek-flash")
+        .find(|c| c.model == "mistral-large-latest")
         .unwrap();
     assert!(flash.after.is_none());
     assert!(
@@ -259,7 +266,7 @@ fn an_override_after_a_fetch_reports_against_the_fetched_price() {
     let _ = global::install_fetched(table(
         r#"{"schema": 1, "providers": {
             "anthropic": {"claude-sonnet-5": {"input": 1.5, "output": 7.5}},
-            "deepseek": {"deepseek-flash": {"input": 0.15, "output": 0.6,
+            "mistral": {"mistral-large-latest": {"input": 0.15, "output": 0.6,
                 "tiers": [{"above_prompt_tokens": 128000, "input": 0.3, "output": 1.2}]}}}}"#,
     ));
     let builtin = PriceTable::builtin();
@@ -267,7 +274,7 @@ fn an_override_after_a_fetch_reports_against_the_fetched_price() {
         global::install_override(table(&format!(
             r#"{{"schema": 1, "providers": {{
                 "anthropic": {{"claude-sonnet-5": {}}},
-                "deepseek": {{"deepseek-flash": {{"input": 0.15, "output": 0.6}}}}}}}}"#,
+                "mistral": {{"mistral-large-latest": {{"input": 0.15, "output": 0.6}}}}}}}}"#,
             serde_json::to_string(&serde_json::json!({
                 "input": 2.0, "output": 10.0, "cache_read": 0.2, "cache_write": 2.5
             }))
@@ -288,12 +295,12 @@ fn an_override_after_a_fetch_reports_against_the_fetched_price() {
         sonnet[0].after,
         builtin.cost("anthropic", "claude-sonnet-5")
     );
-    // Only the fetched layer had deepseek-flash's tier; dropping it warns.
+    // Only the fetched layer had mistral-large-latest's tier; dropping it warns.
     assert!(
         report
             .warnings
             .iter()
-            .any(|w| w.contains("deepseek/deepseek-flash drops the 1 context tier")),
+            .any(|w| w.contains("mistral/mistral-large-latest drops the 1 context tier")),
         "{:?}",
         report.warnings
     );
@@ -305,17 +312,17 @@ fn install_fetched_reports_against_the_previous_state_and_marks_shadowed() {
     let first = table(
         r#"{"schema": 1, "providers": {
             "anthropic": {"claude-sonnet-5": {"input": 1.5, "output": 7.5}},
-            "deepseek": {"deepseek-flash": {"input": 0.15, "output": 0.6}}}}"#,
+            "mistral": {"mistral-large-latest": {"input": 0.15, "output": 0.6}}}}"#,
     );
     let changes = global::install_fetched(first);
     assert_eq!(
         names(&changes),
-        ["anthropic/claude-sonnet-5", "deepseek/deepseek-flash"]
+        ["anthropic/claude-sonnet-5", "mistral/mistral-large-latest"]
     );
     assert!(changes.iter().all(|c| !c.shadowed));
 
     // The user layer overrides sonnet; a new fetched layer that drops
-    // deepseek-flash and moves sonnet again reports both — the revert, and
+    // mistral-large-latest and moves sonnet again reports both — the revert, and
     // sonnet's change marked as shadowed (it bills at the override).
     let _ = global::install_override(table(
         r#"{"schema": 1, "providers": {"anthropic": {"claude-sonnet-5": {"input": 1.0, "output": 5.0}}}}"#,
@@ -327,7 +334,7 @@ fn install_fetched_reports_against_the_previous_state_and_marks_shadowed() {
     });
     assert_eq!(
         names(&changes),
-        ["anthropic/claude-sonnet-5", "deepseek/deepseek-flash"]
+        ["anthropic/claude-sonnet-5", "mistral/mistral-large-latest"]
     );
     let sonnet = changes
         .iter()
@@ -338,7 +345,7 @@ fn install_fetched_reports_against_the_previous_state_and_marks_shadowed() {
     assert!(sonnet.to_string().ends_with("[shadowed by the user layer]"));
     let flash = changes
         .iter()
-        .find(|c| c.model == "deepseek-flash")
+        .find(|c| c.model == "mistral-large-latest")
         .unwrap();
     assert!(!flash.shadowed);
     assert!(flash.after.is_none(), "reverted to unpriced");
@@ -358,30 +365,36 @@ fn install_fetched_reports_against_the_previous_state_and_marks_shadowed() {
 fn add_only_merges_and_never_overrides() {
     let _g = exclusive();
     let _ = global::install_fetched(table(
-        r#"{"schema": 1, "providers": {"deepseek": {"deepseek-flash": {"input": 0.15, "output": 0.6}}}}"#,
+        r#"{"schema": 1, "providers": {"mistral": {"mistral-large-latest": {"input": 0.15, "output": 0.6}}}}"#,
     ));
     let (changes, warns) = warns_of(|| {
         global::install_fetched_with(
             table(
                 r#"{"schema": 1, "providers": {
                     "anthropic": {"claude-sonnet-5": {"input": 1.5, "output": 7.5}},
-                    "deepseek": {"deepseek-flash": {"input": 9, "output": 9},
-                                 "deepseek-v4-pro": {"input": 0.435, "output": 0.87}}}}"#,
+                    "mistral": {"mistral-large-latest": {"input": 9, "output": 9},
+                                 "mistral-small-latest": {"input": 0.435, "output": 0.87}}}}"#,
             ),
             InstallPolicy::AddOnly,
         )
     });
     // Only the model neither the built-in data nor the current fetched layer
     // listed.
-    assert_eq!(names(&changes), ["deepseek/deepseek-v4-pro"]);
+    assert_eq!(names(&changes), ["mistral/mistral-small-latest"]);
     assert!(warns.is_empty(), "{warns:?}");
     assert_eq!(
         ModelConfig::claude_sonnet_5().cost,
         PriceTable::builtin().cost("anthropic", "claude-sonnet-5")
     );
     // The earlier fetched entry survived (merged, not replaced).
-    assert_eq!(input(ModelConfig::deepseek("deepseek-flash", "D")), 0.15);
-    assert_eq!(input(ModelConfig::deepseek("deepseek-v4-pro", "D")), 0.435);
+    assert_eq!(
+        input(ModelConfig::mistral("mistral-large-latest", "M")),
+        0.15
+    );
+    assert_eq!(
+        input(ModelConfig::mistral("mistral-small-latest", "D")),
+        0.435
+    );
 
     // Positive control: the default policy replaces the layer and overrides.
     let changes = global::install_fetched_with(
@@ -394,12 +407,14 @@ fn add_only_merges_and_never_overrides() {
         names(&changes),
         [
             "anthropic/claude-sonnet-5",
-            "deepseek/deepseek-flash",
-            "deepseek/deepseek-v4-pro"
+            "mistral/mistral-large-latest",
+            "mistral/mistral-small-latest"
         ]
     );
     assert_eq!(input(ModelConfig::claude_sonnet_5()), 1.5);
-    assert!(ModelConfig::deepseek("deepseek-flash", "D").cost.is_none());
+    assert!(ModelConfig::mistral("mistral-large-latest", "M")
+        .cost
+        .is_none());
 }
 
 /// Disagreements with the bundled snapshot are logged: the first five, then
@@ -467,7 +482,7 @@ fn precedence_user_over_fetched_over_builtin() {
 fn reprice_repeats_the_constructor_lookup() {
     let _g = exclusive();
     let _ = global::install_override(sonnet_override());
-    let flash = ModelConfig::deepseek("deepseek-flash", "D");
+    let flash = ModelConfig::mistral("mistral-large-latest", "M");
     let sonnet = ModelConfig::claude_sonnet_5();
     let generic = ModelConfig::anthropic("claude-sonnet-5", "S");
     let gateway_table = table(

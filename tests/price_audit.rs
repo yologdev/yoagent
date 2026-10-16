@@ -90,7 +90,7 @@ const TIER_KEYS: [&str; 2] = ["tiers", "context_over_200k"];
 /// from the entries themselves, so it cannot notice the file shrinking — an
 /// empty table produced "0 compared, 0 drifted" and a green pass. Raise this
 /// when you add an entry.
-const MIN_ENTRIES: usize = 13;
+const MIN_ENTRIES: usize = 16;
 
 /// A `prices.json` entry and where to look when it drifts.
 struct Preset {
@@ -156,8 +156,49 @@ struct FlatRateGap {
     why: &'static str,
 }
 
-/// Recorded gaps, as `(provider, model, gap)`. Empty today.
-const FLAT_RATE_GAPS: &[(&str, &str, FlatRateGap)] = &[];
+/// DeepSeek bills reasoning tokens as output; models.dev lists them as a
+/// separate `reasoning` rate equal to its output rate.
+const DEEPSEEK_REASONING: &str =
+    "models.dev's `reasoning` rate is its output rate: DeepSeek bills \
+     reasoning tokens as output tokens (its pricing page lists no separate rate).";
+
+/// Recorded gaps, as `(provider, model, gap)`.
+const FLAT_RATE_GAPS: &[(&str, &str, FlatRateGap)] = &[
+    (
+        "deepseek",
+        "deepseek-flash",
+        FlatRateGap {
+            keys: &["reasoning"],
+            rates: &[("/reasoning", 0.6), ("/output", 0.6)],
+            why: DEEPSEEK_REASONING,
+        },
+    ),
+    (
+        "deepseek",
+        "deepseek-v4-flash",
+        FlatRateGap {
+            keys: &["reasoning"],
+            rates: &[("/reasoning", 0.6), ("/output", 0.6)],
+            why: DEEPSEEK_REASONING,
+        },
+    ),
+    (
+        "deepseek",
+        "deepseek-v4-pro",
+        FlatRateGap {
+            keys: &["reasoning"],
+            rates: &[("/reasoning", 1.98), ("/output", 1.98)],
+            why: DEEPSEEK_REASONING,
+        },
+    ),
+];
+
+/// Vendors that bill a peak rate and half of it off-peak, which a flat
+/// `CostConfig` cannot express: the crate carries the peak rate (an upper
+/// bound) and models.dev the off-peak one. For these, `input`, `output` and
+/// `cache_read` must be exactly twice models.dev's — asserted, not waived: if
+/// models.dev starts listing the peak rate, or the ratio changes, it is drift.
+const PEAK_IS_TWICE_UPSTREAM: &[&str] = &["deepseek"];
 
 /// models.dev's provider key for one of ours. The two agree except where
 /// models.dev names the vendor differently.
@@ -219,6 +260,9 @@ fn every_priced_preset_is_an_audited_entry() {
         ModelConfig::gpt_6_luna(),
         ModelConfig::meta("muse-spark-1.1", "Muse Spark 1.1"),
         ModelConfig::meta("muse-spark-1.2", "Muse Spark 1.2"),
+        ModelConfig::deepseek("deepseek-flash", "DeepSeek Flash"),
+        ModelConfig::deepseek("deepseek-v4-flash", "DeepSeek V4 Flash"),
+        ModelConfig::deepseek("deepseek-v4-pro", "DeepSeek V4 Pro"),
     ] {
         let entry = table
             .entry(&config.provider, &config.id)
@@ -353,6 +397,11 @@ fn audit(db: &serde_json::Value, all: &[Preset]) -> Outcome {
     let mut unexpectedly_missing: Vec<String> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
     let (mut compared, mut absent) = (0usize, 0usize);
+    for provider in PEAK_IS_TWICE_UPSTREAM {
+        notes.push(format!(
+            "{provider}: peak rates, compared as twice models.dev's off-peak ones"
+        ));
+    }
 
     println!(
         "\n{:<30} {:<14} {:>10} {:>12}",
@@ -463,18 +512,28 @@ fn audit(db: &serde_json::Value, all: &[Preset]) -> Outcome {
                 Upstream::Value(theirs) => {
                     compared += 1;
                     drift.extend(stale_allowance(p, name));
-                    let same = (ours - theirs).abs() < 1e-9;
+                    // The peak rate, against models.dev's off-peak one.
+                    let twice = PEAK_IS_TWICE_UPSTREAM.contains(&p.provider.as_str())
+                        && name != "cache_write";
+                    let expected = if twice { 2.0 * theirs } else { theirs };
+                    let same = (ours - expected).abs() < 1e-9;
                     println!(
-                        "{:<30} {:<14} {:>10} {:>12}  {}",
+                        "{:<30} {:<14} {:>10} {:>12}  {}{}",
                         p.model,
                         name,
                         ours,
                         theirs,
-                        if same { "ok" } else { "DRIFT" }
+                        if same { "ok" } else { "DRIFT" },
+                        if twice { " (peak = 2 × off-peak)" } else { "" }
                     );
                     if !same {
+                        let rule = if twice {
+                            format!(" (expected the peak rate, {expected}: twice models.dev's off-peak)")
+                        } else {
+                            String::new()
+                        };
                         drift.push(format!(
-                            "{}: {name} is {ours} in the crate, {theirs} in models.dev — \
+                            "{}: {name} is {ours} in the crate, {theirs} in models.dev{rule} — \
                              check {} and edit {} if the vendor agrees",
                             p.model, p.vendor_page, p.constructor
                         ));
@@ -748,7 +807,14 @@ fn the_audit_logic_runs_offline_against_the_fixture() {
     let db: serde_json::Value = serde_json::from_str(FIXTURE).unwrap();
     let all = fixture_presets(&db);
     let names: Vec<&str> = all.iter().map(|p| p.model.as_str()).collect();
-    for covered in ["claude-opus-5-5", "gpt-5.5", "gpt-6-sol", "muse-spark-1.2"] {
+    for covered in [
+        "claude-opus-5-5",
+        "gpt-5.5",
+        "gpt-6-sol",
+        "muse-spark-1.2",
+        "deepseek-flash",
+        "deepseek-v4-pro",
+    ] {
         assert!(
             names.contains(&covered),
             "fixture lost {covered}: {names:?}"
@@ -769,8 +835,8 @@ fn the_audit_logic_runs_offline_against_the_fixture() {
         o.notes
     );
     // Unlisted cache_write accepted by the allowance: gpt-5.5 base and tier,
-    // and Muse Spark 1.2.
-    assert_eq!(o.absent, 3);
+    // Muse Spark 1.2, and the three DeepSeek entries.
+    assert_eq!(o.absent, 6);
 
     // Positive controls: each kind of drift is caught.
     let drift_after = |mutate: &dyn Fn(&mut Preset)| {
@@ -800,6 +866,28 @@ fn the_audit_logic_runs_offline_against_the_fixture() {
     });
     // Base, tier and mirror cache_write are now unexplained.
     assert_eq!(allowance.len(), 3, "{allowance:?}");
+    // A peak-priced vendor's entry at the off-peak rate is drift, not a match.
+    let off_peak = drift_after(&|p| {
+        if p.model == "deepseek-flash" {
+            p.cost.input_per_million = 0.15;
+        }
+    });
+    // Its cache_write (the old input rate) no longer matches the input either.
+    assert_eq!(off_peak.len(), 2, "{off_peak:?}");
+    assert!(
+        off_peak
+            .iter()
+            .any(|d| d.contains("twice models.dev's off-peak")),
+        "{off_peak:?}"
+    );
+    // Without the recorded gap, models.dev's `reasoning` rate is unknown
+    // structure.
+    let reasoning = drift_after(&|p| {
+        if p.model == "deepseek-v4-pro" {
+            p.flat_rate_gap = None;
+        }
+    });
+    assert_eq!(reasoning.len(), 1, "{reasoning:?}");
 }
 
 /// An entry models.dev lacks is drift unless it records `absent_upstream` —
@@ -846,8 +934,19 @@ async fn models_dev_source_still_maps() {
         "only {} models mapped — has models.dev's schema changed?",
         fetched.len()
     );
+    // Time-of-day-priced providers are skipped by the mapping on purpose (its
+    // off-peak rate must not replace the snapshot's peak one), and must stay so.
+    for (p, m, _) in builtin.iter() {
+        if PEAK_IS_TWICE_UPSTREAM.contains(&p) {
+            assert!(
+                fetched.entry(p, m).is_none(),
+                "{p}/{m}: the models.dev mapping took an off-peak rate"
+            );
+        }
+    }
     let missing: Vec<String> = builtin
         .iter()
+        .filter(|(p, _, _)| !PEAK_IS_TWICE_UPSTREAM.contains(p))
         .filter(|(p, m, e)| e.absent_upstream.is_none() && fetched.entry(p, m).is_none())
         .map(|(p, m, _)| format!("{p}/{m}"))
         .collect();

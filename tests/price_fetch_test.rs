@@ -134,13 +134,10 @@ fn models_dev_fixture_maps_into_our_schema() {
     assert_eq!(gpt.cache_write_per_million, 0.0);
     let gemini = t.cost("google", "gemini-2.5-pro").unwrap();
     assert_eq!(gemini.context_tiers[0].above_prompt_tokens, 200_000);
-    // reasoning == output is expressible.
-    assert_eq!(
-        t.cost("deepseek", "deepseek-v4-pro")
-            .unwrap()
-            .output_per_million,
-        0.87
-    );
+    // DeepSeek bills by time of day: never taken from models.dev (it lists
+    // the off-peak rate), so the snapshot's peak rate stands.
+    assert!(t.cost("deepseek", "deepseek-v4-pro").is_none());
+    assert!(t.cost("deepseek", "deepseek-flash").is_none());
     // alibaba is our qwen.
     assert!(t.cost("qwen", "qwen-flash").is_some());
     assert!(t.cost("alibaba", "qwen-flash").is_none());
@@ -149,7 +146,7 @@ fn models_dev_fixture_maps_into_our_schema() {
         .cost("openrouter", "perplexity/sonar-deep-research")
         .is_none());
     assert!(t.cost("poe", "cerebras/qwen3-32b-cs").is_none());
-    assert_eq!(t.len(), 11);
+    assert_eq!(t.len(), 9);
 
     // Against the built-in data: every overlapping model agrees as billed
     // (gpt-5.5's implicit cache_write equals its explicit input-rate one), so
@@ -164,9 +161,10 @@ fn models_dev_fixture_maps_into_our_schema() {
             .map(ToString::to_string)
             .collect::<Vec<_>>()
     );
+    // A model the snapshot lacks is reported as new.
     assert!(changes
         .iter()
-        .any(|c| c.provider == "deepseek" && c.model == "deepseek-flash"));
+        .any(|c| c.provider == "google" && c.model == "gemini-2.5-pro"));
 }
 
 #[test]
@@ -186,7 +184,7 @@ fn a_changed_models_dev_envelope_is_an_error_not_an_empty_table() {
 fn the_models_dev_report_says_what_was_skipped_and_why() {
     let _g = exclusive();
     let report = PriceTable::from_models_dev_json_report(MODELS_DEV).unwrap();
-    assert_eq!(report.table.len(), 11);
+    assert_eq!(report.table.len(), 9);
     let reason = |p: &str, m: &str| {
         report
             .skipped
@@ -197,7 +195,10 @@ fn the_models_dev_report_says_what_was_skipped_and_why() {
     };
     assert!(reason("openrouter", "perplexity/sonar-deep-research").contains("reasoning"));
     assert!(reason("poe", "cerebras/qwen3-32b-cs").contains("no cost"));
-    assert_eq!(report.skipped.len(), 2);
+    for m in ["deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro"] {
+        assert!(reason("deepseek", m).contains("time of day"));
+    }
+    assert_eq!(report.skipped.len(), 5);
     assert!(report.ignored_fields.is_empty());
 }
 
@@ -280,7 +281,7 @@ async fn fetches_models_dev_format_from_a_url() {
         }
         expected
     });
-    assert_eq!(report.skipped.len(), 2);
+    assert_eq!(report.skipped.len(), 5);
 }
 
 /// Item 2: a `Url` source is usually hand-maintained, so it is strict.
@@ -417,9 +418,9 @@ async fn an_expired_cache_is_refetched_and_rewritten() {
         "{:?}",
         got.origin
     );
-    assert_eq!(got.table.len(), 11);
+    assert_eq!(got.table.len(), 9);
     // The models.dev skip list reaches the caller.
-    assert_eq!(got.skipped.len(), 2);
+    assert_eq!(got.skipped.len(), 5);
     // The cache now holds the mapped table and serves it, fresh.
     let again = PriceTable::fetch_cached(&source, &cache, opts(DAY, DAY)).await;
     assert!(matches!(again.origin, PriceOrigin::Cache { .. }));

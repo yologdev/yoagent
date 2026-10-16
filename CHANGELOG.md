@@ -6,6 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+### yoagent
+
+- **DeepSeek is priced** (after `prices::enable_bundled()`): `deepseek-flash`, `deepseek-v4-pro` and the legacy `deepseek-v4-flash` (billed as Flash), from DeepSeek's pricing page. **At the peak rate:** DeepSeek bills half of it off-peak (all hours but 01:00–04:00 and 06:00–10:00 UTC on weekdays), and a `CostConfig` has no time of day, so costs are an upper bound — off-peak they read up to twice the bill, and a `Budget` stops early rather than late. Install the off-peak rates as an override to count those instead (`docs/concepts/pricing.md`). `ModelConfig::deepseek(..)` for those ids now has a `cost`; `Budget::for_model` works for them. The price audit checks the rates as exactly twice models.dev's off-peak ones, and a live models.dev fetch (`enable_live`) skips DeepSeek's models, so its off-peak rates never replace the bundled peak ones.
+
 ### yoagent-rutis (0.4.0)
 
 - **`yoagent_rutis::adapters`: where the pi and DSH adapters are.** `adapters()` returns the folders of the adapter files the crate ships (`plugins/pi`, `plugins/dsh`, `plugins/yoagent.d.ts`), so a host can copy them and `npm ci` the copy instead of keeping its own copy of them in step with the crate's.

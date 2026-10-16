@@ -64,6 +64,38 @@
         "verified": "2026-08-19"
       }
     },
+    "deepseek": {
+        "deepseek-flash": {
+            "input": 0.3,
+            "output": 1.2,
+            "cache_read": 0.006,
+            "cache_write": 0.3,
+            "cache_write_at_input": true,
+            "note": "Peak rate. DeepSeek bills half of it off-peak: all hours but 01:00-04:00 and 06:00-10:00 UTC on weekdays (about 79% of the week). A flat CostConfig has no time of day, so the peak rate is the upper bound: costs are over-stated off-peak, never under-stated, and a Budget stops early rather than late.",
+            "source": "https://api-docs.deepseek.com/quick_start/pricing",
+            "verified": "2026-10-16"
+        },
+        "deepseek-v4-flash": {
+            "input": 0.3,
+            "output": 1.2,
+            "cache_read": 0.006,
+            "cache_write": 0.3,
+            "cache_write_at_input": true,
+            "note": "The legacy name: served by DeepSeek-V4.1-Flash and billed at the deepseek-flash price. Peak rate. DeepSeek bills half of it off-peak: all hours but 01:00-04:00 and 06:00-10:00 UTC on weekdays (about 79% of the week). A flat CostConfig has no time of day, so the peak rate is the upper bound: costs are over-stated off-peak, never under-stated, and a Budget stops early rather than late.",
+            "source": "https://api-docs.deepseek.com/quick_start/pricing",
+            "verified": "2026-10-16"
+        },
+        "deepseek-v4-pro": {
+            "input": 1.32,
+            "output": 3.96,
+            "cache_read": 0.044,
+            "cache_write": 1.32,
+            "cache_write_at_input": true,
+            "note": "Peak rate. DeepSeek bills half of it off-peak: all hours but 01:00-04:00 and 06:00-10:00 UTC on weekdays (about 79% of the week). A flat CostConfig has no time of day, so the peak rate is the upper bound: costs are over-stated off-peak, never under-stated, and a Budget stops early rather than late.",
+            "source": "https://api-docs.deepseek.com/quick_start/pricing",
+            "verified": "2026-10-16"
+        }
+    },
     "meta": {
       "muse-spark-1.1": {
         "input": 1.25,

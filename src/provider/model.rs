@@ -131,12 +131,11 @@ pub(crate) fn openai_id_is_reasoning(id: &str) -> bool {
 /// // config.cost.as_mut()` would silently do nothing — but set every rate
 /// // you pay, since the rest start at zero (an unset cache rate then bills
 /// // at the input rate):
-/// let mut deepseek = ModelConfig::deepseek("deepseek-flash", "DeepSeek Flash");
-/// assert!(deepseek.cost.is_none());
-/// // DeepSeek Flash peak rates (off-peak is half); DeepSeek has no
-/// // cache-write category.
-/// deepseek.cost = Some(CostConfig::new(0.30, 1.20).with_cache_read(0.006));
-/// assert_eq!(deepseek.cost.as_ref().unwrap().input_per_million, 0.30);
+/// let mut mistral = ModelConfig::mistral("mistral-large-latest", "Mistral Large");
+/// assert!(mistral.cost.is_none());
+/// // The rates you pay, from Mistral's pricing page (these are placeholders).
+/// mistral.cost = Some(CostConfig::new(2.0, 6.0).with_cache_read(0.2));
+/// assert_eq!(mistral.cost.as_ref().unwrap().input_per_million, 2.0);
 ///
 /// // A model you run for free is `Some` with zero rates, and costs $0:
 /// let mut local = ModelConfig::local("http://localhost:1234/v1", "qwen3");
@@ -2968,7 +2967,8 @@ mod tests {
             ModelConfig::qwen("qwen-plus", "Qwen"),
             ModelConfig::xai("grok-4-1-fast", "Grok"),
             ModelConfig::groq("llama-3.3-70b-versatile", "Llama"),
-            ModelConfig::deepseek("deepseek-v4-flash", "DeepSeek"),
+            // A DeepSeek id the snapshot does not list (the retired names are).
+            ModelConfig::deepseek("deepseek-chat", "DeepSeek"),
             ModelConfig::mistral("mistral-large-latest", "Mistral"),
             ModelConfig::google("gemini-3-pro", "Gemini"),
             // `meta` looks its id up too: the contributor tier is not listed,
@@ -3067,7 +3067,7 @@ mod tests {
         assert_eq!(sonnet.cost, Some(CostConfig::new(1.8, 9.0)));
         let opus = ModelConfig::claude_opus_5().with_prices(&table);
         assert_eq!(opus.cost, ModelConfig::claude_opus_5().cost);
-        let unknown = ModelConfig::deepseek("deepseek-flash", "D").with_prices(&table);
+        let unknown = ModelConfig::mistral("mistral-large-latest", "M").with_prices(&table);
         assert!(unknown.cost.is_none());
         // Explicit, so it applies to a local endpoint too: free, not unknown.
         let local = ModelConfig::local("http://localhost:1234/v1", "qwen3").with_prices(&table);

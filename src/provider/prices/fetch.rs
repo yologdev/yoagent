@@ -400,6 +400,10 @@ impl PriceTable {
                         reason,
                     })
                 };
+                if TIME_OF_DAY_PRICED.contains(&provider) {
+                    skip(TIME_OF_DAY_REASON.into());
+                    continue;
+                }
                 let Some(cost) = info.get("cost") else {
                     skip("models.dev lists no cost".into());
                     continue;
@@ -418,8 +422,10 @@ impl PriceTable {
             }
         }
         let builtin = builtin_ref();
+        // Skipped by design (time-of-day pricing) is not news; unmappable data is.
         let dropped: Vec<String> = skipped
             .iter()
+            .filter(|s| !TIME_OF_DAY_PRICED.contains(&s.provider.as_str()))
             .filter(|s| builtin.entry(&s.provider, &s.model).is_some())
             .map(|s| format!("{}/{} ({})", s.provider, s.model, s.reason))
             .collect();
@@ -702,6 +708,16 @@ async fn write_cache(path: &Path, url: &str, table: &PriceTable) -> Result<(), P
 
 /// One models.dev `cost` object as a [`CostConfig`], or why it cannot be
 /// expressed as one.
+/// Providers whose rates depend on the time of day (DeepSeek: half price
+/// off-peak). models.dev lists one of the two rates and a flat `CostConfig`
+/// cannot express both, so their models are skipped: the bundled snapshot
+/// carries the peak rate (an upper bound), and a fetched off-peak rate must
+/// not silently replace it.
+const TIME_OF_DAY_PRICED: &[&str] = &["deepseek"];
+
+const TIME_OF_DAY_REASON: &str = "priced by time of day (peak and off-peak): a flat \
+     CostConfig cannot express it; the bundled snapshot carries the peak rate";
+
 fn map_models_dev_cost(cost: &Value) -> Result<CostConfig, String> {
     let obj = cost.as_object().ok_or("cost is not an object")?;
     let (input, output, cache_read, cache_write) = map_band(obj, &["tiers", "context_over_200k"])?;

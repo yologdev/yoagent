@@ -191,13 +191,27 @@ every lookup is `None`. Once it has:
   `None` otherwise. `ModelConfig::anthropic("claude-sonnet-5", ..)` is priced
   exactly like `claude_sonnet_5()`; `meta` prices `muse-spark-1.1` and
   `muse-spark-1.2` and leaves any other id (the far cheaper contributor tier,
-  say) unknown.
+  say) unknown. `deepseek` prices `deepseek-flash`, `deepseek-v4-pro` and the
+  legacy `deepseek-v4-flash` (see below).
 - **Gateways and custom endpoints** — `custom`, `openai_compat`, `local`,
   `ollama`, `opencode_zen`, `opencode_go`, `mock` — are always `None`, even
   for an id the table lists. A gateway's bill is not the vendor's list price.
 
 `None` means **unknown**, never free. Set `config.cost` yourself for a model
 the table does not list.
+
+**DeepSeek is priced at its peak rate.** DeepSeek bills half its peak rate
+off-peak: every hour except 01:00–04:00 and 06:00–10:00 UTC on weekdays,
+about 79% of the week. A `CostConfig` has no time of day, so the snapshot
+carries the peak rate, the upper bound: off-peak, `cost_usd` and
+`total_cost_usd()` are up to twice the bill, and a `Budget` stops early rather
+than late. To count off-peak spend instead, install the off-peak rates as an
+override (`install_override` or `YOAGENT_PRICES`, below):
+
+```json
+{ "schema": 1, "providers": { "deepseek": {
+  "deepseek-flash": { "input": 0.15, "output": 0.6, "cache_read": 0.003 } } } }
+```
 
 ## Overriding prices at runtime
 
@@ -444,7 +458,9 @@ for every model it lists.
   V4 Pro's price. The mapping is conservative:
   - A model whose cost carries structure `CostConfig` cannot express is
     **skipped**, not approximated. That covers a separate reasoning rate, a
-    non-context tier and an unknown key.
+    non-context tier and an unknown key — and DeepSeek's models, priced by
+    time of day: models.dev lists the off-peak rate, which must not replace
+    the snapshot's peak one (they are reported as skipped, without a warning).
   - A skipped model that the bundled snapshot lists is **named in a `warn`
     log**. It keeps the snapshot's price when the snapshot is enabled
     (`enable_live*` always enables it).
@@ -528,7 +544,11 @@ drift, on an entry that vanished upstream, and on a comparison that silently
 checked nothing. The comparison logic also runs offline in CI, against a
 checked-in slice of models.dev. models.dev is community-maintained, so a
 failure sends a human to the entry's `source`; the audit never edits the
-file. Run the live audit before a release:
+file. Where the vendor and models.dev legitimately differ, the audit records
+the difference and asserts it both ways rather than skipping the field: for
+DeepSeek, the snapshot's rates must be exactly twice models.dev's (which lists
+the off-peak ones), and models.dev's separate `reasoning` rate must equal its
+output rate. Run the live audit before a release:
 
 ```text
 cargo test --all-features --test price_audit -- --ignored --nocapture
