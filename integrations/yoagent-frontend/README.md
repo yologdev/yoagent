@@ -7,7 +7,7 @@ crates.io.
 
 | Was here | Now |
 |---|---|
-| `integrations/yoagent-frontend/` | [`frontend/`](https://github.com/yologdev/yobuild/tree/main/frontend) |
+| `integrations/yoagent-frontend/` | the Rust code: [`src/frontend/`](https://github.com/yologdev/yobuild/tree/main/src/frontend) (no longer a crate of its own); its plugins and web page: [`frontend/`](https://github.com/yologdev/yobuild/tree/main/frontend) |
 | `integrations/yoagent-frontend/examples/` (`coding_agent`, `handoff_agent`, `minimal_browser`) | [`examples/`](https://github.com/yologdev/yobuild/tree/main/examples) |
 | `scripts/try-coding-agent.sh`, `scripts/try-handoff.sh` | [`scripts/`](https://github.com/yologdev/yobuild/tree/main/scripts) |
 | `integrations/yoagent-frontend/plugins/pi-extensions/confirm-dangerous.ts` | [`frontend/plugins/pi-extensions/`](https://github.com/yologdev/yobuild/tree/main/frontend/plugins/pi-extensions) |
