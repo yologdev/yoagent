@@ -24,6 +24,8 @@ use yoagent::extension::{
 };
 use yoagent::{AgentEvent, AgentMessage, AgentTool, Message, ToolDecision};
 
+use crate::registry::ToolOwner;
+
 /// The run a hook is called for.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
@@ -97,6 +99,11 @@ pub struct ToolCall {
     /// otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub messages: Option<Messages>,
+    /// The plugin handler that offered this run the tool called, when a
+    /// handler did ([`Registry::offered_by`](crate::Registry::offered_by));
+    /// `None` for the agent's own tools. Absent from the JSON when `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offered_by: Option<ToolOwner>,
     /// The run (flattened into the JSON object).
     #[serde(flatten)]
     pub run: RunInfo,
@@ -112,6 +119,7 @@ impl ToolCall {
             user_request: None,
             latest_user_text: None,
             messages: None,
+            offered_by: None,
             run: RunInfo::default(),
         }
     }
@@ -140,11 +148,18 @@ impl ToolCall {
         self
     }
 
+    /// For a tool this plugin handler offered.
+    pub fn with_offered_by(mut self, owner: ToolOwner) -> Self {
+        self.offered_by = Some(owner);
+        self
+    }
+
     /// `messages`: whether a handler of the run asked for the conversation.
     pub(crate) fn from_request(
         call: &yoagent::ToolCallRequest<'_>,
         run: &RunInfo,
         messages: bool,
+        offered_by: Option<ToolOwner>,
     ) -> Self {
         Self {
             tool: call.tool_name.to_string(),
@@ -153,6 +168,7 @@ impl ToolCall {
             user_request: call.user_request(),
             latest_user_text: call.latest_user_text(),
             messages: messages.then(|| llm_messages(call.messages.iter())),
+            offered_by,
             run: run.clone(),
         }
     }
@@ -605,6 +621,13 @@ pub(crate) trait EventSink: Send + Sync {
     }
 }
 
+/// A tool a handler offers for one run, with where the handler says it came
+/// from ([`ToolOwner::source`](crate::ToolOwner::source)).
+pub(crate) struct Offer {
+    pub(crate) tool: Arc<dyn AgentTool>,
+    pub(crate) source: Option<String>,
+}
+
 /// A registered handler, whatever implements it: a Rust [`Handler`], or a
 /// language plugin's object behind a session.
 #[async_trait::async_trait]
@@ -612,7 +635,7 @@ pub(crate) trait HandlerImpl: Send + Sync + 'static {
     fn hooks(&self) -> Hooks;
     /// Tools offered on every run, checked for unique names at registration.
     fn static_tools(&self) -> Vec<Arc<dyn AgentTool>>;
-    async fn tools(&self, run: RunInfo) -> Result<Vec<Arc<dyn AgentTool>>, ExtensionError>;
+    async fn tools(&self, run: RunInfo) -> Result<Vec<Offer>, ExtensionError>;
     async fn before_tool(&self, call: ToolCall) -> Result<ToolDecision, ExtensionError>;
     async fn after_tool(
         &self,
@@ -662,10 +685,15 @@ impl HandlerImpl for Handler {
         self.tools.clone()
     }
 
-    async fn tools(&self, run: RunInfo) -> Result<Vec<Arc<dyn AgentTool>>, ExtensionError> {
+    async fn tools(&self, run: RunInfo) -> Result<Vec<Offer>, ExtensionError> {
         let mut tools = Vec::new();
         for f in &self.tools_fns {
-            tools.extend(f(run.clone()).await?);
+            tools.extend(
+                f(run.clone())
+                    .await?
+                    .into_iter()
+                    .map(|tool| Offer { tool, source: None }),
+            );
         }
         Ok(tools)
     }

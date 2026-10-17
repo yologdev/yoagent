@@ -712,6 +712,21 @@ the others).
   run it gives that run's figures (with the bridge as a tree extension, the
   sub-agent runs it served included). The numbers to decide whether a
   plugin is worth rewriting in Rust.
+- **Which plugin offered a tool**: `bridge.registry().offered_by(run_id, tool)`
+  — and `offered_by` on the `ToolCall` every `before_tool` / `after_tool`
+  handler receives — is the `ToolOwner` of a plugin tool in that run: the
+  handler's name, the plugin it registered under (a Rust plugin's name; for a
+  language plugin, its runtime session — rutis does not tell the host which
+  row of a runtime made a call) and an optional `source`, which the handler
+  declares per tool: the pi adapter gives the extension file that registered
+  the tool, a TypeScript or Python plugin may set `source` on the tools it
+  returns, and the DSH adapter gives none (DSH's tool registry does not record
+  which plugin registered a tool). `None` for the agent's own tools; known from
+  the run's `tools` until it ends. For a policy that trusts a tool by where it
+  came from, say an allow list per plugin. `source` is self-declared, and when
+  the agent itself (or an extension before the bridge) has a tool of the same
+  name, yoagent keeps that one while `offered_by` still names the plugin —
+  keep your own tool names apart from your plugins'.
 
 ## Versions
 

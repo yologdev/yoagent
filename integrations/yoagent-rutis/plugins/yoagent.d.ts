@@ -177,6 +177,8 @@ export interface ToolCall extends RunInfo {
   latest_user_text: string | null
   /** With `options.messages` (`before_tool` only): the conversation, the assistant message making this call last. */
   messages?: Message[]
+  /** The plugin handler that offered this run the tool called; absent for the agent's own tools. */
+  offered_by?: { handler: string; owner: string; source?: string }
 }
 
 /** Allow (nothing), deny with a reason the model sees, or rewrite the arguments. */
@@ -263,6 +265,12 @@ export interface ToolSpec {
   description?: string | null
   /** JSON Schema of the arguments (default, also for `null`: an object with no properties). */
   parameters?: Record<string, unknown> | null
+  /**
+   * Where the tool came from, in this plugin's own terms (the pi adapter gives the extension
+   * file that registered it). The host reads it with `Registry::offered_by` and as
+   * `offered_by.source` on a tool call; it is self-declared, not checked.
+   */
+  source?: string | null
 }
 
 /**

@@ -74,7 +74,7 @@ use yoagent::{AgentEvent, AgentTool, Content, ToolContext, ToolDecision, ToolErr
 
 use std::time::Duration;
 
-use crate::handler::{EventSink, HandlerImpl, Hooks, Input, RunInfo, Stop, ToolCall, Turn};
+use crate::handler::{EventSink, HandlerImpl, Hooks, Input, Offer, RunInfo, Stop, ToolCall, Turn};
 use crate::registry::Registry;
 
 /// How many events may wait for one handler's `on_event` before it counts
@@ -636,19 +636,20 @@ impl HandlerImpl for RemoteHandler {
         Vec::new()
     }
 
-    async fn tools(&self, run: RunInfo) -> Result<Vec<Arc<dyn AgentTool>>, ExtensionError> {
+    async fn tools(&self, run: RunInfo) -> Result<Vec<Offer>, ExtensionError> {
         let specs = self.target.call("tools", vec![to_json(&run)]).await?;
         let specs: Vec<ToolSpec> = serde_json::from_value(specs)
             .map_err(|e| ExtensionError::new(format!("`tools` returned invalid tools: {e}")))?;
         Ok(specs
             .into_iter()
-            .map(|spec| {
-                Arc::new(RemoteTool {
+            .map(|spec| Offer {
+                source: spec.source.clone(),
+                tool: Arc::new(RemoteTool {
                     label: spec.label.clone().unwrap_or_else(|| spec.name.clone()),
                     spec,
                     target: self.target.clone(),
                     run: run.clone(),
-                }) as Arc<dyn AgentTool>
+                }),
             })
             .collect())
     }
@@ -1043,6 +1044,9 @@ struct ToolSpec {
     description: String,
     #[serde(default = "empty_schema", deserialize_with = "null_as_empty_schema")]
     parameters: Json,
+    /// Where the plugin says the tool came from ([`ToolOwner::source`](crate::ToolOwner::source)).
+    #[serde(default)]
+    source: Option<String>,
 }
 
 fn empty_schema() -> Json {
@@ -1407,7 +1411,7 @@ mod tests {
         fn static_tools(&self) -> Vec<Arc<dyn AgentTool>> {
             Vec::new()
         }
-        async fn tools(&self, _: RunInfo) -> Result<Vec<Arc<dyn AgentTool>>, ExtensionError> {
+        async fn tools(&self, _: RunInfo) -> Result<Vec<crate::handler::Offer>, ExtensionError> {
             Ok(Vec::new())
         }
         async fn before_tool(&self, _: ToolCall) -> Result<ToolDecision, ExtensionError> {

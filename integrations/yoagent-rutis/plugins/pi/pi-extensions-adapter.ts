@@ -721,6 +721,16 @@ export default definePlugin<Config>({
       }
       return byName
     }
+    /** The extension file that registered each tool `registered()` keeps (first wins, the same rule). */
+    const registeredBy = () => {
+      const paths = new Map<string, string>()
+      for (const ext of extensions) {
+        for (const { definition } of ext.tools.values()) {
+          if (!paths.has(definition.name)) paths.set(definition.name, ext.path)
+        }
+      }
+      return paths
+    }
 
     // pi.setActiveTools: an allowlist over the tools pi knows — yoagent's built-ins under pi's
     // names and the extensions' tools. Other tools (MCP, sub-agents, the host's own) are not pi's
@@ -1036,8 +1046,11 @@ export default definePlugin<Config>({
           checkUnmapped(false)
           checkShadowing(false)
           if (refusal) return []
+          const paths = registeredBy()
           return [...available().values()].map((tool) => ({
             name: tool.name,
+            // The extension file that registered it: a host's policy may trust a tool by it.
+            source: paths.get(tool.name) ?? null,
             label: tool.label ?? null,
             description: [tool.description ?? '', ...(tool.promptGuidelines ?? []).map((g) => `- ${g}`)]
               .filter(Boolean)

@@ -448,3 +448,84 @@ async fn installing_twice_shares_one_registry_and_registering_without_a_bridge_f
     assert!(Arc::ptr_eq(first.registry(), second.registry()));
     root.shutdown().await.unwrap();
 }
+
+/// `offered_by` names the handler (and plugin) that offered a run each plugin
+/// tool — static or per run — on the bridge's `ToolCall` and through the
+/// registry, `None` for the agent's own tools, and is forgotten at the run's end.
+#[tokio::test(flavor = "multi_thread")]
+async fn offered_by_names_the_handler_of_each_plugin_tool() {
+    let (root, bridge) = setup();
+    let greeter = root.plugin(plugin(
+        handler("greeter")
+            .with_tool(Reply::new("greet", "hello"))
+            .with_tools(|_| vec![Arc::new(EchoArgs) as Arc<dyn AgentTool>]),
+    ));
+    wait_active(&greeter).await;
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let (record, registry) = (seen.clone(), bridge.registry().clone());
+    let watch = root.plugin(plugin(handler("watch").with_before_tool(move |call| {
+        let looked_up = registry.offered_by(&call.run.run_id, &call.tool);
+        record.lock().unwrap().push((
+            call.tool.clone(),
+            call.offered_by.clone(),
+            looked_up,
+            call.run.run_id.clone(),
+        ));
+        ToolDecision::Allow
+    })));
+    wait_active(&watch).await;
+    let owner = bridge
+        .registry()
+        .handlers()
+        .into_iter()
+        .find(|h| h.name() == "greeter")
+        .unwrap()
+        .owner()
+        .to_string();
+
+    let (agent, _) = agent(vec![
+        MockResponse::ToolCalls(
+            ["greet", "echo_args", "own"]
+                .iter()
+                .map(|name| MockToolCall {
+                    provider_metadata: None,
+                    name: (*name).into(),
+                    arguments: serde_json::json!({}),
+                })
+                .collect(),
+        ),
+        text("done"),
+    ]);
+    let mut agent = agent
+        .with_tools(vec![Box::new(Reply::new("own", "mine"))])
+        .with_extension(bridge.extension());
+    let (_, results) = run(&mut agent, "go").await;
+    assert!(results.iter().all(|r| !r.2), "{results:?}");
+
+    let mut seen = seen.lock().unwrap().clone();
+    seen.sort_by(|a, b| a.0.cmp(&b.0));
+    let greeter_owned = yoagent_rutis::ToolOwner::new("greeter", owner);
+    let tools: Vec<_> = seen
+        .iter()
+        .map(|(tool, on_call, looked_up, _)| (tool.as_str(), on_call.clone(), looked_up.clone()))
+        .collect();
+    assert_eq!(
+        tools,
+        vec![
+            (
+                "echo_args",
+                Some(greeter_owned.clone()),
+                Some(greeter_owned.clone())
+            ),
+            ("greet", Some(greeter_owned.clone()), Some(greeter_owned)),
+            ("own", None, None),
+        ]
+    );
+    let run_id = &seen[0].3;
+    assert_eq!(
+        bridge.registry().offered_by(run_id, "greet"),
+        None,
+        "forgotten when the run ended"
+    );
+    root.shutdown().await.unwrap();
+}

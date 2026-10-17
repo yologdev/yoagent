@@ -28,11 +28,12 @@
 //! generation's handler and gets those errors; the new generation's handler
 //! serves the next run. The bridge never rebinds a run to a newer generation.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rutis::{CordisError, Ctx, Disposer, Effect};
+use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 use yoagent::AgentTool;
 
@@ -58,6 +59,8 @@ use crate::handler::{Handler, HandlerImpl, Hooks};
 pub struct Registry {
     inner: Mutex<Inner>,
     timings: Arc<Timings>,
+    /// Per run in progress: which handler offered each plugin tool.
+    offers: Mutex<HashMap<String, Arc<HashMap<String, ToolOwner>>>>,
 }
 
 #[derive(Default)]
@@ -305,6 +308,58 @@ impl Timings {
     }
 }
 
+/// The plugin handler that offered a run one of its tools
+/// ([`Registry::offered_by`], [`ToolCall::offered_by`](crate::ToolCall::offered_by)).
+///
+/// `handler` and `owner` come from the bridge: the handler's registered name
+/// and the plugin it registered under — for a Rust plugin, the rutis plugin's
+/// name; for a language plugin, its runtime session (rutis does not tell the
+/// host which row of a runtime made a call). `source` is what the handler
+/// says about the tool: the pi adapter gives the extension file that
+/// registered it; a language plugin may give any string. It is
+/// self-declared — a plugin could name another's — so a policy keyed on it
+/// trusts the plugins of that handler as much as the handler itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ToolOwner {
+    pub(crate) handler: String,
+    pub(crate) owner: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) source: Option<String>,
+}
+
+impl ToolOwner {
+    /// One, for testing a policy outside an agent.
+    pub fn new(handler: impl Into<String>, owner: impl Into<String>) -> Self {
+        Self {
+            handler: handler.into(),
+            owner: owner.into(),
+            source: None,
+        }
+    }
+
+    /// With what the handler said about the tool's origin.
+    pub fn with_source(mut self, source: impl Into<String>) -> Self {
+        self.source = Some(source.into());
+        self
+    }
+
+    /// The handler's registered name.
+    pub fn handler(&self) -> &str {
+        &self.handler
+    }
+
+    /// The plugin the handler registered under ([`HandlerInfo::owner`]).
+    pub fn owner(&self) -> &str {
+        &self.owner
+    }
+
+    /// Where the handler says the tool came from (self-declared; see the
+    /// type docs), if it said.
+    pub fn source(&self) -> Option<&str> {
+        self.source.as_deref()
+    }
+}
+
 /// A registered handler, for diagnostics.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HandlerInfo {
@@ -515,6 +570,45 @@ impl Registry {
     /// registration order.
     pub fn tool_names(&self) -> Vec<String> {
         self.handlers().into_iter().flat_map(|h| h.tools).collect()
+    }
+
+    /// The plugin handler that offered the run `run_id` its tool `tool`:
+    /// for a policy that trusts a tool by where it came from (a run id is
+    /// in yoagent's `RunContext::run_id`, and in every hook argument's
+    /// [`RunInfo`](crate::RunInfo)). Known from the run's `tools` until the
+    /// run ends; `None` for a tool no plugin handler offered (the agent's
+    /// own), or another run's.
+    ///
+    /// The bridge answers for the tools **it** offered. When the agent
+    /// itself, or an extension before the bridge, has a tool of the same
+    /// name, yoagent keeps that one and drops the plugin's (with a
+    /// warning) — and a call of that name still reads as the plugin's here.
+    /// A host that scopes trust by plugin should keep its own tool names
+    /// apart from its plugins' (yoagent logs every such drop).
+    pub fn offered_by(&self, run_id: &str, tool: &str) -> Option<ToolOwner> {
+        let offers = self.offers.lock().unwrap_or_else(|e| e.into_inner());
+        offers.get(run_id)?.get(tool).cloned()
+    }
+
+    /// Record what the run `run_id` was offered (replacing an earlier
+    /// record of that run), returning the record for the run to keep.
+    pub(crate) fn record_offers(
+        &self,
+        run_id: &str,
+        offered: HashMap<String, ToolOwner>,
+    ) -> Arc<HashMap<String, ToolOwner>> {
+        let offered = Arc::new(offered);
+        if !offered.is_empty() {
+            let mut offers = self.offers.lock().unwrap_or_else(|e| e.into_inner());
+            offers.insert(run_id.to_owned(), offered.clone());
+        }
+        offered
+    }
+
+    /// The run `run_id` ended: forget what it was offered.
+    pub(crate) fn forget_offers(&self, run_id: &str) {
+        let mut offers = self.offers.lock().unwrap_or_else(|e| e.into_inner());
+        offers.remove(run_id);
     }
 }
 
