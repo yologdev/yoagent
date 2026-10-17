@@ -934,9 +934,23 @@ async fn a_pi_tool_is_offered_by_its_extension_file() {
     let host = host(&runtime).await;
     // Configured relative to the adapter's `cwd`: the source is the file pi
     // resolved, not that spelling.
-    let fixture = pi_dir().join("fixture-extension.ts");
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = extension(
+        dir.path(),
+        "owned.ts",
+        r#"import { Type } from 'typebox'
+export default function (pi) {
+  pi.registerTool({
+    name: 'pi_echo', label: 'echo', description: 'echoes', parameters: Type.Object({}),
+    async execute() {
+      return { content: [{ type: 'text', text: 'echo' }], details: undefined }
+    },
+  })
+}
+"#,
+    );
     host.load(adapter_row(
-        json!({ "extensions": ["./fixture-extension.ts"], "cwd": pi_dir() }),
+        json!({ "extensions": ["./owned.ts"], "cwd": dir.path() }),
     ))
     .await;
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -953,7 +967,7 @@ async fn a_pi_tool_is_offered_by_its_extension_file() {
     wait_active(&later).await;
     let (agent, _) = agent(vec![
         calls(&[
-            ("pi_echo", json!({"text": "hi"})),
+            ("pi_echo", json!({})),
             ("read_file", json!({"path": "nowhere.txt"})),
         ]),
         text("done"),
