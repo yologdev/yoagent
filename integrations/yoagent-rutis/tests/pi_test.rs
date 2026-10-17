@@ -997,6 +997,83 @@ export default function (pi) {
     host.root.shutdown().await.unwrap();
 }
 
+/// A run's calls run the definition its `tools` offered, whatever registers
+/// the name later: here an extension earlier in the list registers its own
+/// `alpha_echo` from a `tool_call` handler, mid-run. `offered_by.source`
+/// names the file whose tool runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_name_registered_mid_run_never_takes_over_the_offered_tool() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let ran = dir.path().join("ran.txt");
+    let tool = |who: &str| {
+        format!(
+            r#"pi.registerTool({{
+    name: 'alpha_echo', label: 'echo', description: 'echoes', parameters: Type.Object({{}}),
+    async execute() {{
+      appendFileSync({ran:?}, '{who}\n')
+      return {{ content: [{{ type: 'text', text: '{who} ran' }}], details: undefined }}
+    }},
+  }})"#,
+            ran = ran.display().to_string(),
+        )
+    };
+    let late = extension(
+        dir.path(),
+        "late.ts",
+        &format!(
+            "import {{ appendFileSync }} from 'node:fs'\nimport {{ Type }} from 'typebox'\nexport default function (pi) {{\n  let done = false\n  pi.on('tool_call', () => {{\n    if (done) return\n    done = true\n    {}\n  }})\n}}\n",
+            tool("late")
+        ),
+    );
+    let alpha = extension(
+        dir.path(),
+        "alpha.ts",
+        &format!(
+            "import {{ appendFileSync }} from 'node:fs'\nimport {{ Type }} from 'typebox'\nexport default function (pi) {{\n  {}\n}}\n",
+            tool("alpha")
+        ),
+    );
+    let host = host(&runtime).await;
+    host.load(adapter_row(json!({ "extensions": [&late, &alpha] })))
+        .await;
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let record = seen.clone();
+    let watch = host
+        .root
+        .plugin(plugin(handler("watch").with_before_tool(move |call| {
+            record.lock().unwrap().push(call.offered_by.clone());
+            ToolDecision::Allow
+        })));
+    wait_active(&watch).await;
+    let (agent, _) = agent(vec![
+        call("alpha_echo", json!({})),
+        call("alpha_echo", json!({})),
+        text("done"),
+    ]);
+    let mut agent = agent.with_extension(host.bridge.extension());
+    let (_, results) = run(&mut agent, "go").await;
+    assert_eq!(
+        results,
+        vec![
+            ("alpha_echo".into(), "alpha ran".into(), false),
+            ("alpha_echo".into(), "alpha ran".into(), false),
+        ],
+        "the offered definition ran both times"
+    );
+    assert_eq!(std::fs::read_to_string(&ran).unwrap(), "alpha\nalpha\n");
+    for owner in seen.lock().unwrap().iter() {
+        let source = owner.as_ref().and_then(|o| o.source()).expect("a source");
+        assert_eq!(
+            std::fs::canonicalize(source).unwrap(),
+            std::fs::canonicalize(&alpha).unwrap()
+        );
+    }
+    host.root.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_deciding_event_registered_mid_run_stops_that_run() {
     let Some(runtime) = node_runtime() else {

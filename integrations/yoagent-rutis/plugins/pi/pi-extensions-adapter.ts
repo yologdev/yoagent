@@ -134,7 +134,7 @@
 import { randomUUID } from 'node:crypto'
 import { isAbsolute, resolve } from 'node:path'
 import { definePlugin } from '@arcships/rutis'
-import type { Cancellable, ContentBlock, Message, Stop, ToolCall, ToolOutput, ToolResult, ToolSpec, Yoagent } from '../yoagent.d.ts'
+import type { Cancellable, ContentBlock, Message, RunInfo, Stop, ToolCall, ToolOutput, ToolResult, ToolSpec, Yoagent } from '../yoagent.d.ts'
 
 export interface Config {
   /** The handler's name in the bridge (unique across the host's plugins). */
@@ -980,6 +980,11 @@ export default definePlugin<Config>({
     const terminated = new Map<string, string>()
     // The arguments the policies approved, per run and call: `call_tool` runs only these.
     const judged = new Map<string, string>()
+    // The pi tools each run was offered, as offered: its calls are judged and run against these
+    // definitions only. A name registered again later (an extension earlier in the list, from an
+    // event handler or a timer) never takes over a call, so `source` names what runs.
+    const offered = new Map<string, Map<string, PiTool>>()
+    const offeredIn = (runId: string) => offered.get(runId) ?? new Map<string, PiTool>()
     const callKey = (call: ToolCall) => `${call.run_id}/${call.call_id}`
 
     const startNote = async (prompt: string, signal: AbortSignal) => {
@@ -1044,13 +1049,15 @@ export default definePlugin<Config>({
 
     ctx.effect(
       yoagent.register(config.name ?? 'pi-extensions', {
-        async tools(): Promise<ToolSpec[]> {
+        async tools(run: RunInfo): Promise<ToolSpec[]> {
           // Registrations made since load: reported now (a run cannot refuse the load).
           checkUnmapped(false)
           checkShadowing(false)
           if (refusal) return []
           const paths = registeredBy()
-          return [...available().values()].map((tool) => ({
+          const tools = available()
+          offered.set(run.run_id, tools)
+          return [...tools.values()].map((tool) => ({
             name: tool.name,
             // The extension file that registered it: a host's policy may trust a tool by it.
             source: paths.get(tool.name) ?? null,
@@ -1063,7 +1070,8 @@ export default definePlugin<Config>({
         },
 
         async call_tool(call: ToolCall & Cancellable): Promise<ToolResult> {
-          const tool = available().get(call.tool)
+          // The definition this run was offered, whatever registered the name since.
+          const tool = offeredIn(call.run_id).get(call.tool)
           if (!tool) return { text: `pi tool ${call.tool} is not available`, is_error: true }
           const approved = judged.get(callKey(call))
           judged.delete(callKey(call))
@@ -1092,7 +1100,7 @@ export default definePlugin<Config>({
             const stopped = await checkEnded(call.run_id, call.messages, call.signal)
             if (stopped) return { deny: stopped }
           }
-          const piTools = available()
+          const piTools = offeredIn(call.run_id)
           const own = piTools.get(call.tool)
           const counterpart = names.get(call.tool)
           // A yoagent built-in whose pi counterpart an extension overrides: the model must use the override.
@@ -1169,7 +1177,7 @@ export default definePlugin<Config>({
           if (refusal) throw new Error(refusal)
           const editors = handlers('tool_result')
           if (editors.length === 0) return
-          const own = available().has(call.tool)
+          const own = offeredIn(call.run_id).has(call.tool)
           const shape = own ? undefined : ARGS.get(call.tool)
           const event = {
             type: 'tool_result',
@@ -1275,6 +1283,7 @@ export default definePlugin<Config>({
           ended.delete(outcome.run_id)
           queue.delete(outcome.run_id)
           for (const key of judged.keys()) if (key.startsWith(`${outcome.run_id}/`)) judged.delete(key)
+          offered.delete(outcome.run_id)
         },
       }, watching ? { messages: true } : undefined),
     )
