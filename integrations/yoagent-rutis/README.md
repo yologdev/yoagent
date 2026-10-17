@@ -344,8 +344,15 @@ offers every tool in dsh's tool registry (the `tools` service of
 |---|---|
 | `tools` | `tools.schemas()` → name, description, parameters (config `tools`: an allowlist) |
 | `call_tool` | `tools.execute({callId, name, arguments, signal})` with the bridge's cancel handle as dsh's `signal`: cancelling the run aborts the dsh call. `isError` → an error tool result. Text blocks stay text; an image block — a reference into dsh's attachment store — becomes a yoagent image, its bytes read with the `attachments` service when one is loaded (looked up per image, so the adapter also runs without it). Without one, when a read fails, when dsh marked the image `offloaded`, or over 3.75 MB (under Anthropic's 5 MB once base64), the image is a text placeholder; an error result's images are not read; other blocks are named. The tool's own presenters (`presentCall` / `presentResult`, dsh's card vocabulary: generic, terminal, diff, search, read, web) go along with a successful result as `details.view = {call?, result?}`, for a frontend to draw (content blocks as text, other blocks as `[type block]`; over 100k JSON characters, or a presenter that throws, leaves the card out; an error result has none) |
-| | Arguments holding an integer beyond ±(2^53−1) — a `bigint` in the plugin since rutis 0.11 — are refused by dsh itself ("tool execution arguments must be losslessly JSON-serializable", an error result), before any policy or approval; with rutis 0.9 they arrived rounded and the tool ran |
 | `before_model` | the system-prompt sections dsh plugins added (the harness identity and persona slots left out, sections whose variables are unset skipped), as one note, capped at `maxNoteChars` (2000) |
+
+Arguments holding an integer beyond ±(2^53−1), a `bigint` in the plugin
+since rutis 0.11, are refused by dsh itself ("tool execution arguments must
+be losslessly JSON-serializable", an error result the model sees), before
+dsh's `tools/pre-execute` stage (its policies and the approval dialog).
+yoagent's own policies have already run by then. With rutis 0.9 such an
+integer arrived as a JS number, rounded when a float64 cannot hold it, and
+the tool ran.
 
 Load, as rows of one Node runtime whose `package.json` is `plugins/dsh/`'s:
 `@deepseek-ai/dsh-system-prompt`, `@deepseek-ai/dsh-tools`, your dsh tool

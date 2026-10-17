@@ -240,7 +240,10 @@ async fn dsh_tools_reach_a_yoagent_agent_through_the_adapter() {
             ("fixture_echo", json!({"text": "hi"})),
             ("fixture_fail", json!({"why": "nope"})),
             // Beyond ±(2^53−1): a `bigint` in the plugin since rutis 0.11.
-            ("fixture_echo", json!({"text": "big", "id": 1u64 << 60})),
+            (
+                "fixture_echo",
+                json!({"text": "big", "id": (1u64 << 60) + 1}),
+            ),
         ]),
         text("done"),
         call("fixture_slow", json!({})),
@@ -273,7 +276,8 @@ async fn dsh_tools_reach_a_yoagent_agent_through_the_adapter() {
         "{results:?}"
     );
     // ...dsh refuses arguments holding an integer it cannot keep exactly
-    // (before rutis 0.11 it arrived rounded, and the tool ran)...
+    // (before rutis 0.11 it arrived as a JS number, here rounded, and the
+    // tool ran)...
     let (name, text, is_error) = &results[2];
     assert_eq!(name, "fixture_echo");
     assert!(
