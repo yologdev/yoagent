@@ -484,6 +484,7 @@ impl RunHooks for RunState {
                 tools.push(Arc::new(LiveTool {
                     inner: tool,
                     gate: h.gate.clone(),
+                    handler: h.clone(),
                 }) as Arc<dyn AgentTool>);
             } else {
                 tracing::warn!(
@@ -744,15 +745,24 @@ impl RunHooks for RunState {
             let sent = std::panic::catch_unwind(AssertUnwindSafe(|| observer.sink.send(event)));
             let failed = match sent {
                 // A Rust handler panicked.
-                Err(payload) => Some(format!(
-                    "plugin handler `{}` panicked in `on_event`: {} (not called again this run)",
-                    observer.handler.name,
-                    panic_text(&*payload)
-                )),
+                Err(payload) => {
+                    timer.done(false);
+                    Some(format!(
+                        "plugin handler `{}` panicked in `on_event`: {} (not called again this run)",
+                        observer.handler.name,
+                        panic_text(&*payload)
+                    ))
+                }
                 // A language plugin's delivery failed (its message says how).
-                Ok(()) => observer.sink.failure(),
+                Ok(taken) => {
+                    if taken {
+                        timer.done(true);
+                    } else {
+                        timer.discard();
+                    }
+                    observer.sink.failure()
+                }
             };
-            timer.done(failed.is_none());
             if let Some(why) = failed {
                 observer.off.store(true, Ordering::Relaxed);
                 self.skipped(&Missed::Failed(why));

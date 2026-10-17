@@ -653,11 +653,94 @@ async fn the_registry_times_each_handlers_hooks() {
     assert!(slow_t.max >= Duration::from_millis(30) && slow_t.max <= slow_t.total);
     assert!(!slow_t.owner.is_empty());
     // A call that errors is counted, and as failed.
+    assert_eq!(slow_t.cancelled, 0);
     let failing_t = of("failing-policy");
     assert_eq!((failing_t.calls, failing_t.failed), (2, 2), "{failing_t:?}");
 
     // take_timings reads and starts from zero.
     assert_eq!(bridge.registry().take_timings(), timings);
     assert!(bridge.registry().timings().is_empty());
+    root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plugin_tools_and_events_are_timed_too() {
+    let (root, bridge) = setup();
+    let seen = Arc::new(AtomicUsize::new(0));
+    let counted = seen.clone();
+    let tooler = root.plugin(plugin(
+        handler("tooler")
+            .with_tool(Reply::new("plugin_act", "acted"))
+            .with_on_event(move |_run, _event| {
+                counted.fetch_add(1, Ordering::SeqCst);
+            }),
+    ));
+    wait_active(&tooler).await;
+    bridge.registry().take_timings();
+
+    let (agent, _) = agent(vec![
+        call("plugin_act", serde_json::json!({})),
+        text("done"),
+    ]);
+    let mut agent = agent.with_extension(bridge.extension());
+    let (_, results) = run(&mut agent, "go").await;
+    assert_eq!(results, vec![("plugin_act".into(), "acted".into(), false)]);
+
+    let timings = bridge.registry().timings();
+    let tool = timings
+        .iter()
+        .find(|t| t.hook == "tool")
+        .unwrap_or_else(|| panic!("no tool timing: {timings:?}"));
+    assert_eq!(tool.handler, "tooler");
+    assert_eq!(tool.tool.as_deref(), Some("plugin_act"));
+    assert_eq!((tool.calls, tool.failed, tool.cancelled), (1, 0, 0));
+    // A Rust handler's on_event: one call per event it was sent.
+    let events = timings
+        .iter()
+        .find(|t| t.hook == "on_event")
+        .expect("on_event");
+    assert_eq!(events.calls as usize, seen.load(Ordering::SeqCst));
+    assert!(events.calls > 0 && events.tool.is_none());
+    root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hook_abandoned_by_a_cancelled_run_counts_as_cancelled() {
+    let (root, bridge) = setup();
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let signal = entered.clone();
+    let hanging = root.plugin(plugin(handler("hanging-policy").with_before_tool_async(
+        move |_| {
+            let signal = signal.clone();
+            async move {
+                signal.notify_one();
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                Ok(ToolDecision::Allow)
+            }
+        },
+    )));
+    wait_active(&hanging).await;
+    bridge.registry().take_timings();
+
+    let (agent, _) = agent(vec![call("act", serde_json::json!({})), text("done")]);
+    let mut agent = agent
+        .with_tools(vec![Box::new(Reply::new("act", "acted"))])
+        .with_extension(bridge.extension());
+    let mut rx = agent.prompt("go").await;
+    entered.notified().await;
+    agent.abort();
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while rx.recv().await.is_some() {}
+    })
+    .await
+    .expect("the cancelled run ends");
+    agent.finish().await;
+
+    let timings = bridge.registry().timings();
+    let t = timings
+        .iter()
+        .find(|t| t.handler == "hanging-policy" && t.hook == "before_tool")
+        .unwrap_or_else(|| panic!("the abandoned call was not recorded: {timings:?}"));
+    assert_eq!((t.calls, t.failed, t.cancelled), (1, 0, 1), "{t:?}");
     root.shutdown().await.unwrap();
 }

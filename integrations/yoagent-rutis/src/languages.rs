@@ -969,13 +969,13 @@ impl RemoteEvents {
 }
 
 impl EventSink for RemoteEvents {
-    fn send(&self, event: &AgentEvent) {
+    fn send(&self, event: &AgentEvent) -> bool {
         if self.failure().is_some() {
-            return;
+            return false;
         }
         let kind = event_type(event);
         if !self.filter.contains(&kind) {
-            return;
+            return false;
         }
         let mut json = to_json(event);
         if let (Some(fields), Json::Object(run)) = (json.as_object_mut(), to_json(&self.run)) {
@@ -983,15 +983,21 @@ impl EventSink for RemoteEvents {
         }
         use tokio::sync::mpsc::error::TrySendError;
         match self.tx.try_send(Delivery::Event(json)) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) => record_failure(
-                &self.failed,
-                format!(
-                    "plugin handler `{}` fell {EVENT_QUEUE} events behind in `on_event` (not called again this run)",
-                    self.name
-                ),
-            ),
-            Err(TrySendError::Closed(_)) => self.ended(),
+            Ok(()) => true,
+            Err(TrySendError::Full(_)) => {
+                record_failure(
+                    &self.failed,
+                    format!(
+                        "plugin handler `{}` fell {EVENT_QUEUE} events behind in `on_event` (not called again this run)",
+                        self.name
+                    ),
+                );
+                false
+            }
+            Err(TrySendError::Closed(_)) => {
+                self.ended();
+                false
+            }
         }
     }
 
