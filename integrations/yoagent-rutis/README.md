@@ -545,7 +545,8 @@ Config: `extensions` (files, or directories with an `index.ts` /
 (`"any"` by default, as pi; `"own-extension"`: a pi tool's `ctx.executeTool`
 reaches only tools its own extension registered; `"off"`; a refused call is
 an error result to the calling tool, and `ctx.tools` lists only what it may
-call). Load it as a
+call; so under `"own-extension"` a codemode-style tool reaches only its own
+extension's tools). Load it as a
 row of a Node runtime whose `package.json` is `plugins/pi/`'s (pi 1.1.0,
 pinned exactly: the adapter imports pi's loader by file, since the package
 exports only `discoverAndLoadExtensions`, which also loads

@@ -30,7 +30,8 @@
 //                           with `parentToolCallId`, results through
 //                           `tool_result`; never rejects); yoagent's own tools
 //                           are not reachable from it. `ctx.tools` lists the
-//                           callable ones.
+//                           callable ones. Config `nestedCalls` narrows both
+//                           (`own-extension`, `off`).
 //                           A tool that overrides one of pi's built-ins
 //                           (`read`, `edit`, ...) makes the adapter deny
 //                           yoagent's counterpart (`read_file`, ...), so the
@@ -154,8 +155,8 @@ export interface Config {
   /**
    * Which tools a pi tool may call through `ctx.executeTool`. Nested calls are judged by pi's
    * `tool_call` handlers only, never by the host's per-call policies, so a host that trusts tools
-   * per extension narrows them: `"any"` (default, as pi), `"own-extension"` (only tools the calling
-   * tool's own extension registered), `"off"`. A refused call is an error result to the caller.
+   * per extension narrows them: `"any"` (default, as pi), `"own-extension"` (only tools whose winning
+   * registration is the calling tool's own extension's), `"off"`. A refused call is an error result to the caller.
    */
   nestedCalls?: 'any' | 'own-extension' | 'off'
 }
