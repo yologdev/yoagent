@@ -70,7 +70,7 @@ use crate::handler::{
     join_notes, llm_messages, EventSink, Input, Messages, RunInfo, Stop, ToolCall, Turn,
 };
 use crate::host::{Host, NOT_RUNNING};
-use crate::registry::{LiveTool, Registered, Registry};
+use crate::registry::{LiveTool, Outcome, Registered, Registry};
 
 /// Default bound on one handler's `before_tool`, `after_tool` and `on_stop`
 /// call (the tool call is denied / the result withheld / the handler skipped
@@ -333,7 +333,7 @@ async fn call<T>(
     }
     let timer = h.time(hook);
     let result = call_timed(h, hook, limit, fut).await;
-    timer.done(result.is_ok());
+    timer.done(Outcome::answered(result.is_ok()));
     result
 }
 
@@ -746,7 +746,7 @@ impl RunHooks for RunState {
             let failed = match sent {
                 // A Rust handler panicked.
                 Err(payload) => {
-                    timer.done(false);
+                    timer.done(Outcome::Failed);
                     Some(format!(
                         "plugin handler `{}` panicked in `on_event`: {} (not called again this run)",
                         observer.handler.name,
@@ -756,7 +756,7 @@ impl RunHooks for RunState {
                 // A language plugin's delivery failed (its message says how).
                 Ok(taken) => {
                     if taken {
-                        timer.done(true);
+                        timer.done(Outcome::Ok);
                     } else {
                         timer.discard();
                     }

@@ -615,10 +615,16 @@ async fn tool_results_reach_after_tool_as_plain_data_too() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_registry_times_each_handlers_hooks() {
     let (root, bridge) = setup();
+    // 60 ms, then 10 ms: `max` is the longest call, not the last.
+    let nth = Arc::new(AtomicUsize::new(0));
     let slow = root.plugin(plugin(handler("slow-policy").with_before_tool_async(
-        |_| async {
-            tokio::time::sleep(Duration::from_millis(30)).await;
-            Ok(ToolDecision::Allow)
+        move |_| {
+            let first = nth.fetch_add(1, Ordering::SeqCst) == 0;
+            async move {
+                let ms = if first { 60 } else { 10 };
+                tokio::time::sleep(Duration::from_millis(ms)).await;
+                Ok(ToolDecision::Allow)
+            }
         },
     )));
     wait_active(&slow).await;
@@ -649,9 +655,15 @@ async fn the_registry_times_each_handlers_hooks() {
     let slow_t = of("slow-policy");
     assert_eq!(slow_t.calls, 2, "{slow_t:?}");
     assert_eq!(slow_t.failed, 0);
-    assert!(slow_t.total >= Duration::from_millis(60), "{slow_t:?}");
-    assert!(slow_t.max >= Duration::from_millis(30) && slow_t.max <= slow_t.total);
-    assert!(!slow_t.owner.is_empty());
+    assert!(slow_t.total >= Duration::from_millis(70), "{slow_t:?}");
+    assert!(slow_t.max >= Duration::from_millis(60) && slow_t.max <= slow_t.total);
+    let owner = bridge
+        .registry()
+        .handlers()
+        .into_iter()
+        .find(|h| h.name() == "slow-policy")
+        .map(|h| h.owner().to_string());
+    assert_eq!(Some(slow_t.owner.clone()), owner);
     // A call that errors is counted, and as failed.
     assert_eq!(slow_t.cancelled, 0);
     let failing_t = of("failing-policy");
@@ -742,5 +754,124 @@ async fn a_hook_abandoned_by_a_cancelled_run_counts_as_cancelled() {
         .find(|t| t.handler == "hanging-policy" && t.hook == "before_tool")
         .unwrap_or_else(|| panic!("the abandoned call was not recorded: {timings:?}"));
     assert_eq!((t.calls, t.failed, t.cancelled), (1, 0, 1), "{t:?}");
+    root.shutdown().await.unwrap();
+}
+
+/// A plugin tool that ends as told.
+struct Ends {
+    name: &'static str,
+    how: &'static str,
+}
+
+#[async_trait::async_trait]
+impl yoagent::AgentTool for Ends {
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn label(&self) -> &str {
+        self.name
+    }
+    fn description(&self) -> &str {
+        "ends as told"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object", "properties": {}})
+    }
+    async fn execute(
+        &self,
+        _params: serde_json::Value,
+        _ctx: yoagent::ToolContext,
+    ) -> Result<ToolResult, yoagent::ToolError> {
+        match self.how {
+            "fail" => Err(yoagent::ToolError::Failed("nope".into())),
+            "cancel" => Err(yoagent::ToolError::Cancelled),
+            _ => panic!("tool bug"),
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tool_that_fails_panics_or_is_cancelled_is_counted_as_such() {
+    let (root, bridge) = setup();
+    let tools = root.plugin(plugin(
+        handler("enders")
+            .with_tool(Ends {
+                name: "t_fail",
+                how: "fail",
+            })
+            .with_tool(Ends {
+                name: "t_cancel",
+                how: "cancel",
+            })
+            .with_tool(Ends {
+                name: "t_panic",
+                how: "panic",
+            }),
+    ));
+    wait_active(&tools).await;
+    bridge.registry().take_timings();
+    let (agent, _) = agent(vec![
+        call("t_fail", serde_json::json!({})),
+        call("t_cancel", serde_json::json!({})),
+        call("t_panic", serde_json::json!({})),
+        text("done"),
+    ]);
+    let mut agent = agent.with_extension(bridge.extension());
+    run(&mut agent, "go").await;
+
+    let timings = bridge.registry().timings();
+    let of = |tool: &str| {
+        let t = timings
+            .iter()
+            .find(|t| t.hook == "tool" && t.tool.as_deref() == Some(tool))
+            .unwrap_or_else(|| panic!("no timing for {tool}: {timings:?}"));
+        (t.calls, t.failed, t.cancelled)
+    };
+    assert_eq!(of("t_fail"), (1, 1, 0));
+    assert_eq!(of("t_cancel"), (1, 0, 1));
+    assert_eq!(
+        of("t_panic"),
+        (1, 1, 0),
+        "a panic is a failure, not a cancel"
+    );
+    root.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_panicking_on_event_and_a_timed_out_hook_count_as_failed() {
+    let (root, bridge) = setup();
+    let watcher = root.plugin(plugin(
+        handler("panicky-watcher").with_on_event(|_run, _event| panic!("observer bug")),
+    ));
+    wait_active(&watcher).await;
+    let slow = root.plugin(plugin(handler("slow-note").with_before_model_async(
+        |_| async {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            Ok(TurnDecision::Continue)
+        },
+    )));
+    wait_active(&slow).await;
+    bridge.registry().take_timings();
+
+    let (agent, _) = agent(vec![text("done")]);
+    let mut agent = agent.with_extension(
+        bridge
+            .extension()
+            .with_turn_timeout(Some(Duration::from_millis(50))),
+    );
+    run(&mut agent, "go").await;
+
+    let timings = bridge.registry().timings();
+    let of = |handler: &str, hook: &str| {
+        let t = timings
+            .iter()
+            .find(|t| t.handler == handler && t.hook == hook)
+            .unwrap_or_else(|| panic!("no {hook} timing for {handler}: {timings:?}"));
+        (t.calls, t.failed, t.cancelled)
+    };
+    // Switched off after the panic: one call, failed.
+    assert_eq!(of("panicky-watcher", "on_event"), (1, 1, 0));
+    // Past the bridge's own limit: failed, not cancelled.
+    assert_eq!(of("slow-note", "before_model"), (1, 1, 0));
     root.shutdown().await.unwrap();
 }

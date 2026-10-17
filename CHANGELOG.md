@@ -8,7 +8,7 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### yoagent-rutis
 
-- **Hook timing per plugin handler**: `Registry::timings()` and `take_timings()` return a `HookTiming` per handler and hook kind (`tools`, `on_input`, `before_model`, `before_tool`, `after_tool`, `on_stop`, `on_event`, `finish`) and per tool the handler offers (`hook: "tool"`, `tool: Some(name)`): calls, failed calls, calls yoagent abandoned (`cancelled`: a cancelled run, `finish` past its limit), total and longest time, as the agent waited for them (measured at the bridge; for a language plugin, the round trip to its runtime; for `on_event`, the time to queue an event the plugin subscribed to). Always on, one clock read per call; no change in behaviour. Asked for by yobuild, to decide from numbers whether a plugin should become a Rust part.
+- **Hook timing per plugin handler**: `Registry::timings()` and `take_timings()` return a `HookTiming` per handler and hook kind (`tools`, `on_input`, `before_model`, `before_tool`, `after_tool`, `on_stop`, `on_event`, `finish`) and per tool the handler offers (`hook: "tool"`, `tool: Some(name)`): calls, failed calls, cancelled calls (a hook of a cancelled run, a `finish` cut off by yoagent's limit, a tool that returned `ToolError::Cancelled`), total and longest time, as the agent waited for them (measured at the bridge; for a language plugin, the round trip to its runtime, and for its `on_event` the time to queue an event it subscribed to; for a Rust handler, the call itself). Always on: two clock reads and a short lock per call; no change in behaviour. Asked for by yobuild, to decide from numbers whether a plugin should become a Rust part.
 
 ## 0.25.7 (2026-10-16)
 

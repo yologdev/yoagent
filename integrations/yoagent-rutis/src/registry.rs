@@ -155,9 +155,11 @@ struct Key {
     tool: Option<String>,
 }
 
-/// A hook call being timed ([`Registered::time`]). Dropped before `done` —
-/// the call abandoned by yoagent (the run cancelled, `finish` past its
-/// limit) — it records the call as cancelled, with the time it had taken.
+/// A hook call being timed ([`Registered::time`]). Dropped before `done`,
+/// it records the call with the time it had taken: as failed while a panic
+/// unwinds through it (a Rust plugin tool that panicked), else as
+/// cancelled (the call abandoned by yoagent: a hook of a cancelled run, a
+/// `finish` cut off by yoagent's limit).
 pub(crate) struct Timer {
     key: Option<Key>,
     timings: Arc<Timings>,
@@ -165,15 +167,10 @@ pub(crate) struct Timer {
 }
 
 impl Timer {
-    /// The call ended; `ok` is whether it answered (not errored, panicked or
-    /// timed out).
-    pub(crate) fn done(mut self, ok: bool) {
+    /// The call ended, as `outcome` says.
+    pub(crate) fn done(mut self, outcome: Outcome) {
         if let Some(key) = self.key.take() {
-            self.timings.record(
-                key,
-                self.start.elapsed(),
-                if ok { Outcome::Ok } else { Outcome::Failed },
-            );
+            self.timings.record(key, self.start.elapsed(), outcome);
         }
     }
 
@@ -186,17 +183,33 @@ impl Timer {
 impl Drop for Timer {
     fn drop(&mut self) {
         if let Some(key) = self.key.take() {
-            self.timings
-                .record(key, self.start.elapsed(), Outcome::Cancelled);
+            let outcome = if std::thread::panicking() {
+                Outcome::Failed
+            } else {
+                Outcome::Cancelled
+            };
+            self.timings.record(key, self.start.elapsed(), outcome);
         }
     }
 }
 
+/// How a timed call ended.
 #[derive(Clone, Copy)]
-enum Outcome {
+pub(crate) enum Outcome {
     Ok,
     Failed,
     Cancelled,
+}
+
+impl Outcome {
+    /// `Ok` when the call answered, else `Failed`.
+    pub(crate) fn answered(ok: bool) -> Self {
+        if ok {
+            Outcome::Ok
+        } else {
+            Outcome::Failed
+        }
+    }
 }
 
 /// The time one handler spent in one kind of hook (or one of its tools),
@@ -223,13 +236,18 @@ pub struct HookTiming {
     /// Calls made (answered, failed and cancelled).
     pub calls: u64,
     /// Calls that did not answer: an error, a panic, a timeout, or the
-    /// plugin unloading during the call. For `on_event`, a panic in a Rust
-    /// handler only (a language plugin's late delivery failure is logged and
-    /// switches its events off, as before).
+    /// plugin unloading during the call. For `tool`, any error the tool
+    /// returned other than [`ToolError::Cancelled`](yoagent::ToolError), and
+    /// a panic. For `on_event`, a panic in a Rust handler only (a language
+    /// plugin's late delivery failure is logged and switches its events
+    /// off, as before).
     pub failed: u64,
-    /// Calls yoagent abandoned before they answered: the run was cancelled,
-    /// or `finish` ran past yoagent's limit. Their time up to then is in
-    /// `total` and `max`.
+    /// Calls ended by cancellation before they answered: a hook abandoned
+    /// when its run was cancelled, a `finish` cut off by yoagent's 5 s
+    /// limit (with the default turn timeout, also 5 s, either limit can
+    /// end it first: a slow `finish` may count as failed instead), or a
+    /// tool that returned [`ToolError::Cancelled`](yoagent::ToolError).
+    /// Their time up to then is in `total` and `max`.
     pub cancelled: u64,
     /// Time spent in all of them.
     pub total: Duration,
@@ -463,13 +481,16 @@ impl Registry {
     /// The time each handler spent in each kind of hook, as the agent
     /// waited for it, sorted by handler, owner and hook: cumulative since
     /// the bridge was installed or the last [`take_timings`](Self::take_timings).
-    /// Cheap to keep on (one clock read per call); for a whole-session view.
+    /// Cheap to keep on (two clock reads and a short lock per call); for a
+    /// whole-session view.
     pub fn timings(&self) -> Vec<HookTiming> {
         self.timings.list(false)
     }
 
     /// [`timings`](Self::timings), and start counting from zero: called at a
-    /// run's end, the figures of that run alone (with runs one at a time).
+    /// run's end, the figures of that run alone (with runs one at a time;
+    /// with the bridge as a tree extension, the sub-agent runs it served
+    /// included).
     pub fn take_timings(&self) -> Vec<HookTiming> {
         self.timings.list(true)
     }
@@ -536,6 +557,7 @@ impl AgentTool for LiveTool {
         if !self.gate.is_available() {
             return Err(self.gone());
         }
+        // A panic unwinds through `timer`, which records it as failed.
         let timer = self.handler.time_tool(self.inner.name());
         let result = tokio::select! {
             result = self.inner.execute(params, ctx) => result,
@@ -544,7 +566,11 @@ impl AgentTool for LiveTool {
                 self.inner.name()
             ))),
         };
-        timer.done(result.is_ok());
+        timer.done(match &result {
+            Ok(_) => Outcome::Ok,
+            Err(yoagent::ToolError::Cancelled) => Outcome::Cancelled,
+            Err(_) => Outcome::Failed,
+        });
         result
     }
 }

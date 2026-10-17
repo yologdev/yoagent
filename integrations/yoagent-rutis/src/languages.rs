@@ -1571,7 +1571,10 @@ mod tests {
                 }
             }),
         );
-        sink.send(&tool_end());
+        // Taken: an event it subscribed to. Not taken: one it did not, which
+        // the timings then do not count.
+        assert!(sink.send(&tool_end()));
+        assert!(!sink.send(&AgentEvent::AgentStart));
         sink.flush().await;
         assert_eq!(delivered.lock().unwrap().len(), 1);
         assert_eq!(sink.failure(), None);
@@ -1588,5 +1591,11 @@ mod tests {
         assert_eq!(fields.len(), 3);
         // Anything else is passed as it is.
         assert!(matches!(with_signal(json!("text")), Value::Data(t) if t == "text"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_sink_whose_delivery_ended_takes_nothing() {
+        let sink = sink(Breaks::TaskDies, &RunInfo::new("run-1"));
+        assert!(!sink.send(&tool_end()));
     }
 }

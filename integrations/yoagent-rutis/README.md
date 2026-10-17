@@ -702,13 +702,16 @@ the others).
 - **What each plugin costs the agent**: `bridge.registry().timings()` lists,
   per handler and kind of hook — and per tool, for the executions of the
   tools it offers (`hook: "tool"`) — the calls made, how many failed, how
-  many yoagent abandoned (a cancelled run, a `finish` past its limit), and
-  the total and longest time the agent waited for them, measured at the
-  bridge (for a language plugin, the round trip to its runtime; for
-  `on_event`, the time to queue an event the plugin subscribed to). Always
-  on: one clock read per call. `take_timings()` reads and starts from zero,
-  so called after each run it gives that run's figures. The numbers to
-  decide whether a plugin is worth rewriting in Rust.
+  many were cancelled (a hook of a cancelled run, a `finish` cut off by
+  yoagent's limit, a tool that returned `ToolError::Cancelled`), and the
+  total and longest time the agent waited for them, measured at the bridge.
+  For a language plugin that is the round trip to its runtime, and for its
+  `on_event` the time to queue an event it subscribed to; for a Rust
+  handler, the call itself. Always on: two clock reads and a short lock per
+  call. `take_timings()` reads and starts from zero, so called after each
+  run it gives that run's figures (with the bridge as a tree extension, the
+  sub-agent runs it served included). The numbers to decide whether a
+  plugin is worth rewriting in Rust.
 
 ## Versions
 
