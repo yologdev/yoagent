@@ -4,9 +4,9 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## yoagent-rutis 0.5.1 (2026-10-18)
 
-### yoagent-rutis
+yoagent-rutis only; requires yoagent 0.25, rutis 0.11 and Rust 1.88, as 0.5.0. **Upgrade from 0.5.0 if you trust pi tools per extension** (`offered_by.source`): its pi adapter could run a different extension's tool under an offered name. No Rust API change; the pi adapter gains the `nestedCalls` config.
 
 - **pi adapter: `nestedCalls`** (config: `"any"`, the default and pi's behaviour; `"own-extension"`; `"off"`): which tools a pi tool may call through `ctx.executeTool`. Nested calls are judged by pi's `tool_call` handlers only, never by the host's per-call policies, so a host that trusts tools per extension sets `"own-extension"`: allowing one tool then never reaches another extension's tools through it. A refused call is an error result to the calling tool and an `info` line in the host's log; `ctx.tools` lists only what it may call; an unknown value refuses the load. Asked for by yobuild.
 - **Fixed: a pi tool name registered mid-run could take over a call.** The pi adapter looked a tool up again by name when a call came in. So an extension earlier in the `extensions` list that registered the same name after the run's tools were offered (from a `tool_call` handler, a timer, any event) ran instead, while `offered_by.source` still named the extension whose tool was offered — a per-extension allow list (yobuild's) let the other extension's code run. Each run now judges and runs exactly the definitions its `tools` offered, nested `ctx.executeTool` calls included, and `ctx.tools` hands out frozen per-run copies (a running tool could swap another tool's `execute` through it). Found by yobuild's security review. Still documented as limits: nested calls are judged by pi's `tool_call` handlers only, not by the host's per-call policies; extensions in one runtime share a process.
