@@ -721,12 +721,15 @@ export default definePlugin<Config>({
       }
       return byName
     }
-    /** The extension file that registered each tool `registered()` keeps (first wins, the same rule). */
+    /**
+     * The extension file that registered each tool `registered()` keeps (first wins, the same
+     * rule): pi's resolved path, not the configured spelling (`./x.ts`, `~/x.ts`).
+     */
     const registeredBy = () => {
       const paths = new Map<string, string>()
       for (const ext of extensions) {
         for (const { definition } of ext.tools.values()) {
-          if (!paths.has(definition.name)) paths.set(definition.name, ext.path)
+          if (!paths.has(definition.name)) paths.set(definition.name, ext.resolvedPath ?? ext.path)
         }
       }
       return paths

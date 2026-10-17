@@ -529,3 +529,39 @@ async fn offered_by_names_the_handler_of_each_plugin_tool() {
     );
     root.shutdown().await.unwrap();
 }
+
+/// With the bridge installed twice on one agent, both extensions read the
+/// first one's record — the one whose tools yoagent keeps — and the record
+/// stays until the run ends.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_bridge_extensions_in_a_run_agree_on_offered_by() {
+    let (root, bridge) = setup();
+    let greeter = root.plugin(plugin(
+        handler("greeter").with_tool(Reply::new("greet", "hello")),
+    ));
+    wait_active(&greeter).await;
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let (record, registry) = (seen.clone(), bridge.registry().clone());
+    let watch = root.plugin(plugin(handler("watch").with_before_tool(move |call| {
+        let looked_up = registry.offered_by(&call.run.run_id, &call.tool);
+        record
+            .lock()
+            .unwrap()
+            .push((call.offered_by.clone(), looked_up));
+        ToolDecision::Allow
+    })));
+    wait_active(&watch).await;
+    let (agent, _) = agent(vec![call("greet", serde_json::json!({})), text("done")]);
+    let mut agent = agent
+        .with_extension(bridge.extension())
+        .with_extension(bridge.extension());
+    let (_, results) = run(&mut agent, "go").await;
+    assert!(results.iter().all(|r| !r.2), "{results:?}");
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 2, "both extensions judged the call: {seen:?}");
+    for (on_call, looked_up) in &seen {
+        assert_eq!(on_call.as_ref().map(|o| o.handler()), Some("greeter"));
+        assert_eq!(on_call, looked_up);
+    }
+    root.shutdown().await.unwrap();
+}

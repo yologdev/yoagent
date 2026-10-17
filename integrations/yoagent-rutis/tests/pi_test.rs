@@ -932,9 +932,13 @@ async fn a_pi_tool_is_offered_by_its_extension_file() {
         return;
     };
     let host = host(&runtime).await;
+    // Configured relative to the adapter's `cwd`: the source is the file pi
+    // resolved, not that spelling.
     let fixture = pi_dir().join("fixture-extension.ts");
-    host.load(adapter_row(json!({ "extensions": [&fixture] })))
-        .await;
+    host.load(adapter_row(
+        json!({ "extensions": ["./fixture-extension.ts"], "cwd": pi_dir() }),
+    ))
+    .await;
     let seen = Arc::new(Mutex::new(Vec::new()));
     let record = seen.clone();
     let later = host
@@ -965,8 +969,12 @@ async fn a_pi_tool_is_offered_by_its_extension_file() {
     assert_eq!(tool, "pi_echo");
     let owner = owner.as_ref().expect("a pi tool is offered by the adapter");
     assert_eq!(owner.handler(), "pi-extensions");
-    let source = std::fs::canonicalize(owner.source().expect("its extension file")).unwrap();
-    assert_eq!(source, std::fs::canonicalize(&fixture).unwrap());
+    let source = owner.source().expect("its extension file");
+    assert!(Path::new(source).is_absolute(), "{source}");
+    assert_eq!(
+        std::fs::canonicalize(source).unwrap(),
+        std::fs::canonicalize(&fixture).unwrap()
+    );
     assert_eq!(
         seen[1],
         ("read_file".to_string(), None),

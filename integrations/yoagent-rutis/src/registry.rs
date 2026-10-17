@@ -590,19 +590,26 @@ impl Registry {
         offers.get(run_id)?.get(tool).cloned()
     }
 
-    /// Record what the run `run_id` was offered (replacing an earlier
-    /// record of that run), returning the record for the run to keep.
+    /// Record what the run `run_id` was offered, returning the record the
+    /// run reads and whether this call made it (and so must forget it).
+    /// A run with an earlier record — a second extension of this bridge in
+    /// the same agent — keeps the first: yoagent keeps the earlier
+    /// extension's tools on a name clash.
     pub(crate) fn record_offers(
         &self,
         run_id: &str,
         offered: HashMap<String, ToolOwner>,
-    ) -> Arc<HashMap<String, ToolOwner>> {
-        let offered = Arc::new(offered);
-        if !offered.is_empty() {
-            let mut offers = self.offers.lock().unwrap_or_else(|e| e.into_inner());
-            offers.insert(run_id.to_owned(), offered.clone());
+    ) -> (Arc<HashMap<String, ToolOwner>>, bool) {
+        let mut offers = self.offers.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(first) = offers.get(run_id) {
+            return (first.clone(), false);
         }
-        offered
+        let offered = Arc::new(offered);
+        if offered.is_empty() {
+            return (offered, false);
+        }
+        offers.insert(run_id.to_owned(), offered.clone());
+        (offered, true)
     }
 
     /// The run `run_id` ended: forget what it was offered.

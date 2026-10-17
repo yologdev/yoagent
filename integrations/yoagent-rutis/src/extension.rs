@@ -256,6 +256,7 @@ impl Extension for RutisExtension {
         Ok(Box::new(RunState {
             registry: self.registry.clone(),
             offered: Arc::default(),
+            recorded: false,
             host: self.host.clone(),
             run: info,
             required: self.mode == ExtensionMode::Required,
@@ -271,7 +272,9 @@ impl Extension for RutisExtension {
 
 impl Drop for RunState {
     fn drop(&mut self) {
-        self.registry.forget_offers(&self.run.run_id);
+        if self.recorded {
+            self.registry.forget_offers(&self.run.run_id);
+        }
     }
 }
 
@@ -289,6 +292,8 @@ struct RunState {
     /// Which handler offered each plugin tool of the run (set by `tools`,
     /// also in the registry until the run's hooks are dropped).
     offered: Arc<HashMap<String, ToolOwner>>,
+    /// This run's `tools` made the registry's record of `offered`.
+    recorded: bool,
     host: Host,
     run: RunInfo,
     required: bool,
@@ -547,7 +552,7 @@ impl RunHooks for RunState {
                 }
             }
         }
-        self.offered = self.registry.record_offers(&self.run.run_id, offered);
+        (self.offered, self.recorded) = self.registry.record_offers(&self.run.run_id, offered);
         tools
     }
 

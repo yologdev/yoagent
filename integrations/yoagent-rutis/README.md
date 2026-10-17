@@ -719,7 +719,7 @@ the others).
   language plugin, its runtime session — rutis does not tell the host which
   row of a runtime made a call) and an optional `source`, which the handler
   declares per tool: the pi adapter gives the extension file that registered
-  the tool, a TypeScript or Python plugin may set `source` on the tools it
+  the tool, a TypeScript, Python or Go plugin may set `source` on the tools it
   returns, and the DSH adapter gives none (DSH's tool registry does not record
   which plugin registered a tool). `None` for the agent's own tools; known from
   the run's `tools` until it ends. For a policy that trusts a tool by where it
