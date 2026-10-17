@@ -631,7 +631,8 @@ export default definePlugin<Config>({
       checkShadowing(false)
       if (refusal) return failed(refusal)
       if (depth >= 8) return failed('nested tool calls are limited to 8 levels')
-      const tool = callable().get(name)
+      // From the run's snapshot, like a top-level call: a name registered since never takes over.
+      const tool = callableIn(runId).get(name)
       if (!tool) return failed(`Tool ${name} not found (yoagent's own tools cannot be called from a pi tool)`)
       let input: Args
       try {
@@ -700,7 +701,8 @@ export default definePlugin<Config>({
       return {
         ...context(signal),
         get tools() {
-          return [...callable().values()]
+          // The run's frozen copies: a tool cannot swap another's `execute` through them.
+          return [...callableIn(runId).values()]
         },
         executeTool: (name: string, args: unknown, options?: { signal?: AbortSignal }) =>
           executeNested(runId, callId, `${callId}/${++nested}`, name, args, options?.signal ?? signal, depth),
@@ -980,11 +982,16 @@ export default definePlugin<Config>({
     const terminated = new Map<string, string>()
     // The arguments the policies approved, per run and call: `call_tool` runs only these.
     const judged = new Map<string, string>()
-    // The pi tools each run was offered, as offered: its calls are judged and run against these
-    // definitions only. A name registered again later (an extension earlier in the list, from an
-    // event handler or a timer) never takes over a call, so `source` names what runs.
-    const offered = new Map<string, Map<string, PiTool>>()
-    const offeredIn = (runId: string) => offered.get(runId) ?? new Map<string, PiTool>()
+    // Per run, as its `tools` saw them: the pi tools it was offered, and the ones its pi tools may
+    // call through `ctx.executeTool`. Its calls, top-level and nested, are judged and run against
+    // these only, so a name registered again later (an extension earlier in the list, from an
+    // event handler or a timer) never takes over a call, and `source` names what runs. Frozen
+    // shallow copies: `ctx.tools` hands them to running tools, which must not swap an `execute`.
+    const snapshots = new Map<string, { offered: Map<string, PiTool>; callable: Map<string, PiTool> }>()
+    const frozen = (tools: Map<string, PiTool>) =>
+      new Map([...tools].map(([name, tool]) => [name, Object.freeze({ ...tool }) as PiTool]))
+    const offeredIn = (runId: string) => snapshots.get(runId)?.offered ?? new Map<string, PiTool>()
+    const callableIn = (runId: string) => snapshots.get(runId)?.callable ?? new Map<string, PiTool>()
     const callKey = (call: ToolCall) => `${call.run_id}/${call.call_id}`
 
     const startNote = async (prompt: string, signal: AbortSignal) => {
@@ -1055,8 +1062,8 @@ export default definePlugin<Config>({
           checkShadowing(false)
           if (refusal) return []
           const paths = registeredBy()
-          const tools = available()
-          offered.set(run.run_id, tools)
+          const tools = frozen(available())
+          snapshots.set(run.run_id, { offered: tools, callable: frozen(callable()) })
           return [...tools.values()].map((tool) => ({
             name: tool.name,
             // The extension file that registered it: a host's policy may trust a tool by it.
@@ -1283,7 +1290,7 @@ export default definePlugin<Config>({
           ended.delete(outcome.run_id)
           queue.delete(outcome.run_id)
           for (const key of judged.keys()) if (key.startsWith(`${outcome.run_id}/`)) judged.delete(key)
-          offered.delete(outcome.run_id)
+          snapshots.delete(outcome.run_id)
         },
       }, watching ? { messages: true } : undefined),
     )

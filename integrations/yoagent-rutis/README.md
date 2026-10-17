@@ -735,6 +735,14 @@ the others).
   the agent itself (or an extension before the bridge) has a tool of the same
   name, yoagent keeps that one while `offered_by` still names the plugin —
   keep your own tool names apart from your plugins'.
+  In the pi adapter a run's calls — top-level and nested (`ctx.executeTool`)
+  — run the definitions its `tools` offered, so `source` names what runs.
+  Two limits remain: a pi tool's **nested** calls are judged by pi's own
+  `tool_call` handlers only, never by the host's per-call policies (yoagent's
+  `before_tool`, an approval gate), so trusting a tool that calls
+  `ctx.executeTool` trusts what it calls; and extensions in one runtime share
+  a process, so per-extension trust guards against honest name clashes, not
+  against a hostile extension loaded beside the others.
 
 ## Versions
 
