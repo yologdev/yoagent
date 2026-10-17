@@ -4,6 +4,12 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### yoagent-rutis
+
+- **Documented**: since rutis 0.11 (yoagent-rutis 0.5.0), a dsh tool call whose arguments hold an integer beyond ±(2^53−1) is refused by dsh itself ("tool execution arguments must be losslessly JSON-serializable", an error result the model sees), before any policy or approval dialog; with rutis 0.9 the number arrived rounded and the tool ran. Now pinned by `dsh_test`.
+
 ## yoagent-rutis 0.5.0 (2026-10-17)
 
 yoagent-rutis only; requires yoagent 0.25, rutis 0.11 and Rust 1.88. A minor bump: rutis 0.11 (its types are in this crate's API), and new public API (`Registry::offered_by` / `ToolOwner`, hook timing).
