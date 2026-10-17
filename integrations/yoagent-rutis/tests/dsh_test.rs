@@ -64,7 +64,7 @@ fn node_runtime() -> Option<PathBuf> {
                 .map(|v| (v[0], v.get(1).copied().unwrap_or(0)))
         });
     match version {
-        // pi needs 22.19 (rutis 0.9: 22).
+        // pi needs 22.19 (rutis: 22).
         Some(version) if version >= (22, 19) => {}
         Some((major, minor)) => return skip(format!("Node {major}.{minor} found, 22.19+ needed")),
         None => return skip("no `node` on PATH".into()),

@@ -1,15 +1,15 @@
 //! TypeScript and Python plugins, end to end: real Node, Bun and Python
-//! runtimes (rutis-bridge 0.9), loaded as rows by rutis-loader, registering
+//! runtimes (rutis-bridge 0.11), loaded as rows by rutis-loader, registering
 //! handlers through the `yoagent` host service. The TypeScript fixtures run
 //! on Node and, for the hooks, fail-closed policies and cancel handles, on
 //! Bun too.
 //!
 //! Needs Node 22.19+ with `npm ci` run in `plugins/` (for `@arcships/rutis` and
-//! `@arcships/rutis-runtime` 0.9.1), and Python 3.10+ with `rutis` 0.9 —
+//! `@arcships/rutis-runtime` 0.11.0), and Python 3.10+ with `rutis` 0.11 —
 //! `plugins/.venv/bin/python` (`uv venv plugins/.venv --python 3.12 && uv pip
-//! install --python plugins/.venv/bin/python rutis==0.9.1`), or the
+//! install --python plugins/.venv/bin/python rutis==0.11.0`), or the
 //! interpreter in `YOAGENT_RUTIS_PYTHON`; Bun 1.4+ (`YOAGENT_RUTIS_BUN`, else
-//! `bun` on `PATH`) with `@arcships/rutis-bun` 0.9 from that `npm ci`. A test
+//! `bun` on `PATH`) with `@arcships/rutis-bun` 0.11 from that `npm ci`. A test
 //! whose runtime is missing
 //! prints why and passes; set `YOAGENT_RUTIS_REQUIRE_RUNTIMES=1` (CI does) to
 //! make a missing runtime fail instead.
@@ -72,25 +72,25 @@ fn node_runtime() -> Option<PathBuf> {
         _ => None,
     };
     match version {
-        // pi needs 22.19 (rutis 0.9: 22).
+        // pi needs 22.19 (rutis: 22).
         Some(version) if version >= (22, 19) => {}
         Some((major, minor)) => {
             return skip("Node", format!("Node {major}.{minor} found, 22.19+ needed"))
         }
         None => return skip("Node", "no `node` on PATH".into()),
     }
-    // The version too, as for Python: a stale install would run the 0.9
+    // The version too, as for Python: a stale install would run an older
     // bridge against an older runtime and pass or fail for the wrong reason.
     let installed = std::fs::read_to_string(runtime.join("package.json"))
         .ok()
         .and_then(|text| serde_json::from_str::<Value>(&text).ok())
         .and_then(|manifest| manifest["version"].as_str().map(str::to_owned));
     match installed {
-        Some(version) if version.starts_with("0.9.") => Some(runtime),
+        Some(version) if version.starts_with("0.11.") => Some(runtime),
         Some(version) => skip(
             "Node",
             format!(
-                "{} is {version}, 0.9 needed: run `npm ci` in plugins/",
+                "{} is {version}, 0.11 needed: run `npm ci` in plugins/",
                 runtime.display()
             ),
         ),
@@ -106,19 +106,19 @@ fn node_runtime() -> Option<PathBuf> {
 /// `PATH`.
 fn bun_runtime() -> Option<(PathBuf, PathBuf)> {
     let package = plugins_dir().join("node_modules/@arcships/rutis-bun");
-    // The version too, as for Node: a stale install would run the 0.9
+    // The version too, as for Node: a stale install would run an older
     // bridge against another runtime and pass or fail for the wrong reason.
     let installed = std::fs::read_to_string(package.join("package.json"))
         .ok()
         .and_then(|text| serde_json::from_str::<Value>(&text).ok())
         .and_then(|manifest| manifest["version"].as_str().map(str::to_owned));
     match installed {
-        Some(version) if version.starts_with("0.9.") => {}
+        Some(version) if version.starts_with("0.11.") => {}
         Some(version) => {
             return skip(
                 "Bun",
                 format!(
-                    "{} is {version}, 0.9 needed: run `npm ci` in plugins/",
+                    "{} is {version}, 0.11 needed: run `npm ci` in plugins/",
                     package.display()
                 ),
             )
@@ -160,7 +160,7 @@ fn bun_runtime() -> Option<(PathBuf, PathBuf)> {
     }
 }
 
-/// A Python 3.10+ interpreter with rutis 0.9.
+/// A Python 3.10+ interpreter with rutis 0.11.
 fn python() -> Option<PathBuf> {
     let python = std::env::var_os("YOAGENT_RUTIS_PYTHON")
         .map(PathBuf::from)
@@ -176,11 +176,11 @@ fn python() -> Option<PathBuf> {
         Ok(out) if out.status.success() => {
             let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
             match text.split_once(' ') {
-                Some(("True", version)) if version.starts_with("0.9.") => Some(python),
+                Some(("True", version)) if version.starts_with("0.11.") => Some(python),
                 _ => skip(
                     "Python",
                     format!(
-                        "{} reports `{text}`: Python 3.10+ and rutis 0.9 needed",
+                        "{} reports `{text}`: Python 3.10+ and rutis 0.11 needed",
                         python.display()
                     ),
                 ),
@@ -1530,7 +1530,7 @@ export default definePlugin({
 })
 "#;
 
-/// rutis 0.9 closes a local channel on a message over 16 MiB, ending the
+/// rutis (since 0.9) closes a local channel on a message over 16 MiB, ending the
 /// runtime. A conversation holding more than that in images still reaches a
 /// handler that reads it — the images as text — and the runtime lives on.
 #[tokio::test(flavor = "multi_thread")]
