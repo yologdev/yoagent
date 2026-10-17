@@ -5,7 +5,7 @@ description: Use when building, extending or upgrading an agent on the yoagent R
 
 # yoagent: which feature for which job
 
-Written for **yoagent 0.25.7** (and yoagent-rutis 0.4.0); the recipes
+Written for **yoagent 0.25.7** (and yoagent-rutis 0.5.0); the recipes
 below are compiled by `tests/skill_test.rs`, line for line. Check what you
 build against: `cargo tree -p yoagent` or `Cargo.lock`. If you are on an
 older version, read [What changed](#what-changed) first.
@@ -239,6 +239,12 @@ Newest first; the full list is `CHANGELOG.md`.
 - **0.24.2** — built-in tool sandbox fixes (path escapes, `search` flag
   injection, Gemini key out of the URL, tool panics contained).
 - **0.24.1** — `retry_safe_events`.
+- **yoagent-rutis 0.5.0** — rutis 0.11 (move the npm / PyPI / Go
+  runtimes to 0.11 with it: an integer beyond ±(2^53−1) now crosses as a
+  big integer, which older peers refuse); `Registry::offered_by(run_id,
+  tool)` names the plugin handler (and, for pi, the extension file) that
+  offered a tool, for policies that trust tools per plugin; per-handler hook
+  timing (`Registry::timings()` / `take_timings()`).
 - **yoagent-rutis 0.4.0** — `adapters()` (the pi and DSH adapter files the
   crate ships: copy `root`, `npm ci` the copy) and the `probe` feature: vet
   a pi extension or DSH plugin without running it as an agent; each
