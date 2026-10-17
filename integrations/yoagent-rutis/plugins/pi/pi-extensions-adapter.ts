@@ -645,11 +645,19 @@ export default definePlugin<Config>({
       checkShadowing(false)
       if (refusal) return failed(refusal)
       if (depth >= 8) return failed('nested tool calls are limited to 8 levels')
+      // A tool still running after its run ended (a timer, a detached promise).
+      if (!snapshots.has(runId)) return failed(`run ${runId} has ended; nested tool calls are no longer possible`)
+      // Refused before any lookup or foreign code: the host's scope, reported to the host, since
+      // nested calls never reach its per-call policies.
+      const refused =
+        nestedCalls === 'off' || callableIn(runId).has(name) ? nestedRefusal(runId, caller, name) : undefined
+      if (refused) {
+        report('info', `[pi] nested call ${parentId} -> ${name} refused: ${refused}`)
+        return failed(refused)
+      }
       // From the run's snapshot, like a top-level call: a name registered since never takes over.
       const tool = callableIn(runId).get(name)
       if (!tool) return failed(`Tool ${name} not found (yoagent's own tools cannot be called from a pi tool)`)
-      const refused = nestedRefusal(runId, caller, name)
-      if (refused) return failed(refused)
       let input: Args
       try {
         // As pi: missing arguments are an empty object.
@@ -999,8 +1007,9 @@ export default definePlugin<Config>({
     const terminated = new Map<string, string>()
     // The arguments the policies approved, per run and call: `call_tool` runs only these.
     const judged = new Map<string, string>()
-    // Per run, as its `tools` saw them: the pi tools it was offered, and the ones its pi tools may
-    // call through `ctx.executeTool`. Its calls, top-level and nested, are judged and run against
+    // Per run, as its `tools` saw them: the pi tools it was offered, the ones its pi tools may
+    // call through `ctx.executeTool`, and the extension file that registered each (what
+    // `nestedCalls` compares). Its calls, top-level and nested, are judged and run against
     // these only, so a name registered again later (an extension earlier in the list, from an
     // event handler or a timer) never takes over a call, and `source` names what runs. Frozen
     // shallow copies: `ctx.tools` hands them to running tools, which must not swap an `execute`.

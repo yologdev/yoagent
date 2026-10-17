@@ -543,10 +543,11 @@ Config: `extensions` (files, or directories with an `index.ts` /
 (the project the extensions see; default the runtime's), `name`,
 `toolNames`, `withoutBuiltins`, `allowUnmapped`, `strict`, `nestedCalls`
 (`"any"` by default, as pi; `"own-extension"`: a pi tool's `ctx.executeTool`
-reaches only tools its own extension registered; `"off"`; a refused call is
-an error result to the calling tool, and `ctx.tools` lists only what it may
-call; so under `"own-extension"` a codemode-style tool reaches only its own
-extension's tools). Load it as a
+reaches only tools whose winning registration (the first in the list) is
+its own extension's; `"off"`; a refused call is an error result to the
+calling tool and an `info` line in the host's log, and `ctx.tools` lists
+only what it may call; a codemode-style tool, which calls other tools by
+design, is then limited to its own extension's). Load it as a
 row of a Node runtime whose `package.json` is `plugins/pi/`'s (pi 1.1.0,
 pinned exactly: the adapter imports pi's loader by file, since the package
 exports only `discoverAndLoadExtensions`, which also loads
@@ -745,10 +746,11 @@ the others).
   Two limits remain: a pi tool's **nested** calls are judged by pi's own
   `tool_call` handlers only, never by the host's per-call policies (yoagent's
   `before_tool`, an approval gate), so trusting a tool that calls
-  `ctx.executeTool` trusts what it calls — set the adapter's `nestedCalls` to
-  `"own-extension"` to keep that within the tool's own extension, or `"off"`; and extensions in one runtime share
-  a process, so per-extension trust guards against honest name clashes, not
-  against a hostile extension loaded beside the others.
+  `ctx.executeTool` trusts what it calls — set the adapter's `nestedCalls`
+  to `"own-extension"` to keep that within the tool's own extension, or
+  `"off"`; and extensions in one runtime share a process, so per-extension
+  trust guards against honest name clashes, not against a hostile extension
+  loaded beside the others.
 
 ## Versions
 

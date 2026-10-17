@@ -1271,6 +1271,102 @@ export default function (pi) {
     host.root.shutdown().await.unwrap();
 }
 
+/// Under `"own-extension"`, a name two extensions registered belongs to the
+/// winning (first) registration — the one whose code would run — in both
+/// load orders; and under `"off"` an unknown name says the host turned nested
+/// calls off.
+#[tokio::test(flavor = "multi_thread")]
+async fn own_extension_follows_the_winning_registration() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let helper = |who: &str| {
+        format!(
+            r#"pi.registerTool({{
+    name: 'shared_helper', label: 'h', description: 'h', parameters: Type.Object({{}}),
+    exposure: 'deferred',
+    async execute() {{ return {{ content: [{{ type: 'text', text: '{who} shared' }}], details: undefined }} }},
+  }})"#
+        )
+    };
+    let alpha = extension(
+        dir.path(),
+        "alpha.ts",
+        &format!(
+            r#"import {{ Type }} from 'typebox'
+export default function (pi) {{
+  {}
+  pi.registerTool({{
+    name: 'alpha_runner', label: 'r', description: 'r', parameters: Type.Object({{}}),
+    async execute(_id, _args, _signal, _update, ctx) {{
+      const said = []
+      for (const name of ['shared_helper', 'nope_helper']) {{
+        const out = await ctx.executeTool(name, {{}})
+        said.push(`${{name}}: ${{out.result.content[0].text}}`)
+      }}
+      said.push(`listed: ${{ctx.tools.map((t) => t.name).filter((n) => n.endsWith('_helper')).join(' ') || 'none'}}`)
+      return {{ content: [{{ type: 'text', text: said.join('; ') }}], details: undefined }}
+    }},
+  }})
+}}
+"#,
+            helper("alpha")
+        ),
+    );
+    let beta = extension(
+        dir.path(),
+        "beta.ts",
+        &format!(
+            "import {{ Type }} from 'typebox'\nexport default function (pi) {{\n  {}\n}}\n",
+            helper("beta")
+        ),
+    );
+    for (order, mode, want) in [
+        (
+            [&beta, &alpha],
+            "own-extension",
+            &[
+                "shared_helper: shared_helper belongs to another extension",
+                "nope_helper: Tool nope_helper not found",
+                "listed: none",
+            ][..],
+        ),
+        (
+            [&alpha, &beta],
+            "own-extension",
+            &[
+                "shared_helper: alpha shared",
+                "nope_helper: Tool nope_helper not found",
+                "listed: shared_helper",
+            ][..],
+        ),
+        (
+            [&alpha, &beta],
+            "off",
+            &[
+                "shared_helper: nested tool calls are turned off",
+                "nope_helper: nested tool calls are turned off",
+                "listed: none",
+            ][..],
+        ),
+    ] {
+        let host = host(&runtime).await;
+        host.load(adapter_row(
+            json!({ "extensions": order, "nestedCalls": mode }),
+        ))
+        .await;
+        let (agent, _) = agent(vec![call("alpha_runner", json!({})), text("done")]);
+        let mut agent = agent.with_extension(host.bridge.extension());
+        let (_, results) = run(&mut agent, "go").await;
+        assert_eq!(results.len(), 1, "{results:?}");
+        for part in want {
+            assert!(results[0].1.contains(part), "{mode} {part:?}: {results:?}");
+        }
+        host.root.shutdown().await.unwrap();
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_deciding_event_registered_mid_run_stops_that_run() {
     let Some(runtime) = node_runtime() else {
