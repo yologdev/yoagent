@@ -63,7 +63,8 @@ fn plugins_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("plugins")
 }
 
-/// Logs twice when it loads: a warning for a run, an error without one.
+/// Logs when it loads: a warning for a run, an error without one, malformed
+/// calls, and a line a moment later.
 const JS_LOGGER: &str = r#"
 import { definePlugin } from 'RUTIS'
 export default definePlugin({
@@ -74,6 +75,8 @@ export default definePlugin({
     yoagent.log('error', 'no run here')
     // Malformed, and not caught: never rejects, so the runtime lives on.
     yoagent.log('warn', { not: 'a string' }, { run_id: 'run-8', tool: 'bash', args: {} })
+    // A message with no JSON form is empty; the context after it keeps its place.
+    yoagent.log('warn', new Date(0), { run_id: 'run-9' })
     setTimeout(() => yoagent.log('info', 'still alive'), 500)
   },
 })
@@ -133,6 +136,7 @@ async fn a_plugin_log_reaches_the_hosts_tracing_with_its_run() {
         "yoagent_rutis::plugin WARN run_id=run-7 hello from js",
         "yoagent_rutis::plugin ERROR run_id= no run here",
         r#"yoagent_rutis::plugin WARN run_id=run-8 {"not":"a string"}"#,
+        "yoagent_rutis::plugin WARN run_id=run-9 ",
         "yoagent_rutis::plugin INFO run_id= still alive",
     ];
     tokio::time::timeout(Duration::from_secs(60), async {

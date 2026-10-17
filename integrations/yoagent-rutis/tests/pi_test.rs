@@ -1083,6 +1083,61 @@ export default function (pi) {{
 /// A `message_end` check cut short by the hook's timeout does not pass: the
 /// message is not marked judged, so the next call on it is checked again
 /// (and here times out again) instead of going ahead unjudged.
+/// rutis 0.11 sends an integer beyond ±(2^53−1) as a big integer; the adapter
+/// compares arguments and messages in a JSON form, which must keep it rather
+/// than throw (a throw denies the call, and with `message_end` handlers every
+/// later call of the run).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_big_integer_in_a_call_neither_denies_it_nor_later_calls() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("seen.txt");
+    let source = format!(
+        r#"import {{ appendFileSync }} from 'node:fs'
+export default function (pi) {{
+  pi.on('tool_call', (e) => {{
+    appendFileSync({log:?}, typeof e.input.snowflake + '\n')
+  }})
+  pi.on('message_end', () => {{}})
+  pi.on('context', () => {{}})
+}}
+"#,
+        log = log.display().to_string(),
+    );
+    let ext = extension(dir.path(), "big.ts", &source);
+    let host = host(&runtime).await;
+    host.load(adapter_row(json!({ "extensions": [ext] }))).await;
+    let snowflake = 1u64 << 60;
+    let (agent, seen) = agent(vec![
+        call(
+            "bash",
+            json!({"command": "echo first", "snowflake": snowflake}),
+        ),
+        call("bash", json!({"command": "echo second"})),
+        text("done"),
+    ]);
+    let mut agent = agent
+        .with_tools(vec![Box::new(BashTool::new())])
+        .with_extension(host.bridge.extension());
+    let (_, results) = run(&mut agent, "go").await;
+    assert_eq!(results.len(), 2, "{results:?}");
+    assert!(
+        !results[0].2 && results[0].1.contains("first"),
+        "{results:?}"
+    );
+    assert!(
+        !results[1].2 && results[1].1.contains("second"),
+        "{results:?}"
+    );
+    assert_eq!(seen.lock().unwrap().len(), 3, "every request went out");
+    // The policy saw the number exactly, as a JS bigint.
+    let seen = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(seen.lines().next(), Some("bigint"), "{seen}");
+    host.root.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_message_end_check_cut_short_does_not_pass() {
     let Some(runtime) = node_runtime() else {

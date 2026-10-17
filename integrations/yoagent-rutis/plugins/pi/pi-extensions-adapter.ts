@@ -469,10 +469,13 @@ function seenAs(value: unknown): unknown {
 /**
  * JSON with object keys sorted and non-integers at 15 significant digits:
  * arguments cross serde_json, which may reorder keys and parse a float's
- * shortest form one unit off.
+ * shortest form one unit off. A big integer (rutis 0.11 sends one beyond
+ * ±(2^53−1) as a `bigint`, which `JSON.stringify` refuses) is written as its
+ * digits plus `n`, so it never equals a string or a number.
  */
 function canon(value: unknown): string {
   return JSON.stringify(value, (_key, v) => {
+    if (typeof v === 'bigint') return `${v}n`
     if (typeof v === 'number' && !Number.isInteger(v)) return Number(v.toPrecision(15))
     return v && typeof v === 'object' && !Array.isArray(v)
       ? Object.fromEntries(Object.entries(v as Args).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))

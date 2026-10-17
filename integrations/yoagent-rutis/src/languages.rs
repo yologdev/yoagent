@@ -172,11 +172,16 @@ const MAX_LOG_CHARS: usize = 8 * 1024;
 /// **Never fails.** A plugin calls it fire-and-forget, and a rejected call
 /// it does not catch would end its runtime process. So any value is taken:
 /// a non-string message is written as JSON, other context fields (a whole
-/// hook argument, say) are ignored, a missing argument is empty.
+/// hook argument, say) are ignored, a missing argument is empty, and one with
+/// no JSON form (a `Date`, a `Map`) is empty too, keeping the others in place.
 fn log(args: Value) -> Reply {
     let args: Vec<Json> = args
         .list()
-        .map(|list| list.into_iter().filter_map(|v| v.json().ok()).collect())
+        .map(|list| {
+            list.into_iter()
+                .map(|v| v.json().unwrap_or(Json::Null))
+                .collect()
+        })
         .unwrap_or_default();
     let text = |value: Option<&Json>| match value {
         Some(Json::String(text)) => text.clone(),
