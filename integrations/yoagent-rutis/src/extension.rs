@@ -321,7 +321,7 @@ fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
 /// it panics, abandoned past `limit` or when its plugin unloads mid-call.
 async fn call<T>(
     h: &Registered,
-    hook: &str,
+    hook: &'static str,
     limit: Option<Duration>,
     fut: impl std::future::Future<Output = Result<T, ExtensionError>>,
 ) -> Result<T, Missed> {
@@ -331,6 +331,18 @@ async fn call<T>(
             h.name
         )));
     }
+    let timer = h.time(hook);
+    let result = call_timed(h, hook, limit, fut).await;
+    timer.done(result.is_ok());
+    result
+}
+
+async fn call_timed<T>(
+    h: &Registered,
+    hook: &'static str,
+    limit: Option<Duration>,
+    fut: impl std::future::Future<Output = Result<T, ExtensionError>>,
+) -> Result<T, Missed> {
     let guarded = AssertUnwindSafe(fut).catch_unwind();
     let raced = async {
         tokio::select! {
@@ -728,6 +740,7 @@ impl RunHooks for RunState {
             if observer.off.load(Ordering::Relaxed) || !observer.handler.gate.is_available() {
                 continue;
             }
+            let timer = observer.handler.time("on_event");
             let sent = std::panic::catch_unwind(AssertUnwindSafe(|| observer.sink.send(event)));
             let failed = match sent {
                 // A Rust handler panicked.
@@ -739,6 +752,7 @@ impl RunHooks for RunState {
                 // A language plugin's delivery failed (its message says how).
                 Ok(()) => observer.sink.failure(),
             };
+            timer.done(failed.is_none());
             if let Some(why) = failed {
                 observer.off.store(true, Ordering::Relaxed);
                 self.skipped(&Missed::Failed(why));

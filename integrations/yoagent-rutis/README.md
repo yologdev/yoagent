@@ -699,6 +699,14 @@ the others).
 - **Route rutis's `ErrorSink`** (default: `eprintln!`) into your logging with
   `Ctx::root_with_sink` — bus listener failures and cleanup errors are
   reported there, not to the agent.
+- **What each plugin costs the agent**: `bridge.registry().timings()` lists,
+  per handler and kind of hook, the calls made, how many failed, and the
+  total and longest time the agent waited for them, measured at the bridge
+  (for a language plugin, the round trip to its runtime; for `on_event`,
+  the time to queue the event). Always on: one clock read per call.
+  `take_timings()` reads and starts from zero, so called after each run it
+  gives that run's figures. The numbers to decide whether a plugin is worth
+  rewriting in Rust.
 
 ## Versions
 

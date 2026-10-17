@@ -4,6 +4,12 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+### yoagent-rutis
+
+- **Hook timing per plugin handler**: `Registry::timings()` and `take_timings()` return a `HookTiming` per handler and hook kind (`tools`, `on_input`, `before_model`, `before_tool`, `after_tool`, `on_stop`, `on_event`, `finish`): calls, failed calls, total and longest time, as the agent waited for them (measured at the bridge; for a language plugin, the round trip to its runtime; for `on_event`, the time to queue the event). Always on, one clock read per call; no change in behaviour. Asked for by yobuild, to decide from numbers whether a plugin should become a Rust part.
+
 ## 0.25.7 (2026-10-16)
 
 - **`McpToolAdapter::with_prefix` / `from_client_with_prefix` now name the tool** `<prefix>__<tool>` (as `OpenApiConfig::with_name_prefix` does for OpenAPI tools). The prefix was stored but never used, so two servers offering a tool of the same name, or a server tool named like a built-in, still gave the agent duplicate tool names, which a provider rejects. The server is still called with its own tool name. The MCP guide now shows how (the `with_mcp_server_*` helpers add no prefix). Reported by the yobuild session.

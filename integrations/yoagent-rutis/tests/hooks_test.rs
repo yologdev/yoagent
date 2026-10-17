@@ -611,3 +611,53 @@ async fn tool_results_reach_after_tool_as_plain_data_too() {
     assert_eq!(results, vec![("act".into(), "replaced".into(), true)]);
     root.shutdown().await.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_registry_times_each_handlers_hooks() {
+    let (root, bridge) = setup();
+    let slow = root.plugin(plugin(handler("slow-policy").with_before_tool_async(
+        |_| async {
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            Ok(ToolDecision::Allow)
+        },
+    )));
+    wait_active(&slow).await;
+    let failing = root
+        .plugin(plugin(handler("failing-policy").with_before_tool_async(
+            |_| async { Err(ExtensionError::new("down")) },
+        )));
+    wait_active(&failing).await;
+    bridge.registry().take_timings();
+
+    let (agent, _) = agent(vec![
+        call("act", serde_json::json!({})),
+        call("act", serde_json::json!({})),
+        text("done"),
+    ]);
+    let mut agent = agent
+        .with_tools(vec![Box::new(Reply::new("act", "acted"))])
+        .with_extension(bridge.extension());
+    run(&mut agent, "go").await;
+
+    let timings = bridge.registry().timings();
+    let of = |name: &str| {
+        timings
+            .iter()
+            .find(|t| t.handler == name && t.hook == "before_tool")
+            .unwrap_or_else(|| panic!("no before_tool timing for {name}: {timings:?}"))
+    };
+    let slow_t = of("slow-policy");
+    assert_eq!(slow_t.calls, 2, "{slow_t:?}");
+    assert_eq!(slow_t.failed, 0);
+    assert!(slow_t.total >= Duration::from_millis(60), "{slow_t:?}");
+    assert!(slow_t.max >= Duration::from_millis(30) && slow_t.max <= slow_t.total);
+    assert!(!slow_t.owner.is_empty());
+    // A call that errors is counted, and as failed.
+    let failing_t = of("failing-policy");
+    assert_eq!((failing_t.calls, failing_t.failed), (2, 2), "{failing_t:?}");
+
+    // take_timings reads and starts from zero.
+    assert_eq!(bridge.registry().take_timings(), timings);
+    assert!(bridge.registry().timings().is_empty());
+    root.shutdown().await.unwrap();
+}

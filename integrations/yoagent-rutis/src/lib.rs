@@ -180,7 +180,7 @@ pub use extension::{
 };
 pub use handler::{Handler, Input, RunInfo, Stop, ToolCall, Turn};
 pub use plugin::{AgentPlugin, PluginCtxExt};
-pub use registry::{HandlerInfo, Registry};
+pub use registry::{HandlerInfo, HookTiming, Registry};
 
 /// The rutis this bridge is built against (`0.8`, the release train shared
 /// with `rutis-bridge` and `rutis-loader`). Its types are part of this crate's

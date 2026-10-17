@@ -28,7 +28,9 @@
 //! generation's handler and gets those errors; the new generation's handler
 //! serves the next run. The bridge never rebinds a run to a newer generation.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use rutis::{CordisError, Ctx, Disposer, Effect};
 use tokio_util::sync::CancellationToken;
@@ -55,6 +57,7 @@ use crate::handler::{Handler, HandlerImpl, Hooks};
 #[derive(Default)]
 pub struct Registry {
     inner: Mutex<Inner>,
+    timings: Arc<Timings>,
 }
 
 #[derive(Default)]
@@ -111,9 +114,116 @@ impl Gate {
 #[derive(Clone)]
 pub(crate) struct Registered {
     pub(crate) name: Arc<str>,
+    pub(crate) owner: Arc<str>,
     pub(crate) handler: Arc<dyn HandlerImpl>,
     pub(crate) hooks: Hooks,
     pub(crate) gate: Gate,
+    pub(crate) timings: Arc<Timings>,
+}
+
+impl Registered {
+    /// Time one call of `hook` on this handler, from now until the
+    /// returned guard's `done`.
+    pub(crate) fn time(&self, hook: &'static str) -> Timer<'_> {
+        Timer {
+            handler: self,
+            hook,
+            start: Instant::now(),
+        }
+    }
+}
+
+/// A hook call being timed ([`Registered::time`]).
+pub(crate) struct Timer<'a> {
+    handler: &'a Registered,
+    hook: &'static str,
+    start: Instant,
+}
+
+impl Timer<'_> {
+    /// The call ended; `ok` is whether it answered (not errored, panicked or
+    /// timed out).
+    pub(crate) fn done(self, ok: bool) {
+        self.handler.timings.record(
+            &self.handler.name,
+            &self.handler.owner,
+            self.hook,
+            self.start.elapsed(),
+            ok,
+        );
+    }
+}
+
+/// The time one handler spent in one kind of hook, as the agent waited for
+/// it: measured at the bridge, around each call, so for a language plugin it
+/// includes the round trip to its runtime. Cumulative since the bridge was
+/// installed, or since the last [`Registry::take_timings`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct HookTiming {
+    /// The handler's name.
+    pub handler: String,
+    /// The plugin that registered it.
+    pub owner: String,
+    /// `tools`, `on_input`, `before_model`, `before_tool`, `after_tool`,
+    /// `on_stop`, `on_event` or `finish`. For a language plugin, `on_event`
+    /// is the time to queue the event for delivery: the plugin handles it
+    /// later, off the agent's path.
+    pub hook: &'static str,
+    /// Calls made.
+    pub calls: u64,
+    /// Of those, the ones that did not answer: an error, a panic, a timeout,
+    /// or its plugin unloading during the call.
+    pub failed: u64,
+    /// Time spent in all of them.
+    pub total: Duration,
+    /// The longest one.
+    pub max: Duration,
+}
+
+/// Every handler's [`HookTiming`]s, kept for the whole registry.
+#[derive(Default)]
+pub(crate) struct Timings(Mutex<BTreeMap<(String, String, &'static str), Stat>>);
+
+#[derive(Default, Clone, Copy)]
+struct Stat {
+    calls: u64,
+    failed: u64,
+    total: Duration,
+    max: Duration,
+}
+
+impl Timings {
+    fn record(&self, handler: &str, owner: &str, hook: &'static str, took: Duration, ok: bool) {
+        let mut map = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let stat = map
+            .entry((handler.to_owned(), owner.to_owned(), hook))
+            .or_default();
+        stat.calls += 1;
+        stat.failed += u64::from(!ok);
+        stat.total += took;
+        stat.max = stat.max.max(took);
+    }
+
+    fn list(&self, reset: bool) -> Vec<HookTiming> {
+        let mut map = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let out = map
+            .iter()
+            .map(|((handler, owner, hook), s)| HookTiming {
+                handler: handler.clone(),
+                owner: owner.clone(),
+                hook,
+                calls: s.calls,
+                failed: s.failed,
+                total: s.total,
+                max: s.max,
+            })
+            .collect();
+        if reset {
+            map.clear();
+        }
+        out
+    }
 }
 
 /// A registered handler, for diagnostics.
@@ -280,11 +390,27 @@ impl Registry {
             .filter(|e| e.gate.is_available())
             .map(|e| Registered {
                 name: e.name.as_str().into(),
+                owner: e.owner.as_str().into(),
                 hooks: e.handler.hooks(),
                 handler: e.handler.clone(),
                 gate: e.gate.clone(),
+                timings: self.timings.clone(),
             })
             .collect()
+    }
+
+    /// The time each handler spent in each kind of hook, as the agent
+    /// waited for it, sorted by handler, owner and hook: cumulative since
+    /// the bridge was installed or the last [`take_timings`](Self::take_timings).
+    /// Cheap to keep on (one clock read per call); for a whole-session view.
+    pub fn timings(&self) -> Vec<HookTiming> {
+        self.timings.list(false)
+    }
+
+    /// [`timings`](Self::timings), and start counting from zero: called at a
+    /// run's end, the figures of that run alone (with runs one at a time).
+    pub fn take_timings(&self) -> Vec<HookTiming> {
+        self.timings.list(true)
     }
 
     /// The handlers a run starting now would get, in registration order.
