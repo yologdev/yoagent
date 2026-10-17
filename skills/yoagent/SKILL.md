@@ -5,7 +5,7 @@ description: Use when building, extending or upgrading an agent on the yoagent R
 
 # yoagent: which feature for which job
 
-Written for **yoagent 0.25.7** (and yoagent-rutis 0.5.0); the recipes
+Written for **yoagent 0.25.7** (and yoagent-rutis 0.5.1); the recipes
 below are compiled by `tests/skill_test.rs`, line for line. Check what you
 build against: `cargo tree -p yoagent` or `Cargo.lock`. If you are on an
 older version, read [What changed](#what-changed) first.
@@ -239,6 +239,10 @@ Newest first; the full list is `CHANGELOG.md`.
 - **0.24.2** — built-in tool sandbox fixes (path escapes, `search` flag
   injection, Gemini key out of the URL, tool panics contained).
 - **0.24.1** — `retry_safe_events`.
+- **yoagent-rutis 0.5.1** — pi adapter fix: a run calls only the tools it
+  was offered (top-level and nested), so `offered_by.source` names what
+  runs; `nestedCalls` (`"own-extension"`, `"off"`) narrows what a pi tool
+  can call through `ctx.executeTool`.
 - **yoagent-rutis 0.5.0** — rutis 0.11 (move the npm / PyPI / Go
   runtimes to 0.11 with it: an integer beyond ±(2^53−1) now crosses as a
   big integer, which older peers refuse); `Registry::offered_by(run_id,
