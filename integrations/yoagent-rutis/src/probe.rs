@@ -13,7 +13,8 @@
 //!   adapter, in a Node runtime whose `package.json` is the base folder's.
 //!   Reports what the rows add to the base — tools and prompt guidance — and
 //!   which of the services the rows' plugins inject exist (a plugin missing
-//!   one never starts, though its row reads as started to the host).
+//!   one never starts, though its row reads as started to the probe's host,
+//!   which shares only registered names, as rutis did before 0.12).
 //!
 //! **The adapters, installed.** Both take `plugins`: a folder laid out like
 //! [`adapters`](crate::adapters)' `root` (the pi and DSH adapters beside
@@ -250,6 +251,11 @@ async fn host(
     let root = Ctx::root()?;
     let bridge = RutisBridge::install(&root)?;
     let mut catalog = ServiceCatalog::new();
+    // As before rutis 0.12: only the registered names gate a row in rutis,
+    // so a Cordis row injecting a service nobody provides reads as started
+    // at once instead of waiting out `SETTLE`; `probe-services` reports what
+    // is missing either way.
+    catalog.share_registered_only();
     catalog.register_shared("yoagent");
     let launcher = env
         .iter()

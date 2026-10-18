@@ -52,9 +52,9 @@
 //! opt-in the same way (`options.messages: true`): `messages` on the
 //! arguments of `before_model`, `before_tool` and `on_stop`.
 //!
-//! The host must share the name with the loader's catalog
-//! (`ServiceCatalog::register_shared("yoagent")`, or `share_by_name()`), so
-//! language rows can inject it.
+//! The loader's catalog must share the name so language rows can inject it:
+//! rutis 0.12's `ServiceCatalog::new()` shares every name by name; one set
+//! to `share_registered_only()` needs `register_shared("yoagent")`.
 
 use std::collections::BTreeMap;
 use std::panic::AssertUnwindSafe;

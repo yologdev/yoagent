@@ -6,7 +6,8 @@
 // rutis shows a host service only to plugins that inject it, and starts a
 // plugin only once everything it injects exists. So the adapter cannot
 // declare `ui` (hosts without one would never start it): this plugin
-// injects it and re-provides it in the runtime as `pi-host-ui`, which the
+// injects it and re-provides it as `pi-host-ui` (since rutis 0.12 that name
+// reaches rutis too, so load this plugin in one runtime only), which the
 // adapter looks up when it makes a pi context.
 
 import { definePlugin } from '@arcships/rutis'
