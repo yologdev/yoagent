@@ -258,9 +258,9 @@ def apply(ctx, config):
   stand-in throws (Python: `AttributeError`): wrap the call and fall back
   to `console.warn` / `print`.
 - **The bridge never loads plugins**: the host does, typically with
-  [rutis-loader](https://crates.io/crates/rutis-loader) rows, and must share
-  `yoagent` in the loader's catalog (`catalog.register_shared("yoagent")` or
-  `share_by_name()`). [`examples/language_plugins.rs`](examples/language_plugins.rs)
+  [rutis-loader](https://crates.io/crates/rutis-loader) rows, whose catalog
+  must share `yoagent` (rutis 0.12's `ServiceCatalog::new()` shares every
+  name; after `share_registered_only()`, `catalog.register_shared("yoagent")`). [`examples/language_plugins.rs`](examples/language_plugins.rs)
   is a complete host: `npm ci` in `plugins/`, a Python 3.10+ with
   `rutis==0.12.0` in `plugins/.venv`, then
   `cargo run --features node,python --example language_plugins`.
@@ -761,7 +761,10 @@ with rutis's 0.11 SDK need 0.11 runtimes, and an integer beyond ±(2^53−1)
 now crosses as a big integer, which a 0.10-or-older peer refuses); 0.6
 requires rutis 0.12 (Rust 1.88; services a plugin `ctx.provide`s without
 declaring them now reach rutis, so on a name clash the row providing it
-later fails: rename it or list it in that row's `isolate`). rutis's release
+later fails: rename it or list it in that row's `isolate`; and
+`ServiceCatalog::new()` shares every name, so a row injecting a service
+nobody provides waits in rutis instead of reading as started —
+`share_registered_only()` keeps the old rule). rutis's release
 train (`rutis`, `rutis-bridge`, `rutis-loader`, the npm and PyPI runtimes)
 shares one version: move the host and the language runtimes together.
 yoagent and rutis types are in its API, so a minor bump of either is a

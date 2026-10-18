@@ -19,6 +19,7 @@ use std::time::Duration;
 use common::*;
 use rutis::{Ctx, FiberState};
 use rutis_bridge::runtime::LocalRuntime;
+use rutis_bridge::session::{host_key, HostDispatch, Reply, Value as BridgeValue};
 use rutis_loader::{
     Chain, EntryStatus, Layer, Loader, LoaderOptions, LoaderPlugin, Patch, RuntimeResolver,
     RuntimeRowsPlugin, ServiceCatalog,
@@ -74,7 +75,20 @@ fn node_runtime() -> Option<PathBuf> {
             ));
         }
     }
-    Some(modules.join("@arcships/rutis-runtime"))
+    // A stale install would run the previous rutis's runtime, silently: the
+    // session protocol did not change.
+    let runtime = modules.join("@arcships/rutis-runtime");
+    let manifest = std::fs::read_to_string(runtime.join("package.json")).unwrap_or_default();
+    let version = serde_json::from_str::<Value>(&manifest)
+        .ok()
+        .and_then(|m| m["version"].as_str().map(str::to_owned))
+        .unwrap_or_default();
+    if !version.starts_with("0.12.") {
+        return skip(format!(
+            "@arcships/rutis-runtime is {version:?}, 0.12 needed: run `npm ci` in plugins/pi/"
+        ));
+    }
+    Some(runtime)
 }
 
 struct Host {
@@ -84,10 +98,20 @@ struct Host {
 }
 
 async fn host(runtime: &Path) -> Host {
+    host_with_ui(runtime, None).await
+}
+
+/// [`host`], with a host `ui` service when given.
+async fn host_with_ui(runtime: &Path, ui: Option<Arc<dyn HostDispatch>>) -> Host {
     let root = Ctx::root().unwrap();
     let bridge = RutisBridge::install(&root).unwrap();
     let mut catalog = ServiceCatalog::new();
     catalog.register_shared("yoagent");
+    if let Some(ui) = ui {
+        catalog.register_shared("ui");
+        root.provide_as::<dyn HostDispatch>(host_key("ui"), ui)
+            .unwrap();
+    }
     let node = LocalRuntime::node(runtime, pi_dir().join("package.json"));
     let resolver = Arc::new(RuntimeResolver::node(node.handle()).with_catalog(&catalog));
     root.plugin(node);
@@ -1362,6 +1386,87 @@ export default function (pi) {{
         assert_eq!(results.len(), 1, "{results:?}");
         for part in want {
             assert!(results[0].1.contains(part), "{mode} {part:?}: {results:?}");
+        }
+        host.root.shutdown().await.unwrap();
+    }
+}
+
+/// A host `ui` that answers every request `true` and records it.
+#[derive(Default)]
+struct YesUi(Mutex<Vec<Value>>);
+
+impl HostDispatch for YesUi {
+    fn invoke(&self, method: &str, args: BridgeValue) -> Reply {
+        match method {
+            "request" => {
+                let request = args.list()?.into_iter().next().unwrap().json()?;
+                self.0.lock().unwrap().push(request);
+                Ok(BridgeValue::Data(json!(true)))
+            }
+            "frontends" => Ok(BridgeValue::Data(json!(1))),
+            _ => Ok(BridgeValue::Undefined),
+        }
+    }
+
+    fn methods(&self) -> Option<Value> {
+        Some(json!({ "request": "async", "withdraw": "async", "frontends": "sync" }))
+    }
+}
+
+/// `host-ui.ts` re-provides the host's `ui` as `pi-host-ui` (an undeclared
+/// `ctx.provide`, which reaches rutis since 0.12): a pi extension's
+/// `ctx.ui.confirm` then asks the host; without that row it answers as print
+/// mode (`false`), and the policy denies.
+#[tokio::test(flavor = "multi_thread")]
+async fn host_ui_brings_pi_dialogs_to_the_host() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let ext = extension(
+        dir.path(),
+        "ask.ts",
+        r#"import { Type } from 'typebox'
+export default function (pi) {
+  pi.registerTool({
+    name: 'pi_ask', label: 'a', description: 'a', parameters: Type.Object({}),
+    async execute() { return { content: [{ type: 'text', text: 'asked and ran' }], details: undefined } },
+  })
+  pi.on('tool_call', async (event, ctx) => {
+    if (event.toolName !== 'pi_ask') return
+    if (!(await ctx.ui.confirm('Run pi_ask?', 'it is harmless'))) return { block: true, reason: 'not confirmed' }
+  })
+}
+"#,
+    );
+    for with_host_ui in [true, false] {
+        let ui = Arc::new(YesUi::default());
+        let host = host_with_ui(&runtime, Some(ui.clone())).await;
+        let mut rows = adapter_row(json!({ "extensions": [&ext] }));
+        if with_host_ui {
+            rows.as_array_mut()
+                .unwrap()
+                .push(json!({ "id": "host-ui", "name": pi_dir().join("host-ui.ts") }));
+        }
+        host.load(rows).await;
+        let (agent, _) = agent(vec![call("pi_ask", json!({})), text("done")]);
+        let mut agent = agent.with_extension(host.bridge.extension());
+        let (_, results) = run(&mut agent, "go").await;
+        let asked = ui.0.lock().unwrap().clone();
+        if with_host_ui {
+            assert_eq!(
+                results,
+                vec![("pi_ask".into(), "asked and ran".into(), false)]
+            );
+            assert_eq!(asked.len(), 1, "{asked:?}");
+            assert_eq!(asked[0]["kind"], "confirm");
+            assert_eq!(asked[0]["title"], "Run pi_ask?");
+        } else {
+            assert!(
+                results[0].2 && results[0].1.contains("not confirmed"),
+                "{results:?}"
+            );
+            assert!(asked.is_empty(), "{asked:?}");
         }
         host.root.shutdown().await.unwrap();
     }

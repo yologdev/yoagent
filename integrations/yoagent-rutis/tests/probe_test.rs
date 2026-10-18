@@ -143,6 +143,9 @@ async fn a_dsh_plugin_missing_a_service_it_injects_is_not_clean() {
         json!(["yoagentNoSuchService"]),
         "{report:?}"
     );
+    // At once: under rutis 0.12's default catalog the row would wait out the
+    // probe's settle time and read `waiting`.
+    assert_eq!(report.rows[0].state, "active", "{report:?}");
     assert!(report.problem().is_some(), "{report:?}");
 }
 

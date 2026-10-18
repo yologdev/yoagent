@@ -78,7 +78,20 @@ fn node_runtime() -> Option<PathBuf> {
             ));
         }
     }
-    Some(modules.join("@arcships/rutis-runtime"))
+    // A stale install would run the previous rutis's runtime, silently: the
+    // session protocol did not change.
+    let runtime = modules.join("@arcships/rutis-runtime");
+    let manifest = std::fs::read_to_string(runtime.join("package.json")).unwrap_or_default();
+    let version = serde_json::from_str::<Value>(&manifest)
+        .ok()
+        .and_then(|m| m["version"].as_str().map(str::to_owned))
+        .unwrap_or_default();
+    if !version.starts_with("0.12.") {
+        return skip(format!(
+            "@arcships/rutis-runtime is {version:?}, 0.12 needed: run `npm ci` in plugins/dsh/"
+        ));
+    }
+    Some(runtime)
 }
 
 struct Host {
