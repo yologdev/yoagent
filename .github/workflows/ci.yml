@@ -286,12 +286,12 @@ jobs:
       - name: Example
         run: cargo run --manifest-path "$MANIFEST" --example policy_plugin
       # rutis-agent's tools through the bridge (its own workspace; rutis-agent
-      # from git at rutis v0.11.0): one of the ecosystems the extensions guide
+      # from git at rutis v0.12.0): one of the ecosystems the extensions guide
       # names, kept working here. Scripted, no network beyond the git fetch.
       - name: rutis-agent example
         run: cargo run --manifest-path integrations/yoagent-rutis/examples/rutis-agent-tools/Cargo.toml
 
-  # The bridge declares rust-version 1.88, the rutis 0.11 release train's MSRV
+  # The bridge declares rust-version 1.88, the rutis 0.12 release train's MSRV
   # (yoagent's own is 1.86). Mirrors the `msrv` job above, including its
   # yoke-derive pin; the language features build there too.
   rutis-bridge-msrv:
@@ -315,13 +315,13 @@ jobs:
           cargo update --manifest-path "$MANIFEST" -p yoke-derive --precise 0.8.2
       - name: Check
         run: cargo check --manifest-path "$MANIFEST" --all-targets
-      - name: Check with the language features (rutis-bridge 0.11)
+      - name: Check with the language features (rutis-bridge 0.12)
         run: cargo check --manifest-path "$MANIFEST" --all-targets --features node,python,bun,go,websocket,probe
 
-  # TypeScript (Node and Bun 1.4), Python and Go (1.24) plugins through rutis-bridge 0.11, end to end: real
+  # TypeScript (Node and Bun 1.4), Python and Go (1.24) plugins through rutis-bridge 0.12, end to end: real
   # Node 22 (the floor: pi needs 22.19, rutis 22)
   # and Python 3.12 runtimes load the example plugins and fixtures as
-  # rutis-loader rows. The npm and PyPI packages are pinned to the 0.11.0
+  # rutis-loader rows. The npm and PyPI packages are pinned to the 0.12.0
   # train (plugins/package-lock.json, plugins/requirements.txt). A missing
   # runtime fails the job instead of skipping (YOAGENT_RUTIS_REQUIRE_RUNTIMES).
   rutis-bridge-languages:

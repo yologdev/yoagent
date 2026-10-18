@@ -7,8 +7,8 @@
     "node": ">=22.19"
   },
   "dependencies": {
-    "@arcships/rutis": "0.11.0",
-    "@arcships/rutis-bun": "0.11.0",
-    "@arcships/rutis-runtime": "0.11.0"
+    "@arcships/rutis": "0.12.0",
+    "@arcships/rutis-bun": "0.12.0",
+    "@arcships/rutis-runtime": "0.12.0"
   }
 }
