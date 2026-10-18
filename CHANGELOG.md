@@ -4,9 +4,9 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## yoagent-rutis 0.6.1 (2026-10-18)
 
-### yoagent-rutis
+yoagent-rutis only; requires yoagent 0.25, rutis 0.12 and Rust 1.88, as 0.6.0. Additive: the `loader` feature and the `rows` module.
 
 - **`rows::wait_running`** (feature `loader`): wait until the plugin rows a host loaded with rutis-loader run, at most a timeout. `reconcile` counts a row still waiting as settled, and since rutis 0.12 a row injecting a service nobody provides waits for good, so a host reading only `reconcile`'s failures sees a plugin that never starts as a success. A row that never will (failed, disposed, unresolved, disabled, stopped, no such row) ends the wait at once; rows waiting, loading, unloading or inactive are waited for. At the end each row still waiting is reported (`RowsNotRunning`, a `RowState` per row, `missing` and a `note` saying why it is unknown when it is) with the services it injects that do not exist — from `Loader::check` (bounded at 10 s) plus a lookup in rutis, since `check` alone cannot tell (a 0.12 JavaScript row may provide undeclared services, and a name another row only declares reads as provided). The `dsh_tools` and `pi_extensions` examples use it (they now need `--features node,loader`). Asked for by yobuild.
 
