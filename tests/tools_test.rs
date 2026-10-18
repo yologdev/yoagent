@@ -1298,6 +1298,28 @@ async fn a_background_job_holding_the_pipes_does_not_hold_the_call() {
         .unwrap();
 }
 
+/// #342: what a job prints after `bash` exits but within the grace is
+/// captured, and a job that closes the pipes in time gets no note.
+#[cfg(unix)]
+#[tokio::test]
+async fn output_printed_within_the_read_grace_is_captured() {
+    let result = BashTool::new()
+        .with_timeout(std::time::Duration::from_secs(20))
+        .execute(
+            serde_json::json!({ "command": "(sleep 0.3; echo late) & echo early" }),
+            ctx("bash"),
+        )
+        .await
+        .unwrap();
+    let text = match &result.content[0] {
+        Content::Text { text } => text.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert!(text.contains("early") && text.contains("late"), "{text}");
+    assert!(!text.contains("NOTE:"), "{text}");
+    assert_eq!(result.details["output_still_open"], false);
+}
+
 /// #342: a job left running keeps working when it prints after the call:
 /// the pipes are drained, never closed under it (that would SIGPIPE it).
 #[cfg(unix)]
@@ -1305,11 +1327,17 @@ async fn a_background_job_holding_the_pipes_does_not_hold_the_call() {
 async fn a_background_job_that_keeps_printing_survives_the_call() {
     let dir = tempfile::tempdir().unwrap();
     let pid_file = dir.path().join("pid");
+    // Written after the job has put more than a pipe buffer (64 KiB) on each
+    // stream: only a pipe that is read lets it get there.
+    let done = dir.path().join("done");
     BashTool::new()
+        .with_timeout(std::time::Duration::from_secs(20))
         .execute(
             serde_json::json!({
                 "command": format!(
-                    "(sleep 1.5; while :; do echo tick; echo tock >&2; sleep 0.05; done) & echo $! > {}; echo hi",
+                    "(sleep 1.5; head -c 300000 /dev/zero; head -c 300000 /dev/zero >&2; touch {}; \
+                     while :; do echo tick; sleep 0.05; done) & echo $! > {}; echo hi",
+                    done.display(),
                     pid_file.display()
                 )
             }),
@@ -1318,8 +1346,14 @@ async fn a_background_job_that_keeps_printing_survives_the_call() {
         .await
         .unwrap();
     let pid = background_pid(&pid_file).await;
-    // Past the grace and well into the job's printing.
-    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    let mut waited = 0;
+    while !done.exists() {
+        assert!(waited < 200, "the job never got its output out");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        waited += 1;
+    }
+    // Still printing, past the grace.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     assert!(alive(&pid), "the job died after the call returned");
     std::process::Command::new("kill")
         .arg(&pid)
@@ -1362,8 +1396,9 @@ async fn a_timeout_during_the_read_grace_keeps_a_finished_command() {
 
 /// #341: a FIFO, a device or a directory is refused before any read, write
 /// or edit — a FIFO reports a length of 0, so the size check passed and the
-/// read blocked for ever; `/dev/zero` read without end. Each call is bounded
-/// so a regression fails instead of hanging the suite.
+/// read blocked for ever; `/dev/zero` read without end. The bounds report a
+/// regression, but cannot end it: the blocked `tokio::fs` thread keeps the
+/// runtime from shutting down, so a regression still hangs this test.
 #[cfg(unix)]
 #[tokio::test]
 async fn file_tools_refuse_what_is_not_a_regular_file() {

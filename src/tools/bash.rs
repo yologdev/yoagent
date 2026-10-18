@@ -228,7 +228,8 @@ impl AgentTool for BashTool {
         let mut out = Capture::default();
         let mut err = Capture::default();
         // Set once `bash` has exited, so a timeout or cancel that fires during
-        // the read grace still sees a finished command.
+        // the read grace still sees a finished command (a cancel is still
+        // reported, but leaves the command's jobs running).
         let mut exited = None;
         let outcome = {
             // Wait for `bash` itself, not for the pipes: a background job
@@ -259,8 +260,9 @@ impl AgentTool for BashTool {
                 drained = run => Some(Some(drained)),
             }
         };
+        let cancelled = outcome.is_none();
         let drained = match (outcome, &exited) {
-            (None, _) => return Err(ToolError::Cancelled),
+            (None, None) => return Err(ToolError::Cancelled),
             // The timeout fired before `bash` exited.
             (Some(None), None) => {
                 let _ = child.start_kill();
@@ -270,15 +272,17 @@ impl AgentTool for BashTool {
                     render_output(&out, &err)
                 )));
             }
-            // It fired during the read grace: a finished command.
-            (Some(None), Some(_)) => false,
             (Some(Some(drained)), _) => drained,
+            // A timeout or cancel during the read grace: `bash` had finished.
+            (_, Some(_)) => false,
         };
         let status = exited
             .expect("`bash` has exited")
             .map_err(|e| ToolError::Failed(format!("Failed to execute: {}", e)))?;
         // Finished on its own: what it left running in the background (a
-        // server it started, say) is the command's business.
+        // server it started, say) is the command's business. (A cancel
+        // during the grace still leaves it: `bash` is reaped, so its group id
+        // is no longer ours to signal.)
         group.disarm();
         if !drained {
             // Keep reading what such a job prints, and discard it: closing
@@ -291,6 +295,9 @@ impl AgentTool for BashTool {
                     tokio::io::copy(&mut child_err, &mut sink_err),
                 );
             });
+        }
+        if cancelled {
+            return Err(ToolError::Cancelled);
         }
         let exit_code = status.code().unwrap_or(-1);
         let mut output = format!("Exit code: {}\n{}", exit_code, render_output(&out, &err));

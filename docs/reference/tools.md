@@ -38,11 +38,13 @@ returns an error carrying the output so far. On Unix a timeout or cancel kills t
 group (pipeline stages, `&&` lists, background jobs; only a process that starts its own session
 escapes); elsewhere it kills the `bash` process only.
 
-A command that finishes on its own leaves its background jobs running (a server it started, say).
-The call ends when `bash` exits: the output is read for one more second, and a job that still
-holds the output pipes then is left running. What it prints from then on is read and discarded
-in the background (so a closed pipe does not kill it), and the result says so with a `NOTE:` line
-and `details.output_still_open: true`. Before 0.25.8 such a job held the call until the timeout, which then killed it.
+A command that finishes on its own leaves its background jobs running (a server it started, say),
+even if the call is cancelled after `bash` exits. The call ends when `bash` exits: the output is
+read for one more second, and a job that still holds the output pipes then is left running. What
+it prints from then on is read and discarded in the background (so a closed pipe does not kill
+it; a job that prints without pause keeps that reading busy), and the result says so with a
+`NOTE:` line and `details.output_still_open: true`. Redirect a job's output (`cmd >log 2>&1 &`)
+to keep it. Before 0.25.8 such a job held the call until the timeout, which then killed it.
 
 ### Example
 
