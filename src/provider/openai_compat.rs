@@ -675,6 +675,8 @@ struct OpenAiUsage {
     #[serde(default)]
     prompt_tokens_details: Option<OpenAiPromptTokensDetails>,
     #[serde(default)]
+    completion_tokens_details: Option<OpenAiCompletionTokensDetails>,
+    #[serde(default)]
     prompt_cache_hit_tokens: Option<u64>,
     #[serde(default)]
     prompt_cache_miss_tokens: Option<u64>,
@@ -691,6 +693,12 @@ struct OpenAiPromptTokensDetails {
     cache_write_tokens: u64,
 }
 
+#[derive(Deserialize)]
+struct OpenAiCompletionTokensDetails {
+    #[serde(default, deserialize_with = "null_as_zero")]
+    reasoning_tokens: u64,
+}
+
 /// Maps a streamed usage chunk onto [`Usage`].
 ///
 /// `prompt_tokens` includes both cached and cache-written tokens — OpenAI's
@@ -700,6 +708,13 @@ struct OpenAiPromptTokensDetails {
 /// excludes both, matching how the other providers split `Usage`. DeepSeek
 /// reports the split directly as `prompt_cache_hit_tokens` /
 /// `prompt_cache_miss_tokens`, which take precedence.
+///
+/// Reasoning tokens bill as output. OpenAI counts them inside
+/// `completion_tokens` (`completion_tokens_details.reasoning_tokens` is a
+/// breakdown); a provider may instead report them beside it, so that
+/// `total_tokens = prompt_tokens + completion_tokens + reasoning_tokens`. They
+/// are added to `output` only when `total_tokens` shows exactly that, so a
+/// provider that includes them is never double-counted.
 fn usage_from_openai(u: &OpenAiUsage) -> Usage {
     let details = u.prompt_tokens_details.as_ref();
     let cache_read = u
@@ -713,10 +728,24 @@ fn usage_from_openai(u: &OpenAiUsage) -> Usage {
                 .saturating_sub(cache_read)
                 .saturating_sub(cache_write)
         }),
-        output: u.completion_tokens,
+        output: u.completion_tokens + reasoning_outside_completion(u),
         cache_read,
         cache_write,
         total_tokens: u.total_tokens,
+    }
+}
+
+/// Reasoning tokens reported beside `completion_tokens` rather than inside it
+/// (see [`usage_from_openai`]); 0 when they are inside, or not reported.
+fn reasoning_outside_completion(u: &OpenAiUsage) -> u64 {
+    let reasoning = u
+        .completion_tokens_details
+        .as_ref()
+        .map_or(0, |d| d.reasoning_tokens);
+    if reasoning > 0 && u.total_tokens == u.prompt_tokens + u.completion_tokens + reasoning {
+        reasoning
+    } else {
+        0
     }
 }
 
@@ -1384,6 +1413,33 @@ mod tests {
         assert_eq!(usage.cache_write, 0);
         assert_eq!(usage.output, 10);
         assert_eq!(usage.total_tokens, 110);
+    }
+
+    /// Reasoning tokens reported beside `completion_tokens` (total =
+    /// prompt + completion + reasoning) are output; reported inside it (total =
+    /// prompt + completion, OpenAI's convention) they are not added again.
+    #[test]
+    fn test_reasoning_tokens_count_once() {
+        let usage = |json: serde_json::Value| {
+            let chunk: OpenAiChunk =
+                serde_json::from_value(serde_json::json!({ "choices": [], "usage": json }))
+                    .unwrap();
+            usage_from_openai(&chunk.usage.unwrap())
+        };
+        let beside = usage(serde_json::json!({
+            "prompt_tokens": 32,
+            "completion_tokens": 9,
+            "completion_tokens_details": { "reasoning_tokens": 94 },
+            "total_tokens": 135
+        }));
+        assert_eq!(beside.output, 103, "visible + reasoning");
+        let inside = usage(serde_json::json!({
+            "prompt_tokens": 32,
+            "completion_tokens": 103,
+            "completion_tokens_details": { "reasoning_tokens": 94 },
+            "total_tokens": 135
+        }));
+        assert_eq!(inside.output, 103, "already counted");
     }
 
     #[test]

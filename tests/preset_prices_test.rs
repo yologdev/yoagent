@@ -174,6 +174,53 @@ fn expected_max_tokens(name: &str) -> u32 {
     }
 }
 
+/// The context window sets the compaction budget: a wrong one means overflow
+/// errors (too large) or needless compaction (too small).
+fn expected_context_window(name: &str) -> u32 {
+    match name {
+        "claude_haiku_4_5" => 200_000,
+        "gpt_5_5" => 1_000_000,
+        "gpt_6_astra" | "gpt_6_sol" | "gpt_6_1_sol" | "gpt_6_luna" => 1_050_000,
+        "gemini_4_argon" | "gemini_3_8_flash" | "meta(muse-spark-1.1)" | "meta(muse-spark-1.2)" => {
+            1_048_576
+        }
+        "grok_4_7" => 500_000,
+        "claude_fable_5" | "claude_fable_5_1" | "claude_opus_5_5" | "claude_opus_5"
+        | "claude_opus_4_8" | "claude_sonnet_5" | "claude_sonnet_5_5" | "claude_haiku_5_5"
+        | "mistral_large_4" | "glm_5_3" | "glm_5_3_flash" | "qwen_3_8_max" | "qwen_3_8_flash" => {
+            1_000_000
+        }
+        _ => panic!("unrecognized pinned preset: {name}"),
+    }
+}
+
+#[test]
+fn every_preset_context_window_is_pinned() {
+    for (name, config, _) in pinned() {
+        assert_eq!(
+            config.context_window,
+            expected_context_window(name),
+            "{name}: the resolved context_window changed"
+        );
+    }
+}
+
+/// Models that always think are marked reasoning-capable, so a `ThinkingLevel`
+/// reaches them without the "not marked reasoning-capable" warning.
+#[test]
+fn always_thinking_presets_are_marked_reasoning() {
+    for config in [
+        ModelConfig::gemini_4_argon(),
+        ModelConfig::gemini_3_8_flash(),
+        ModelConfig::grok_4_7(),
+        ModelConfig::glm_5_3(),
+        ModelConfig::glm_5_3_flash(),
+        ModelConfig::gpt_6_1_sol(),
+    ] {
+        assert!(config.reasoning, "{}", config.id);
+    }
+}
+
 #[test]
 fn every_preset_output_limit_is_pinned() {
     for (name, config, _) in pinned() {

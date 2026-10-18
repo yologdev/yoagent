@@ -1322,6 +1322,8 @@ mod tests {
             "gemini-3-pro-preview",
             "gemini-pro-latest",
             "gemini-flash-latest", // hot-swapped alias: MINIMAL not assumed
+            "gemini-3.8-flash",    // rejects MINIMAL (thinking guide)
+            "gemini-4-argon",      // rejects MINIMAL; thinking cannot be off
         ] {
             assert_eq!(
                 thinking_config(model, ThinkingLevel::Minimal)["thinkingLevel"],

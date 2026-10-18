@@ -63,6 +63,8 @@ First-class model presets are documented in [Model Presets](model-presets.md). C
 let anthropic = ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5");
 let openai = ModelConfig::openai("gpt-5.5", "GPT-5.5");
 let responses = ModelConfig::openai_responses("gpt-5.5", "GPT-5.5");
+// Any model id works; a model with a named preset (`ModelConfig::gemini_3_8_flash()`,
+// `grok_4_7()`, …) also gets its real context window and output limit.
 let google = ModelConfig::google("gemini-3.8-flash", "Gemini 3.8 Flash");
 let xai = ModelConfig::xai("grok-4.7", "Grok 4.7");
 let groq = ModelConfig::groq("openai/gpt-oss-120b", "GPT-OSS 120B");

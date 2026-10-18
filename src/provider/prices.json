@@ -305,7 +305,7 @@
             "cache_read": 1.0
           }
         ],
-        "note": "Prompts of 200,000 tokens or more bill the whole request at the second rates (this table's threshold is exclusive, so a prompt of exactly 200,000 tokens is billed at the lower rate). The US-region endpoint bills 10% more.",
+        "note": "Prompts of 200,000 tokens or more bill the whole request at the second rates (this table's threshold is exclusive, so it costs a prompt of exactly 200,000 tokens at the lower rate, under-counting it; xAI bills it at the higher one). The US-region endpoint bills 10% more.",
         "source": "https://docs.x.ai/docs/models",
         "verified": "2026-10-18"
       }

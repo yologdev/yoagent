@@ -208,7 +208,7 @@ Sub-agents can use any provider supported by yoagent — not just Anthropic. Pas
 ```rust
 use yoagent::provider::ModelConfig;
 
-let model_config = ModelConfig::xai("grok-4.7", "Grok 4.7");
+let model_config = ModelConfig::grok_4_7();
 
 // `from_config` resolves OpenAiCompatProvider from the config's protocol and
 // the key from XAI_API_KEY.

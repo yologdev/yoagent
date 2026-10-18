@@ -578,7 +578,8 @@ fn audit(db: &serde_json::Value, all: &[Preset]) -> Outcome {
                 Upstream::Value(theirs) => {
                     compared += 1;
                     drift.extend(stale_allowance(p, name));
-                    // The peak rate, against models.dev's off-peak one.
+                    // A peak or regular rate, against models.dev's off-peak or
+                    // promotional one.
                     let twice = twice_upstream(&p.provider, &p.model) && name != "cache_write";
                     let expected = if twice { 2.0 * theirs } else { theirs };
                     let same = (ours - expected).abs() < 1e-9;
@@ -906,7 +907,7 @@ fn the_audit_logic_runs_offline_against_the_fixture() {
     );
     // Unlisted cache_write accepted by the allowance: gpt-5.5 base and tier,
     // Muse Spark 1.2, and the three DeepSeek entries; and Mistral Large 4's,
-    // which it does not set.
+    // unset on both sides.
     assert_eq!(o.absent, 7);
     // A promotional entry is compared at twice models.dev's rate.
     assert!(

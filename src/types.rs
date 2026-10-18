@@ -694,7 +694,7 @@ pub enum CacheStrategy {
 /// ⁴ The ceiling is [`OpenAiCompat::max_reasoning_effort`], a
 /// [`ReasoningEffortCeiling`] declared per model (default `High`); the
 /// Responses and Azure providers read it from `ModelConfig::compat`.
-/// Presets: `gpt_6_astra`, `gpt_6_sol`, `gpt_6_luna` — `Max`; `gpt_5_5` —
+/// Presets: `gpt_6_astra`, `gpt_6_sol`, `gpt_6_1_sol`, `gpt_6_luna` — `Max`; `gpt_5_5` —
 /// `XHigh`; [`OpenAiCompat::xai`] — `XHigh` (Grok models without the rung
 /// treat `xhigh` as `high`); every other config `High`.
 ///

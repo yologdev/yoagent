@@ -91,11 +91,12 @@ pub(crate) fn openai_id_is_reasoning(id: &str) -> bool {
 /// prompt tokens (`input + cache_read + cache_write`).
 ///
 /// The OpenAI presets set one at 272K: `gpt_5_5`, `gpt_6_astra`,
-/// `gpt_6_sol` and `gpt_6_luna` (checked 2026-09-25; `gpt_5_5`'s long-band
-/// cache-read rate is unverified — see its docs). The Anthropic presets do
-/// not: Anthropic states that 4.6+ models bill the full 1M window at
-/// standard rates. Meta's page says there is no long-context premium; Haiku
-/// 4.5 is flat because its window is 200K.
+/// `gpt_6_sol`, `gpt_6_1_sol` and `gpt_6_luna` (checked 2026-09-25 and
+/// 2026-10-18; `gpt_5_5`'s long-band cache-read rate is unverified — see its
+/// docs). `claude_haiku_5_5` sets one at 100K and `grok_4_7` at 200K. The
+/// other Anthropic presets do not: Anthropic bills their full 1M window at
+/// standard rates (Haiku 5.5 is the exception). Meta's page says there is no
+/// long-context premium; Haiku 4.5 is flat because its window is 200K.
 ///
 /// Note the derivation: prompt size is `input + cache_read + cache_write`, which
 /// holds only where the provider subtracts cached tokens out of `input`.
@@ -779,15 +780,16 @@ impl OpenAiCompat {
 pub struct AnthropicCompat {
     /// Use adaptive thinking (`thinking: {"type": "adaptive"}` plus
     /// `output_config.effort`). Required by Claude Fable 5/5.1, Opus 5.5,
-    /// Opus 5, Opus 4.7/4.8, and Sonnet 5; recommended on Opus 4.6 / Sonnet
-    /// 4.6. Set to `false` for pre-4.6 models, which only accept
+    /// Opus 5, Opus 4.7/4.8, Sonnet 5/5.5 and Haiku 5.5; recommended on Opus
+    /// 4.6 / Sonnet 4.6. Set to `false` for pre-4.6 models, which only accept
     /// `{"type": "enabled", "budget_tokens": N}`.
     ///
     /// `ThinkingLevel::Off` omits the `thinking` field rather than sending
     /// `{"type": "disabled"}`. That disables thinking only on models that
-    /// think on request: Opus 5.5 and Fable 5.1 always think (at their
-    /// default effort, `medium` and `high` respectively), and Opus 5 thinks
-    /// whenever the field is absent.
+    /// think on request: Opus 5.5, Fable 5.1 and Sonnet 5.5 always think (at
+    /// their default effort, `medium`, `high` and `high` respectively), and
+    /// Opus 5 and Haiku 5.5 think whenever the field is absent (Haiku 5.5 at
+    /// `medium`).
     pub adaptive_thinking: bool,
     /// Send the API key as `Authorization: Bearer {key}` instead of the
     /// Anthropic-native `x-api-key` header. Needed for OpenAI-style gateways
@@ -800,7 +802,7 @@ pub struct AnthropicCompat {
     ///
     /// Required on models that reject forced `tool_choice` (`any` / `tool`)
     /// with a 400 — Claude Fable 5.1 and Opus 5.5 — and supported by Fable 5,
-    /// Opus 4.5–5.5, Sonnet 4.5/4.6/5 and Haiku 4.5 on the Claude API. The
+    /// Opus 4.5–5.5, Sonnet 4.5/4.6/5/5.5 and Haiku 4.5/5.5 on the Claude API. The
     /// Claude presets for those models set it. Unlike tool-forcing it leaves
     /// thinking on and tool choice at `auto`, so regular tools stay callable.
     ///
@@ -1531,7 +1533,9 @@ impl ModelConfig {
     /// output.
     ///
     /// Adaptive thinking, unlike Haiku 4.5 (`budget_tokens` is a 400); its
-    /// default effort is `medium`. A non-default `temperature`, `top_p` or
+    /// default effort is `medium`. `ThinkingLevel::Off` omits the thinking
+    /// field, and Haiku 5.5 thinks at `medium` when it is absent (this crate
+    /// never sends `{"type": "disabled"}`). A non-default `temperature`, `top_p` or
     /// `top_k` is a 400.
     ///
     /// Rates verified against <https://platform.claude.com/docs/en/about-claude/pricing>
@@ -2590,6 +2594,7 @@ mod tests {
         for (mc, id) in [
             (ModelConfig::gpt_6_astra(), "gpt-6-astra"),
             (ModelConfig::gpt_6_sol(), "gpt-6-sol"),
+            (ModelConfig::gpt_6_1_sol(), "gpt-6.1-sol"),
             (ModelConfig::gpt_6_luna(), "gpt-6-luna"),
         ] {
             assert_eq!(mc.id, id);
@@ -2987,6 +2992,8 @@ mod tests {
             ModelConfig::claude_opus_5(),
             ModelConfig::claude_opus_4_8(),
             ModelConfig::claude_sonnet_5(),
+            ModelConfig::claude_sonnet_5_5(),
+            ModelConfig::claude_haiku_5_5(),
             ModelConfig::claude_haiku_4_5(),
         ] {
             let compat = mc.anthropic.as_ref().expect("preset sets compat");
@@ -3291,6 +3298,17 @@ mod tests {
             ModelConfig::gpt_6_sol(),
             ModelConfig::gpt_6_luna(),
             ModelConfig::meta("muse-spark-1.2", "Muse Spark 1.2"),
+            ModelConfig::claude_sonnet_5_5(),
+            ModelConfig::claude_haiku_5_5(),
+            ModelConfig::gpt_6_1_sol(),
+            ModelConfig::gemini_4_argon(),
+            ModelConfig::gemini_3_8_flash(),
+            ModelConfig::grok_4_7(),
+            ModelConfig::mistral_large_4(),
+            ModelConfig::glm_5_3(),
+            ModelConfig::glm_5_3_flash(),
+            ModelConfig::qwen_3_8_max(),
+            ModelConfig::qwen_3_8_flash(),
         ] {
             let cost = mc.cost.as_ref();
             assert!(

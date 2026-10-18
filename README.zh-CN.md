@@ -113,7 +113,7 @@ async fn main() {
 
 ```rust
 Agent::from_config(ModelConfig::groq("openai/gpt-oss-120b", "GPT-OSS 120B"));    // GROQ_API_KEY
-Agent::from_config(ModelConfig::google("gemini-3.8-flash", "Gemini 3.8 Flash")); // GEMINI_API_KEY
+Agent::from_config(ModelConfig::gemini_3_8_flash());                              // GEMINI_API_KEY
 Agent::from_config(ModelConfig::ollama("http://localhost:11434/v1", "llama3.1:8b")); // 无需密钥
 ```
 
