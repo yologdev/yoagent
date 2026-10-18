@@ -137,7 +137,11 @@ class instance or a dict; in Go, a map of functions — see
 [`plugins/go/main.go`](plugins/go/main.go)) of async functions, passed by reference — rutis
 calls them in the plugin's own process. `register(name, handler, options?)`
 returns a function that unregisters it; pass it to `ctx.effect` so the
-handler goes when the plugin unloads.
+handler goes when the plugin unloads. A plugin loaded as a row of a
+runtime is also tied to that row by the host (rutis 0.12's caller row):
+its handlers go when the row unloads or restarts, while the runtime runs
+on, even if the plugin dropped the disposer, and their owner
+(`HandlerInfo::owner`, `ToolOwner::owner`) is the row's loader id.
 
 ```ts
 import { definePlugin } from '@arcships/rutis'
@@ -288,7 +292,8 @@ sits inside every run of every agent using the extension:
 - **Registration** with an object handler reads each hook name back with a
   synchronous call (about ten round trips per `register`; a Python dict
   needs none).
-- **Which session.** A handler is removed when the session that registered
+- **Which row, which session.** A handler registered by a row is removed
+  when that row unloads or restarts, and when the session that registered
   it closes. For a plugin behind a link, that is the link: a remote runtime
   that crashes while the link stays up leaves its handlers registered and
   failing (every tool call denied) until the plugin's own `ctx.effect`
@@ -730,8 +735,10 @@ the others).
   — and `offered_by` on the `ToolCall` every `before_tool` / `after_tool`
   handler receives — is the `ToolOwner` of a plugin tool in that run: the
   handler's name, the plugin it registered under (a Rust plugin's name; for a
-  language plugin, its runtime session — rutis does not tell the host which
-  row of a runtime made a call) and an optional `source`, which the handler
+  language plugin, the loader id of the row that registered it, which the
+  host sees itself — rutis 0.12's caller row — so a policy can trust it;
+  the runtime session only for a call from outside any row) and an
+  optional `source`, which the handler
   declares per tool: the pi adapter gives the extension file that registered
   the tool, a TypeScript, Python or Go plugin may set `source` on the tools it
   returns, and the DSH adapter gives none (DSH's tool registry does not record

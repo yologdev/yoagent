@@ -63,7 +63,7 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 use futures::FutureExt;
 
-use rutis::Ctx;
+use rutis::{Ctx, Effect};
 use rutis_bridge::session::{self, host_key, Error, HostDispatch, Reference, Reply, Value};
 use serde_json::{json, Value as Json};
 use tokio_util::sync::CancellationToken;
@@ -270,9 +270,16 @@ impl Service {
             }
         }
         let caller = session::caller();
-        let owner = match &caller {
-            Some(connection) => format!("language plugin (session {})", connection.tag()),
-            None => "language plugin".to_string(),
+        // The row making the call (rutis 0.12), when it comes from one: its
+        // loader id is the owner, attested by the host rather than said by
+        // the plugin, and the registration lives no longer than the row.
+        let row = session::caller_row();
+        let owner = match (&row, &caller) {
+            (Some(row), _) => row.id().to_string(),
+            (None, Some(connection)) => {
+                format!("language plugin (session {})", connection.tag())
+            }
+            (None, None) => "language plugin".to_string(),
         };
         let handler = Arc::new(RemoteHandler {
             name: name.clone(),
@@ -280,11 +287,40 @@ impl Service {
             hooks,
             events: Arc::new(options.events),
         });
-        let lifetime = CancellationToken::new();
+        // Unavailable as soon as the row starts unloading (its generation's
+        // token, as for a Rust plugin), or when the disposer runs.
+        let lifetime = match &row {
+            Some(row) => row.ctx().cancellation_token().child_token(),
+            None => CancellationToken::new(),
+        };
         let (seq, _gate) = self
             .registry
             .insert(name.clone(), owner, handler, lifetime.clone())
             .map_err(session::native_error)?;
+        // Removed when the row unloads or restarts, while its runtime runs
+        // on, whether or not the plugin hands the disposer to `ctx.effect`.
+        if let Some(row) = &row {
+            let registry = Arc::downgrade(&self.registry);
+            let ended = lifetime.clone();
+            let tied = row
+                .ctx()
+                .effect_named(format!("yoagent handler: {name}"), move || {
+                    Effect::Disposer(Box::new(move || {
+                        ended.cancel();
+                        if let Some(registry) = registry.upgrade() {
+                            registry.remove(seq);
+                        }
+                        Ok(())
+                    }))
+                });
+            if let Err(error) = tied {
+                // The row is no longer loading or active: nothing would
+                // remove the entry.
+                lifetime.cancel();
+                self.registry.remove(seq);
+                return Err(session::native_error(error));
+            }
+        }
         // The runtime crashed or exited: its session closed, and the handler
         // goes with it.
         match caller {

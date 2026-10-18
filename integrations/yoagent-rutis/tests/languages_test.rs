@@ -744,8 +744,24 @@ def apply(ctx, config):
     ctx.effect(ctx.use("yoagent").register("py-cancel", Handler(ctx.use("probe"))))
 "#;
 
+/// Registers `config.name` offering `config.tool`, and does **not** hand the
+/// disposer to `ctx.effect`: only the host can tie it to the row.
+const JS_ROW: &str = r#"
+import { definePlugin } from 'RUTIS'
+export default definePlugin({
+  inject: ['yoagent'],
+  apply(ctx, config) {
+    ctx.use('yoagent').register(config.name, {
+      async tools() { return [{ name: config.tool }] },
+      async call_tool() { return `${config.tool} ran` },
+    })
+  },
+})
+"#;
+
 struct Fixtures {
     js: PathBuf,
+    row: PathBuf,
     strict: PathBuf,
     cancel: PathBuf,
     images: PathBuf,
@@ -764,6 +780,8 @@ fn fixtures() -> Fixtures {
     std::fs::write(&js, JS_HOOKS.replace("RUTIS", &rutis)).unwrap();
     let strict = dir.path().join("strict.mjs");
     std::fs::write(&strict, JS_STRICT.replace("RUTIS", &rutis)).unwrap();
+    let row = dir.path().join("row.mjs");
+    std::fs::write(&row, JS_ROW.replace("RUTIS", &rutis)).unwrap();
     let cancel = dir.path().join("cancel.mjs");
     std::fs::write(&cancel, JS_CANCEL.replace("RUTIS", &rutis)).unwrap();
     let images = dir.path().join("images.mjs");
@@ -785,6 +803,7 @@ fn fixtures() -> Fixtures {
     .unwrap();
     Fixtures {
         js,
+        row,
         strict,
         cancel,
         images,
@@ -1050,6 +1069,63 @@ async fn unloading_a_row_unregisters_its_handler() {
     run(&mut agent, "go").await;
     assert_eq!(seen.lock().unwrap()[0].tools, vec!["bash".to_string()]);
     assert_eq!(bash_runs.load(Ordering::SeqCst), 1, "no policy any more");
+    host.root.shutdown().await.unwrap();
+}
+
+/// rutis 0.12's caller row: a language handler's owner is the row that
+/// registered it (two rows of one Node runtime are two owners), and unloading
+/// one row removes its handler while the runtime and the other row run on,
+/// even though the plugin never handed its disposer to `ctx.effect`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_handler_belongs_to_its_row_and_goes_with_it() {
+    let Some(node) = node_runtime() else {
+        return;
+    };
+    let fixtures = fixtures();
+    let host = host(Some(&node), None).await;
+    let alpha = ts_row(
+        "alpha",
+        &fixtures.row,
+        json!({ "name": "row-a", "tool": "a_tool" }),
+    );
+    let beta = ts_row(
+        "beta",
+        &fixtures.row,
+        json!({ "name": "row-b", "tool": "b_tool" }),
+    );
+    host.load(vec![alpha, beta.clone()]).await;
+    host.until_handlers(&["row-a", "row-b"]).await;
+    let owner = |name: &str| {
+        host.bridge
+            .registry()
+            .handlers()
+            .into_iter()
+            .find(|h| h.name() == name)
+            .map(|h| h.owner().to_string())
+    };
+    assert_eq!(owner("row-a").as_deref(), Some("alpha"));
+    assert_eq!(owner("row-b").as_deref(), Some("beta"));
+
+    // Only beta stays: alpha's row unloads, its runtime does not.
+    let patches: Vec<Patch> = serde_json::from_value(json!([{ "insert": [beta] }])).unwrap();
+    let report = host
+        .loader
+        .reconcile(vec![Layer::new("rows", patches)], None)
+        .await
+        .unwrap();
+    assert!(report.failures.is_empty(), "{report:?}");
+    host.until_no_handler("row-a").await;
+    assert_eq!(owner("row-b").as_deref(), Some("beta"));
+
+    let (agent, seen) = agent(vec![call("b_tool", json!({})), text("done")]);
+    let mut agent = agent.with_extension(host.bridge.extension());
+    let (_, results) = run(&mut agent, "go").await;
+    assert_eq!(seen.lock().unwrap()[0].tools, vec!["b_tool".to_string()]);
+    assert_eq!(
+        results,
+        vec![("b_tool".into(), "b_tool ran".into(), false)],
+        "the other row's handler still answers"
+    );
     host.root.shutdown().await.unwrap();
 }
 
