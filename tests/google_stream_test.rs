@@ -340,6 +340,35 @@ async fn cached_tokens_are_not_double_counted_in_usage() {
     assert_eq!(usage.input + usage.cache_read + usage.output, 105);
 }
 
+/// Thinking tokens bill as output tokens, but Gemini counts them apart
+/// (`thoughtsTokenCount`, not in `candidatesTokenCount`): `output` must hold
+/// both, or every cost of a thinking model is undercounted.
+#[tokio::test]
+async fn thinking_tokens_count_as_output() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/v1beta/models/{}:streamGenerateContent",
+            MODEL
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            sse(&[
+                r#"{"candidates":[{"content":{"parts":[{"text":"hi"}],"role":"model"},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":500,"thoughtsTokenCount":3000,"totalTokenCount":3600}}"#,
+            ]),
+            "text/event-stream",
+        ))
+        .mount(&server)
+        .await;
+
+    let message = run_stream(stream_config(&server.uri(), vec![Message::user("hi")])).await;
+
+    let Message::Assistant { usage, .. } = &message else {
+        panic!("expected assistant message");
+    };
+    assert_eq!(usage.output, 3_500, "visible + thinking tokens");
+    assert_eq!(usage.input + usage.output, 3_600);
+}
+
 /// Thought-summary parts (thinkingConfig.includeThoughts) must stream as
 /// ThinkingDelta and land as Content::Thinking — separate from the answer.
 #[tokio::test]

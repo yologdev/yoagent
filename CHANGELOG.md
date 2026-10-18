@@ -8,9 +8,10 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### yoagent
 
-- **Eleven new model presets, all priced** (after `prices::enable_bundled()`), with each model's real context window and output limit — the generic constructors assume 128K–131K context and 4,096 output tokens, so `ModelConfig::xai("grok-4.7", ..)` compacted at 131K and stopped replies at 4K (yologdev/yoagent#332 asked for `gpt-6.1-sol`):
+- **Eleven new model presets, all priced** (after `prices::enable_bundled()`), with each model's real context window and output limit — the generic constructors assume conservative limits (often 128K context and 4,096 output tokens), so `ModelConfig::xai("grok-4.7", ..)` compacted at 131K and stopped replies at 4K (yologdev/yoagent#332 asked for `gpt-6.1-sol`):
   `claude_sonnet_5_5()`, `claude_haiku_5_5()` (adaptive thinking; Haiku 5.5 bills a prompt over 100,000 tokens at its second rate), `gpt_6_1_sol()` (Codex's default; Responses API, 272K tier), `gemini_4_argon()`, `gemini_3_8_flash()`, `grok_4_7()` (200K tier), `mistral_large_4()`, `glm_5_3()`, `glm_5_3_flash()`, `qwen_3_8_max()`, `qwen_3_8_flash()`. Google, xAI, Mistral, Z.ai and Qwen models were never priced before. Each rate was read from the vendor's own pricing page on 2026-10-18 (`source` / `verified` in `prices.json`) and cross-checked by the price audit.
   **Promotions:** `gemini_4_argon` (introductory through 2026-11-30), `gemini_3_8_flash` (through 2026-12-31) and `mistral_large_4` (launch sale to about 2026-10-20) carry the **regular** rate, so their costs read up to twice the bill until the promotion ends — an upper bound, like DeepSeek's peak rate. The price audit compares them as twice models.dev's promotional rate and fails once models.dev lists the regular one.
+- **Gemini: thinking tokens now count as output.** Google bills them as output but reports them apart (`thoughtsTokenCount`); `Usage::output` (Gemini and Vertex) held only the visible tokens, so every cost of a thinking Gemini model was undercounted — harmless while Gemini was unpriced, wrong from this release on.
 - **DeepSeek:** the `deepseek-flash` docs name its current snapshot (`DeepSeek-V4.1-Flash-1017`, which takes images — verified live); the legacy `deepseek-v4-flash-vision-exp` is priced like `deepseek-v4-flash` (DeepSeek serves and bills it as Flash).
 
 ## yoagent-rutis 0.6.1 (2026-10-18)

@@ -1824,7 +1824,8 @@ impl ModelConfig {
     /// Qwen3.8-Max on Alibaba Cloud Model Studio's international endpoint.
     /// 1,000,000-token context (991,808 input), 131,072 max output.
     ///
-    /// Thinking is on by default (`enable_thinking`, [`OpenAiCompat::qwen`]).
+    /// The model thinks by default; this crate sends no thinking control for
+    /// it, so `ThinkingLevel` has no effect here.
     ///
     /// Priced for the international (Singapore) deployment (read
     /// 2026-10-18): $2 / $6, implicit-cache read $0.25, explicit-cache

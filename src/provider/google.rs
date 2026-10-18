@@ -328,7 +328,13 @@ pub(crate) async fn parse_stream(
                                     .prompt_token_count
                                     .unwrap_or(0)
                                     .saturating_sub(u.cached_content_token_count.unwrap_or(0));
-                                usage.output = u.candidates_token_count.unwrap_or(0);
+                                // Thinking tokens bill as output ("Output price
+                                // (including thinking tokens)") but are counted
+                                // apart, in `thoughtsTokenCount`.
+                                usage.output = u
+                                    .candidates_token_count
+                                    .unwrap_or(0)
+                                    .saturating_add(u.thoughts_token_count.unwrap_or(0));
                                 usage.total_tokens = u.total_token_count.unwrap_or(0);
                                 usage.cache_read = u.cached_content_token_count.unwrap_or(0);
                             }
@@ -797,6 +803,8 @@ struct GoogleUsageMetadata {
     total_token_count: Option<u64>,
     #[serde(default, rename = "cachedContentTokenCount")]
     cached_content_token_count: Option<u64>,
+    #[serde(default, rename = "thoughtsTokenCount")]
+    thoughts_token_count: Option<u64>,
 }
 
 #[cfg(test)]
