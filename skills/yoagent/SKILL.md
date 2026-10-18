@@ -5,7 +5,7 @@ description: Use when building, extending or upgrading an agent on the yoagent R
 
 # yoagent: which feature for which job
 
-Written for **yoagent 0.25.7** (and yoagent-rutis 0.6.1); the recipes
+Written for **yoagent 0.25.8** (and yoagent-rutis 0.6.1); the recipes
 below are compiled by `tests/skill_test.rs`, line for line. Check what you
 build against: `cargo tree -p yoagent` or `Cargo.lock`. If you are on an
 older version, read [What changed](#what-changed) first.
@@ -198,6 +198,18 @@ and its examples.
 
 Newest first; the full list is `CHANGELOG.md`.
 
+- **0.25.8** — eleven priced presets with real context windows and
+  output limits (`claude_sonnet_5_5`, `claude_haiku_5_5`, `gpt_6_1_sol`,
+  `gemini_4_argon`, `gemini_3_8_flash`, `grok_4_7`, `mistral_large_4`,
+  `glm_5_3`, `glm_5_3_flash`, `qwen_3_8_max`, `qwen_3_8_flash`; the three
+  on promotion carry the regular rate). Gemini thinking tokens and
+  OpenAI-compatible reasoning tokens reported beside `completion_tokens`
+  now count as output (cost, context tracking, `max_total_tokens`). The
+  file tools refuse a FIFO, device, socket or directory. **Behaviour
+  change:** `bash` returns when `bash` exits; a background job still
+  holding its output is left running with that output discarded
+  (`NOTE:` line, `details.output_still_open`) instead of holding the call
+  until the timeout killed it — redirect a job's output to keep it.
 - **0.25.7** — `McpToolAdapter::with_prefix` / `from_client_with_prefix`
   name the tool `<prefix>__<tool>` (the prefix was ignored); the server is
   still called with its own name. The `with_mcp_server_*` helpers add no

@@ -4,9 +4,9 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.25.8 (2026-10-19)
 
-### yoagent
+Additive: new presets and fixes; no API removed. The skill notes the yoagent-rutis 0.5–0.6 releases.
 
 - **Eleven new model presets, all priced** (after `prices::enable_bundled()`), with each model's real context window and output limit — the generic constructors assume conservative limits (often 128K context and 4,096 output tokens), so `ModelConfig::xai("grok-4.7", ..)` budgeted for a 131K window and stopped replies at 4K (yologdev/yoagent#332 asked for `gpt-6.1-sol`):
   `claude_sonnet_5_5()`, `claude_haiku_5_5()` (adaptive thinking; Haiku 5.5 bills a prompt over 100,000 tokens at its second rate), `gpt_6_1_sol()` (Codex's default; Responses API, 272K tier), `gemini_4_argon()`, `gemini_3_8_flash()`, `grok_4_7()` (200K tier), `mistral_large_4()`, `glm_5_3()`, `glm_5_3_flash()`, `qwen_3_8_max()`, `qwen_3_8_flash()`. Google, xAI, Mistral, Z.ai and Qwen models were never priced before. Each rate was read from the vendor's own pricing page on 2026-10-18 (`source` / `verified` in `prices.json`) and cross-checked by the price audit.
