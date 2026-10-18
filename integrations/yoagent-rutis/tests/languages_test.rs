@@ -1250,7 +1250,7 @@ async fn wait_running_names_the_services_a_waiting_row_lacks() {
     .expect_err("the row that waits");
     assert_eq!(error.rows.len(), 1, "{error}");
     assert_eq!(error.rows[0].id, "needs");
-    assert_eq!(error.rows[0].state, "waiting");
+    assert_eq!(error.rows[0].state, yoagent_rutis::rows::RowState::Waiting);
     assert_eq!(
         error.rows[0].missing,
         vec!["yoagentNoSuchService".to_string()],
