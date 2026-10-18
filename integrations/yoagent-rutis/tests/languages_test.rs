@@ -759,9 +759,20 @@ export default definePlugin({
 })
 "#;
 
+/// Injects a service no host provides: under rutis 0.12's default catalog
+/// its row waits for good.
+const JS_NEEDS: &str = r#"
+import { definePlugin } from 'RUTIS'
+export default definePlugin({
+  inject: ['yoagent', 'yoagentNoSuchService'],
+  apply() {},
+})
+"#;
+
 struct Fixtures {
     js: PathBuf,
     row: PathBuf,
+    needs: PathBuf,
     strict: PathBuf,
     cancel: PathBuf,
     images: PathBuf,
@@ -782,6 +793,8 @@ fn fixtures() -> Fixtures {
     std::fs::write(&strict, JS_STRICT.replace("RUTIS", &rutis)).unwrap();
     let row = dir.path().join("row.mjs");
     std::fs::write(&row, JS_ROW.replace("RUTIS", &rutis)).unwrap();
+    let needs = dir.path().join("needs.mjs");
+    std::fs::write(&needs, JS_NEEDS.replace("RUTIS", &rutis)).unwrap();
     let cancel = dir.path().join("cancel.mjs");
     std::fs::write(&cancel, JS_CANCEL.replace("RUTIS", &rutis)).unwrap();
     let images = dir.path().join("images.mjs");
@@ -804,6 +817,7 @@ fn fixtures() -> Fixtures {
     Fixtures {
         js,
         row,
+        needs,
         strict,
         cancel,
         images,
@@ -1186,6 +1200,68 @@ async fn a_restarted_row_registers_its_handler_again() {
     let handlers = host.bridge.registry().handlers();
     assert_eq!(handlers.len(), 1, "the old generation's entry is gone");
     assert_eq!(handlers[0].owner(), "alpha");
+    host.root.shutdown().await.unwrap();
+}
+
+/// `rows::wait_running`: a row that runs passes; one injecting a service
+/// nobody provides still waits when the wait ends, and is reported with the
+/// service it lacks.
+#[cfg(feature = "loader")]
+#[tokio::test(flavor = "multi_thread")]
+async fn wait_running_names_the_services_a_waiting_row_lacks() {
+    let Some(node) = node_runtime() else {
+        return;
+    };
+    let fixtures = fixtures();
+    let host = host(Some(&node), None).await;
+    let rows = vec![
+        ts_row(
+            "runs",
+            &fixtures.row,
+            json!({ "name": "row-r", "tool": "r_tool" }),
+        ),
+        ts_row("needs", &fixtures.needs, json!({})),
+    ];
+    let patches: Vec<Patch> = serde_json::from_value(json!([{ "insert": rows }])).unwrap();
+    let layers = vec![Layer::new("rows", patches)];
+    let report = host.loader.reconcile(layers.clone(), None).await.unwrap();
+    assert!(
+        report.failures.is_empty(),
+        "reconcile sees no failure: {report:?}"
+    );
+
+    yoagent_rutis::rows::wait_running(
+        &host.loader,
+        &host.root,
+        &layers,
+        &["runs"],
+        Duration::from_secs(30),
+    )
+    .await
+    .expect("the row that runs");
+    let error = yoagent_rutis::rows::wait_running(
+        &host.loader,
+        &host.root,
+        &layers,
+        &["runs", "needs"],
+        Duration::from_secs(2),
+    )
+    .await
+    .expect_err("the row that waits");
+    assert_eq!(error.rows.len(), 1, "{error}");
+    assert_eq!(error.rows[0].id, "needs");
+    assert_eq!(error.rows[0].state, "waiting");
+    assert_eq!(
+        error.rows[0].missing,
+        vec!["yoagentNoSuchService".to_string()],
+        "{error}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("nothing provides yoagentNoSuchService"),
+        "{error}"
+    );
     host.root.shutdown().await.unwrap();
 }
 

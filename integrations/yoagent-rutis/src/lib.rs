@@ -172,6 +172,9 @@ pub mod plugin;
 #[cfg_attr(docsrs, doc(cfg(feature = "probe")))]
 pub mod probe;
 pub mod registry;
+#[cfg(feature = "loader")]
+#[cfg_attr(docsrs, doc(cfg(feature = "loader")))]
+pub mod rows;
 
 pub use bridge::RutisBridge;
 pub use events::AgentEventEmitted;

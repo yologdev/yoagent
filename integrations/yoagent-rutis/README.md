@@ -127,6 +127,7 @@ service `yoagent`:
 | `python` | Python plugins in local Python runtimes (Python 3.10+, Linux/macOS) |
 | `go` | Go plugins built with the rutis Go SDK (Go 1.24+, Linux/macOS): each binary is a runtime, started when a `go:<plugin>` row needs it (rutis-loader's `GoResolver` / `GoRuntimes`). A handler is a map of Go functions; a hook's `context.Context` is cancelled when the host gives the call up, as a JavaScript hook's `signal` aborts — see [`plugins/go/main.go`](plugins/go/main.go) |
 | `websocket` | runtimes and nodes on other machines, over `wss` |
+| `loader` | `rows::wait_running`: wait until the plugin rows a host loaded with rutis-loader run — `reconcile` counts a row still waiting as settled, and since rutis 0.12 a row injecting a service nobody provides waits for good — and name, per row still waiting, the services it injects that do not exist |
 
 ```toml
 yoagent-rutis = { git = "https://github.com/yologdev/yoagent", features = ["node", "python"] }
@@ -392,8 +393,8 @@ says which, per package.
 
 ```sh
 (cd plugins/dsh && npm ci)
-cargo run --features node --example dsh_tools            # scripted model, real web search: needs network
-cargo run --features node --example dsh_tools -- --live  # DeepSeek: DEEPSEEK_API_KEY
+cargo run --features node,loader --example dsh_tools            # scripted model, real web search: needs network
+cargo run --features node,loader --example dsh_tools -- --live  # DeepSeek: DEEPSEEK_API_KEY
 ```
 
 [`examples/dsh_tools.rs`](examples/dsh_tools.rs) loads `dsh-web`,
@@ -563,9 +564,9 @@ upgrade), with `yoagent` shared in the loader's catalog.
 
 ```sh
 (cd plugins/pi && npm ci)
-cargo run --features node --example pi_extensions                          # the fixture extension, scripted
-cargo run --features node --example pi_extensions -- hello.ts todo.ts ...  # your pi extensions
-cargo run --features node --example pi_extensions -- --live --prompt "..." [--without bash] EXT.ts ...  # DeepSeek
+cargo run --features node,loader --example pi_extensions                          # the fixture extension, scripted
+cargo run --features node,loader --example pi_extensions -- hello.ts todo.ts ...  # your pi extensions
+cargo run --features node,loader --example pi_extensions -- --live --prompt "..." [--without bash] EXT.ts ...  # DeepSeek
 ```
 
 The example runs yoagent's own tools in the temporary project the

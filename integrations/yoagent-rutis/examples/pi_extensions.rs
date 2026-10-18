@@ -24,7 +24,7 @@
 //!
 //! Setup (once): `npm ci` in `plugins/pi/` (Node 22.19+).
 //!
-//! Run: `cargo run --manifest-path integrations/yoagent-rutis/Cargo.toml --features node --example pi_extensions [-- [--live] [--prompt TEXT] [--without NAME] EXT.ts ...]`
+//! Run: `cargo run --manifest-path integrations/yoagent-rutis/Cargo.toml --features node,loader --example pi_extensions [-- [--live] [--prompt TEXT] [--without NAME] EXT.ts ...]`
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -162,12 +162,15 @@ async fn main() -> Result<(), BoxError> {
             "withoutBuiltins": without,
         },
     }] }]))?;
-    let report = loader
-        .reconcile(vec![Layer::new("app", patches)], None)
-        .await?;
+    let layers = vec![Layer::new("app", patches)];
+    let report = loader.reconcile(layers.clone(), None).await?;
     if !report.failures.is_empty() {
         return Err(format!("the adapter failed to load: {report:?}").into());
     }
+    // `reconcile` counts a row still waiting as settled: wait until each
+    // runs, or name what it lacks.
+    yoagent_rutis::rows::wait_running(&loader, &root, &layers, &["pi"], Duration::from_secs(60))
+        .await?;
     tokio::time::timeout(Duration::from_secs(60), async {
         while bridge.registry().handlers().is_empty() {
             tokio::time::sleep(Duration::from_millis(50)).await;
