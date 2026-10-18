@@ -40,8 +40,9 @@ escapes); elsewhere it kills the `bash` process only.
 
 A command that finishes on its own leaves its background jobs running (a server it started, say).
 The call ends when `bash` exits: the output is read for one more second, and a job that still
-holds the output pipes then is left alone, with a note in the result that its later output was
-not captured. Before 0.25.8 such a job held the call until the timeout, which then killed it.
+holds the output pipes then is left running. What it prints from then on is read and discarded
+in the background (so a closed pipe does not kill it), and the result says so with a `NOTE:` line
+and `details.output_still_open: true`. Before 0.25.8 such a job held the call until the timeout, which then killed it.
 
 ### Example
 

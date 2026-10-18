@@ -1288,9 +1288,39 @@ async fn a_background_job_holding_the_pipes_does_not_hold_the_call() {
         other => panic!("{other:?}"),
     };
     assert!(text.contains("hi") && text.contains("oops"), "{text}");
-    assert!(text.contains("still holds the output"), "{text}");
+    assert!(text.contains("still holds the command's output"), "{text}");
+    assert_eq!(result.details["output_still_open"], true);
     let pid = background_pid(&pid_file).await;
     assert!(alive(&pid), "the job is left running");
+    std::process::Command::new("kill")
+        .arg(&pid)
+        .status()
+        .unwrap();
+}
+
+/// #342: a job left running keeps working when it prints after the call:
+/// the pipes are drained, never closed under it (that would SIGPIPE it).
+#[cfg(unix)]
+#[tokio::test]
+async fn a_background_job_that_keeps_printing_survives_the_call() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("pid");
+    BashTool::new()
+        .execute(
+            serde_json::json!({
+                "command": format!(
+                    "(sleep 1.5; while :; do echo tick; echo tock >&2; sleep 0.05; done) & echo $! > {}; echo hi",
+                    pid_file.display()
+                )
+            }),
+            ctx("bash"),
+        )
+        .await
+        .unwrap();
+    let pid = background_pid(&pid_file).await;
+    // Past the grace and well into the job's printing.
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    assert!(alive(&pid), "the job died after the call returned");
     std::process::Command::new("kill")
         .arg(&pid)
         .status()
@@ -1305,7 +1335,8 @@ async fn a_timeout_during_the_read_grace_keeps_a_finished_command() {
     let dir = tempfile::tempdir().unwrap();
     let pid_file = dir.path().join("pid");
     let result = BashTool::new()
-        .with_timeout(std::time::Duration::from_millis(500))
+        // Inside the 1 s grace, with room for `bash` to start on a busy runner.
+        .with_timeout(std::time::Duration::from_millis(900))
         .execute(
             serde_json::json!({
                 "command": format!("sleep 30 & echo $! > {}; echo hi", pid_file.display())
@@ -1315,6 +1346,12 @@ async fn a_timeout_during_the_read_grace_keeps_a_finished_command() {
         .await
         .unwrap();
     assert_eq!(result.details["exit_code"], 0);
+    assert_eq!(result.details["output_still_open"], true);
+    let text = match &result.content[0] {
+        Content::Text { text } => text.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert!(text.contains("hi") && text.contains("NOTE:"), "{text}");
     let pid = background_pid(&pid_file).await;
     assert!(alive(&pid), "the job is left running");
     std::process::Command::new("kill")
@@ -1378,6 +1415,28 @@ async fn file_tools_refuse_what_is_not_a_regular_file() {
     .expect("write_file on a FIFO hung");
     refused(result, "FIFO");
 
+    for path in [dir.path().to_str().unwrap(), "/dev/null"] {
+        let kind = if path == "/dev/null" {
+            "character device"
+        } else {
+            "directory"
+        };
+        let result = bounded(write.execute(
+            serde_json::json!({ "path": path, "content": "x" }),
+            ctx("write_file"),
+        ))
+        .await
+        .expect("write_file hung");
+        refused(result, kind);
+        let result = bounded(edit.execute(
+            serde_json::json!({ "path": path, "old_text": "a", "new_text": "b" }),
+            ctx("edit_file"),
+        ))
+        .await
+        .expect("edit_file hung");
+        refused(result, kind);
+    }
+
     // A symlink to a regular file still reads and writes.
     let real = dir.path().join("real.txt");
     std::fs::write(&real, "hello\n").unwrap();
@@ -1391,4 +1450,12 @@ async fn file_tools_refuse_what_is_not_a_regular_file() {
         matches!(&result.content[0], Content::Text { text } if text.contains("hello")),
         "{result:?}"
     );
+    write
+        .execute(
+            serde_json::json!({ "path": link, "content": "bye\n" }),
+            ctx("write_file"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(&real).unwrap(), "bye\n");
 }
