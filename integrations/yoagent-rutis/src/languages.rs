@@ -298,7 +298,11 @@ impl Service {
             .insert(name.clone(), owner, handler, lifetime.clone())
             .map_err(session::native_error)?;
         // Removed when the row unloads or restarts, while its runtime runs
-        // on, whether or not the plugin hands the disposer to `ctx.effect`.
+        // on, whether or not the plugin hands the disposer to `ctx.effect`:
+        // the session watch below removes it as the row's token is cancelled
+        // (a spawned task), and this effect removes it synchronously in the
+        // row's cleanup, so it is gone before a restarted row registers the
+        // name again.
         if let Some(row) = &row {
             let registry = Arc::downgrade(&self.registry);
             let ended = lifetime.clone();

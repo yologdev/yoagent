@@ -1129,6 +1129,52 @@ async fn a_handler_belongs_to_its_row_and_goes_with_it() {
     host.root.shutdown().await.unwrap();
 }
 
+/// A row restarted by a config change: its old handler is gone before the
+/// new generation registers the same name, which keeps the row as owner and
+/// serves the new config.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restarted_row_registers_its_handler_again() {
+    let Some(node) = node_runtime() else {
+        return;
+    };
+    let fixtures = fixtures();
+    let host = host(Some(&node), None).await;
+    let row = |tool: &str| {
+        ts_row(
+            "alpha",
+            &fixtures.row,
+            json!({ "name": "row-a", "tool": tool }),
+        )
+    };
+    host.load(vec![row("a_tool")]).await;
+    host.until_handlers(&["row-a"]).await;
+    let patches: Vec<Patch> =
+        serde_json::from_value(json!([{ "insert": [row("a2_tool")] }])).unwrap();
+    let report = host
+        .loader
+        .reconcile(vec![Layer::new("rows", patches)], None)
+        .await
+        .unwrap();
+    assert!(report.failures.is_empty(), "{report:?}");
+    // The new generation serves the new config, under the same owner.
+    let mut tools = Vec::new();
+    for _ in 0..150 {
+        let (agent, seen) = agent(vec![text("done")]);
+        let mut agent = agent.with_extension(host.bridge.extension());
+        run(&mut agent, "go").await;
+        tools = seen.lock().unwrap()[0].tools.clone();
+        if tools == vec!["a2_tool".to_string()] {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(tools, vec!["a2_tool".to_string()]);
+    let handlers = host.bridge.registry().handlers();
+    assert_eq!(handlers.len(), 1, "the old generation's entry is gone");
+    assert_eq!(handlers[0].owner(), "alpha");
+    host.root.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_crashed_runtime_withdraws_its_handlers() {
     let Some(python) = python() else {

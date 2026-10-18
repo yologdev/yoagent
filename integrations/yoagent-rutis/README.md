@@ -737,7 +737,9 @@ the others).
   handler's name, the plugin it registered under (a Rust plugin's name; for a
   language plugin, the loader id of the row that registered it, which the
   host sees itself — rutis 0.12's caller row — so a policy can trust it;
-  the runtime session only for a call from outside any row) and an
+  the runtime session only for a call from outside any row; copies of one
+  row in an instanced group share its id, and row ids and Rust plugin names
+  are one name space, both the host's) and an
   optional `source`, which the handler
   declares per tool: the pi adapter gives the extension file that registered
   the tool, a TypeScript, Python or Go plugin may set `source` on the tools it
