@@ -1007,6 +1007,11 @@ export default function (pi) {
     assert_eq!(tool, "pi_echo");
     let owner = owner.as_ref().expect("a pi tool is offered by the adapter");
     assert_eq!(owner.handler(), "pi-extensions");
+    assert_eq!(
+        owner.owner(),
+        "pi",
+        "the adapter's row (rutis 0.12's caller row)"
+    );
     let source = owner.source().expect("its extension file");
     assert!(Path::new(source).is_absolute(), "{source}");
     assert_eq!(

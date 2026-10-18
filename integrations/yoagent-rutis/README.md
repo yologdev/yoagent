@@ -296,8 +296,10 @@ sits inside every run of every agent using the extension:
   when that row unloads or restarts, and when the session that registered
   it closes. For a plugin behind a link, that is the link: a remote runtime
   that crashes while the link stays up leaves its handlers registered and
-  failing (every tool call denied) until the plugin's own `ctx.effect`
-  cleanup or the link goes, and its name stays taken.
+  failing (every tool call denied) until its row unloads or the link goes,
+  and its name stays taken. A plugin that finds `yoagent` without declaring
+  it in `inject` registers under no row: its session owns it (logged at
+  info), so declare it.
 - **Availability.** An unreachable handler fails closed for that call, but a
   peer that disconnects has its handlers removed: later runs have no policy
   from it, and allow, unless the extension has `.require_policy()`. Use it
@@ -739,7 +741,8 @@ the others).
   host sees itself — rutis 0.12's caller row — so a policy can trust it;
   the runtime session only for a call from outside any row; copies of one
   row in an instanced group share its id, and row ids and Rust plugin names
-  are one name space, both the host's) and an
+  (`Plugin::name()`) are one name space; a row is attributed only when the plugin declares
+  `yoagent` in its `inject`) and an
   optional `source`, which the handler
   declares per tool: the pi adapter gives the extension file that registered
   the tool, a TypeScript, Python or Go plugin may set `source` on the tools it

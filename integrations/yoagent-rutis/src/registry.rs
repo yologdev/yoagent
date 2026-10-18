@@ -317,8 +317,7 @@ impl Timings {
 /// (rutis 0.12's `session::caller_row`, seen by the host, not said by the
 /// plugin), or its runtime session for a call from outside any row. Copies
 /// of one row in several instances of an instanced group share its id, and
-/// row ids and Rust plugin names are one name space, both chosen by the
-/// host. `source` is what the handler
+/// row ids and Rust plugin names (`Plugin::name()`) are one name space. `source` is what the handler
 /// says about the tool: the pi adapter gives the extension file that
 /// registered it; a language plugin may give any string. It is
 /// self-declared — a plugin could name another's — so a policy keyed on it

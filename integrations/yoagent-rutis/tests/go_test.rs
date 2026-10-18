@@ -109,6 +109,13 @@ async fn a_go_plugin_offers_tools_redacts_fails_closed_and_unloads() {
     })
     .await
     .unwrap_or_else(|_| panic!("the Go handler did not register: {}", log()));
+    // A Go row's handler belongs to its row too (rutis 0.12's caller row).
+    let owner = registry
+        .handlers()
+        .into_iter()
+        .find(|h| h.name() == "go-policy")
+        .map(|h| h.owner().to_string());
+    assert_eq!(owner.as_deref(), Some("go"));
 
     let until = |line: &'static str| {
         let log = &log;

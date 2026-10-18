@@ -1117,10 +1117,24 @@ async fn a_handler_belongs_to_its_row_and_goes_with_it() {
     host.until_no_handler("row-a").await;
     assert_eq!(owner("row-b").as_deref(), Some("beta"));
 
+    // A policy sees the row as the tool's owner, end to end.
+    let owners = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let record = owners.clone();
+    let watch = host
+        .root
+        .plugin(plugin(handler("watch").with_before_tool(move |call| {
+            record.lock().unwrap().push(call.offered_by.clone());
+            ToolDecision::Allow
+        })));
+    wait_active(&watch).await;
     let (agent, seen) = agent(vec![call("b_tool", json!({})), text("done")]);
     let mut agent = agent.with_extension(host.bridge.extension());
     let (_, results) = run(&mut agent, "go").await;
     assert_eq!(seen.lock().unwrap()[0].tools, vec!["b_tool".to_string()]);
+    let owners = owners.lock().unwrap().clone();
+    assert_eq!(owners.len(), 1, "{owners:?}");
+    let offered = owners[0].as_ref().expect("offered by a plugin");
+    assert_eq!((offered.handler(), offered.owner()), ("row-b", "beta"));
     assert_eq!(
         results,
         vec![("b_tool".into(), "b_tool ran".into(), false)],
@@ -1184,6 +1198,15 @@ async fn a_crashed_runtime_withdraws_its_handlers() {
     let host = host(None, Some((&fx.py, &python))).await;
     host.load(vec![py_row("py", "py_hooks", json!({}))]).await;
     host.until_handlers(&["py-hooks"]).await;
+    // A Python row's handler belongs to its row too (rutis 0.12's caller row).
+    let owner = host
+        .bridge
+        .registry()
+        .handlers()
+        .into_iter()
+        .find(|h| h.name() == "py-hooks")
+        .map(|h| h.owner().to_string());
+    assert_eq!(owner.as_deref(), Some("py"));
 
     let denied = Reply::new("py_denied", "ran");
     let denied_runs = denied.runs();

@@ -30,8 +30,11 @@ export interface Yoagent {
    * (Rust, TypeScript and Python alike): a taken name throws.
    *
    * Returns a function that unregisters it: pass it to `ctx.effect`, so the
-   * handler goes when the plugin unloads. When the plugin's runtime process
-   * exits or crashes, its handlers are removed too.
+   * handler goes when the plugin unloads. A plugin loaded as a row (with
+   * `yoagent` in its `inject`) is also tied to that row by the host: its
+   * handlers go when the row unloads or restarts, and their owner is the
+   * row's id. When the plugin's runtime process exits or crashes, its
+   * handlers are removed too.
    *
    * Agents get the handler from their next run on; a run keeps the handlers
    * it started with. A handler that is gone while a run still holds it is
