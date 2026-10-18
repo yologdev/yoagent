@@ -57,6 +57,47 @@ fn get_image_mime_type(path: &Path) -> Option<&'static str> {
 /// [`compact_headroom_turns`]: crate::context::ContextConfig::compact_headroom_turns
 pub const DEFAULT_READ_MAX_LINES: usize = 500;
 
+/// What a path that is not a regular file is, for a refusal message.
+fn non_regular_kind(file_type: std::fs::FileType) -> &'static str {
+    if file_type.is_dir() {
+        return "a directory";
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        if file_type.is_fifo() {
+            return "a FIFO (named pipe)";
+        }
+        if file_type.is_char_device() {
+            return "a character device";
+        }
+        if file_type.is_block_device() {
+            return "a block device";
+        }
+        if file_type.is_socket() {
+            return "a socket";
+        }
+    }
+    "not a regular file"
+}
+
+/// Refuse anything but a regular file (after following symlinks, as
+/// `metadata` does): a FIFO, a tty or `/dev/stdin` reports a length of 0, so
+/// a size check passes and a read then blocks for ever, and `/dev/zero`
+/// reads without end. Writing to one blocks or reaches a device.
+pub(crate) fn require_regular_file(
+    metadata: &std::fs::Metadata,
+    path: &str,
+) -> Result<(), ToolError> {
+    if metadata.is_file() {
+        return Ok(());
+    }
+    let kind = non_regular_kind(metadata.file_type());
+    Err(ToolError::Failed(format!(
+        "{path} is {kind}: only regular files can be read or written"
+    )))
+}
+
 /// Read a file's contents. Supports line range for large files.
 pub struct ReadFileTool {
     /// Max file size to read (prevents OOM)
@@ -147,6 +188,7 @@ impl AgentTool for ReadFileTool {
         let metadata = tokio::fs::metadata(&io_path)
             .await
             .map_err(|e| ToolError::Failed(format!("Cannot access {}: {}", path, e)))?;
+        require_regular_file(&metadata, path)?;
 
         // Handle image files: read as binary, return base64-encoded Content::Image
         let file_path = Path::new(path);
@@ -309,6 +351,12 @@ impl AgentTool for WriteFileTool {
         }
 
         let io_path = crate::tools::PathSandbox::new(self.allowed_paths.clone()).io_path(path)?;
+
+        // An existing path must be a regular file: writing to a FIFO blocks
+        // until something reads it, and a device is not a file to overwrite.
+        if let Ok(metadata) = tokio::fs::metadata(&io_path).await {
+            require_regular_file(&metadata, path)?;
+        }
 
         // Create parent directories
         if let Some(parent) = io_path.parent() {

@@ -93,7 +93,11 @@ impl AgentTool for EditFileTool {
 
         let io_path = crate::tools::PathSandbox::new(self.allowed_paths.clone()).io_path(path)?;
 
-        // Read existing file
+        // Read existing file (a regular one: a FIFO or device would block or
+        // read without end).
+        if let Ok(metadata) = tokio::fs::metadata(&io_path).await {
+            crate::tools::file::require_regular_file(&metadata, path)?;
+        }
         let content = tokio::fs::read_to_string(&io_path).await.map_err(|e| {
             ToolError::Failed(format!(
                 "Cannot read {}: {}. Use write_file to create new files.",

@@ -25,6 +25,11 @@ use async_trait::async_trait;
 use std::time::Duration;
 use tokio::process::Command;
 
+/// How long the output is still read after `bash` exits, for what is
+/// buffered in the pipes: past it, a background job that holds them is left
+/// running and the result says its later output was not captured.
+const READ_GRACE: Duration = Duration::from_secs(1);
+
 /// Execute shell commands. Captures stdout + stderr.
 pub struct BashTool {
     /// Working directory for commands
@@ -222,12 +227,28 @@ impl AgentTool for BashTool {
         let mut out = Capture::default();
         let mut err = Capture::default();
         let outcome = {
+            // Wait for `bash` itself, not for the pipes: a background job
+            // inherits them, and one still running would keep them open until
+            // the timeout. Once `bash` exits, what is buffered is read for
+            // `READ_GRACE`; a job still holding the pipes then is left alone.
             let run = async {
-                tokio::join!(
-                    out.read(child_out, max_bytes),
-                    err.read(child_err, max_bytes),
-                );
-                child.wait().await
+                let reads = async {
+                    tokio::join!(
+                        out.read(child_out, max_bytes),
+                        err.read(child_err, max_bytes),
+                    );
+                };
+                tokio::pin!(reads);
+                let mut drained = false;
+                let status = tokio::select! {
+                    () = &mut reads => {
+                        drained = true;
+                        child.wait().await
+                    }
+                    status = child.wait() => status,
+                };
+                let drained = drained || tokio::time::timeout(READ_GRACE, &mut reads).await.is_ok();
+                (status, drained)
             };
             tokio::select! {
                 _ = cancel.cancelled() => None,
@@ -235,8 +256,14 @@ impl AgentTool for BashTool {
                 status = run => Some(Ok(status)),
             }
         };
-        let status = match outcome {
+        let (status, drained) = match outcome {
             None => return Err(ToolError::Cancelled),
+            // The timeout fired during the read grace: `bash` had finished,
+            // so this is a finished command whose job holds the pipes.
+            Some(Err(())) if matches!(child.try_wait(), Ok(Some(_))) => {
+                group.disarm();
+                (child.wait().await, false)
+            }
             Some(Err(())) => {
                 let _ = child.start_kill();
                 return Err(ToolError::Failed(format!(
@@ -245,15 +272,22 @@ impl AgentTool for BashTool {
                     render_output(&out, &err)
                 )));
             }
-            Some(Ok(status)) => {
+            Some(Ok((status, drained))) => {
                 // Finished on its own: what it left running in the background
                 // (a server it started, say) is the command's business.
                 group.disarm();
-                status.map_err(|e| ToolError::Failed(format!("Failed to execute: {}", e)))?
+                (status, drained)
             }
         };
+        let status = status.map_err(|e| ToolError::Failed(format!("Failed to execute: {}", e)))?;
         let exit_code = status.code().unwrap_or(-1);
-        let output = format!("Exit code: {}\n{}", exit_code, render_output(&out, &err));
+        let mut output = format!("Exit code: {}\n{}", exit_code, render_output(&out, &err));
+        if !drained {
+            output.push_str(
+                "\n... (a background process still holds the output; \
+                 what it prints from now on is not captured)",
+            );
+        }
 
         // Return output even on failure — LLMs need error output to self-correct
         Ok(ToolResult {

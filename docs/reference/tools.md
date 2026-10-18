@@ -34,8 +34,14 @@ By default a command inherits the agent's whole environment, including any `*_AP
 `env_allowlist` to pass only the listed variables (plus `PATH`, `HOME`, `PWD` if present).
 
 Output beyond `max_output_bytes` is drained and discarded, so memory stays bounded. A timeout
-returns an error carrying the output so far. A timeout or cancel kills the `bash` process, but not
-what it started (pipeline stages, `&&` lists, background jobs).
+returns an error carrying the output so far. On Unix a timeout or cancel kills the whole process
+group (pipeline stages, `&&` lists, background jobs; only a process that starts its own session
+escapes); elsewhere it kills the `bash` process only.
+
+A command that finishes on its own leaves its background jobs running (a server it started, say).
+The call ends when `bash` exits: the output is read for one more second, and a job that still
+holds the output pipes then is left alone, with a note in the result that its later output was
+not captured. Before 0.25.8 such a job held the call until the timeout, which then killed it.
 
 ### Example
 
@@ -71,6 +77,11 @@ Every file tool (`read_file`, `write_file`, `edit_file`, `list_files`, `search`)
 path, so `..` and symlinks (dangling ones included) cannot escape, and the tool does its I/O on
 the checked path (see `PathSandbox`). Before 0.24.2 a `..` after a missing directory, or a
 dangling symlink, could get past the check.
+
+`read_file`, `write_file` and `edit_file` refuse a path that is not a regular file (after
+following symlinks): a FIFO, a device, a socket or a directory. Before 0.25.8 a FIFO passed the
+size check (its length reads 0) and the read blocked until something wrote to it, and a device
+such as `/dev/zero` was read without end.
 
 ## WriteFileTool
 
