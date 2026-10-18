@@ -162,8 +162,31 @@ const DEEPSEEK_REASONING: &str =
     "models.dev's `reasoning` rate is its output rate: DeepSeek bills \
      reasoning tokens as output tokens (its pricing page lists no separate rate).";
 
+/// Gemini lists an audio-input rate equal to its text-input rate.
+const GEMINI_AUDIO: &str =
+    "models.dev's `input_audio` rate equals the text `input` rate (both at the \
+     introductory price): audio input bills like text, so the flat rate holds.";
+
 /// Recorded gaps, as `(provider, model, gap)`.
 const FLAT_RATE_GAPS: &[(&str, &str, FlatRateGap)] = &[
+    (
+        "google",
+        "gemini-4-argon",
+        FlatRateGap {
+            keys: &["input_audio"],
+            rates: &[("/input_audio", 2.0), ("/input", 2.0)],
+            why: GEMINI_AUDIO,
+        },
+    ),
+    (
+        "google",
+        "gemini-3.8-flash",
+        FlatRateGap {
+            keys: &["input_audio"],
+            rates: &[("/input_audio", 0.75), ("/input", 0.75)],
+            why: GEMINI_AUDIO,
+        },
+    ),
     (
         "deepseek",
         "deepseek-flash",
@@ -176,6 +199,15 @@ const FLAT_RATE_GAPS: &[(&str, &str, FlatRateGap)] = &[
     (
         "deepseek",
         "deepseek-v4-flash",
+        FlatRateGap {
+            keys: &["reasoning"],
+            rates: &[("/reasoning", 0.6), ("/output", 0.6)],
+            why: DEEPSEEK_REASONING,
+        },
+    ),
+    (
+        "deepseek",
+        "deepseek-v4-flash-vision-exp",
         FlatRateGap {
             keys: &["reasoning"],
             rates: &[("/reasoning", 0.6), ("/output", 0.6)],
@@ -199,6 +231,24 @@ const FLAT_RATE_GAPS: &[(&str, &str, FlatRateGap)] = &[
 /// `cache_read` must be exactly twice models.dev's — asserted, not waived: if
 /// models.dev starts listing the peak rate, or the ratio changes, it is drift.
 const PEAK_IS_TWICE_UPSTREAM: &[&str] = &["deepseek"];
+
+/// Models on a temporary half-price promotion, which models.dev lists: the
+/// crate carries the regular rate (an upper bound until the promotion ends;
+/// see each entry's `note`). `input`, `output` and `cache_read` must be
+/// exactly twice models.dev's — asserted, not waived: when the promotion ends
+/// and models.dev lists the regular rate, the audit fails, and the model
+/// leaves this list.
+const PROMO_IS_HALF_REGULAR: &[(&str, &str)] = &[
+    ("google", "gemini-4-argon"),
+    ("google", "gemini-3.8-flash"),
+    ("mistral", "mistral-large-4"),
+];
+
+/// Whether the crate's `input`/`output`/`cache_read` are twice models.dev's
+/// for this entry (a peak rate, or a regular rate during a promotion).
+fn twice_upstream(provider: &str, model: &str) -> bool {
+    PEAK_IS_TWICE_UPSTREAM.contains(&provider) || PROMO_IS_HALF_REGULAR.contains(&(provider, model))
+}
 
 /// models.dev's provider key for one of ours. The two agree except where
 /// models.dev names the vendor differently.
@@ -263,6 +313,17 @@ fn every_priced_preset_is_an_audited_entry() {
         ModelConfig::deepseek("deepseek-flash", "DeepSeek Flash"),
         ModelConfig::deepseek("deepseek-v4-flash", "DeepSeek V4 Flash"),
         ModelConfig::deepseek("deepseek-v4-pro", "DeepSeek V4 Pro"),
+        ModelConfig::claude_sonnet_5_5(),
+        ModelConfig::claude_haiku_5_5(),
+        ModelConfig::gpt_6_1_sol(),
+        ModelConfig::gemini_4_argon(),
+        ModelConfig::gemini_3_8_flash(),
+        ModelConfig::grok_4_7(),
+        ModelConfig::mistral_large_4(),
+        ModelConfig::glm_5_3(),
+        ModelConfig::glm_5_3_flash(),
+        ModelConfig::qwen_3_8_max(),
+        ModelConfig::qwen_3_8_flash(),
     ] {
         let entry = table
             .entry(&config.provider, &config.id)
@@ -402,6 +463,11 @@ fn audit(db: &serde_json::Value, all: &[Preset]) -> Outcome {
             "{provider}: peak rates, compared as twice models.dev's off-peak ones"
         ));
     }
+    for (provider, model) in PROMO_IS_HALF_REGULAR {
+        notes.push(format!(
+            "{provider}/{model}: regular rate, compared as twice models.dev's promotional one"
+        ));
+    }
 
     println!(
         "\n{:<30} {:<14} {:>10} {:>12}",
@@ -513,8 +579,7 @@ fn audit(db: &serde_json::Value, all: &[Preset]) -> Outcome {
                     compared += 1;
                     drift.extend(stale_allowance(p, name));
                     // The peak rate, against models.dev's off-peak one.
-                    let twice = PEAK_IS_TWICE_UPSTREAM.contains(&p.provider.as_str())
-                        && name != "cache_write";
+                    let twice = twice_upstream(&p.provider, &p.model) && name != "cache_write";
                     let expected = if twice { 2.0 * theirs } else { theirs };
                     let same = (ours - expected).abs() < 1e-9;
                     println!(
@@ -524,11 +589,15 @@ fn audit(db: &serde_json::Value, all: &[Preset]) -> Outcome {
                         ours,
                         theirs,
                         if same { "ok" } else { "DRIFT" },
-                        if twice { " (peak = 2 × off-peak)" } else { "" }
+                        if twice {
+                            " (2 × models.dev: peak or regular)"
+                        } else {
+                            ""
+                        }
                     );
                     if !same {
                         let rule = if twice {
-                            format!(" (expected the peak rate, {expected}: twice models.dev's off-peak)")
+                            format!(" (expected {expected}: twice models.dev's off-peak or promotional rate)")
                         } else {
                             String::new()
                         };
@@ -814,6 +883,7 @@ fn the_audit_logic_runs_offline_against_the_fixture() {
         "muse-spark-1.2",
         "deepseek-flash",
         "deepseek-v4-pro",
+        "mistral-large-4",
     ] {
         assert!(
             names.contains(&covered),
@@ -835,8 +905,17 @@ fn the_audit_logic_runs_offline_against_the_fixture() {
         o.notes
     );
     // Unlisted cache_write accepted by the allowance: gpt-5.5 base and tier,
-    // Muse Spark 1.2, and the three DeepSeek entries.
-    assert_eq!(o.absent, 6);
+    // Muse Spark 1.2, and the three DeepSeek entries; and Mistral Large 4's,
+    // which it does not set.
+    assert_eq!(o.absent, 7);
+    // A promotional entry is compared at twice models.dev's rate.
+    assert!(
+        o.notes
+            .iter()
+            .any(|n| n.starts_with("mistral/mistral-large-4: regular rate")),
+        "{:?}",
+        o.notes
+    );
 
     // Positive controls: each kind of drift is caught.
     let drift_after = |mutate: &dyn Fn(&mut Preset)| {
@@ -879,6 +958,18 @@ fn the_audit_logic_runs_offline_against_the_fixture() {
             .iter()
             .any(|d| d.contains("twice models.dev's off-peak")),
         "{off_peak:?}"
+    );
+    // A promotional entry carried at the promotional rate is drift: the
+    // crate carries the regular one.
+    let promo = drift_after(&|p| {
+        if p.model == "mistral-large-4" {
+            p.cost.input_per_million = 0.68;
+        }
+    });
+    assert_eq!(promo.len(), 1, "{promo:?}");
+    assert!(
+        promo[0].contains("twice models.dev's off-peak or promotional rate"),
+        "{promo:?}"
     );
     // Without the recorded gap, models.dev's `reasoning` rate is unknown
     // structure.

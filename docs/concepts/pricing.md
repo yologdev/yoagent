@@ -181,9 +181,15 @@ config is built**. Until the process opts in (above) the table is empty and
 every lookup is `None`. Once it has:
 
 - **Named presets** (`claude_fable_5`, `claude_fable_5_1`, `claude_opus_5_5`,
-  `claude_opus_5`, `claude_opus_4_8`, `claude_sonnet_5`, `claude_haiku_4_5`,
-  `gpt_5_5`, `gpt_6_astra`, `gpt_6_sol`, `gpt_6_luna`) are all listed in the
-  bundled snapshot.
+  `claude_opus_5`, `claude_opus_4_8`, `claude_sonnet_5`, `claude_sonnet_5_5`,
+  `claude_haiku_5_5`, `claude_haiku_4_5`, `gpt_5_5`, `gpt_6_astra`,
+  `gpt_6_sol`, `gpt_6_1_sol`, `gpt_6_luna`, `gemini_4_argon`,
+  `gemini_3_8_flash`, `grok_4_7`, `mistral_large_4`, `glm_5_3`,
+  `glm_5_3_flash`, `qwen_3_8_max`, `qwen_3_8_flash`) are all listed in the
+  bundled snapshot. Three carry the **regular** rate during a vendor
+  promotion (`gemini_4_argon` to 2026-11-30, `gemini_3_8_flash` to
+  2026-12-31, `mistral_large_4` to about 2026-10-20), so their costs read up
+  to twice the bill until it ends — an upper bound, like DeepSeek's peak rate.
 - **Generic first-party constructors** — those whose provider is in
   `PRICED_PROVIDERS`: `anthropic`, `openai` and `openai_responses` (both use
   provider `openai`), `google`, `xai`, `groq`, `deepseek`, `mistral`, `zai`,

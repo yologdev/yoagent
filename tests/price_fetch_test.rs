@@ -146,12 +146,23 @@ fn models_dev_fixture_maps_into_our_schema() {
         .cost("openrouter", "perplexity/sonar-deep-research")
         .is_none());
     assert!(t.cost("poe", "cerebras/qwen3-32b-cs").is_none());
-    assert_eq!(t.len(), 9);
+    assert_eq!(t.len(), 10);
 
     // Against the built-in data: every overlapping model agrees as billed
     // (gpt-5.5's implicit cache_write equals its explicit input-rate one), so
     // only new models are reported.
     let changes = t.changes_from(&PriceTable::builtin());
+    // Except a model on a vendor promotion: the snapshot carries the regular
+    // rate, models.dev the promotional half (what a live fetch installs).
+    let promo = |c: &yoagent::provider::prices::PriceChange| {
+        c.provider == "mistral" && c.model == "mistral-large-4"
+    };
+    let mistral = changes.iter().find(|c| promo(c)).expect("the promotion");
+    assert_eq!(
+        mistral.after.as_ref().map(|a| a.input_per_million),
+        Some(0.68)
+    );
+    let changes: Vec<_> = changes.into_iter().filter(|c| !promo(c)).collect();
     assert!(
         changes.iter().all(|c| c.before.is_none()),
         "{:?}",
@@ -184,7 +195,7 @@ fn a_changed_models_dev_envelope_is_an_error_not_an_empty_table() {
 fn the_models_dev_report_says_what_was_skipped_and_why() {
     let _g = exclusive();
     let report = PriceTable::from_models_dev_json_report(MODELS_DEV).unwrap();
-    assert_eq!(report.table.len(), 9);
+    assert_eq!(report.table.len(), 10);
     let reason = |p: &str, m: &str| {
         report
             .skipped
@@ -418,7 +429,7 @@ async fn an_expired_cache_is_refetched_and_rewritten() {
         "{:?}",
         got.origin
     );
-    assert_eq!(got.table.len(), 9);
+    assert_eq!(got.table.len(), 10);
     // The models.dev skip list reaches the caller.
     assert_eq!(got.skipped.len(), 5);
     // The cache now holds the mapped table and serves it, fresh.

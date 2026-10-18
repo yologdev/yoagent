@@ -356,5 +356,59 @@
     }
    }
   }
+ },
+ "mistral": {
+  "id": "mistral",
+  "env": [
+   "MISTRAL_API_KEY"
+  ],
+  "npm": "@ai-sdk/mistral",
+  "name": "Mistral",
+  "doc": "https://docs.mistral.ai/getting-started/models/",
+  "models": {
+   "mistral-large-4": {
+    "id": "mistral-large-4",
+    "name": "Mistral Large 4",
+    "description": "Mistral's 1T-parameter multimodal MoE for reasoning, coding, and agentic work",
+    "family": "mistral-large",
+    "attachment": true,
+    "reasoning": true,
+    "reasoning_options": [
+     {
+      "type": "effort",
+      "values": [
+       "none",
+       "high"
+      ]
+     }
+    ],
+    "tool_call": true,
+    "structured_output": true,
+    "temperature": true,
+    "release_date": "2026-10-06",
+    "last_updated": "2026-10-06",
+    "modalities": {
+     "input": [
+      "text",
+      "image"
+     ],
+     "output": [
+      "text"
+     ]
+    },
+    "open_weights": false,
+    "limit": {
+     "context": 1048576,
+     "output": 262144
+    },
+    "status": "beta",
+    "cost": {
+     "input": 0.68,
+     "output": 2.09,
+     "cache_read": 0.07
+    },
+    "canonical_model_id": "mistral/mistral-large-4"
+   }
+  }
  }
 }

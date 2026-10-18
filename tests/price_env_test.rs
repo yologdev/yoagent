@@ -15,7 +15,7 @@ fn env_var_file_overrides_what_it_lists_and_is_read_once() {
         &path,
         r#"{"schema": 1, "providers": {
             "anthropic": {"claude-haiku-4-5": {"input": 0.8, "output": 4.0}},
-            "xai": {"grok-4.7": {"input": 3.0, "output": 15.0, "cache_read": 0.75}}}}"#,
+            "xai": {"grok-4.6": {"input": 3.0, "output": 15.0, "cache_read": 0.75}}}}"#,
     )
     .unwrap();
     std::env::set_var("YOAGENT_PRICES", &path);
@@ -25,7 +25,7 @@ fn env_var_file_overrides_what_it_lists_and_is_read_once() {
     assert_eq!(haiku.input_per_million, 0.8);
     assert_eq!(haiku.cache_read_per_million, 0.0);
     assert_eq!(
-        ModelConfig::xai("grok-4.7", "Grok")
+        ModelConfig::xai("grok-4.6", "Grok")
             .cost
             .unwrap()
             .output_per_million,
@@ -102,7 +102,7 @@ fn env_var_file_overrides_what_it_lists_and_is_read_once() {
     reverted.sort();
     assert_eq!(
         reverted,
-        ["anthropic/claude-haiku-4-5:true", "xai/grok-4.7:false"]
+        ["anthropic/claude-haiku-4-5:true", "xai/grok-4.6:false"]
     );
     assert_eq!(
         ModelConfig::claude_haiku_4_5().cost,

@@ -15,32 +15,41 @@ Use a preset when the provider is listed here. Use a custom `ModelConfig` when y
 | `ModelConfig::claude_opus_5()` | Anthropic | `AnthropicMessages` | `https://api.anthropic.com/v1` | 1M | 64,000 |
 | `ModelConfig::claude_opus_4_8()` | Anthropic | `AnthropicMessages` | `https://api.anthropic.com/v1` | 1M | 64,000 |
 | `ModelConfig::claude_sonnet_5()` | Anthropic | `AnthropicMessages` | `https://api.anthropic.com/v1` | 1M | 64,000 |
+| `ModelConfig::claude_sonnet_5_5()` | Anthropic | `AnthropicMessages` | `https://api.anthropic.com/v1` | 1M | 64,000 |
+| `ModelConfig::claude_haiku_5_5()` | Anthropic | `AnthropicMessages` | `https://api.anthropic.com/v1` | 1M | 64,000 |
 | `ModelConfig::claude_haiku_4_5()` | Anthropic | `AnthropicMessages` | `https://api.anthropic.com/v1` | 200K | 32,000 |
 | `ModelConfig::openai(id, name)` | OpenAI | `OpenAiCompletions` | `https://api.openai.com/v1` | 128K | 4,096 |
 | `ModelConfig::openai_responses(id, name)` | OpenAI | `OpenAiResponses` | `https://api.openai.com/v1` | 128K | 16,000 |
 | `ModelConfig::gpt_5_5()` | OpenAI | `OpenAiCompletions` | `https://api.openai.com/v1` | 1M | 64,000 |
 | `ModelConfig::gpt_6_astra()` | OpenAI | `OpenAiResponses` | `https://api.openai.com/v1` | 1,050,000 | 64,000 |
 | `ModelConfig::gpt_6_sol()` | OpenAI | `OpenAiResponses` | `https://api.openai.com/v1` | 1,050,000 | 64,000 |
+| `ModelConfig::gpt_6_1_sol()` | OpenAI | `OpenAiResponses` | `https://api.openai.com/v1` | 1,050,000 | 64,000 |
 | `ModelConfig::gpt_6_luna()` | OpenAI | `OpenAiResponses` | `https://api.openai.com/v1` | 1,050,000 | 64,000 |
 | `ModelConfig::opencode_zen(model_id)` | OpenCode Zen | by model family | `https://opencode.ai/zen/v1` | 128K | 16,000 |
 | `ModelConfig::opencode_go(model_id)` | OpenCode Go | by model family | `https://opencode.ai/zen/go/v1` | 128K | 16,000 |
 | `ModelConfig::google(id, name)` | Google Gemini | `GoogleGenerativeAi` | `https://generativelanguage.googleapis.com` | 1M | 8,192 |
+| `ModelConfig::gemini_4_argon()` | Google Gemini | `GoogleGenerativeAi` | `https://generativelanguage.googleapis.com` | 1,048,576 | 65,536 |
+| `ModelConfig::gemini_3_8_flash()` | Google Gemini | `GoogleGenerativeAi` | `https://generativelanguage.googleapis.com` | 1,048,576 | 65,536 |
 | `ModelConfig::xai(id, name)` | xAI | `OpenAiCompletions` | `https://api.x.ai/v1` | 131,072 | 4,096 |
+| `ModelConfig::grok_4_7()` | xAI | `OpenAiCompletions` | `https://api.x.ai/v1` | 500,000 | 64,000 |
 | `ModelConfig::groq(id, name)` | Groq | `OpenAiCompletions` | `https://api.groq.com/openai/v1` | 128K | 4,096 |
 | `ModelConfig::deepseek(id, name)` | DeepSeek | `OpenAiCompletions` | `https://api.deepseek.com` | 1M | 384K |
 | `ModelConfig::mistral(id, name)` | Mistral | `OpenAiCompletions` | `https://api.mistral.ai/v1` | 128K | 4,096 |
+| `ModelConfig::mistral_large_4()` | Mistral | `OpenAiCompletions` | `https://api.mistral.ai/v1` | 1M | 32,768 |
 | `ModelConfig::minimax(id, name)` | MiniMax | `OpenAiCompletions` | `https://api.minimax.io/v1` | 1M | 4,096 |
 | `ModelConfig::meta(id, name)` | Meta (Muse Spark) — US-only preview as of 2026-07 | `OpenAiCompletions` | `https://api.meta.ai/v1` | 1M | 131,072 |
 | `ModelConfig::zai(id, name)` | Z.ai | `OpenAiCompletions` | `https://api.z.ai/api/paas/v4` | 128K | 4,096 |
+| `ModelConfig::glm_5_3()`, `glm_5_3_flash()` | Z.ai | `OpenAiCompletions` | `https://api.z.ai/api/paas/v4` | 1M | 128,000 |
 | `ModelConfig::qwen(id, name)` | Qwen / DashScope | `OpenAiCompletions` | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` | 128K | 4,096 |
+| `ModelConfig::qwen_3_8_max()`, `qwen_3_8_flash()` | Qwen / DashScope | `OpenAiCompletions` | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1` | 1M | 131,072 |
 | `ModelConfig::ollama(base_url, model_id)` | Ollama | `OpenAiCompletions` | caller provided | 128K | 4,096 |
 | `ModelConfig::openai_compat(base_url, model_id, provider, compat)` | Custom compatible server | `OpenAiCompletions` | caller provided | 128K | 4,096 |
 | `ModelConfig::local(base_url, model_id)` | Local compatible server | `OpenAiCompletions` | caller provided | 128K | 4,096 |
 | `ModelConfig::custom(api, provider, base_url, model_id, name)` | Any (Azure, Bedrock, Vertex, gateways) | caller provided | caller provided | 128K | 16,000 |
 
-The constructors do not validate model IDs. They send the `id` you pass through to the provider, which lets you use newly released model IDs before yoagent updates its examples.
+The generic constructors (`google(id, name)`, `xai`, `mistral`, …) assume conservative limits; for a model with a named preset, use the preset — it carries the model's real context window and output limit (a generic `ModelConfig::xai("grok-4.7", ..)` compacts at 131K and stops replies at 4,096 tokens). The constructors do not validate model IDs. They send the `id` you pass through to the provider, which lets you use newly released model IDs before yoagent updates its examples.
 
-**Nothing is priced until the process opts in** — `prices::enable_bundled()` (the bundled data file `src/provider/prices.json`, offline) or `prices::enable_live(..)` (native) — see [Model Pricing](../concepts/pricing.md#enabling-pricing). After that, prices are looked up by `(provider, id)` when the config is built. The named presets (`claude_fable_5`, `claude_fable_5_1`, `claude_opus_5_5`, `claude_opus_5`, `claude_opus_4_8`, `claude_sonnet_5`, `claude_haiku_4_5`, `gpt_5_5`, `gpt_6_astra`, `gpt_6_sol`, `gpt_6_luna`) are all in the snapshot (`cost: Some(CostConfig)`). The OpenAI ones carry a context tier: above 272K prompt tokens the whole request bills at the long-context rates (`gpt_5_5`'s long-band cached-input rate is unverified; see its `note` in the data file). The generic first-party constructors (`anthropic`, `openai`, `openai_responses`, `google`, `xai`, `groq`, `deepseek`, `mistral`, `zai`, `minimax`, `qwen`, `meta`) are priced when the file lists the id — `ModelConfig::anthropic("claude-sonnet-5", ..)` gets `claude_sonnet_5()`'s rates, `meta` prices `muse-spark-1.1`/`-1.2`, `deepseek` prices `deepseek-flash`/`deepseek-v4-pro`/`deepseek-v4-flash` at the peak rate (see [DeepSeek Models](#deepseek-models)) — and carry `cost: None` otherwise. Gateways and custom endpoints (`custom`, `openai_compat`, `local`, `ollama`, `opencode_zen`, `opencode_go`) are always `cost: None`, since what they bill is not the vendor's list price. `None` means pricing **unknown**, not free; set `config.cost = Some(CostConfig::new(input, output))` yourself if you want cost reporting. The OpenCode presets select the API protocol from the model id — see [OpenCode Zen & Go](opencode.md).
+**Nothing is priced until the process opts in** — `prices::enable_bundled()` (the bundled data file `src/provider/prices.json`, offline) or `prices::enable_live(..)` (native) — see [Model Pricing](../concepts/pricing.md#enabling-pricing). After that, prices are looked up by `(provider, id)` when the config is built. The named presets (`claude_fable_5`, `claude_fable_5_1`, `claude_opus_5_5`, `claude_opus_5`, `claude_opus_4_8`, `claude_sonnet_5`, `claude_sonnet_5_5`, `claude_haiku_5_5`, `claude_haiku_4_5`, `gpt_5_5`, `gpt_6_astra`, `gpt_6_sol`, `gpt_6_1_sol`, `gpt_6_luna`, `gemini_4_argon`, `gemini_3_8_flash`, `grok_4_7`, `mistral_large_4`, `glm_5_3`, `glm_5_3_flash`, `qwen_3_8_max`, `qwen_3_8_flash`) are all in the snapshot (`cost: Some(CostConfig)`). The OpenAI ones carry a context tier: above 272K prompt tokens the whole request bills at the long-context rates (`gpt_5_5`'s long-band cached-input rate is unverified; see its `note` in the data file); so do `claude_haiku_5_5` (above 100K) and `grok_4_7` (from 200K). `gemini_4_argon`, `gemini_3_8_flash` and `mistral_large_4` carry the **regular** rate while their vendors run a promotion (Gemini 4 Argon through 2026-11-30, 3.8 Flash through 2026-12-31, Mistral's launch sale to about 2026-10-20): until then their costs read up to twice the bill, an upper bound, as with DeepSeek's peak rate. The generic first-party constructors (`anthropic`, `openai`, `openai_responses`, `google`, `xai`, `groq`, `deepseek`, `mistral`, `zai`, `minimax`, `qwen`, `meta`) are priced when the file lists the id — `ModelConfig::anthropic("claude-sonnet-5", ..)` gets `claude_sonnet_5()`'s rates, `meta` prices `muse-spark-1.1`/`-1.2`, `deepseek` prices `deepseek-flash`/`deepseek-v4-pro` and the legacy `deepseek-v4-flash`/`deepseek-v4-flash-vision-exp` at the peak rate (see [DeepSeek Models](#deepseek-models)) — and carry `cost: None` otherwise. Gateways and custom endpoints (`custom`, `openai_compat`, `local`, `ollama`, `opencode_zen`, `opencode_go`) are always `cost: None`, since what they bill is not the vendor's list price. `None` means pricing **unknown**, not free; set `config.cost = Some(CostConfig::new(input, output))` yourself if you want cost reporting. The OpenCode presets select the API protocol from the model id — see [OpenCode Zen & Go](opencode.md).
 
 The `claude_*` presets also set `AnthropicCompat::native_structured_output`, so `Agent::prompt_structured` uses the API's native JSON outputs instead of a forced tool call. `claude_fable_5_1` and `claude_opus_5_5` depend on it, because both models reject forced `tool_choice`. `ModelConfig::anthropic(id, name)` infers it (and the thinking mode) from a Claude id, and leaves it off for any other id. See [Structured Outputs](../concepts/structured-outputs.md).
 
@@ -68,7 +77,7 @@ the model's real top rung instead of being clamped to `high`:
 | Preset | Protocol | Effort ceiling | `XHigh` → | `Max` → |
 |--------|----------|----------------|-----------|---------|
 | `gpt_5_5()` | Chat Completions | `xhigh` | `xhigh` | `xhigh` |
-| `gpt_6_astra()`, `gpt_6_sol()`, `gpt_6_luna()` | Responses | `max` | `xhigh` | `max` |
+| `gpt_6_astra()`, `gpt_6_sol()`, `gpt_6_1_sol()`, `gpt_6_luna()` | Responses | `max` | `xhigh` | `max` |
 
 `ThinkingLevel::Off` omits the effort on every preset, so the model runs at
 its own default (`medium` on GPT-5.5, Sol and Luna) — it does not turn
@@ -145,13 +154,13 @@ let qwen_ollama = ModelConfig::openai_compat(
 Use the current DeepSeek API model IDs:
 
 ```rust
-let flash = ModelConfig::deepseek("deepseek-flash", "DeepSeek Flash"); // V4.1 Flash
+let flash = ModelConfig::deepseek("deepseek-flash", "DeepSeek Flash"); // V4.1 Flash (1017), takes images
 let pro = ModelConfig::deepseek("deepseek-v4-pro", "DeepSeek V4 Pro");
 ```
 
 **Pricing** (after `prices::enable_bundled()`): `deepseek-flash` and `deepseek-v4-flash` at $0.30 input / $0.006 cache hit / $1.20 output per million tokens, `deepseek-v4-pro` at $1.32 / $0.044 / $3.96 — DeepSeek's **peak** rates. Off-peak (every hour but 01:00–04:00 and 06:00–10:00 UTC on weekdays) DeepSeek bills half; a `CostConfig` has no time of day, so reported costs are an upper bound and a `Budget` stops early rather than late. To count off-peak rates, install them as an override ([Model Pricing](../concepts/pricing.md#which-constructors-are-priced)).
 
-The legacy names `deepseek-chat` and `deepseek-reasoner` were discontinued on 2026-07-24; requests using them fail. `deepseek-v4-flash` (and `deepseek-v4-flash-vision-exp`) are still accepted, but the V4 Flash model behind them is retired — DeepSeek serves those requests with V4.1 Flash at the Flash price. Prefer `deepseek-flash`.
+The legacy names `deepseek-chat` and `deepseek-reasoner` were discontinued on 2026-07-24; requests using them fail. `deepseek-v4-flash` (and `deepseek-v4-flash-vision-exp`) are still accepted, but the V4 Flash model behind them is retired — DeepSeek serves those requests with V4.1 Flash at the Flash price. Prefer `deepseek-flash`. Since the V4.1-Flash-1017 snapshot, `deepseek-flash` accepts images (`deepseek-v4-pro` does not); yoagent sends them as OpenAI-style `image_url` parts, as for every OpenAI-compatible provider.
 
 yoagent also sends DeepSeek's current request shape:
 

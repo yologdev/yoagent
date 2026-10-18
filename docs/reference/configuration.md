@@ -153,7 +153,7 @@ except for `Off`.
 ² `OpenAiCompat::max_reasoning_effort` (a `ReasoningEffortCeiling`, default
 `High`) is declared per model — the Responses and Azure providers read it from
 `ModelConfig::compat` too. Presets: `gpt_6_astra` / `gpt_6_sol` /
-`gpt_6_luna` — `Max`; `gpt_5_5` — `XHigh`; `OpenAiCompat::xai()` — `XHigh`
+`gpt_6_1_sol` / `gpt_6_luna` — `Max`; `gpt_5_5` — `XHigh`; `OpenAiCompat::xai()` — `XHigh`
 (Grok treats `xhigh` as `high` where it lacks the rung); everything else
 `High`. A clamp is logged once per process with `tracing::warn!`.
 
@@ -212,7 +212,9 @@ the process-wide price table — **empty until the process opts in** with
 `prices::enable_bundled()` (the bundled `src/provider/prices.json`) or
 `prices::enable_live(..)`; see [Model Pricing](../concepts/pricing.md#enabling-pricing).
 `None` means **pricing unknown**, not free. Once opted in, the named presets (`claude_*`,
-`gpt_5_5`, `gpt_6_astra` / `gpt_6_sol` / `gpt_6_luna`) are all priced; the
+`gpt_5_5`, `gpt_6_astra` / `gpt_6_sol` / `gpt_6_1_sol` / `gpt_6_luna`, `gemini_4_argon`,
+`gemini_3_8_flash`, `grok_4_7`, `mistral_large_4`, `glm_5_3` / `glm_5_3_flash`,
+`qwen_3_8_max` / `qwen_3_8_flash`) are all priced; the
 generic first-party constructors (`anthropic`, `openai`, `openai_responses`,
 `google`, `xai`, `groq`, `deepseek`, `mistral`, `zai`, `minimax`, `qwen`,
 `meta`) are priced when the table lists the id — so
@@ -283,9 +285,11 @@ CostConfig::new(5.0, 30.0)
 
 Tiers are kept sorted, and `cost_usd` takes the last one the prompt clears, so a
 multi-step schedule works. The whole request moves to the tier's rates. The
-OpenAI presets `gpt_5_5`, `gpt_6_astra`, `gpt_6_sol` and `gpt_6_luna` set one
-at 272,000 prompt tokens (exclusive); `gpt_5_5`'s long-band cache-read rate is
-unverified — see its rustdoc. The Anthropic and Meta presets are flat. A tier's
+OpenAI presets `gpt_5_5`, `gpt_6_astra`, `gpt_6_sol`, `gpt_6_1_sol` and
+`gpt_6_luna` set one at 272,000 prompt tokens (exclusive); `gpt_5_5`'s
+long-band cache-read rate is unverified — see its rustdoc. `claude_haiku_5_5`
+sets one at 100,000 and `grok_4_7` at 200,000. The other Anthropic presets and
+the Meta presets are flat. A tier's
 cache rate left at `0.0` bills at that tier's input rate.
 
 One caveat if you add a tier: prompt size is derived as

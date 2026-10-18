@@ -14,13 +14,15 @@ use yoagent::provider::{ContextTier, CostConfig, ModelConfig};
 
 fn pinned() -> Vec<(&'static str, ModelConfig, CostConfig)> {
     let flat = |i, o, r, w| CostConfig::new(i, o).with_cache_read(r).with_cache_write(w);
-    let tiered = |base: CostConfig, i, o, r, w| {
+    let tiered_at = |above, base: CostConfig, i, o, r, w| {
         base.with_context_tier(
-            ContextTier::new(272_000, i, o)
+            ContextTier::new(above, i, o)
                 .with_cache_read(r)
                 .with_cache_write(w),
         )
     };
+    let tiered = |base: CostConfig, i, o, r, w| tiered_at(272_000, base, i, o, r, w);
+    let read_only = |i, o, r| CostConfig::new(i, o).with_cache_read(r);
     vec![
         (
             "claude_fable_5",
@@ -87,6 +89,58 @@ fn pinned() -> Vec<(&'static str, ModelConfig, CostConfig)> {
             ModelConfig::meta("muse-spark-1.2", "Muse Spark 1.2"),
             flat(1.25, 4.25, 0.15, 1.25),
         ),
+        (
+            "claude_sonnet_5_5",
+            ModelConfig::claude_sonnet_5_5(),
+            flat(2.0, 10.0, 0.1, 2.5),
+        ),
+        (
+            "claude_haiku_5_5",
+            ModelConfig::claude_haiku_5_5(),
+            tiered_at(100_000, flat(0.1, 0.5, 0.01, 0.125), 0.5, 2.5, 0.05, 0.625),
+        ),
+        (
+            "gpt_6_1_sol",
+            ModelConfig::gpt_6_1_sol(),
+            tiered(flat(2.0, 10.0, 0.1, 2.5), 4.0, 15.0, 0.2, 5.0),
+        ),
+        (
+            "gemini_4_argon",
+            ModelConfig::gemini_4_argon(),
+            read_only(4.0, 20.0, 0.2),
+        ),
+        (
+            "gemini_3_8_flash",
+            ModelConfig::gemini_3_8_flash(),
+            read_only(1.5, 7.5, 0.15),
+        ),
+        (
+            "grok_4_7",
+            ModelConfig::grok_4_7(),
+            read_only(2.0, 6.0, 0.5)
+                .with_context_tier(ContextTier::new(200_000, 4.0, 12.0).with_cache_read(1.0)),
+        ),
+        (
+            "mistral_large_4",
+            ModelConfig::mistral_large_4(),
+            read_only(1.36, 4.18, 0.14),
+        ),
+        ("glm_5_3", ModelConfig::glm_5_3(), read_only(1.4, 4.4, 0.26)),
+        (
+            "glm_5_3_flash",
+            ModelConfig::glm_5_3_flash(),
+            read_only(0.15, 0.5, 0.03),
+        ),
+        (
+            "qwen_3_8_max",
+            ModelConfig::qwen_3_8_max(),
+            flat(2.0, 6.0, 0.25, 2.5),
+        ),
+        (
+            "qwen_3_8_flash",
+            ModelConfig::qwen_3_8_flash(),
+            flat(0.15, 0.47, 0.016, 0.2),
+        ),
     ]
 }
 
@@ -111,6 +165,11 @@ fn expected_max_tokens(name: &str) -> u32 {
         | "gpt_6_luna" => 64_000,
         "claude_haiku_4_5" => 32_000,
         "meta(muse-spark-1.1)" | "meta(muse-spark-1.2)" => 131_072,
+        "claude_sonnet_5_5" | "claude_haiku_5_5" | "gpt_6_1_sol" | "grok_4_7" => 64_000,
+        "gemini_4_argon" | "gemini_3_8_flash" => 65_536,
+        "mistral_large_4" => 32_768,
+        "glm_5_3" | "glm_5_3_flash" => 128_000,
+        "qwen_3_8_max" | "qwen_3_8_flash" => 131_072,
         _ => panic!("unrecognized pinned preset: {name}"),
     }
 }

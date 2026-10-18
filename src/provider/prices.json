@@ -62,6 +62,33 @@
         "note": "Shipped Sonnet 4.6's $3/$15 from v0.9.0 through v0.16.5; these are Sonnet 5's own rates.",
         "source": "https://platform.claude.com/docs/en/about-claude/pricing",
         "verified": "2026-08-19"
+      },
+      "claude-sonnet-5-5": {
+        "input": 2.0,
+        "output": 10.0,
+        "cache_read": 0.1,
+        "cache_write": 2.5,
+        "note": "5-minute cache write; the 1-hour write is $4.00. No long-context tier: the full 1M bills at these rates.",
+        "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+        "verified": "2026-10-18"
+      },
+      "claude-haiku-5-5": {
+        "input": 0.1,
+        "output": 0.5,
+        "cache_read": 0.01,
+        "cache_write": 0.125,
+        "tiers": [
+          {
+            "above_prompt_tokens": 100000,
+            "input": 0.5,
+            "output": 2.5,
+            "cache_read": 0.05,
+            "cache_write": 0.625
+          }
+        ],
+        "note": "Prompts over 100,000 tokens (input + cache reads + cache writes) bill the whole request at the second rates. 5-minute cache write; the 1-hour write is $0.20 / $1.00.",
+        "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+        "verified": "2026-10-18"
       }
     },
     "deepseek": {
@@ -84,6 +111,16 @@
             "note": "The legacy name: served by DeepSeek-V4.1-Flash and billed at the deepseek-flash price. Peak rate. DeepSeek bills half of it off-peak: all hours but 01:00-04:00 and 06:00-10:00 UTC on weekdays (about 79% of the week). A flat CostConfig has no time of day, so the peak rate is the upper bound: costs are over-stated off-peak, never under-stated, and a Budget stops early rather than late.",
             "source": "https://api-docs.deepseek.com/quick_start/pricing",
             "verified": "2026-10-16"
+        },
+        "deepseek-v4-flash-vision-exp": {
+            "input": 0.3,
+            "output": 1.2,
+            "cache_read": 0.006,
+            "cache_write": 0.3,
+            "cache_write_at_input": true,
+            "note": "The legacy name of a retired vision experiment: served by DeepSeek-V4.1-Flash-1017 (deepseek-flash, which takes images) and billed at the deepseek-flash price. Peak rate. DeepSeek bills half of it off-peak: all hours but 01:00-04:00 and 06:00-10:00 UTC on weekdays (about 79% of the week). A flat CostConfig has no time of day, so the peak rate is the upper bound: costs are over-stated off-peak, never under-stated, and a Budget stops early rather than late.",
+            "source": "https://api-docs.deepseek.com/quick_start/pricing",
+            "verified": "2026-10-18"
         },
         "deepseek-v4-pro": {
             "input": 1.32,
@@ -188,6 +225,106 @@
         ],
         "source": "https://developers.openai.com/api/docs/pricing",
         "verified": "2026-09-25"
+      },
+      "gpt-6.1-sol": {
+        "input": 2.0,
+        "output": 10.0,
+        "cache_read": 0.1,
+        "cache_write": 2.5,
+        "tiers": [
+          {
+            "above_prompt_tokens": 272000,
+            "input": 4.0,
+            "output": 15.0,
+            "cache_read": 0.2,
+            "cache_write": 5.0
+          }
+        ],
+        "source": "https://developers.openai.com/api/docs/pricing",
+        "verified": "2026-10-18"
+      }
+    },
+    "google": {
+      "gemini-3.8-flash": {
+        "input": 1.5,
+        "output": 7.5,
+        "cache_read": 0.15,
+        "note": "Regular price. Google bills an introductory $0.75 / $3.75 / $0.075 through 2026-12-31: until then costs read twice the bill (an upper bound, so a Budget stops early, never late). Context-cache storage ($1.00 per 1M tokens per hour) is not modelled.",
+        "source": "https://ai.google.dev/gemini-api/docs/pricing",
+        "verified": "2026-10-18"
+      },
+      "gemini-4-argon": {
+        "input": 4.0,
+        "output": 20.0,
+        "cache_read": 0.2,
+        "note": "Regular price. Google bills an introductory $2 / $10 / $0.10 through 2026-11-30: until then costs read twice the bill (an upper bound, so a Budget stops early, never late). No context tier.",
+        "source": "https://ai.google.dev/gemini-api/docs/pricing",
+        "verified": "2026-10-18"
+      }
+    },
+    "mistral": {
+      "mistral-large-4": {
+        "input": 1.36,
+        "output": 4.18,
+        "cache_read": 0.14,
+        "note": "Regular price. Mistral's launch sale (50% off for two weeks from 2026-10-06) bills half of it until about 2026-10-20.",
+        "source": "https://docs.mistral.ai/models/mistral-large-4-0",
+        "verified": "2026-10-18"
+      }
+    },
+    "qwen": {
+      "qwen3.8-flash": {
+        "input": 0.15,
+        "output": 0.47,
+        "cache_read": 0.016,
+        "cache_write": 0.2,
+        "note": "International (Singapore) deployment, the endpoint ModelConfig::qwen uses; the Global and Beijing scopes bill less.",
+        "source": "https://www.alibabacloud.com/help/en/model-studio/model-pricing",
+        "verified": "2026-10-18"
+      },
+      "qwen3.8-max": {
+        "input": 2.0,
+        "output": 6.0,
+        "cache_read": 0.25,
+        "cache_write": 2.5,
+        "note": "International (Singapore) deployment, the endpoint ModelConfig::qwen uses. cache_read is the implicit-cache rate; an explicit-cache read bills $0.17. The Global and Beijing scopes bill less.",
+        "source": "https://www.alibabacloud.com/help/en/model-studio/model-pricing",
+        "verified": "2026-10-18"
+      }
+    },
+    "xai": {
+      "grok-4.7": {
+        "input": 2.0,
+        "output": 6.0,
+        "cache_read": 0.5,
+        "tiers": [
+          {
+            "above_prompt_tokens": 200000,
+            "input": 4.0,
+            "output": 12.0,
+            "cache_read": 1.0
+          }
+        ],
+        "note": "Prompts of 200,000 tokens or more bill the whole request at the second rates (this table's threshold is exclusive, so a prompt of exactly 200,000 tokens is billed at the lower rate). The US-region endpoint bills 10% more.",
+        "source": "https://docs.x.ai/docs/models",
+        "verified": "2026-10-18"
+      }
+    },
+    "zai": {
+      "glm-5.3": {
+        "input": 1.4,
+        "output": 4.4,
+        "cache_read": 0.26,
+        "note": "Cache storage is free for a limited time.",
+        "source": "https://docs.z.ai/guides/overview/pricing",
+        "verified": "2026-10-18"
+      },
+      "glm-5.3-flash": {
+        "input": 0.15,
+        "output": 0.5,
+        "cache_read": 0.03,
+        "source": "https://docs.z.ai/guides/overview/pricing",
+        "verified": "2026-10-18"
       }
     },
     "cloudflare": {

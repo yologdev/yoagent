@@ -22,7 +22,7 @@ and unpriced (`cost: None`) otherwise. For an unlisted model, set `cost` to a
 field.
 
 The GPT-6 presets — `ModelConfig::gpt_6_astra()`, `gpt_6_sol()`,
-`gpt_6_luna()` — are built on `openai_responses` and priced (after the opt-in), including their
+`gpt_6_1_sol()`, `gpt_6_luna()` — are built on `openai_responses` and priced (after the opt-in), including their
 272K context tier. They use Responses because Chat Completions does not
 support function calling with GPT-6 Astra, and on Sol/Luna allows it only at
 reasoning effort `none`. This provider does not enforce `prompt_structured`

@@ -1506,6 +1506,48 @@ impl ModelConfig {
         }
     }
 
+    /// Claude Sonnet 5.5. 1M context; defaults to 64K of the model's 128K max
+    /// output.
+    ///
+    /// Adaptive thinking only: `budget_tokens` and `{"type": "disabled"}` are
+    /// a 400, so `ThinkingLevel::Off` sends no thinking field and the model
+    /// runs at its default effort (`high`). A non-default `temperature`,
+    /// `top_p` or `top_k` is a 400 too.
+    ///
+    /// Rates verified against <https://platform.claude.com/docs/en/about-claude/pricing>
+    /// on 2026-10-18 ($2 / $10, cached $0.10, 5-minute cache write $2.50; no
+    /// long-context tier). Carried in `prices.json`; see [`CostConfig`] — a
+    /// snapshot, not an authority.
+    pub fn claude_sonnet_5_5() -> Self {
+        Self {
+            context_window: 1_000_000,
+            max_tokens: 64_000,
+            anthropic: Some(AnthropicCompat::default().with_native_structured_output(true)),
+            ..Self::anthropic("claude-sonnet-5-5", "Claude Sonnet 5.5")
+        }
+    }
+
+    /// Claude Haiku 5.5. 1M context; defaults to 64K of the model's 128K max
+    /// output.
+    ///
+    /// Adaptive thinking, unlike Haiku 4.5 (`budget_tokens` is a 400); its
+    /// default effort is `medium`. A non-default `temperature`, `top_p` or
+    /// `top_k` is a 400.
+    ///
+    /// Rates verified against <https://platform.claude.com/docs/en/about-claude/pricing>
+    /// on 2026-10-18: $0.10 / $0.50, cached $0.01, cache write $0.125; a
+    /// prompt over 100,000 tokens (input + cache reads + cache writes) bills
+    /// the whole request at $0.50 / $2.50 / $0.05 / $0.625. Carried in
+    /// `prices.json`; see [`CostConfig`] — a snapshot, not an authority.
+    pub fn claude_haiku_5_5() -> Self {
+        Self {
+            context_window: 1_000_000,
+            max_tokens: 64_000,
+            anthropic: Some(AnthropicCompat::default().with_native_structured_output(true)),
+            ..Self::anthropic("claude-haiku-5-5", "Claude Haiku 5.5")
+        }
+    }
+
     /// GPT-5.5. ~1M context; defaults to 64K of the model's 128K max output.
     /// Uses the Chat Completions API.
     ///
@@ -1631,6 +1673,30 @@ impl ModelConfig {
         Self::gpt_6("gpt-6-luna", "GPT-6 Luna")
     }
 
+    /// GPT-6.1 Sol (`gpt-6.1-sol`), the successor to
+    /// [`gpt_6_sol`](Self::gpt_6_sol) and Codex's default model.
+    /// 1,050,000-token context (922,000 input); defaults to 64K of the
+    /// model's 128K max output.
+    ///
+    /// **Uses the Responses API**, for the same reason as `gpt_6_sol`: tool
+    /// calling needs it.
+    ///
+    /// Reasoning effort: `low`/`medium` (default)/`high`/`xhigh`/`max`,
+    /// ceiling [`ReasoningEffortCeiling::Max`]; `none` and `minimal` are not
+    /// supported, so `Minimal` is sent as `low` and `ThinkingLevel::Off`
+    /// omits the effort (the model's default). Do not set a `temperature`.
+    ///
+    /// **Structured outputs are not enforced:** the Responses provider warns
+    /// and ignores [`Agent::prompt_structured`](crate::Agent::prompt_structured)'s
+    /// schema.
+    ///
+    /// Priced per OpenAI's pricing page (read 2026-10-18): $2 input / $0.10
+    /// cached / $2.50 cache write / $10 output; above 272K prompt tokens the
+    /// whole request bills at $4 / $0.20 / $5 / $15. See [`CostConfig`].
+    pub fn gpt_6_1_sol() -> Self {
+        Self::gpt_6("gpt-6.1-sol", "GPT-6.1 Sol")
+    }
+
     /// Shared shape of the GPT-6 presets. There is no bare `gpt-6` model id.
     ///
     /// `compat` carries only the effort capability here — the Responses
@@ -1647,6 +1713,138 @@ impl ModelConfig {
                 ..OpenAiCompat::openai()
             }),
             ..Self::openai_responses(id, name)
+        }
+    }
+
+    /// Gemini 4 Argon. 1,048,576-token context; defaults to the model's
+    /// 65,536-token streaming output cap (a non-streaming request caps at
+    /// 32,768; this crate streams).
+    ///
+    /// Thinking is always on: `thinkingLevel` `low`/`medium` (default)/`high`
+    /// (`minimal` is an error, which this crate never sends to it);
+    /// `ThinkingLevel::Off` sends no `thinkingConfig`, so the model runs at
+    /// `medium`. Sampling parameters are ignored.
+    ///
+    /// Priced at the **regular** rate, $4 / $20, cached $0.20 per Google's
+    /// pricing page (read 2026-10-18) — Google bills an introductory $2 / $10
+    /// / $0.10 through 2026-11-30, so until then costs read twice the bill: an
+    /// upper bound, so a `Budget` stops early, never late. See [`CostConfig`].
+    pub fn gemini_4_argon() -> Self {
+        Self {
+            reasoning: true,
+            context_window: 1_048_576,
+            max_tokens: 65_536,
+            ..Self::google("gemini-4-argon", "Gemini 4 Argon")
+        }
+    }
+
+    /// Gemini 3.8 Flash. 1,048,576-token context, 65,536 max output.
+    ///
+    /// `thinkingLevel` `low`/`medium` (default)/`high`; `minimal` is an
+    /// error, which this crate never sends to it.
+    ///
+    /// Priced at the **regular** rate, $1.50 / $7.50, cached $0.15 per
+    /// Google's pricing page (read 2026-10-18) — Google bills an introductory
+    /// $0.75 / $3.75 / $0.075 through 2026-12-31, so until then costs read
+    /// twice the bill (an upper bound). Context-cache storage is not
+    /// modelled. See [`CostConfig`].
+    pub fn gemini_3_8_flash() -> Self {
+        Self {
+            reasoning: true,
+            context_window: 1_048_576,
+            max_tokens: 65_536,
+            ..Self::google("gemini-3.8-flash", "Gemini 3.8 Flash")
+        }
+    }
+
+    /// Grok 4.7. 500,000-token context; xAI states no output limit beyond
+    /// the context, so this defaults to 64K.
+    ///
+    /// Reasoning is always on: `reasoning_effort` `low`/`medium`/`high`
+    /// (default)/`xhigh` ([`OpenAiCompat::xai`]'s ceiling); `ThinkingLevel::Off`
+    /// omits it.
+    ///
+    /// Priced per xAI's model docs (read 2026-10-18): $2 / $6, cached $0.50;
+    /// a prompt of 200,000 tokens or more bills the whole request at $4 / $12
+    /// / $1. The US-region endpoint bills 10% more. See [`CostConfig`].
+    pub fn grok_4_7() -> Self {
+        Self {
+            reasoning: true,
+            context_window: 500_000,
+            max_tokens: 64_000,
+            ..Self::xai("grok-4.7", "Grok 4.7")
+        }
+    }
+
+    /// Mistral Large 4 (public preview). 1M-token context per Mistral's model
+    /// card; Mistral publishes no output limit, so this defaults to 32K.
+    ///
+    /// Reasoning (`reasoning_effort` `high` or `none`) is not sent by this
+    /// preset: the model runs at its own default.
+    ///
+    /// Priced at the **regular** rate, $1.36 / $4.18, cached $0.14 (read
+    /// 2026-10-18) — Mistral's launch sale bills half until about 2026-10-20.
+    /// See [`CostConfig`].
+    pub fn mistral_large_4() -> Self {
+        Self {
+            context_window: 1_000_000,
+            max_tokens: 32_768,
+            ..Self::mistral("mistral-large-4", "Mistral Large 4")
+        }
+    }
+
+    /// GLM-5.3. 1M-token context, 128K max output.
+    ///
+    /// Thinking is always on (`thinking.type` accepts only `enabled`); its
+    /// `reasoning_effort` (`low`/`high`/`max`, default `max`) is not sent by
+    /// this preset.
+    ///
+    /// Priced per Z.ai's pricing page (read 2026-10-18): $1.40 / $4.40,
+    /// cached $0.26. See [`CostConfig`].
+    pub fn glm_5_3() -> Self {
+        Self {
+            reasoning: true,
+            context_window: 1_000_000,
+            max_tokens: 128_000,
+            ..Self::zai("glm-5.3", "GLM-5.3")
+        }
+    }
+
+    /// GLM-5.3-Flash: [`glm_5_3`](Self::glm_5_3)'s shape at $0.15 / $0.50,
+    /// cached $0.03 (Z.ai's pricing page, read 2026-10-18).
+    pub fn glm_5_3_flash() -> Self {
+        Self {
+            reasoning: true,
+            context_window: 1_000_000,
+            max_tokens: 128_000,
+            ..Self::zai("glm-5.3-flash", "GLM-5.3-Flash")
+        }
+    }
+
+    /// Qwen3.8-Max on Alibaba Cloud Model Studio's international endpoint.
+    /// 1,000,000-token context (991,808 input), 131,072 max output.
+    ///
+    /// Thinking is on by default (`enable_thinking`, [`OpenAiCompat::qwen`]).
+    ///
+    /// Priced for the international (Singapore) deployment (read
+    /// 2026-10-18): $2 / $6, implicit-cache read $0.25, explicit-cache
+    /// creation $2.50. See [`CostConfig`].
+    pub fn qwen_3_8_max() -> Self {
+        Self {
+            context_window: 1_000_000,
+            max_tokens: 131_072,
+            ..Self::qwen("qwen3.8-max", "Qwen3.8-Max")
+        }
+    }
+
+    /// Qwen3.8-Flash: [`qwen_3_8_max`](Self::qwen_3_8_max)'s shape at $0.15 /
+    /// $0.47, cached $0.016, cache creation $0.20 (international deployment,
+    /// read 2026-10-18).
+    pub fn qwen_3_8_flash() -> Self {
+        Self {
+            context_window: 1_000_000,
+            max_tokens: 131_072,
+            ..Self::qwen("qwen3.8-flash", "Qwen3.8-Flash")
         }
     }
 
@@ -2072,11 +2270,13 @@ impl ModelConfig {
 
     /// Create a new DeepSeek model config.
     ///
-    /// Models: `deepseek-flash` (V4.1 Flash), `deepseek-v4-pro`.
+    /// Models: `deepseek-flash` (V4.1 Flash, snapshot `DeepSeek-V4.1-Flash-1017`,
+    /// which takes images), `deepseek-v4-pro` (text only).
     ///
     /// The legacy names `deepseek-chat` and `deepseek-reasoner` were
-    /// discontinued on 2026-07-24. `deepseek-v4-flash` is still accepted but
-    /// served by V4.1 Flash; prefer `deepseek-flash`.
+    /// discontinued on 2026-07-24. `deepseek-v4-flash` and
+    /// `deepseek-v4-flash-vision-exp` are still accepted but served by V4.1
+    /// Flash at its price; prefer `deepseek-flash`.
     pub fn deepseek(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             id: id.into(),

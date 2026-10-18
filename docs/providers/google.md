@@ -10,7 +10,9 @@ Two providers for Google's Gemini models:
 ```rust
 use yoagent::provider::ModelConfig;
 
-let agent = Agent::from_config(ModelConfig::google("gemini-3.8-flash", "Gemini 3.8 Flash"));
+// The preset carries the model's real limits (1,048,576 context, 65,536 output)
+// and its price; `ModelConfig::google(id, name)` works for any other Gemini id.
+let agent = Agent::from_config(ModelConfig::gemini_3_8_flash());
 ```
 
 ### API Details
