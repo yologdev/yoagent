@@ -769,10 +769,21 @@ export default definePlugin({
 })
 "#;
 
+/// Takes 1.5 s in `apply`: its row reads loading meanwhile.
+const JS_SLOW: &str = r#"
+import { definePlugin } from 'RUTIS'
+export default definePlugin({
+  async apply() {
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+  },
+})
+"#;
+
 struct Fixtures {
     js: PathBuf,
     row: PathBuf,
     needs: PathBuf,
+    slow: PathBuf,
     strict: PathBuf,
     cancel: PathBuf,
     images: PathBuf,
@@ -795,6 +806,8 @@ fn fixtures() -> Fixtures {
     std::fs::write(&row, JS_ROW.replace("RUTIS", &rutis)).unwrap();
     let needs = dir.path().join("needs.mjs");
     std::fs::write(&needs, JS_NEEDS.replace("RUTIS", &rutis)).unwrap();
+    let slow = dir.path().join("slow.mjs");
+    std::fs::write(&slow, JS_SLOW.replace("RUTIS", &rutis)).unwrap();
     let cancel = dir.path().join("cancel.mjs");
     std::fs::write(&cancel, JS_CANCEL.replace("RUTIS", &rutis)).unwrap();
     let images = dir.path().join("images.mjs");
@@ -818,6 +831,7 @@ fn fixtures() -> Fixtures {
         js,
         row,
         needs,
+        slow,
         strict,
         cancel,
         images,
@@ -1253,13 +1267,80 @@ async fn wait_running_names_the_services_a_waiting_row_lacks() {
     assert_eq!(error.rows[0].state, yoagent_rutis::rows::RowState::Waiting);
     assert_eq!(
         error.rows[0].missing,
-        vec!["yoagentNoSuchService".to_string()],
+        Some(vec!["yoagentNoSuchService".to_string()]),
         "{error}"
     );
+    assert_eq!(error.rows[0].note, None, "{error}");
     assert!(
         error
             .to_string()
             .contains("nothing provides yoagentNoSuchService"),
+        "{error}"
+    );
+    host.root.shutdown().await.unwrap();
+}
+
+/// `rows::wait_running` ends at once on a row that never runs — no such
+/// row, a module that does not resolve — and waits for one still loading.
+#[cfg(feature = "loader")]
+#[tokio::test(flavor = "multi_thread")]
+async fn wait_running_ends_at_once_or_waits_by_state() {
+    use yoagent_rutis::rows::{wait_running, RowState};
+    let Some(node) = node_runtime() else {
+        return;
+    };
+    let fixtures = fixtures();
+    let host = host(Some(&node), None).await;
+    let rows = vec![
+        ts_row("slow", &fixtures.slow, json!({})),
+        ts_row(
+            "broken",
+            &fixtures.slow.with_file_name("no-such-module.mjs"),
+            json!({}),
+        ),
+    ];
+    let patches: Vec<Patch> = serde_json::from_value(json!([{ "insert": rows }])).unwrap();
+    let layers = vec![Layer::new("rows", patches)];
+    let _ = host.loader.reconcile(layers.clone(), None).await.unwrap();
+
+    // Still loading: waited for, not a failure.
+    wait_running(
+        &host.loader,
+        &host.root,
+        &layers,
+        &["slow"],
+        Duration::from_secs(30),
+    )
+    .await
+    .expect("the slow row runs once its apply ends");
+
+    // Never runs: the wait ends at once, every row not running listed.
+    let started = std::time::Instant::now();
+    let ids = vec!["broken".to_string(), "no-such-row".to_string()];
+    let error = wait_running(
+        &host.loader,
+        &host.root,
+        &layers,
+        &ids,
+        Duration::from_secs(30),
+    )
+    .await
+    .expect_err("rows that never run");
+    assert!(started.elapsed() < Duration::from_secs(10), "{error}");
+    let state = |id: &str| {
+        error
+            .rows
+            .iter()
+            .find(|r| r.id == id)
+            .map(|r| r.state.clone())
+    };
+    assert_eq!(state("broken"), Some(RowState::Unresolved), "{error}");
+    assert_eq!(state("no-such-row"), Some(RowState::NoSuchRow), "{error}");
+    assert!(
+        error
+            .rows
+            .iter()
+            .any(|r| r.id == "broken" && r.error.is_some()),
         "{error}"
     );
     host.root.shutdown().await.unwrap();
