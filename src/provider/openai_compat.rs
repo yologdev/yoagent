@@ -385,14 +385,8 @@ fn build_request_body(
                     // Images present: use array format for multimodal tool results
                     content_to_openai(content)
                 } else {
-                    // Text-only: use plain string for maximum compat
-                    let text = content
-                        .iter()
-                        .find_map(|c| match c {
-                            Content::Text { text } => Some(text.clone()),
-                            _ => None,
-                        })
-                        .unwrap_or_default();
+                    // Text-only: every text block in one plain string, for maximum compat
+                    let text = super::tool_result_text(content);
                     serde_json::json!(text)
                 };
 
@@ -1657,6 +1651,43 @@ mod tests {
         assert_eq!(tool_msg["content"], "hello");
     }
 
+    #[test]
+    fn test_tool_result_sends_every_text_block() {
+        // An MCP server may answer in several text blocks (ESLint's: an intro,
+        // the findings, a closing note); the model must see all of them.
+        let model_config = ModelConfig::openai("gpt-4o", "GPT-4o");
+        let compat = OpenAiCompat::openai();
+        let config = StreamConfig {
+            model: "gpt-4o".into(),
+            system_prompt: String::new(),
+            messages: vec![Message::ToolResult {
+                tool_call_id: "call-1".into(),
+                tool_name: "lint".into(),
+                content: vec![
+                    Content::Text {
+                        text: "Here are the results:".into(),
+                    },
+                    Content::Text {
+                        text: "[{\"line\":3}]".into(),
+                    },
+                ],
+                is_error: false,
+                timestamp: 0,
+            }],
+            tools: vec![],
+            thinking_level: ThinkingLevel::Off,
+            api_key: "test".into(),
+            max_tokens: None,
+            temperature: None,
+            model_config: Some(model_config.clone()),
+            cache_config: CacheConfig::default(),
+            output_schema: None,
+        };
+
+        let body = build_request_body(&config, &model_config, &compat);
+        let tool_msg = body["messages"].as_array().unwrap().last().unwrap().clone();
+        assert_eq!(tool_msg["content"], "Here are the results:\n[{\"line\":3}]");
+    }
     #[test]
     fn test_ollama_inserts_assistant_after_tool_result_run() {
         let model_config = ModelConfig::ollama("http://localhost:11434/v1", "llama3.1:8b");

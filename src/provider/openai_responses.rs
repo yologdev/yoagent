@@ -193,4 +193,29 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn tool_result_sends_every_text_block() {
+        // An MCP server may answer in several text blocks (ESLint's: an intro,
+        // the findings, a closing note); the model must see all of them.
+        let mut config = StreamConfig::new("gpt-5.5", "key");
+        config.messages = vec![Message::ToolResult {
+            tool_call_id: "call-1".into(),
+            tool_name: "lint".into(),
+            content: vec![
+                Content::Text {
+                    text: "Here are the results:".into(),
+                },
+                Content::Text {
+                    text: "[{\"line\":3}]".into(),
+                },
+            ],
+            is_error: false,
+            timestamp: 0,
+        }];
+        let body = build_request_body(&config, ApiProtocol::OpenAiResponses);
+        let output = &body["input"][0];
+        assert_eq!(output["type"], "function_call_output");
+        assert_eq!(output["output"], "Here are the results:\n[{\"line\":3}]");
+    }
 }

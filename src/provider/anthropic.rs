@@ -568,14 +568,8 @@ fn build_request_body(config: &StreamConfig, is_oauth: bool) -> serde_json::Valu
                     // Multi-content with images: use array format
                     serde_json::json!(content_to_anthropic(content))
                 } else {
-                    // Text-only: use string shorthand
-                    let text = content
-                        .iter()
-                        .find_map(|c| match c {
-                            Content::Text { text } => Some(text.clone()),
-                            _ => None,
-                        })
-                        .unwrap_or_default();
+                    // Text-only: string shorthand, every text block joined
+                    let text = super::tool_result_text(content);
                     serde_json::json!(text)
                 };
 
@@ -1569,6 +1563,49 @@ mod tests {
         assert_eq!(tool_result["content"], "hello");
     }
 
+    #[test]
+    fn test_tool_result_sends_every_text_block() {
+        // An MCP server may answer in several text blocks (ESLint's: an intro,
+        // the findings, a closing note); the model must see all of them.
+        let config = StreamConfig {
+            model: "claude-sonnet-4-20250514".into(),
+            system_prompt: "".into(),
+            messages: vec![Message::ToolResult {
+                tool_call_id: "tc-1".into(),
+                tool_name: "lint".into(),
+                content: vec![
+                    Content::Text {
+                        text: "Here are the results:".into(),
+                    },
+                    Content::Text {
+                        text: "[{\"line\":3}]".into(),
+                    },
+                ],
+                is_error: false,
+                timestamp: 0,
+            }],
+            tools: vec![],
+            thinking_level: ThinkingLevel::Off,
+            api_key: "test-key".into(),
+            max_tokens: Some(1024),
+            temperature: None,
+            model_config: None,
+            cache_config: CacheConfig {
+                enabled: false,
+                strategy: CacheStrategy::Disabled,
+                ..CacheConfig::default()
+            },
+            output_schema: None,
+        };
+
+        let body = build_request_body(&config, false);
+        let tool_result = &body["messages"][0]["content"][0];
+        assert_eq!(tool_result["type"], "tool_result");
+        assert_eq!(
+            tool_result["content"],
+            "Here are the results:\n[{\"line\":3}]"
+        );
+    }
     #[test]
     fn test_content_to_anthropic_filters_empty_text() {
         let content = vec![

@@ -752,14 +752,12 @@ async fn record_event(
             is_error,
             ..
         } if tracking.started => {
-            let text = result
-                .content
-                .iter()
-                .find_map(|c| match c {
-                    Content::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .unwrap_or("(no output)");
+            let text = crate::provider::tool_result_text(&result.content);
+            let text = if text.is_empty() {
+                "(no output)"
+            } else {
+                text.as_str()
+            };
             sink.on_tool_finished(YoAgentToolFinished {
                 run_id: tracking.run_id.clone(),
                 tool: tool_name.clone(),

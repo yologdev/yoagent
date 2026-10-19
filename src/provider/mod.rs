@@ -42,3 +42,47 @@ pub use registry::{resolve_api_key, ProviderRegistry};
 pub use tool_args::{parse_tool_arguments, unparsed_tool_arguments, UNPARSED_ARGUMENTS_KEY};
 pub use traits::*;
 pub use turn_hook::TurnHookProvider;
+
+/// The text of a tool result as one string: every non-empty text block, in
+/// order, joined with `"\n"`; images and other blocks are left out (each
+/// provider sends images its own way).
+///
+/// Providers that send a text-only tool result as a single string must send
+/// all of it: a tool may answer in several blocks (MCP servers do — ESLint's
+/// sends an intro line, the findings and a closing note), and taking only the
+/// first block showed the model the intro and nothing else.
+pub(crate) fn tool_result_text(content: &[crate::types::Content]) -> String {
+    let texts: Vec<&str> = content
+        .iter()
+        .filter_map(|c| match c {
+            crate::types::Content::Text { text } if !text.is_empty() => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    texts.join("\n")
+}
+
+#[cfg(test)]
+mod tool_result_text_tests {
+    use super::tool_result_text;
+    use crate::types::Content;
+
+    #[test]
+    fn joins_every_text_block_in_order_and_skips_images() {
+        let content = vec![
+            Content::Text {
+                text: "intro".into(),
+            },
+            Content::Image {
+                data: "AAAA".into(),
+                mime_type: "image/png".into(),
+            },
+            Content::Text { text: "".into() },
+            Content::Text {
+                text: "findings".into(),
+            },
+        ];
+        assert_eq!(tool_result_text(&content), "intro\nfindings");
+        assert_eq!(tool_result_text(&[]), "");
+    }
+}

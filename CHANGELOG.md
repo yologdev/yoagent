@@ -4,6 +4,10 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+- **A tool result's text reaches the model whole.** When a tool result held several text blocks and no image, the Anthropic, OpenAI-compatible, Responses (OpenAI and Azure), Gemini and Vertex providers sent only the first block and dropped the rest (Gemini and Vertex did so with images too). An MCP tool that answers in several blocks was seen as its first line only: ESLint's MCP server (`@eslint/mcp`) answers `lint-files` with an intro line, the findings and a closing note, so the model saw "Here are the results of running ESLint …" and reported the files clean (found by yobuild, through DeepSeek). Every text block is now sent, in order, joined with a newline (`provider::tool_result_text`, crate-private; empty blocks left out); results with images keep their array form. Bedrock already sent every block. The GASP recorder's tool output summary reads every block too.
+
 ## 0.25.8 (2026-10-19)
 
 Additive: new presets and fixes; no API removed. The skill notes the yoagent-rutis 0.5–0.6 releases.

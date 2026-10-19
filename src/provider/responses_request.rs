@@ -110,13 +110,7 @@ pub(crate) fn build_request_body(config: &StreamConfig, protocol: ApiProtocol) -
                 let output_val = if content.iter().any(|c| matches!(c, Content::Image { .. })) {
                     json!(input_parts(content))
                 } else {
-                    let text = content
-                        .iter()
-                        .find_map(|c| match c {
-                            Content::Text { text } => Some(text.clone()),
-                            _ => None,
-                        })
-                        .unwrap_or_default();
+                    let text = super::tool_result_text(content);
                     json!(text)
                 };
                 input.push(json!({
