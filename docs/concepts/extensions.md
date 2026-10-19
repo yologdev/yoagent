@@ -167,7 +167,7 @@ async fn start_run(&self, run: &RunContext<'_>) -> Result<Box<dyn RunHooks>, Ext
 }
 ```
 
-`add(&usage, &model)` prices the call at the model's `cost` (`add_priced` takes a `CostConfig` instead); never pass dollars. A `Budget` counts it at its next check (before the next request), and the run's `SessionStats` holds it in `extensions`, inside `total_usage()` and `total_cost_usd()` (an unpriced call makes the total `None`, as an unpriced turn does); `Agent::extension_spend()` sums it across runs. Spend recorded after the run ended — after the extensions' `finish` — is not counted, with a warning. `run.spend_handle()` is `None` outside a loop (a `RunContext::new` in a test).
+`add(&usage, &model)` prices the call at the model's `cost` (`add_priced` takes a `CostConfig` instead); never pass dollars. A `Budget` counts it at its next check (before the next request), and the run's `SessionStats` holds it in `extensions`, inside `total_usage()` and `total_cost_usd()` (an unpriced call makes the total `None`, as an unpriced turn does); `Agent::extension_spend()` sums it across runs. Spend recorded after the run ended — after the extensions' `finish` — is not counted, with a warning; spend recorded in a `finish` that runs after a `Budget`'s own is in the run's stats but not in that budget's total. `run.spend_handle()` is `None` outside a loop (a `RunContext::new` in a test).
 
 ## Built on extensions
 

@@ -416,17 +416,17 @@ async fn spend_recorded_through_a_handle_counts_in_the_budget_and_the_stats() {
     }
     let (messages, stats) = end.expect("an AgentEnd");
     assert!(stopped_on_budget(&messages), "{:?}", messages.last());
-    assert_eq!(stats.extensions.calls, 2);
+    assert_eq!(stats.extensions.requests, 2);
     assert_eq!(stats.extensions.usage.input, 120_000);
     assert!((stats.extensions.cost_usd.unwrap() - 0.12).abs() < 1e-9);
     assert_eq!(stats.total_usage().input, 120_000);
     assert!((stats.total_cost_usd().unwrap() - 0.12).abs() < 1e-9);
-    assert_eq!(agent.extension_spend().calls, 2);
+    assert_eq!(agent.extension_spend().requests, 2);
 
     // After the run ended the handle counts nothing more.
     let late = metered.handle.lock().unwrap().clone().unwrap();
     late.add_priced(&usage(50), Some(&dollar_per_million()));
-    assert_eq!(agent.extension_spend().calls, 2);
+    assert_eq!(agent.extension_spend().requests, 2);
 }
 
 /// An unpriced call recorded through the handle makes the run's total

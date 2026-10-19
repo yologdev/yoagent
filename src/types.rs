@@ -1036,7 +1036,7 @@ pub enum ToolError {
 // `AgentEnd` carries the run's `SessionStats` by value (a public, frozen
 // shape: boxing it would break callers); one event per run, so the size is
 // not worth that. Only the 32-bit wasm32 build crosses the lint's threshold.
-#[allow(clippy::large_enum_variant)]
+#[cfg_attr(target_arch = "wasm32", allow(clippy::large_enum_variant))]
 pub enum AgentEvent {
     AgentStart,
     /// The run finished. Carries the messages it produced and a
@@ -1349,15 +1349,15 @@ pub struct ExtensionSpend {
     /// [`is_unpriced`](Self::is_unpriced) tells them apart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,
-    /// Calls recorded.
+    /// Model requests recorded.
     #[serde(default)]
-    pub calls: u32,
+    pub requests: u32,
 }
 
 impl ExtensionSpend {
     /// Whether nothing was recorded.
     pub fn is_empty(&self) -> bool {
-        self.calls == 0 && usage_is_zero(&self.usage) && self.cost_usd.is_none()
+        self.requests == 0 && usage_is_zero(&self.usage) && self.cost_usd.is_none()
     }
 
     /// Whether recorded spend cannot be priced: non-zero
@@ -1372,7 +1372,7 @@ impl ExtensionSpend {
     pub fn merge(&mut self, other: &ExtensionSpend) {
         self.cost_usd = combine_cost(&self.usage, self.cost_usd, &other.usage, other.cost_usd);
         self.usage = add_usage(&self.usage, &other.usage);
-        self.calls = self.calls.saturating_add(other.calls);
+        self.requests = self.requests.saturating_add(other.requests);
     }
 
     /// One call, priced with its model's rates (`None` = unpriced).
@@ -1384,7 +1384,7 @@ impl ExtensionSpend {
         self.merge(&ExtensionSpend {
             usage: add_usage(&Usage::default(), usage),
             cost_usd: cost.map(|c| c.cost_usd(usage)),
-            calls: 1,
+            requests: 1,
         });
     }
 }
@@ -2855,7 +2855,7 @@ mod wire_tag_freeze {
                         ..Default::default()
                     },
                     cost_usd: Some(0.003),
-                    calls: 1,
+                    requests: 1,
                 },
             },
         ),
