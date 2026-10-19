@@ -1605,6 +1605,101 @@ async fn steering_queued_after_tool_execution_reaches_the_next_turn() {
     );
 }
 
+/// Steering or a follow-up the loop has taken from its queue is kept in the
+/// history when the run is cancelled before the next turn: the message is no
+/// longer in its queue, so dropping it would lose it.
+#[tokio::test]
+async fn messages_taken_from_the_queues_survive_a_cancel() {
+    fn has_user_text(messages: &[AgentMessage], want: &str) -> bool {
+        messages.iter().any(|message| {
+            matches!(
+                message,
+                AgentMessage::Llm(Message::User { content, .. })
+                    if content.iter().any(|c| matches!(c, Content::Text { text } if text == want))
+            )
+        })
+    }
+
+    // Steering taken after a tool, with the cancel landing at that moment.
+    let provider = MockProvider::new(vec![
+        MockResponse::ToolCalls(vec![MockToolCall {
+            provider_metadata: None,
+            name: "silent_tool".into(),
+            arguments: serde_json::json!({}),
+        }]),
+        MockResponse::Text("never reached".into()),
+    ]);
+    let mut config = make_config(provider);
+    let cancel = CancellationToken::new();
+    let polls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (polls_clone, cancel_clone) = (polls.clone(), cancel.clone());
+    config.get_steering_messages = Some(Box::new(move || {
+        if polls_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 1 {
+            cancel_clone.cancel();
+            vec![AgentMessage::Llm(Message::user("steer"))]
+        } else {
+            Vec::new()
+        }
+    }));
+    let mut context = AgentContext {
+        system_prompt: "test".into(),
+        messages: Vec::new(),
+        tools: vec![Box::new(SilentTool)],
+    };
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let new_messages = agent_loop(
+        vec![AgentMessage::Llm(Message::user("start"))],
+        &mut context,
+        &config,
+        tx,
+        cancel,
+    )
+    .await;
+    assert!(has_user_text(&new_messages, "steer"), "{new_messages:?}");
+    assert!(has_user_text(&context.messages, "steer"));
+
+    // A follow-up taken as the agent would stop, with the cancel landing then.
+    let provider = MockProvider::new(vec![
+        MockResponse::Text("first answer".into()),
+        MockResponse::Text("never reached".into()),
+    ]);
+    let mut config = make_config(provider);
+    let cancel = CancellationToken::new();
+    let cancel_clone = cancel.clone();
+    let taken = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    config.get_follow_up_messages = Some(Box::new(move || {
+        if taken.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            Vec::new()
+        } else {
+            cancel_clone.cancel();
+            vec![AgentMessage::Llm(Message::user("follow up"))]
+        }
+    }));
+    let mut context = AgentContext {
+        system_prompt: "test".into(),
+        messages: Vec::new(),
+        tools: Vec::new(),
+    };
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let new_messages = agent_loop(
+        vec![AgentMessage::Llm(Message::user("start"))],
+        &mut context,
+        &config,
+        tx,
+        cancel,
+    )
+    .await;
+    assert!(
+        has_user_text(&new_messages, "follow up"),
+        "{new_messages:?}"
+    );
+    // The cancel marker still comes last.
+    assert!(
+        matches!(new_messages.last(), Some(m) if format!("{m:?}").contains("cancelled")),
+        "{new_messages:?}"
+    );
+}
+
 /// Two parallel tools both emit progress — events are distinguishable by tool_call_id.
 struct NamedProgressTool {
     tool_name: String,

@@ -302,6 +302,33 @@ fn push_stop_marker(
 
 /// Mark a run cancelled between provider calls — only when it did something,
 /// so a run cancelled before it started leaves no trace.
+/// Append the steering or follow-up messages taken from their queues to the
+/// history, with their events. Also on cancel: a message taken is no longer
+/// in its queue, so dropping it would lose it.
+fn inject_pending(
+    pending: &mut Vec<AgentMessage>,
+    tx: &mpsc::UnboundedSender<AgentEvent>,
+    context: &mut AgentContext,
+    new_messages: &mut Vec<AgentMessage>,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    note_run_prompts(pending);
+    for msg in pending.drain(..) {
+        tx.send(AgentEvent::MessageStart {
+            message: msg.clone(),
+        })
+        .ok();
+        tx.send(AgentEvent::MessageEnd {
+            message: msg.clone(),
+        })
+        .ok();
+        context.messages.push(msg.clone());
+        new_messages.push(msg);
+    }
+}
+
 fn mark_cancelled(
     tx: &mpsc::UnboundedSender<AgentEvent>,
     context: &mut AgentContext,
@@ -1044,6 +1071,9 @@ async fn run_loop(
     // Outer loop: follow-ups after agent would stop
     loop {
         if cancel.is_cancelled() {
+            // Steering or follow-ups already taken from their queues are
+            // kept in the history, not dropped with the run.
+            inject_pending(&mut pending, tx, context, new_messages);
             mark_cancelled(tx, context, new_messages);
             // The caller opened the first turn; nothing has closed it.
             if first_turn {
@@ -1057,6 +1087,7 @@ async fn run_loop(
         // Inner loop: runs at least once, then continues if tool calls or pending messages
         loop {
             if cancel.is_cancelled() {
+                inject_pending(&mut pending, tx, context, new_messages);
                 mark_cancelled(tx, context, new_messages);
                 if first_turn {
                     close_turn(tx, context);
@@ -1071,21 +1102,7 @@ async fn run_loop(
             }
 
             // Inject pending messages
-            if !pending.is_empty() {
-                note_run_prompts(&pending);
-                for msg in pending.drain(..) {
-                    tx.send(AgentEvent::MessageStart {
-                        message: msg.clone(),
-                    })
-                    .ok();
-                    tx.send(AgentEvent::MessageEnd {
-                        message: msg.clone(),
-                    })
-                    .ok();
-                    context.messages.push(msg.clone());
-                    new_messages.push(msg);
-                }
-            }
+            inject_pending(&mut pending, tx, context, new_messages);
 
             // A required extension that failed where it could not end the
             // run (its tools, after a tool, observing an event) ends it here,
