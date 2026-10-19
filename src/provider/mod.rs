@@ -84,5 +84,18 @@ mod tool_result_text_tests {
         ];
         assert_eq!(tool_result_text(&content), "intro\nfindings");
         assert_eq!(tool_result_text(&[]), "");
+        // An empty first block no longer hides the text after it.
+        let empty_first = vec![
+            Content::Text { text: "".into() },
+            Content::Text { text: "x".into() },
+        ];
+        assert_eq!(tool_result_text(&empty_first), "x");
+        // A single block is sent exactly as before.
+        assert_eq!(
+            tool_result_text(&[Content::Text {
+                text: "only\n".into()
+            }]),
+            "only\n"
+        );
     }
 }

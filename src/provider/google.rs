@@ -1576,4 +1576,39 @@ mod tests {
             "Here are the results:\n[{\"line\":3}]"
         );
     }
+
+    #[test]
+    fn tool_result_with_an_image_sends_every_text_block_and_the_image() {
+        let config = StreamConfig {
+            model: "gemini-2.5-flash".into(),
+            system_prompt: "".into(),
+            messages: vec![Message::ToolResult {
+                tool_call_id: "call-1".into(),
+                tool_name: "screenshot".into(),
+                content: vec![
+                    Content::Text { text: "a".into() },
+                    Content::Image {
+                        data: "AAAA".into(),
+                        mime_type: "image/png".into(),
+                    },
+                    Content::Text { text: "b".into() },
+                ],
+                is_error: false,
+                timestamp: 0,
+            }],
+            tools: vec![],
+            thinking_level: ThinkingLevel::Off,
+            api_key: "test".into(),
+            max_tokens: None,
+            temperature: None,
+            model_config: None,
+            cache_config: CacheConfig::default(),
+            output_schema: None,
+        };
+        let body = build_request_body(&config);
+        let parts = &body["contents"][0]["parts"];
+        assert_eq!(parts[0]["functionResponse"]["response"]["result"], "a\nb");
+        assert_eq!(parts[1]["inlineData"]["data"], "AAAA");
+        assert_eq!(parts.as_array().unwrap().len(), 2);
+    }
 }

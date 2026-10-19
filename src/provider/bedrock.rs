@@ -2547,4 +2547,42 @@ mod tests {
             "{err:?}"
         );
     }
+
+    #[test]
+    fn tool_result_sends_every_text_block_and_image() {
+        // Bedrock sends each block as its own entry; pinned so it never
+        // regresses to the first block only (as five other providers had).
+        let config = StreamConfig {
+            model: "anthropic.claude-3-sonnet-20240229-v1:0".into(),
+            system_prompt: "".into(),
+            messages: vec![Message::ToolResult {
+                tool_call_id: "call-1".into(),
+                tool_name: "screenshot".into(),
+                content: vec![
+                    Content::Text { text: "a".into() },
+                    Content::Image {
+                        data: "AAAA".into(),
+                        mime_type: "image/png".into(),
+                    },
+                    Content::Text { text: "b".into() },
+                ],
+                is_error: false,
+                timestamp: 0,
+            }],
+            tools: vec![],
+            thinking_level: ThinkingLevel::Off,
+            api_key: "key:secret".into(),
+            max_tokens: None,
+            temperature: None,
+            model_config: None,
+            cache_config: CacheConfig::default(),
+            output_schema: None,
+        };
+        let body = build_bedrock_body(&config);
+        let content = &body["messages"][0]["content"][0]["toolResult"]["content"];
+        assert_eq!(content[0]["text"], "a");
+        assert_eq!(content[1]["image"]["source"]["bytes"], "AAAA");
+        assert_eq!(content[2]["text"], "b");
+        assert_eq!(content.as_array().unwrap().len(), 3);
+    }
 }
