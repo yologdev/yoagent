@@ -1987,8 +1987,9 @@ async fn two_adapters_load_one_extension_at_once() {
 
 /// pi's observer events fire from yoagent's event stream, in order and in
 /// pi's shapes: the run, each turn (its index, message and tool results),
-/// messages starting and streaming, and each tool call under pi's name with
-/// its arguments and result.
+/// messages starting and streaming, and each tool call under pi's name and
+/// argument shape — in the tool events and inside messages alike. A throwing
+/// observer is reported and the ones after it still run.
 #[tokio::test(flavor = "multi_thread")]
 async fn pi_observer_events_fire_in_order() {
     let Some(runtime) = node_runtime() else {
@@ -2009,29 +2010,39 @@ export default function (pi) {
     },
   })
   const write = (e) => appendFileSync(LOG, JSON.stringify(e) + '\n')
+  // Registered first: a throwing observer must not stop the ones after it.
+  pi.on('turn_start', () => { throw new Error('observer boom') })
   for (const name of ['agent_start', 'agent_end', 'turn_start', 'turn_end', 'message_start', 'message_update',
     'tool_execution_start', 'tool_execution_update', 'tool_execution_end']) {
     pi.on(name, (e) => write({
       type: e.type, turnIndex: e.turnIndex, toolName: e.toolName, args: e.args, isError: e.isError,
       result: e.result, role: e.message?.role, results: e.toolResults?.length, messages: e.messages?.length,
       delta: e.assistantMessageEvent?.type, outcome: e.outcome,
+      calls: (e.message?.content ?? []).filter((b) => b.type === 'toolCall').map((b) => b.name),
+      resultNames: (e.toolResults ?? []).map((r) => r.toolName),
     }))
   }
-  // A throwing observer is reported and the others go on.
-  pi.on('turn_start', () => { throw new Error('observer boom') })
 }
 "#
     .replace("LOG", &format!("{:?}", log.display().to_string()));
     let ext = extension(dir.path(), "observer.ts", &source);
     let host = host(&runtime).await;
     host.load(adapter_row(json!({ "extensions": [ext] }))).await;
+    let readme = dir.path().join("readme.txt");
+    std::fs::write(&readme, "hello").unwrap();
     let (agent, _) = agent(vec![
-        call("pi_echo2", json!({ "text": "hi" })),
+        calls(&[
+            ("pi_echo2", json!({ "text": "hi" })),
+            ("read_file", json!({ "path": readme })),
+        ]),
         text("done"),
     ]);
-    let mut agent = agent.with_extension(host.bridge.extension());
+    let mut agent = agent
+        .with_tools(vec![Box::new(yoagent::tools::ReadFileTool::new())])
+        .with_extension(host.bridge.extension());
     let (_, results) = run(&mut agent, "go").await;
     assert!(results[0].1.contains("echo hi"), "{results:?}");
+    assert!(results[1].1.contains("hello"), "{results:?}");
     let text = wait_file(&log, |t| t.contains("\"agent_end\"")).await;
     let events: Vec<Value> = text
         .lines()
@@ -2044,40 +2055,151 @@ export default function (pi) {
             _ => e["type"].as_str().unwrap().to_owned(),
         })
         .collect();
+    // The two tools run in parallel: their start, end and result events may
+    // interleave, but each comes once, between the answer's start and the turn's end.
+    let (head, rest) = kinds.split_at(4);
+    let (middle, tail) = rest.split_at(6);
     assert_eq!(
-        kinds,
+        head,
         [
             "agent_start",
             "turn_start",
             "message_start:user",
-            "message_start:assistant",
-            "tool_execution_start",
-            "tool_execution_end",
+            "message_start:assistant"
+        ],
+        "{text}"
+    );
+    let mut middle = middle.to_vec();
+    middle.sort();
+    assert_eq!(
+        middle,
+        [
             "message_start:toolResult",
+            "message_start:toolResult",
+            "tool_execution_end",
+            "tool_execution_end",
+            "tool_execution_start",
+            "tool_execution_start",
+        ],
+        "{text}"
+    );
+    assert_eq!(
+        tail,
+        [
             "turn_end",
             "turn_start",
             "message_start:assistant",
             "message_update",
             "turn_end",
-            "agent_end",
+            "agent_end"
         ],
         "{text}"
     );
     let find = |kind: &str, n: usize| events.iter().filter(|e| e["type"] == kind).nth(n).unwrap();
+    let by_name = |kind: &str, name: &str| {
+        events
+            .iter()
+            .find(|e| e["type"] == kind && e["toolName"] == name)
+            .unwrap()
+    };
     assert_eq!(find("turn_start", 1)["turnIndex"], 1);
-    assert_eq!(find("turn_end", 0)["turnIndex"], 0);
-    assert_eq!(find("turn_end", 0)["results"], 1);
-    assert_eq!(find("turn_end", 0)["outcome"], "completed");
-    let start = find("tool_execution_start", 0);
+    let turn = find("turn_end", 0);
     assert_eq!(
-        (&start["toolName"], &start["args"]),
-        (&json!("pi_echo2"), &json!({ "text": "hi" }))
+        (&turn["turnIndex"], &turn["results"], &turn["outcome"]),
+        (&json!(0), &json!(2), &json!("completed"))
     );
-    let end = find("tool_execution_end", 0);
+    // Built-ins under pi's names, in tool events and inside messages alike.
+    assert_eq!(turn["calls"], json!(["pi_echo2", "read"]));
+    assert_eq!(turn["resultNames"], json!(["pi_echo2", "read"]));
+    assert_eq!(
+        by_name("tool_execution_start", "read")["args"]["path"],
+        json!(readme)
+    );
+    assert_eq!(
+        by_name("tool_execution_start", "pi_echo2")["args"],
+        json!({ "text": "hi" })
+    );
+    let end = by_name("tool_execution_end", "pi_echo2");
     assert_eq!(end["isError"], false);
     assert_eq!(end["result"]["content"][0]["text"], "echo hi");
     assert_eq!(end["result"]["details"], json!({ "n": 1 }));
     assert_eq!(find("message_update", 0)["delta"], "text_delta");
-    assert_eq!(find("agent_end", 0)["messages"], 4);
+    assert_eq!(find("agent_end", 0)["messages"], 5);
+    host.root.shutdown().await.unwrap();
+}
+
+/// With only `turn_start` handlers the turn index still advances at each
+/// turn's end (both turn event types are subscribed), as in pi.
+#[tokio::test(flavor = "multi_thread")]
+async fn turn_start_alone_still_counts_turns() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("turns.jsonl");
+    let source = r#"
+import { appendFileSync } from 'node:fs'
+export default function (pi) {
+  pi.on('turn_start', (e) => appendFileSync(LOG, JSON.stringify(e.turnIndex) + '\n'))
+  pi.registerTool({
+    name: 'pi_noop', label: 'pi_noop', description: 'x', parameters: { type: 'object', properties: {} },
+    async execute() { return { content: [{ type: 'text', text: 'ok' }], details: {} } },
+  })
+}
+"#
+    .replace("LOG", &format!("{:?}", log.display().to_string()));
+    let ext = extension(dir.path(), "turns.ts", &source);
+    let host = host(&runtime).await;
+    host.load(adapter_row(json!({ "extensions": [ext] }))).await;
+    let (agent, _) = agent(vec![call("pi_noop", json!({})), text("done")]);
+    let mut agent = agent.with_extension(host.bridge.extension());
+    run(&mut agent, "go").await;
+    let seen = wait_file(&log, |t| t.lines().count() >= 2).await;
+    assert_eq!(seen.lines().collect::<Vec<_>>(), ["0", "1"]);
+    host.root.shutdown().await.unwrap();
+}
+
+/// A slow observer (a tracer flushing over the network) neither fails a
+/// required bridge's run nor silences the observers: the handlers run on the
+/// adapter's own ordered chain, so the bridge's per-event timeout (5 s) never
+/// fires, and a later `agent_end` still arrives.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_slow_observer_does_not_fail_the_run_or_drop_events() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("slow.jsonl");
+    let source = r#"
+import { appendFileSync } from 'node:fs'
+export default function (pi) {
+  pi.on('turn_end', async () => {
+    await new Promise((resolve) => setTimeout(resolve, 6000))
+    appendFileSync(LOG, 'turn_end\n')
+  })
+  pi.on('agent_end', () => appendFileSync(LOG, 'agent_end\n'))
+}
+"#
+    .replace("LOG", &format!("{:?}", log.display().to_string()));
+    let ext = extension(dir.path(), "slow.ts", &source);
+    let host = host(&runtime).await;
+    host.load(adapter_row(json!({ "extensions": [ext] }))).await;
+    let (agent, _) = agent(vec![text("done")]);
+    let mut agent = agent.with_extension(host.bridge.extension().required());
+    run(&mut agent, "go").await;
+    // Held up by nothing: the run ended normally, not failed by the bridge.
+    let last = agent.messages().last().cloned();
+    assert!(
+        matches!(
+            &last,
+            Some(AgentMessage::Llm(Message::Assistant {
+                stop_reason: yoagent::StopReason::Stop,
+                ..
+            }))
+        ),
+        "{last:?}"
+    );
+    let seen = wait_file(&log, |t| t.contains("agent_end")).await;
+    assert_eq!(seen.lines().collect::<Vec<_>>(), ["turn_end", "agent_end"]);
     host.root.shutdown().await.unwrap();
 }

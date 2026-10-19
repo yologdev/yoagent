@@ -114,10 +114,15 @@
 // `turn_end`, `message_start` / `message_update`, `tool_execution_*`) fire
 // from yoagent's event stream when a handler for them exists at load (the
 // bridge's `on_event`, subscribed to the yoagent types they need): after the
-// fact and in order, on copies, a result ignored (`turn_end`'s `continue` /
-// `entries` reported once), a throw reported once; tool calls under pi's
-// names and argument shapes; `turn_end` gets generated entry ids and an empty
-// context preview. One registered later fires if its types are subscribed.
+// fact and in order, on copies, on the adapter's own chain (`on_event` returns
+// at once, so a slow observer never meets the bridge's per-event timeout; at
+// most MAX_OBSERVER_BACKLOG wait, then events are dropped, reported once), a
+// result ignored (`turn_end`'s `continue` / `entries` reported once), a throw
+// reported once; tool calls under pi's names and argument shapes, in the tool
+// events and inside messages; `turn_end` only for a turn that ended with an
+// assistant message (the index advances at every turn's end), with generated
+// entry ids and an empty context preview. `message_end` (the checked path) is
+// not ordered with these. One registered later fires if its types are subscribed.
 //
 // What does not map: no other event is ever fired. Events that would decide
 // or rewrite something yoagent does (DECIDING_EVENTS: `context_with_system`,
@@ -286,14 +291,18 @@ const CHECKED_EVENTS = new Set(['context', 'message_end'])
 const OBSERVED_EVENTS = new Map<string, string[]>([
   ['agent_start', ['agentStart']],
   ['agent_end', ['agentEnd']],
-  ['turn_start', ['turnStart']],
-  ['turn_end', ['turnEnd']],
+  // Both need both: the turn index advances at every turn's end, as in pi.
+  ['turn_start', ['turnStart', 'turnEnd']],
+  ['turn_end', ['turnStart', 'turnEnd']],
   ['message_start', ['messageStart']],
   ['message_update', ['messageUpdate']],
   ['tool_execution_start', ['toolExecutionStart']],
   ['tool_execution_update', ['toolExecutionStart', 'toolExecutionUpdate']],
   ['tool_execution_end', ['toolExecutionEnd']],
 ])
+
+/** Most observer events waiting for slow handlers before later ones are dropped. */
+const MAX_OBSERVER_BACKLOG = 1000
 
 /** pi's names for yoagent's stream deltas (`message_update`'s `assistantMessageEvent.type`). */
 const DELTA_TYPES: Record<string, string> = { text: 'text_delta', thinking: 'thinking_delta', toolCallDelta: 'toolcall_delta' }
@@ -1360,8 +1369,25 @@ export default definePlugin<Config>({
       }
       return { toolName: own ? tool : (names.get(tool) ?? tool), args: input }
     }
-    const llm = (messages: unknown) =>
-      ((messages as Message[] | undefined) ?? []).filter((m) => m && m.role !== ('extension' as never)).map(piMessage)
+    /** A message as pi's observers see it: its tool calls and results under pi's names and shapes. */
+    const observedMessage = (runId: string, message: Message) => {
+      const out = piMessage(message) as Record<string, unknown> & { role: string; content?: unknown }
+      if (out.role === 'assistant' && Array.isArray(out.content)) {
+        out.content = out.content.map((block: Record<string, unknown>) => {
+          if (block?.type !== 'toolCall' || typeof block.name !== 'string') return block
+          const call = piCall(runId, block.name, block.arguments)
+          return { ...block, name: call.toolName, arguments: call.args }
+        })
+      }
+      if (out.role === 'toolResult' && typeof out.toolName === 'string') {
+        out.toolName = piCall(runId, out.toolName, undefined).toolName
+      }
+      return out
+    }
+    const llm = (runId: string, messages: unknown) =>
+      ((messages as Message[] | undefined) ?? [])
+        .filter((m) => m && m.role !== ('extension' as never))
+        .map((m) => observedMessage(runId, m))
     /** The pi event for a yoagent one, or nothing (the types a subscribed observer does not use). */
     const piEvent = (event: Record<string, unknown> & { type: string; run: RunInfo }): Record<string, unknown> | undefined => {
       const runId = event.run.run_id
@@ -1372,19 +1398,21 @@ export default definePlugin<Config>({
         case 'agentEnd':
           turns.delete(runId)
           for (const key of running.keys()) if (key.startsWith(`${runId}/`)) running.delete(key)
-          return { type: 'agent_end', messages: llm(event.messages) }
+          return { type: 'agent_end', messages: llm(runId, event.messages) }
         case 'turnStart':
           return { type: 'turn_start', turnIndex: turns.get(runId) ?? 0, timestamp: Date.now() }
         case 'turnEnd': {
           const turnIndex = turns.get(runId) ?? 0
           turns.set(runId, turnIndex + 1)
           const message = event.message as Message
+          // As pi: only a turn that ended with an assistant message (not a stop or cancel marker).
+          if (message?.role !== 'assistant') return undefined
           const stop = (message as { stopReason?: string }).stopReason
-          const toolResults = llm(event.toolResults)
+          const toolResults = llm(runId, event.toolResults)
           return {
             type: 'turn_end',
             turnIndex,
-            message: piMessage(message),
+            message: observedMessage(runId, message),
             toolResults,
             // No session entries in yoagent: ids for this run and turn, and an empty boundary.
             messageEntryId: `${runId}/turn-${turnIndex}`,
@@ -1396,9 +1424,9 @@ export default definePlugin<Config>({
           }
         }
         case 'messageStart':
-          return { type: 'message_start', message: piMessage(event.message as Message) }
+          return { type: 'message_start', message: observedMessage(runId, event.message as Message) }
         case 'messageUpdate': {
-          const message = piMessage(event.message as Message) as { content?: unknown[] }
+          const message = observedMessage(runId, event.message as Message) as { content?: unknown[] }
           const delta = event.delta as { type: string; delta: string }
           return {
             type: 'message_update',
@@ -1437,14 +1465,19 @@ export default definePlugin<Config>({
       }
     }
     /**
-     * Fires a yoagent event's pi counterpart at its handlers, in order. Never throws: an
-     * observer that throws is reported once (per extension and event) and the others still run;
-     * a result is ignored (a `turn_end` asking to continue or add entries is reported once).
+     * Fires a yoagent event's pi counterpart at its handlers. The pi event is built now (the
+     * run's tools are still known), the handlers run later on one ordered chain: `on_event`
+     * returns at once, so a slow observer (a tracer flushing over the network) never meets the
+     * bridge's per-event timeout, which would switch every observer off for the run (and fail a
+     * required bridge's run). At most MAX_OBSERVER_BACKLOG events wait; past that, events are
+     * dropped, reported once. Never throws: a throwing handler is reported once (per extension
+     * and event) and the others still run; a result is ignored (a `turn_end` asking to continue
+     * or add entries is reported once).
      */
-    const observe = async (event: Record<string, unknown> & { type: string; run: RunInfo }) => {
-      if (refusal) return
-      const pi = piEvent(event)
-      if (!pi) return
+    let chain: Promise<void> = Promise.resolve()
+    let backlog = 0
+    let backlogReported = false
+    const runHandlers = async (pi: Record<string, unknown>) => {
       for (const { ext, fn } of handlers(pi.type as string)) {
         try {
           const result = (await fn(structuredClone(pi), context())) as { continue?: unknown; entries?: unknown[] } | undefined
@@ -1463,6 +1496,29 @@ export default definePlugin<Config>({
           }
         }
       }
+    }
+    const observe = async (event: Record<string, unknown> & { type: string; run: RunInfo }) => {
+      if (refusal) return
+      let pi: Record<string, unknown> | undefined
+      try {
+        pi = piEvent(event)
+      } catch (error) {
+        report('warn', `[pi] could not map a ${event.type} event for pi observers: ${message(error)}`)
+        return
+      }
+      if (!pi) return
+      if (backlog >= MAX_OBSERVER_BACKLOG) {
+        if (!backlogReported) {
+          backlogReported = true
+          report('warn', `[pi] observers are ${MAX_OBSERVER_BACKLOG} events behind; dropping events until they catch up`)
+        }
+        return
+      }
+      backlog++
+      const next = pi
+      chain = chain.then(() => runHandlers(next)).finally(() => {
+        backlog--
+      })
     }
 
     ctx.effect(
@@ -1702,6 +1758,10 @@ export default definePlugin<Config>({
           queue.delete(outcome.run_id)
           for (const key of judged.keys()) if (key.startsWith(`${outcome.run_id}/`)) judged.delete(key)
           snapshots.delete(outcome.run_id)
+          // Observer bookkeeping: whatever event types are subscribed (the bridge delivers the
+          // run's events before `finish`; only `agentEnd`, which needs neither, comes after).
+          turns.delete(outcome.run_id)
+          for (const key of running.keys()) if (key.startsWith(`${outcome.run_id}/`)) running.delete(key)
         },
         // Only with observer handlers at load: pi's observer events, from yoagent's.
         ...(subscribed.size > 0 ? { on_event: observe } : {}),
