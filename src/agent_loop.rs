@@ -300,8 +300,6 @@ fn push_stop_marker(
     new_messages.push(marker);
 }
 
-/// Mark a run cancelled between provider calls — only when it did something,
-/// so a run cancelled before it started leaves no trace.
 /// Append the steering or follow-up messages taken from their queues to the
 /// history, with their events. Also on cancel: a message taken is no longer
 /// in its queue, so dropping it would lose it.
@@ -329,6 +327,8 @@ fn inject_pending(
     }
 }
 
+/// Mark a run cancelled between provider calls — only when it did something,
+/// so a run cancelled before it started leaves no trace.
 fn mark_cancelled(
     tx: &mpsc::UnboundedSender<AgentEvent>,
     context: &mut AgentContext,
@@ -2352,8 +2352,10 @@ async fn execute_tool_calls(
             let mut steering_messages: Option<Vec<AgentMessage>> = None;
             let mut sub_agent_stats: Vec<SessionStats> = Vec::new();
 
-            // `chunks(0)` panics, and `size` comes from config: treat 0 as 1.
-            for (batch_idx, batch) in tool_calls.chunks((*size).max(1)).enumerate() {
+            // `chunks(0)` panics, and `size` comes from config: treat 0 as 1
+            // (everywhere: the skip count below multiplies by it).
+            let size = (*size).max(1);
+            for (batch_idx, batch) in tool_calls.chunks(size).enumerate() {
                 let batch_result = execute_batch(tools, batch, tx, cancel, None, gate).await;
                 results.extend(batch_result.tool_results);
                 sub_agent_stats.extend(batch_result.sub_agent_stats);
@@ -2364,7 +2366,7 @@ async fn execute_tool_calls(
                     if !steering.is_empty() {
                         steering_messages = Some(steering);
                         // Skip remaining batches
-                        let executed = (batch_idx + 1) * *size;
+                        let executed = (batch_idx + 1) * size;
                         if executed < tool_calls.len() {
                             for (skip_id, skip_name, _) in &tool_calls[executed..] {
                                 results.push(skip_tool_call(skip_id, skip_name, tx));
