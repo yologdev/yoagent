@@ -110,12 +110,21 @@
 //                           rewrite fails the run only for a required bridge,
 //                           and refuses every later run.
 //
+// Observers (OBSERVED_EVENTS: `agent_start` / `agent_end`, `turn_start` /
+// `turn_end`, `message_start` / `message_update`, `tool_execution_*`) fire
+// from yoagent's event stream when a handler for them exists at load (the
+// bridge's `on_event`, subscribed to the yoagent types they need): after the
+// fact and in order, on copies, a result ignored (`turn_end`'s `continue` /
+// `entries` reported once), a throw reported once; tool calls under pi's
+// names and argument shapes; `turn_end` gets generated entry ids and an empty
+// context preview. One registered later fires if its types are subscribed.
+//
 // What does not map: no other event is ever fired. Events that would decide
 // or rewrite something yoagent does (DECIDING_EVENTS: `context_with_system`,
 // `before_provider_request`, ...; `context` and `message_end` too when
-// registered after load) refuse the load unless listed in `allowUnmapped`; the rest (observers such as `agent_end` or
-// `tool_execution_*`, pi's session events, the boundary events `turn_end` /
-// `agent_before_settle`), commands, shortcuts, flags, renderers, model
+// registered after load) refuse the load unless listed in `allowUnmapped`; the rest (an
+// observer registered after load whose types are not subscribed, pi's session
+// events, `agent_before_settle`, `agent_settled`), commands, shortcuts, flags, renderers, model
 // providers, virtual models and MCP servers are reported (at info: expected,
 // not a fault; a load failure with `strict`). One registered after load (in a handler or a
 // tool) is reported at the next model request or tool call, and a deciding
@@ -267,6 +276,27 @@ const DECIDING_EVENTS = new Set([
 
 /** Events whose handlers run on copies, stopping the adapter if one would change what it got. */
 const CHECKED_EVENTS = new Set(['context', 'message_end'])
+
+/**
+ * pi's observer events, fired from yoagent's event stream (`on_event`):
+ * after the fact, so a handler's result changes nothing. Each needs the
+ * yoagent event types listed. `message_end` is not here: its handlers run
+ * on the checked path (CHECKED_EVENTS), once per message.
+ */
+const OBSERVED_EVENTS = new Map<string, string[]>([
+  ['agent_start', ['agentStart']],
+  ['agent_end', ['agentEnd']],
+  ['turn_start', ['turnStart']],
+  ['turn_end', ['turnEnd']],
+  ['message_start', ['messageStart']],
+  ['message_update', ['messageUpdate']],
+  ['tool_execution_start', ['toolExecutionStart']],
+  ['tool_execution_update', ['toolExecutionStart', 'toolExecutionUpdate']],
+  ['tool_execution_end', ['toolExecutionEnd']],
+])
+
+/** pi's names for yoagent's stream deltas (`message_update`'s `assistantMessageEvent.type`). */
+const DELTA_TYPES: Record<string, string> = { text: 'text_delta', thinking: 'thinking_delta', toolCallDelta: 'toolcall_delta' }
 
 /** pi's message shape from yoagent's (they match; pi's assistant messages also name their API). */
 const piMessage = (message: Message) =>
@@ -1079,6 +1109,7 @@ export default definePlugin<Config>({
         for (const event of ext.handlers.keys()) {
           if (MAPPED_EVENTS.has(event)) continue
           if (watching && CHECKED_EVENTS.has(event)) continue
+          if (observed(event)) continue
           if (DECIDING_EVENTS.has(event) && !allowUnmapped.has(event)) deciding.push(own(`event "${event}"`))
           else ignored.push(own(`event "${event}"`))
         }
@@ -1300,9 +1331,139 @@ export default definePlugin<Config>({
       throw new Error(`pi extensions failed in session_start: ${started.join('; ')}`)
     }
     // After session_start, so what it registered is checked too.
+    // Observer events: the yoagent event types the handlers present at load need. One registered
+    // later is fired when its types are already subscribed, else reported as not available.
+    // (After session_start, like `watching`: what it registered counts.)
+    const subscribed = new Set<string>()
+    for (const [event, types] of OBSERVED_EVENTS) {
+      if (handlers(event).length > 0) for (const t of types) subscribed.add(t)
+    }
+    const observed = (event: string) =>
+      OBSERVED_EVENTS.has(event) && OBSERVED_EVENTS.get(event)!.every((t) => subscribed.has(t))
     watching = handlers('context').length + handlers('message_end').length > 0
     checkUnmapped(true)
     checkShadowing(true)
+
+    /** Per run: the turn index, and each running tool call's pi name and arguments. */
+    const turns = new Map<string, number>()
+    const running = new Map<string, { toolName: string; args: unknown }>()
+    const observerFailed = new Set<string>()
+    /** A yoagent tool call as pi names it: a pi tool keeps its name, a built-in gets pi's name and argument shape. */
+    const piCall = (runId: string, tool: string, args: unknown) => {
+      const own = snapshots.get(runId)?.offered.has(tool) ?? false
+      const shape = own ? undefined : ARGS.get(tool)
+      let input = args
+      try {
+        input = shape && args && typeof args === 'object' ? shape.toPi(args as Args) : args
+      } catch {
+        // An argument shape pi's form cannot hold (two edits): the yoagent form.
+      }
+      return { toolName: own ? tool : (names.get(tool) ?? tool), args: input }
+    }
+    const llm = (messages: unknown) =>
+      ((messages as Message[] | undefined) ?? []).filter((m) => m && m.role !== ('extension' as never)).map(piMessage)
+    /** The pi event for a yoagent one, or nothing (the types a subscribed observer does not use). */
+    const piEvent = (event: Record<string, unknown> & { type: string; run: RunInfo }): Record<string, unknown> | undefined => {
+      const runId = event.run.run_id
+      switch (event.type) {
+        case 'agentStart':
+          turns.set(runId, 0)
+          return { type: 'agent_start' }
+        case 'agentEnd':
+          turns.delete(runId)
+          for (const key of running.keys()) if (key.startsWith(`${runId}/`)) running.delete(key)
+          return { type: 'agent_end', messages: llm(event.messages) }
+        case 'turnStart':
+          return { type: 'turn_start', turnIndex: turns.get(runId) ?? 0, timestamp: Date.now() }
+        case 'turnEnd': {
+          const turnIndex = turns.get(runId) ?? 0
+          turns.set(runId, turnIndex + 1)
+          const message = event.message as Message
+          const stop = (message as { stopReason?: string }).stopReason
+          const toolResults = llm(event.toolResults)
+          return {
+            type: 'turn_end',
+            turnIndex,
+            message: piMessage(message),
+            toolResults,
+            // No session entries in yoagent: ids for this run and turn, and an empty boundary.
+            messageEntryId: `${runId}/turn-${turnIndex}`,
+            toolResultEntryIds: toolResults.map((_, i) => `${runId}/turn-${turnIndex}/result-${i}`),
+            entries: [],
+            continue: false,
+            context: { contextEntries: [], contextMessages: [], llmMessages: [], pendingMessages: [], canContinue: false },
+            outcome: stop === 'aborted' ? 'aborted' : stop === 'error' ? 'error' : 'completed',
+          }
+        }
+        case 'messageStart':
+          return { type: 'message_start', message: piMessage(event.message as Message) }
+        case 'messageUpdate': {
+          const message = piMessage(event.message as Message) as { content?: unknown[] }
+          const delta = event.delta as { type: string; delta: string }
+          return {
+            type: 'message_update',
+            message,
+            assistantMessageEvent: {
+              type: DELTA_TYPES[delta.type] ?? `${delta.type}_delta`,
+              contentIndex: Math.max(0, (message.content?.length ?? 1) - 1),
+              delta: delta.delta,
+              partial: message,
+            },
+          }
+        }
+        case 'toolExecutionStart': {
+          const call = piCall(runId, event.toolName as string, event.args)
+          running.set(`${runId}/${event.toolCallId}`, call)
+          return { type: 'tool_execution_start', toolCallId: event.toolCallId, ...call }
+        }
+        case 'toolExecutionUpdate': {
+          const call = running.get(`${runId}/${event.toolCallId}`) ?? piCall(runId, event.toolName as string, undefined)
+          return { type: 'tool_execution_update', toolCallId: event.toolCallId, ...call, partialResult: event.partialResult }
+        }
+        case 'toolExecutionEnd': {
+          const key = `${runId}/${event.toolCallId}`
+          const call = running.get(key) ?? piCall(runId, event.toolName as string, undefined)
+          running.delete(key)
+          return {
+            type: 'tool_execution_end',
+            toolCallId: event.toolCallId,
+            toolName: call.toolName,
+            result: event.result,
+            isError: event.isError,
+          }
+        }
+        default:
+          return undefined
+      }
+    }
+    /**
+     * Fires a yoagent event's pi counterpart at its handlers, in order. Never throws: an
+     * observer that throws is reported once (per extension and event) and the others still run;
+     * a result is ignored (a `turn_end` asking to continue or add entries is reported once).
+     */
+    const observe = async (event: Record<string, unknown> & { type: string; run: RunInfo }) => {
+      if (refusal) return
+      const pi = piEvent(event)
+      if (!pi) return
+      for (const { ext, fn } of handlers(pi.type as string)) {
+        try {
+          const result = (await fn(structuredClone(pi), context())) as { continue?: unknown; entries?: unknown[] } | undefined
+          if (pi.type === 'turn_end' && result && (result.continue || (result.entries?.length ?? 0) > 0)) {
+            const key = `${ext.path}\0turn_end-result`
+            if (!observerFailed.has(key)) {
+              observerFailed.add(key)
+              report('info', `[pi] ${short(ext.path)}: a turn_end result (continue / entries) is not applied in yoagent; ignored`)
+            }
+          }
+        } catch (error) {
+          const key = `${ext.path}\0${pi.type}`
+          if (!observerFailed.has(key)) {
+            observerFailed.add(key)
+            report('warn', `[pi] ${short(ext.path)}: a ${pi.type} handler threw (reported once): ${message(error)}`)
+          }
+        }
+      }
+    }
 
     ctx.effect(
       yoagent.register(config.name ?? 'pi-extensions', {
@@ -1542,7 +1703,12 @@ export default definePlugin<Config>({
           for (const key of judged.keys()) if (key.startsWith(`${outcome.run_id}/`)) judged.delete(key)
           snapshots.delete(outcome.run_id)
         },
-      }, watching ? { messages: true } : undefined),
+        // Only with observer handlers at load: pi's observer events, from yoagent's.
+        ...(subscribed.size > 0 ? { on_event: observe } : {}),
+      }, {
+        ...(watching ? { messages: true } : {}),
+        ...(subscribed.size > 0 ? { events: [...subscribed] } : {}),
+      }),
     )
   },
 })

@@ -496,6 +496,7 @@ onto one handler, following pi 1.1.0's own runner and agent loop:
 | `on("input")` | `on_input`: `handled` rejects the prompt (it never reaches the agent, as in pi); `transform` and a throwing handler reject it too (yoagent cannot rewrite a prompt) |
 | `on("before_agent_start")` | `before_model`: the handlers run once per run, and the text they add around `event.systemPrompt` is a note on the latest user turn of every request of that run. A handler that throws, replaces the prompt or changes `systemPromptOptions` is skipped with a warning — even under `strict` (a run cannot refuse the load), so a policy that replaces the prompt (a "read-only mode") does not apply; the others still count. A returned `message` is dropped, the same handler's addition kept |
 | `on("session_start")` / `on("session_shutdown")` | when the adapter loads / unloads; a `session_start` handler that throws refuses the load (its extension may be missing its policies) |
+| `on("agent_start")`, `agent_end`, `turn_start`, `turn_end`, `message_start`, `message_update`, `tool_execution_start` / `_update` / `_end` | fired from yoagent's event stream (the bridge's `on_event`, subscribed only to the event types the handlers present at load need, so `message_update`'s per-chunk traffic only when someone listens): after the fact and in order, each handler on its own copy. Observers only: a result is ignored (a `turn_end` asking to `continue` or add `entries` is reported once), a throw is reported once and the others still run. Tool calls carry pi's names and argument shapes (`write_file` → `write`), `turn_end` its turn index, message and tool results, with generated entry ids and an empty `context` preview (yoagent keeps no pi session entries); `message_update`'s `assistantMessageEvent` is the delta (`text_delta`, `thinking_delta`, `toolcall_delta`). `message_end` stays on the checked path below |
 | `on("message_end")` / `on("context")` | checked, not applied: each message of the run goes (a copy) to the `message_end` handlers once — the assistant message in `before_tool`, before any of its tools runs; prompts and tool results before the next request; the answer in `on_stop` — and the messages each request sends go to the `context` handlers. A handler that reads (usage meters, footers, indexers) works; one that would change what it got (a returned `message` / `messages`, or an edit in place) stops the adapter, since yoagent cannot apply the change; a check cut short by the hook's timeout or a cancel does not pass. The answer is checked after it was given: a rewrite there fails the run only if the host made the bridge `.required()`, and refuses every later run. "Once" is per message as sent (a message compaction truncated counts as new). The adapter asks the bridge for the run's conversation (`options.messages`) only when such handlers exist at load; a later one is then checked too (without any at load, it is refused) |
 
 **What refuses the load** (fail closed, `strict` or not): an extension that
@@ -519,8 +520,8 @@ cannot go around it.
 
 **What is only reported** (a warning in the host's `tracing` logs, through the bridge's `log`; config
 `strict: true` makes it a load failure): every other unfired event —
-observers such as `agent_end` or `tool_execution_*`, pi's session events,
-the boundary events `turn_end` / `agent_before_settle` — commands,
+pi's session events, `agent_before_settle` / `agent_settled`, and an
+observer registered after load whose event types are not subscribed — commands,
 shortcuts, flags, renderers, model providers, virtual models and MCP
 servers. `pi.appendEntry` and `pi.sendMessage` are recorded in the
 adapter's in-memory session — readable through `ctx.sessionManager`, a

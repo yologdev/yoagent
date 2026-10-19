@@ -1984,3 +1984,100 @@ async fn two_adapters_load_one_extension_at_once() {
     .expect("both adapters register their handler");
     host.root.shutdown().await.unwrap();
 }
+
+/// pi's observer events fire from yoagent's event stream, in order and in
+/// pi's shapes: the run, each turn (its index, message and tool results),
+/// messages starting and streaming, and each tool call under pi's name with
+/// its arguments and result.
+#[tokio::test(flavor = "multi_thread")]
+async fn pi_observer_events_fire_in_order() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("events.jsonl");
+    let source = r#"
+import { appendFileSync } from 'node:fs'
+export default function (pi) {
+  pi.registerTool({
+    name: 'pi_echo2',
+    label: 'pi_echo2',
+    description: 'echoes',
+    parameters: { type: 'object', properties: { text: { type: 'string' } } },
+    async execute(_id, params) {
+      return { content: [{ type: 'text', text: `echo ${params.text}` }], details: { n: 1 } }
+    },
+  })
+  const write = (e) => appendFileSync(LOG, JSON.stringify(e) + '\n')
+  for (const name of ['agent_start', 'agent_end', 'turn_start', 'turn_end', 'message_start', 'message_update',
+    'tool_execution_start', 'tool_execution_update', 'tool_execution_end']) {
+    pi.on(name, (e) => write({
+      type: e.type, turnIndex: e.turnIndex, toolName: e.toolName, args: e.args, isError: e.isError,
+      result: e.result, role: e.message?.role, results: e.toolResults?.length, messages: e.messages?.length,
+      delta: e.assistantMessageEvent?.type, outcome: e.outcome,
+    }))
+  }
+  // A throwing observer is reported and the others go on.
+  pi.on('turn_start', () => { throw new Error('observer boom') })
+}
+"#
+    .replace("LOG", &format!("{:?}", log.display().to_string()));
+    let ext = extension(dir.path(), "observer.ts", &source);
+    let host = host(&runtime).await;
+    host.load(adapter_row(json!({ "extensions": [ext] }))).await;
+    let (agent, _) = agent(vec![
+        call("pi_echo2", json!({ "text": "hi" })),
+        text("done"),
+    ]);
+    let mut agent = agent.with_extension(host.bridge.extension());
+    let (_, results) = run(&mut agent, "go").await;
+    assert!(results[0].1.contains("echo hi"), "{results:?}");
+    let text = wait_file(&log, |t| t.contains("\"agent_end\"")).await;
+    let events: Vec<Value> = text
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let kinds: Vec<String> = events
+        .iter()
+        .map(|e| match e["role"].as_str() {
+            Some(role) if e["type"] == "message_start" => format!("message_start:{role}"),
+            _ => e["type"].as_str().unwrap().to_owned(),
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "agent_start",
+            "turn_start",
+            "message_start:user",
+            "message_start:assistant",
+            "tool_execution_start",
+            "tool_execution_end",
+            "message_start:toolResult",
+            "turn_end",
+            "turn_start",
+            "message_start:assistant",
+            "message_update",
+            "turn_end",
+            "agent_end",
+        ],
+        "{text}"
+    );
+    let find = |kind: &str, n: usize| events.iter().filter(|e| e["type"] == kind).nth(n).unwrap();
+    assert_eq!(find("turn_start", 1)["turnIndex"], 1);
+    assert_eq!(find("turn_end", 0)["turnIndex"], 0);
+    assert_eq!(find("turn_end", 0)["results"], 1);
+    assert_eq!(find("turn_end", 0)["outcome"], "completed");
+    let start = find("tool_execution_start", 0);
+    assert_eq!(
+        (&start["toolName"], &start["args"]),
+        (&json!("pi_echo2"), &json!({ "text": "hi" }))
+    );
+    let end = find("tool_execution_end", 0);
+    assert_eq!(end["isError"], false);
+    assert_eq!(end["result"]["content"][0]["text"], "echo hi");
+    assert_eq!(end["result"]["details"], json!({ "n": 1 }));
+    assert_eq!(find("message_update", 0)["delta"], "text_delta");
+    assert_eq!(find("agent_end", 0)["messages"], 4);
+    host.root.shutdown().await.unwrap();
+}

@@ -4,6 +4,12 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## yoagent-rutis Unreleased
+
+yoagent-rutis only; requires yoagent 0.25, rutis 0.12 and Rust 1.88, as 0.7.0. Additive.
+
+- **pi adapter: observer events fire.** `agent_start` / `agent_end`, `turn_start` / `turn_end`, `message_start` / `message_update` and `tool_execution_start` / `_update` / `_end` handlers were loaded and never called (reported as "not available"), so extensions built on them — per-turn summaries such as pi-lens's, tracers such as langfuse and langsmith — loaded and did nothing. They now fire from yoagent's event stream (the bridge's `on_event`, subscribed only to the event types the handlers present at load need), in order and in pi's shapes: tool calls under pi's names and argument shapes, `turn_end` with its turn index, message and tool results, `message_update` with the streamed delta. They observe only: a handler's result is ignored (a `turn_end` asking to continue or add session entries is reported once), and a throwing handler is reported once while the others still run. `turn_end`'s session entry ids are generated and its context preview is empty, since yoagent keeps no pi session. Asked for by yobuild.
+
 ## 0.25.10 (2026-10-19)
 
 Additive: new API and docs, and two fixes.
