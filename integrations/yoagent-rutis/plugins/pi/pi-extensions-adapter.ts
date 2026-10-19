@@ -299,8 +299,10 @@ let report = (level: 'error' | 'warn' | 'info' | 'debug', message: string) => {
  */
 const answered = new Set<string>()
 function fixedAnswer<T>(question: string, answer: T, shown: string = JSON.stringify(answer) ?? 'undefined'): T {
-  if (!answered.has(question)) {
-    answered.add(question)
+  // Keyed by the answer too: two adapters in one runtime may answer differently.
+  const key = `${question}\0${shown}`
+  if (!answered.has(key)) {
+    answered.add(key)
     report('info', `[pi] fixed answer: ${question} → ${shown}`)
   }
   return answer
@@ -473,9 +475,6 @@ const FACTORIES = Symbol.for('yoagent-rutis.pi.factories')
  * runs it, under the extension's own resolved path.
  */
 async function loadGated(paths: string[], cwd: string, gate: (pi: PiApi, path: string) => PiApi): Promise<Loaded> {
-  const { mkdtemp, writeFile, rm } = await import('node:fs/promises')
-  const { tmpdir } = await import('node:os')
-  const { join } = await import('node:path')
   const loader = await piModule<{
     loadExtensions(paths: string[], cwd: string, eventBus: unknown, runtime: unknown): Promise<Loaded>
     loadExtensionFromFactory(factory: Factory, cwd: string, eventBus: unknown, runtime: unknown, path: string): Promise<PiExtension>
@@ -494,33 +493,24 @@ async function loadGated(paths: string[], cwd: string, gate: (pi: PiApi, path: s
   // back to back, as pi runs them: nothing but the factories happens between
   // the last of them and the adapter's load-time checks.
   const imported: { path: string; resolved: string; factory: Factory }[] = []
-  const dir = await mkdtemp(join(tmpdir(), 'yoagent-pi-'))
-  try {
-    const wrappers = new Map<string, { path: string; resolved: string; key: string }>()
-    for (const path of paths) {
-      const resolved = resolvePath(path, cwd, { normalizeUnicodeSpaces: true })
-      const key = randomUUID()
-      const wrapper = join(dir, `${key}.ts`)
-      await writeFile(
-        wrapper,
-        `import factory from ${JSON.stringify(resolved)}\n` +
-          `export default () => { globalThis[Symbol.for('yoagent-rutis.pi.factories')].set(${JSON.stringify(key)}, factory) }\n`,
-      )
-      wrappers.set(wrapper, { path, resolved, key })
-    }
-    const first = await loader.loadExtensions([...wrappers.keys()], cwd, eventBus, runtime)
-    const failed = new Map(first.errors.map((e) => [e.path, e.error]))
-    for (const [wrapper, { path, resolved, key }] of wrappers) {
-      const factory = factories.get(key)
-      factories.delete(key)
-      const error = failed.get(wrapper)
-      if (error !== undefined) errors.push({ path, error: error.replaceAll(wrapper, resolved) })
-      else if (typeof factory !== 'function') {
-        errors.push({ path, error: `Extension does not export a valid factory function: ${path}` })
-      } else imported.push({ path, resolved, factory })
-    }
-  } finally {
-    await rm(dir, { recursive: true, force: true })
+  const dir = await wrapperDir()
+  const wrappers = new Map<string, { path: string; resolved: string }>()
+  for (const path of paths) {
+    const resolved = resolvePath(path, cwd, { normalizeUnicodeSpaces: true })
+    wrappers.set(await writeWrapper(dir, resolved), { path, resolved })
+  }
+  const first = await loader.loadExtensions([...wrappers.keys()], cwd, eventBus, runtime)
+  const failed = new Map(first.errors.map((e) => [e.path, e.error]))
+  for (const [wrapper, { path, resolved }] of wrappers) {
+    // Keyed by the extension's path: two adapters loading one file at once may
+    // swap their copies of it, which are the same code.
+    const factory = factories.get(resolved)
+    factories.delete(resolved)
+    const error = failed.get(wrapper)
+    if (error !== undefined) errors.push({ path, error: error.replaceAll(wrapper, resolved) })
+    else if (typeof factory !== 'function') {
+      errors.push({ path, error: `Extension does not export a valid factory function: ${path}` })
+    } else imported.push({ path, resolved, factory })
   }
   for (const { path, resolved, factory } of imported) {
     try {
@@ -532,6 +522,46 @@ async function loadGated(paths: string[], cwd: string, gate: (pi: PiApi, path: s
     }
   }
   return { extensions, errors, runtime }
+}
+
+/**
+ * The directory the wrappers live in: one per user under the temp directory,
+ * kept, so each extension's wrapper has a stable name and content and pi's
+ * jiti reuses its transpile cache (a fresh name per load would leave a cache
+ * file behind every time). Refused unless it is a real directory of this
+ * user's that nobody else can write: a wrapper is code this runtime runs.
+ */
+async function wrapperDir(): Promise<string> {
+  const { mkdir, lstat } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const uid = process.getuid?.()
+  const dir = join(tmpdir(), `yoagent-pi-wrappers-${uid ?? 'user'}`)
+  try {
+    await mkdir(dir, { recursive: true, mode: 0o700 })
+    const info = await lstat(dir)
+    if (!info.isDirectory() || (uid !== undefined && info.uid !== uid) || (info.mode & 0o022) !== 0) {
+      throw new Error('it is not a directory of this user\'s that only this user can write')
+    }
+  } catch (error) {
+    throw new Error(`pi adapter: cannot use ${dir} for the extension wrappers (needed to gate pi.exec): ${message(error)}`)
+  }
+  return dir
+}
+
+/** Writes (atomically) and returns the wrapper that hands `resolved`'s factory over. */
+async function writeWrapper(dir: string, resolved: string): Promise<string> {
+  const { writeFile, rename } = await import('node:fs/promises')
+  const { join } = await import('node:path')
+  const { createHash } = await import('node:crypto')
+  const wrapper = join(dir, `${createHash('sha256').update(resolved).digest('hex').slice(0, 32)}.ts`)
+  const source =
+    `import factory from ${JSON.stringify(resolved)}\n` +
+    `export default () => { globalThis[Symbol.for('yoagent-rutis.pi.factories')].set(${JSON.stringify(resolved)}, factory) }\n`
+  const temporary = `${wrapper}.${randomUUID()}`
+  await writeFile(temporary, source, { mode: 0o600 })
+  await rename(temporary, wrapper)
+  return wrapper
 }
 
 /** `pi.exec` as the host's `exec` grant allows it; everything else on pi's API as it is. */
@@ -546,11 +576,14 @@ function gateExec(exec: boolean | string[]) {
       const key = `${path}\0${command}`
       if (!refusedOnce.has(key)) {
         refusedOnce.add(key)
-        report('warn', `[pi] ${short(path)}: refused ${why}`)
+        report('warn', `[pi] ${path}: refused ${why}`)
       }
       return Promise.resolve({ stdout: '', stderr: why, code: 126, killed: false })
     }
-    return new Proxy(pi, { get: (target, key) => (key === 'exec' ? gated : Reflect.get(target, key)) })
+    // A copy, not a Proxy: a Proxy's target still hands the real `exec` out
+    // through `Object.getOwnPropertyDescriptor`. pi's API methods are
+    // closures that never use `this`, and `events` is shared by reference.
+    return { ...pi, exec: gated }
   }
 }
 
@@ -668,6 +701,10 @@ export default definePlugin<Config>({
     if (typeof exec !== 'boolean' && !(Array.isArray(exec) && exec.every((c) => typeof c === 'string'))) {
       throw new Error(`exec must be true, false or a list of commands, not ${JSON.stringify(exec)}`)
     }
+    report(
+      'debug',
+      `[pi] pi.exec allowed: ${exec === true ? 'anything' : exec === false || exec.length === 0 ? 'nothing' : exec.join(', ')}`,
+    )
     const loaded = await loadGated(config.extensions, cwd, gateExec(exec))
     if (loaded.errors.length > 0) {
       throw new Error(`pi extensions failed to load: ${loaded.errors.map((e) => `${e.path}: ${e.error}`).join('; ')}`)
@@ -864,8 +901,9 @@ export default definePlugin<Config>({
     /** A tool's `ctx`: the extension context, plus `tools` and `executeTool` for nested calls. */
     const toolContext = (signal: AbortSignal, runId: string, callId: string, depth: number, caller: string | undefined) => {
       let nested = 0
-      return {
-        ...context(signal),
+      // Added onto the context, not spread: a spread reads every getter, which would log
+      // fixed answers (`ctx.model`, ...) no extension asked for.
+      return Object.defineProperties(context(signal), Object.getOwnPropertyDescriptors({
         get tools() {
           // The run's frozen copies (a tool cannot swap another's `execute` through them), only
           // those `nestedCalls` lets this tool call.
@@ -873,7 +911,7 @@ export default definePlugin<Config>({
         },
         executeTool: (name: string, args: unknown, options?: { signal?: AbortSignal }) =>
           executeNested(runId, callId, `${callId}/${++nested}`, name, args, options?.signal ?? signal, depth, caller),
-      }
+      }))
     }
 
     /** Every handler of `event`, in extension load and registration order. */

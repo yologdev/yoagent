@@ -1782,6 +1782,18 @@ export default function (pi) {
       }
     },
   })
+  // The real `exec` must not be reachable around the gate either.
+  const viaDescriptor = Object.getOwnPropertyDescriptor(pi, 'exec').value
+  pi.registerTool({
+    name: 'pi_exec_descriptor',
+    label: 'pi_exec_descriptor',
+    description: 'runs echo through the property descriptor',
+    parameters: { type: 'object', properties: {} },
+    async execute() {
+      const r = await viaDescriptor('echo', ['hi'])
+      return { content: [{ type: 'text', text: `code=${r.code}` }], details: {} }
+    },
+  })
 }
 "#,
     );
@@ -1808,11 +1820,21 @@ export default function (pi) {
             calls(&[
                 ("pi_exec", json!({ "command": "echo" })),
                 ("pi_exec", json!({ "command": echo })),
+                ("pi_exec_descriptor", json!({})),
             ]),
             text("done"),
         ]);
         let mut agent = agent.with_extension(host.bridge.extension());
         let (_, results) = run(&mut agent, "go").await;
+        assert_eq!(results.len(), 3, "{results:?}");
+        // The descriptor path is gated like `pi.exec` (refused unless `echo` is allowed).
+        let by_name = expect[0];
+        assert!(
+            results[2]
+                .1
+                .contains(&by_name[..by_name.find(' ').unwrap_or(by_name.len())]),
+            "{results:?}"
+        );
         for (result, want) in results.iter().zip(expect) {
             assert!(
                 !result.2 && result.1.contains(want),
@@ -1840,4 +1862,83 @@ fn which_echo() -> String {
         }
     }
     panic!("no echo in /bin or /usr/bin");
+}
+
+/// Extensions still load through the adapter's wrappers as pi loads them (a
+/// directory with `index.ts`, a CommonJS module), and a failed one is named by
+/// its own path, never the wrapper's. An `exec` setting that is not `true`,
+/// `false` or a list of commands refuses the load.
+#[tokio::test(flavor = "multi_thread")]
+async fn extensions_load_through_the_wrappers_as_pi_loads_them() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let tool = |name: &str| {
+        format!(
+            "pi.registerTool({{ name: '{name}', label: '{name}', description: 'x', parameters: {{ type: 'object', properties: {{}} }}, \
+             async execute() {{ return {{ content: [{{ type: 'text', text: '{name} ran' }}], details: {{}} }} }} }})"
+        )
+    };
+    std::fs::create_dir(dir.path().join("dir_ext")).unwrap();
+    extension(
+        &dir.path().join("dir_ext"),
+        "index.ts",
+        &format!("export default function (pi) {{ {} }}", tool("from_dir")),
+    );
+    let cjs = extension(
+        dir.path(),
+        "cjs_ext.cjs",
+        &format!("module.exports = function (pi) {{ {} }}", tool("from_cjs")),
+    );
+    let loaded = host(&runtime).await;
+    loaded
+        .load(adapter_row(json!({
+            "extensions": [dir.path().join("dir_ext"), cjs],
+        })))
+        .await;
+    let (agent, _) = agent(vec![
+        calls(&[("from_dir", json!({})), ("from_cjs", json!({}))]),
+        text("done"),
+    ]);
+    let mut agent = agent.with_extension(loaded.bridge.extension());
+    let (_, results) = run(&mut agent, "go").await;
+    assert_eq!(results.len(), 2, "{results:?}");
+    assert!(
+        results[0].1.contains("from_dir ran") && results[1].1.contains("from_cjs ran"),
+        "{results:?}"
+    );
+    loaded.root.shutdown().await.unwrap();
+
+    let broken = extension(
+        dir.path(),
+        "broken.ts",
+        "export default function (pi) { this is not code }",
+    );
+    let named = extension(dir.path(), "named.ts", "export const notDefault = 1");
+    let missing = dir.path().join("missing.ts");
+    for (path, want) in [
+        (&broken, "broken.ts"),
+        (&named, "does not export a valid factory function"),
+        (&missing, "missing.ts"),
+    ] {
+        let host = host(&runtime).await;
+        let failures = host
+            .try_load(adapter_row(json!({ "extensions": [path] })))
+            .await;
+        assert!(failures.contains(want), "{failures}");
+        assert!(
+            !failures.contains("yoagent-pi-wrappers"),
+            "names the wrapper: {failures}"
+        );
+        host.root.shutdown().await.unwrap();
+    }
+    for exec in [json!("echo"), json!([1])] {
+        let host = host(&runtime).await;
+        let failures = host
+            .try_load(adapter_row(json!({ "extensions": [cjs], "exec": exec })))
+            .await;
+        assert!(failures.contains("exec"), "{exec}: {failures}");
+        host.root.shutdown().await.unwrap();
+    }
 }
