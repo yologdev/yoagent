@@ -1755,7 +1755,8 @@ export default function (pi) {{
 
 /// `pi.exec` runs only what the host's `exec` setting allows: nothing by
 /// default, exactly the listed commands (a name is not its path, nor a path
-/// its name), or anything with `true`.
+/// its name), or anything with `true` — also when an extension takes `exec`
+/// from `Object.getOwnPropertyDescriptor(pi, 'exec')`.
 /// A refusal is a failed command (code 126, the reason in stderr), never a
 /// throw. `ctx.isProjectTrusted()` answers the host's `projectTrusted`.
 #[tokio::test(flavor = "multi_thread")]
@@ -1941,4 +1942,45 @@ async fn extensions_load_through_the_wrappers_as_pi_loads_them() {
         assert!(failures.contains("exec"), "{exec}: {failures}");
         host.root.shutdown().await.unwrap();
     }
+}
+
+/// Two adapters in one runtime loading the same extension at once each get
+/// it: the wrapper hands its factory over on its own load's event bus, so the
+/// loads share nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_adapters_load_one_extension_at_once() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let host = host(&runtime).await;
+    let row = |id: &str| {
+        json!({
+            "id": id,
+            "name": pi_dir().join("pi-extensions-adapter.ts"),
+            "config": {
+                "name": id,
+                "extensions": [pi_dir().join("fixture-extension.ts")],
+                "toolNames": {},
+            },
+        })
+    };
+    let failures = host.try_load(json!([row("pi-a"), row("pi-b")])).await;
+    assert!(failures.is_empty(), "{failures}");
+    let registry = host.bridge.registry().clone();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            let names: Vec<String> = registry
+                .handlers()
+                .iter()
+                .map(|h| h.name().to_owned())
+                .collect();
+            if names.iter().any(|n| n == "pi-a") && names.iter().any(|n| n == "pi-b") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("both adapters register their handler");
+    host.root.shutdown().await.unwrap();
 }
