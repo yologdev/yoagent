@@ -6,13 +6,13 @@ edition = "2021"
 # whose own rust-version fits ours. Without it CI re-resolves to whatever is
 # newest and any transitive bump breaks the MSRV job on unrelated PRs.
 resolver = "3"
-description = "Simple, effective agent loop with tool execution and event streaming"
+description = "The agent loop for Rust: stream from 7 LLM protocols, run tools, loop until done. Native or wasm32 (Cloudflare Workers)."
 license = "MIT"
 repository = "https://github.com/yologdev/yoagent"
 homepage = "https://yologdev.github.io/yoagent/"
 documentation = "https://docs.rs/yoagent"
 readme = "README.md"
-keywords = ["agent", "llm", "ai", "anthropic", "openai"]
+keywords = ["agent", "llm", "mcp", "tool-calling", "wasm"]
 categories = [
     "api-bindings",
     "asynchronous",
