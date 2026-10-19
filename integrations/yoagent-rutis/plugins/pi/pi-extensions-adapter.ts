@@ -115,10 +115,12 @@
 // from yoagent's event stream when a handler for them exists at load (the
 // bridge's `on_event`, subscribed to the yoagent types they need): after the
 // fact and in order, on copies, on the adapter's own chain (`on_event` returns
-// at once, so a slow observer never meets the bridge's per-event timeout; at
-// most MAX_OBSERVER_BACKLOG wait, then events are dropped, reported once), a
-// result ignored (`turn_end`'s `continue` / `entries` reported once), a throw
-// reported once; tool calls under pi's names and argument shapes, in the tool
+// at once, so a slow observer never meets the bridge's per-event timeout; a
+// handler gets OBSERVER_HANDLER_BUDGET_MS before the chain moves on; past
+// MAX_OBSERVER_BACKLOG waiting, streaming events are dropped, lifecycle ones
+// past twice that, counted and reported per burst; unloading waits up to
+// OBSERVER_DRAIN_MS for the queue before `session_shutdown`), a result ignored
+// (`turn_end`'s `continue` / `entries` reported once), a throw reported once per run; tool calls under pi's names and argument shapes, in the tool
 // events and inside messages; `turn_end` only for a turn that ended with an
 // assistant message (the index advances at every turn's end), with generated
 // entry ids and an empty context preview. `message_end` (the checked path) is
@@ -301,8 +303,24 @@ const OBSERVED_EVENTS = new Map<string, string[]>([
   ['tool_execution_end', ['toolExecutionEnd']],
 ])
 
-/** Most observer events waiting for slow handlers before later ones are dropped. */
+/**
+ * Most observer events waiting for slow handlers: past it, streaming events
+ * (`message_update`, `tool_execution_update`) are dropped; lifecycle events
+ * (starts and ends) only past twice as many, so a tracer's spans close.
+ */
 const MAX_OBSERVER_BACKLOG = 1000
+
+/** Events whose loss leaves only a gap in a stream, not an open span. */
+const STREAMING_EVENTS = new Set(['message_update', 'tool_execution_update'])
+
+/**
+ * How long one observer handler may take before the queue moves on without
+ * it (it is reported once per run; the handler itself is not stopped).
+ */
+const OBSERVER_HANDLER_BUDGET_MS = 30_000
+
+/** How long unloading waits for queued observer events before `session_shutdown`. */
+const OBSERVER_DRAIN_MS = 5_000
 
 /** pi's names for yoagent's stream deltas (`message_update`'s `assistantMessageEvent.type`). */
 const DELTA_TYPES: Record<string, string> = { text: 'text_delta', thinking: 'thinking_delta', toolCallDelta: 'toolcall_delta' }
@@ -725,7 +743,14 @@ function canon(value: unknown): string {
   })
 }
 
-const message = (error: unknown) => (error instanceof Error ? error.message : String(error))
+const message = (error: unknown) => {
+  try {
+    return error instanceof Error ? error.message : String(error)
+  } catch {
+    // An error whose own `toString` throws (or that has none).
+    return Object.prototype.toString.call(error)
+  }
+}
 
 export default definePlugin<Config>({
   inject: ['yoagent'],
@@ -1325,8 +1350,12 @@ export default definePlugin<Config>({
         started.push(`${short(ext.path)}: ${message(error)}`)
       }
     }
+    // Set once the observers exist: stops them and waits (bounded) for what is queued, so a
+    // tracer's `agent_end` comes before its `session_shutdown`, as in pi.
+    let drainObservers: () => Promise<void> = async () => {}
     // Registered first, so a refusal below still shuts the extensions down.
     ctx.effect(async () => {
+      await drainObservers()
       for (const { ext, fn } of handlers('session_shutdown')) {
         try {
           await fn({ type: 'session_shutdown', reason: 'quit' }, context())
@@ -1355,17 +1384,20 @@ export default definePlugin<Config>({
 
     /** Per run: the turn index, and each running tool call's pi name and arguments. */
     const turns = new Map<string, number>()
+    /** A run's tools kept past `finish` for its `agentEnd` (delivered after it), when subscribed. */
+    const ending = new Map<string, { offered: Map<string, PiTool> }>()
     const running = new Map<string, { toolName: string; args: unknown }>()
     const observerFailed = new Set<string>()
     /** A yoagent tool call as pi names it: a pi tool keeps its name, a built-in gets pi's name and argument shape. */
     const piCall = (runId: string, tool: string, args: unknown) => {
-      const own = snapshots.get(runId)?.offered.has(tool) ?? false
+      const own = (snapshots.get(runId) ?? ending.get(runId))?.offered.has(tool) ?? false
       const shape = own ? undefined : ARGS.get(tool)
       let input = args
       try {
         input = shape && args && typeof args === 'object' ? shape.toPi(args as Args) : args
-      } catch {
-        // An argument shape pi's form cannot hold (two edits): the yoagent form.
+      } catch (error) {
+        // An argument shape that cannot take pi's form: shown in yoagent's.
+        report('debug', `[pi] ${tool}: arguments shown in yoagent's form to observers: ${message(error)}`)
       }
       return { toolName: own ? tool : (names.get(tool) ?? tool), args: input }
     }
@@ -1395,10 +1427,13 @@ export default definePlugin<Config>({
         case 'agentStart':
           turns.set(runId, 0)
           return { type: 'agent_start' }
-        case 'agentEnd':
+        case 'agentEnd': {
           turns.delete(runId)
           for (const key of running.keys()) if (key.startsWith(`${runId}/`)) running.delete(key)
-          return { type: 'agent_end', messages: llm(runId, event.messages) }
+          const messages = llm(runId, event.messages)
+          ending.delete(runId)
+          return { type: 'agent_end', messages }
+        }
         case 'turnStart':
           return { type: 'turn_start', turnIndex: turns.get(runId) ?? 0, timestamp: Date.now() }
         case 'turnEnd': {
@@ -1476,49 +1511,117 @@ export default definePlugin<Config>({
      */
     let chain: Promise<void> = Promise.resolve()
     let backlog = 0
-    let backlogReported = false
-    const runHandlers = async (pi: Record<string, unknown>) => {
+    let dropped = 0
+    let closed = false
+    const mappingFailed = new Set<string>()
+    /** Once per run, extension and kind of trouble: a failure in a later run is reported again. */
+    const once = (key: string, level: 'warn' | 'info', text: string) => {
+      if (observerFailed.has(key)) return
+      observerFailed.add(key)
+      report(level, text)
+    }
+    const runHandlers = async (pi: Record<string, unknown>, runId: string) => {
       for (const { ext, fn } of handlers(pi.type as string)) {
+        let timer: ReturnType<typeof setTimeout> | undefined
         try {
-          const result = (await fn(structuredClone(pi), context())) as { continue?: unknown; entries?: unknown[] } | undefined
-          if (pi.type === 'turn_end' && result && (result.continue || (result.entries?.length ?? 0) > 0)) {
-            const key = `${ext.path}\0turn_end-result`
-            if (!observerFailed.has(key)) {
-              observerFailed.add(key)
-              report('info', `[pi] ${short(ext.path)}: a turn_end result (continue / entries) is not applied in yoagent; ignored`)
-            }
+          const call = Promise.resolve().then(() => fn(structuredClone(pi), context()))
+          const budget = new Promise<'late'>((resolve) => {
+            timer = setTimeout(() => resolve('late'), OBSERVER_HANDLER_BUDGET_MS)
+          })
+          const result = (await Promise.race([call, budget])) as
+            | 'late'
+            | { continue?: unknown; entries?: unknown[] }
+            | undefined
+          if (result === 'late') {
+            // Left running; the queue moves on so one stuck handler cannot stall every observer.
+            call.catch(() => {})
+            once(
+              `${runId}\0${ext.path}\0${pi.type}\0late`,
+              'warn',
+              `[pi] ${short(ext.path)}: a ${pi.type} handler did not finish within ${OBSERVER_HANDLER_BUDGET_MS / 1000} s; ` +
+                `the observers went on without it (reported once per run)`,
+            )
+          } else if (pi.type === 'turn_end' && result && (result.continue || (result.entries?.length ?? 0) > 0)) {
+            once(
+              `${ext.path}\0turn_end-result`,
+              'warn',
+              `[pi] ${short(ext.path)}: a turn_end result (continue / entries) is not applied in yoagent; ignored`,
+            )
           }
         } catch (error) {
-          const key = `${ext.path}\0${pi.type}`
-          if (!observerFailed.has(key)) {
-            observerFailed.add(key)
-            report('warn', `[pi] ${short(ext.path)}: a ${pi.type} handler threw (reported once): ${message(error)}`)
-          }
+          once(
+            `${runId}\0${ext.path}\0${pi.type}`,
+            'warn',
+            `[pi] ${short(ext.path)}: a ${pi.type} handler threw (reported once per run): ${message(error)}`,
+          )
+        } finally {
+          clearTimeout(timer)
         }
       }
+      // The run is over for its observers: its once-per-run keys can go.
+      if (pi.type === 'agent_end') {
+        for (const key of observerFailed) if (key.startsWith(`${runId}\0`)) observerFailed.delete(key)
+      }
     }
+    /**
+     * Fires a yoagent event's pi counterpart at its handlers. The pi event is built now (the
+     * run's tools are still known), the handlers run later on one ordered chain: `on_event`
+     * returns at once, so a slow observer (a tracer flushing over the network) never meets the
+     * bridge's per-event timeout, which would switch every observer off for the run (and fail a
+     * required bridge's run). A handler gets OBSERVER_HANDLER_BUDGET_MS before the queue moves
+     * on. Past MAX_OBSERVER_BACKLOG waiting events streaming events are dropped (lifecycle ones
+     * past twice that), counted and reported when the queue catches up. Never throws: a
+     * throwing handler is reported once per run and the others still run; a result is ignored
+     * (a `turn_end` asking to continue or add entries is reported once).
+     */
     const observe = async (event: Record<string, unknown> & { type: string; run: RunInfo }) => {
-      if (refusal) return
+      if (refusal || closed) {
+        ending.clear()
+        return
+      }
       let pi: Record<string, unknown> | undefined
       try {
         pi = piEvent(event)
       } catch (error) {
-        report('warn', `[pi] could not map a ${event.type} event for pi observers: ${message(error)}`)
+        if (!mappingFailed.has(event.type)) {
+          mappingFailed.add(event.type)
+          report('warn', `[pi] could not map ${event.type} events for pi observers (reported once): ${message(error)}`)
+        }
         return
       }
       if (!pi) return
-      if (backlog >= MAX_OBSERVER_BACKLOG) {
-        if (!backlogReported) {
-          backlogReported = true
-          report('warn', `[pi] observers are ${MAX_OBSERVER_BACKLOG} events behind; dropping events until they catch up`)
+      const limit = STREAMING_EVENTS.has(pi.type as string) ? MAX_OBSERVER_BACKLOG : 2 * MAX_OBSERVER_BACKLOG
+      if (backlog >= limit) {
+        if (dropped++ === 0) {
+          report('warn', `[pi] observers are ${backlog} events behind; dropping events until they catch up`)
         }
         return
       }
       backlog++
       const next = pi
-      chain = chain.then(() => runHandlers(next)).finally(() => {
-        backlog--
-      })
+      const runId = event.run.run_id
+      chain = chain
+        .then(() => runHandlers(next, runId))
+        .catch((error) => report('warn', `[pi] observer queue: ${message(error)}`))
+        .finally(() => {
+          backlog--
+          if (backlog === 0 && dropped > 0) {
+            report('warn', `[pi] observers caught up; ${dropped} events were dropped`)
+            dropped = 0
+          }
+        })
+    }
+    drainObservers = async () => {
+      closed = true
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const done = await Promise.race([
+        chain.then(() => true),
+        new Promise<false>((resolve) => {
+          timer = setTimeout(() => resolve(false), OBSERVER_DRAIN_MS)
+        }),
+      ])
+      clearTimeout(timer)
+      if (!done) report('warn', `[pi] unloading with ${backlog} observer events still queued`)
     }
 
     ctx.effect(
@@ -1757,6 +1860,9 @@ export default definePlugin<Config>({
           ended.delete(outcome.run_id)
           queue.delete(outcome.run_id)
           for (const key of judged.keys()) if (key.startsWith(`${outcome.run_id}/`)) judged.delete(key)
+          // `agentEnd` comes after `finish`: it names tools from what this run offered.
+          const snapshot = snapshots.get(outcome.run_id)
+          if (snapshot && subscribed.has('agentEnd')) ending.set(outcome.run_id, snapshot)
           snapshots.delete(outcome.run_id)
           // Observer bookkeeping: whatever event types are subscribed (the bridge delivers the
           // run's events before `finish`; only `agentEnd`, which needs neither, comes after).

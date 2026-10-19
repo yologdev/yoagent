@@ -2055,6 +2055,7 @@ export default function (pi) {
             _ => e["type"].as_str().unwrap().to_owned(),
         })
         .collect();
+    assert_eq!(kinds.len(), 16, "{text}");
     // The two tools run in parallel: their start, end and result events may
     // interleave, but each comes once, between the answer's start and the turn's end.
     let (head, rest) = kinds.split_at(4);
@@ -2159,10 +2160,11 @@ export default function (pi) {
     host.root.shutdown().await.unwrap();
 }
 
-/// A slow observer (a tracer flushing over the network) neither fails a
-/// required bridge's run nor silences the observers: the handlers run on the
-/// adapter's own ordered chain, so the bridge's per-event timeout (5 s) never
-/// fires, and a later `agent_end` still arrives.
+/// A slow observer (a tracer flushing over the network) does not silence the
+/// observers: the handlers run on the adapter's own ordered chain, so the
+/// bridge's per-event timeout (5 s), which would switch them off for the run,
+/// never fires — a later `agent_end` still arrives — and the run (with a
+/// required bridge) ends normally.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_slow_observer_does_not_fail_the_run_or_drop_events() {
     let Some(runtime) = node_runtime() else {
@@ -2202,4 +2204,40 @@ export default function (pi) {
     let seen = wait_file(&log, |t| t.contains("agent_end")).await;
     assert_eq!(seen.lines().collect::<Vec<_>>(), ["turn_end", "agent_end"]);
     host.root.shutdown().await.unwrap();
+}
+
+/// Unloading waits (bounded) for queued observer events: a tracer's
+/// `agent_end` comes before its `session_shutdown`, as in pi.
+#[tokio::test(flavor = "multi_thread")]
+async fn queued_observer_events_come_before_session_shutdown() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("order.jsonl");
+    let source = r#"
+import { appendFileSync } from 'node:fs'
+export default function (pi) {
+  pi.on('turn_end', async () => {
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+    appendFileSync(LOG, 'turn_end\n')
+  })
+  pi.on('agent_end', () => appendFileSync(LOG, 'agent_end\n'))
+  pi.on('session_shutdown', () => appendFileSync(LOG, 'shutdown\n'))
+}
+"#
+    .replace("LOG", &format!("{:?}", log.display().to_string()));
+    let ext = extension(dir.path(), "order.ts", &source);
+    let host = host(&runtime).await;
+    host.load(adapter_row(json!({ "extensions": [ext] }))).await;
+    let (agent, _) = agent(vec![text("done")]);
+    let mut agent = agent.with_extension(host.bridge.extension());
+    run(&mut agent, "go").await;
+    // Unload at once, with `turn_end` still running and `agent_end` behind it.
+    host.root.shutdown().await.unwrap();
+    let seen = wait_file(&log, |t| t.contains("shutdown")).await;
+    assert_eq!(
+        seen.lines().collect::<Vec<_>>(),
+        ["turn_end", "agent_end", "shutdown"]
+    );
 }
