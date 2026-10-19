@@ -245,3 +245,20 @@ fn the_pin_detects_a_one_ulp_change() {
     detiered.context_tiers[0].cache_read_per_million = 0.5;
     assert_ne!(Some(detiered), pinned().remove(7).1.cost);
 }
+
+/// `ModelConfig::presets()` lists exactly the presets pinned here (by
+/// provider and id), so a preset added to one and not the other fails.
+#[test]
+fn presets_lists_every_pinned_preset() {
+    let mut pinned: Vec<(String, String)> = pinned()
+        .into_iter()
+        .filter(|(name, _, _)| !name.starts_with("meta("))
+        .map(|(_, config, _)| (config.provider, config.id))
+        .collect();
+    let mut listed: Vec<(String, String)> = ModelConfig::presets()
+        .map(|config| (config.provider, config.id))
+        .collect();
+    pinned.sort();
+    listed.sort();
+    assert_eq!(listed, pinned);
+}

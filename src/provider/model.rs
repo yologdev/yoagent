@@ -1317,7 +1317,7 @@ impl ModelConfig {
     /// and tool-forced structured outputs, which every gateway accepts. The
     /// context window and output limit are generic (200K / 16K); for a
     /// current model prefer its preset — [`claude_sonnet_5`](Self::claude_sonnet_5)
-    /// and friends — which sets those too. Pricing comes from the process-wide price
+    /// and friends, or [`ModelConfig::preset`] by id — which sets those too. Pricing comes from the process-wide price
     /// table either way — none until the process opts in
     /// ([`prices`](crate::provider::prices)).
     pub fn anthropic(id: impl Into<String>, name: impl Into<String>) -> Self {
@@ -1853,7 +1853,125 @@ impl ModelConfig {
         }
     }
 
-    /// Create a new OpenAI model config.
+    /// Every named preset ([`claude_sonnet_5_5`](Self::claude_sonnet_5_5),
+    /// [`gpt_6_sol`](Self::gpt_6_sol), [`grok_4_7`](Self::grok_4_7), …), built
+    /// now, in a fixed order.
+    ///
+    /// For a host that takes a model as text: a preset sets the model's real
+    /// context window, output limit and protocol, which a generic constructor
+    /// cannot know — `ModelConfig::xai("grok-4.7", ..)` gets a 131K window
+    /// and 4,096 output tokens where [`grok_4_7`](Self::grok_4_7) has 500K
+    /// and 64K, and `ModelConfig::openai("gpt-6-sol", ..)` talks Chat
+    /// Completions where [`gpt_6_sol`](Self::gpt_6_sol) uses the Responses
+    /// API. Look one up with [`preset`](Self::preset), or let
+    /// [`for_model`](Self::for_model) fall back to the generic constructor.
+    ///
+    /// Each config is priced as its constructor prices it (none until the
+    /// process opts in; see [`prices`](crate::provider::prices)).
+    ///
+    /// ```
+    /// # use yoagent::provider::ModelConfig;
+    /// assert!(ModelConfig::presets().any(|m| m.provider == "xai" && m.id == "grok-4.7"));
+    /// ```
+    pub fn presets() -> impl Iterator<Item = ModelConfig> {
+        Self::PRESETS.iter().map(|preset| preset())
+    }
+
+    /// Every named preset's constructor. A new preset belongs here too: the
+    /// unit test `every_priced_model_with_a_preset_is_listed` fails for a
+    /// priced preset left out, and `tests/preset_prices_test.rs` for a pinned
+    /// one.
+    const PRESETS: &'static [fn() -> Self] = &[
+        Self::claude_fable_5,
+        Self::claude_fable_5_1,
+        Self::claude_opus_5_5,
+        Self::claude_opus_5,
+        Self::claude_opus_4_8,
+        Self::claude_sonnet_5,
+        Self::claude_haiku_4_5,
+        Self::claude_sonnet_5_5,
+        Self::claude_haiku_5_5,
+        Self::gpt_5_5,
+        Self::gpt_6_astra,
+        Self::gpt_6_sol,
+        Self::gpt_6_luna,
+        Self::gpt_6_1_sol,
+        Self::gemini_4_argon,
+        Self::gemini_3_8_flash,
+        Self::grok_4_7,
+        Self::mistral_large_4,
+        Self::glm_5_3,
+        Self::glm_5_3_flash,
+        Self::qwen_3_8_max,
+        Self::qwen_3_8_flash,
+    ];
+
+    /// The named preset for exactly this `provider` and `id` (as
+    /// [`provider`](Self::provider) and [`id`](Self::id) spell them:
+    /// `"anthropic"`, `"claude-sonnet-5-5"`), or `None` when there is none.
+    /// No case folding, aliases or prefixes: `("openai", "gpt-6-sol")` finds
+    /// [`gpt_6_sol`](Self::gpt_6_sol); `("opencode-zen", "gpt-6-sol")` and
+    /// `("openai", "GPT-6-Sol")` find nothing.
+    ///
+    /// ```
+    /// # use yoagent::provider::{ApiProtocol, ModelConfig};
+    /// let sol = ModelConfig::preset("openai", "gpt-6-sol").unwrap();
+    /// assert_eq!(sol.api, ApiProtocol::OpenAiResponses);
+    /// assert!(ModelConfig::preset("openai", "gpt-4o").is_none());
+    /// ```
+    pub fn preset(provider: &str, id: &str) -> Option<ModelConfig> {
+        Self::presets().find(|m| m.provider == provider && m.id == id)
+    }
+
+    /// A config for `id` at a first-party `provider`: its named
+    /// [`preset`](Self::preset) when there is one, else the provider's
+    /// generic constructor ([`anthropic`](Self::anthropic),
+    /// [`openai`](Self::openai) (Chat Completions), [`google`](Self::google),
+    /// [`xai`](Self::xai), [`groq`](Self::groq),
+    /// [`deepseek`](Self::deepseek), [`mistral`](Self::mistral),
+    /// [`zai`](Self::zai), [`minimax`](Self::minimax), [`qwen`](Self::qwen),
+    /// [`meta`](Self::meta)) with `id` as the name — the providers in
+    /// [`PRICED_PROVIDERS`](super::PRICED_PROVIDERS). `None` for any other
+    /// provider (gateways, local servers and custom endpoints need a base
+    /// URL; build those with their own constructors).
+    ///
+    /// ```
+    /// # use yoagent::provider::ModelConfig;
+    /// assert_eq!(ModelConfig::for_model("xai", "grok-4.7").unwrap().context_window, 500_000);
+    /// assert_eq!(ModelConfig::for_model("xai", "grok-4.6").unwrap().context_window, 131_072);
+    /// assert!(ModelConfig::for_model("ollama", "llama3").is_none());
+    /// ```
+    pub fn for_model(provider: &str, id: &str) -> Option<ModelConfig> {
+        if let Some(preset) = Self::preset(provider, id) {
+            return Some(preset);
+        }
+        let generic: fn(String, String) -> Self = match provider {
+            "anthropic" => Self::anthropic,
+            "openai" => Self::openai,
+            "google" => Self::google,
+            "xai" => Self::xai,
+            "groq" => Self::groq,
+            "deepseek" => Self::deepseek,
+            "mistral" => Self::mistral,
+            "zai" => Self::zai,
+            "minimax" => Self::minimax,
+            "qwen" => Self::qwen,
+            "meta" => Self::meta,
+            _ => return None,
+        };
+        Some(generic(id.to_owned(), id.to_owned()))
+    }
+
+    /// Create a new OpenAI model config (Chat Completions).
+    ///
+    /// Generic limits: 128K context, 4,096 output tokens. OpenAI's current
+    /// models have presets with their real limits and protocol —
+    /// [`gpt_5_5`](Self::gpt_5_5), and on the Responses API
+    /// [`gpt_6_astra`](Self::gpt_6_astra), [`gpt_6_sol`](Self::gpt_6_sol),
+    /// [`gpt_6_luna`](Self::gpt_6_luna), [`gpt_6_1_sol`](Self::gpt_6_1_sol);
+    /// prefer them (or [`ModelConfig::preset`]). Given a GPT-6 id, this
+    /// constructor still talks Chat Completions, where OpenAI restricts
+    /// function calling for those models.
     pub fn openai(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -1886,6 +2004,12 @@ impl ModelConfig {
     /// Priced when the process-wide price table lists the id (as for
     /// [`openai`](Self::openai); nothing is listed until the process opts in),
     /// else `cost: None`; set `cost` for a model it does not list.
+    ///
+    /// Generic limits: 128K context, 16K output tokens. The GPT-6 models have
+    /// presets with their real limits (1,050,000 / 64K) and effort ceiling —
+    /// [`gpt_6_astra`](Self::gpt_6_astra), [`gpt_6_sol`](Self::gpt_6_sol),
+    /// [`gpt_6_luna`](Self::gpt_6_luna), [`gpt_6_1_sol`](Self::gpt_6_1_sol);
+    /// prefer them (or [`ModelConfig::preset`]).
     ///
     /// `compat` is `None`, so reasoning effort tops out at `high`
     /// (`ThinkingLevel::Off` always omits it). For a model with a higher
@@ -2118,7 +2242,10 @@ impl ModelConfig {
 
     /// Create a new Z.ai (Zhipu AI) model config.
     ///
-    /// Models: `glm-4.7`, `glm-4.5-air`, `glm-5`, etc.
+    /// Models: `glm-4.7`, `glm-4.5-air`, `glm-5`, etc. Generic limits: 128K
+    /// context, 4,096 output tokens. GLM-5.3 has presets with its real
+    /// limits (1M / 128K) — [`glm_5_3`](Self::glm_5_3),
+    /// [`glm_5_3_flash`](Self::glm_5_3_flash); prefer them (or [`ModelConfig::preset`]), which set those too.
     pub fn zai(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -2142,7 +2269,8 @@ impl ModelConfig {
     /// Create a new Meta Model API config (Muse Spark).
     ///
     /// Models: `muse-spark-1.1` — 1,048,576-token context; 128K max output
-    /// per Meta's integration examples (no official model card yet).
+    /// per Meta's integration examples (no official model card yet). These
+    /// are this constructor's limits for every id; Meta has no named preset.
     /// US-only public preview as of July 2026. OpenAI-compatible endpoint at
     /// `https://api.meta.ai/v1`. Key resolves from `META_API_KEY`, then
     /// Meta's documented `MODEL_API_KEY`.
@@ -2183,7 +2311,8 @@ impl ModelConfig {
     /// Create a new MiniMax model config.
     ///
     /// Models: `MiniMax-M3`, `MiniMax-M2.7`, etc. Served from
-    /// `https://api.minimax.io/v1`.
+    /// `https://api.minimax.io/v1`. Limits: 1M context, 4,096 output tokens
+    /// (no named preset; raise `max_tokens` for longer replies).
     pub fn minimax(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -2207,6 +2336,10 @@ impl ModelConfig {
     /// Create a new Qwen / DashScope model config.
     ///
     /// Models: `qwen3.6-plus`, `qwen3.5-plus`, `qwen-plus`, `qwen-flash`, etc.
+    /// Generic limits: 128K context, 4,096 output tokens. Qwen3.8 has presets
+    /// with its real limits (1M / 131,072) —
+    /// [`qwen_3_8_max`](Self::qwen_3_8_max),
+    /// [`qwen_3_8_flash`](Self::qwen_3_8_flash); prefer them (or [`ModelConfig::preset`]), which set those too.
     pub fn qwen(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -2229,7 +2362,11 @@ impl ModelConfig {
 
     /// Create a new xAI (Grok) model config.
     ///
-    /// Models: `grok-4.7`, `grok-4.6`, etc.
+    /// For any Grok model id. Generic limits: 131,072-token context, 4,096
+    /// output tokens, reasoning not marked. Grok 4.7 has a preset with its
+    /// real limits (500K / 64K, always reasoning) —
+    /// [`grok_4_7`](Self::grok_4_7); use it (or [`ModelConfig::preset`])
+    /// rather than `xai("grok-4.7", ..)`, which would stop replies at 4K.
     pub fn xai(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -2252,7 +2389,9 @@ impl ModelConfig {
 
     /// Create a new Groq model config.
     ///
-    /// Models: `openai/gpt-oss-120b`, `openai/gpt-oss-20b`, etc.
+    /// Models: `openai/gpt-oss-120b`, `openai/gpt-oss-20b`, etc. Limits: 128K
+    /// context, 4,096 output tokens (no named preset; raise `max_tokens` for
+    /// longer replies).
     pub fn groq(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -2282,6 +2421,9 @@ impl ModelConfig {
     /// discontinued on 2026-07-24. `deepseek-v4-flash` and
     /// `deepseek-v4-flash-vision-exp` are still accepted but served by V4.1
     /// Flash at its price; prefer `deepseek-flash`.
+    ///
+    /// Limits: 1M context, 384K output tokens, for every id (DeepSeek has no
+    /// named preset).
     pub fn deepseek(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -2304,7 +2446,10 @@ impl ModelConfig {
 
     /// Create a new Mistral model config.
     ///
-    /// Models: `mistral-large-latest`, `mistral-small-latest`, etc.
+    /// Models: `mistral-large-latest`, `mistral-small-latest`, etc. Generic
+    /// limits: 128K context, 4,096 output tokens. Mistral Large 4 has a
+    /// preset with its real limits (1M / 32K) —
+    /// [`mistral_large_4`](Self::mistral_large_4); prefer them (or [`ModelConfig::preset`]), which set those too.
     pub fn mistral(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -2326,6 +2471,11 @@ impl ModelConfig {
     }
 
     /// Create a new Google Generative AI (Gemini) model config.
+    ///
+    /// Generic limits: 1M context, 8,192 output tokens, reasoning not
+    /// marked. Current Gemini models have presets with their real limits
+    /// (1,048,576 / 65,536, thinking) — [`gemini_4_argon`](Self::gemini_4_argon),
+    /// [`gemini_3_8_flash`](Self::gemini_3_8_flash); prefer them (or [`ModelConfig::preset`]), which set those too.
     pub fn google(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -2350,6 +2500,119 @@ impl ModelConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Priced models with no named preset: their generic constructor's
+    /// limits are their real ones. A priced model is either here or in
+    /// `ModelConfig::presets()`, so a new preset cannot be left out of it.
+    const PRICED_WITHOUT_PRESET: &[(&str, &str)] = &[
+        ("deepseek", "deepseek-flash"),
+        ("deepseek", "deepseek-v4-flash"),
+        ("deepseek", "deepseek-v4-flash-vision-exp"),
+        ("deepseek", "deepseek-v4-pro"),
+        ("meta", "muse-spark-1.1"),
+        ("meta", "muse-spark-1.2"),
+    ];
+
+    #[test]
+    fn every_priced_model_with_a_preset_is_listed() {
+        let table = crate::provider::PriceTable::builtin();
+        let mut seen = 0;
+        for (provider, id, _) in table.iter() {
+            if !crate::provider::PRICED_PROVIDERS.contains(&provider) {
+                continue; // decision backends' prices, read by no constructor
+            }
+            seen += 1;
+            let listed = ModelConfig::preset(provider, id).is_some();
+            let exempt = PRICED_WITHOUT_PRESET.contains(&(provider, id));
+            assert!(
+                listed != exempt,
+                "{provider}/{id}: listed in presets() = {listed}, in PRICED_WITHOUT_PRESET = {exempt}; \
+                 a priced model with a preset constructor belongs in ModelConfig::PRESETS"
+            );
+        }
+        assert_eq!(
+            seen,
+            ModelConfig::presets().count() + PRICED_WITHOUT_PRESET.len()
+        );
+    }
+
+    #[test]
+    fn every_preset_is_priced_in_the_snapshot_and_listed_once() {
+        let table = crate::provider::PriceTable::builtin();
+        let mut keys = std::collections::HashSet::new();
+        for config in ModelConfig::presets() {
+            assert!(
+                table.cost(&config.provider, &config.id).is_some(),
+                "{}/{} has no price in prices.json",
+                config.provider,
+                config.id
+            );
+            assert!(
+                keys.insert((config.provider.clone(), config.id.clone())),
+                "{}/{} listed twice",
+                config.provider,
+                config.id
+            );
+        }
+        assert_eq!(keys.len(), 22);
+    }
+
+    #[test]
+    fn preset_matches_provider_and_id_exactly() {
+        for config in ModelConfig::presets() {
+            let found = ModelConfig::preset(&config.provider, &config.id).unwrap();
+            assert_eq!(
+                (
+                    found.name,
+                    found.api,
+                    found.context_window,
+                    found.max_tokens
+                ),
+                (
+                    config.name,
+                    config.api,
+                    config.context_window,
+                    config.max_tokens
+                )
+            );
+        }
+        let grok = ModelConfig::preset("xai", "grok-4.7").unwrap();
+        assert_eq!((grok.context_window, grok.max_tokens), (500_000, 64_000));
+        assert_eq!(
+            ModelConfig::preset("openai", "gpt-6-sol").unwrap().api,
+            ApiProtocol::OpenAiResponses
+        );
+        assert!(ModelConfig::preset("openai", "GPT-6-Sol").is_none());
+        assert!(ModelConfig::preset("opencode-zen", "gpt-6-sol").is_none());
+        assert!(ModelConfig::preset("xai", "grok-4.6").is_none());
+        assert!(ModelConfig::preset("anthropic", "").is_none());
+    }
+
+    #[test]
+    fn for_model_takes_the_preset_else_the_generic_constructor() {
+        let sol = ModelConfig::for_model("openai", "gpt-6-sol").unwrap();
+        assert_eq!(sol.api, ApiProtocol::OpenAiResponses);
+        assert_eq!(sol.name, "GPT-6 Sol");
+        let old = ModelConfig::for_model("openai", "gpt-4o").unwrap();
+        assert_eq!(old.api, ApiProtocol::OpenAiCompletions);
+        assert_eq!((old.id.as_str(), old.name.as_str()), ("gpt-4o", "gpt-4o"));
+        assert_eq!(
+            old.max_tokens,
+            ModelConfig::openai("gpt-4o", "x").max_tokens
+        );
+        // Every provider a first-party constructor serves has its arm.
+        for provider in crate::provider::PRICED_PROVIDERS {
+            let config = ModelConfig::for_model(provider, "some-model").unwrap();
+            assert_eq!(config.provider, *provider);
+            assert_eq!(config.id, "some-model");
+        }
+        for provider in ["ollama", "local", "opencode-zen", "mock", "OpenAI", ""] {
+            assert!(
+                ModelConfig::for_model(provider, "m").is_none(),
+                "{provider}"
+            );
+        }
+    }
 
     #[test]
     fn meta_preset_matches_launch_specs() {
