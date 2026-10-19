@@ -5,7 +5,7 @@ description: Use when building, extending or upgrading an agent on the yoagent R
 
 # yoagent: which feature for which job
 
-Written for **yoagent 0.25.9** (and yoagent-rutis 0.6.1); the recipes
+Written for **yoagent 0.25.10** (and yoagent-rutis 0.7.0); the recipes
 below are compiled by `tests/skill_test.rs`, line for line. Check what you
 build against: `cargo tree -p yoagent` or `Cargo.lock`. If you are on an
 older version, read [What changed](#what-changed) first.
@@ -198,6 +198,15 @@ and its examples.
 
 Newest first; the full list is `CHANGELOG.md`.
 
+- **0.25.10** — `ModelConfig::presets()` / `preset(provider, id)` /
+  `generic(provider, id)`: for a model given as text, write
+  `preset(p, id).or_else(|| generic(p, id))` and tell the user when the
+  fallback ran (its limits are the provider's defaults, not the model's).
+  `RunContext::spend_handle()` → `SpendHandle::add(&usage, &model)`: an
+  extension's own model calls (a host service's, for a plugin) count in
+  `Budget` and `SessionStats::extensions`. Steering and follow-ups taken
+  before a cancel are kept in the history (they were lost);
+  `Batched { size: 0 }` no longer answers a steered call twice.
 - **0.25.9** — a tool result with several text blocks reaches the model
   whole (Anthropic, OpenAI-compatible, Responses, Gemini and Vertex sent
   only the first block; an MCP server answering in blocks was seen as its
@@ -255,6 +264,13 @@ Newest first; the full list is `CHANGELOG.md`.
 - **0.24.2** — built-in tool sandbox fixes (path escapes, `search` flag
   injection, Gemini key out of the URL, tool panics contained).
 - **0.24.1** — `retry_safe_events`.
+- **yoagent-rutis 0.7.0** — pi adapter: **`pi.exec` is closed by
+  default** (row config `exec`: `true`, or an exact command list; only the
+  command is checked, so granting `git`/`sh`/`node` grants anything; a
+  refusal is code 126, never a throw). Fixed answers are logged as
+  `[pi] fixed answer: <question> → <answer>`; `projectTrusted` sets
+  `ctx.isProjectTrusted()` (default false). Loads write wrappers to
+  `$TMPDIR/yoagent-pi-wrappers-<uid>`.
 - **yoagent-rutis 0.6.1** — `rows::wait_running` (feature `loader`): a
   host's plugin rows can wait for a service nobody provides, and `reconcile`
   still reports success; this waits until they run and names, per waiting
