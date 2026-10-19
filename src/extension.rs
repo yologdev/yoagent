@@ -183,6 +183,16 @@ pub struct RunContext<'a> {
 }
 
 impl<'a> RunContext<'a> {
+    /// A handle to record model calls an extension makes outside the run's
+    /// own turns, so they count against [`Budget`] and in the run's
+    /// [`crate::SessionStats`] (`extensions`). Keep it from
+    /// [`start_run`](Extension::start_run) and use it from any task while the
+    /// run is live. `None` outside a loop (a context built with
+    /// [`new`](Self::new)).
+    pub fn spend_handle(&self) -> Option<SpendHandle> {
+        self.spend.map(|spend| SpendHandle(Arc::clone(spend)))
+    }
+
     /// A context for a top-level run with no label, for testing extensions.
     pub fn new(run_id: &'a str, prompts: &'a [Message], cancel: &'a CancellationToken) -> Self {
         Self {
@@ -638,6 +648,39 @@ pub(crate) struct RunSpend(std::sync::Mutex<RunSpendInner>);
 struct RunSpendInner {
     priced_usd: f64,
     unpriced: Usage,
+    /// What extensions recorded through a [`SpendHandle`], for the run's
+    /// stats; taken when the run ends.
+    extensions: crate::types::ExtensionSpend,
+    /// The run has ended: a later record is not counted.
+    closed: bool,
+}
+
+/// Records model calls an extension makes outside the run's own turns — a
+/// plugin's model call through a host service, say — into that run:
+/// [`Budget`] counts them at its next check (before the next model request),
+/// and the run's [`SessionStats::extensions`](crate::SessionStats::extensions)
+/// holds them (in `total_usage` and `total_cost_usd`). From
+/// [`RunContext::spend_handle`]; cheap to clone, usable from any task.
+///
+/// Spend is priced here from the model's [`cost`](crate::provider::ModelConfig::cost),
+/// as the run's turns are: never pass a dollar amount. A model with no price
+/// makes the run's `total_cost_usd` `None`, as an unpriced turn does.
+/// Recorded after the run ended (after its extensions' `finish`), spend is
+/// not counted, and a warning says so.
+#[derive(Debug, Clone)]
+pub struct SpendHandle(Arc<RunSpend>);
+
+impl SpendHandle {
+    /// Record one model call's `usage`, priced at `model`'s rates.
+    pub fn add(&self, usage: &Usage, model: &crate::provider::ModelConfig) {
+        self.add_priced(usage, model.cost.as_ref());
+    }
+
+    /// Record one model call's `usage`, priced at `cost` (`None` = the model
+    /// has no price).
+    pub fn add_priced(&self, usage: &Usage, cost: Option<&crate::provider::CostConfig>) {
+        self.0.add_extension(usage, cost);
+    }
 }
 
 impl RunSpend {
@@ -654,6 +697,31 @@ impl RunSpend {
                 u.cache_write = u.cache_write.saturating_add(usage.cache_write);
             }
         }
+    }
+
+    /// Record an extension's model call: for [`Budget`] (as [`add`](Self::add))
+    /// and for the run's stats.
+    fn add_extension(&self, usage: &Usage, cost: Option<&crate::provider::CostConfig>) {
+        {
+            let mut inner = self.0.lock().unwrap_or_else(|e| e.into_inner());
+            if inner.closed {
+                drop(inner);
+                tracing::warn!(
+                    "spend recorded through a SpendHandle after its run ended is not counted"
+                );
+                return;
+            }
+            inner.extensions.record_call(usage, cost);
+        }
+        self.add(usage, cost.map(|c| c.cost_usd(usage)));
+    }
+
+    /// What extensions recorded, taken once at the run's end; later records
+    /// are not counted.
+    pub(crate) fn close_extensions(&self) -> crate::types::ExtensionSpend {
+        let mut inner = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        inner.closed = true;
+        std::mem::take(&mut inner.extensions)
     }
 
     /// Dollars so far, the unpriced pieces priced with `fallback`.

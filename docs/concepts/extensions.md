@@ -147,12 +147,27 @@ let budget = Budget::for_model(2.0, &model).expect("a priced model");
 let agent = Agent::from_config(model).with_extension(budget);
 ```
 
-- **What counts:** the run's assistant turns, its own decision evaluations (tool gate, input guard, advisor) and `LlmCompaction` summaries — each at its model's price, or the budget's rate when unpriced — and what a sub-agent reports spending (at its own price, or this one if it has none).
+- **What counts:** the run's assistant turns, its own decision evaluations (tool gate, input guard, advisor), `LlmCompaction` summaries and model calls extensions record (below) — each at its model's price, or the budget's rate when unpriced — and what a sub-agent reports spending (at its own price, or this one if it has none).
 - **Per run** by default, sub-agents included.
 - **`.across_runs()`** makes it one total for every run the extension serves: all of a session's runs, or, with `with_tree_extension`, a whole delegation tree, where each run's own messages are counted once. Read the total with `spent_usd()` through an `Arc<Budget>` you keep.
 - A **per-run budget installed as a tree extension** gives every run of the tree its own limit.
 - Messages are priced at the one rate given (`Budget::usd(max, CostConfig)` to choose it). `Budget::for_model` takes the model's `cost`, which is `None` until the process opts in to prices ([Model Pricing](pricing.md#enabling-pricing)). A negative or NaN limit panics; `with_name` tells several budgets apart.
 - The check is before each request, so the request that crosses the limit still completes. A provider attempt that fails mid-stream reports no usage, so its billed input tokens are not counted.
+
+### Spend an extension makes
+
+An extension that calls a model outside the run's turns — a host service answering a plugin's model call, say — records it with the run's `SpendHandle`, so it counts like the run's own spend:
+
+```rust,ignore
+async fn start_run(&self, run: &RunContext<'_>) -> Result<Box<dyn RunHooks>, ExtensionError> {
+    // Keep it for the run; usable from any task while the run is live.
+    let spend = run.spend_handle();
+    // ... after a model call made for this run:
+    // spend.add(&usage, &model_config);
+}
+```
+
+`add(&usage, &model)` prices the call at the model's `cost` (`add_priced` takes a `CostConfig` instead); never pass dollars. A `Budget` counts it at its next check (before the next request), and the run's `SessionStats` holds it in `extensions`, inside `total_usage()` and `total_cost_usd()` (an unpriced call makes the total `None`, as an unpriced turn does); `Agent::extension_spend()` sums it across runs. Spend recorded after the run ended — after the extensions' `finish` — is not counted, with a warning. `run.spend_handle()` is `None` outside a loop (a `RunContext::new` in a test).
 
 ## Built on extensions
 

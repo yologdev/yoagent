@@ -306,3 +306,145 @@ async fn a_shared_budget_counts_each_agent_s_sub_agents_correctly() {
         "6 cents counted once + 5 cents: {spent}"
     );
 }
+
+/// An extension that keeps the run's `SpendHandle`, and a `bill` tool that
+/// records a model call through it from another task — as a host service
+/// handling a plugin's model call would.
+#[derive(Clone, Default)]
+struct Metered {
+    handle: Arc<std::sync::Mutex<Option<yoagent::extension::SpendHandle>>>,
+}
+
+struct MeteredHooks;
+
+#[async_trait::async_trait]
+impl yoagent::extension::RunHooks for MeteredHooks {}
+
+#[async_trait::async_trait]
+impl yoagent::extension::Extension for Metered {
+    fn name(&self) -> &str {
+        "metered"
+    }
+    async fn start_run(
+        &self,
+        run: &yoagent::extension::RunContext<'_>,
+    ) -> Result<Box<dyn yoagent::extension::RunHooks>, yoagent::extension::ExtensionError> {
+        *self.handle.lock().unwrap() = run.spend_handle();
+        Ok(Box::new(MeteredHooks))
+    }
+}
+
+/// Records `cents` at `cost` through the metered handle, on a spawned task.
+struct Bill {
+    metered: Metered,
+    cents: u64,
+    cost: Option<CostConfig>,
+}
+
+#[async_trait::async_trait]
+impl AgentTool for Bill {
+    fn name(&self) -> &str {
+        "bill"
+    }
+    fn label(&self) -> &str {
+        "bill"
+    }
+    fn description(&self) -> &str {
+        "records a model call"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object", "properties": {}})
+    }
+    async fn execute(&self, _: serde_json::Value, _: ToolContext) -> Result<ToolResult, ToolError> {
+        let handle = self
+            .metered
+            .handle
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("a handle in a loop");
+        let (cents, cost) = (self.cents, self.cost.clone());
+        tokio::spawn(async move { handle.add_priced(&usage(cents), cost.as_ref()) })
+            .await
+            .unwrap();
+        Ok(ToolResult {
+            content: vec![Content::Text {
+                text: "billed".into(),
+            }],
+            details: serde_json::Value::Null,
+        })
+    }
+}
+
+fn bill_call() -> MockResponse {
+    MockResponse::ToolCalls(vec![MockToolCall {
+        name: "bill".into(),
+        arguments: serde_json::json!({}),
+        provider_metadata: None,
+    }])
+}
+
+/// Spend an extension records through its `SpendHandle` counts against the
+/// budget at the next request, and lands in the run's stats
+/// (`extensions`, `total_usage`, `total_cost_usd`) and the agent's totals.
+#[tokio::test]
+async fn spend_recorded_through_a_handle_counts_in_the_budget_and_the_stats() {
+    // The turns are free; each bill is 6 cents against a 10-cent limit: the
+    // second bill reaches it, so the third request is never sent.
+    let metered = Metered::default();
+    let provider = MockProvider::new(vec![bill_call(), bill_call(), bill_call(), answer(0)]);
+    let mut config = ModelConfig::mock();
+    config.cost = Some(dollar_per_million());
+    let mut agent = Agent::from_provider(provider, config)
+        .with_tools(vec![Box::new(Bill {
+            metered: metered.clone(),
+            cents: 6,
+            cost: Some(dollar_per_million()),
+        })])
+        .with_extension(metered.clone())
+        .with_extension(Budget::usd(0.10, dollar_per_million()));
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    agent.prompt_with_sender("go", tx).await;
+    let mut end = None;
+    while let Ok(event) = rx.try_recv() {
+        if let AgentEvent::AgentEnd {
+            messages, stats, ..
+        } = event
+        {
+            end = Some((messages, stats));
+        }
+    }
+    let (messages, stats) = end.expect("an AgentEnd");
+    assert!(stopped_on_budget(&messages), "{:?}", messages.last());
+    assert_eq!(stats.extensions.calls, 2);
+    assert_eq!(stats.extensions.usage.input, 120_000);
+    assert!((stats.extensions.cost_usd.unwrap() - 0.12).abs() < 1e-9);
+    assert_eq!(stats.total_usage().input, 120_000);
+    assert!((stats.total_cost_usd().unwrap() - 0.12).abs() < 1e-9);
+    assert_eq!(agent.extension_spend().calls, 2);
+
+    // After the run ended the handle counts nothing more.
+    let late = metered.handle.lock().unwrap().clone().unwrap();
+    late.add_priced(&usage(50), Some(&dollar_per_million()));
+    assert_eq!(agent.extension_spend().calls, 2);
+}
+
+/// An unpriced call recorded through the handle makes the run's total
+/// unknown, as an unpriced turn does.
+#[tokio::test]
+async fn an_unpriced_call_through_a_handle_makes_the_total_unknown() {
+    let metered = Metered::default();
+    let provider = MockProvider::new(vec![bill_call(), answer(0)]);
+    let mut config = ModelConfig::mock();
+    config.cost = Some(dollar_per_million());
+    let mut agent = Agent::from_provider(provider, config)
+        .with_tools(vec![Box::new(Bill {
+            metered: metered.clone(),
+            cents: 1,
+            cost: None,
+        })])
+        .with_extension(metered);
+    run(&mut agent, "go").await;
+    assert!(agent.extension_spend().is_unpriced());
+    assert_eq!(agent.total_cost_usd(), None);
+}

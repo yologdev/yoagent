@@ -1482,6 +1482,20 @@ impl Agent {
         &self.spend.compaction
     }
 
+    /// What extensions recorded through a
+    /// [`SpendHandle`](crate::extension::SpendHandle) — model calls made
+    /// outside the runs' own turns — over every run since construction or the
+    /// last [`reset`](Self::reset), sub-agents' included, each call priced at
+    /// its own model's rates. Per run, the same figure is on
+    /// [`AgentEvent::AgentEnd`] as `stats.extensions`.
+    ///
+    /// Only the extension part, already included in
+    /// [`total_cost_usd`](Self::total_cost_usd) /
+    /// [`total_usage`](Self::total_usage), which cover the same window.
+    pub fn extension_spend(&self) -> &crate::types::ExtensionSpend {
+        &self.spend.extensions
+    }
+
     /// Everything this agent's runs spent in dollars — its own turns plus
     /// every sub-agent they delegated to, each run priced at its own model's
     /// rates at the time it ran, plus compaction's summarization requests

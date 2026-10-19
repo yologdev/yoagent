@@ -589,6 +589,7 @@ pub(crate) async fn agent_loop_with_stats(
             .await;
             let mut stats = SessionStats::default();
             recorded.fold_into(&mut stats);
+            stats.extensions.merge(&exts.spend().close_extensions());
             tx.send(AgentEvent::AgentEnd {
                 messages: vec![],
                 stats: stats.clone(),
@@ -602,6 +603,8 @@ pub(crate) async fn agent_loop_with_stats(
     recorded.fold_into(&mut stats);
 
     exts.finish(&run_outcome(&new_messages, &cancel)).await;
+    // What extensions recorded, through their `finish` included.
+    stats.extensions.merge(&exts.spend().close_extensions());
     tx.send(AgentEvent::AgentEnd {
         messages: new_messages.clone(),
         stats: stats.clone(),
@@ -996,7 +999,7 @@ pub(crate) async fn agent_loop_continue_with_stats(
     tx.send(AgentEvent::AgentStart).ok();
     tx.send(AgentEvent::TurnStart).ok();
 
-    let stats = {
+    let mut stats = {
         let (mut stats, recorded) = with_loop_scope(
             Vec::new(),
             exts.spend(),
@@ -1016,6 +1019,8 @@ pub(crate) async fn agent_loop_continue_with_stats(
     };
 
     exts.finish(&run_outcome(&new_messages, &cancel)).await;
+    // What extensions recorded, through their `finish` included.
+    stats.extensions.merge(&exts.spend().close_extensions());
     tx.send(AgentEvent::AgentEnd {
         messages: new_messages.clone(),
         stats: stats.clone(),
@@ -1577,6 +1582,7 @@ async fn run_loop(
                     // for the whole tree.
                     stats.decision.merge(&child.decision);
                     stats.compaction.merge(&child.compaction);
+                    stats.extensions.merge(&child.extensions);
                 }
 
                 // Cap oversized output on the way in when configured, so

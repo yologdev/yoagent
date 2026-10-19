@@ -1033,6 +1033,10 @@ pub enum ToolError {
     rename_all_fields = "camelCase"
 )]
 #[non_exhaustive]
+// `AgentEnd` carries the run's `SessionStats` by value (a public, frozen
+// shape: boxing it would break callers); one event per run, so the size is
+// not worth that. Only the 32-bit wasm32 build crosses the lint's threshold.
+#[allow(clippy::large_enum_variant)]
 pub enum AgentEvent {
     AgentStart,
     /// The run finished. Carries the messages it produced and a
@@ -1315,6 +1319,74 @@ pub struct SessionStats {
     /// reported no usage and adds nothing.
     #[serde(default, skip_serializing_if = "CompactionSpend::is_empty")]
     pub compaction: CompactionSpend,
+    /// What extensions recorded for model calls they made outside the run's
+    /// own turns, through [`SpendHandle`](crate::extension::SpendHandle) —
+    /// a plugin's model calls through a host service, say — including those
+    /// of sub-agents this run delegated to. Omitted from the wire when empty.
+    ///
+    /// A **separate bucket**, like [`compaction`](Self::compaction): its
+    /// tokens are part of [`total_usage`](Self::total_usage) and its dollar
+    /// cost part of [`total_cost_usd`](Self::total_cost_usd), each call priced
+    /// at its own model's rates (unpriced → the total is `None`).
+    #[serde(default, skip_serializing_if = "ExtensionSpend::is_empty")]
+    pub extensions: ExtensionSpend,
+}
+
+/// What model calls recorded by extensions cost; see
+/// [`SessionStats::extensions`] and
+/// [`Agent::extension_spend`](crate::Agent::extension_spend).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct ExtensionSpend {
+    /// Provider usage summed over the recorded calls. `total_tokens` stays 0,
+    /// as in [`SessionStats::usage`].
+    #[serde(default)]
+    pub usage: Usage,
+    /// Dollar cost of [`usage`](Self::usage), each call at its model's rates,
+    /// with the crate's rule: `None` once any call with non-zero usage could
+    /// not be priced (a model with `cost: None`), and when nothing was priced.
+    /// [`is_unpriced`](Self::is_unpriced) tells them apart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+    /// Calls recorded.
+    #[serde(default)]
+    pub calls: u32,
+}
+
+impl ExtensionSpend {
+    /// Whether nothing was recorded.
+    pub fn is_empty(&self) -> bool {
+        self.calls == 0 && usage_is_zero(&self.usage) && self.cost_usd.is_none()
+    }
+
+    /// Whether recorded spend cannot be priced: non-zero
+    /// [`usage`](Self::usage) with no [`cost_usd`](Self::cost_usd). `false`
+    /// for an empty bucket.
+    pub fn is_unpriced(&self) -> bool {
+        is_unpriced(&self.usage, self.cost_usd)
+    }
+
+    /// Fold another bucket into this one. Keeps [`cost_usd`](Self::cost_usd)
+    /// `None` once any part is unpriced.
+    pub fn merge(&mut self, other: &ExtensionSpend) {
+        self.cost_usd = combine_cost(&self.usage, self.cost_usd, &other.usage, other.cost_usd);
+        self.usage = add_usage(&self.usage, &other.usage);
+        self.calls = self.calls.saturating_add(other.calls);
+    }
+
+    /// One call, priced with its model's rates (`None` = unpriced).
+    pub(crate) fn record_call(
+        &mut self,
+        usage: &Usage,
+        cost: Option<&crate::provider::CostConfig>,
+    ) {
+        self.merge(&ExtensionSpend {
+            usage: add_usage(&Usage::default(), usage),
+            cost_usd: cost.map(|c| c.cost_usd(usage)),
+            calls: 1,
+        });
+    }
 }
 
 /// What compaction's model requests cost; see [`SessionStats::compaction`]
@@ -1492,6 +1564,7 @@ impl SessionStats {
             sub_agents: SubAgentSpend::default(),
             decision: DecisionStats::default(),
             compaction: CompactionSpend::default(),
+            extensions: ExtensionSpend::default(),
         }
     }
 
@@ -1505,15 +1578,19 @@ impl SessionStats {
 
     /// This run's own usage plus everything its sub-agents spent, plus what
     /// compaction's summarization requests used
-    /// ([`compaction`](Self::compaction)). Decision-model tokens are not
+    /// ([`compaction`](Self::compaction)) and what extensions recorded
+    /// ([`extensions`](Self::extensions)). Decision-model tokens are not
     /// included (see [`decision`](Self::decision)).
     ///
     /// `total_tokens` stays 0, as in [`usage`](Self::usage), and for the same
     /// reason: providers disagree on what it counts.
     pub fn total_usage(&self) -> Usage {
         add_usage(
-            &add_usage(&self.usage, &self.sub_agents.usage),
-            &self.compaction.usage,
+            &add_usage(
+                &add_usage(&self.usage, &self.sub_agents.usage),
+                &self.compaction.usage,
+            ),
+            &self.extensions.usage,
         )
     }
 
@@ -1527,9 +1604,9 @@ impl SessionStats {
     /// `Some(0.0)`, not `None`. Spend of zero tokens needs no price, so a
     /// zero-usage part never poisons the rest.
     ///
-    /// Decision-model spend ([`decision`](Self::decision)) and compaction
-    /// spend ([`compaction`](Self::compaction)) are included, under the same
-    /// rule.
+    /// Decision-model spend ([`decision`](Self::decision)), compaction
+    /// spend ([`compaction`](Self::compaction)) and extension-recorded spend
+    /// ([`extensions`](Self::extensions)) are included, under the same rule.
     pub fn total_cost_usd(&self) -> Option<f64> {
         let own_and_delegated = combine_cost(
             &self.usage,
@@ -1544,13 +1621,20 @@ impl SessionStats {
             &self.compaction.usage,
             self.compaction.cost_usd,
         );
+        let compacted_usage = add_usage(&turns_usage, &self.compaction.usage);
+        let with_extensions = combine_cost(
+            &compacted_usage,
+            with_compaction,
+            &self.extensions.usage,
+            self.extensions.cost_usd,
+        );
         if self.decision.is_unpriced() {
             return None;
         }
-        let llm_usage = add_usage(&turns_usage, &self.compaction.usage);
+        let llm_usage = add_usage(&compacted_usage, &self.extensions.usage);
         combine_cost(
             &llm_usage,
-            with_compaction,
+            with_extensions,
             &self.decision.usage,
             self.decision.cost_usd,
         )
@@ -1567,6 +1651,7 @@ impl SessionStats {
         self.sub_agents.merge(&other.sub_agents);
         self.decision.merge(&other.decision);
         self.compaction.merge(&other.compaction);
+        self.extensions.merge(&other.extensions);
     }
 
     /// The [`SessionStats`] of a sub-agent run, if `result` came from a
@@ -2762,6 +2847,15 @@ mod wire_tag_freeze {
                     },
                     cost_usd: Some(0.012),
                     requests: 2,
+                },
+                extensions: ExtensionSpend {
+                    usage: Usage {
+                        input: 300,
+                        output: 30,
+                        ..Default::default()
+                    },
+                    cost_usd: Some(0.003),
+                    calls: 1,
                 },
             },
         ),
