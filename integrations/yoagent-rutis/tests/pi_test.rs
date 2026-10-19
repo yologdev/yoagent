@@ -1752,3 +1752,92 @@ export default function (pi) {{
     assert!(!ran.exists(), "no tool ran");
     host.root.shutdown().await.unwrap();
 }
+
+/// `pi.exec` runs only what the host's `exec` setting allows: nothing by
+/// default, exactly the listed commands (a name is not its path, nor a path
+/// its name), or anything with `true`.
+/// A refusal is a failed command (code 126, the reason in stderr), never a
+/// throw. `ctx.isProjectTrusted()` answers the host's `projectTrusted`.
+#[tokio::test(flavor = "multi_thread")]
+async fn pi_exec_runs_only_what_the_host_allows() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let ext = extension(
+        dir.path(),
+        "exec.ts",
+        r#"
+export default function (pi) {
+  pi.registerTool({
+    name: 'pi_exec',
+    label: 'pi_exec',
+    description: 'runs a command through pi.exec',
+    parameters: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] },
+    async execute(_id, params, _signal, _update, ctx) {
+      const r = await pi.exec(params.command, ['hi'])
+      return {
+        content: [{ type: 'text', text: `code=${r.code} out=${r.stdout.trim()} err=${r.stderr} trusted=${ctx.isProjectTrusted()}` }],
+        details: {},
+      }
+    },
+  })
+}
+"#,
+    );
+    let echo = which_echo();
+    for (config, expect) in [
+        (json!({}), ["code=126", "code=126"]),
+        (json!({ "exec": ["echo"] }), ["code=0 out=hi", "code=126"]),
+        (
+            json!({ "exec": [echo.clone()] }),
+            ["code=126", "code=0 out=hi"],
+        ),
+        (
+            json!({ "exec": true, "projectTrusted": true }),
+            ["code=0 out=hi", "code=0 out=hi"],
+        ),
+    ] {
+        let host = host(&runtime).await;
+        let mut row = json!({ "extensions": [ext] });
+        row.as_object_mut()
+            .unwrap()
+            .extend(config.as_object().unwrap().clone());
+        host.load(adapter_row(row)).await;
+        let (agent, _) = agent(vec![
+            calls(&[
+                ("pi_exec", json!({ "command": "echo" })),
+                ("pi_exec", json!({ "command": echo })),
+            ]),
+            text("done"),
+        ]);
+        let mut agent = agent.with_extension(host.bridge.extension());
+        let (_, results) = run(&mut agent, "go").await;
+        for (result, want) in results.iter().zip(expect) {
+            assert!(
+                !result.2 && result.1.contains(want),
+                "{config}: {results:?}"
+            );
+            if want == "code=126" {
+                assert!(result.1.contains("not allowed by the host"), "{results:?}");
+            }
+        }
+        let trusted = config["projectTrusted"] == true;
+        assert!(
+            results[0].1.ends_with(&format!("trusted={trusted}")),
+            "{results:?}"
+        );
+        host.root.shutdown().await.unwrap();
+    }
+}
+
+/// The absolute path of `echo` (so a listed path is tested as a path).
+fn which_echo() -> String {
+    for dir in ["/bin", "/usr/bin"] {
+        let path = format!("{dir}/echo");
+        if Path::new(&path).exists() {
+            return path;
+        }
+    }
+    panic!("no echo in /bin or /usr/bin");
+}

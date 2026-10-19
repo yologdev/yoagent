@@ -124,7 +124,14 @@
 // `pi.sendMessage` are recorded in the adapter's in-memory session (readable
 // through `ctx.sessionManager`; a displayed message is also logged; a message
 // never starts a turn); other runtime actions (`pi.sendUserMessage`,
-// `pi.setModel`, ...) throw "not available in yoagent". `ctx.hasUI` is false and `ctx.ui` behaves as in
+// `pi.setModel`, ...) throw "not available in yoagent". `pi.exec` runs only
+// what the host's `exec` setting allows (default nothing; a refusal is a
+// failed command, code 126): each factory gets a `pi` whose `exec` is gated,
+// so extensions are imported through pi's loader by a generated wrapper and
+// run with its `loadExtensionFromFactory` (`loadGated`). Fixed answers —
+// `ctx.isProjectTrusted()` (the host's `projectTrusted`, default false),
+// `ctx.model`, `ctx.modelRegistry`, print-mode dialogs — are logged once each
+// as `[pi] fixed answer: …`. `ctx.hasUI` is false and `ctx.ui` behaves as in
 // pi's print mode: `confirm` answers false, `select` and `input` nothing, so
 // a policy that would ask the user denies instead. When the host provides a
 // `ui` service (yoagent-frontend, experimental) and loads `host-ui.ts` next
@@ -159,6 +166,16 @@ export interface Config {
    * registration is the calling tool's own extension's), `"off"`. A refused call is an error result to the caller.
    */
   nestedCalls?: 'any' | 'own-extension' | 'off'
+  /**
+   * What `pi.exec(command, args)` may run: `false` (default: nothing), `true` (anything, as pi), or
+   * the commands allowed, each matched against `command` exactly: `"git"` allows `git` (found on
+   * `PATH`), not `/usr/bin/git` or `./git`. A refused call resolves as a failed command (code 126,
+   * the reason in `stderr`) and is reported at warn, once per extension and command. This gates pi's
+   * API only: an extension is code the host runs and may start processes itself.
+   */
+  exec?: boolean | string[]
+  /** What `ctx.isProjectTrusted()` answers (default `false`; pi's own default is `true`). */
+  projectTrusted?: boolean
 }
 
 /**
@@ -275,14 +292,28 @@ let report = (level: 'error' | 'warn' | 'info' | 'debug', message: string) => {
   console.warn(message)
 }
 
+/**
+ * A question pi's API asks that this adapter answers with a fixed value: said
+ * once per question, at info, under one tag hosts can search for, so a plugin
+ * that does nothing can be traced to the answer it got.
+ */
+const answered = new Set<string>()
+function fixedAnswer<T>(question: string, answer: T, shown: string = JSON.stringify(answer) ?? 'undefined'): T {
+  if (!answered.has(question)) {
+    answered.add(question)
+    report('info', `[pi] fixed answer: ${question} → ${shown}`)
+  }
+  return answer
+}
+
 /** pi's print-mode UI (its `noOpUIContext`): nothing to show, no one to ask. */
 const NO_UI = new Proxy(
   {
-    select: async () => undefined,
-    confirm: async () => false,
-    input: async () => undefined,
-    editor: async () => undefined,
-    custom: async () => undefined,
+    select: async () => fixedAnswer('ctx.ui.select() (no user to ask)', undefined),
+    confirm: async () => fixedAnswer('ctx.ui.confirm() (no user to ask)', false),
+    input: async () => fixedAnswer('ctx.ui.input() (no user to ask)', undefined),
+    editor: async () => fixedAnswer('ctx.ui.editor() (no user to ask)', undefined),
+    custom: async () => fixedAnswer('ctx.ui.custom() (no user to ask)', undefined),
     notify: (message: string, level?: string) =>
       report(level === 'error' ? 'error' : level === 'warning' ? 'warn' : 'info', `[pi ${level ?? 'info'}] ${message}`),
     onTerminalInput: () => () => {},
@@ -407,20 +438,120 @@ interface PiRuntime {
   [action: string]: unknown
 }
 
+interface PiApi {
+  exec(command: string, args: string[], options?: unknown): Promise<ExecResult>
+  [member: string]: unknown
+}
+type ExecResult = { stdout: string; stderr: string; code: number; killed: boolean }
+type Factory = (pi: PiApi) => unknown
+type Loaded = {
+  extensions: PiExtension[]
+  errors: { path: string; error: string }[]
+  warnings?: { path: string; warning: string }[]
+  runtime: PiRuntime
+}
+
 /**
  * pi's loader, by file: the package exports only `discoverAndLoadExtensions`,
  * which also loads `<cwd>/.pi/extensions` and `~/.pi/agent/extensions`.
  */
-async function piLoader(): Promise<{
-  loadExtensions(paths: string[], cwd: string): Promise<{
-    extensions: PiExtension[]
-    errors: { path: string; error: string }[]
-    warnings?: { path: string; warning: string }[]
-    runtime: PiRuntime
-  }>
-}> {
+async function piModule<T>(path: string): Promise<T> {
   const index = import.meta.resolve('@earendil-works/pi-coding-agent')
-  return import(new URL('./core/extensions/loader.js', index).href)
+  return import(new URL(path, index).href)
+}
+
+/** Where the wrappers below leave each extension's factory for `loadGated`. */
+const FACTORIES = Symbol.for('yoagent-rutis.pi.factories')
+
+/**
+ * Load extensions as pi's `loadExtensions` does, except that each factory is
+ * given `gate(pi)` instead of pi's API object: `pi.exec` lives on that object,
+ * created inside pi's loader with no hook, so gating it means calling the
+ * factory ourselves. pi's loader still imports every module (its resolution
+ * and aliases): it loads one generated wrapper per extension, which only hands
+ * the extension's factory over; pi's exported `loadExtensionFromFactory` then
+ * runs it, under the extension's own resolved path.
+ */
+async function loadGated(paths: string[], cwd: string, gate: (pi: PiApi, path: string) => PiApi): Promise<Loaded> {
+  const { mkdtemp, writeFile, rm } = await import('node:fs/promises')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const loader = await piModule<{
+    loadExtensions(paths: string[], cwd: string, eventBus: unknown, runtime: unknown): Promise<Loaded>
+    loadExtensionFromFactory(factory: Factory, cwd: string, eventBus: unknown, runtime: unknown, path: string): Promise<PiExtension>
+    createExtensionRuntime(): PiRuntime
+  }>('./core/extensions/loader.js')
+  const { createEventBus } = await piModule<{ createEventBus(): unknown }>('./core/event-bus.js')
+  const { resolvePath } = await piModule<{ resolvePath(input: string, base: string, options?: unknown): string }>(
+    './utils/paths.js',
+  )
+  const eventBus = createEventBus()
+  const runtime = loader.createExtensionRuntime()
+  const factories = ((globalThis as Record<symbol, Map<string, Factory>>)[FACTORIES] ??= new Map())
+  const extensions: PiExtension[] = []
+  const errors: { path: string; error: string }[] = []
+  // First every module, through pi's loader (file I/O); then every factory,
+  // back to back, as pi runs them: nothing but the factories happens between
+  // the last of them and the adapter's load-time checks.
+  const imported: { path: string; resolved: string; factory: Factory }[] = []
+  const dir = await mkdtemp(join(tmpdir(), 'yoagent-pi-'))
+  try {
+    const wrappers = new Map<string, { path: string; resolved: string; key: string }>()
+    for (const path of paths) {
+      const resolved = resolvePath(path, cwd, { normalizeUnicodeSpaces: true })
+      const key = randomUUID()
+      const wrapper = join(dir, `${key}.ts`)
+      await writeFile(
+        wrapper,
+        `import factory from ${JSON.stringify(resolved)}\n` +
+          `export default () => { globalThis[Symbol.for('yoagent-rutis.pi.factories')].set(${JSON.stringify(key)}, factory) }\n`,
+      )
+      wrappers.set(wrapper, { path, resolved, key })
+    }
+    const first = await loader.loadExtensions([...wrappers.keys()], cwd, eventBus, runtime)
+    const failed = new Map(first.errors.map((e) => [e.path, e.error]))
+    for (const [wrapper, { path, resolved, key }] of wrappers) {
+      const factory = factories.get(key)
+      factories.delete(key)
+      const error = failed.get(wrapper)
+      if (error !== undefined) errors.push({ path, error: error.replaceAll(wrapper, resolved) })
+      else if (typeof factory !== 'function') {
+        errors.push({ path, error: `Extension does not export a valid factory function: ${path}` })
+      } else imported.push({ path, resolved, factory })
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+  for (const { path, resolved, factory } of imported) {
+    try {
+      extensions.push(
+        await loader.loadExtensionFromFactory((pi) => factory(gate(pi, resolved)), cwd, eventBus, runtime, resolved),
+      )
+    } catch (error) {
+      errors.push({ path, error: `Failed to load extension: ${message(error)}` })
+    }
+  }
+  return { extensions, errors, runtime }
+}
+
+/** `pi.exec` as the host's `exec` grant allows it; everything else on pi's API as it is. */
+function gateExec(exec: boolean | string[]) {
+  const refusedOnce = new Set<string>()
+  return (pi: PiApi, path: string): PiApi => {
+    if (exec === true) return pi
+    const allowed = (command: string) => Array.isArray(exec) && exec.includes(command)
+    const gated = (command: string, args: string[], options?: unknown): Promise<ExecResult> => {
+      if (allowed(command)) return pi.exec(command, args, options)
+      const why = `pi.exec("${command}") is not allowed by the host (the adapter's \`exec\` setting)`
+      const key = `${path}\0${command}`
+      if (!refusedOnce.has(key)) {
+        refusedOnce.add(key)
+        report('warn', `[pi] ${short(path)}: refused ${why}`)
+      }
+      return Promise.resolve({ stdout: '', stderr: why, code: 126, killed: false })
+    }
+    return new Proxy(pi, { get: (target, key) => (key === 'exec' ? gated : Reflect.get(target, key)) })
+  }
 }
 
 const short = (path: string) => path.split('/').pop() ?? path
@@ -507,6 +638,8 @@ export default definePlugin<Config>({
       allowUnmapped: { type: 'array', items: { type: 'string' } },
       strict: { type: 'boolean' },
       nestedCalls: { type: 'string', enum: ['any', 'own-extension', 'off'] },
+      exec: { anyOf: [{ type: 'boolean' }, { type: 'array', items: { type: 'string' } }] },
+      projectTrusted: { type: 'boolean' },
     },
   },
   async apply(ctx, config) {
@@ -531,7 +664,11 @@ export default definePlugin<Config>({
 
     const { SessionManager } = await import('@earendil-works/pi-coding-agent')
     const { validateToolArguments } = await import('@earendil-works/pi-ai')
-    const loaded = await (await piLoader()).loadExtensions(config.extensions, cwd)
+    const exec = config.exec ?? false
+    if (typeof exec !== 'boolean' && !(Array.isArray(exec) && exec.every((c) => typeof c === 'string'))) {
+      throw new Error(`exec must be true, false or a list of commands, not ${JSON.stringify(exec)}`)
+    }
+    const loaded = await loadGated(config.extensions, cwd, gateExec(exec))
     if (loaded.errors.length > 0) {
       throw new Error(`pi extensions failed to load: ${loaded.errors.map((e) => `${e.path}: ${e.error}`).join('; ')}`)
     }
@@ -577,15 +714,20 @@ export default definePlugin<Config>({
       hasUI: hostUiService !== undefined,
       cwd,
       sessionManager,
-      modelRegistry: undefined,
-      model: undefined,
+      get modelRegistry() {
+        return fixedAnswer('ctx.modelRegistry', undefined)
+      },
+      get model() {
+        return fixedAnswer('ctx.model', undefined)
+      },
       scopedModels: [],
       signal,
       isIdle: () => signal === undefined,
-      // pi's own default is true; this adapter loads only the files it is given, never a project's `.pi`.
-      isProjectTrusted: () => false,
+      // pi's own default is true; this adapter loads only the files it is given, never a project's
+      // `.pi`, and a host opts in (`projectTrusted`) to what extensions do in a trusted project.
+      isProjectTrusted: () => fixedAnswer('ctx.isProjectTrusted()', config.projectTrusted ?? false),
       hasPendingMessages: () => false,
-      getContextUsage: () => undefined,
+      getContextUsage: () => fixedAnswer('ctx.getContextUsage()', undefined),
       getSystemPrompt: () => systemPrompt,
       abort: () => {
         throw new Error('ctx.abort() is not available in yoagent')
