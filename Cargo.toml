@@ -17,7 +17,7 @@ categories = [
     "api-bindings",
     "asynchronous",
     "development-tools",
-    "web-programming::http-client",
+    "wasm",
     "network-programming",
 ]
 authors = ["Yuanhao <yuanhao@yolog.dev>"]

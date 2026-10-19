@@ -5,9 +5,10 @@
 // shared within one thread only. Native builds keep the lint.
 #![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
 
-//! **yoagent** — the agent runtime for Rust.
+//! **yoagent** — the agent loop for Rust.
 //!
-//! A simple, effective agent loop with tool execution and event streaming:
+//! Stream from any of 7 LLM protocols, run tools, loop until done, natively
+//! or on wasm32 (Cloudflare Workers):
 //! `Prompt → LLM stream → tool execution → loop`. The loop is the product;
 //! everything else is optional layers on top of it.
 //!
