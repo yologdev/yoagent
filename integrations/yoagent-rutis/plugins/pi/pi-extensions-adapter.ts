@@ -150,7 +150,8 @@
 // loader by a generated wrapper and run with its `loadExtensionFromFactory`
 // (`loadGated`; every load, whatever the grants are). Host services reach the
 // adapter re-provided by `host-approval.ts` / `host-session.ts`, the way
-// `host-ui.ts` brings `ui`; each host call names the extension's file last.
+// `host-ui.ts` brings `ui`; `ask` and `wake` name the extension's file last (`judge` gets the
+// argv and cwd only).
 // Fixed answers — `ctx.isProjectTrusted()` (`projectTrustedFor`, else the
 // host's `projectTrusted`, default false), `ctx.model`, `ctx.modelRegistry`,
 // `ctx.getContextUsage()`, print-mode dialogs — are logged once per
@@ -195,15 +196,18 @@ export interface Config {
    * (found on `PATH`), not `/usr/bin/git` or `./git`. Only the command is checked; its arguments
    * and `options.cwd` are the extension's, so allowing a command that can run others (`git`, `sh`,
    * `node`, `npx`) allows those too. A refused call resolves as a failed command (code 126, empty
-   * `stdout`, the reason in `stderr`) and is reported at warn, once per extension and command.
+   * `stdout`, the reason in `stderr`) and is reported at warn, once per extension, command and
+   * kind of refusal (a cancel only at debug).
    * This gates pi's API only: an extension is code the host runs and may start processes itself.
    *
    * `"gate"` asks the host about each call: `host_approval.judge([command, ...args], cwd?)`
    * (`cwd` is `options.cwd` resolved against the adapter's, left out when the extension passed
-   * none) answering `{free: true}` runs it; otherwise `host_approval.ask(question, details | null,
-   * file)` with the judge's `question` and `details` and the extension's file, and only `"allow"`
-   * runs it. Any other answer, a host error, a cancel or no `host_approval` service (load
-   * `host-approval.ts`) is a refusal, as above.
+   * none — the call then runs in the adapter's `cwd`) answering `{free: true}` runs it; otherwise
+   * `host_approval.ask(question, details | null, file)` with the judge's `question` and `details`
+   * and the extension's file, and only `"allow"` runs it. Any other answer, a host error, a cancel
+   * or no `host_approval` service (load `host-approval.ts`) is a refusal, as above; so is an
+   * `options.cwd` that is not a path string, unjudged. What runs is what was judged (copied when
+   * the call is made). `judge` is bounded at 30 s; `ask` is the host's to time out.
    */
   exec?: Grant
   /**
@@ -221,9 +225,10 @@ export interface Config {
    * Extensions whose `pi.sendUserMessage(content)`, and `pi.sendMessage` with `triggerTurn` or
    * `deliverAs`, wake the host's session: `host_session.wake(text, file)` (the content as text;
    * load `host-session.ts`). Keyed like `execFor`; default none. pi's calls return nothing, so a
-   * refusal (a host error, or no service) cannot reach the extension: it is reported at warn,
-   * once per extension. Without the grant, `sendUserMessage` throws "not available in yoagent"
-   * and `sendMessage` is recorded only.
+   * refusal (a host error, no answer in 30 s, or no service) cannot reach the extension: it is
+   * reported at warn, once per extension and kind (repeats at debug). A wake while extensions
+   * load, or once the adapter starts unloading, throws. Without the grant, `sendUserMessage`
+   * throws "not available in yoagent" and `sendMessage` is recorded only.
    */
   wakeFor?: Record<string, boolean>
   /**
@@ -823,9 +828,9 @@ interface Gates {
   execFor(path: string): Grant
   /** Whether the extension at `path` may wake the host's session (`wakeFor`). */
   wakes(path: string): boolean
-  /** The adapter's `cwd`, which a relative `options.cwd` resolves against. */
+  /** The adapter's `cwd`, which a relative `options.cwd` resolves against, and where a call without one runs. */
   cwd: string
-  /** Whether pi's runtime actions are live: not while extensions load, nor after unloading. */
+  /** Whether pi's runtime actions are live: not while extensions load, nor once unloading starts (`session_shutdown` included). */
   active(): boolean
   approval(): Lookup<HostApproval>
   session(): Lookup<HostSession>
@@ -847,7 +852,10 @@ function gatePi(gates: Gates) {
     warned.add(key)
     report('warn', text)
   }
-  /** Wakes go to the host one after another, in the order extensions sent them. */
+  /**
+   * Wakes go to the host one at a time, in the order extensions sent them, each after the previous
+   * one answered or went 30 s without an answer (so a late one may land after the next).
+   */
   let wakes: Promise<unknown> = Promise.resolve()
   return (pi: PiApi, path: string): PiApi => {
     const grant = gates.execFor(path)
@@ -864,15 +872,19 @@ function gatePi(gates: Gates) {
      * resolved against the adapter's `cwd`.
      */
     const approved = async (command: unknown, args: unknown, options?: ExecOptions): Promise<ExecResult> => {
-      const argv = [String(command), ...(Array.isArray(args) ? args.map(String) : [])]
+      // `Array.from`, not `map`: a hole would be skipped by `map` and spread back as `undefined`.
+      const argv = [String(command), ...(Array.isArray(args) ? Array.from(args, (a) => String(a)) : [])]
       const what = `pi.exec("${argv[0]}")`
       const given = options?.cwd
       if (given !== undefined && typeof given !== 'string') {
         return refuse(argv[0], 'cwd', `${what}: options.cwd must be a path string to be judged, not ${typeof given}`)
       }
       const cwd = given === undefined ? undefined : resolve(gates.cwd, given)
-      const signal = options?.signal instanceof AbortSignal ? options.signal : undefined
-      const timeout = typeof options?.timeout === 'number' ? options.timeout : undefined
+      // Each option read once (a getter could answer differently the second time).
+      const givenSignal = options?.signal
+      const givenTimeout = options?.timeout
+      const signal = givenSignal instanceof AbortSignal ? givenSignal : undefined
+      const timeout = typeof givenTimeout === 'number' ? givenTimeout : undefined
       const run = () => pi.exec(argv[0], argv.slice(1), { signal, timeout, cwd: cwd ?? gates.cwd })
       const approval = gates.approval()
       if ('missing' in approval) {
@@ -884,6 +896,8 @@ function gatePi(gates: Gates) {
       /** `promise`, or CANCELLED at the call's own cancel; the listener is removed either way. */
       const orCancel = async <T>(promise: Promise<T>): Promise<T | typeof CANCELLED> => {
         if (!signal) return promise
+        // Aborted between two host calls: no listener would fire.
+        if (signal.aborted) return CANCELLED
         let onAbort: (() => void) | undefined
         try {
           return await Promise.race([promise, new Promise<typeof CANCELLED>((done) => {
@@ -927,13 +941,15 @@ function gatePi(gates: Gates) {
       }
       if (answer === 'allow') return run()
       const said = typeof answer === 'string' ? answer : JSON.stringify(answer) ?? 'no answer'
-      return refuse(argv[0], `declined:${said}`, `${what} was not approved by the host (${said})`)
+      // Keyed by the answer for the ones a host gives (a free-form one would key every refusal anew).
+      const kind = answer === 'block' || answer === 'unanswered' ? `declined:${answer}` : 'declined'
+      return refuse(argv[0], kind, `${what} was not approved by the host (${said})`)
     }
     const gated = (command: string, args: string[], options?: ExecOptions): Promise<ExecResult> => {
       if (grant === 'gate') return approved(command, args, options)
       if (Array.isArray(grant) && grant.includes(command)) return pi.exec(command, args, options)
       return Promise.resolve(
-        refuse(String(command), 'not-allowed', `pi.exec("${command}") is not allowed by the host (the adapter's \`exec\` / \`execFor\` setting)`),
+        refuse(String(command), 'not-allowed', `pi.exec("${String(command)}") is not allowed by the host (the adapter's \`exec\` / \`execFor\` setting)`),
       )
     }
     // A copy, not a Proxy: a Proxy's target still hands the real `exec` out
@@ -952,24 +968,23 @@ function gatePi(gates: Gates) {
           throw new Error('Extension runtime not initialized. Action methods cannot be called during extension loading.')
         }
         const said = typeof content === 'string' ? content : Array.isArray(content) ? text(content as Block[]) : JSON.stringify(content)
-        const failed = (why: string) => once(`wake\0${path}\0${why}`, `[pi] ${path}: wake refused: ${why}`)
+        /** Said once per extension and kind (`no-service`, `timeout`, `error`): a host's error text may vary. */
+        const failed = (kind: string, why: string) => once(`wake\0${path}\0${kind}`, `[pi] ${path}: wake refused: ${why}`)
         const session = gates.session()
-        if ('missing' in session) return failed(session.missing)
+        if ('missing' in session) return failed('no-service', session.missing)
         const host = session.service
         wakes = wakes.then(() =>
           bounded('host_session.wake', Promise.resolve().then(() => host.wake(said ?? '', path)), HOST_CALL_MS).catch((error) =>
-            failed(
-              /took longer than/.test(message(error))
-                ? `no answer within ${HOST_CALL_MS / 1000} s (it may still be delivered; later wakes go on)`
-                : message(error),
-            ),
+            /took longer than/.test(message(error))
+              ? failed('timeout', `no answer within ${HOST_CALL_MS / 1000} s (it may still be delivered; later wakes go on)`)
+              : failed('error', message(error)),
           ),
         )
       }
       own.sendUserMessage = (content: unknown) => wake(content)
       own.sendMessage = (msg: { content?: unknown }, options?: { triggerTurn?: boolean; deliverAs?: string }) => {
         const turn = !!(options?.triggerTurn || options?.deliverAs)
-        // Checked before recording, so a wake that cannot be sent does not leave half a call done.
+        // Checked before recording, so a call that throws records nothing.
         if (turn && !gates.active()) {
           throw new Error('Extension runtime not initialized. Action methods cannot be called during extension loading.')
         }

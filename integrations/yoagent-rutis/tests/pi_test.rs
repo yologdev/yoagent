@@ -2516,6 +2516,7 @@ impl HostDispatch for FakeApproval {
             .push((method.into(), Value::Array(args.clone())));
         match method {
             "judge" => match args[0][1].as_str() {
+                _ if args[0][0] == "pwd" => Ok(BridgeValue::Data(json!({ "free": true }))),
                 Some("free") => Ok(BridgeValue::Data(json!({ "free": true, "judged": true }))),
                 Some("boom") => Err(BridgeError::Value("the gate broke".into())),
                 _ => Ok(BridgeValue::Data(
@@ -2537,11 +2538,17 @@ impl HostDispatch for FakeApproval {
                         .and_then(|(_, a)| a[0][1].as_str().map(str::to_owned))
                         .as_deref()
                     {
-                        Some("yes") => "allow",
-                        _ => "block",
+                        Some("yes") => json!("allow"),
+                        Some("unans") => json!("unanswered"),
+                        // Truthy, but not "allow".
+                        Some("truthy") => json!(true),
+                        Some("askboom") => {
+                            return Err(BridgeError::Value("the question broke".into()))
+                        }
+                        _ => json!("block"),
                     }
                 } else {
-                    "unanswered"
+                    json!("unanswered")
                 }
             ))),
             _ => Ok(BridgeValue::Undefined),
@@ -2603,6 +2610,9 @@ async fn exec_gate_asks_the_host() {
                 ("gated_exec", json!({ "arg": "yes" })),
                 ("gated_exec", json!({ "arg": "no" })),
                 ("gated_exec", json!({ "arg": "boom" })),
+                ("gated_exec", json!({ "arg": "unans" })),
+                ("gated_exec", json!({ "arg": "truthy" })),
+                ("gated_exec", json!({ "arg": "askboom" })),
                 ("other_exec", json!({ "arg": "free" })),
             ]),
             text("done"),
@@ -2626,8 +2636,16 @@ async fn exec_gate_asks_the_host() {
                     && out[3].contains("the gate broke"),
                 "{out:?}"
             );
+            // Only "allow" runs: an unanswered question, a truthy answer and a failed one refuse.
+            for (o, want) in [
+                (out[4], "(unanswered)"),
+                (out[5], "(true)"),
+                (out[6], "the question broke"),
+            ] {
+                assert!(o.starts_with("code=126") && o.contains(want), "{out:?}");
+            }
             assert!(
-                out[4].starts_with("code=126") && out[4].contains("is not allowed by the host"),
+                out[7].starts_with("code=126") && out[7].contains("is not allowed by the host"),
                 "{out:?}"
             );
             let seen = approval.0.lock().unwrap().clone();
@@ -2651,9 +2669,15 @@ async fn exec_gate_asks_the_host() {
             );
             // `free` and `boom` are never asked; `other` never judged.
             let methods: Vec<&str> = seen.iter().map(|(m, _)| m.as_str()).collect();
-            assert_eq!(methods, ["judge", "judge", "ask", "judge", "ask", "judge"]);
+            assert_eq!(
+                methods,
+                [
+                    "judge", "judge", "ask", "judge", "ask", "judge", "judge", "ask", "judge",
+                    "ask", "judge", "ask"
+                ]
+            );
         } else {
-            for o in &out[..4] {
+            for o in &out[..7] {
                 assert!(
                     o.starts_with("code=126") && o.contains("no host_approval service"),
                     "{out:?}"
@@ -2671,7 +2695,7 @@ async fn exec_gate_asks_the_host() {
             json!({ "extensions": [&gated], "exec": "ask" }),
         ))
         .await;
-    assert!(failures.contains("exec"), "{failures}");
+    assert!(failures.contains("exec must be true, false"), "{failures}");
     host.root.shutdown().await.unwrap();
 }
 
@@ -2713,15 +2737,20 @@ async fn trust_and_wake_per_extension() {
         return;
     };
     let dir = tempfile::tempdir().unwrap();
+    let late = dir.path().join("late.log");
     let source = |tool: &str| {
         format!(
-            "export default function (pi) {{ pi.registerTool({{ name: '{tool}', label: '{tool}', description: 'x', \
+            "import {{ appendFileSync }} from 'node:fs'\nexport default function (pi) {{ pi.registerTool({{ name: '{tool}', label: '{tool}', description: 'x', \
              parameters: {{ type: 'object', properties: {{}} }}, \
              async execute(_id, _p, _s, _u, ctx) {{ let sent = 'sent'; \
              try {{ pi.sendUserMessage('hello\\nworld'); pi.sendUserMessage('please refuse'); \
              pi.sendMessage({{ customType: 'note', content: [{{ type: 'text', text: 'm1' }}, {{ type: 'text', text: 'm2' }}] }}, {{ triggerTurn: true }}); \
-             pi.sendMessage({{ customType: 'note', content: 'quiet' }}) }} catch (e) {{ sent = e.message }} \
-             return {{ content: [{{ type: 'text', text: `${{ctx.isProjectTrusted()}}|${{sent}}` }}], details: {{}} }} }} }}) }}"
+             pi.sendMessage({{ customType: 'note', content: 'quiet' }}); \
+             pi.sendMessage({{ customType: 'note', content: 'd' }}, {{ deliverAs: 'steer' }}); \
+             pi.sendUserMessage('end') }} catch (e) {{ sent = e.message }} \
+             return {{ content: [{{ type: 'text', text: `${{ctx.isProjectTrusted()}}|${{sent}}` }}], details: {{}} }} }} }}); \
+             pi.on('session_shutdown', () => {{ try {{ pi.sendUserMessage('late') }} catch (e) {{ \
+             appendFileSync({late:?}, `{tool}: ${{e.message}}\n`) }} }}) }}"
         )
     };
     let woken = extension(dir.path(), "woken.ts", &source("woken_tool"));
@@ -2754,21 +2783,23 @@ async fn trust_and_wake_per_extension() {
         "{results:?}"
     );
     let file = woken.to_str().unwrap();
+    // Wakes are sent one at a time: once "end" is in, every earlier one has been decided.
     let wakes = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let seen = session.0.lock().unwrap().clone();
-            if seen.len() >= 3 {
+            if seen.iter().any(|w| w[0] == "end") {
                 return seen;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     })
     .await
-    .expect("three wakes");
+    .expect("the wakes");
     let texts: Vec<&str> = wakes.iter().map(|w| w[0].as_str().unwrap()).collect();
+    // The quiet `sendMessage` (no turn) wakes nothing; `deliverAs` alone does.
     assert_eq!(
         texts,
-        ["hello\nworld", "please refuse", "m1\nm2"],
+        ["hello\nworld", "please refuse", "m1\nm2", "d", "end"],
         "{wakes:?}"
     );
     for w in &wakes {
@@ -2778,17 +2809,41 @@ async fn trust_and_wake_per_extension() {
         );
     }
     host.root.shutdown().await.unwrap();
+    // Unloading: a wake from `session_shutdown` throws, as pi's own runtime once it is gone;
+    // the neighbour throws "not available" as ever.
+    let said = wait_file(&late, |t| t.lines().count() >= 2).await;
+    assert!(
+        said.contains("woken_tool: Extension runtime not initialized"),
+        "{said}"
+    );
+    assert!(
+        said.contains("quiet_tool: pi.sendUserMessage() is not available"),
+        "{said}"
+    );
+    assert!(!session.0.lock().unwrap().iter().any(|w| w[0] == "late"));
 
-    for bad in [
-        json!({ "wakeFor": { dir.path().join("typo.ts").to_str().unwrap(): true } }),
-        json!({ "projectTrustedFor": { dir.path().join("typo.ts").to_str().unwrap(): true } }),
-        json!({ "projectTrustedFor": { woken.to_str().unwrap(): "yes" } }),
+    for (bad, want) in [
+        (
+            json!({ "wakeFor": { dir.path().join("typo.ts").to_str().unwrap(): true } }),
+            "not loaded",
+        ),
+        (
+            json!({ "projectTrustedFor": { dir.path().join("typo.ts").to_str().unwrap(): true } }),
+            "not loaded",
+        ),
+        (
+            json!({ "projectTrustedFor": { woken.to_str().unwrap(): "yes" } }),
+            "must be true or false",
+        ),
         // One file under two spellings.
-        json!({ "wakeFor": {
+        (
+            json!({ "wakeFor": {
             woken.to_str().unwrap(): true,
             dir.path().join(".").join("woken.ts").to_str().unwrap(): false,
         } }),
-        json!({ "wakeFor": true }),
+            "twice",
+        ),
+        (json!({ "wakeFor": true }), "wakeFor"),
     ] {
         let host = crate::host(&runtime).await;
         let mut row = json!({ "extensions": [&woken] });
@@ -2796,12 +2851,7 @@ async fn trust_and_wake_per_extension() {
             .unwrap()
             .extend(bad.as_object().unwrap().clone());
         let failures = host.try_load(adapter_row(row)).await;
-        assert!(
-            failures.contains("not loaded")
-                || failures.contains("must")
-                || failures.contains("twice"),
-            "{bad}: {failures}"
-        );
+        assert!(failures.contains(want), "{bad}: {failures}");
         host.root.shutdown().await.unwrap();
     }
 }
@@ -2817,6 +2867,7 @@ async fn the_gate_runs_what_it_judged() {
         return;
     };
     let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("sub")).unwrap();
     let ext = extension(
         dir.path(),
         "tricky.ts",
@@ -2840,6 +2891,8 @@ export default function (pi) {
     return `code=${r.code} err=${r.stderr}`
   })
   tool('at_load', async () => atLoad)
+  tool('where_sub', async () => (await pi.exec('pwd', [], { cwd: 'sub' })).stdout.trim())
+  tool('where_default', async () => (await pi.exec('pwd', [])).stdout.trim())
 }
 "#,
     );
@@ -2869,6 +2922,8 @@ export default function (pi) {
             ("swap_args", json!({})),
             ("url_cwd", json!({})),
             ("at_load", json!({})),
+            ("where_sub", json!({})),
+            ("where_default", json!({})),
         ]),
         text("done"),
     ]);
@@ -2885,10 +2940,158 @@ export default function (pi) {
         results[2].1.contains("Extension runtime not initialized"),
         "{results:?}"
     );
+    // A gated call runs where it was judged: `options.cwd` resolved against the adapter's
+    // `cwd`, and without one the adapter's `cwd` itself.
+    let canonical = |p: &str| std::fs::canonicalize(p).unwrap();
+    assert_eq!(
+        canonical(&results[3].1),
+        canonical(dir.path().join("sub").to_str().unwrap())
+    );
+    assert_eq!(
+        canonical(&results[4].1),
+        canonical(dir.path().to_str().unwrap())
+    );
     // `swap_args` was judged (and asked about) as `echo yes`; `url_cwd` never reached the host.
     let seen = approval.0.lock().unwrap().clone();
     assert_eq!(seen[0], ("judge".into(), json!([["echo", "yes"]])));
-    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert_eq!(seen[1].0, "ask");
+    assert_eq!(seen.len(), 4, "{seen:?}");
     assert!(session.0.lock().unwrap().is_empty());
+    host.root.shutdown().await.unwrap();
+}
+
+/// The host's `host_approval` with an `ask` that answers only when the test
+/// says so (and "allow" then): for a cancel while the user is asked.
+struct LateApproval(Mutex<Option<tokio::sync::oneshot::Receiver<()>>>);
+
+impl HostDispatch for LateApproval {
+    fn invoke(&self, method: &str, _args: BridgeValue) -> Reply {
+        match method {
+            "judge" => Ok(BridgeValue::Data(json!({ "free": false, "question": "q" }))),
+            "ask" => {
+                let answer = self.0.lock().unwrap().take();
+                Ok(BridgeValue::future(async move {
+                    if let Some(answer) = answer {
+                        let _ = answer.await;
+                    }
+                    Ok(BridgeValue::Data(json!("allow")))
+                }))
+            }
+            _ => Ok(BridgeValue::Undefined),
+        }
+    }
+
+    fn methods(&self) -> Option<Value> {
+        Some(json!({ "judge": "async", "ask": "async" }))
+    }
+}
+
+/// A gated call fails closed on its own cancel: aborted before the host is
+/// asked, it is not judged; aborted while the user is asked, it is refused at
+/// once and a later "allow" runs nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancelled_gated_call_never_runs() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("ran");
+    let ext = extension(
+        dir.path(),
+        "cancel.ts",
+        &format!(
+            r#"
+export default function (pi) {{
+  const tool = (name, run) => pi.registerTool({{
+    name, label: name, description: 'x', parameters: {{ type: 'object', properties: {{}} }},
+    async execute() {{ const r = await run(); return {{ content: [{{ type: 'text', text: `code=${{r.code}} err=${{r.stderr}}` }}], details: {{}} }} }},
+  }})
+  tool('pre_aborted', () => {{ const ac = new AbortController(); ac.abort(); return pi.exec('touch', [{marker:?}], {{ signal: ac.signal }}) }})
+  tool('abort_in_ask', () => {{
+    const ac = new AbortController()
+    setTimeout(() => ac.abort(), 300)
+    return pi.exec('touch', [{marker:?}], {{ signal: ac.signal }})
+  }})
+}}
+"#
+        ),
+    );
+    let (answer, later) = tokio::sync::oneshot::channel();
+    let approval = Arc::new(LateApproval(Mutex::new(Some(later))));
+    let host = host_with(
+        &runtime,
+        vec![("host_approval", approval.clone() as Arc<dyn HostDispatch>)],
+    )
+    .await;
+    let mut rows = adapter_row(json!({ "extensions": [&ext], "exec": "gate" }));
+    rows.as_array_mut()
+        .unwrap()
+        .push(json!({ "id": "host-approval", "name": pi_dir().join("host-approval.ts") }));
+    host.load(rows).await;
+    let (agent, _) = agent(vec![
+        calls(&[("pre_aborted", json!({})), ("abort_in_ask", json!({}))]),
+        text("done"),
+    ]);
+    let mut agent = agent
+        .with_tool_execution(yoagent::ToolExecutionStrategy::Sequential)
+        .with_extension(host.bridge.extension());
+    let (_, results) = run(&mut agent, "go").await;
+    for (_, out, _) in &results {
+        assert!(
+            out.starts_with("code=126") && out.contains("cancelled while the host was asked"),
+            "{results:?}"
+        );
+    }
+    // The user allows it now: nothing runs.
+    answer.send(()).unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(!marker.exists(), "a cancelled call ran after a late allow");
+    host.root.shutdown().await.unwrap();
+}
+
+/// `projectTrustedFor: false` over a row-wide `true` reaches the extension's
+/// handlers too: its `tool_call` policy and its `session_start`.
+#[tokio::test(flavor = "multi_thread")]
+async fn untrusted_for_one_extension_reaches_its_handlers() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("trust.log");
+    let wary = extension(
+        dir.path(),
+        "wary.ts",
+        &format!(
+            r#"
+import {{ appendFileSync }} from 'node:fs'
+export default function (pi) {{
+  pi.on('session_start', (_e, ctx) => {{ appendFileSync({log:?}, `start=${{ctx.isProjectTrusted()}}\n`) }})
+  pi.on('tool_call', (e, ctx) => e.toolName === 'probe' ? {{ block: true, reason: `trusted=${{ctx.isProjectTrusted()}}` }} : undefined)
+}}
+"#
+        ),
+    );
+    let probe = extension(
+        dir.path(),
+        "probe.ts",
+        "export default function (pi) { pi.registerTool({ name: 'probe', label: 'p', description: 'x', \
+         parameters: { type: 'object', properties: {} }, \
+         async execute() { return { content: [{ type: 'text', text: 'ran' }], details: {} } } }) }",
+    );
+    let host = host(&runtime).await;
+    host.load(adapter_row(json!({
+        "extensions": [&wary, &probe],
+        "projectTrusted": true,
+        "projectTrustedFor": { wary.to_str().unwrap(): false },
+    })))
+    .await;
+    let (agent, _) = agent(vec![call("probe", json!({})), text("done")]);
+    let mut agent = agent.with_extension(host.bridge.extension());
+    let (_, results) = run(&mut agent, "go").await;
+    assert!(
+        results[0].2 && results[0].1.contains("trusted=false"),
+        "{results:?}"
+    );
+    assert_eq!(wait_file(&log, |t| !t.is_empty()).await, "start=false\n");
     host.root.shutdown().await.unwrap();
 }

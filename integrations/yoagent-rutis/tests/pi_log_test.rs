@@ -81,11 +81,19 @@ async fn a_plugin_warning_reaches_the_hosts_logs() {
     let loader = plugin.handle();
     root.plugin(plugin).await.unwrap();
     root.plugin(RuntimeRowsPlugin::new(resolver));
-    // The fixture registers a command: the adapter reports it as not available.
+    // The fixture registers a command: the adapter reports it as not available. A second
+    // extension asks a fixed question at load, which the log line names it for.
+    let dir = tempfile::tempdir().unwrap();
+    let asks = dir.path().join("asks.ts");
+    std::fs::write(
+        &asks,
+        "export default function (pi) { pi.on('session_start', (_e, ctx) => { ctx.isProjectTrusted() }) }",
+    )
+    .unwrap();
     let patches: Vec<Patch> = serde_json::from_value(json!([{ "insert": [{
         "id": "pi",
         "name": pi_dir().join("pi-extensions-adapter.ts"),
-        "config": { "extensions": [pi_dir().join("fixture-extension.ts")] },
+        "config": { "extensions": [pi_dir().join("fixture-extension.ts"), &asks] },
     }] }]))
     .unwrap();
     let report = loader
@@ -120,6 +128,17 @@ async fn a_plugin_warning_reaches_the_hosts_logs() {
         )
     });
     assert!(found.contains("not available in yoagent"), "{found}");
+    let named = format!(
+        "fixed answer ({}): ctx.isProjectTrusted() → false",
+        asks.display()
+    );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !logs.0.lock().unwrap().iter().any(|l| l.contains(&named)) {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("no `{named}` in {:?}", logs.0.lock().unwrap()));
     let _ = bridge;
     root.shutdown().await.unwrap();
 }
