@@ -193,8 +193,103 @@ export interface Config {
    * This gates pi's API only: an extension is code the host runs and may start processes itself.
    */
   exec?: boolean | string[]
+  /**
+   * Grants for single extensions, over `exec`: an extension file (as in `extensions`, resolved
+   * against `cwd`) → its own `true` / `false` / command list. A key naming no loaded extension
+   * refuses the load (a typo would otherwise grant nothing, silently).
+   */
+  execFor?: Record<string, boolean | string[]>
   /** What `ctx.isProjectTrusted()` answers (default `false`; pi's own default is `true`). */
   projectTrusted?: boolean
+  /**
+   * What `ctx.model` is: the model the agent runs. Default: the run's model id (from yoagent's
+   * request), under provider `yoagent`; before the first request, `undefined`.
+   */
+  model?: ModelSpec
+  /**
+   * What `ctx.modelRegistry` lists (`getAll`, `getAvailable`, `find`; default: `model`, if
+   * set). Read-only: its other methods — credentials, model calls, provider registration —
+   * throw "not available in yoagent".
+   */
+  models?: ModelSpec[]
+}
+
+/** A model as the host describes it to pi extensions. */
+export interface ModelSpec {
+  provider: string
+  id: string
+  name?: string
+  contextWindow?: number
+  maxTokens?: number
+  reasoning?: boolean
+  /** Input kinds (default `["text"]`). */
+  input?: ('text' | 'image')[]
+}
+
+/** A host's model in pi's `Model` shape (frozen; `api` is `yoagent`, no costs or credentials). */
+function piModel(spec: ModelSpec) {
+  return Object.freeze({
+    id: spec.id,
+    name: spec.name ?? spec.id,
+    api: 'yoagent',
+    provider: spec.provider,
+    baseUrl: '',
+    input: Object.freeze([...(spec.input ?? ['text'])]),
+    cost: Object.freeze({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }),
+    reasoning: spec.reasoning ?? false,
+    contextWindow: spec.contextWindow ?? 128_000,
+    maxTokens: spec.maxTokens ?? 4_096,
+  })
+}
+
+/** Whether `value` is a usable `ModelSpec`. */
+const isModelSpec = (value: unknown): value is ModelSpec => {
+  const m = value as ModelSpec
+  return (
+    !!m &&
+    typeof m === 'object' &&
+    typeof m.provider === 'string' &&
+    !!m.provider &&
+    typeof m.id === 'string' &&
+    !!m.id &&
+    (m.name === undefined || typeof m.name === 'string') &&
+    (m.contextWindow === undefined || (Number.isInteger(m.contextWindow) && m.contextWindow > 0)) &&
+    (m.maxTokens === undefined || (Number.isInteger(m.maxTokens) && m.maxTokens > 0)) &&
+    (m.reasoning === undefined || typeof m.reasoning === 'boolean') &&
+    (m.input === undefined || (Array.isArray(m.input) && m.input.every((i) => i === 'text' || i === 'image')))
+  )
+}
+
+/**
+ * A read-only `ModelRegistry` over the host's models: the lookups pi extensions use to see
+ * models; everything else (credentials, model calls, registering providers) throws, reported once.
+ */
+function readOnlyRegistry(models: ReturnType<typeof piModel>[]) {
+  const reads: Record<string, (...args: never[]) => unknown> = {
+    getAll: () => [...models],
+    getAvailable: () => [...models],
+    find: (provider: string, id: string) => models.find((m) => m.provider === provider && m.id === id),
+    getError: () => undefined,
+    getProviderDisplayName: (provider: string) => provider,
+    hasConfiguredAuth: () => false,
+    isUsingOAuth: () => false,
+    getRegisteredProviderIds: () => [...new Set(models.map((m) => m.provider))],
+  }
+  const refused = new Set<string>()
+  return new Proxy(reads, {
+    get: (target, key) => {
+      if (typeof key !== 'string' || key === 'then') return undefined
+      if (key in target) return target[key]
+      return () => {
+        const why = `ctx.modelRegistry.${key}() is not available in yoagent (no credentials, model calls or providers are handed to extensions)`
+        if (!refused.has(key)) {
+          refused.add(key)
+          report('info', `[pi] ${why}`)
+        }
+        throw new Error(why)
+      }
+    },
+  })
 }
 
 /**
@@ -652,15 +747,19 @@ async function writeWrapper(dir: string, resolved: string): Promise<string> {
   return wrapper
 }
 
-/** `pi.exec` as the host's `exec` grant allows it; everything else on pi's API as it is. */
-function gateExec(exec: boolean | string[]) {
+/**
+ * `pi.exec` as the host's grant for the extension at `path` allows it (`grantFor`: its own in
+ * `execFor`, else the row-wide `exec`); everything else on pi's API as it is.
+ */
+function gateExec(grantFor: (path: string) => boolean | string[]) {
   const refusedOnce = new Set<string>()
   return (pi: PiApi, path: string): PiApi => {
+    const exec = grantFor(path)
     if (exec === true) return pi
     const allowed = (command: string) => Array.isArray(exec) && exec.includes(command)
     const gated = (command: string, args: string[], options?: unknown): Promise<ExecResult> => {
       if (allowed(command)) return pi.exec(command, args, options)
-      const why = `pi.exec("${command}") is not allowed by the host (the adapter's \`exec\` setting)`
+      const why = `pi.exec("${command}") is not allowed by the host (the adapter's \`exec\` / \`execFor\` setting)`
       const key = `${path}\0${command}`
       if (!refusedOnce.has(key)) {
         refusedOnce.add(key)
@@ -767,7 +866,13 @@ export default definePlugin<Config>({
       strict: { type: 'boolean' },
       nestedCalls: { type: 'string', enum: ['any', 'own-extension', 'off'] },
       exec: { anyOf: [{ type: 'boolean' }, { type: 'array', items: { type: 'string' } }] },
+      execFor: {
+        type: 'object',
+        additionalProperties: { anyOf: [{ type: 'boolean' }, { type: 'array', items: { type: 'string' } }] },
+      },
       projectTrusted: { type: 'boolean' },
+      model: { type: 'object' },
+      models: { type: 'array', items: { type: 'object' } },
     },
   },
   async apply(ctx, config) {
@@ -792,15 +897,41 @@ export default definePlugin<Config>({
 
     const { SessionManager } = await import('@earendil-works/pi-coding-agent')
     const { validateToolArguments } = await import('@earendil-works/pi-ai')
+    const isGrant = (g: unknown): g is boolean | string[] =>
+      typeof g === 'boolean' || (Array.isArray(g) && g.every((c) => typeof c === 'string'))
     const exec = config.exec ?? false
-    if (typeof exec !== 'boolean' && !(Array.isArray(exec) && exec.every((c) => typeof c === 'string'))) {
-      throw new Error(`exec must be true, false or a list of commands, not ${JSON.stringify(exec)}`)
-    }
-    report(
-      'debug',
-      `[pi] pi.exec allowed: ${exec === true ? 'anything' : exec === false || exec.length === 0 ? 'nothing' : exec.join(', ')}`,
+    if (!isGrant(exec)) throw new Error(`exec must be true, false or a list of commands, not ${JSON.stringify(exec)}`)
+    const shown = (g: boolean | string[]) => (g === true ? 'anything' : g === false || g.length === 0 ? 'nothing' : g.join(', '))
+    report('debug', `[pi] pi.exec allowed: ${shown(exec)}`)
+    // Per-extension grants, keyed by the resolved file as `loadGated` resolves `extensions`.
+    const { resolvePath } = await piModule<{ resolvePath(input: string, base: string, options?: unknown): string }>(
+      './utils/paths.js',
     )
-    const loaded = await loadGated(config.extensions, cwd, gateExec(exec))
+    const resolveExt = (path: string) => resolvePath(path, cwd, { normalizeUnicodeSpaces: true })
+    const execFor = new Map<string, boolean | string[]>()
+    for (const [path, grant] of Object.entries(config.execFor ?? {})) {
+      if (!isGrant(grant)) {
+        throw new Error(`execFor["${path}"] must be true, false or a list of commands, not ${JSON.stringify(grant)}`)
+      }
+      execFor.set(resolveExt(path), grant)
+      report('debug', `[pi] pi.exec allowed for ${path}: ${shown(grant)}`)
+    }
+    const listed = new Set(config.extensions.map(resolveExt))
+    const unknown = [...execFor.keys()].filter((path) => !listed.has(path))
+    if (unknown.length > 0) {
+      throw new Error(`execFor names extensions that are not loaded: ${unknown.join(', ')}`)
+    }
+    // Models extensions see (`ctx.model`, `ctx.modelRegistry`).
+    for (const [what, spec] of [['model', config.model] as const, ...(config.models ?? []).map((m, i) => [`models[${i}]`, m] as const)]) {
+      if (spec !== undefined && !isModelSpec(spec)) {
+        throw new Error(`${what} must be {provider, id, name?, contextWindow?, maxTokens?, reasoning?, input?}, not ${JSON.stringify(spec)}`)
+      }
+    }
+    const hostModel = config.model ? piModel(config.model) : undefined
+    const registry = readOnlyRegistry(config.models ? config.models.map(piModel) : hostModel ? [hostModel] : [])
+    /** The id of the model the latest yoagent request used (when the host names no `model`). */
+    let runModel: string | undefined
+    const loaded = await loadGated(config.extensions, cwd, gateExec((path) => execFor.get(path) ?? exec))
     if (loaded.errors.length > 0) {
       throw new Error(`pi extensions failed to load: ${loaded.errors.map((e) => `${e.path}: ${e.error}`).join('; ')}`)
     }
@@ -847,10 +978,11 @@ export default definePlugin<Config>({
       cwd,
       sessionManager,
       get modelRegistry() {
-        return fixedAnswer('ctx.modelRegistry', undefined)
+        return fixedAnswer('ctx.modelRegistry', registry, `a read-only list of ${registry.getAll().length} model(s)`)
       },
       get model() {
-        return fixedAnswer('ctx.model', undefined)
+        const model = hostModel ?? (runModel ? piModel({ provider: 'yoagent', id: runModel }) : undefined)
+        return fixedAnswer('ctx.model', model, model ? `${model.provider}/${model.id}` : 'undefined')
       },
       scopedModels: [],
       signal,
@@ -1821,6 +1953,7 @@ export default definePlugin<Config>({
         },
 
         async before_model(turn) {
+          if (typeof turn.model === 'string' && turn.model) runModel = turn.model
           checkUnmapped(false)
           checkShadowing(false)
           if (refusal) return { stop: refusal }
