@@ -676,9 +676,10 @@ const MIN_BLOCK_LINES: usize = TRUNCATION_MARKER_LINES + 2;
 /// many-block result (an MCP server's) fits the budget one block would. A
 /// block is never cut below [`MIN_BLOCK_LINES`] (or `max_lines`, if smaller),
 /// so a result with more long blocks than the budget can mark goes over it by
-/// at most that many lines per block — never silently.
+/// at most that many lines per block — never silently, for a budget of 5 or
+/// more.
 ///
-/// Idempotent with [`truncate_text_head_tail`]: a cut block is exactly its
+/// Idempotent with [`truncate_text_head_tail`]: a cut block is at most its
 /// budget long, so the result either fits afterwards (and a second pass
 /// leaves it alone) or every cut block is at the floor, which a second pass
 /// assigns again.
