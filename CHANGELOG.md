@@ -4,7 +4,7 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## yoagent-rutis Unreleased
+## yoagent-rutis 0.8.0 (2026-10-20)
 
 yoagent-rutis only; requires yoagent 0.25, rutis 0.12 and Rust 1.88, as 0.7.1. A minor bump: new values and settings for the pi adapter's grants.
 

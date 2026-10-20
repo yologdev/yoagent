@@ -5,7 +5,7 @@ description: Use when building, extending or upgrading an agent on the yoagent R
 
 # yoagent: which feature for which job
 
-Written for **yoagent 0.25.11** (and yoagent-rutis 0.7.1); the recipes
+Written for **yoagent 0.25.11** (and yoagent-rutis 0.8.0); the recipes
 below are compiled by `tests/skill_test.rs`, line for line. Check what you
 build against: `cargo tree -p yoagent` or `Cargo.lock`. If you are on an
 older version, read [What changed](#what-changed) first.
@@ -269,6 +269,14 @@ Newest first; the full list is `CHANGELOG.md`.
 - **0.24.2** — built-in tool sandbox fixes (path escapes, `search` flag
   injection, Gemini key out of the URL, tool panics contained).
 - **0.24.1** — `retry_safe_events`.
+- **yoagent-rutis 0.8.0** — pi adapter grants a host can ask about:
+  `exec` / `execFor[file] = "gate"` sends each `pi.exec` to the host's
+  `host_approval` (`judge(argv, cwd?)`, then `ask(question, details,
+  file)`; only `"allow"` runs, exactly what was judged);
+  `projectTrustedFor` per extension; `wakeFor` turns `pi.sendUserMessage`
+  into `host_session.wake(text, file)`. Load `plugins/pi/host-approval.ts`
+  / `host-session.ts` to pass the services in. Fixed-answer log lines now
+  name the extension file.
 - **yoagent-rutis 0.7.1** — pi adapter: `model` / `models` give
   extensions `ctx.model` (default: the run's model id under provider
   `yoagent`) and a read-only `ctx.modelRegistry`; `execFor` grants
