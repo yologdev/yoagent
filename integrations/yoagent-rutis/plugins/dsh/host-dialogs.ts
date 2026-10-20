@@ -24,7 +24,18 @@
 //              out, no frontend) fails the request with that reason; a blank
 //              input or an empty multiple choice is a skip (`selected: []`).
 //
-// With no frontend attached (`ui.frontends()` is 0) when a call starts, both
+//   approvals  with `dsh-host.ts` loaded, a call carries the stand-in agent,
+//   (agent)    so a guard's `ask` goes through DSH's own approval service
+//              (`@deepseek-ai/dsh-user-approval`, whose audit pair needs the
+//              stand-in's open turn) and reaches `approval/request`: the
+//              user is asked (confirm, with the asker's reason). Yes →
+//              `allowed-once`, no or no answer → `rejected`, the request
+//              withdrawn → `cancelled`, the host failing → `unavailable`.
+//   questions  `user-questions/request` from the stand-in agent is answered
+//   (agent)    the same way as an agentless one (DSH refuses questions from
+//              a child agent before they get here).
+//
+// With no frontend attached (`ui.frontends()` is 0) when a call starts, all
 // step aside and dsh's own result stands.
 
 import { randomUUID } from 'node:crypto'
@@ -72,6 +83,21 @@ const excerpt = (text: string, max: number) => {
 
 /** A question nobody answered: the tool reports it, rather than a made-up answer. */
 class Unanswered extends Error {}
+
+/** `dsh-host.ts` marks its stand-in agents with this. */
+const STAND_IN = Symbol.for('yoagent-rutis.dsh.stand-in')
+const isStandIn = (agent: unknown) => typeof agent === 'object' && agent !== null && (agent as Record<symbol, unknown>)[STAND_IN] === true
+
+/** DSH's approval request (`@deepseek-ai/dsh-user-approval`), the fields read here. */
+interface ApprovalRequest {
+  agent?: unknown
+  toolName: string
+  callId?: string
+  reason?: string
+  displayReason?: { en?: string }
+  signal?: AbortSignal
+}
+type ApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
 
 // The Cordis context is used untyped: Cordis types are not needed at runtime.
 export function apply(ctx: any) {
@@ -159,11 +185,33 @@ export function apply(ctx: any) {
     true,
   )
 
-  // A request with an agent belongs to dsh's own (agent-scoped) answerers.
+  // DSH's own approval service, for calls that carry the stand-in agent (`dsh-host.ts`).
+  ctx.on('approval/request', async (request: ApprovalRequest, next: () => Promise<ApprovalOutcome>): Promise<ApprovalOutcome> => {
+    if (!isStandIn(request.agent) || !attached()) return next()
+    const reason = request.displayReason?.en ?? request.reason
+    try {
+      const answer = await ask(
+        {
+          kind: 'confirm',
+          title: `Allow the tool ${request.toolName}?`,
+          message: reason ?? '',
+        },
+        request.signal,
+      )
+      if (request.signal?.aborted) return 'cancelled'
+      return answer === true ? 'allowed-once' : 'rejected'
+    } catch (error) {
+      if (request.signal?.aborted) return 'cancelled'
+      say(`[dsh] asking the user to approve ${request.toolName} failed, so it is not approved: ${error}`)
+      return 'unavailable'
+    }
+  })
+
+  // A request from another agent belongs to dsh's own (agent-scoped) answerers.
   ctx.on(
     'user-questions/request',
     async (request: AskUserQuestionRequestEvent, next: () => Promise<{ answers: AskUserQuestionAnswerItem[] }>) => {
-      if (request.agent !== undefined || !attached()) return next()
+      if ((request.agent !== undefined && !isStandIn(request.agent)) || !attached()) return next()
       const { signal } = request
       const answers: AskUserQuestionAnswerItem[] = []
       try {

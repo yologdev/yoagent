@@ -16,7 +16,7 @@ mod common;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -140,10 +140,37 @@ async fn host(runtime: &Path, ui: Option<Arc<ScriptedUi>>) -> Host {
 
 /// [`host`], the DSH runtime's process given `env` on top of what it inherits.
 async fn host_with(runtime: &Path, ui: Option<Arc<ScriptedUi>>, env: &[(&str, &Path)]) -> Host {
+    host_serving(runtime, ui, env, Vec::new()).await
+}
+
+/// [`host_serving`] over `plugins/dsh`.
+async fn host_serving(
+    runtime: &Path,
+    ui: Option<Arc<ScriptedUi>>,
+    env: &[(&str, &Path)],
+    services: Vec<(&str, Arc<dyn HostDispatch>)>,
+) -> Host {
+    host_in(&dsh_dir(), runtime, ui, env, services).await
+}
+
+/// [`host_with`], also sharing these host services into the runtime, with
+/// the DSH runtime's packages those of `dir` (`plugins/dsh` or a copy).
+async fn host_in(
+    dir: &Path,
+    runtime: &Path,
+    ui: Option<Arc<ScriptedUi>>,
+    env: &[(&str, &Path)],
+    services: Vec<(&str, Arc<dyn HostDispatch>)>,
+) -> Host {
     let root = Ctx::root().unwrap();
     let bridge = RutisBridge::install(&root).unwrap();
     let mut catalog = ServiceCatalog::new();
     catalog.register_shared("yoagent");
+    for (name, service) in services {
+        catalog.register_shared(name);
+        root.provide_as::<dyn HostDispatch>(host_key(name), service)
+            .unwrap();
+    }
     if let Some(ui) = ui {
         catalog.register_shared("ui");
         root.provide_as::<dyn HostDispatch>(host_key("ui"), ui)
@@ -154,7 +181,7 @@ async fn host_with(runtime: &Path, ui: Option<Arc<ScriptedUi>>, env: &[(&str, &P
         .fold(Launcher::node(runtime), |launcher, (name, value)| {
             launcher.env(*name, *value)
         });
-    let node = LocalRuntime::launcher("node", launcher, dsh_dir().join("package.json"));
+    let node = LocalRuntime::launcher("node", launcher, dir.join("package.json"));
     let resolver = Arc::new(RuntimeResolver::node(node.handle()).with_catalog(&catalog));
     root.plugin(node);
     let plugin = LoaderPlugin::new(
@@ -845,4 +872,364 @@ async fn a_dsh_plugin_needing_host_services_runs_only_with_them() {
         }
         host.root.shutdown().await.unwrap();
     }
+}
+
+/// What a host gives `dsh-host.ts` (yobuild's `host_session` and
+/// `host_workspace`): the session's id and generation, steering it is
+/// woken with, and the workspace.
+struct FakeSession {
+    generation: AtomicU64,
+    woken: Mutex<Vec<String>>,
+}
+
+impl HostDispatch for FakeSession {
+    fn invoke(&self, method: &str, args: BridgeValue) -> Reply {
+        match method {
+            "info" => Ok(BridgeValue::Data(
+                json!({ "id": "host-session", "generation": self.generation.load(Ordering::SeqCst) }),
+            )),
+            "wake" => {
+                let text = args.list()?.into_iter().next().unwrap().json()?;
+                self.woken
+                    .lock()
+                    .unwrap()
+                    .push(text.as_str().unwrap_or_default().to_owned());
+                Ok(BridgeValue::Undefined)
+            }
+            _ => Ok(BridgeValue::Undefined),
+        }
+    }
+
+    fn methods(&self) -> Option<Value> {
+        Some(json!({ "info": "async", "wake": "async" }))
+    }
+}
+
+struct FakeWorkspace(PathBuf);
+
+impl HostDispatch for FakeWorkspace {
+    fn invoke(&self, method: &str, _args: BridgeValue) -> Reply {
+        match method {
+            "cwd" => Ok(BridgeValue::Data(json!(self.0))),
+            _ => Ok(BridgeValue::Undefined),
+        }
+    }
+
+    fn methods(&self) -> Option<Value> {
+        Some(json!({ "cwd": "async" }))
+    }
+}
+
+/// `plugins/dsh/dsh-host.json`'s rows, as a host loads them: the stand-in's
+/// file under `plugins/dsh`, the session log under `sessions`.
+fn dsh_host_rows(sessions: &Path) -> Vec<Value> {
+    let rows: Vec<Value> =
+        serde_json::from_str(&std::fs::read_to_string(dsh_dir().join("dsh-host.json")).unwrap())
+            .unwrap();
+    rows.into_iter()
+        .map(|mut row| {
+            if row["name"] == "dsh-host.ts" {
+                row["name"] = json!(dsh_dir().join("dsh-host.ts"));
+            }
+            if row["id"] == "dsh-session-persistence" {
+                row["config"] = json!({ "root": sessions });
+            }
+            row
+        })
+        .collect()
+}
+
+/// With `dsh-host.ts` (and `dsh-host.json`'s rows) loaded, each call carries
+/// a stand-in DSH agent: a dsh tool that needs one works in the host's
+/// workspace; the run is one DSH turn; steering goes to the host's
+/// `host_session.wake`; a policy's `ask` goes through DSH's own approval
+/// service to the host's `ui` (yes → runs, no → rejected); a host reset (a
+/// new generation) gives a new agent; the session log is written.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stand_in_agent_gives_dsh_plugins_a_workspace_turns_and_approvals() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let work = dir.path().join("work");
+    let sessions = dir.path().join("sessions");
+    std::fs::create_dir_all(&work).unwrap();
+    let session = Arc::new(FakeSession {
+        generation: AtomicU64::new(1),
+        woken: Mutex::new(Vec::new()),
+    });
+    let ui = Arc::new(ScriptedUi {
+        frontends: 1,
+        ..ScriptedUi::default()
+    });
+    ui.answers
+        .lock()
+        .unwrap()
+        .extend([json!(true), json!(false)]);
+    let host = host_serving(
+        &runtime,
+        Some(ui.clone()),
+        &[],
+        vec![
+            ("host_session", session.clone() as Arc<dyn HostDispatch>),
+            ("host_workspace", Arc::new(FakeWorkspace(work.clone()))),
+        ],
+    )
+    .await;
+    let mut rows = vec![
+        json!({ "id": "system-prompt", "name": "@deepseek-ai/dsh-system-prompt" }),
+        json!({ "id": "tools", "name": "@deepseek-ai/dsh-tools" }),
+    ];
+    rows.extend(dsh_host_rows(&sessions));
+    rows.extend([
+        json!({ "id": "fixture", "name": dsh_dir().join("fixture-tools.ts") }),
+        json!({ "id": "fixture-agent", "name": dsh_dir().join("fixture-needs-agent.ts") }),
+        json!({ "id": "adapter", "name": dsh_dir().join("dsh-tools-adapter.ts") }),
+        json!({ "id": "dialogs", "name": dsh_dir().join("host-dialogs.ts") }),
+    ]);
+    host.load(Value::Array(rows)).await;
+
+    let mut agent = agent(vec![
+        call("fixture_where", json!({})),
+        call("fixture_steer", json!({ "text": "look again" })),
+        call("fixture_guarded", json!({})),
+        call("fixture_turns", json!({})),
+        text("done"),
+    ])
+    .0
+    .with_extension(host.bridge.extension());
+    let (_, results) = tokio::time::timeout(Duration::from_secs(60), run(&mut agent, "go"))
+        .await
+        .expect("the run finishes");
+    let (_, whereabouts, failed) = &results[0];
+    assert!(
+        !failed && whereabouts.ends_with(work.to_str().unwrap()),
+        "{results:?}"
+    );
+    let first_agent = whereabouts.split(' ').next().unwrap().to_owned();
+    assert_eq!(results[1].1, "steered", "{results:?}");
+    assert_eq!(*session.woken.lock().unwrap(), ["look again"]);
+    // The policy's `ask` went through DSH's approval service to the user: yes.
+    assert_eq!(
+        results[2],
+        ("fixture_guarded".into(), "guarded ran".into(), false),
+        "{results:?}"
+    );
+    let asked = ui.asked.lock().unwrap().clone();
+    assert_eq!(asked[0]["kind"], "confirm", "{asked:?}");
+    assert!(
+        asked[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("fixture_guarded needs a yes"),
+        "{asked:?}"
+    );
+    assert_eq!(results[3].1, "1", "one run, one DSH turn: {results:?}");
+
+    // A second run: a second turn of the same agent; the user says no.
+    let mut agent = agent_again(
+        &host,
+        vec![
+            call("fixture_guarded", json!({})),
+            call("fixture_turns", json!({})),
+            call("fixture_where", json!({})),
+            text("done"),
+        ],
+    );
+    let (_, results) = run(&mut agent, "go").await;
+    assert!(results[0].2, "rejected: {results:?}");
+    assert_eq!(results[1].1, "2", "{results:?}");
+    assert!(results[2].1.starts_with(&first_agent), "{results:?}");
+
+    // The host reset: a new generation, a new agent.
+    session.generation.store(2, Ordering::SeqCst);
+    let mut agent = agent_again(&host, vec![call("fixture_where", json!({})), text("done")]);
+    let (_, results) = run(&mut agent, "go").await;
+    assert!(!results[0].2, "{results:?}");
+    assert!(
+        !results[0].1.starts_with(&first_agent),
+        "a new agent: {results:?}"
+    );
+
+    host.root.shutdown().await.unwrap();
+    // Both generations' sessions were written.
+    let files = walk(&sessions);
+    assert!(
+        files.iter().filter(|f| f.ends_with(".jsonl.zstd")).count() >= 2,
+        "{files:?}"
+    );
+}
+
+/// A fresh agent over the same host, scripted with `responses`.
+fn agent_again(host: &Host, responses: Vec<MockResponse>) -> yoagent::Agent {
+    agent(responses).0.with_extension(host.bridge.extension())
+}
+
+/// Every file under `dir`, as paths.
+fn walk(dir: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            out.extend(walk(&path));
+        } else {
+            out.push(path.display().to_string());
+        }
+    }
+    out
+}
+
+/// yobuild's 2026-10-19 probe, as a test to re-run on each DSH bump:
+/// dsh-univer-office (a DSH plugin whose every file tool needs a calling
+/// agent) through the stand-in. It creates a book and a worktree, imports a
+/// CSV, merges after the user approves (DSH's approval service, inside the
+/// run's turn), and exports a valid .xlsx. Installs dsh-univer-office into a
+/// copy of `plugins/dsh` (network; minutes), so `--ignored`.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "installs dsh-univer-office from npm; run with --ignored"]
+async fn dsh_univer_office_works_through_the_stand_in_agent() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("dsh");
+    std::fs::create_dir_all(&base).unwrap();
+    for entry in std::fs::read_dir(dsh_dir()).unwrap().flatten() {
+        if entry.path().is_file() {
+            std::fs::copy(entry.path(), base.join(entry.file_name())).unwrap();
+        }
+    }
+    for args in [
+        &["ci", "--no-audit", "--no-fund"][..],
+        &[
+            "install",
+            "--no-save",
+            "--no-audit",
+            "--no-fund",
+            "dsh-univer-office@0.3.7",
+        ][..],
+    ] {
+        let status = Command::new("npm")
+            .args(args)
+            .current_dir(&base)
+            .status()
+            .unwrap();
+        assert!(status.success(), "npm {args:?}");
+    }
+    let work = dir.path().join("work");
+    let home = dir.path().join("dsh-home");
+    for d in [&work, &home] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    std::fs::write(work.join("data.csv"), "name,qty\napple,3\npear,5\n").unwrap();
+    let session = Arc::new(FakeSession {
+        generation: AtomicU64::new(1),
+        woken: Mutex::new(Vec::new()),
+    });
+    let ui = Arc::new(ScriptedUi {
+        frontends: 1,
+        ..ScriptedUi::default()
+    });
+    ui.answers.lock().unwrap().push_back(json!(true));
+    let host = host_in(
+        &base,
+        &runtime,
+        Some(ui.clone()),
+        &[("DSH_HOME", &home)],
+        vec![
+            ("host_session", session.clone() as Arc<dyn HostDispatch>),
+            ("host_workspace", Arc::new(FakeWorkspace(work.clone()))),
+        ],
+    )
+    .await;
+    let mut rows = vec![
+        json!({ "id": "system-prompt", "name": "@deepseek-ai/dsh-system-prompt" }),
+        json!({ "id": "tools", "name": "@deepseek-ai/dsh-tools" }),
+    ];
+    rows.extend(
+        dsh_host_rows(&dir.path().join("sessions"))
+            .into_iter()
+            .map(|mut row| {
+                if row["id"] == "dsh-host" {
+                    row["name"] = json!(base.join("dsh-host.ts"));
+                }
+                row
+            }),
+    );
+    rows.extend([
+        json!({ "id": "univer", "name": "dsh-univer-office", "config": { "telemetry": false, "gatewayPort": 19287, "gatewayStartupTimeoutMs": 30000 } }),
+        json!({ "id": "adapter", "name": base.join("dsh-tools-adapter.ts") }),
+        json!({ "id": "dialogs", "name": base.join("host-dialogs.ts") }),
+    ]);
+    host.load(Value::Array(rows)).await;
+
+    let step = |responses: Vec<MockResponse>| agent_again(&host, responses);
+    let book = json!("book.univer");
+    let (_, results) = run(
+        &mut step(vec![
+            call("univer_new", json!({ "file": book })),
+            call(
+                "univer_worktree",
+                json!({ "action": "create", "file": book, "name": "t" }),
+            ),
+            text("done"),
+        ]),
+        "go",
+    )
+    .await;
+    assert!(!results[0].2 && !results[1].2, "{results:?}");
+    let worktree = Value::from(
+        serde_json::from_str::<Value>(&results[1].1).unwrap()["result"]["worktreeId"]
+            .as_str()
+            .unwrap(),
+    );
+    let (_, results) = run(
+        &mut step(vec![
+            call("univer_import", json!({ "source": "data.csv", "file": book, "worktreeId": worktree, "name": "Data" })),
+            call("univer_status", json!({ "file": book, "worktreeId": worktree })),
+            text("done"),
+        ]),
+        "go",
+    )
+    .await;
+    assert!(!results[0].2, "{results:?}");
+    let unit = serde_json::from_str::<Value>(&results[1].1).unwrap()["result"]["selectedWorktree"]
+        ["units"][0]["unitId"]
+        .clone();
+    assert!(unit.is_string(), "{results:?}");
+    let (_, results) = run(
+        &mut step(vec![
+            call("univer_export", json!({ "file": book, "unitId": unit, "worktreeId": worktree, "output": "out.xlsx" })),
+            call("univer_worktree", json!({ "action": "ready", "file": book, "worktreeId": worktree })),
+            text("next"),
+        ]),
+        "go",
+    )
+    .await;
+    assert!(!results[0].2 && !results[1].2, "{results:?}");
+    let xlsx = std::fs::read(work.join("out.xlsx")).unwrap();
+    assert!(
+        xlsx.starts_with(b"PK"),
+        "a zip (xlsx), {} bytes",
+        xlsx.len()
+    );
+    // Merging asks: the user's yes, through DSH's approval service.
+    let (_, results) = run(
+        &mut step(vec![
+            call(
+                "univer_worktree",
+                json!({ "action": "merge", "file": book, "worktreeId": worktree }),
+            ),
+            text("done"),
+        ]),
+        "go",
+    )
+    .await;
+    assert!(!results[0].2, "{results:?}");
+    assert_eq!(
+        ui.asked.lock().unwrap().len(),
+        1,
+        "the merge was asked about"
+    );
+    host.root.shutdown().await.unwrap();
 }

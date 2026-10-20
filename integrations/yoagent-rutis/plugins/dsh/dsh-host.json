@@ -1,0 +1,7 @@
+[
+  { "id": "dsh-session", "name": "@deepseek-ai/dsh-session" },
+  { "id": "dsh-agent", "name": "@deepseek-ai/dsh-agent" },
+  { "id": "dsh-user-approval", "name": "@deepseek-ai/dsh-user-approval" },
+  { "id": "dsh-session-persistence", "name": "@deepseek-ai/dsh-session-persistence-jsonl" },
+  { "id": "dsh-host", "name": "dsh-host.ts" }
+]

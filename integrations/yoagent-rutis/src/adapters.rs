@@ -27,7 +27,8 @@ pub struct Adapters {
     /// `host-ui.ts`, `resolve-package.mjs`, and their `package.json` and lock.
     pub pi: PathBuf,
     /// `plugins/dsh`: the DSH tools adapter (`dsh-tools-adapter.ts`), the
-    /// host services a headless DSH host loads (`host-services.json`), and
+    /// host services a headless DSH host loads (`host-services.json`), the
+    /// stand-in DSH agent's rows (`dsh-host.json`, `dsh-host.ts`), and
     /// their `package.json` and lock.
     pub dsh: PathBuf,
     /// `plugins/yoagent.d.ts`: the `yoagent` host service's TypeScript types.
@@ -58,6 +59,8 @@ mod tests {
             a.dsh.join("dsh-tools-adapter.ts"),
             a.pi.join("package-lock.json"),
             a.dsh.join("host-services.json"),
+            a.dsh.join("dsh-host.json"),
+            a.dsh.join("dsh-host.ts"),
             a.dsh.join("probe-services.ts"),
             a.dsh.join("package.json"),
             a.dsh.join("package-lock.json"),

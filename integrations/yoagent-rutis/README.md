@@ -406,6 +406,42 @@ scripted, that free-search's prompt section reached the model).
 store (`plugins/dsh/fixture-attachments.ts`), and that the host services
 start headless in a `DSH_HOME` of their own.
 
+**A DSH agent for the calls (`dsh-host.ts`).** Many DSH plugins expect
+the call's DSH agent: they read its workspace (`exec.agent.session.header.cwd`),
+ask approvals through DSH's own service, or ask agent-scoped questions.
+On the adapter's agentless calls they fail (dsh-univer-office's file tools
+answer `SESSION_SCOPE_UNAVAILABLE`). A host that wants them loads the rows in
+[`plugins/dsh/dsh-host.json`](plugins/dsh/dsh-host.json) — DSH's own
+`dsh-session`, `dsh-agent`, `dsh-user-approval`, the jsonl session log
+(`dsh-session-persistence-jsonl`, under the row id `dsh-session-persistence`
+so it replaces `host-services.json`'s storage-less row; its `config.root` is
+the host's, e.g. `<DSH_HOME>/sessions`), and
+[`plugins/dsh/dsh-host.ts`](plugins/dsh/dsh-host.ts) (file names relative to
+`plugins/dsh`) — and shares two host services into the runtime:
+
+| service | methods | used for |
+|---|---|---|
+| `host_session` | `info()` → `{id, generation}`; `wake(text)` | one stand-in per generation (a reset bumps it: plugin state does not carry over); a DSH plugin's `steer` / `followup` / waking `send` / `inject`, as text (a refusal is logged at warn) |
+| `host_workspace` | `cwd()` | the stand-in session's working directory |
+
+The calls then come from the `dsh-host` row (the host answers its services
+by the calling row). Each call carries the generation's stand-in agent —
+registered as a root with DSH's `agents`, its id its DSH session's, its ctx
+a DSH scope — and each run is one DSH turn: `turn/start` at its first DSH
+call, `turn/end` at its `finish`; a turn left open (a cancel, a reset) is
+closed (`aborted`) before the next. The stand-in runs no model: its inbox
+stays empty and `cancel` / `whenIdle` / `runMaintenance` do nothing
+(reported once). The session's events go to the jsonl log; no conversation
+is mirrored into it. A host that loaded it but cannot give a stand-in (no
+workspace, a host service failing) fails the call with the reason.
+`host-dialogs.ts` answers what these calls ask: DSH's `approval/request`
+(yes → `allowed-once`, no or no answer → `rejected`) and the stand-in's
+questions, as below. Tested end to end with a fixture
+(`plugins/dsh/fixture-needs-agent.ts`), and with dsh-univer-office 0.3.7 in an
+opt-in test (`--ignored`: book, worktree, CSV import, an approved merge, an
+.xlsx export). `dsh-session-persistence-jsonl` depends on `koffi`, which has
+an install script.
+
 **Asking the user.** On its own, a dsh tool call the adapter makes cannot
 reach a person: an `ask` from a dsh tool policy is denied, and
 `ask_user_question` (`@deepseek-ai/dsh-tool-ask-user`) finds no answerer.
@@ -423,9 +459,11 @@ it never starts:
   no answer in time, denies it ("not approved"); a cancelled call is
   cancelled; a host that fails while asking denies it ("asking the user
   failed"). dsh's own approval service is not used: it needs a dsh agent and
-  session, which these calls do not have (so no dsh audit entry).
+  session, which these calls do not have (so no dsh audit entry) — unless
+  `dsh-host.ts` gives them one (above): then `approval/request` is answered
+  instead, with DSH's audit pair in the stand-in's session.
 - **questions** — an answerer on `user-questions/request` for requests
-  without an agent, which is what `ask_user_question` sends from these
+  without an agent or from the stand-in, which is what `ask_user_question` sends from these
   calls. Each question becomes a select (its distinct option labels, plus
   "Other" — which then asks for typed text — unless an option already has
   that label), a multiple select, or a text input. A blank input or an empty

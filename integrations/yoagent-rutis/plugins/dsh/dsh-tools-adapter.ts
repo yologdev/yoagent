@@ -42,10 +42,17 @@
 //
 // dsh's dialogs (an approval its policy asks for, `ask_user_question`) are
 // `host-dialogs.ts`'s, loaded when the host provides a `ui` service.
+//
+// With `dsh-host.ts` loaded (the rows in `dsh-host.json`), each call carries
+// its stand-in DSH agent (`agent` in `tools.execute`): the run's DSH turn
+// opens at its first call and ends at its `finish`. Without it, calls stay
+// agentless. A host that loaded it but refuses a stand-in (no workspace, a
+// failed host service) fails the call with the reason.
 
 import { definePlugin } from '@arcships/rutis'
 import { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
-import type { Cancellable, ContentBlock, ToolCall, ToolResult, ToolSpec, Yoagent } from '../yoagent.d.ts'
+import type { Cancellable, ContentBlock, Outcome, ToolCall, ToolResult, ToolSpec, Yoagent } from '../yoagent.d.ts'
+import type { DshHost } from './dsh-host.ts'
 
 /** The slice of `@deepseek-ai/dsh-attachment`'s `AttachmentStore` this adapter uses. */
 interface DshAttachments {
@@ -86,6 +93,7 @@ interface DshTools {
     name: string
     arguments: unknown
     signal: AbortSignal
+    agent?: unknown
   }): Promise<{
     isError: boolean
     content?: DshBlock[]
@@ -173,6 +181,14 @@ export default definePlugin<Config>({
     const attachments = (): DshAttachments | undefined => {
       try {
         return ctx.use<DshAttachments>('attachments')
+      } catch {
+        return undefined
+      }
+    }
+    /** The DSH host (`dsh-host.ts`), when the host loaded it: looked up per call, like `attachments`. */
+    const dshHost = (): DshHost | undefined => {
+      try {
+        return ctx.use<DshHost>('yoagent-dsh-host')
       } catch {
         return undefined
       }
@@ -273,11 +289,21 @@ export default definePlugin<Config>({
         },
 
         async call_tool(call: ToolCall & Cancellable): Promise<ToolResult> {
+          const host = dshHost()
+          let agent: unknown
+          if (host) {
+            try {
+              agent = await host.agentFor(call.run_id)
+            } catch (error) {
+              return { text: `the DSH host has no agent for this call: ${error instanceof Error ? error.message : error}`, is_error: true }
+            }
+          }
           const out = await dsh.execute({
             callId: `yoagent:${call.call_id}`,
             name: call.tool,
             arguments: call.args,
             signal: call.signal,
+            ...(agent === undefined ? {} : { agent }),
           })
           if (out.isError) {
             const text = (out.content ?? [])
@@ -306,6 +332,15 @@ export default definePlugin<Config>({
           }
           const shown = view(call.tool, call.args, out)
           return { content, ...(shown ? { details: { view: shown } } : {}) }
+        },
+
+        // The run's DSH turn, if a stand-in opened one, ends with it.
+        async finish(outcome: Outcome & Cancellable) {
+          try {
+            await dshHost()?.endRun(outcome.run_id)
+          } catch (error) {
+            say('warn', `[dsh] ending the run's DSH turn failed: ${error}`)
+          }
         },
 
         async before_model(turn: Cancellable) {
