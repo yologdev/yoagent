@@ -2277,6 +2277,24 @@ async fn exec_grants_per_extension() {
     assert_eq!(results[1].1, "code=126", "{results:?}");
     host.root.shutdown().await.unwrap();
 
+    // A per-extension `false` over a row-wide `true`.
+    let host = crate::host(&runtime).await;
+    host.load(adapter_row(json!({
+        "extensions": [granted, other],
+        "exec": true,
+        "execFor": { other.to_str().unwrap(): false },
+    })))
+    .await;
+    let (agent, _) = crate::agent(vec![
+        calls(&[("granted_exec", json!({})), ("other_exec", json!({}))]),
+        text("done"),
+    ]);
+    let mut agent = agent.with_extension(host.bridge.extension());
+    let (_, results) = run(&mut agent, "go").await;
+    assert_eq!(results[0].1, "code=0", "{results:?}");
+    assert_eq!(results[1].1, "code=126", "{results:?}");
+    host.root.shutdown().await.unwrap();
+
     // The same grant spelled relative to `cwd`.
     let host = crate::host(&runtime).await;
     host.load(adapter_row(json!({
@@ -2390,10 +2408,14 @@ export default function (pi) {
     assert_eq!(seen["foundOfType"], true, "{seen}");
     assert_eq!(seen["json"], "{}", "{seen}");
     assert_eq!(seen["overwritten"], false, "{seen}");
+    // `model` alone: the registry lists it.
+    let seen = check(json!({ "model": { "provider": "deepseek", "id": "deepseek-flash" } })).await;
+    assert_eq!(seen["all"], json!(["deepseek/deepseek-flash"]), "{seen}");
     // No model configured: the run's model id, and an empty registry.
     let seen = check(json!({})).await;
-    assert!(
-        seen["model"].as_str().unwrap().starts_with("yoagent/"),
+    assert_eq!(
+        seen["model"],
+        format!("yoagent/{}", yoagent::provider::ModelConfig::mock().id),
         "{seen}"
     );
     assert_eq!(seen["all"], json!([]), "{seen}");
@@ -2406,5 +2428,64 @@ export default function (pi) {
         })))
         .await;
     assert!(failures.contains("model must be"), "{failures}");
+    host.root.shutdown().await.unwrap();
+}
+
+/// Without a host `model`, `ctx.model` is each run's own: a parent's tool
+/// called after a sub-agent (on another model) ran sees the parent's model,
+/// and each run's `agent_end` observer — which comes after the run's `finish`
+/// — sees its own run's.
+#[tokio::test(flavor = "multi_thread")]
+async fn ctx_model_is_per_run() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("ends.log");
+    let ext = extension(
+        dir.path(),
+        "model.ts",
+        &format!(
+            r#"
+import {{ appendFileSync }} from 'node:fs'
+export default function (pi) {{
+  pi.registerTool({{
+    name: 'pi_model', label: 'pi_model', description: 'x', parameters: {{ type: 'object', properties: {{}} }},
+    async execute(_id, _params, _signal, _update, ctx) {{
+      return {{ content: [{{ type: 'text', text: String(ctx.model?.id) }}], details: {{}} }}
+    }},
+  }})
+  pi.on('agent_end', (_event, ctx) => appendFileSync({log:?}, `${{ctx.model?.id}}\n`))
+}}
+"#
+        ),
+    );
+    let host = host(&runtime).await;
+    host.load(adapter_row(json!({ "extensions": [ext] }))).await;
+    let (child, _) = recording(vec![text("child done")]);
+    let mut child_model = yoagent::provider::ModelConfig::mock();
+    child_model.id = "child-model".into();
+    let sub = yoagent::SubAgentTool::from_provider("helper", child, child_model);
+    let (parent, _) = agent(vec![
+        calls(&[("helper", json!({ "task": "x" })), ("pi_model", json!({}))]),
+        text("done"),
+    ]);
+    let mut parent = parent
+        .with_sub_agent(sub)
+        .with_tool_execution(yoagent::ToolExecutionStrategy::Sequential)
+        .with_tree_extension(host.bridge.extension());
+    let (_, results) = run(&mut parent, "go").await;
+    let parent_model = yoagent::provider::ModelConfig::mock().id;
+    let own = results.iter().find(|(name, _, _)| name == "pi_model");
+    assert_eq!(
+        own.map(|(_, out, _)| out.as_str()),
+        Some(parent_model.as_str()),
+        "{results:?}"
+    );
+    let ends = wait_file(&log, |t| t.lines().count() >= 2).await;
+    assert_eq!(
+        ends.lines().collect::<Vec<_>>(),
+        ["child-model", parent_model.as_str()]
+    );
     host.root.shutdown().await.unwrap();
 }

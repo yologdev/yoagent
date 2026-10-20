@@ -288,6 +288,7 @@ function readOnlyRegistry(models: ReturnType<typeof piModel>[]) {
   return new Proxy(reads, {
     set: () => false,
     defineProperty: () => false,
+    setPrototypeOf: () => false,
     deleteProperty: () => false,
     get: (target, key) => {
       // Not a promise, and `JSON.stringify` sees an object with no own data.
@@ -984,7 +985,9 @@ export default definePlugin<Config>({
         return undefined
       }
     }
-    const context = (signal?: AbortSignal, runId?: string, systemPrompt = '') => {
+    /** The model id `ctx.model` names for a run: its latest request's, else any run's latest. */
+    const modelOf = (runId?: string) => (runId !== undefined ? runModels.get(runId) : undefined) ?? latestModel
+    const context = (signal?: AbortSignal, runId?: string, systemPrompt = '', modelId = modelOf(runId)) => {
       const hostUiService = lookupUi()
       return {
       ui: hostUiService ? hostUi(hostUiService, signal) : NO_UI,
@@ -996,8 +999,7 @@ export default definePlugin<Config>({
         return fixedAnswer('ctx.modelRegistry', registry, `a read-only list of ${registry.getAll().length} model(s)`)
       },
       get model() {
-        const id = (runId !== undefined ? runModels.get(runId) : undefined) ?? latestModel
-        const model = hostModel ?? (id ? piModel({ provider: 'yoagent', id }) : undefined)
+        const model = hostModel ?? (modelId ? piModel({ provider: 'yoagent', id: modelId }) : undefined)
         return fixedAnswer('ctx.model', model, model ? `${model.provider}/${model.id}` : 'undefined')
       },
       scopedModels: [],
@@ -1533,7 +1535,7 @@ export default definePlugin<Config>({
     /** Per run: the turn index, and each running tool call's pi name and arguments. */
     const turns = new Map<string, number>()
     /** A run's tools kept past `finish` for its `agentEnd` (delivered after it), when subscribed. */
-    const ending = new Map<string, { offered: Map<string, PiTool> }>()
+    const ending = new Map<string, { offered: Map<string, PiTool>; model?: string }>()
     const running = new Map<string, { toolName: string; args: unknown }>()
     const observerFailed = new Set<string>()
     /** A yoagent tool call as pi names it: a pi tool keeps its name, a built-in gets pi's name and argument shape. */
@@ -1668,11 +1670,11 @@ export default definePlugin<Config>({
       observerFailed.add(key)
       report(level, text)
     }
-    const runHandlers = async (pi: Record<string, unknown>, runId: string) => {
+    const runHandlers = async (pi: Record<string, unknown>, runId: string, model: string | undefined) => {
       for (const { ext, fn } of handlers(pi.type as string)) {
         let timer: ReturnType<typeof setTimeout> | undefined
         try {
-          const call = Promise.resolve().then(() => fn(structuredClone(pi), context(undefined, runId)))
+          const call = Promise.resolve().then(() => fn(structuredClone(pi), context(undefined, runId, '', model)))
           const budget = new Promise<'late'>((resolve) => {
             timer = setTimeout(() => resolve('late'), OBSERVER_HANDLER_BUDGET_MS)
           })
@@ -1727,6 +1729,9 @@ export default definePlugin<Config>({
         ending.clear()
         return
       }
+      // The run's model now, not when the handler runs: by then the run may have ended
+      // (`agentEnd` always comes after `finish`) and another run made the latest request.
+      const model = runModels.get(event.run.run_id) ?? ending.get(event.run.run_id)?.model ?? latestModel
       let pi: Record<string, unknown> | undefined
       try {
         pi = piEvent(event)
@@ -1749,7 +1754,7 @@ export default definePlugin<Config>({
       const next = pi
       const runId = event.run.run_id
       chain = chain
-        .then(() => runHandlers(next, runId))
+        .then(() => runHandlers(next, runId, model))
         .catch((error) => report('warn', `[pi] observer queue: ${message(error)}`))
         .finally(() => {
           backlog--
@@ -1956,7 +1961,7 @@ export default definePlugin<Config>({
             const event = { type: 'input', text: input.text, source: 'interactive' }
             let result: { action?: string } | undefined
             try {
-              result = (await fn(event, context(input.signal))) as typeof result
+              result = (await fn(event, context(input.signal, input.run_id))) as typeof result
             } catch (error) {
               // Unlike pi (which goes on): an input check that failed rejects.
               return { reject: `pi extension ${short(ext.path)} failed: ${message(error)}` }
@@ -2007,7 +2012,6 @@ export default definePlugin<Config>({
           : {}),
 
         async finish(outcome) {
-          runModels.delete(outcome.run_id)
           notes.delete(outcome.run_id)
           terminated.delete(outcome.run_id)
           ended.delete(outcome.run_id)
@@ -2015,8 +2019,9 @@ export default definePlugin<Config>({
           for (const key of judged.keys()) if (key.startsWith(`${outcome.run_id}/`)) judged.delete(key)
           // `agentEnd` comes after `finish`: it names tools from what this run offered.
           const snapshot = snapshots.get(outcome.run_id)
-          if (snapshot && subscribed.has('agentEnd')) ending.set(outcome.run_id, snapshot)
+          if (snapshot && subscribed.has('agentEnd')) ending.set(outcome.run_id, { ...snapshot, model: runModels.get(outcome.run_id) })
           snapshots.delete(outcome.run_id)
+          runModels.delete(outcome.run_id)
           // Observer bookkeeping: whatever event types are subscribed (the bridge delivers the
           // run's events before `finish`; only `agentEnd`, which needs neither, comes after).
           turns.delete(outcome.run_id)
