@@ -429,7 +429,9 @@ services into the runtime:
 | `host_workspace` | `cwd()` | the stand-in session's working directory (an absolute path) |
 
 The calls to them come from the `dsh-host` row (the host answers its
-services by the calling row), each bounded at 30 s. Each call carries the
+services by the calling row), each bounded at 30 s; a call waits at most
+120 s for its stand-in, queue included, and a timeout names the step the
+host was stuck on. Each call carries the
 generation's stand-in agent — registered as a root with DSH's `agents`, its
 id its DSH session's (`yoagent-<uuid>`), its ctx a DSH scope — and each
 top-level run is one DSH turn: `turn/start` at its first DSH call, the
@@ -437,10 +439,12 @@ runs it delegates to join it at any depth (every run carrying the bridge,
 as its own extension or a parent's tree extension, tells the host who
 delegated it — from the adapter's `tools` and `before_model` hooks; a run
 without the bridge in between breaks the chain), `turn/end` at its `finish`
-(`completed`; a cancelled run `aborted`, a failed one `error` with the run's
+(`completed` — also for a stopped or rejected run, DSH having no stopped
+reason; a cancelled run `aborted`, a failed one `error` with the run's
 error). One stand-in holds one turn at a time: a turn another top-level run
 finds still open (a lost `finish`, or two top-level runs at once) is closed
-`aborted` and logged. The log is flushed after the turn ends, without
+`aborted` and logged: two overlapping top-level runs take the turn from
+each other. The log is flushed after the turn ends, without
 holding up `finish`. The stand-in runs no model: its inbox stays empty;
 `cancel`, inbox writes and a non-waking `send` do nothing (each logged at
 warn, once per generation); `runMaintenance` runs its task at once.

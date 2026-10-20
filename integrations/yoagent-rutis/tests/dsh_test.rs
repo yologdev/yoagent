@@ -117,12 +117,20 @@ impl HostDispatch for ScriptedUi {
         match method {
             "request" => {
                 let request = args.list()?.into_iter().next().unwrap().json()?;
+                let request_kind = request["kind"].as_str().unwrap_or_default().to_owned();
                 self.asked.lock().unwrap().push(request);
                 if self.fail.load(Ordering::SeqCst) {
                     return Err(BridgeError::Value("the host's ui broke".into()));
                 }
                 let answer = self.answers.lock().unwrap().pop_front();
-                Ok(BridgeValue::Data(answer.unwrap_or(Value::Null)))
+                // Out of script: what yobuild answers when nobody does — `false` for a
+                // confirm, nothing for the rest.
+                let unanswered = if request_kind == "confirm" {
+                    json!(false)
+                } else {
+                    Value::Null
+                };
+                Ok(BridgeValue::Data(answer.unwrap_or(unanswered)))
             }
             "frontends" => Ok(BridgeValue::Data(json!(self.frontends))),
             _ => Ok(BridgeValue::Undefined),
@@ -990,7 +998,8 @@ fn turns(text: &str) -> (u64, Vec<String>) {
 /// host's workspace; each run is one DSH turn, ended `completed` at its
 /// finish; steering goes to the host's `host_session.wake`; a policy's
 /// `ask` goes through DSH's own approval service to the host's `ui`, with
-/// the call's arguments (yes → runs, no → rejected); a host reset (a new
+/// the call's arguments (Allow once → runs, Deny → rejected, no answer →
+/// unavailable); a host reset (a new
 /// generation) gives a new agent; the session logs are written.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stand_in_agent_gives_dsh_plugins_a_workspace_turns_and_approvals() {
@@ -1228,7 +1237,11 @@ async fn delegated_runs_join_the_top_level_run_s_dsh_turn() {
         .with_extension(host.bridge.extension());
     let (_, results) = run(&mut parent, "go").await;
     // The grandchild's call had an agent: its steering reached the host.
-    assert_eq!(grandchild_seen.lock().unwrap().len(), 2);
+    assert_eq!(
+        grandchild_seen.lock().unwrap().len(),
+        2,
+        "the grandchild called its tool"
+    );
     tokio::time::timeout(Duration::from_secs(10), async {
         while session.woken.lock().unwrap().is_empty() {
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1456,15 +1469,16 @@ async fn a_tree_extension_s_delegated_runs_join_the_top_level_turn() {
         return;
     };
     let dir = tempfile::tempdir().unwrap();
+    let session = fake_session();
     let host = stand_in_host(
         &runtime,
         dir.path(),
-        fake_session(),
+        session.clone(),
         Arc::new(ScriptedUi::default()),
     )
     .await;
-    let (grandchild, _) = recording(vec![
-        call("fixture_turns", json!({})),
+    let (grandchild, grandchild_seen) = recording(vec![
+        call("fixture_steer", json!({ "text": "from the grandchild" })),
         text("grandchild done"),
     ]);
     let deep = yoagent::SubAgentTool::from_provider(
@@ -1499,5 +1513,18 @@ async fn a_tree_extension_s_delegated_runs_join_the_top_level_turn() {
         (1, vec![]),
         "still the parent's one turn: {results:?}"
     );
+    // The grandchild's call had an agent: its steering reached the host.
+    assert_eq!(
+        grandchild_seen.lock().unwrap().len(),
+        2,
+        "the grandchild called its tool"
+    );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while session.woken.lock().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the grandchild's steering reaches the host");
     host.root.shutdown().await.unwrap();
 }

@@ -234,8 +234,13 @@ export function apply(ctx: any) {
           request.signal,
         )
         if (request.signal?.aborted) return 'cancelled'
+        if (answer === ALLOW_ONCE) return 'allowed-once'
+        if (answer === DENY) return 'rejected'
         // No answer (dismissed, timed out, nobody attached) is not a no.
-        return answer === ALLOW_ONCE ? 'allowed-once' : answer === DENY ? 'rejected' : 'unavailable'
+        if (answer !== null && answer !== undefined) {
+          say(`[dsh] the host answered approving ${request.toolName} with ${JSON.stringify(answer)}, neither "${ALLOW_ONCE}" nor "${DENY}": not approved`)
+        }
+        return 'unavailable'
       } catch (error) {
         if (request.signal?.aborted) return 'cancelled'
         say(`[dsh] asking the user to approve ${request.toolName} failed, so it is not approved: ${error}`)

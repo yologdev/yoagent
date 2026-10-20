@@ -351,7 +351,9 @@ export default definePlugin<Config>({
             // A failed run says why in `error` (and which extension failed it); a stopped one in `reason`.
             const why =
               outcome.end === 'failed'
-                ? [outcome.error, outcome.extension ? `(extension ${outcome.extension})` : undefined].filter(Boolean).join(' ')
+                ? [outcome.error || 'the yoagent run failed', outcome.extension ? `(extension ${outcome.extension})` : undefined]
+                    .filter(Boolean)
+                    .join(' ')
                 : outcome.reason
             await dshHost()?.endRun(outcome.run_id, outcome.end, why)
           } catch (error) {

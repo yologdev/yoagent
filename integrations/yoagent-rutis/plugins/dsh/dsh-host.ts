@@ -110,7 +110,11 @@ export interface DshHost {
    * Throws when the host refuses one; `signal` stops the wait.
    */
   agentFor(runId: string, parentRunId: string | null, signal?: AbortSignal): Promise<unknown>
-  /** Run `runId` finished: the turn it owns ends (`message`: why it failed or stopped). */
+  /**
+   * Run `runId` finished: the turn it owns ends — `completed`, `aborted` (user) for a cancelled
+   * run, `error` with `message` for a failed one (DSH's turn ends have no "stopped" with a reason:
+   * a stopped or rejected run ends `completed`).
+   */
   endRun(runId: string, end: RunEnd, message?: string): Promise<void>
   /** Run `runId` started, delegated by `parentRunId` (null for a top-level run). */
   noteRun(runId: string, parentRunId: string | null): void
@@ -131,6 +135,8 @@ interface Generation {
   /** The top-level run whose turn is open, if any. */
   owner?: string
   log?: DshLog
+  /** Torn down: a flush queued before is skipped. */
+  ended?: boolean
   end: () => Promise<void>
 }
 
@@ -214,6 +220,8 @@ export function apply(ctx: any) {
     lock = run.catch(() => {})
     return run
   }
+  /** What the stand-in's queue is doing, for a call that gives up waiting. */
+  let stage = 'idle'
   /** The top-level run each run belongs to (a sub-agent's run joins its root's turn). */
   const rootOf = new Map<string, string>()
 
@@ -233,7 +241,7 @@ export function apply(ctx: any) {
 
   /** The session's durability checkpoint (the jsonl backend writes each event as it comes). */
   const writeLog = async (g: Generation) => {
-    if (!g.log) return
+    if (!g.log || g.ended) return
     try {
       const flushed = await bounded('writing the DSH session log', sessions.flush(g.session), HOST_CALL_MS)
       if (!flushed) once(`unflushed-${g.key}`, 'warn', `[dsh-host] no DSH session log took the session's events`)
@@ -258,6 +266,7 @@ export function apply(ctx: any) {
     rootOf.get(runId) ?? (parentRunId ? (rootOf.get(parentRunId) ?? parentRunId) : runId)
 
   const start = async (key: string, signal?: AbortSignal): Promise<Generation> => {
+    stage = 'asking the host for the workspace'
     const cwd = await bounded(
       'host_workspace.cwd',
       Promise.resolve().then(() => hostWorkspace.cwd()),
@@ -271,7 +280,7 @@ export function apply(ctx: any) {
     const unwind = async () => {
       for (const [what, dispose] of undo.reverse()) {
         try {
-          await dispose()
+          await bounded(`ending the stand-in (${what})`, Promise.resolve().then(dispose), HOST_CALL_MS)
         } catch (error) {
           say('warn', `[dsh-host] ending the stand-in (${what}) failed: ${message(error)}`)
         }
@@ -333,7 +342,9 @@ export function apply(ctx: any) {
       // DSH: await the registration (entry and announcement) before using the agent.
       const registration = agents.register(target) as (() => unknown) & PromiseLike<unknown>
       undo.push(['registration', () => registration()])
-      await registration
+      stage = 'registering the stand-in with DSH'
+      await bounded('registering the stand-in with DSH', Promise.resolve(registration), HOST_CALL_MS)
+      stage = 'opening the DSH session log'
       let log: DshLog | undefined
       try {
         log = await bounded('opening the DSH session log', persistence.create(session.header), HOST_CALL_MS)
@@ -365,6 +376,7 @@ export function apply(ctx: any) {
         log,
         end: async () => {
           await closeTurn(g, { kind: 'aborted', reason: { kind: 'disposed' } })
+          g.ended = true
           await unwind()
         },
       }
@@ -410,19 +422,22 @@ export function apply(ctx: any) {
         serial(async () => {
           if (closed) throw new Error('the DSH host is unloading')
           signal?.throwIfAborted()
+          stage = 'asking the host which session this is'
           const g = await generation(signal)
+          stage = 'idle'
           const root = rootFor(runId, parentRunId)
           rootOf.set(runId, root)
           if (g.owner === root) return g.agent
           if (g.owner !== undefined) {
-            // Another top-level run's turn is still open: it ended without its `finish`.
+            // The stand-in holds one turn: another top-level run's is still open (its `finish` was
+            // lost, or the two runs overlap).
             say(
               'warn',
-              `[dsh-host] run ${g.owner}'s DSH turn was still open when run ${root} started; it is closed as aborted`,
+              `[dsh-host] top-level run ${root} needed the stand-in while run ${g.owner}'s DSH turn was open; that turn is closed as aborted (one turn at a time)`,
             )
             await closeTurn(g, {
               kind: 'aborted',
-              reason: { kind: 'hook', reason: 'its yoagent run ended without finishing' },
+              reason: { kind: 'hook', reason: 'another top-level yoagent run needed the stand-in' },
             })
           }
           g.turn++
@@ -432,7 +447,11 @@ export function apply(ctx: any) {
         }),
         WAIT_MS,
         signal,
-      ),
+      ).catch((error) => {
+        // Say what the host was doing when a call gave up on it.
+        if (!signal?.aborted && stage !== 'idle') throw new Error(`${message(error)} (the DSH host was ${stage})`)
+        throw error
+      }),
     endRun: (runId, end, why) =>
       serial(async () => {
         const g = current
