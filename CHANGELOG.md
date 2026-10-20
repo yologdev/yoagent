@@ -4,6 +4,10 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+- **A tool result's line budget covers all its text blocks.** `tool_output_max_lines` was applied to each text block on its own, so since 0.25.9 (which sends every block, #347) a result of N blocks could reach the model as N × the budget — 50 blocks from an MCP server, 10,000 lines where 200 were meant. The budget is now the result's: blocks shorter than an even share stay whole, the long ones split what is left (the remainder to the earliest), each cut head + tail with its own marker and stash key as before. A cut block keeps at least 5 lines (head, marker, tail), so a result with more long blocks than the budget can mark goes over it by that much, never cut without a marker. One-block results are unchanged; truncation stays idempotent, so already truncated history is not rewritten.
+
 ## yoagent-rutis Unreleased
 
 yoagent-rutis only; requires yoagent 0.25, rutis 0.12 and Rust 1.88, as 0.7.0. Additive.

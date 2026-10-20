@@ -148,7 +148,7 @@ let config = ContextConfig::from_context_window(1_000_000);
 
 ### Level 1: Truncate Tool Outputs
 
-Replaces long tool outputs with head + tail, fitting the result into exactly `tool_output_max_lines` lines (the `[... N lines truncated ...]` marker is charged against that budget). This is the cheapest level — it preserves conversation structure and typically saves 50-70% in coding sessions.
+Replaces long tool outputs with head + tail, fitting the result into exactly `tool_output_max_lines` lines (the `[... N lines truncated ...]` marker is charged against that budget). The budget is the whole result's: when a result has several text blocks (an MCP server's, say), blocks shorter than an even share stay whole and the long ones split the rest, each cut with its own marker; a cut block keeps at least 5 lines (head, marker, tail), so a result with more long blocks than the budget can mark goes over it by that much rather than being cut silently. This is the cheapest level — it preserves conversation structure and typically saves 50-70% in coding sessions.
 
 Truncation is idempotent: re-running it on an already-truncated output returns it byte for byte, so a session that sits above the budget does not re-truncate the same outputs turn after turn.
 
