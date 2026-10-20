@@ -167,7 +167,8 @@ pub struct ContextConfig {
     pub keep_recent: usize,
     /// Minimum first messages to always keep
     pub keep_first: usize,
-    /// Max lines to keep per tool output, for tools with no override below.
+    /// Max lines to keep per tool result, shared by its text blocks (see
+    /// [`truncate_tool_output`]), for tools with no override below.
     ///
     /// Tuned for command output — build logs, test runs, `grep` — where
     /// head+tail is a good cut: the first error is at the top, the summary at
@@ -546,8 +547,8 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 
 /// The stash key for one content block of a tool result.
 ///
-/// Block-qualified because a result can carry several text blocks, each
-/// truncated independently and each getting its own marker. Sharing one key
+/// Block-qualified because a result can carry several text blocks, each cut
+/// with its own marker (from one budget shared across them). Sharing one key
 /// across them made every marker resolve to all the blocks concatenated —
 /// never the one the model had just been told to fetch.
 pub fn block_key(base: &str, block: usize) -> String {
@@ -593,6 +594,9 @@ pub fn block_texts(msg: &AgentMessage) -> Vec<(usize, String)> {
 /// block whose marker it followed — not the whole result flattened, which is
 /// what a single shared key produced and which silently dropped any non-text
 /// content sitting between the blocks.
+///
+/// Line budgets come from the blocks' line counts alone (one budget per result,
+/// shared), so the unkeyed and keyed passes cut the same lines.
 ///
 /// Public so a caller implementing their own stash sink can reproduce exactly
 /// what the loop does: truncate with `None` to learn which blocks carry a
@@ -644,12 +648,15 @@ pub fn truncate_tool_output_keyed(
     }
 }
 
-/// Cap a single tool result's text at the tool's line budget, keeping head and
-/// tail.
+/// Fit a single tool result's text into the tool's line budget, keeping head
+/// and tail.
 ///
-/// The budget is the result's, shared by its text blocks: blocks shorter than an
-/// even share stay whole, the rest split what is left and are cut head + tail,
-/// each with its own marker, never below 5 lines (head, marker, tail).
+/// The budget is the result's, shared by its text blocks: blocks no longer
+/// than an even share stay whole, and the others split what is left, each cut
+/// head + tail with its own marker. With a budget of 5 or more a cut block
+/// keeps at least 5 lines (head, marker, tail), so a result with many blocks
+/// can go over the budget; below 5, each block keeps the budget on its own and
+/// gets no marker.
 ///
 /// The budget comes from [`ContextConfig::max_lines_for`], so a tool that
 /// tolerates head+tail badly can be exempted. Non-tool-result messages pass
@@ -664,25 +671,29 @@ pub fn truncate_tool_output(msg: AgentMessage, config: &ContextConfig) -> AgentM
 /// Lines the truncation marker occupies: a blank line, the marker, a blank line.
 const TRUNCATION_MARKER_LINES: usize = 3;
 
-/// The fewest lines a cut block keeps: one head line, the marker, one tail
-/// line — so every cut block says it was cut.
+/// The fewest lines a cut block keeps: one head line, the marker's three lines,
+/// one tail line — so every cut block says it was cut (when the budget is at
+/// least this large).
 const MIN_BLOCK_LINES: usize = TRUNCATION_MARKER_LINES + 2;
 
 /// Each content block's line budget, from one budget for the whole result.
 ///
 /// The text blocks share `max_lines`: when they fit together, every block is
-/// left alone; otherwise blocks shorter than an even share stay whole and the
-/// rest split what is left evenly (the remainder to the earliest), so a
+/// left alone; otherwise blocks no longer than an even share stay whole and
+/// the rest split what is left evenly (the remainder to the earliest), so a
 /// many-block result (an MCP server's) fits the budget one block would. A
-/// block is never cut below [`MIN_BLOCK_LINES`] (or `max_lines`, if smaller),
-/// so a result with more long blocks than the budget can mark goes over it by
-/// at most that many lines per block — never silently, for a budget of 5 or
-/// more.
+/// block not left whole is given at least [`MIN_BLOCK_LINES`] (so it is cut
+/// with a marker, or kept whole if shorter): when the even share is smaller
+/// than that, the result goes over `max_lines` by at most `MIN_BLOCK_LINES`
+/// per such block, never silently. When `max_lines < MIN_BLOCK_LINES` the
+/// floor is `max_lines` itself, so every block keeps the whole budget, as
+/// before, and gets no marker.
 ///
 /// Idempotent with [`truncate_text_head_tail`]: a cut block is at most its
 /// budget long, so the result either fits afterwards (and a second pass
-/// leaves it alone) or every cut block is at the floor, which a second pass
-/// assigns again.
+/// leaves it alone) or the share fell below the floor, leaving every block
+/// not left whole at most the floor long; a second pass gives each such block
+/// at least the smaller of its length and the floor, so nothing is cut again.
 fn block_budgets(content: &[Content], max_lines: usize) -> Vec<usize> {
     let lines: Vec<Option<usize>> = content
         .iter()
@@ -1770,7 +1781,7 @@ mod tests {
             tool_output_max_lines: 200,
             ..Default::default()
         };
-        // Twenty blocks of 200 lines: before, each kept 200 (4,000 in all).
+        // Twenty blocks of 200 lines: a per-block budget would keep 4,000.
         let many = result_with(
             (0..20)
                 .map(|b| lines_block(&format!("b{b}-"), 200))
@@ -1823,6 +1834,50 @@ mod tests {
     }
 
     #[test]
+    fn the_shared_budget_s_remainder_and_freed_slack() {
+        let config = ContextConfig {
+            tool_output_max_lines: 200,
+            ..Default::default()
+        };
+        // 200 over three long blocks: the remainder goes to the earliest.
+        let three = result_with(
+            (0..3)
+                .map(|b| lines_block(&format!("b{b}-"), 300))
+                .collect(),
+        );
+        assert_eq!(
+            block_lines(&truncate_tool_output(three, &config)),
+            [67, 67, 66]
+        );
+        // 60 lines is over an even share of 150 (50) but fits once the
+        // 10-line block has left 140 for two (70): it stays whole.
+        let config = ContextConfig {
+            tool_output_max_lines: 150,
+            ..Default::default()
+        };
+        let slack = result_with(vec![
+            lines_block("s", 10),
+            lines_block("m", 60),
+            lines_block("l", 300),
+        ]);
+        assert_eq!(
+            block_lines(&truncate_tool_output(slack, &config)),
+            [10, 60, 80]
+        );
+        // A tool exempted by an override stays whole, however many blocks.
+        let mut config = ContextConfig::default();
+        config
+            .tool_output_max_lines_overrides
+            .insert("mcp_tool".into(), usize::MAX);
+        let many = result_with(
+            (0..20)
+                .map(|b| lines_block(&format!("b{b}-"), 200))
+                .collect(),
+        );
+        assert_eq!(truncate_tool_output(many.clone(), &config), many);
+    }
+
+    #[test]
     fn more_long_blocks_than_the_budget_can_mark_keep_a_marker_each() {
         let config = ContextConfig {
             tool_output_max_lines: 20,
@@ -1843,6 +1898,14 @@ mod tests {
             once,
             "idempotent"
         );
+        // Short blocks past that point stay whole: sixty 4-line blocks keep
+        // 240 lines of a 200-line budget, none cut.
+        let config = ContextConfig {
+            tool_output_max_lines: 200,
+            ..Default::default()
+        };
+        let short = result_with((0..60).map(|b| lines_block(&format!("b{b}-"), 4)).collect());
+        assert_eq!(truncate_tool_output(short.clone(), &config), short);
     }
 
     #[test]

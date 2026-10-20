@@ -4211,6 +4211,24 @@ async fn each_text_block_gets_its_own_key_and_resolves_to_itself() {
         _ => false,
     });
     assert!(has_image, "non-text content must pass through untouched");
+
+    // The two blocks share the result's 20 lines, rather than taking 20 each.
+    let lines: Vec<usize> = messages
+        .iter()
+        .find_map(|m| match m {
+            AgentMessage::Llm(Message::ToolResult { content, .. }) => Some(
+                content
+                    .iter()
+                    .filter_map(|c| match c {
+                        Content::Text { text } => Some(text.lines().count()),
+                        _ => None,
+                    })
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .expect("a tool result");
+    assert_eq!(lines, [10, 10]);
 }
 
 /// Only the second text block is long enough to truncate, so `marked` is
