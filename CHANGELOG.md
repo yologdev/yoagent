@@ -4,6 +4,18 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## yoagent-rutis Unreleased
+
+yoagent-rutis only; requires yoagent 0.25, rutis 0.12 and Rust 1.88, as 0.7.1. A minor bump: new values and settings for the pi adapter's grants.
+
+- **pi adapter: per-extension grants a host can ask about.** Asked for by yobuild (its M3b plugin grants).
+  - `exec` / `execFor[file]` take `"gate"`: each `pi.exec` call goes to the host's `host_approval.judge([command, ...args], cwd?)` (`options.cwd` resolved against the adapter's `cwd` — and run there, so what runs is what was judged; left out without one). `{free: true}` runs it; otherwise `host_approval.ask(question, details | null, file)` with the judge's question and details, and only `"allow"` runs it. Any other answer, a host error, a cancel or no service is the usual refusal (code 126, reason in `stderr`, warned once per extension and command). `judge` is bounded at 30 s; the question is the host's to time out.
+  - `projectTrustedFor: {file: boolean}` over `projectTrusted`: what `ctx.isProjectTrusted()` tells that extension's handlers and tools.
+  - `wakeFor: {file: boolean}` (default none): that extension's `pi.sendUserMessage(content)`, and `pi.sendMessage` with `triggerTurn` or `deliverAs`, become `host_session.wake(text, file)` (content as text, in the order sent; the message is still recorded). pi's calls return nothing, so a refusal is a `warn` line, once per extension, not an error the extension sees.
+  - Keys of every per-file setting resolve like `extensions`, and one naming no loaded extension refuses the load. Each host call names the extension's resolved file last.
+  - The services reach the adapter through two new rows, `plugins/pi/host-approval.ts` and `plugins/pi/host-session.ts`, which re-provide `host_approval` / `host_session` as `pi-host-approval` / `pi-host-session` (as `host-ui.ts` does `ui`): the adapter looks them up per call, so rows without these grants load without them.
+  - Fixed-answer log lines name the asking extension: `[pi] fixed answer (<file>): <question> → <answer>`, once per extension, question and answer.
+
 ## 0.25.11 (2026-10-20)
 
 A fix; no API change.

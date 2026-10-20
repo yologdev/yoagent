@@ -139,16 +139,22 @@
 // go to the host's logs (`yoagent.log`, else stderr). `pi.appendEntry` and
 // `pi.sendMessage` are recorded in the adapter's in-memory session (readable
 // through `ctx.sessionManager`; a displayed message is also logged; a message
-// never starts a turn); other runtime actions (`pi.sendUserMessage`,
-// `pi.setModel`, ...) throw "not available in yoagent". `pi.exec` runs only
-// what the host's `exec` setting allows (default nothing; a refusal is a
-// failed command, code 126, empty stdout): each factory gets a `pi` whose
-// `exec` is gated, so extensions are imported through pi's loader by a
-// generated wrapper and run with its `loadExtensionFromFactory` (`loadGated`;
-// every load, whatever `exec` is). Fixed answers — `ctx.isProjectTrusted()`
-// (the host's `projectTrusted`, default false), `ctx.model`,
-// `ctx.modelRegistry`, `ctx.getContextUsage()`, print-mode dialogs — are
-// logged once per question and answer as `[pi] fixed answer: …`. `ctx.hasUI` is false and `ctx.ui` behaves as in
+// never starts a turn, unless the host grants the extension `wakeFor`); other
+// runtime actions (`pi.sendUserMessage` without that grant, `pi.setModel`,
+// ...) throw "not available in yoagent". `pi.exec` runs only what the host's
+// `exec` / `execFor` setting allows (default nothing; `"gate"` asks the host's
+// `host_approval` per call; a refusal is a failed command, code 126, empty
+// stdout): each factory gets its own `pi`, with `exec` gated and, with
+// `wakeFor`, `sendUserMessage` / `sendMessage` waking the host's session
+// (`host_session.wake(text, file)`), so extensions are imported through pi's
+// loader by a generated wrapper and run with its `loadExtensionFromFactory`
+// (`loadGated`; every load, whatever the grants are). Host services reach the
+// adapter re-provided by `host-approval.ts` / `host-session.ts`, the way
+// `host-ui.ts` brings `ui`; each host call names the extension's file last.
+// Fixed answers — `ctx.isProjectTrusted()` (`projectTrustedFor`, else the
+// host's `projectTrusted`, default false), `ctx.model`, `ctx.modelRegistry`,
+// `ctx.getContextUsage()`, print-mode dialogs — are logged once per
+// extension, question and answer as `[pi] fixed answer (<file>): …`. `ctx.hasUI` is false and `ctx.ui` behaves as in
 // pi's print mode: `confirm` answers false, `select` and `input` nothing, so
 // a policy that would ask the user denies instead. When the host provides a
 // `ui` service (yoagent-frontend, experimental) and loads `host-ui.ts` next
@@ -191,16 +197,35 @@ export interface Config {
    * `node`, `npx`) allows those too. A refused call resolves as a failed command (code 126, empty
    * `stdout`, the reason in `stderr`) and is reported at warn, once per extension and command.
    * This gates pi's API only: an extension is code the host runs and may start processes itself.
+   *
+   * `"gate"` asks the host about each call: `host_approval.judge([command, ...args], cwd?)`
+   * (`cwd` is `options.cwd` resolved against the adapter's, left out when the extension passed
+   * none) answering `{free: true}` runs it; otherwise `host_approval.ask(question, details | null,
+   * file)` with the judge's `question` and `details` and the extension's file, and only `"allow"`
+   * runs it. Any other answer, a host error, a cancel or no `host_approval` service (load
+   * `host-approval.ts`) is a refusal, as above.
    */
-  exec?: boolean | string[]
+  exec?: Grant
   /**
    * Grants for single extensions, over `exec`: an extension file (as in `extensions`, resolved
-   * against `cwd`) → its own `true` / `false` / command list. A key naming no loaded extension
-   * refuses the load (a typo would otherwise grant nothing, silently).
+   * against `cwd`) → its own `true` / `false` / command list / `"gate"`. A key naming no loaded
+   * extension refuses the load (a typo would otherwise grant nothing, silently); so for the other
+   * `…For` settings.
    */
-  execFor?: Record<string, boolean | string[]>
+  execFor?: Record<string, Grant>
   /** What `ctx.isProjectTrusted()` answers (default `false`; pi's own default is `true`). */
   projectTrusted?: boolean
+  /** `projectTrusted` for single extensions, keyed like `execFor`: what a handler or tool of that file is told. */
+  projectTrustedFor?: Record<string, boolean>
+  /**
+   * Extensions whose `pi.sendUserMessage(content)`, and `pi.sendMessage` with `triggerTurn` or
+   * `deliverAs`, wake the host's session: `host_session.wake(text, file)` (the content as text;
+   * load `host-session.ts`). Keyed like `execFor`; default none. pi's calls return nothing, so a
+   * refusal (a host error, or no service) cannot reach the extension: it is reported at warn,
+   * once per extension. Without the grant, `sendUserMessage` throws "not available in yoagent"
+   * and `sendMessage` is recorded only.
+   */
+  wakeFor?: Record<string, boolean>
   /**
    * What `ctx.model` is: the model the agent runs. Default: the run's model id (from yoagent's
    * request), under provider `yoagent`; before the first request, `undefined`.
@@ -212,6 +237,32 @@ export interface Config {
    * throw "not available in yoagent".
    */
   models?: ModelSpec[]
+}
+
+/** What `pi.exec` may run: nothing, anything, these commands, or what the host approves per call. */
+export type Grant = boolean | string[] | 'gate'
+
+/** The host's `host_approval` service (yobuild's), re-provided as `pi-host-approval` by `host-approval.ts`. */
+interface HostApproval {
+  judge(argv: string[], cwd?: string): Promise<{ free?: boolean; judged?: boolean; question?: string; details?: string } | undefined>
+  ask(question: string, details: string | null, file: string): Promise<unknown>
+}
+
+/** The host's `host_session` service, re-provided as `pi-host-session` by `host-session.ts`. */
+interface HostSession {
+  wake(text: string, file: string): Promise<unknown>
+}
+
+/** How long the adapter waits for `host_approval.judge` and `host_session.wake` (asking the user is not bounded here). */
+const HOST_CALL_MS = 30_000
+
+/** `promise`, or a rejection naming `what` after `ms`. */
+function bounded<T>(what: string, promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} took longer than ${ms / 1000} s`)), ms)
+  })
+  return Promise.race([promise, late]).finally(() => clearTimeout(timer))
 }
 
 /** A model as the host describes it to pi extensions. */
@@ -463,28 +514,28 @@ let report = (level: 'error' | 'warn' | 'info' | 'debug', message: string) => {
 
 /**
  * A question pi's API asks that this adapter answers with a fixed value: said
- * once per question and answer (per runtime, shared by every adapter in it), at info, under one tag hosts can search for, so a plugin
- * that does nothing can be traced to the answer it got.
+ * once per extension, question and answer (per runtime, shared by every adapter in it), at info, under one tag hosts can search for, so a plugin
+ * that does nothing can be traced to the answer it got. `file` is the asking extension's, when one asked.
  */
 const answered = new Set<string>()
-function fixedAnswer<T>(question: string, answer: T, shown: string = JSON.stringify(answer) ?? 'undefined'): T {
+function fixedAnswer<T>(question: string, answer: T, shown: string = JSON.stringify(answer) ?? 'undefined', file?: string): T {
   // Keyed by the answer too: two adapters in one runtime may answer differently.
-  const key = `${question}\0${shown}`
+  const key = `${file ?? ''}\0${question}\0${shown}`
   if (!answered.has(key)) {
     answered.add(key)
-    report('info', `[pi] fixed answer: ${question} → ${shown}`)
+    report('info', `[pi] fixed answer${file ? ` (${file})` : ''}: ${question} → ${shown}`)
   }
   return answer
 }
 
-/** pi's print-mode UI (its `noOpUIContext`): nothing to show, no one to ask. */
-const NO_UI = new Proxy(
+/** pi's print-mode UI (its `noOpUIContext`): nothing to show, no one to ask. `file`: the extension asking. */
+const noUi = (file?: string) => new Proxy(
   {
-    select: async () => fixedAnswer('ctx.ui.select() (no user to ask)', undefined),
-    confirm: async () => fixedAnswer('ctx.ui.confirm() (no user to ask)', false),
-    input: async () => fixedAnswer('ctx.ui.input() (no user to ask)', undefined),
-    editor: async () => fixedAnswer('ctx.ui.editor() (no user to ask)', undefined),
-    custom: async () => fixedAnswer('ctx.ui.custom() (no user to ask)', undefined),
+    select: async () => fixedAnswer('ctx.ui.select() (no user to ask)', undefined, undefined, file),
+    confirm: async () => fixedAnswer('ctx.ui.confirm() (no user to ask)', false, undefined, file),
+    input: async () => fixedAnswer('ctx.ui.input() (no user to ask)', undefined, undefined, file),
+    editor: async () => fixedAnswer('ctx.ui.editor() (no user to ask)', undefined, undefined, file),
+    custom: async () => fixedAnswer('ctx.ui.custom() (no user to ask)', undefined, undefined, file),
     notify: (message: string, level?: string) =>
       report(level === 'error' ? 'error' : level === 'warning' ? 'warn' : 'info', `[pi ${level ?? 'info'}] ${message}`),
     onTerminalInput: () => () => {},
@@ -501,6 +552,7 @@ const NO_UI = new Proxy(
     get: (target, key) => (key in target ? target[key as string] : key === 'then' ? undefined : () => undefined),
   },
 )
+const NO_UI = noUi()
 
 /** The host's `ui` service (yoagent-frontend), when it provides one. */
 interface HostUi {
@@ -513,7 +565,7 @@ interface HostUi {
  * frontend answers first; a failure, no frontend or no answer in time gives
  * print mode's answer.
  */
-const hostUi = (ui: HostUi, contextSignal?: AbortSignal) => {
+const hostUi = (ui: HostUi, contextSignal?: AbortSignal, file?: string) => {
   const ask = async (request: Record<string, unknown>, opts?: { timeout?: number; signal?: AbortSignal }) => {
     // When the hook is cancelled (the run stopped, the policy timed out) the
     // question is withdrawn: frontends close its dialog. rutis's JavaScript runtime (as of 0.9) cannot
@@ -546,7 +598,7 @@ const hostUi = (ui: HostUi, contextSignal?: AbortSignal) => {
   const text = (value: unknown) => (typeof value === 'string' ? value : undefined)
   return new Proxy(
     {
-      ...(NO_UI as Record<string, unknown>),
+      ...(noUi(file) as Record<string, unknown>),
       select: async (title: unknown, options: unknown[], opts?: { timeout?: number; signal?: AbortSignal }) =>
         text(await ask({ kind: 'select', title: String(title), options: (options ?? []).map(String) }, opts)),
       confirm: async (title: unknown, body?: unknown, opts?: { timeout?: number; signal?: AbortSignal }) =>
@@ -614,6 +666,7 @@ interface PiApi {
   [member: string]: unknown
 }
 type ExecResult = { stdout: string; stderr: string; code: number; killed: boolean }
+type ExecOptions = { signal?: AbortSignal; timeout?: number; cwd?: string }
 type Factory = (pi: PiApi) => unknown
 type Loaded = {
   extensions: PiExtension[]
@@ -761,30 +814,115 @@ async function writeWrapper(dir: string, resolved: string): Promise<string> {
   return wrapper
 }
 
+/** What the per-extension gate needs from the adapter, looked up when a call is made. */
+interface Gates {
+  /** The grant for the extension at `path`: its own in `execFor`, else the row-wide `exec`. */
+  execFor(path: string): Grant
+  /** Whether the extension at `path` may wake the host's session (`wakeFor`). */
+  wakes(path: string): boolean
+  /** The adapter's `cwd`, which a relative `options.cwd` resolves against. */
+  cwd: string
+  approval(): HostApproval | undefined
+  session(): HostSession | undefined
+}
+
 /**
- * `pi.exec` as the host's grant for the extension at `path` allows it (`grantFor`: its own in
- * `execFor`, else the row-wide `exec`); everything else on pi's API as it is.
+ * Each extension's own `pi`: `exec` as its grant allows (`Gates.execFor`), and, with `wakeFor`,
+ * `sendUserMessage` / a turn-starting `sendMessage` waking the host's session; everything else on
+ * pi's API as it is.
  */
-function gateExec(grantFor: (path: string) => boolean | string[]) {
+function gatePi(gates: Gates) {
   const refusedOnce = new Set<string>()
+  const wakeFailed = new Set<string>()
+  /** Wakes go to the host one after another, in the order extensions sent them. */
+  let wakes: Promise<unknown> = Promise.resolve()
   return (pi: PiApi, path: string): PiApi => {
-    const exec = grantFor(path)
-    if (exec === true) return pi
-    const allowed = (command: string) => Array.isArray(exec) && exec.includes(command)
-    const gated = (command: string, args: string[], options?: unknown): Promise<ExecResult> => {
-      if (allowed(command)) return pi.exec(command, args, options)
-      const why = `pi.exec("${command}") is not allowed by the host (the adapter's \`exec\` / \`execFor\` setting)`
+    const grant = gates.execFor(path)
+    const refuse = (command: string, why: string): ExecResult => {
       const key = `${path}\0${command}`
       if (!refusedOnce.has(key)) {
         refusedOnce.add(key)
         report('warn', `[pi] ${path}: refused ${why}`)
       }
-      return Promise.resolve({ stdout: '', stderr: why, code: 126, killed: false })
+      return { stdout: '', stderr: why, code: 126, killed: false }
+    }
+    /** Asks the host (`"gate"`): runs the call only when the judge frees it or the user allows it. */
+    const approved = async (command: string, args: string[], options?: ExecOptions): Promise<ExecResult> => {
+      const approval = gates.approval()
+      const what = `pi.exec("${command}")`
+      if (!approval) {
+        return refuse(command, `${what} needs the host's approval (\`exec\` "gate"), and the host provides no host_approval service (load host-approval.ts)`)
+      }
+      const argv = [command, ...(args ?? []).map(String)]
+      const cwd = typeof options?.cwd === 'string' ? resolve(gates.cwd, options.cwd) : undefined
+      // What runs is what was judged: the same resolved directory.
+      const run = () => pi.exec(command, args, cwd === undefined ? options : { ...options, cwd })
+      const signal = options?.signal
+      const cancelled = () => refuse(command, `${what} was cancelled while the host was asked`)
+      if (signal?.aborted) return cancelled()
+      // Until the call's own cancel, if it has one.
+      const orCancel = <T>(promise: Promise<T>) =>
+        signal
+          ? Promise.race([promise, new Promise<'cancelled'>((done) => signal.addEventListener('abort', () => done('cancelled'), { once: true }))])
+          : promise
+      let verdict: Awaited<ReturnType<HostApproval['judge']>> | 'cancelled'
+      try {
+        verdict = await orCancel(
+          bounded('host_approval.judge', Promise.resolve().then(() => (cwd === undefined ? approval.judge(argv) : approval.judge(argv, cwd))), HOST_CALL_MS),
+        )
+      } catch (error) {
+        return refuse(command, `${what}: the host could not judge it: ${message(error)}`)
+      }
+      if (verdict === 'cancelled') return cancelled()
+      if (verdict?.free === true) return run()
+      const question = typeof verdict?.question === 'string' && verdict.question ? verdict.question : `Run ${argv.join(' ')}?`
+      const details = typeof verdict?.details === 'string' ? verdict.details : null
+      let answer: unknown
+      try {
+        // Not bounded here: the host's own question times out (an "unanswered").
+        answer = await orCancel(Promise.resolve().then(() => approval.ask(question, details, path)))
+      } catch (error) {
+        return refuse(command, `${what}: the host's approval failed: ${message(error)}`)
+      }
+      if (answer === 'cancelled') return cancelled()
+      if (answer === 'allow') return run()
+      return refuse(command, `${what} was not approved by the host (${typeof answer === 'string' ? answer : 'no answer'})`)
+    }
+    const gated = (command: string, args: string[], options?: ExecOptions): Promise<ExecResult> => {
+      if (grant === 'gate') return approved(command, args, options)
+      if (Array.isArray(grant) && grant.includes(command)) return pi.exec(command, args, options)
+      return Promise.resolve(refuse(command, `pi.exec("${command}") is not allowed by the host (the adapter's \`exec\` / \`execFor\` setting)`))
     }
     // A copy, not a Proxy: a Proxy's target still hands the real `exec` out
     // through `Object.getOwnPropertyDescriptor`. pi's API methods are
     // closures that never use `this`, and `events` is shared by reference.
-    return { ...pi, exec: gated }
+    const own: PiApi = { ...pi }
+    if (grant !== true) own.exec = gated
+    if (gates.wakes(path)) {
+      /** The content as text to the host's session; a refusal is reported (pi's calls return nothing). */
+      const wake = (content: unknown) => {
+        const said = typeof content === 'string' ? content : Array.isArray(content) ? text(content as Block[]) : JSON.stringify(content)
+        const failed = (why: string) => {
+          if (wakeFailed.has(path)) return
+          wakeFailed.add(path)
+          report('warn', `[pi] ${path}: wake refused: ${why} (reported once per extension)`)
+        }
+        const session = gates.session()
+        if (!session) return failed('the host provides no host_session service (load host-session.ts)')
+        wakes = wakes.then(() =>
+          bounded('host_session.wake', Promise.resolve().then(() => session.wake(said ?? '', path)), HOST_CALL_MS).catch((error) =>
+            failed(message(error)),
+          ),
+        )
+      }
+      own.sendUserMessage = (content: unknown) => wake(content)
+      own.sendMessage = (msg: { content?: unknown }, options?: { triggerTurn?: boolean; deliverAs?: string }) => {
+        // Recorded as before (pi's own runtime stores it); the turn it asks for is the host's to start.
+        ;(pi.sendMessage as (m: unknown, o?: unknown) => void)(msg)
+        if (options?.triggerTurn || options?.deliverAs) wake(msg?.content ?? '')
+      }
+    }
+    return own
   }
 }
 
@@ -879,12 +1017,14 @@ export default definePlugin<Config>({
       allowUnmapped: { type: 'array', items: { type: 'string' } },
       strict: { type: 'boolean' },
       nestedCalls: { type: 'string', enum: ['any', 'own-extension', 'off'] },
-      exec: { anyOf: [{ type: 'boolean' }, { type: 'array', items: { type: 'string' } }] },
+      exec: { anyOf: [{ type: 'boolean' }, { type: 'array', items: { type: 'string' } }, { const: 'gate' }] },
       execFor: {
         type: 'object',
-        additionalProperties: { anyOf: [{ type: 'boolean' }, { type: 'array', items: { type: 'string' } }] },
+        additionalProperties: { anyOf: [{ type: 'boolean' }, { type: 'array', items: { type: 'string' } }, { const: 'gate' }] },
       },
       projectTrusted: { type: 'boolean' },
+      projectTrustedFor: { type: 'object', additionalProperties: { type: 'boolean' } },
+      wakeFor: { type: 'object', additionalProperties: { type: 'boolean' } },
       model: { type: 'object' },
       models: { type: 'array', items: { type: 'object' } },
     },
@@ -911,30 +1051,40 @@ export default definePlugin<Config>({
 
     const { SessionManager } = await import('@earendil-works/pi-coding-agent')
     const { validateToolArguments } = await import('@earendil-works/pi-ai')
-    const isGrant = (g: unknown): g is boolean | string[] =>
-      typeof g === 'boolean' || (Array.isArray(g) && g.every((c) => typeof c === 'string'))
+    const isGrant = (g: unknown): g is Grant =>
+      typeof g === 'boolean' || g === 'gate' || (Array.isArray(g) && g.every((c) => typeof c === 'string'))
     const exec = config.exec ?? false
-    if (!isGrant(exec)) throw new Error(`exec must be true, false or a list of commands, not ${JSON.stringify(exec)}`)
-    const shown = (g: boolean | string[]) => (g === true ? 'anything' : g === false || g.length === 0 ? 'nothing' : g.join(', '))
+    if (!isGrant(exec)) throw new Error(`exec must be true, false, "gate" or a list of commands, not ${JSON.stringify(exec)}`)
+    const shown = (g: Grant) =>
+      g === true ? 'anything' : g === 'gate' ? 'what the host approves' : g === false || g.length === 0 ? 'nothing' : g.join(', ')
     report('debug', `[pi] pi.exec allowed: ${shown(exec)}`)
-    // Per-extension grants, keyed by the resolved file as `loadGated` resolves `extensions`.
+    if (typeof config.projectTrusted !== 'undefined' && typeof config.projectTrusted !== 'boolean') {
+      throw new Error(`projectTrusted must be true or false, not ${JSON.stringify(config.projectTrusted)}`)
+    }
+    // Per-extension settings, keyed by the resolved file as `loadGated` resolves `extensions`.
     const { resolvePath } = await piModule<{ resolvePath(input: string, base: string, options?: unknown): string }>(
       './utils/paths.js',
     )
     const resolveExt = (path: string) => resolvePath(path, cwd, { normalizeUnicodeSpaces: true })
-    const execFor = new Map<string, boolean | string[]>()
-    for (const [path, grant] of Object.entries(config.execFor ?? {})) {
-      if (!isGrant(grant)) {
-        throw new Error(`execFor["${path}"] must be true, false or a list of commands, not ${JSON.stringify(grant)}`)
-      }
-      execFor.set(resolveExt(path), grant)
-      report('debug', `[pi] pi.exec allowed for ${path}: ${shown(grant)}`)
-    }
     const listed = new Set(config.extensions.map(resolveExt))
-    const unknown = [...execFor.keys()].filter((path) => !listed.has(path))
-    if (unknown.length > 0) {
-      throw new Error(`execFor names extensions that are not loaded: ${unknown.join(', ')}`)
+    /** A `…For` setting as a map from resolved files; a bad value or a key naming no loaded extension refuses the load. */
+    const keyed = <T>(setting: string, entries: Record<string, unknown> | undefined, valid: (v: unknown) => v is T, expected: string) => {
+      const map = new Map<string, T>()
+      for (const [path, value] of Object.entries(entries ?? {})) {
+        if (!valid(value)) throw new Error(`${setting}["${path}"] must be ${expected}, not ${JSON.stringify(value)}`)
+        map.set(resolveExt(path), value)
+      }
+      const unknown = [...map.keys()].filter((path) => !listed.has(path))
+      if (unknown.length > 0) throw new Error(`${setting} names extensions that are not loaded: ${unknown.join(', ')}`)
+      return map
     }
+    const isBool = (v: unknown): v is boolean => typeof v === 'boolean'
+    const execFor = keyed('execFor', config.execFor, isGrant, 'true, false, "gate" or a list of commands')
+    for (const [path, grant] of execFor) report('debug', `[pi] pi.exec allowed for ${path}: ${shown(grant)}`)
+    const projectTrustedFor = keyed('projectTrustedFor', config.projectTrustedFor, isBool, 'true or false')
+    const wakeFor = keyed('wakeFor', config.wakeFor, isBool, 'true or false')
+    /** What `ctx.isProjectTrusted()` answers for a handler or tool of the extension at `file`. */
+    const trusted = (file?: string) => (file !== undefined ? projectTrustedFor.get(file) : undefined) ?? config.projectTrusted ?? false
     // Models extensions see (`ctx.model`, `ctx.modelRegistry`).
     for (const [what, spec] of [['model', config.model] as const, ...(config.models ?? []).map((m, i) => [`models[${i}]`, m] as const)]) {
       if (spec !== undefined && !isModelSpec(spec)) {
@@ -947,7 +1097,25 @@ export default definePlugin<Config>({
     const runModels = new Map<string, string>()
     /** The latest request's model of any run: for contexts outside a run (`session_start`, ...). */
     let latestModel: string | undefined
-    const loaded = await loadGated(config.extensions, cwd, gateExec((path) => execFor.get(path) ?? exec))
+    // Host services for the grants: looked up when a call is made, never injected (as `ui`).
+    const lookup = <T>(name: string) => {
+      try {
+        return ctx.use<T>(name)
+      } catch {
+        return undefined
+      }
+    }
+    const loaded = await loadGated(
+      config.extensions,
+      cwd,
+      gatePi({
+        execFor: (path) => execFor.get(path) ?? exec,
+        wakes: (path) => wakeFor.get(path) === true,
+        cwd,
+        approval: () => lookup<HostApproval>('pi-host-approval'),
+        session: () => lookup<HostSession>('pi-host-session'),
+      }),
+    )
     if (loaded.errors.length > 0) {
       throw new Error(`pi extensions failed to load: ${loaded.errors.map((e) => `${e.path}: ${e.error}`).join('; ')}`)
     }
@@ -987,29 +1155,39 @@ export default definePlugin<Config>({
     }
     /** The model id `ctx.model` names for a run: its latest request's, else any run's latest. */
     const modelOf = (runId?: string) => (runId !== undefined ? runModels.get(runId) : undefined) ?? latestModel
-    const context = (signal?: AbortSignal, runId?: string, systemPrompt = '', modelId = modelOf(runId)) => {
+    /**
+     * A pi `ctx` for a handler or tool of the extension at `file` (its fixed answers name it; its
+     * `isProjectTrusted()` is its own), in run `runId`.
+     */
+    const context = (
+      file: string | undefined,
+      signal?: AbortSignal,
+      runId?: string,
+      systemPrompt = '',
+      modelId = modelOf(runId),
+    ) => {
       const hostUiService = lookupUi()
       return {
-      ui: hostUiService ? hostUi(hostUiService, signal) : NO_UI,
+      ui: hostUiService ? hostUi(hostUiService, signal, file) : noUi(file),
       mode: hostUiService ? 'rpc' : 'print',
       hasUI: hostUiService !== undefined,
       cwd,
       sessionManager,
       get modelRegistry() {
-        return fixedAnswer('ctx.modelRegistry', registry, `a read-only list of ${registry.getAll().length} model(s)`)
+        return fixedAnswer('ctx.modelRegistry', registry, `a read-only list of ${registry.getAll().length} model(s)`, file)
       },
       get model() {
         const model = hostModel ?? (modelId ? piModel({ provider: 'yoagent', id: modelId }) : undefined)
-        return fixedAnswer('ctx.model', model, model ? `${model.provider}/${model.id}` : 'undefined')
+        return fixedAnswer('ctx.model', model, model ? `${model.provider}/${model.id}` : 'undefined', file)
       },
       scopedModels: [],
       signal,
       isIdle: () => signal === undefined,
       // pi's own default is true; this adapter loads only the files it is given, never a project's
       // `.pi`, and a host opts in (`projectTrusted`) to what extensions do in a trusted project.
-      isProjectTrusted: () => fixedAnswer('ctx.isProjectTrusted()', config.projectTrusted ?? false),
+      isProjectTrusted: () => fixedAnswer('ctx.isProjectTrusted()', trusted(file), undefined, file),
       hasPendingMessages: () => false,
-      getContextUsage: () => fixedAnswer('ctx.getContextUsage()', undefined),
+      getContextUsage: () => fixedAnswer('ctx.getContextUsage()', undefined, undefined, file),
       getSystemPrompt: () => systemPrompt,
       abort: () => {
         throw new Error('ctx.abort() is not available in yoagent')
@@ -1095,7 +1273,7 @@ export default definePlugin<Config>({
         const event = { type: 'tool_call', toolCallId: id, parentToolCallId: parentId, toolName: name, input }
         let result: { block?: boolean; reason?: string; terminate?: boolean } | undefined
         try {
-          result = (await fn(event, context(signal, runId))) as typeof result
+          result = (await fn(event, context(ext.path, signal, runId))) as typeof result
         } catch (error) {
           return failed(`pi extension ${short(ext.path)} failed: ${message(error)}`, input)
         }
@@ -1126,7 +1304,7 @@ export default definePlugin<Config>({
       }
       for (const { ext, fn } of handlers('tool_result')) {
         try {
-          const edit = (await fn(event, context(signal, runId))) as { content?: Block[]; details?: unknown; isError?: boolean } | undefined
+          const edit = (await fn(event, context(ext.path, signal, runId))) as { content?: Block[]; details?: unknown; isError?: boolean } | undefined
           if (edit?.content !== undefined) event.content = edit.content
           if (edit?.details !== undefined) event.details = edit.details
           if (edit?.isError !== undefined) event.isError = edit.isError
@@ -1148,7 +1326,7 @@ export default definePlugin<Config>({
       let nested = 0
       // Added onto the context, not spread: a spread reads every getter, which would log
       // fixed answers (`ctx.model`, ...) no extension asked for.
-      return Object.defineProperties(context(signal, runId), Object.getOwnPropertyDescriptors({
+      return Object.defineProperties(context(caller, signal, runId), Object.getOwnPropertyDescriptors({
         get tools() {
           // The run's frozen copies (a tool cannot swap another's `execute` through them), only
           // those `nestedCalls` lets this tool call.
@@ -1388,7 +1566,7 @@ export default definePlugin<Config>({
             const before = canon(copy)
             let result: { message?: unknown } | undefined
             try {
-              result = (await fn({ type: 'message_end', message: copy }, context(signal, runId))) as typeof result
+              result = (await fn({ type: 'message_end', message: copy }, context(ext.path, signal, runId))) as typeof result
             } catch (error) {
               // Cut short: not judged, so not seen; the next check runs it again.
               if (signal?.aborted) return unfinished('message_end')
@@ -1413,7 +1591,7 @@ export default definePlugin<Config>({
         const before = canon(copy)
         let result: { messages?: unknown } | undefined
         try {
-          result = (await fn({ type: 'context', messages: copy }, context(signal, runId))) as typeof result
+          result = (await fn({ type: 'context', messages: copy }, context(ext.path, signal, runId))) as typeof result
         } catch (error) {
           if (signal?.aborted) return unfinished('context')
           report('warn', `[pi] ${short(ext.path)} context: ${message(error)}`)
@@ -1470,7 +1648,7 @@ export default definePlugin<Config>({
         })
         const event = { type: 'before_agent_start', prompt, systemPrompt, systemPromptOptions: options }
         try {
-          const result = (await fn(event, context(signal, runId, systemPrompt))) as
+          const result = (await fn(event, context(ext.path, signal, runId, systemPrompt))) as
             | { systemPrompt?: unknown; message?: unknown }
             | undefined
           if (result?.message !== undefined) {
@@ -1495,7 +1673,7 @@ export default definePlugin<Config>({
     const started: string[] = []
     for (const { ext, fn } of handlers('session_start')) {
       try {
-        await fn({ type: 'session_start', reason: 'startup' }, context())
+        await fn({ type: 'session_start', reason: 'startup' }, context(ext.path))
       } catch (error) {
         started.push(`${short(ext.path)}: ${message(error)}`)
       }
@@ -1508,7 +1686,7 @@ export default definePlugin<Config>({
       await drainObservers()
       for (const { ext, fn } of handlers('session_shutdown')) {
         try {
-          await fn({ type: 'session_shutdown', reason: 'quit' }, context())
+          await fn({ type: 'session_shutdown', reason: 'quit' }, context(ext.path))
         } catch (error) {
           report('warn', `[pi] ${short(ext.path)} session_shutdown: ${message(error)}`)
         }
@@ -1674,7 +1852,7 @@ export default definePlugin<Config>({
       for (const { ext, fn } of handlers(pi.type as string)) {
         let timer: ReturnType<typeof setTimeout> | undefined
         try {
-          const call = Promise.resolve().then(() => fn(structuredClone(pi), context(undefined, runId, '', model)))
+          const call = Promise.resolve().then(() => fn(structuredClone(pi), context(ext.path, undefined, runId, '', model)))
           const budget = new Promise<'late'>((resolve) => {
             timer = setTimeout(() => resolve('late'), OBSERVER_HANDLER_BUDGET_MS)
           })
@@ -1869,7 +2047,7 @@ export default definePlugin<Config>({
             const event = { type: 'tool_call', toolCallId: call.call_id, toolName, input }
             let result: { block?: boolean; reason?: string; terminate?: boolean } | undefined
             try {
-              result = (await fn(event, context(call.signal, call.run_id))) as typeof result
+              result = (await fn(event, context(ext.path, call.signal, call.run_id))) as typeof result
             } catch (error) {
               // As in pi: a failing tool_call handler blocks the call.
               return { deny: `pi extension ${short(ext.path)} failed: ${message(error)}` }
@@ -1923,7 +2101,7 @@ export default definePlugin<Config>({
           const failed: string[] = []
           for (const { ext, fn } of editors) {
             try {
-              const result = (await fn(event, context(call.signal, call.run_id))) as
+              const result = (await fn(event, context(ext.path, call.signal, call.run_id))) as
                 | { content?: Block[]; details?: unknown; isError?: boolean }
                 | undefined
               if (result?.content !== undefined) {
@@ -1961,7 +2139,7 @@ export default definePlugin<Config>({
             const event = { type: 'input', text: input.text, source: 'interactive' }
             let result: { action?: string } | undefined
             try {
-              result = (await fn(event, context(input.signal, input.run_id))) as typeof result
+              result = (await fn(event, context(ext.path, input.signal, input.run_id))) as typeof result
             } catch (error) {
               // Unlike pi (which goes on): an input check that failed rejects.
               return { reject: `pi extension ${short(ext.path)} failed: ${message(error)}` }

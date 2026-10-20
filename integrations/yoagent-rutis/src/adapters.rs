@@ -24,7 +24,9 @@ pub struct Adapters {
     /// `plugins/`: everything below.
     pub root: PathBuf,
     /// `plugins/pi`: the pi extensions adapter (`pi-extensions-adapter.ts`),
-    /// `host-ui.ts`, `resolve-package.mjs`, and their `package.json` and lock.
+    /// the host-service re-providers `host-ui.ts`, `host-approval.ts` and
+    /// `host-session.ts`, `resolve-package.mjs`, and their `package.json` and
+    /// lock.
     pub pi: PathBuf,
     /// `plugins/dsh`: the DSH tools adapter (`dsh-tools-adapter.ts`), the
     /// host services a headless DSH host loads (`host-services.json`), the
