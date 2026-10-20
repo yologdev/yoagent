@@ -2243,8 +2243,9 @@ export default function (pi) {
 }
 
 /// `execFor` grants `pi.exec` per extension file, over the row-wide `exec`:
-/// one extension may run `echo`, its neighbour may not. A key naming no
-/// loaded extension refuses the load.
+/// one extension may run `echo`, its neighbour may not. A key is resolved like
+/// `extensions` (relative to `cwd`); a key naming no loaded extension refuses
+/// the load.
 #[tokio::test(flavor = "multi_thread")]
 async fn exec_grants_per_extension() {
     let Some(runtime) = node_runtime() else {
@@ -2276,6 +2277,20 @@ async fn exec_grants_per_extension() {
     assert_eq!(results[1].1, "code=126", "{results:?}");
     host.root.shutdown().await.unwrap();
 
+    // The same grant spelled relative to `cwd`.
+    let host = crate::host(&runtime).await;
+    host.load(adapter_row(json!({
+        "extensions": ["./granted.ts"],
+        "cwd": dir.path(),
+        "execFor": { "./granted.ts": ["echo"] },
+    })))
+    .await;
+    let (agent, _) = crate::agent(vec![call("granted_exec", json!({})), text("done")]);
+    let mut agent = agent.with_extension(host.bridge.extension());
+    let (_, results) = run(&mut agent, "go").await;
+    assert_eq!(results[0].1, "code=0", "{results:?}");
+    host.root.shutdown().await.unwrap();
+
     let host = crate::host(&runtime).await;
     let failures = host
         .try_load(adapter_row(json!({
@@ -2288,8 +2303,9 @@ async fn exec_grants_per_extension() {
 }
 
 /// `ctx.model` and `ctx.modelRegistry`: the host's `model` and `models`, read
-/// only (credentials and model calls refused); without them, the run's model
-/// id under provider `yoagent`.
+/// only (credentials and model calls refused, `refresh` a no-op, chat the only
+/// type, nothing to serialize or overwrite); without them, the run's model id
+/// under provider `yoagent`. A malformed model refuses the load.
 #[tokio::test(flavor = "multi_thread")]
 async fn extensions_see_the_host_s_models_read_only() {
     let Some(runtime) = node_runtime() else {
@@ -2306,12 +2322,21 @@ export default function (pi) {
     async execute(_id, _params, _signal, _update, ctx) {
       let refused = ''
       try { await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model) } catch (e) { refused = String(e.message) }
+      const registry = ctx.modelRegistry
+      let overwritten = true
+      try { registry.getAll = () => []; overwritten = registry.getAll().length === 0 } catch { overwritten = false }
       const out = {
         model: ctx.model && `${ctx.model.provider}/${ctx.model.id}`,
         window: ctx.model?.contextWindow,
         all: ctx.modelRegistry.getAll().map((m) => `${m.provider}/${m.id}`),
         found: !!ctx.modelRegistry.find('deepseek', 'deepseek-flash'),
         refused,
+        refreshed: (await registry.refresh()).aborted,
+        chat: registry.getModelsOfType('chat').length,
+        images: registry.getModelsOfType('image').length,
+        foundOfType: !!registry.findOfType('chat', 'deepseek', 'deepseek-flash'),
+        json: JSON.stringify(registry),
+        overwritten,
       }
       return { content: [{ type: 'text', text: JSON.stringify(out) }], details: {} }
     },
@@ -2359,6 +2384,12 @@ export default function (pi) {
             .contains("not available in yoagent"),
         "{seen}"
     );
+    assert_eq!(seen["refreshed"], false, "{seen}");
+    assert_eq!(seen["chat"], 2, "{seen}");
+    assert_eq!(seen["images"], 0, "{seen}");
+    assert_eq!(seen["foundOfType"], true, "{seen}");
+    assert_eq!(seen["json"], "{}", "{seen}");
+    assert_eq!(seen["overwritten"], false, "{seen}");
     // No model configured: the run's model id, and an empty registry.
     let seen = check(json!({})).await;
     assert!(
@@ -2366,4 +2397,14 @@ export default function (pi) {
         "{seen}"
     );
     assert_eq!(seen["all"], json!([]), "{seen}");
+
+    let host = host(&runtime).await;
+    let failures = host
+        .try_load(adapter_row(json!({
+            "extensions": [ext],
+            "model": { "provider": "deepseek" },
+        })))
+        .await;
+    assert!(failures.contains("model must be"), "{failures}");
+    host.root.shutdown().await.unwrap();
 }
