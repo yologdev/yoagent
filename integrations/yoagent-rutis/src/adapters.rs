@@ -46,6 +46,50 @@ pub fn adapters() -> Adapters {
     }
 }
 
+/// The rows a DSH host with the stand-in agent loads, from `dsh` (this
+/// crate's `plugins/dsh`, or the copy the host installed): every row of
+/// `host-services.json`, with the rows `dsh-host.json` also names replaced
+/// by its own — rutis-loader keeps the first of two rows with one id, so
+/// adding `dsh-host.json` after `host-services.json` would leave the
+/// storage-less `dsh-session-persistence` in place — then `dsh-host.json`'s
+/// other rows. File names become absolute (under `dsh`), and the session
+/// log is kept under `sessions` (the jsonl backend's `config.root`).
+///
+/// The host also shares `host_session` and `host_workspace` with the
+/// runtime (see the crate README's DSH section).
+pub fn dsh_host_rows(dsh: &Path, sessions: &Path) -> std::io::Result<Vec<serde_json::Value>> {
+    let read = |file: &str| -> std::io::Result<Vec<serde_json::Value>> {
+        serde_json::from_str(&std::fs::read_to_string(dsh.join(file))?).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{file}: {e}"))
+        })
+    };
+    let host: Vec<serde_json::Value> = read("dsh-host.json")?
+        .into_iter()
+        .map(|mut row| {
+            if let Some(name) = row["name"].as_str().filter(|n| n.ends_with(".ts")) {
+                row["name"] = serde_json::json!(dsh.join(name));
+            }
+            if row["name"] == "@deepseek-ai/dsh-session-persistence-jsonl" {
+                row["config"] = serde_json::json!({ "root": sessions });
+            }
+            row
+        })
+        .collect();
+    let mut rows = Vec::new();
+    for row in read("host-services.json")? {
+        match host.iter().find(|h| h["id"] == row["id"]) {
+            Some(replacement) => rows.push(replacement.clone()),
+            None => rows.push(row),
+        }
+    }
+    for row in host {
+        if !rows.iter().any(|r| r["id"] == row["id"]) {
+            rows.push(row);
+        }
+    }
+    Ok(rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -69,5 +113,30 @@ mod tests {
             assert!(file.is_file(), "{}", file.display());
         }
         assert!(a.pi.starts_with(&a.root) && a.dsh.starts_with(&a.root));
+    }
+
+    #[test]
+    fn dsh_host_rows_replace_the_storage_less_session_persistence() {
+        let a = adapters();
+        let rows = dsh_host_rows(&a.dsh, Path::new("/tmp/sessions")).unwrap();
+        let ids: Vec<&str> = rows.iter().map(|r| r["id"].as_str().unwrap()).collect();
+        let mut unique = ids.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), ids.len(), "one row per id: {ids:?}");
+        let persistence = rows
+            .iter()
+            .find(|r| r["id"] == "dsh-session-persistence")
+            .unwrap();
+        assert_eq!(
+            persistence["name"],
+            "@deepseek-ai/dsh-session-persistence-jsonl"
+        );
+        assert_eq!(persistence["config"]["root"], "/tmp/sessions");
+        let host = rows.iter().find(|r| r["id"] == "dsh-host").unwrap();
+        assert_eq!(host["name"], serde_json::json!(a.dsh.join("dsh-host.ts")));
+        for id in ["dsh-fs", "dsh-session", "dsh-agent", "dsh-user-approval"] {
+            assert!(ids.contains(&id), "{id}: {ids:?}");
+        }
     }
 }

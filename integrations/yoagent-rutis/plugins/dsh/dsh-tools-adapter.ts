@@ -293,9 +293,11 @@ export default definePlugin<Config>({
           let agent: unknown
           if (host) {
             try {
-              agent = await host.agentFor(call.run_id)
+              agent = await host.agentFor(call.run_id, call.parent_run_id, call.signal)
             } catch (error) {
-              return { text: `the DSH host has no agent for this call: ${error instanceof Error ? error.message : error}`, is_error: true }
+              const why = error instanceof Error ? error.message : String(error)
+              say('warn', `[dsh] the DSH host has no agent for ${call.tool}: ${why}`)
+              return { text: `the DSH host has no agent for this call: ${why}`, is_error: true }
             }
           }
           const out = await dsh.execute({
@@ -337,7 +339,7 @@ export default definePlugin<Config>({
         // The run's DSH turn, if a stand-in opened one, ends with it.
         async finish(outcome: Outcome & Cancellable) {
           try {
-            await dshHost()?.endRun(outcome.run_id)
+            await dshHost()?.endRun(outcome.run_id, outcome.end, outcome.reason)
           } catch (error) {
             say('warn', `[dsh] ending the run's DSH turn failed: ${error}`)
           }

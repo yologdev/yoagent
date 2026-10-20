@@ -28,9 +28,11 @@
 //   (agent)    so a guard's `ask` goes through DSH's own approval service
 //              (`@deepseek-ai/dsh-user-approval`, whose audit pair needs the
 //              stand-in's open turn) and reaches `approval/request`: the
-//              user is asked (confirm, with the asker's reason). Yes →
-//              `allowed-once`, no or no answer → `rejected`, the request
-//              withdrawn → `cancelled`, the host failing → `unavailable`.
+//              user is asked (confirm, with the asker's reason and the
+//              call's arguments, kept from `tools/pre-execute` by call id).
+//              Yes → `allowed-once`, no → `rejected`, no answer or the
+//              host failing → `unavailable`, the request withdrawn →
+//              `cancelled`.
 //   questions  `user-questions/request` from the stand-in agent is answered
 //   (agent)    the same way as an agentless one (DSH refuses questions from
 //              a child agent before they get here).
@@ -80,6 +82,9 @@ const excerpt = (text: string, max: number) => {
   const tail = max - head
   return `${chars.slice(0, head).join('')}\n… (${chars.length} characters in all; the middle is not shown) …\n${chars.slice(-tail).join('')}`
 }
+
+/** Stand-in calls whose arguments are kept for an approval dialog that may follow. */
+const MAX_PENDING_ARGS = 256
 
 /** A question nobody answered: the tool reports it, rather than a made-up answer. */
 class Unanswered extends Error {}
@@ -148,10 +153,27 @@ export function apply(ctx: any) {
     }
   }
 
+  /** A stand-in call's arguments, by call id, for its approval dialog (DSH's request carries none). */
+  const pendingArgs = new Map<string, unknown>()
+  const argsText = (args: unknown) => {
+    try {
+      return excerpt(JSON.stringify(args ?? {}, null, 1), MAX_ARGS_CHARS)
+    } catch {
+      return '(the arguments could not be shown)'
+    }
+  }
+
   // Outermost (prepended), so it sees what every dsh guard decided together.
   ctx.on(
     'tools/pre-execute',
     async (exec: PendingCall, next: () => Promise<PreToolDecision>): Promise<PreToolDecision> => {
+      if (isStandIn(exec.agent)) {
+        // DSH's own approval service asks for it after these listeners decide (below): keep the
+        // arguments to show, the most recent MAX_PENDING_ARGS calls' (taken when the ask comes).
+        pendingArgs.set(String(exec.callId), exec.arguments)
+        if (pendingArgs.size > MAX_PENDING_ARGS) pendingArgs.delete(pendingArgs.keys().next().value!)
+        return next()
+      }
       const decision = await next()
       const ours = exec.agent === undefined && String(exec.callId).startsWith('yoagent:')
       if (decision?.kind !== 'ask' || !ours || !attached()) return decision
@@ -186,26 +208,35 @@ export function apply(ctx: any) {
   )
 
   // DSH's own approval service, for calls that carry the stand-in agent (`dsh-host.ts`).
-  ctx.on('approval/request', async (request: ApprovalRequest, next: () => Promise<ApprovalOutcome>): Promise<ApprovalOutcome> => {
-    if (!isStandIn(request.agent) || !attached()) return next()
-    const reason = request.displayReason?.en ?? request.reason
-    try {
-      const answer = await ask(
-        {
-          kind: 'confirm',
-          title: `Allow the tool ${request.toolName}?`,
-          message: reason ?? '',
-        },
-        request.signal,
-      )
-      if (request.signal?.aborted) return 'cancelled'
-      return answer === true ? 'allowed-once' : 'rejected'
-    } catch (error) {
-      if (request.signal?.aborted) return 'cancelled'
-      say(`[dsh] asking the user to approve ${request.toolName} failed, so it is not approved: ${error}`)
-      return 'unavailable'
-    }
-  })
+  // Prepended, as the call policy above: this host's user answers first.
+  ctx.on(
+    'approval/request',
+    async (request: ApprovalRequest, next: () => Promise<ApprovalOutcome>): Promise<ApprovalOutcome> => {
+      if (!isStandIn(request.agent) || !attached()) return next()
+      const reason = request.displayReason?.en ?? request.reason
+      const id = request.callId === undefined ? undefined : String(request.callId)
+      const args = id !== undefined && pendingArgs.has(id) ? `Arguments: ${argsText(pendingArgs.get(id))}` : undefined
+      if (id !== undefined) pendingArgs.delete(id)
+      try {
+        const answer = await ask(
+          {
+            kind: 'confirm',
+            title: `Allow the tool ${request.toolName}?`,
+            message: [reason, args].filter(Boolean).join('\n\n'),
+          },
+          request.signal,
+        )
+        if (request.signal?.aborted) return 'cancelled'
+        // `false` is a no; no answer (dismissed, timed out, nobody attached) is not one.
+        return answer === true ? 'allowed-once' : answer === false ? 'rejected' : 'unavailable'
+      } catch (error) {
+        if (request.signal?.aborted) return 'cancelled'
+        say(`[dsh] asking the user to approve ${request.toolName} failed, so it is not approved: ${error}`)
+        return 'unavailable'
+      }
+    },
+    true,
+  )
 
   // A request from another agent belongs to dsh's own (agent-scoped) answerers.
   ctx.on(

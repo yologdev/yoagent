@@ -6,7 +6,8 @@
 //                            agent (as dsh-univer-office's tools do)
 //   fixture_steer  {text}  → steers the calling agent with the text
 //                            (`agent.steer`), → "steered"
-//   fixture_turns  {}      → how many turns the agent's session has opened
+//   fixture_turns  {}      → the agent's session's turns, as JSON:
+//                            {starts, ends: ["completed", "aborted:user", …]}
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
@@ -18,7 +19,14 @@ const TEXT_OUTPUT = {
   render: (_args: unknown, value: string) => [{ type: 'text' as const, text: value }],
 }
 
-type Exec = { agent?: { id: string; session: { header: { cwd?: string }; seq: number | bigint; eventAt(i: number): { type: string } }; steer(m: unknown): void } }
+type Event = { type: string; data?: { reason?: { kind: string; reason?: { kind: string } } } }
+type Exec = {
+  agent?: {
+    id: string
+    session: { header: { cwd?: string }; seq: number | bigint; eventAt(i: number): Event }
+    steer(m: unknown): void
+  }
+}
 
 const agentOf = (exec: Exec | undefined) => {
   if (!exec?.agent) throw new Error('SESSION_SCOPE_UNAVAILABLE: this tool needs a calling agent with a workspace')
@@ -55,9 +63,17 @@ export function apply(ctx: any) {
       output: TEXT_OUTPUT,
       async execute(_args: unknown, exec: Exec) {
         const session = agentOf(exec).session
-        let turns = 0
-        for (let i = 0; i < Number(session.seq); i++) if (session.eventAt(i)?.type === 'turn/start') turns++
-        return String(turns)
+        let starts = 0
+        const ends: string[] = []
+        for (let i = 0; i < Number(session.seq); i++) {
+          const event = session.eventAt(i)
+          if (event?.type === 'turn/start') starts++
+          if (event?.type === 'turn/end') {
+            const reason = event.data?.reason
+            ends.push(reason?.reason ? `${reason.kind}:${reason.reason.kind}` : String(reason?.kind))
+          }
+        }
+        return JSON.stringify({ starts, ends })
       },
     }),
   ]

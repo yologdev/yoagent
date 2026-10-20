@@ -920,31 +920,78 @@ impl HostDispatch for FakeWorkspace {
     }
 }
 
-/// `plugins/dsh/dsh-host.json`'s rows, as a host loads them: the stand-in's
-/// file under `plugins/dsh`, the session log under `sessions`.
-fn dsh_host_rows(sessions: &Path) -> Vec<Value> {
-    let rows: Vec<Value> =
-        serde_json::from_str(&std::fs::read_to_string(dsh_dir().join("dsh-host.json")).unwrap())
-            .unwrap();
-    rows.into_iter()
-        .map(|mut row| {
-            if row["name"] == "dsh-host.ts" {
-                row["name"] = json!(dsh_dir().join("dsh-host.ts"));
-            }
-            if row["id"] == "dsh-session-persistence" {
-                row["config"] = json!({ "root": sessions });
-            }
-            row
-        })
-        .collect()
+/// What a host with the stand-in loads: DSH's prompt and tool registry, then
+/// `adapters::dsh_host_rows` (`host-services.json` with `dsh-host.json`'s
+/// rows in), then the fixtures, the adapter and the dialogs.
+fn stand_in_rows(sessions: &Path) -> Value {
+    let mut rows = vec![
+        json!({ "id": "system-prompt", "name": "@deepseek-ai/dsh-system-prompt" }),
+        json!({ "id": "tools", "name": "@deepseek-ai/dsh-tools" }),
+    ];
+    rows.extend(yoagent_rutis::adapters::dsh_host_rows(&dsh_dir(), sessions).unwrap());
+    rows.extend([
+        json!({ "id": "fixture", "name": dsh_dir().join("fixture-tools.ts") }),
+        json!({ "id": "fixture-agent", "name": dsh_dir().join("fixture-needs-agent.ts") }),
+        json!({ "id": "adapter", "name": dsh_dir().join("dsh-tools-adapter.ts") }),
+        json!({ "id": "dialogs", "name": dsh_dir().join("host-dialogs.ts") }),
+    ]);
+    Value::Array(rows)
 }
 
-/// With `dsh-host.ts` (and `dsh-host.json`'s rows) loaded, each call carries
-/// a stand-in DSH agent: a dsh tool that needs one works in the host's
-/// workspace; the run is one DSH turn; steering goes to the host's
-/// `host_session.wake`; a policy's `ask` goes through DSH's own approval
-/// service to the host's `ui` (yes → runs, no → rejected); a host reset (a
-/// new generation) gives a new agent; the session log is written.
+/// A host with the stand-in: fake `host_session` / `host_workspace`, a
+/// scripted `ui`, DSH's homes under `dir`.
+async fn stand_in_host(
+    runtime: &Path,
+    dir: &Path,
+    session: Arc<FakeSession>,
+    ui: Arc<ScriptedUi>,
+) -> Host {
+    let work = dir.join("work");
+    let home = dir.join("dsh-home");
+    for d in [&work, &home] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let host = host_serving(
+        runtime,
+        Some(ui),
+        &[
+            ("DSH_HOME", &home),
+            ("DSH_AGENTS_HOME", &home),
+            ("HOME", &home),
+        ],
+        vec![
+            ("host_session", session as Arc<dyn HostDispatch>),
+            ("host_workspace", Arc::new(FakeWorkspace(work))),
+        ],
+    )
+    .await;
+    host.load(stand_in_rows(&dir.join("sessions"))).await;
+    host
+}
+
+fn fake_session() -> Arc<FakeSession> {
+    Arc::new(FakeSession {
+        generation: AtomicU64::new(1),
+        woken: Mutex::new(Vec::new()),
+    })
+}
+
+/// `fixture_turns`' answer: turns started, and each turn's end reason.
+fn turns(text: &str) -> (u64, Vec<String>) {
+    let v: Value = serde_json::from_str(text).unwrap_or_else(|_| panic!("{text}"));
+    (
+        v["starts"].as_u64().unwrap(),
+        serde_json::from_value(v["ends"].clone()).unwrap(),
+    )
+}
+
+/// With `dsh-host.ts` loaded (rows from `adapters::dsh_host_rows`), each call
+/// carries a stand-in DSH agent: a dsh tool that needs one works in the
+/// host's workspace; each run is one DSH turn, ended `completed` at its
+/// finish; steering goes to the host's `host_session.wake`; a policy's
+/// `ask` goes through DSH's own approval service to the host's `ui`, with
+/// the call's arguments (yes → runs, no → rejected); a host reset (a new
+/// generation) gives a new agent; the session logs are written.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stand_in_agent_gives_dsh_plugins_a_workspace_turns_and_approvals() {
     let Some(runtime) = node_runtime() else {
@@ -952,12 +999,7 @@ async fn a_stand_in_agent_gives_dsh_plugins_a_workspace_turns_and_approvals() {
     };
     let dir = tempfile::tempdir().unwrap();
     let work = dir.path().join("work");
-    let sessions = dir.path().join("sessions");
-    std::fs::create_dir_all(&work).unwrap();
-    let session = Arc::new(FakeSession {
-        generation: AtomicU64::new(1),
-        woken: Mutex::new(Vec::new()),
-    });
+    let session = fake_session();
     let ui = Arc::new(ScriptedUi {
         frontends: 1,
         ..ScriptedUi::default()
@@ -966,38 +1008,18 @@ async fn a_stand_in_agent_gives_dsh_plugins_a_workspace_turns_and_approvals() {
         .lock()
         .unwrap()
         .extend([json!(true), json!(false)]);
-    let host = host_serving(
-        &runtime,
-        Some(ui.clone()),
-        &[],
-        vec![
-            ("host_session", session.clone() as Arc<dyn HostDispatch>),
-            ("host_workspace", Arc::new(FakeWorkspace(work.clone()))),
-        ],
-    )
-    .await;
-    let mut rows = vec![
-        json!({ "id": "system-prompt", "name": "@deepseek-ai/dsh-system-prompt" }),
-        json!({ "id": "tools", "name": "@deepseek-ai/dsh-tools" }),
-    ];
-    rows.extend(dsh_host_rows(&sessions));
-    rows.extend([
-        json!({ "id": "fixture", "name": dsh_dir().join("fixture-tools.ts") }),
-        json!({ "id": "fixture-agent", "name": dsh_dir().join("fixture-needs-agent.ts") }),
-        json!({ "id": "adapter", "name": dsh_dir().join("dsh-tools-adapter.ts") }),
-        json!({ "id": "dialogs", "name": dsh_dir().join("host-dialogs.ts") }),
-    ]);
-    host.load(Value::Array(rows)).await;
+    let host = stand_in_host(&runtime, dir.path(), session.clone(), ui.clone()).await;
 
-    let mut agent = agent(vec![
-        call("fixture_where", json!({})),
-        call("fixture_steer", json!({ "text": "look again" })),
-        call("fixture_guarded", json!({})),
-        call("fixture_turns", json!({})),
-        text("done"),
-    ])
-    .0
-    .with_extension(host.bridge.extension());
+    let mut agent = agent_again(
+        &host,
+        vec![
+            call("fixture_where", json!({})),
+            call("fixture_steer", json!({ "text": "look again" })),
+            call("fixture_guarded", json!({ "path": "notes.txt" })),
+            call("fixture_turns", json!({})),
+            text("done"),
+        ],
+    );
     let (_, results) = tokio::time::timeout(Duration::from_secs(60), run(&mut agent, "go"))
         .await
         .expect("the run finishes");
@@ -1007,8 +1029,11 @@ async fn a_stand_in_agent_gives_dsh_plugins_a_workspace_turns_and_approvals() {
         "{results:?}"
     );
     let first_agent = whereabouts.split(' ').next().unwrap().to_owned();
+    assert!(
+        first_agent.starts_with("yoagent-"),
+        "a unique session id: {first_agent}"
+    );
     assert_eq!(results[1].1, "steered", "{results:?}");
-    assert_eq!(*session.woken.lock().unwrap(), ["look again"]);
     // The policy's `ask` went through DSH's approval service to the user: yes.
     assert_eq!(
         results[2],
@@ -1017,16 +1042,24 @@ async fn a_stand_in_agent_gives_dsh_plugins_a_workspace_turns_and_approvals() {
     );
     let asked = ui.asked.lock().unwrap().clone();
     assert_eq!(asked[0]["kind"], "confirm", "{asked:?}");
+    let shown = asked[0]["message"].as_str().unwrap();
+    assert!(shown.contains("fixture_guarded needs a yes"), "{shown}");
     assert!(
-        asked[0]["message"]
-            .as_str()
-            .unwrap()
-            .contains("fixture_guarded needs a yes"),
-        "{asked:?}"
+        shown.contains("notes.txt"),
+        "the arguments are shown: {shown}"
     );
-    assert_eq!(results[3].1, "1", "one run, one DSH turn: {results:?}");
+    assert_eq!(turns(&results[3].1), (1, vec![]), "{results:?}");
+    // Steering is sent to the host as it comes (fire and forget).
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while session.woken.lock().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the steering reaches the host");
+    assert_eq!(*session.woken.lock().unwrap(), ["look again"]);
 
-    // A second run: a second turn of the same agent; the user says no.
+    // A second run: the first turn ended `completed`; the user says no.
     let mut agent = agent_again(
         &host,
         vec![
@@ -1038,26 +1071,132 @@ async fn a_stand_in_agent_gives_dsh_plugins_a_workspace_turns_and_approvals() {
     );
     let (_, results) = run(&mut agent, "go").await;
     assert!(results[0].2, "rejected: {results:?}");
-    assert_eq!(results[1].1, "2", "{results:?}");
+    assert_eq!(
+        turns(&results[1].1),
+        (2, vec!["completed".into()]),
+        "{results:?}"
+    );
     assert!(results[2].1.starts_with(&first_agent), "{results:?}");
 
-    // The host reset: a new generation, a new agent.
+    // The host reset: a new generation, a new agent with a turn of its own.
     session.generation.store(2, Ordering::SeqCst);
-    let mut agent = agent_again(&host, vec![call("fixture_where", json!({})), text("done")]);
+    let mut agent = agent_again(
+        &host,
+        vec![
+            call("fixture_where", json!({})),
+            call("fixture_turns", json!({})),
+            text("done"),
+        ],
+    );
     let (_, results) = run(&mut agent, "go").await;
     assert!(!results[0].2, "{results:?}");
     assert!(
         !results[0].1.starts_with(&first_agent),
         "a new agent: {results:?}"
     );
+    assert_eq!(turns(&results[1].1), (1, vec![]), "{results:?}");
 
     host.root.shutdown().await.unwrap();
     // Both generations' sessions were written.
-    let files = walk(&sessions);
+    let files = walk(&dir.path().join("sessions"));
     assert!(
         files.iter().filter(|f| f.ends_with(".jsonl.zstd")).count() >= 2,
         "{files:?}"
     );
+}
+
+/// A sub-agent's DSH calls join its parent's DSH turn: they neither close it
+/// nor open one of their own, and the parent's finish ends it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sub_agent_joins_its_parent_s_dsh_turn() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let host = stand_in_host(
+        &runtime,
+        dir.path(),
+        fake_session(),
+        Arc::new(ScriptedUi::default()),
+    )
+    .await;
+    let (child, child_seen) = recording(vec![call("fixture_turns", json!({})), text("child done")]);
+    let sub = yoagent::SubAgentTool::from_provider(
+        "helper",
+        child,
+        yoagent::provider::ModelConfig::mock(),
+    )
+    .with_extension(host.bridge.extension());
+    let (parent, _) = agent(vec![
+        call("fixture_turns", json!({})),
+        call("helper", json!({ "task": "count the turns" })),
+        call("fixture_turns", json!({})),
+        text("done"),
+    ]);
+    let mut parent = parent
+        .with_sub_agent(sub)
+        .with_extension(host.bridge.extension());
+    let (_, results) = run(&mut parent, "go").await;
+    assert_eq!(turns(&results[0].1), (1, vec![]), "{results:?}");
+    // The child made its DSH call (a second request after its tool), and the
+    // parent's next call still sees the one turn: the child neither closed it
+    // nor opened another.
+    assert_eq!(
+        child_seen.lock().unwrap().len(),
+        2,
+        "the child called its tool"
+    );
+    assert_eq!(
+        turns(&results[2].1),
+        (1, vec![]),
+        "still the parent's one turn: {results:?}"
+    );
+    // The next run finds the parent's turn ended `completed`.
+    let mut next = agent_again(&host, vec![call("fixture_turns", json!({})), text("done")]);
+    let (_, results) = run(&mut next, "go").await;
+    assert_eq!(
+        turns(&results[0].1),
+        (2, vec!["completed".into()]),
+        "{results:?}"
+    );
+    host.root.shutdown().await.unwrap();
+}
+
+/// A host whose workspace is not an absolute path gets no stand-in: the
+/// call fails, saying why.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stand_in_needs_an_absolute_workspace() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("dsh-home");
+    std::fs::create_dir_all(&home).unwrap();
+    let host = host_serving(
+        &runtime,
+        None,
+        &[
+            ("DSH_HOME", &home),
+            ("DSH_AGENTS_HOME", &home),
+            ("HOME", &home),
+        ],
+        vec![
+            ("host_session", fake_session() as Arc<dyn HostDispatch>),
+            (
+                "host_workspace",
+                Arc::new(FakeWorkspace(PathBuf::from("relative/dir"))),
+            ),
+        ],
+    )
+    .await;
+    host.load(stand_in_rows(&dir.path().join("sessions"))).await;
+    let mut agent = agent_again(&host, vec![call("fixture_where", json!({})), text("done")]);
+    let (_, results) = run(&mut agent, "go").await;
+    assert!(
+        results[0].2 && results[0].1.contains("not an absolute path"),
+        "{results:?}"
+    );
+    host.root.shutdown().await.unwrap();
 }
 
 /// A fresh agent over the same host, scripted with `responses`.
@@ -1147,17 +1286,16 @@ async fn dsh_univer_office_works_through_the_stand_in_agent() {
         json!({ "id": "tools", "name": "@deepseek-ai/dsh-tools" }),
     ];
     rows.extend(
-        dsh_host_rows(&dir.path().join("sessions"))
-            .into_iter()
-            .map(|mut row| {
-                if row["id"] == "dsh-host" {
-                    row["name"] = json!(base.join("dsh-host.ts"));
-                }
-                row
-            }),
+        yoagent_rutis::adapters::dsh_host_rows(&base, &dir.path().join("sessions")).unwrap(),
     );
+    // A free port for univer's gateway.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
     rows.extend([
-        json!({ "id": "univer", "name": "dsh-univer-office", "config": { "telemetry": false, "gatewayPort": 19287, "gatewayStartupTimeoutMs": 30000 } }),
+        json!({ "id": "univer", "name": "dsh-univer-office", "config": { "telemetry": false, "gatewayPort": port, "gatewayStartupTimeoutMs": 30000 } }),
         json!({ "id": "adapter", "name": base.join("dsh-tools-adapter.ts") }),
         json!({ "id": "dialogs", "name": base.join("host-dialogs.ts") }),
     ]);
