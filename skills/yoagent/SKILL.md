@@ -5,7 +5,7 @@ description: Use when building, extending or upgrading an agent on the yoagent R
 
 # yoagent: which feature for which job
 
-Written for **yoagent 0.25.10** (and yoagent-rutis 0.7.0); the recipes
+Written for **yoagent 0.25.11** (and yoagent-rutis 0.7.1); the recipes
 below are compiled by `tests/skill_test.rs`, line for line. Check what you
 build against: `cargo tree -p yoagent` or `Cargo.lock`. If you are on an
 older version, read [What changed](#what-changed) first.
@@ -198,6 +198,11 @@ and its examples.
 
 Newest first; the full list is `CHANGELOG.md`.
 
+- **0.25.11** — `tool_output_max_lines` is one budget per tool result,
+  shared by its text blocks (a many-block MCP result reached the model as
+  blocks × the budget): short blocks stay whole, long ones split the rest,
+  each cut with its own marker and stash key. Older multi-block results
+  over the budget are cut once more at their first level-1 compaction.
 - **0.25.10** — `ModelConfig::presets()` / `preset(provider, id)` /
   `generic(provider, id)`: for a model given as text, write
   `preset(p, id).or_else(|| generic(p, id))` and tell the user when the
@@ -264,6 +269,12 @@ Newest first; the full list is `CHANGELOG.md`.
 - **0.24.2** — built-in tool sandbox fixes (path escapes, `search` flag
   injection, Gemini key out of the URL, tool panics contained).
 - **0.24.1** — `retry_safe_events`.
+- **yoagent-rutis 0.7.1** — pi adapter: `model` / `models` give
+  extensions `ctx.model` (default: the run's model id under provider
+  `yoagent`) and a read-only `ctx.modelRegistry`; `execFor` grants
+  `pi.exec` per extension file. pi observer events (`agent_end`,
+  `turn_end`, `tool_execution_*`, …) now fire. Opt-in DSH host
+  (`adapters::dsh_host_rows`) gives DSH plugins a stand-in DSH agent.
 - **yoagent-rutis 0.7.0** — pi adapter: **`pi.exec` is closed by
   default** (row config `exec`: `true`, or an exact command list; only the
   command is checked, so granting `git`/`sh`/`node` grants anything; a
