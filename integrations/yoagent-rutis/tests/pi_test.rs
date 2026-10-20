@@ -2783,6 +2783,12 @@ async fn trust_and_wake_per_extension() {
         json!({ "wakeFor": { dir.path().join("typo.ts").to_str().unwrap(): true } }),
         json!({ "projectTrustedFor": { dir.path().join("typo.ts").to_str().unwrap(): true } }),
         json!({ "projectTrustedFor": { woken.to_str().unwrap(): "yes" } }),
+        // One file under two spellings.
+        json!({ "wakeFor": {
+            woken.to_str().unwrap(): true,
+            dir.path().join(".").join("woken.ts").to_str().unwrap(): false,
+        } }),
+        json!({ "wakeFor": true }),
     ] {
         let host = crate::host(&runtime).await;
         let mut row = json!({ "extensions": [&woken] });
@@ -2791,9 +2797,98 @@ async fn trust_and_wake_per_extension() {
             .extend(bad.as_object().unwrap().clone());
         let failures = host.try_load(adapter_row(row)).await;
         assert!(
-            failures.contains("not loaded") || failures.contains("must be"),
+            failures.contains("not loaded")
+                || failures.contains("must")
+                || failures.contains("twice"),
             "{bad}: {failures}"
         );
         host.root.shutdown().await.unwrap();
     }
+}
+
+/// The gate runs exactly what it judged: an extension that changes its
+/// argument array while the host is asked still runs the judged command, a
+/// `cwd` that is not a path string is refused unjudged, and a granted wake
+/// from an extension's factory (while extensions load) throws as pi's own
+/// runtime does, reaching no host.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_gate_runs_what_it_judged() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let ext = extension(
+        dir.path(),
+        "tricky.ts",
+        r#"
+let atLoad = 'no error'
+export default function (pi) {
+  try { pi.sendUserMessage('from the factory') } catch (e) { atLoad = e.message }
+  const tool = (name, run) => pi.registerTool({
+    name, label: name, description: 'x', parameters: { type: 'object', properties: {} },
+    async execute() { return { content: [{ type: 'text', text: await run() }], details: {} } },
+  })
+  tool('swap_args', async () => {
+    const args = ['yes']
+    const pending = pi.exec('echo', args)
+    args[0] = 'swapped'
+    const r = await pending
+    return `code=${r.code} out=${r.stdout.trim()}`
+  })
+  tool('url_cwd', async () => {
+    const r = await pi.exec('echo', ['free'], { cwd: new URL('file:///') })
+    return `code=${r.code} err=${r.stderr}`
+  })
+  tool('at_load', async () => atLoad)
+}
+"#,
+    );
+    let approval = Arc::new(FakeApproval::default());
+    let session = Arc::new(WakeLog::default());
+    let host = host_with(
+        &runtime,
+        vec![
+            ("host_approval", approval.clone() as Arc<dyn HostDispatch>),
+            ("host_session", session.clone() as Arc<dyn HostDispatch>),
+        ],
+    )
+    .await;
+    let mut rows = adapter_row(json!({
+        "extensions": [&ext],
+        "cwd": dir.path(),
+        "exec": "gate",
+        "wakeFor": { ext.to_str().unwrap(): true },
+    }));
+    rows.as_array_mut().unwrap().extend([
+        json!({ "id": "host-approval", "name": pi_dir().join("host-approval.ts") }),
+        json!({ "id": "host-session", "name": pi_dir().join("host-session.ts") }),
+    ]);
+    host.load(rows).await;
+    let (agent, _) = agent(vec![
+        calls(&[
+            ("swap_args", json!({})),
+            ("url_cwd", json!({})),
+            ("at_load", json!({})),
+        ]),
+        text("done"),
+    ]);
+    let mut agent = agent
+        .with_tool_execution(yoagent::ToolExecutionStrategy::Sequential)
+        .with_extension(host.bridge.extension());
+    let (_, results) = run(&mut agent, "go").await;
+    assert_eq!(results[0].1, "code=0 out=yes", "{results:?}");
+    assert!(
+        results[1].1.starts_with("code=126") && results[1].1.contains("must be a path string"),
+        "{results:?}"
+    );
+    assert!(
+        results[2].1.contains("Extension runtime not initialized"),
+        "{results:?}"
+    );
+    // `swap_args` was judged (and asked about) as `echo yes`; `url_cwd` never reached the host.
+    let seen = approval.0.lock().unwrap().clone();
+    assert_eq!(seen[0], ("judge".into(), json!([["echo", "yes"]])));
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert!(session.0.lock().unwrap().is_empty());
+    host.root.shutdown().await.unwrap();
 }

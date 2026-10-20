@@ -814,6 +814,9 @@ async function writeWrapper(dir: string, resolved: string): Promise<string> {
   return wrapper
 }
 
+/** A host service, or why it could not be had (not provided, or the lookup failed). */
+type Lookup<T> = { service: T } | { missing: string }
+
 /** What the per-extension gate needs from the adapter, looked up when a call is made. */
 interface Gates {
   /** The grant for the extension at `path`: its own in `execFor`, else the row-wide `exec`. */
@@ -822,9 +825,14 @@ interface Gates {
   wakes(path: string): boolean
   /** The adapter's `cwd`, which a relative `options.cwd` resolves against. */
   cwd: string
-  approval(): HostApproval | undefined
-  session(): HostSession | undefined
+  /** Whether pi's runtime actions are live: not while extensions load, nor after unloading. */
+  active(): boolean
+  approval(): Lookup<HostApproval>
+  session(): Lookup<HostSession>
 }
+
+/** What `orCancel` resolves when the call is cancelled first (never a host's answer). */
+const CANCELLED = Symbol('cancelled')
 
 /**
  * Each extension's own `pi`: `exec` as its grant allows (`Gates.execFor`), and, with `wakeFor`,
@@ -832,66 +840,101 @@ interface Gates {
  * pi's API as it is.
  */
 function gatePi(gates: Gates) {
-  const refusedOnce = new Set<string>()
-  const wakeFailed = new Set<string>()
+  const warned = new Set<string>()
+  /** A warning once per key (extension, command and kind of trouble): a new kind is said again. */
+  const once = (key: string, text: string) => {
+    if (warned.has(key)) return report('debug', text)
+    warned.add(key)
+    report('warn', text)
+  }
   /** Wakes go to the host one after another, in the order extensions sent them. */
   let wakes: Promise<unknown> = Promise.resolve()
   return (pi: PiApi, path: string): PiApi => {
     const grant = gates.execFor(path)
-    const refuse = (command: string, why: string): ExecResult => {
-      const key = `${path}\0${command}`
-      if (!refusedOnce.has(key)) {
-        refusedOnce.add(key)
-        report('warn', `[pi] ${path}: refused ${why}`)
-      }
+    /** A refused call (126); said once per extension, command and `kind`, a cancel only at debug. */
+    const refuse = (command: string, kind: string, why: string): ExecResult => {
+      if (kind === 'cancelled') report('debug', `[pi] ${path}: refused ${why}`)
+      else once(`exec\0${path}\0${command}\0${kind}`, `[pi] ${path}: refused ${why}`)
       return { stdout: '', stderr: why, code: 126, killed: false }
     }
-    /** Asks the host (`"gate"`): runs the call only when the judge frees it or the user allows it. */
-    const approved = async (command: string, args: string[], options?: ExecOptions): Promise<ExecResult> => {
-      const approval = gates.approval()
-      const what = `pi.exec("${command}")`
-      if (!approval) {
-        return refuse(command, `${what} needs the host's approval (\`exec\` "gate"), and the host provides no host_approval service (load host-approval.ts)`)
+    /**
+     * Asks the host (`"gate"`): runs the call only when the judge frees it or the user allows it.
+     * What runs is exactly what was judged: the command, arguments and directory are copied on
+     * entry (the extension's own array and options are not read again), and the directory is
+     * resolved against the adapter's `cwd`.
+     */
+    const approved = async (command: unknown, args: unknown, options?: ExecOptions): Promise<ExecResult> => {
+      const argv = [String(command), ...(Array.isArray(args) ? args.map(String) : [])]
+      const what = `pi.exec("${argv[0]}")`
+      const given = options?.cwd
+      if (given !== undefined && typeof given !== 'string') {
+        return refuse(argv[0], 'cwd', `${what}: options.cwd must be a path string to be judged, not ${typeof given}`)
       }
-      const argv = [command, ...(args ?? []).map(String)]
-      const cwd = typeof options?.cwd === 'string' ? resolve(gates.cwd, options.cwd) : undefined
-      // What runs is what was judged: the same resolved directory.
-      const run = () => pi.exec(command, args, cwd === undefined ? options : { ...options, cwd })
-      const signal = options?.signal
-      const cancelled = () => refuse(command, `${what} was cancelled while the host was asked`)
+      const cwd = given === undefined ? undefined : resolve(gates.cwd, given)
+      const signal = options?.signal instanceof AbortSignal ? options.signal : undefined
+      const timeout = typeof options?.timeout === 'number' ? options.timeout : undefined
+      const run = () => pi.exec(argv[0], argv.slice(1), { signal, timeout, cwd: cwd ?? gates.cwd })
+      const approval = gates.approval()
+      if ('missing' in approval) {
+        return refuse(argv[0], 'no-service', `${what} needs the host's approval (\`exec\` "gate"): ${approval.missing}`)
+      }
+      const host = approval.service
+      const cancelled = () => refuse(argv[0], 'cancelled', `${what} was cancelled while the host was asked`)
       if (signal?.aborted) return cancelled()
-      // Until the call's own cancel, if it has one.
-      const orCancel = <T>(promise: Promise<T>) =>
-        signal
-          ? Promise.race([promise, new Promise<'cancelled'>((done) => signal.addEventListener('abort', () => done('cancelled'), { once: true }))])
-          : promise
-      let verdict: Awaited<ReturnType<HostApproval['judge']>> | 'cancelled'
+      /** `promise`, or CANCELLED at the call's own cancel; the listener is removed either way. */
+      const orCancel = async <T>(promise: Promise<T>): Promise<T | typeof CANCELLED> => {
+        if (!signal) return promise
+        let onAbort: (() => void) | undefined
+        try {
+          return await Promise.race([promise, new Promise<typeof CANCELLED>((done) => {
+            onAbort = () => done(CANCELLED)
+            signal.addEventListener('abort', onAbort, { once: true })
+          })])
+        } finally {
+          if (onAbort) signal.removeEventListener('abort', onAbort)
+        }
+      }
+      let verdict: Awaited<ReturnType<HostApproval['judge']>> | typeof CANCELLED
       try {
         verdict = await orCancel(
-          bounded('host_approval.judge', Promise.resolve().then(() => (cwd === undefined ? approval.judge(argv) : approval.judge(argv, cwd))), HOST_CALL_MS),
+          bounded('host_approval.judge', Promise.resolve().then(() => (cwd === undefined ? host.judge(argv) : host.judge(argv, cwd))), HOST_CALL_MS),
         )
       } catch (error) {
-        return refuse(command, `${what}: the host could not judge it: ${message(error)}`)
+        return refuse(argv[0], 'judge-failed', `${what}: the host could not judge it: ${message(error)}`)
       }
-      if (verdict === 'cancelled') return cancelled()
+      if (verdict === CANCELLED) return cancelled()
       if (verdict?.free === true) return run()
+      if (typeof verdict?.free !== 'boolean') {
+        report('debug', `[pi] ${path}: host_approval.judge answered ${JSON.stringify(verdict)} (no boolean \`free\`); asking`)
+      }
       const question = typeof verdict?.question === 'string' && verdict.question ? verdict.question : `Run ${argv.join(' ')}?`
       const details = typeof verdict?.details === 'string' ? verdict.details : null
+      // Not bounded here: the host's own question times out (an "unanswered"). A cancel does not
+      // withdraw it: the question stays until then, and a later answer is only logged.
+      const asked = Promise.resolve().then(() => host.ask(question, details, path))
       let answer: unknown
       try {
-        // Not bounded here: the host's own question times out (an "unanswered").
-        answer = await orCancel(Promise.resolve().then(() => approval.ask(question, details, path)))
+        answer = await orCancel(asked)
       } catch (error) {
-        return refuse(command, `${what}: the host's approval failed: ${message(error)}`)
+        return refuse(argv[0], 'ask-failed', `${what}: the host's approval failed: ${message(error)}`)
       }
-      if (answer === 'cancelled') return cancelled()
+      if (answer === CANCELLED) {
+        asked.then(
+          (late) => report('debug', `[pi] ${path}: ${what} was answered ${JSON.stringify(late)} after it was cancelled; not run`),
+          () => {},
+        )
+        return cancelled()
+      }
       if (answer === 'allow') return run()
-      return refuse(command, `${what} was not approved by the host (${typeof answer === 'string' ? answer : 'no answer'})`)
+      const said = typeof answer === 'string' ? answer : JSON.stringify(answer) ?? 'no answer'
+      return refuse(argv[0], `declined:${said}`, `${what} was not approved by the host (${said})`)
     }
     const gated = (command: string, args: string[], options?: ExecOptions): Promise<ExecResult> => {
       if (grant === 'gate') return approved(command, args, options)
       if (Array.isArray(grant) && grant.includes(command)) return pi.exec(command, args, options)
-      return Promise.resolve(refuse(command, `pi.exec("${command}") is not allowed by the host (the adapter's \`exec\` / \`execFor\` setting)`))
+      return Promise.resolve(
+        refuse(String(command), 'not-allowed', `pi.exec("${command}") is not allowed by the host (the adapter's \`exec\` / \`execFor\` setting)`),
+      )
     }
     // A copy, not a Proxy: a Proxy's target still hands the real `exec` out
     // through `Object.getOwnPropertyDescriptor`. pi's API methods are
@@ -899,27 +942,40 @@ function gatePi(gates: Gates) {
     const own: PiApi = { ...pi }
     if (grant !== true) own.exec = gated
     if (gates.wakes(path)) {
-      /** The content as text to the host's session; a refusal is reported (pi's calls return nothing). */
+      /**
+       * The content as text to the host's session. pi's calls return nothing, so a refusal is
+       * reported: once per extension and reason, repeats at debug.
+       */
       const wake = (content: unknown) => {
-        const said = typeof content === 'string' ? content : Array.isArray(content) ? text(content as Block[]) : JSON.stringify(content)
-        const failed = (why: string) => {
-          if (wakeFailed.has(path)) return
-          wakeFailed.add(path)
-          report('warn', `[pi] ${path}: wake refused: ${why} (reported once per extension)`)
+        // As pi's own runtime refuses actions while extensions load (and after unloading).
+        if (!gates.active()) {
+          throw new Error('Extension runtime not initialized. Action methods cannot be called during extension loading.')
         }
+        const said = typeof content === 'string' ? content : Array.isArray(content) ? text(content as Block[]) : JSON.stringify(content)
+        const failed = (why: string) => once(`wake\0${path}\0${why}`, `[pi] ${path}: wake refused: ${why}`)
         const session = gates.session()
-        if (!session) return failed('the host provides no host_session service (load host-session.ts)')
+        if ('missing' in session) return failed(session.missing)
+        const host = session.service
         wakes = wakes.then(() =>
-          bounded('host_session.wake', Promise.resolve().then(() => session.wake(said ?? '', path)), HOST_CALL_MS).catch((error) =>
-            failed(message(error)),
+          bounded('host_session.wake', Promise.resolve().then(() => host.wake(said ?? '', path)), HOST_CALL_MS).catch((error) =>
+            failed(
+              /took longer than/.test(message(error))
+                ? `no answer within ${HOST_CALL_MS / 1000} s (it may still be delivered; later wakes go on)`
+                : message(error),
+            ),
           ),
         )
       }
       own.sendUserMessage = (content: unknown) => wake(content)
       own.sendMessage = (msg: { content?: unknown }, options?: { triggerTurn?: boolean; deliverAs?: string }) => {
+        const turn = !!(options?.triggerTurn || options?.deliverAs)
+        // Checked before recording, so a wake that cannot be sent does not leave half a call done.
+        if (turn && !gates.active()) {
+          throw new Error('Extension runtime not initialized. Action methods cannot be called during extension loading.')
+        }
         // Recorded as before (pi's own runtime stores it); the turn it asks for is the host's to start.
         ;(pi.sendMessage as (m: unknown, o?: unknown) => void)(msg)
-        if (options?.triggerTurn || options?.deliverAs) wake(msg?.content ?? '')
+        if (turn) wake(msg?.content ?? '')
       }
     }
     return own
@@ -1070,9 +1126,14 @@ export default definePlugin<Config>({
     /** A `…For` setting as a map from resolved files; a bad value or a key naming no loaded extension refuses the load. */
     const keyed = <T>(setting: string, entries: Record<string, unknown> | undefined, valid: (v: unknown) => v is T, expected: string) => {
       const map = new Map<string, T>()
+      if (entries !== undefined && (typeof entries !== 'object' || entries === null || Array.isArray(entries))) {
+        throw new Error(`${setting} must map extension files to settings, not ${JSON.stringify(entries)}`)
+      }
       for (const [path, value] of Object.entries(entries ?? {})) {
         if (!valid(value)) throw new Error(`${setting}["${path}"] must be ${expected}, not ${JSON.stringify(value)}`)
-        map.set(resolveExt(path), value)
+        const file = resolveExt(path)
+        if (map.has(file)) throw new Error(`${setting} names ${file} twice (as "${path}" and another spelling)`)
+        map.set(file, value)
       }
       const unknown = [...map.keys()].filter((path) => !listed.has(path))
       if (unknown.length > 0) throw new Error(`${setting} names extensions that are not loaded: ${unknown.join(', ')}`)
@@ -1098,13 +1159,18 @@ export default definePlugin<Config>({
     /** The latest request's model of any run: for contexts outside a run (`session_start`, ...). */
     let latestModel: string | undefined
     // Host services for the grants: looked up when a call is made, never injected (as `ui`).
-    const lookup = <T>(name: string) => {
+    /** A re-provided host service; why not, when it cannot be had (the error's own text). */
+    const lookup = <T>(hostName: string, plugin: string): Lookup<T> => {
+      const missing = `the host provides no ${hostName} service (load ${plugin})`
       try {
-        return ctx.use<T>(name)
-      } catch {
-        return undefined
+        const service = ctx.use<T>(`pi-${hostName.replace('_', '-')}`)
+        return service ? { service } : { missing }
+      } catch (error) {
+        return { missing: `${missing}: ${message(error)}` }
       }
     }
+    /** pi's runtime actions are live: after load (set below, with the actions) until unloading. */
+    let actionsLive = false
     const loaded = await loadGated(
       config.extensions,
       cwd,
@@ -1112,8 +1178,9 @@ export default definePlugin<Config>({
         execFor: (path) => execFor.get(path) ?? exec,
         wakes: (path) => wakeFor.get(path) === true,
         cwd,
-        approval: () => lookup<HostApproval>('pi-host-approval'),
-        session: () => lookup<HostSession>('pi-host-session'),
+        active: () => actionsLive,
+        approval: () => lookup<HostApproval>('host_approval', 'host-approval.ts'),
+        session: () => lookup<HostSession>('host_session', 'host-session.ts'),
       }),
     )
     if (loaded.errors.length > 0) {
@@ -1460,6 +1527,7 @@ export default definePlugin<Config>({
       }
     }
     runtime.setModel = () => Promise.reject(new Error('pi.setModel() is not available in yoagent'))
+    actionsLive = true
 
     // What does not map: reported once each; deciding events refuse.
     const reported = new Set<string>()
@@ -1683,6 +1751,7 @@ export default definePlugin<Config>({
     let drainObservers: () => Promise<void> = async () => {}
     // Registered first, so a refusal below still shuts the extensions down.
     ctx.effect(async () => {
+      actionsLive = false
       await drainObservers()
       for (const { ext, fn } of handlers('session_shutdown')) {
         try {
