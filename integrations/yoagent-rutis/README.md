@@ -433,8 +433,10 @@ services by the calling row), each bounded at 30 s. Each call carries the
 generation's stand-in agent — registered as a root with DSH's `agents`, its
 id its DSH session's (`yoagent-<uuid>`), its ctx a DSH scope — and each
 top-level run is one DSH turn: `turn/start` at its first DSH call, the
-runs it delegates to join it at any depth (every run tells the host who
-delegated it, from the adapter's `tools` hook), `turn/end` at its `finish`
+runs it delegates to join it at any depth (every run carrying the bridge,
+as its own extension or a parent's tree extension, tells the host who
+delegated it — from the adapter's `tools` and `before_model` hooks; a run
+without the bridge in between breaks the chain), `turn/end` at its `finish`
 (`completed`; a cancelled run `aborted`, a failed one `error` with the run's
 error). One stand-in holds one turn at a time: a turn another top-level run
 finds still open (a lost `finish`, or two top-level runs at once) is closed

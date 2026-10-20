@@ -51,7 +51,7 @@
 
 import { definePlugin } from '@arcships/rutis'
 import { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
-import type { Cancellable, ContentBlock, Outcome, RunInfo, ToolCall, ToolResult, ToolSpec, Yoagent } from '../yoagent.d.ts'
+import type { Cancellable, ContentBlock, Outcome, RunInfo, ToolCall, ToolResult, ToolSpec, Turn, Yoagent } from '../yoagent.d.ts'
 import type { DshHost } from './dsh-host.ts'
 
 /** The slice of `@deepseek-ai/dsh-attachment`'s `AttachmentStore` this adapter uses. */
@@ -193,6 +193,14 @@ export default definePlugin<Config>({
         return undefined
       }
     }
+    /** Tell the DSH host who delegated this run, so its DSH turn is its top-level run's. */
+    const noteRun = (run: RunInfo) => {
+      try {
+        dshHost()?.noteRun(run.run_id, run.parent_run_id)
+      } catch (error) {
+        say('warn', `[dsh] the DSH host could not note run ${run.run_id}: ${error}`)
+      }
+    }
     const maxNote = config?.maxNoteChars ?? 2000
     const say = (level: 'warn' | 'debug', message: string) => {
       // On a host without `log`, rutis's stand-in throws: fall back either way.
@@ -278,12 +286,7 @@ export default definePlugin<Config>({
     ctx.effect(
       yoagent.register(config?.name ?? 'dsh-tools', {
         async tools(run: RunInfo): Promise<ToolSpec[]> {
-          // Every run passes here: the DSH host learns who delegated it (its turn is its root's).
-          try {
-            dshHost()?.noteRun(run.run_id, run.parent_run_id)
-          } catch (error) {
-            say('warn', `[dsh] the DSH host could not note run ${run.run_id}: ${error}`)
-          }
+          noteRun(run)
           return dsh
             .schemas()
             .filter((schema) => !only || only.has(schema.name))
@@ -356,7 +359,10 @@ export default definePlugin<Config>({
           }
         },
 
-        async before_model(turn: Cancellable) {
+        async before_model(turn: Turn & Cancellable) {
+          // Also here: a run that has this bridge only as a parent's tree extension never calls
+          // `tools`, but reaches `before_model` (before any of its tool calls).
+          noteRun(turn)
           if (maxNote === 0) return
           const assembly = await prompt.assemble({ signal: turn.signal })
           const parts: string[] = []

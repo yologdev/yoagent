@@ -1163,14 +1163,12 @@ process.exit(0)
 "#,
         root = sessions.display().to_string()
     );
-    let file = dsh_dir().join(format!("read-logs-{}.mjs", std::process::id()));
-    std::fs::write(&file, script).unwrap();
+    // Evaluated from `plugins/dsh`, so its packages resolve; no file left behind.
     let output = Command::new("node")
-        .arg(&file)
+        .args(["--input-type=module", "-e", &script])
         .current_dir(dsh_dir())
         .output()
         .unwrap();
-    std::fs::remove_file(&file).ok();
     assert!(
         output.status.success(),
         "{}",
@@ -1443,6 +1441,63 @@ async fn dsh_univer_office_works_through_the_stand_in_agent() {
         ui.asked.lock().unwrap().len(),
         1,
         "the merge was asked about"
+    );
+    host.root.shutdown().await.unwrap();
+}
+
+/// The same through a tree extension: the parent installs the bridge with
+/// `with_tree_extension`, so its child carries it only inherited (an
+/// inherited extension's `tools` hook does not run, its `before_model`
+/// does), and the grandchild has it as its own. The grandchild's DSH call
+/// still joins the parent's turn.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tree_extension_s_delegated_runs_join_the_top_level_turn() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let host = stand_in_host(
+        &runtime,
+        dir.path(),
+        fake_session(),
+        Arc::new(ScriptedUi::default()),
+    )
+    .await;
+    let (grandchild, _) = recording(vec![
+        call("fixture_turns", json!({})),
+        text("grandchild done"),
+    ]);
+    let deep = yoagent::SubAgentTool::from_provider(
+        "deep",
+        grandchild,
+        yoagent::provider::ModelConfig::mock(),
+    )
+    .with_extension(host.bridge.extension());
+    let (child, _) = recording(vec![
+        call("deep", json!({ "task": "count" })),
+        text("child done"),
+    ]);
+    let helper = yoagent::SubAgentTool::from_provider(
+        "helper",
+        child,
+        yoagent::provider::ModelConfig::mock(),
+    )
+    .with_tools(vec![Arc::new(deep)]);
+    let (parent, _) = agent(vec![
+        call("fixture_turns", json!({})),
+        call("helper", json!({ "task": "delegate" })),
+        call("fixture_turns", json!({})),
+        text("done"),
+    ]);
+    let mut parent = parent
+        .with_sub_agent(helper)
+        .with_tree_extension(host.bridge.extension());
+    let (_, results) = run(&mut parent, "go").await;
+    assert_eq!(turns(&results[0].1), (1, vec![]), "{results:?}");
+    assert_eq!(
+        turns(&results[2].1),
+        (1, vec![]),
+        "still the parent's one turn: {results:?}"
     );
     host.root.shutdown().await.unwrap();
 }

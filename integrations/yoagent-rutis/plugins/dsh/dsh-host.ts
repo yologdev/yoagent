@@ -30,8 +30,10 @@
 // `host_session.wake` as text.
 //
 // Turns belong to a top-level run: `turn/start` at its first DSH call, the
-// runs it delegates to, at any depth (`noteRun`, from the adapter's `tools`
-// hook, which every run reaches), join it, `turn/end` at its `finish` —
+// runs it delegates to, at any depth, join it (`noteRun`, from the adapter's
+// `tools` and `before_model` hooks: every run that carries the bridge, as its
+// own extension or a parent's tree extension, tells the host who delegated
+// it — a run without the bridge in between breaks the chain), `turn/end` at its `finish` —
 // `completed`, or for a cancelled run `aborted` (user), a failed one `error`
 // with the run's error. DSH's approvals need the open turn. One stand-in
 // holds one turn at a time: a turn another top-level run finds still open
