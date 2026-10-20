@@ -51,7 +51,7 @@
 
 import { definePlugin } from '@arcships/rutis'
 import { renderPrompt } from '@deepseek-ai/dsh-system-prompt'
-import type { Cancellable, ContentBlock, Outcome, ToolCall, ToolResult, ToolSpec, Yoagent } from '../yoagent.d.ts'
+import type { Cancellable, ContentBlock, Outcome, RunInfo, ToolCall, ToolResult, ToolSpec, Yoagent } from '../yoagent.d.ts'
 import type { DshHost } from './dsh-host.ts'
 
 /** The slice of `@deepseek-ai/dsh-attachment`'s `AttachmentStore` this adapter uses. */
@@ -277,7 +277,13 @@ export default definePlugin<Config>({
 
     ctx.effect(
       yoagent.register(config?.name ?? 'dsh-tools', {
-        async tools(): Promise<ToolSpec[]> {
+        async tools(run: RunInfo): Promise<ToolSpec[]> {
+          // Every run passes here: the DSH host learns who delegated it (its turn is its root's).
+          try {
+            dshHost()?.noteRun(run.run_id, run.parent_run_id)
+          } catch (error) {
+            say('warn', `[dsh] the DSH host could not note run ${run.run_id}: ${error}`)
+          }
           return dsh
             .schemas()
             .filter((schema) => !only || only.has(schema.name))
@@ -296,7 +302,7 @@ export default definePlugin<Config>({
               agent = await host.agentFor(call.run_id, call.parent_run_id, call.signal)
             } catch (error) {
               const why = error instanceof Error ? error.message : String(error)
-              say('warn', `[dsh] the DSH host has no agent for ${call.tool}: ${why}`)
+              if (!call.signal.aborted) say('warn', `[dsh] the DSH host has no agent for ${call.tool}: ${why}`)
               return { text: `the DSH host has no agent for this call: ${why}`, is_error: true }
             }
           }
@@ -339,7 +345,12 @@ export default definePlugin<Config>({
         // The run's DSH turn, if a stand-in opened one, ends with it.
         async finish(outcome: Outcome & Cancellable) {
           try {
-            await dshHost()?.endRun(outcome.run_id, outcome.end, outcome.reason)
+            // A failed run says why in `error` (and which extension failed it); a stopped one in `reason`.
+            const why =
+              outcome.end === 'failed'
+                ? [outcome.error, outcome.extension ? `(extension ${outcome.extension})` : undefined].filter(Boolean).join(' ')
+                : outcome.reason
+            await dshHost()?.endRun(outcome.run_id, outcome.end, why)
           } catch (error) {
             say('warn', `[dsh] ending the run's DSH turn failed: ${error}`)
           }

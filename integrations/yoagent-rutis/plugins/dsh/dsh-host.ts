@@ -14,8 +14,8 @@
 //   host_workspace  cwd() — the workspace (an absolute path) the stand-in's
 //                   session runs in
 //
-// Each host call is bounded (HOST_CALL_MS) and a tool call's own cancel
-// stops waiting for its stand-in.
+// Each host call is bounded (HOST_CALL_MS), and a tool call's own cancel
+// stops its wait for the stand-in, queued behind other calls or not.
 //
 // One stand-in per host session generation: its id is its DSH session's id
 // (a fresh `yoagent-<uuid>`: DSH's default ids restart at `session-1` in each
@@ -23,17 +23,22 @@
 // as a root with DSH's `agents`, its ctx a DSH scope (`createScope`), its
 // session prepared, entered and announced in DSH's own `sessions` with
 // `meta.cwd` the workspace. It never runs a model: its inbox stays empty,
-// and what a plugin puts there, `cancel`, `runMaintenance` and a non-waking
-// `send` do nothing (reported at warn, once per kind and generation);
+// and what a plugin puts there, `cancel` and a non-waking `send` do nothing
+// (reported at warn, once per kind and generation), `runMaintenance` runs its
+// task at once (there is no turn to wait for);
 // `steer` / `followup` / a waking `send` / `inject` go to
 // `host_session.wake` as text.
 //
-// Turns belong to a top-level run: `turn/start` at its first DSH call, its
-// sub-agents' runs (`parent_run_id`) join it, `turn/end` at its `finish` —
-// `completed`, or for a cancelled run `aborted` (user), a failed one `error`.
-// DSH's approvals need the open turn. A turn another top-level run finds
-// still open (a lost `finish`) is closed `aborted` (hook) first, reported;
-// the generation's end and unload close it `aborted` (disposed).
+// Turns belong to a top-level run: `turn/start` at its first DSH call, the
+// runs it delegates to, at any depth (`noteRun`, from the adapter's `tools`
+// hook, which every run reaches), join it, `turn/end` at its `finish` —
+// `completed`, or for a cancelled run `aborted` (user), a failed one `error`
+// with the run's error. DSH's approvals need the open turn. One stand-in
+// holds one turn at a time: a turn another top-level run finds still open
+// (a lost `finish`, or two top-level runs at once) is closed `aborted` (hook)
+// first, reported; the generation's end and unload close it `aborted`
+// (disposed). The log is flushed after a turn ends without holding up
+// `finish` (bounded by yoagent at 5 s).
 //
 // The session log: `sessionPersistence` (DSH's jsonl backend, from
 // `dsh-host.json`) is opened once per generation; from then on the backend
@@ -56,6 +61,9 @@ export const STAND_IN = Symbol.for('yoagent-rutis.dsh.stand-in')
 
 /** How long one call to a host service may take. */
 const HOST_CALL_MS = 30_000
+
+/** How long a call may wait for its stand-in, queue included (a generation may need several host calls). */
+const WAIT_MS = 4 * HOST_CALL_MS
 
 /** The host's session service (yobuild's `host_session`). */
 interface HostSession {
@@ -100,8 +108,10 @@ export interface DshHost {
    * Throws when the host refuses one; `signal` stops the wait.
    */
   agentFor(runId: string, parentRunId: string | null, signal?: AbortSignal): Promise<unknown>
-  /** Run `runId` finished: the turn it owns ends. */
-  endRun(runId: string, end: RunEnd, reason?: string): Promise<void>
+  /** Run `runId` finished: the turn it owns ends (`message`: why it failed or stopped). */
+  endRun(runId: string, end: RunEnd, message?: string): Promise<void>
+  /** Run `runId` started, delegated by `parentRunId` (null for a top-level run). */
+  noteRun(runId: string, parentRunId: string | null): void
 }
 
 /** DSH's turn-end reasons this writes. */
@@ -230,17 +240,20 @@ export function apply(ctx: any) {
     }
   }
 
-  const closeTurn = async (g: Generation, reason: TurnEnd) => {
+  const closeTurn = async (g: Generation, reason: TurnEnd, flush = true) => {
     if (g.owner === undefined) return
     try {
       g.session.append('turn/end', { turn: g.turn, reason })
     } catch (error) {
       say('warn', `[dsh-host] closing DSH turn ${g.turn} failed: ${message(error)}`)
     }
-    for (const [run, root] of rootOf) if (root === g.owner) rootOf.delete(run)
     g.owner = undefined
-    await writeLog(g)
+    if (flush) await writeLog(g)
   }
+
+  /** The top-level run a run belongs to. */
+  const rootFor = (runId: string, parentRunId: string | null) =>
+    rootOf.get(runId) ?? (parentRunId ? (rootOf.get(parentRunId) ?? parentRunId) : runId)
 
   const start = async (key: string, signal?: AbortSignal): Promise<Generation> => {
     const cwd = await bounded(
@@ -267,6 +280,12 @@ export function apply(ctx: any) {
       const session = sessions.prepare(`yoagent-${randomUUID()}`, { meta: { cwd } })
       undo.push(['session', sessions.enter(session)])
       sessions.announce(session)
+      const ranMaintenance = () =>
+        once(
+          `maintenance-${key}`,
+          'info',
+          `[dsh-host] a DSH plugin's maintenance task ran at once (the stand-in has no turn to wait for)`,
+        )
       const ignored = (what: string) =>
         once(
           `ignored-${key}-${what}`,
@@ -297,7 +316,7 @@ export function apply(ctx: any) {
         cancel: () => ignored('cancel'),
         whenIdle: async () => {},
         runMaintenance: async (task: (signal: AbortSignal) => Promise<unknown>) => {
-          ignored('run maintenance')
+          ranMaintenance()
           return task(new AbortController().signal)
         },
         send: (msg: unknown, _target: unknown, wakeup: boolean) =>
@@ -373,37 +392,46 @@ export function apply(ctx: any) {
     if (current?.key === key) return current
     const old = current
     current = undefined
-    rootOf.clear()
     await old?.end()
     current = await start(key, signal)
     return current
   }
 
   const host: DshHost = {
+    noteRun: (runId, parentRunId) => {
+      rootOf.set(runId, rootFor(runId, parentRunId))
+    },
+    // A cancelled call stops waiting, also while queued behind other calls.
     agentFor: (runId, parentRunId, signal) =>
-      serial(async () => {
-        if (closed) throw new Error('the DSH host is unloading')
-        const g = await generation(signal)
-        const root = parentRunId ? (rootOf.get(parentRunId) ?? parentRunId) : runId
-        rootOf.set(runId, root)
-        if (g.owner === root) return g.agent
-        if (g.owner !== undefined) {
-          // Another top-level run's turn is still open: it ended without its `finish`.
-          say(
-            'warn',
-            `[dsh-host] run ${g.owner}'s DSH turn was still open when run ${root} started; it is closed as aborted`,
-          )
-          await closeTurn(g, {
-            kind: 'aborted',
-            reason: { kind: 'hook', reason: 'its yoagent run ended without finishing' },
-          })
-        }
-        g.turn++
-        g.session.append('turn/start', { turn: g.turn })
-        g.owner = root
-        return g.agent
-      }),
-    endRun: (runId, end, reason) =>
+      bounded(
+        'waiting for the DSH host',
+        serial(async () => {
+          if (closed) throw new Error('the DSH host is unloading')
+          signal?.throwIfAborted()
+          const g = await generation(signal)
+          const root = rootFor(runId, parentRunId)
+          rootOf.set(runId, root)
+          if (g.owner === root) return g.agent
+          if (g.owner !== undefined) {
+            // Another top-level run's turn is still open: it ended without its `finish`.
+            say(
+              'warn',
+              `[dsh-host] run ${g.owner}'s DSH turn was still open when run ${root} started; it is closed as aborted`,
+            )
+            await closeTurn(g, {
+              kind: 'aborted',
+              reason: { kind: 'hook', reason: 'its yoagent run ended without finishing' },
+            })
+          }
+          g.turn++
+          g.session.append('turn/start', { turn: g.turn })
+          g.owner = root
+          return g.agent
+        }),
+        WAIT_MS,
+        signal,
+      ),
+    endRun: (runId, end, why) =>
       serial(async () => {
         const g = current
         rootOf.delete(runId)
@@ -413,9 +441,12 @@ export function apply(ctx: any) {
           end === 'cancelled'
             ? { kind: 'aborted', reason: { kind: 'user' } }
             : end === 'failed'
-              ? { kind: 'error', error: { message: reason ?? 'the yoagent run failed', code: 'UNKNOWN' } }
+              ? { kind: 'error', error: { message: why || 'the yoagent run failed', code: 'UNKNOWN' } }
               : { kind: 'completed' },
+          false,
         )
+        // The checkpoint after `finish` returns: yoagent gives `finish` 5 s, a flush may take longer.
+        void serial(() => writeLog(g))
       }),
   }
 

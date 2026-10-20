@@ -1004,10 +1004,11 @@ async fn a_stand_in_agent_gives_dsh_plugins_a_workspace_turns_and_approvals() {
         frontends: 1,
         ..ScriptedUi::default()
     });
+    // Allow once; then Deny; then no answer (the script runs out: `null`).
     ui.answers
         .lock()
         .unwrap()
-        .extend([json!(true), json!(false)]);
+        .extend([json!("Allow once"), json!("Deny")]);
     let host = stand_in_host(&runtime, dir.path(), session.clone(), ui.clone()).await;
 
     let mut agent = agent_again(
@@ -1041,7 +1042,12 @@ async fn a_stand_in_agent_gives_dsh_plugins_a_workspace_turns_and_approvals() {
         "{results:?}"
     );
     let asked = ui.asked.lock().unwrap().clone();
-    assert_eq!(asked[0]["kind"], "confirm", "{asked:?}");
+    assert_eq!(asked[0]["kind"], "select", "{asked:?}");
+    assert_eq!(
+        asked[0]["options"],
+        json!(["Allow once", "Deny"]),
+        "{asked:?}"
+    );
     let shown = asked[0]["message"].as_str().unwrap();
     assert!(shown.contains("fixture_guarded needs a yes"), "{shown}");
     assert!(
@@ -1059,24 +1065,33 @@ async fn a_stand_in_agent_gives_dsh_plugins_a_workspace_turns_and_approvals() {
     .expect("the steering reaches the host");
     assert_eq!(*session.woken.lock().unwrap(), ["look again"]);
 
-    // A second run: the first turn ended `completed`; the user says no.
+    // A second run: the first turn ended `completed`; the user denies, then
+    // does not answer — not a rejection, but no approval.
     let mut agent = agent_again(
         &host,
         vec![
             call("fixture_guarded", json!({})),
             call("fixture_turns", json!({})),
             call("fixture_where", json!({})),
+            call("fixture_guarded", json!({})),
             text("done"),
         ],
     );
     let (_, results) = run(&mut agent, "go").await;
-    assert!(results[0].2, "rejected: {results:?}");
+    assert!(
+        results[0].2 && results[0].1.contains("rejected"),
+        "{results:?}"
+    );
     assert_eq!(
         turns(&results[1].1),
         (2, vec!["completed".into()]),
         "{results:?}"
     );
     assert!(results[2].1.starts_with(&first_agent), "{results:?}");
+    assert!(
+        results[3].2 && results[3].1.contains("no approval channel"),
+        "no answer is unavailable, not a rejection: {results:?}"
+    );
 
     // The host reset: a new generation, a new agent with a turn of its own.
     session.generation.store(2, Ordering::SeqCst);
@@ -1097,61 +1112,135 @@ async fn a_stand_in_agent_gives_dsh_plugins_a_workspace_turns_and_approvals() {
     assert_eq!(turns(&results[1].1), (1, vec![]), "{results:?}");
 
     host.root.shutdown().await.unwrap();
-    // Both generations' sessions were written.
-    let files = walk(&dir.path().join("sessions"));
-    assert!(
-        files.iter().filter(|f| f.ends_with(".jsonl.zstd")).count() >= 2,
-        "{files:?}"
+    // Both generations' sessions are in the log, with their turns and the
+    // approvals' audit pairs (read back through DSH's own jsonl backend).
+    let logs = read_logs(&dir.path().join("sessions"));
+    let first: Vec<String> = serde_json::from_value(logs[&first_agent].clone()).unwrap();
+    for want in [
+        "turn/start",
+        "approval/asked",
+        "approval/decided",
+        "turn/end",
+    ] {
+        assert!(first.iter().any(|t| t == want), "{want}: {first:?}");
+    }
+    assert_eq!(
+        first.iter().filter(|t| *t == "turn/end").count(),
+        2,
+        "{first:?}"
+    );
+    assert_eq!(
+        first.iter().filter(|t| *t == "approval/decided").count(),
+        3,
+        "{first:?}"
+    );
+    assert_eq!(
+        logs.as_object().unwrap().len(),
+        2,
+        "two generations: {logs}"
     );
 }
 
-/// A sub-agent's DSH calls join its parent's DSH turn: they neither close it
-/// nor open one of their own, and the parent's finish ends it.
+/// The event types of every session stored under `sessions`, by session id,
+/// read with DSH's jsonl backend (in a Node process over `plugins/dsh`).
+fn read_logs(sessions: &Path) -> Value {
+    let script = format!(
+        r#"
+import {{ Context }} from '@deepseek-ai/cordis'
+const root = new Context()
+const m = await import('@deepseek-ai/dsh-session-persistence-jsonl')
+await root.plugin(m.default && !m.apply ? m.default : m, {{ root: {root:?} }})
+const store = root.get('sessionPersistence')
+const out = {{}}
+for (const snap of await store.list()) {{
+  const handle = await store.open(snap.header.id, 'read')
+  const read = await handle.read()
+  out[snap.header.id] = read.events.map((e) => e.type)
+  await handle[Symbol.asyncDispose]?.()
+}}
+console.log(JSON.stringify(out))
+process.exit(0)
+"#,
+        root = sessions.display().to_string()
+    );
+    let file = dsh_dir().join(format!("read-logs-{}.mjs", std::process::id()));
+    std::fs::write(&file, script).unwrap();
+    let output = Command::new("node")
+        .arg(&file)
+        .current_dir(dsh_dir())
+        .output()
+        .unwrap();
+    std::fs::remove_file(&file).ok();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    serde_json::from_str(stdout.lines().last().unwrap_or_default())
+        .unwrap_or_else(|_| panic!("{stdout}"))
+}
+
+/// The runs a top-level run delegates to, at any depth, join its DSH turn:
+/// here a grandchild's DSH call, under a child that makes none (every run
+/// tells the host who delegated it), comes before the parent's own; none of
+/// them closes the turn or opens another, and the parent's finish ends it.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_sub_agent_joins_its_parent_s_dsh_turn() {
+async fn delegated_runs_join_the_top_level_run_s_dsh_turn() {
     let Some(runtime) = node_runtime() else {
         return;
     };
     let dir = tempfile::tempdir().unwrap();
+    let session = fake_session();
     let host = stand_in_host(
         &runtime,
         dir.path(),
-        fake_session(),
+        session.clone(),
         Arc::new(ScriptedUi::default()),
     )
     .await;
-    let (child, child_seen) = recording(vec![call("fixture_turns", json!({})), text("child done")]);
-    let sub = yoagent::SubAgentTool::from_provider(
+    let (grandchild, grandchild_seen) = recording(vec![
+        call("fixture_steer", json!({ "text": "from the grandchild" })),
+        text("grandchild done"),
+    ]);
+    let deep = yoagent::SubAgentTool::from_provider(
+        "deep",
+        grandchild,
+        yoagent::provider::ModelConfig::mock(),
+    )
+    .with_extension(host.bridge.extension());
+    let (child, _) = recording(vec![
+        call("deep", json!({ "task": "steer" })),
+        text("child done"),
+    ]);
+    let helper = yoagent::SubAgentTool::from_provider(
         "helper",
         child,
         yoagent::provider::ModelConfig::mock(),
     )
+    .with_tools(vec![Arc::new(deep)])
     .with_extension(host.bridge.extension());
     let (parent, _) = agent(vec![
-        call("fixture_turns", json!({})),
-        call("helper", json!({ "task": "count the turns" })),
+        call("helper", json!({ "task": "delegate" })),
         call("fixture_turns", json!({})),
         text("done"),
     ]);
     let mut parent = parent
-        .with_sub_agent(sub)
+        .with_sub_agent(helper)
         .with_extension(host.bridge.extension());
     let (_, results) = run(&mut parent, "go").await;
-    assert_eq!(turns(&results[0].1), (1, vec![]), "{results:?}");
-    // The child made its DSH call (a second request after its tool), and the
-    // parent's next call still sees the one turn: the child neither closed it
-    // nor opened another.
-    assert_eq!(
-        child_seen.lock().unwrap().len(),
-        2,
-        "the child called its tool"
-    );
-    assert_eq!(
-        turns(&results[2].1),
-        (1, vec![]),
-        "still the parent's one turn: {results:?}"
-    );
-    // The next run finds the parent's turn ended `completed`.
+    // The grandchild's call had an agent: its steering reached the host.
+    assert_eq!(grandchild_seen.lock().unwrap().len(), 2);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while session.woken.lock().unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the grandchild's steering reaches the host");
+    // The parent's call sees the one turn the grandchild's call opened.
+    assert_eq!(turns(&results[1].1), (1, vec![]), "{results:?}");
+    // The next run finds it ended `completed` by the parent's finish.
     let mut next = agent_again(&host, vec![call("fixture_turns", json!({})), text("done")]);
     let (_, results) = run(&mut next, "go").await;
     assert_eq!(
@@ -1202,20 +1291,6 @@ async fn a_stand_in_needs_an_absolute_workspace() {
 /// A fresh agent over the same host, scripted with `responses`.
 fn agent_again(host: &Host, responses: Vec<MockResponse>) -> yoagent::Agent {
     agent(responses).0.with_extension(host.bridge.extension())
-}
-
-/// Every file under `dir`, as paths.
-fn walk(dir: &Path) -> Vec<String> {
-    let mut out = Vec::new();
-    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            out.extend(walk(&path));
-        } else {
-            out.push(path.display().to_string());
-        }
-    }
-    out
 }
 
 /// yobuild's 2026-10-19 probe, as a test to re-run on each DSH bump:
@@ -1269,7 +1344,7 @@ async fn dsh_univer_office_works_through_the_stand_in_agent() {
         frontends: 1,
         ..ScriptedUi::default()
     });
-    ui.answers.lock().unwrap().push_back(json!(true));
+    ui.answers.lock().unwrap().push_back(json!("Allow once"));
     let host = host_in(
         &base,
         &runtime,

@@ -28,11 +28,13 @@
 //   (agent)    so a guard's `ask` goes through DSH's own approval service
 //              (`@deepseek-ai/dsh-user-approval`, whose audit pair needs the
 //              stand-in's open turn) and reaches `approval/request`: the
-//              user is asked (confirm, with the asker's reason and the
-//              call's arguments, kept from `tools/pre-execute` by call id).
-//              Yes → `allowed-once`, no → `rejected`, no answer or the
-//              host failing → `unavailable`, the request withdrawn →
-//              `cancelled`.
+//              user is asked (a choice of "Allow once" / "Deny", with the
+//              asker's reason and the call's arguments, kept from
+//              `tools/pre-execute` by call id — a choice, not a confirm, so
+//              no answer is told from a no: a host's confirm answers `false`
+//              for both). Allow once → `allowed-once`, Deny → `rejected`, no
+//              answer or the host failing → `unavailable`, the request
+//              withdrawn → `cancelled`.
 //   questions  `user-questions/request` from the stand-in agent is answered
 //   (agent)    the same way as an agentless one (DSH refuses questions from
 //              a child agent before they get here).
@@ -82,6 +84,10 @@ const excerpt = (text: string, max: number) => {
   const tail = max - head
   return `${chars.slice(0, head).join('')}\n… (${chars.length} characters in all; the middle is not shown) …\n${chars.slice(-tail).join('')}`
 }
+
+/** The choices of an approval for the stand-in's calls. */
+const ALLOW_ONCE = 'Allow once'
+const DENY = 'Deny'
 
 /** Stand-in calls whose arguments are kept for an approval dialog that may follow. */
 const MAX_PENDING_ARGS = 256
@@ -220,15 +226,16 @@ export function apply(ctx: any) {
       try {
         const answer = await ask(
           {
-            kind: 'confirm',
+            kind: 'select',
             title: `Allow the tool ${request.toolName}?`,
             message: [reason, args].filter(Boolean).join('\n\n'),
+            options: [ALLOW_ONCE, DENY],
           },
           request.signal,
         )
         if (request.signal?.aborted) return 'cancelled'
-        // `false` is a no; no answer (dismissed, timed out, nobody attached) is not one.
-        return answer === true ? 'allowed-once' : answer === false ? 'rejected' : 'unavailable'
+        // No answer (dismissed, timed out, nobody attached) is not a no.
+        return answer === ALLOW_ONCE ? 'allowed-once' : answer === DENY ? 'rejected' : 'unavailable'
       } catch (error) {
         if (request.signal?.aborted) return 'cancelled'
         say(`[dsh] asking the user to approve ${request.toolName} failed, so it is not approved: ${error}`)

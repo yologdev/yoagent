@@ -432,22 +432,29 @@ The calls to them come from the `dsh-host` row (the host answers its
 services by the calling row), each bounded at 30 s. Each call carries the
 generation's stand-in agent — registered as a root with DSH's `agents`, its
 id its DSH session's (`yoagent-<uuid>`), its ctx a DSH scope — and each
-top-level run is one DSH turn: `turn/start` at its first DSH call, its
-sub-agents' calls join it, `turn/end` at its `finish` (`completed`; a
-cancelled run `aborted`, a failed one `error`); a turn another top-level run
-finds still open is closed `aborted` and logged. The stand-in runs no model:
-its inbox stays empty, and `cancel`, `runMaintenance`, inbox writes and a
-non-waking `send` do nothing (each logged at warn, once per generation).
+top-level run is one DSH turn: `turn/start` at its first DSH call, the
+runs it delegates to join it at any depth (every run tells the host who
+delegated it, from the adapter's `tools` hook), `turn/end` at its `finish`
+(`completed`; a cancelled run `aborted`, a failed one `error` with the run's
+error). One stand-in holds one turn at a time: a turn another top-level run
+finds still open (a lost `finish`, or two top-level runs at once) is closed
+`aborted` and logged. The log is flushed after the turn ends, without
+holding up `finish`. The stand-in runs no model: its inbox stays empty;
+`cancel`, inbox writes and a non-waking `send` do nothing (each logged at
+warn, once per generation); `runMaintenance` runs its task at once.
 The session's events go to the jsonl log; no conversation is mirrored into
 it. A host that loaded it but cannot give a stand-in (no absolute workspace,
 a malformed `info`, a host service failing or not answering) fails the
 call with the reason, logged. `host-dialogs.ts` answers what these calls
-ask: DSH's `approval/request`, showing the call's arguments (yes →
-`allowed-once`, no → `rejected`, no answer or a host failure →
-`unavailable`), and the stand-in's questions, as below. Tested end to end with a fixture
-(`plugins/dsh/fixture-needs-agent.ts`: workspace, steering, approvals,
-turn ends, a reset, a sub-agent joining its parent's turn, a relative
-workspace refused), and with dsh-univer-office 0.3.7 in an
+ask: DSH's `approval/request`, as a choice of "Allow once" / "Deny" (not a
+confirm: a host's confirm answers `false` for a no and for no answer
+alike) showing the call's arguments — Allow once → `allowed-once`, Deny →
+`rejected`, no answer or a host failure → `unavailable` (DSH: "no approval
+channel") — and the stand-in's questions, as below. Tested end to end with a fixture
+(`plugins/dsh/fixture-needs-agent.ts`: workspace, steering, approvals and
+their outcomes, turn ends, a reset, a grandchild run joining the top-level
+run's turn, a relative workspace refused, the session logs read back from
+disk), and with dsh-univer-office 0.3.7 in an
 opt-in test (`--ignored`: book, worktree, CSV import, an approved merge, an
 .xlsx export). `dsh-session-persistence-jsonl` depends on `koffi`, which has
 an install script.
