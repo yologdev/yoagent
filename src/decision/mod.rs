@@ -101,7 +101,12 @@ mod logprobs;
 mod mock;
 mod openai;
 mod question;
-pub(crate) mod systemone;
+mod systemone;
+/// For `provider::api_key_variables`' test: the decision presets' key variables.
+#[cfg(test)]
+pub(crate) use systemone::{
+    CLOUDFLARE_API_TOKEN_ENV, CLOUDFLARE_AUTH_TOKEN_ENV, TYPESAFE_API_KEY_ENV,
+};
 
 pub use advisory::Advisory;
 pub use answer::{

@@ -316,5 +316,9 @@ async fn probe_options_set_the_runtime_s_environment() {
     let seen: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
     assert_eq!(seen["value"], "abc", "{seen}");
-    assert_ne!(seen["home"], "/caller/home", "{seen}");
+    // Set, and the probe's own (a caller's does not override it).
+    assert!(
+        seen["home"].as_str().is_some_and(|h| h != "/caller/home"),
+        "{seen}"
+    );
 }

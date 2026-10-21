@@ -158,7 +158,7 @@ mod tests {
     #[cfg(feature = "decision")]
     #[test]
     fn decision_key_variables_match_the_presets() {
-        use crate::decision::systemone::{
+        use crate::decision::{
             CLOUDFLARE_API_TOKEN_ENV, CLOUDFLARE_AUTH_TOKEN_ENV, TYPESAFE_API_KEY_ENV,
         };
         assert_eq!(
@@ -282,9 +282,12 @@ pub fn resolve_api_key(provider: &str) -> Option<String> {
                 );
                 return Some(token);
             }
-            let access = set("AWS_ACCESS_KEY_ID")?;
-            let secret = set("AWS_SECRET_ACCESS_KEY")?;
-            Some(match set("AWS_SESSION_TOKEN") {
+            let [_, access, secret, token] = BEDROCK_KEY_VARIABLES else {
+                unreachable!("BEDROCK_KEY_VARIABLES lists four names")
+            };
+            let access = set(access)?;
+            let secret = set(secret)?;
+            Some(match set(token) {
                 Some(token) => format!("{}:{}:{}", access, secret, token),
                 None => format!("{}:{}", access, secret),
             })
