@@ -1611,21 +1611,29 @@ impl TokenUsage {
 mod tests {
     use super::*;
 
-    /// An assistant turn that errored with no content is not sent as an empty
-    /// message; the user turns around it go back as one (#369).
+    /// An errored assistant turn — as the loop builds it, one empty text block,
+    /// or with no content at all — is not sent as an empty message; the user
+    /// turns around it go back as one (#369).
     #[test]
     fn an_empty_assistant_turn_is_not_sent() {
-        let mut config = StreamConfig::new("anthropic.claude-sonnet", "a:b");
-        config.messages = vec![
-            Message::user("first"),
-            Message::assistant(vec![], StopReason::Error, "m", "bedrock", Usage::default()),
-            Message::user("again"),
-        ];
-        let body = build_bedrock_body(&config);
-        assert_eq!(
-            body["messages"],
-            serde_json::json!([{"role": "user", "content": [{"text": "first"}, {"text": "again"}]}])
-        );
+        for errored in [
+            vec![Content::Text {
+                text: String::new(),
+            }],
+            vec![],
+        ] {
+            let mut config = StreamConfig::new("anthropic.claude-sonnet", "a:b");
+            config.messages = vec![
+                Message::user("first"),
+                Message::assistant(errored, StopReason::Error, "m", "bedrock", Usage::default()),
+                Message::user("again"),
+            ];
+            let body = build_bedrock_body(&config);
+            assert_eq!(
+                body["messages"],
+                serde_json::json!([{"role": "user", "content": [{"text": "first"}, {"text": "again"}]}])
+            );
+        }
     }
 
     /// A parallel tool call's results go back as one user message, the

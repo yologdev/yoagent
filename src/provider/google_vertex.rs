@@ -373,6 +373,29 @@ mod tests {
         );
     }
 
+    /// A model turn with only thinking (not replayed) is not sent as an empty
+    /// content; the user turns around it go back as one (#369).
+    #[test]
+    fn an_empty_model_turn_is_not_sent() {
+        let mut c = config(ThinkingLevel::Off);
+        c.messages = vec![
+            Message::user("first"),
+            Message::assistant(
+                vec![Content::thinking("thought")],
+                crate::types::StopReason::Error,
+                "m",
+                "vertex",
+                crate::types::Usage::default(),
+            ),
+            Message::user("again"),
+        ];
+        let body = build_vertex_request_body(&c);
+        assert_eq!(
+            body["contents"],
+            serde_json::json!([{"role": "user", "parts": [{"text": "first"}, {"text": "again"}]}])
+        );
+    }
+
     /// A parallel tool call's results go back as one user turn (#223).
     #[test]
     fn parallel_tool_results_go_back_in_one_turn() {

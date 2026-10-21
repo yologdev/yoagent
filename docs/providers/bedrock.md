@@ -209,7 +209,7 @@ is kept in `Content::Thinking::redacted` (with `redacted_protocol` set to
 `BedrockConverseStream`) and sent back as `redactedContent`. Encrypted
 reasoning from another API is not: AWS does not document `redactedContent` as
 the same bytes as the Anthropic API's `redacted_thinking` data, so an Anthropic
-redacted block is skipped here with a warning (and Bedrock's is skipped by the
+redacted block is skipped here, logged at debug (and Bedrock's is skipped by the
 Anthropic provider).
 Reasoning without a signature is sent back as `reasoningText {text}` with no
 signature key (the signature is optional in `ReasoningTextBlock`, and Bedrock's

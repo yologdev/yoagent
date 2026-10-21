@@ -634,6 +634,49 @@ async fn reasoning_with_signature_is_accumulated_and_replayed() {
     );
 }
 
+/// A run that failed leaves an errored assistant message (one empty text
+/// block) in the history; the next prompt does not send it as an empty
+/// message, so the two user turns go back as one (#369). The history keeps it.
+#[tokio::test]
+async fn an_errored_turn_is_not_resent_as_an_empty_message() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({"message": "Bad request"})))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(text_response("ok"), EVENTSTREAM))
+        .with_priority(2)
+        .mount(&server)
+        .await;
+    let mut agent = Agent::from_provider(BedrockProvider, model_config(&server.uri()))
+        .with_api_key("test-bedrock-api-key");
+    for prompt in ["one", "two"] {
+        let mut rx = agent.prompt(prompt).await;
+        while rx.recv().await.is_some() {}
+        agent.finish().await;
+    }
+    let errored = agent.messages().iter().any(|m| {
+        matches!(
+            m,
+            AgentMessage::Llm(Message::Assistant {
+                stop_reason: StopReason::Error,
+                ..
+            })
+        )
+    });
+    assert!(errored, "the history keeps the errored turn");
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    let body: Value = serde_json::from_slice(&requests[1].body).unwrap();
+    assert_eq!(
+        body["messages"],
+        json!([{"role": "user", "content": [{"text": "one"}, {"text": "two"}]}])
+    );
+}
+
 /// A parallel tool call through the real loop: both results go back in one
 /// user message, in call order, so Converse's roles alternate (#223).
 #[tokio::test]
