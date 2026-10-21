@@ -834,6 +834,29 @@ mod tests {
     use crate::provider::{GoogleCompat, ModelConfig};
 
     /// A parallel tool call's results go back as one user turn, with the
+    /// A model turn with only thinking (not replayed) or none at all is not
+    /// sent as an empty content (#369).
+    #[test]
+    fn an_empty_model_turn_is_not_sent() {
+        let mut config = StreamConfig::new("gemini-2.5-pro", "k");
+        config.messages = vec![
+            Message::user("first"),
+            Message::assistant(
+                vec![Content::thinking("thought")],
+                StopReason::Error,
+                "m",
+                "google",
+                Usage::default(),
+            ),
+            Message::user("again"),
+        ];
+        let body = build_request_body(&config);
+        assert_eq!(
+            body["contents"],
+            serde_json::json!([{"role": "user", "parts": [{"text": "first"}, {"text": "again"}]}])
+        );
+    }
+
     /// steering message after them, so roles alternate (#223).
     #[test]
     fn parallel_tool_results_go_back_in_one_turn() {
