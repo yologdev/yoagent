@@ -1611,7 +1611,6 @@ impl TokenUsage {
 mod tests {
     use super::*;
 
-    /// A parallel tool call's results go back as one user message, the
     /// An assistant turn that errored with no content is not sent as an empty
     /// message; the user turns around it go back as one (#369).
     #[test]
@@ -1629,6 +1628,7 @@ mod tests {
         );
     }
 
+    /// A parallel tool call's results go back as one user message, the
     /// steering message after them, so Converse's roles alternate (#223).
     #[test]
     fn parallel_tool_results_go_back_in_one_message() {

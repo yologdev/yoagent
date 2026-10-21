@@ -833,7 +833,6 @@ mod tests {
     use super::*;
     use crate::provider::{GoogleCompat, ModelConfig};
 
-    /// A parallel tool call's results go back as one user turn, with the
     /// A model turn with only thinking (not replayed) or none at all is not
     /// sent as an empty content (#369).
     #[test]
@@ -857,6 +856,7 @@ mod tests {
         );
     }
 
+    /// A parallel tool call's results go back as one user turn, with the
     /// steering message after them, so roles alternate (#223).
     #[test]
     fn parallel_tool_results_go_back_in_one_turn() {
