@@ -5,7 +5,7 @@ description: Use when building, extending or upgrading an agent on the yoagent R
 
 # yoagent: which feature for which job
 
-Written for **yoagent 0.25.11** (and yoagent-rutis 0.8.0); the recipes
+Written for **yoagent 0.25.12** (and yoagent-rutis 0.8.1); the recipes
 below are compiled by `tests/skill_test.rs`, line for line. Check what you
 build against: `cargo tree -p yoagent` or `Cargo.lock`. If you are on an
 older version, read [What changed](#what-changed) first.
@@ -198,6 +198,11 @@ and its examples.
 
 Newest first; the full list is `CHANGELOG.md`.
 
+- **0.25.12** — `provider::api_key_variables()`: every environment
+  variable yoagent reads a credential from (providers', Bedrock's `AWS_*`,
+  the `YOAGENT_API_KEY` / `API_KEY` fallback, the decision presets'). To
+  keep keys from processes you start (plugin runtimes, MCP servers), set
+  each to `""` in their environment.
 - **0.25.11** — `tool_output_max_lines` is one budget per tool result,
   shared by its text blocks (a many-block MCP result reached the model as
   blocks × the budget): short blocks stay whole, long ones split the rest,
@@ -269,6 +274,9 @@ Newest first; the full list is `CHANGELOG.md`.
 - **0.24.2** — built-in tool sandbox fixes (path escapes, `search` flag
   injection, Gemini key out of the URL, tool panics contained).
 - **0.24.1** — `retry_safe_events`.
+- **yoagent-rutis 0.8.1** — `probe::pi_with` / `probe::dsh_with` with
+  `ProbeOptions::default().env(name, value)`: variables for the probe's
+  runtime (an empty value blanks one; the DSH probe's own homes win).
 - **yoagent-rutis 0.8.0** — pi adapter grants a host can ask about:
   `exec` / `execFor[file] = "gate"` sends each `pi.exec` to the host's
   `host_approval` (`judge(argv, cwd?)`, then `ask(question, details,

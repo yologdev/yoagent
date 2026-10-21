@@ -4,11 +4,13 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.25.12 (2026-10-21)
+
+Additive: one new function.
 
 - **`provider::api_key_variables()`**: every environment variable yoagent reads a credential from — each provider's key variables as `resolve_api_key` reads them (Bedrock's `AWS_*` included), the `YOAGENT_API_KEY` / `API_KEY` fallback, and the decision presets' keys (`TYPESAFE_API_KEY`, `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_AUTH_TOKEN`) — for hosts that blank credentials in processes they start (plugin runtimes, MCP servers). `resolve_api_key` now reads the same per-provider table, so a provider's variables cannot drift from the list (Bedrock's and the decision presets' names are pinned by tests). Additive. Asked for by yobuild.
 
-## yoagent-rutis Unreleased
+## yoagent-rutis 0.8.1 (2026-10-21)
 
 yoagent-rutis only; requires yoagent 0.25, rutis 0.12 and Rust 1.88, as 0.8.0. Additive.
 
