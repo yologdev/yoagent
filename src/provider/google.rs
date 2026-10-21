@@ -591,6 +591,30 @@ pub(crate) fn gemini_thinking_config(config: &StreamConfig) -> Option<serde_json
     }
 }
 
+/// Each user content's `functionResponse` parts first, then its other parts,
+/// each group in its order. A merged turn of tool results would otherwise
+/// interleave a result's images between the responses (`response A, image
+/// A, response B`); Gemini matches responses to the calls by count and
+/// position, and images among them are a reported cause of its "number of
+/// function response parts" 400.
+pub(crate) fn function_responses_first(
+    mut contents: Vec<serde_json::Value>,
+) -> Vec<serde_json::Value> {
+    for content in &mut contents {
+        if let Some(parts) = content
+            .get_mut("parts")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            let (mut responses, rest): (Vec<_>, Vec<_>) = std::mem::take(parts)
+                .into_iter()
+                .partition(|part| part.get("functionResponse").is_some());
+            responses.extend(rest);
+            *parts = responses;
+        }
+    }
+    contents
+}
+
 fn build_request_body(config: &StreamConfig) -> serde_json::Value {
     let mut contents: Vec<serde_json::Value> = Vec::new();
 
@@ -644,6 +668,9 @@ fn build_request_body(config: &StreamConfig) -> serde_json::Value {
         }
     }
 
+    // Gemini wants a turn's function responses in one content, matching its
+    // function calls — the responses first, then any images and text.
+    let contents = function_responses_first(super::merge_same_role(contents, "parts"));
     let mut body = serde_json::json!({
         "contents": contents,
     });
@@ -805,6 +832,60 @@ struct GoogleUsageMetadata {
 mod tests {
     use super::*;
     use crate::provider::{GoogleCompat, ModelConfig};
+
+    /// A parallel tool call's results go back as one user turn, with the
+    /// steering message after them, so roles alternate (#223).
+    #[test]
+    fn parallel_tool_results_go_back_in_one_turn() {
+        let mut config = StreamConfig::new("gemini-2.5-pro", "k");
+        config.messages = crate::provider::parallel_tool_conversation();
+        let body = build_request_body(&config);
+        let contents = body["contents"].as_array().unwrap();
+        let roles: Vec<&str> = contents
+            .iter()
+            .map(|c| c["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles, ["user", "model", "user"], "{body}");
+        let parts = contents[2]["parts"].as_array().unwrap();
+        assert_eq!(parts[0]["functionResponse"]["name"], "read_file");
+        assert_eq!(
+            parts[0]["functionResponse"]["response"]["result"],
+            "fn a() {}"
+        );
+        assert_eq!(
+            parts[1]["functionResponse"]["response"]["result"],
+            "fn b() {}"
+        );
+        assert_eq!(parts[2]["text"], "also check c.rs");
+        assert_eq!(parts.len(), 3);
+    }
+
+    /// A result with an image: every function response first, in call
+    /// order, then the image and the text that followed.
+    #[test]
+    fn merged_tool_results_put_the_function_responses_first() {
+        let mut config = StreamConfig::new("gemini-2.5-pro", "k");
+        config.messages = crate::provider::parallel_tool_conversation();
+        if let Message::ToolResult { content, .. } = &mut config.messages[2] {
+            content.push(Content::Image {
+                data: "AAAA".into(),
+                mime_type: "image/png".into(),
+            });
+        }
+        let body = build_request_body(&config);
+        let parts = body["contents"][2]["parts"].as_array().unwrap();
+        assert_eq!(parts.len(), 4, "{body}");
+        assert_eq!(
+            parts[0]["functionResponse"]["response"]["result"],
+            "fn a() {}"
+        );
+        assert_eq!(
+            parts[1]["functionResponse"]["response"]["result"],
+            "fn b() {}"
+        );
+        assert_eq!(parts[2]["inlineData"]["data"], "AAAA");
+        assert_eq!(parts[3]["text"], "also check c.rs");
+    }
 
     #[test]
     fn thinking_blocks_are_dropped_on_replay() {

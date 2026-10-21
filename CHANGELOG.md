@@ -4,6 +4,10 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+- **Bedrock, Gemini and Vertex: a parallel tool call's results go back in one message** (#223). Each tool result was sent as its own user-role message, and a steering message, stop marker or compaction summary after them added another, while Bedrock's Converse requires roles to alternate and Gemini requires a turn's function responses in one content, as many as its function calls. So the request after any turn with two or more tool calls (the default parallel strategy) could be rejected. The three request builders now merge consecutive same-role messages, keeping every block in order: the results in call order, then whatever followed; on Gemini and Vertex a merged turn's function responses come first, then any images and text (images among the responses are a reported cause of Gemini's response-count 400). Pinned by request-body tests; not run against a live endpoint.
+
 ## 0.25.12 (2026-10-21)
 
 Additive: one new function.

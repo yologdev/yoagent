@@ -173,6 +173,9 @@ fn build_vertex_request_body(config: &StreamConfig) -> serde_json::Value {
         }
     }
 
+    // As on the Gemini API: a turn's function responses in one content, first.
+    let contents =
+        super::google::function_responses_first(super::merge_same_role(contents, "parts"));
     let mut body = serde_json::json!({"contents": contents});
 
     if !config.system_prompt.is_empty() {
@@ -368,6 +371,46 @@ mod tests {
             build_vertex_request_body(&c)["generationConfig"]["thinkingConfig"],
             serde_json::json!({"thinkingBudget": 8192, "includeThoughts": true})
         );
+    }
+
+    /// A parallel tool call's results go back as one user turn (#223).
+    #[test]
+    fn parallel_tool_results_go_back_in_one_turn() {
+        let mut c = config(ThinkingLevel::Off);
+        c.messages = crate::provider::parallel_tool_conversation();
+        let body = build_vertex_request_body(&c);
+        let contents = body["contents"].as_array().unwrap();
+        let roles: Vec<&str> = contents
+            .iter()
+            .map(|c| c["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles, ["user", "model", "user"], "{body}");
+        let parts = contents[2]["parts"].as_array().unwrap();
+        assert_eq!(
+            parts[0]["functionResponse"]["response"]["result"],
+            "fn a() {}"
+        );
+        assert_eq!(
+            parts[1]["functionResponse"]["response"]["result"],
+            "fn b() {}"
+        );
+        assert_eq!(parts[2]["text"], "also check c.rs");
+        assert_eq!(parts.len(), 3, "{body}");
+        // Vertex sends no response ids: Gemini matches them by name and position.
+        assert_eq!(parts[0]["functionResponse"]["name"], "read_file");
+
+        // A result with an image: the responses still come first.
+        if let Message::ToolResult { content, .. } = &mut c.messages[2] {
+            content.push(Content::Image {
+                data: "AAAA".into(),
+                mime_type: "image/png".into(),
+            });
+        }
+        let body = build_vertex_request_body(&c);
+        let parts = body["contents"][2]["parts"].as_array().unwrap();
+        assert_eq!(parts.len(), 4, "{body}");
+        assert!(parts[1]["functionResponse"].is_object(), "{body}");
+        assert_eq!(parts[2]["inlineData"]["data"], "AAAA");
     }
 
     #[test]

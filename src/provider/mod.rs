@@ -62,6 +62,106 @@ pub(crate) fn tool_result_text(content: &[crate::types::Content]) -> String {
     texts.join("\n")
 }
 
+/// Merge each message into the one before it when both have the same `role`,
+/// appending its `key` array (`"content"` on Bedrock, `"parts"` on Gemini).
+///
+/// Bedrock's Converse and Gemini require user and assistant/model turns to
+/// alternate, and a turn's tool results to arrive together, in one message.
+/// The loop keeps one `Message::ToolResult` per call (and may put a steering
+/// message, a stop marker or a compaction summary right after them), so these
+/// builders produce one wire message per result. Merging keeps every block in
+/// order: the results first, in call order, then whatever followed them.
+pub(crate) fn merge_same_role(
+    messages: Vec<serde_json::Value>,
+    key: &str,
+) -> Vec<serde_json::Value> {
+    let mut merged: Vec<serde_json::Value> = Vec::with_capacity(messages.len());
+    for message in messages {
+        if let Some(last) = merged.last_mut() {
+            if last.get("role") == message.get("role") {
+                let from = message.get(key).and_then(serde_json::Value::as_array);
+                if let (Some(into), Some(from)) = (
+                    last.get_mut(key).and_then(serde_json::Value::as_array_mut),
+                    from,
+                ) {
+                    into.extend(from.iter().cloned());
+                    continue;
+                }
+            }
+        }
+        merged.push(message);
+    }
+    merged
+}
+
+/// A conversation with a parallel tool call: the user's request, an assistant
+/// turn calling two tools, both results, then a steering message — four user
+/// role messages in a row once results are user turns on the wire.
+#[cfg(test)]
+pub(crate) fn parallel_tool_conversation() -> Vec<crate::types::Message> {
+    use crate::types::{Content, Message, StopReason, Usage};
+    let result = |id: &str, name: &str, text: &str| Message::ToolResult {
+        tool_call_id: id.into(),
+        tool_name: name.into(),
+        content: vec![Content::Text { text: text.into() }],
+        is_error: false,
+        timestamp: 0,
+    };
+    vec![
+        Message::user("look at both files"),
+        Message::assistant(
+            vec![
+                Content::tool_call("call-a", "read_file", serde_json::json!({"path": "a.rs"})),
+                Content::tool_call("call-b", "read_file", serde_json::json!({"path": "b.rs"})),
+            ],
+            StopReason::ToolUse,
+            "m",
+            "p",
+            Usage::default(),
+        ),
+        result("call-a", "read_file", "fn a() {}"),
+        result("call-b", "read_file", "fn b() {}"),
+        Message::user("also check c.rs"),
+    ]
+}
+
+#[cfg(test)]
+mod merge_same_role_tests {
+    use super::merge_same_role;
+    use serde_json::json;
+
+    #[test]
+    fn adjacent_same_role_messages_become_one_in_order() {
+        let merged = merge_same_role(
+            vec![
+                json!({"role": "user", "content": [{"text": "1"}]}),
+                json!({"role": "assistant", "content": [{"text": "2"}]}),
+                json!({"role": "user", "content": []}),
+                json!({"role": "user", "content": [{"text": "3"}]}),
+                json!({"role": "user", "content": [{"text": "4"}, {"text": "5"}]}),
+                json!({"role": "user", "content": []}),
+                json!({"role": "assistant", "content": [{"text": "6"}]}),
+                json!({"role": "assistant", "content": [{"text": "7"}]}),
+                // Without the key: kept as it is, never given a `null` one.
+                json!({"role": "user"}),
+                json!({"role": "user", "content": [{"text": "8"}]}),
+            ],
+            "content",
+        );
+        assert_eq!(
+            merged,
+            vec![
+                json!({"role": "user", "content": [{"text": "1"}]}),
+                json!({"role": "assistant", "content": [{"text": "2"}]}),
+                json!({"role": "user", "content": [{"text": "3"}, {"text": "4"}, {"text": "5"}]}),
+                json!({"role": "assistant", "content": [{"text": "6"}, {"text": "7"}]}),
+                json!({"role": "user"}),
+                json!({"role": "user", "content": [{"text": "8"}]}),
+            ]
+        );
+    }
+}
+
 #[cfg(test)]
 mod tool_result_text_tests {
     use super::tool_result_text;

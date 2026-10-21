@@ -634,6 +634,39 @@ async fn reasoning_with_signature_is_accumulated_and_replayed() {
     );
 }
 
+/// A parallel tool call through the real loop: both results go back in one
+/// user message, in call order, so Converse's roles alternate (#223).
+#[tokio::test]
+async fn parallel_tool_results_go_back_in_one_message() {
+    let first = [
+        message_start(),
+        tool_start(0, "a", "read_file"),
+        tool_input(0, "{\"path\":\"a\"}"),
+        block_stop(0),
+        tool_start(1, "b", "read_file"),
+        tool_input(1, "{\"path\":\"b\"}"),
+        block_stop(1),
+        message_stop("tool_use"),
+        small_usage(),
+    ]
+    .concat();
+    let (ran, _, server) = run_agent(first, text_response("Done.")).await;
+    assert_eq!(ran.len(), 2);
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    let body: Value = serde_json::from_slice(&requests[1].body).unwrap();
+    let messages = body["messages"].as_array().unwrap();
+    let roles: Vec<&str> = messages
+        .iter()
+        .map(|m| m["role"].as_str().unwrap())
+        .collect();
+    assert_eq!(roles, ["user", "assistant", "user"], "{body}");
+    let results = messages[2]["content"].as_array().unwrap();
+    assert_eq!(results.len(), 2, "{body}");
+    assert_eq!(results[0]["toolResult"]["toolUseId"], "a");
+    assert_eq!(results[1]["toolResult"]["toolUseId"], "b");
+}
+
 // ---------------------------------------------------------------------------
 // Framing over the network
 // ---------------------------------------------------------------------------

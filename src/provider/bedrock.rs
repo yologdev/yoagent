@@ -1321,6 +1321,8 @@ fn build_bedrock_body(config: &StreamConfig) -> serde_json::Value {
         }
     }
 
+    // Converse wants roles to alternate, a turn's tool results in one message.
+    let messages = super::merge_same_role(messages, "content");
     let mut body = serde_json::json!({"messages": messages});
 
     if !config.system_prompt.is_empty() {
@@ -1608,6 +1610,26 @@ impl TokenUsage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A parallel tool call's results go back as one user message, the
+    /// steering message after them, so Converse's roles alternate (#223).
+    #[test]
+    fn parallel_tool_results_go_back_in_one_message() {
+        let mut config = StreamConfig::new("anthropic.claude-sonnet", "a:b");
+        config.messages = crate::provider::parallel_tool_conversation();
+        let body = build_bedrock_body(&config);
+        let messages = body["messages"].as_array().unwrap();
+        let roles: Vec<&str> = messages
+            .iter()
+            .map(|m| m["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(roles, ["user", "assistant", "user"], "{body}");
+        let content = messages[2]["content"].as_array().unwrap();
+        assert_eq!(content[0]["toolResult"]["toolUseId"], "call-a");
+        assert_eq!(content[1]["toolResult"]["toolUseId"], "call-b");
+        assert_eq!(content[2]["text"], "also check c.rs");
+        assert_eq!(content.len(), 3);
+    }
 
     #[test]
     fn thinking_blocks_are_replayed_with_signature() {
