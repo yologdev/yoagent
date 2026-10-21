@@ -150,7 +150,7 @@ The generic hooks it rides on need no feature: `ToolCallRequest::messages` / `ru
 
 ### Construction API
 
-The primary constructor is `Agent::from_config(ModelConfig)`: it selects the built-in provider from `config.api`, sets the model id from `config.id`, and resolves the API key from the provider-conventional env var (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, …; see `provider::resolve_api_key`). This removes the provider↔config pairing footgun and the doubly-specified model id.
+The primary constructor is `Agent::from_config(ModelConfig)`: it selects the built-in provider from `config.api`, sets the model id from `config.id`, and resolves the API key from the provider-conventional env var (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `XAI_API_KEY`, …; see `provider::resolve_api_key`, which reads the private `PROVIDER_KEY_VARIABLES` table in `registry.rs`; `provider::api_key_variables()` lists that table, Bedrock's `AWS_*`, the `YOAGENT_API_KEY`/`API_KEY` fallback and the decision presets' keys — a test pins the decision ones to `decision::systemone`'s constants). This removes the provider↔config pairing footgun and the doubly-specified model id.
 
 ```rust
 // provider auto-selected, key from XAI_API_KEY

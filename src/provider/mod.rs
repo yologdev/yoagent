@@ -38,7 +38,7 @@ pub use prices::{
     PRICED_PROVIDERS, PRICES_ENV_VAR, PRICE_SCHEMA_VERSION,
 };
 pub(crate) use registry::resolve_api_key_or_warn;
-pub use registry::{resolve_api_key, ProviderRegistry};
+pub use registry::{api_key_variables, resolve_api_key, ProviderRegistry};
 pub use tool_args::{parse_tool_arguments, unparsed_tool_arguments, UNPARSED_ARGUMENTS_KEY};
 pub use traits::*;
 pub use turn_hook::TurnHookProvider;

@@ -25,11 +25,18 @@
 //! **A verdict.** Each report's `problem()` says what kept the package from
 //! giving an agent what it offers, if anything; `None` is a clean load.
 //!
+//! **The runtime's environment.** The probe's Node process inherits this
+//! process's environment. [`pi_with`] / [`dsh_with`] take a [`ProbeOptions`]
+//! with variables to set on top — a host that keeps credentials from plugins
+//! sets each of `yoagent::provider::api_key_variables()` to the empty
+//! string, as it does for the runtimes it starts itself.
+//!
 //! **One at a time.** Probes in one process run one after another (a second
 //! waits): [`Logs`] is one buffer for the process, and each report carries
 //! the lines of its own load. Loading a package runs its code, as its own
 //! host would.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -240,13 +247,32 @@ struct Host {
     loader: Loader,
 }
 
+/// How a probe starts its runtime. `Default` is what [`pi`] and [`dsh`] use.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct ProbeOptions {
+    /// Variables set in the probe's Node process, over the environment it
+    /// inherits; an empty value sets the variable to the empty string (a
+    /// launcher cannot remove one). The probe's own (the DSH probe's private
+    /// `DSH_HOME` / `DSH_AGENTS_HOME`) are set after these and win.
+    pub env: Vec<(OsString, OsString)>,
+}
+
+impl ProbeOptions {
+    /// These options with `name` set to `value` in the probe's runtime.
+    pub fn env(mut self, name: impl Into<OsString>, value: impl Into<OsString>) -> Self {
+        self.env.push((name.into(), value.into()));
+        self
+    }
+}
+
 /// A rutis root with the bridge and one Node runtime (`runtime`, the
 /// `@arcships/rutis-runtime` package) whose `package.json` is
 /// `package_json`, where row names resolve; its process given `env`.
 async fn host(
     runtime: &Path,
     package_json: &Path,
-    env: &[(&str, &Path)],
+    env: &[(OsString, OsString)],
 ) -> Result<Host, BoxError> {
     let root = Ctx::root()?;
     let bridge = RutisBridge::install(&root)?;
@@ -260,7 +286,7 @@ async fn host(
     let launcher = env
         .iter()
         .fold(Launcher::node(runtime), |launcher, (name, value)| {
-            launcher.env(*name, *value)
+            launcher.env(name.clone(), value.clone())
         });
     let node = LocalRuntime::launcher("node", launcher, package_json);
     let resolver = Arc::new(RuntimeResolver::node(node.handle()).with_catalog(&catalog));
@@ -465,6 +491,26 @@ pub async fn pi(
     skill_paths: &[PathBuf],
     logs: Option<&Logs>,
 ) -> PiReport {
+    pi_with(
+        plugins,
+        cwd,
+        extensions,
+        skill_paths,
+        logs,
+        &ProbeOptions::default(),
+    )
+    .await
+}
+
+/// [`pi`], with the runtime started as `options` say (its environment).
+pub async fn pi_with(
+    plugins: &Path,
+    cwd: &Path,
+    extensions: &[String],
+    skill_paths: &[PathBuf],
+    logs: Option<&Logs>,
+    options: &ProbeOptions,
+) -> PiReport {
     let _one = ONE_AT_A_TIME.lock().await;
     let mut report = PiReport {
         skills: skills(skill_paths),
@@ -473,7 +519,15 @@ pub async fn pi(
     if extensions.is_empty() {
         return report;
     }
-    pi_load(&mut report, &plugins.join("pi"), cwd, extensions, logs).await;
+    pi_load(
+        &mut report,
+        &plugins.join("pi"),
+        cwd,
+        extensions,
+        logs,
+        options,
+    )
+    .await;
     report.logs = logs.map(Logs::lines).unwrap_or_default();
     report
 }
@@ -484,6 +538,7 @@ async fn pi_load(
     cwd: &Path,
     extensions: &[String],
     logs: Option<&Logs>,
+    options: &ProbeOptions,
 ) {
     let runtime = pi_dir.join("node_modules/@arcships/rutis-runtime");
     let mut without: Vec<String> = Vec::new();
@@ -494,7 +549,7 @@ async fn pi_load(
             logs.clear();
         }
         report.without = without.clone();
-        let host = match host(&runtime, &pi_dir.join("package.json"), &[]).await {
+        let host = match host(&runtime, &pi_dir.join("package.json"), &options.env).await {
             Ok(host) => host,
             Err(e) => {
                 report.loaded = Some(false);
@@ -624,11 +679,23 @@ pub async fn dsh(
     inject: &[String],
     logs: Option<&Logs>,
 ) -> DshReport {
+    dsh_with(plugins, base, rows, inject, logs, &ProbeOptions::default()).await
+}
+
+/// [`dsh`], with the runtime started as `options` say (its environment).
+pub async fn dsh_with(
+    plugins: &Path,
+    base: &Path,
+    rows: &Value,
+    inject: &[String],
+    logs: Option<&Logs>,
+    options: &ProbeOptions,
+) -> DshReport {
     let _one = ONE_AT_A_TIME.lock().await;
     if let Some(logs) = logs {
         logs.clear();
     }
-    let mut report = match dsh_load(&plugins.join("dsh"), base, rows, inject).await {
+    let mut report = match dsh_load(&plugins.join("dsh"), base, rows, inject, options).await {
         Ok(report) => report,
         Err(e) => DshReport {
             error: Some(e.to_string()),
@@ -644,6 +711,7 @@ async fn dsh_load(
     base: &Path,
     rows: &Value,
     inject: &[String],
+    options: &ProbeOptions,
 ) -> Result<DshReport, BoxError> {
     let plugin_ids = row_ids(rows)?;
     let mut report = DshReport::default();
@@ -651,16 +719,13 @@ async fn dsh_load(
     let dsh_home = tempfile::tempdir()?;
     let agents_home = dsh_home.path().join("agents");
     let base_rows = dsh_base_rows(dsh_dir, base)?;
-    let host = host(
-        &runtime,
-        &base.join("package.json"),
-        &[
-            ("DSH_HOME", dsh_home.path()),
-            ("DSH_AGENTS_HOME", &agents_home),
-        ],
-    )
-    .await
-    .map_err(|e| format!("host: {e}"))?;
+    // The caller's variables, then the probe's own private homes (which win).
+    let mut env = options.env.clone();
+    env.push(("DSH_HOME".into(), dsh_home.path().into()));
+    env.push(("DSH_AGENTS_HOME".into(), agents_home.clone().into()));
+    let host = host(&runtime, &base.join("package.json"), &env)
+        .await
+        .map_err(|e| format!("host: {e}"))?;
     // The base alone first, then the plugin's rows on top: the difference is
     // what the plugin adds.
     let base_state = load(&host, vec![("base", base_rows.clone())]).await;

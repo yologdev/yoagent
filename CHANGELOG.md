@@ -4,6 +4,16 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+- **`provider::api_key_variables()`**: every environment variable yoagent reads a credential from — each provider's key variables as `resolve_api_key` reads them (Bedrock's `AWS_*` included), the `YOAGENT_API_KEY` / `API_KEY` fallback, and the decision presets' keys (`TYPESAFE_API_KEY`, `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_AUTH_TOKEN`) — for hosts that blank credentials in processes they start (plugin runtimes, MCP servers). `resolve_api_key` now reads the same table, so the two cannot drift. Additive. Asked for by yobuild.
+
+## yoagent-rutis Unreleased
+
+yoagent-rutis only; requires yoagent 0.25, rutis 0.12 and Rust 1.88, as 0.8.0. Additive.
+
+- **`probe::pi_with` / `probe::dsh_with` and `ProbeOptions`**: the probe's Node runtime can be given environment variables (`ProbeOptions::default().env(name, value)`, `OsString`s, an empty value included), set over the inherited environment; the DSH probe's private `DSH_HOME` / `DSH_AGENTS_HOME` are set after them and win. `probe::pi` / `dsh` are unchanged. For hosts that blank provider keys in every plugin runtime (yobuild's `check`, whose probes were the one runtime still inheriting them). Asked for by yobuild.
+
 ## yoagent-rutis 0.8.0 (2026-10-20)
 
 yoagent-rutis only; requires yoagent 0.25, rutis 0.12 and Rust 1.88, as 0.7.1. A minor bump: new values and settings for the pi adapter's grants.

@@ -240,3 +240,81 @@ async fn a_base_of_its_own_gets_the_probe_files_copied_in() {
     assert!(base.path().join("probe-services.ts").is_file());
     assert!(base.path().join("dsh-tools-adapter.ts").is_file());
 }
+
+/// `pi_with` / `dsh_with`: the caller's variables reach the probe's runtime,
+/// an empty value included (how a host blanks provider keys); the DSH
+/// probe's own private `DSH_HOME` wins over a caller's.
+#[tokio::test(flavor = "multi_thread")]
+async fn probe_options_set_the_runtime_s_environment() {
+    let pi = adapters().pi;
+    if !installed(&pi) {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let extension = dir.path().join("env.ts");
+    std::fs::write(
+        &extension,
+        "const said = (v) => v === undefined ? 'unset' : v === '' ? 'empty' : v\n\
+         export default function (pi) { pi.registerTool({ \
+         name: `seen_${said(process.env.PROBE_VALUE)}_${said(process.env.PROBE_BLANK)}`, \
+         label: 'x', description: 'x', parameters: { type: 'object', properties: {} }, \
+         async execute() { return { content: [], details: {} } } }) }",
+    )
+    .unwrap();
+    let options = probe::ProbeOptions::default()
+        .env("PROBE_VALUE", "abc")
+        .env("PROBE_BLANK", "");
+    let report = probe::pi_with(
+        &adapters().root,
+        dir.path(),
+        &[extension.display().to_string()],
+        &[],
+        None,
+        &options,
+    )
+    .await;
+    assert!(
+        report.tools.iter().any(|t| t == "seen_abc_empty"),
+        "{report:?}"
+    );
+    // Without options: unset, as before.
+    let report = probe::pi(
+        &adapters().root,
+        dir.path(),
+        &[extension.display().to_string()],
+        &[],
+        None,
+    )
+    .await;
+    assert!(
+        report.tools.iter().any(|t| t == "seen_unset_unset"),
+        "{report:?}"
+    );
+
+    let dsh = adapters().dsh;
+    if !installed(&dsh) {
+        return;
+    }
+    let out = dir.path().join("dsh-env.json");
+    let plugin = dir.path().join("env-plugin.ts");
+    std::fs::write(
+        &plugin,
+        format!(
+            "import {{ writeFileSync }} from 'node:fs'\n\
+             export const name = 'env-probe'\n\
+             export function apply() {{ writeFileSync({out:?}, JSON.stringify({{ \
+             value: process.env.PROBE_VALUE, home: process.env.DSH_HOME }})) }}"
+        ),
+    )
+    .unwrap();
+    let rows = json!([{ "id": "env", "name": plugin }]);
+    let options = probe::ProbeOptions::default()
+        .env("PROBE_VALUE", "abc")
+        .env("DSH_HOME", "/caller/home");
+    let report = probe::dsh_with(&adapters().root, &dsh, &rows, &[], None, &options).await;
+    assert_eq!(report.error, None, "{report:?}");
+    let seen: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&out).unwrap()).unwrap();
+    assert_eq!(seen["value"], "abc", "{seen}");
+    assert_ne!(seen["home"], "/caller/home", "{seen}");
+}

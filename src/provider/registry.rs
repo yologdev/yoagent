@@ -126,6 +126,119 @@ mod tests {
         );
         assert!(registry.has(&ApiProtocol::AnthropicMessages));
     }
+
+    #[test]
+    fn api_key_variables_lists_every_credential_once() {
+        let names = super::api_key_variables();
+        for name in [
+            "ANTHROPIC_API_KEY",
+            "GOOGLE_API_KEY",
+            "MODEL_API_KEY",
+            "OPENCODE_API_KEY",
+            "AZURE_OPENAI_API_KEY",
+            "AWS_BEARER_TOKEN_BEDROCK",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+            "YOAGENT_API_KEY",
+            "API_KEY",
+            "TYPESAFE_API_KEY",
+            "CLOUDFLARE_AUTH_TOKEN",
+        ] {
+            assert!(names.contains(&name), "{name} missing from {names:?}");
+        }
+        let mut unique = names.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), names.len(), "a name listed twice: {names:?}");
+        // Every provider's own variables come first, in the table's order.
+        assert_eq!(&names[..2], ["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]);
+    }
+
+    /// The decision presets read these names from their own constants.
+    #[cfg(feature = "decision")]
+    #[test]
+    fn decision_key_variables_match_the_presets() {
+        use crate::decision::systemone::{
+            CLOUDFLARE_API_TOKEN_ENV, CLOUDFLARE_AUTH_TOKEN_ENV, TYPESAFE_API_KEY_ENV,
+        };
+        assert_eq!(
+            super::DECISION_KEY_VARIABLES,
+            [
+                TYPESAFE_API_KEY_ENV,
+                CLOUDFLARE_API_TOKEN_ENV,
+                CLOUDFLARE_AUTH_TOKEN_ENV
+            ]
+        );
+    }
+}
+
+/// The variables [`resolve_api_key`] reads for each provider name with keys of
+/// its own, first match wins (Bedrock's, `vertex` and the keyless locals are
+/// handled apart; any other name reads [`FALLBACK_KEY_VARIABLES`]).
+const PROVIDER_KEY_VARIABLES: &[(&str, &[&str])] = &[
+    ("anthropic", &["ANTHROPIC_API_KEY"]),
+    ("openai", &["OPENAI_API_KEY"]),
+    ("google", &["GEMINI_API_KEY", "GOOGLE_API_KEY"]),
+    ("xai", &["XAI_API_KEY"]),
+    ("groq", &["GROQ_API_KEY"]),
+    ("deepseek", &["DEEPSEEK_API_KEY"]),
+    ("mistral", &["MISTRAL_API_KEY"]),
+    ("zai", &["ZAI_API_KEY"]),
+    ("minimax", &["MINIMAX_API_KEY"]),
+    // Meta's docs name the generic MODEL_API_KEY; prefer the unambiguous
+    // META_API_KEY, accept the official one.
+    ("meta", &["META_API_KEY", "MODEL_API_KEY"]),
+    ("openrouter", &["OPENROUTER_API_KEY"]),
+    ("cerebras", &["CEREBRAS_API_KEY"]),
+    ("qwen", &["DASHSCOPE_API_KEY"]),
+    ("opencode-zen", &["OPENCODE_API_KEY"]),
+    ("opencode-go", &["OPENCODE_API_KEY"]),
+    ("azure", &["AZURE_OPENAI_API_KEY"]),
+];
+
+/// What [`resolve_api_key`] reads for a provider name it does not know.
+const FALLBACK_KEY_VARIABLES: &[&str] = &["YOAGENT_API_KEY", "API_KEY"];
+
+/// Bedrock's credentials: a Bedrock API key, else an AWS access key pair (and
+/// session token).
+const BEDROCK_KEY_VARIABLES: &[&str] = &[
+    crate::provider::bedrock::BEARER_TOKEN_ENV,
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+];
+
+/// Credentials the decision-model presets read (feature `decision`), beyond
+/// the provider keys above: TypeSafe's (`jev()`) and Cloudflare's (`clef*()`).
+const DECISION_KEY_VARIABLES: &[&str] = &[
+    "TYPESAFE_API_KEY",
+    "CLOUDFLARE_API_TOKEN",
+    "CLOUDFLARE_AUTH_TOKEN",
+];
+
+/// Every environment variable yoagent reads a credential from: each
+/// provider's key variables as [`resolve_api_key`] reads them (Bedrock's
+/// AWS ones included), its `YOAGENT_API_KEY` / `API_KEY` fallback, and the
+/// decision-model presets' keys — each once, in that order.
+///
+/// For hosts that keep credentials away from code they run (plugins, MCP
+/// servers): set each of these to the empty string in the child's
+/// environment when the launcher can only add variables. A key a host
+/// passes under another name (a manifest's own variable) is not in it.
+pub fn api_key_variables() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = Vec::new();
+    let all = PROVIDER_KEY_VARIABLES
+        .iter()
+        .flat_map(|(_, vars)| vars.iter())
+        .chain(BEDROCK_KEY_VARIABLES)
+        .chain(FALLBACK_KEY_VARIABLES)
+        .chain(DECISION_KEY_VARIABLES);
+    for name in all {
+        if !names.contains(name) {
+            names.push(name);
+        }
+    }
+    names
 }
 
 /// Resolve an API key from the conventional environment variable(s) for a
@@ -158,23 +271,6 @@ pub fn resolve_api_key(provider: &str) -> Option<String> {
         })
     };
     match provider {
-        "anthropic" => first(&["ANTHROPIC_API_KEY"]),
-        "openai" => first(&["OPENAI_API_KEY"]),
-        "google" => first(&["GEMINI_API_KEY", "GOOGLE_API_KEY"]),
-        "xai" => first(&["XAI_API_KEY"]),
-        "groq" => first(&["GROQ_API_KEY"]),
-        "deepseek" => first(&["DEEPSEEK_API_KEY"]),
-        "mistral" => first(&["MISTRAL_API_KEY"]),
-        "zai" => first(&["ZAI_API_KEY"]),
-        "minimax" => first(&["MINIMAX_API_KEY"]),
-        // Meta's docs name the generic MODEL_API_KEY; prefer the unambiguous
-        // META_API_KEY, accept the official one.
-        "meta" => first(&["META_API_KEY", "MODEL_API_KEY"]),
-        "openrouter" => first(&["OPENROUTER_API_KEY"]),
-        "cerebras" => first(&["CEREBRAS_API_KEY"]),
-        "qwen" => first(&["DASHSCOPE_API_KEY"]),
-        "opencode-zen" | "opencode-go" => first(&["OPENCODE_API_KEY"]),
-        "azure" => first(&["AZURE_OPENAI_API_KEY"]),
         "bedrock" => {
             // Empty values count as unset (a blanked-out export).
             let set = |n: &str| var(n).ok().filter(|v| !v.trim().is_empty());
@@ -195,7 +291,12 @@ pub fn resolve_api_key(provider: &str) -> Option<String> {
         }
         "vertex" => None,
         "local" | "ollama" => Some(String::new()),
-        _ => first(&["YOAGENT_API_KEY", "API_KEY"]),
+        other => first(
+            PROVIDER_KEY_VARIABLES
+                .iter()
+                .find(|(name, _)| *name == other)
+                .map_or(FALLBACK_KEY_VARIABLES, |(_, vars)| vars),
+        ),
     }
 }
 

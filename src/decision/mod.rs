@@ -101,7 +101,7 @@ mod logprobs;
 mod mock;
 mod openai;
 mod question;
-mod systemone;
+pub(crate) mod systemone;
 
 pub use advisory::Advisory;
 pub use answer::{

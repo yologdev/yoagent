@@ -325,7 +325,11 @@ what the plugin logged — without calling a tool or a model (loading runs
 the package's code, as its own host would). Each report's `problem()` is
 the verdict: `None` for a clean load, else what kept the package from
 giving an agent what it offers (a refusal after load included). Probes in
-one process run one at a time.
+one process run one at a time. The probe's Node process inherits this
+process's environment; `probe::pi_with` / `dsh_with` take a `ProbeOptions`
+with variables to set on top (`ProbeOptions::default().env(name, value)`;
+an empty value blanks one) — a host that keeps provider keys from plugins
+sets each of `yoagent::provider::api_key_variables()` to `""` there too.
 
 ```rust,no_run
 # async fn check() {
