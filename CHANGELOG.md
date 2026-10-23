@@ -14,6 +14,7 @@ adheres to [Semantic Versioning](https://semver.org/).
 yoagent-rutis only; requires yoagent 0.25, rutis 0.12 and Rust 1.88, as 0.8.1. Additive.
 
 - **`adapters::files()`** (feature `embedded-adapters`): the pi and DSH adapter files built into the binary — `(path relative to plugins/, contents)`, every file under `plugins/pi` and `plugins/dsh` but the test fixtures, with each folder's `package.json` / `package-lock.json`, plus `yoagent.d.ts` — so a host installed without this crate's source (`cargo install`, a release binary) can write them under one folder and run `npm ci` in its `pi/` and `dsh/` (key the folder by version). About 370 KB, opt-in. A test keeps the list equal to the files in `pi/` and `dsh/`, subfolders included; another loads a pi extension through a written-out copy. Asked for by yobuild (M4).
+- **DSH host: every turn ending is tested** (#363). The stored JSONL events are checked for user cancellation, failed runs, overlapping runs, session resets and host unload, including the failing extension's error and a previous run's finish while another turn is open.
 
 ## 0.25.12 (2026-10-21)
 

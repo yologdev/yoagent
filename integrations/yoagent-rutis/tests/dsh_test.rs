@@ -31,7 +31,12 @@ use rutis_loader::{
     ServiceCatalog,
 };
 use serde_json::{json, Value};
+use tokio::sync::{mpsc, Notify};
+use yoagent::extension::{ClonedHooks, RunHooks, StopContext, StopDecision};
 use yoagent::provider::mock::{MockResponse, MockToolCall};
+use yoagent::provider::{
+    MockProvider, ModelConfig, ProviderError, StreamConfig, StreamEvent, StreamProvider,
+};
 use yoagent::{AgentEvent, AgentMessage, Content, Message};
 use yoagent_rutis::RutisBridge;
 
@@ -938,7 +943,11 @@ fn stand_in_rows(sessions: &Path) -> Value {
     ];
     rows.extend(yoagent_rutis::adapters::dsh_host_rows(&dsh_dir(), sessions).unwrap());
     rows.extend([
-        json!({ "id": "fixture", "name": dsh_dir().join("fixture-tools.ts") }),
+        json!({
+            "id": "fixture",
+            "name": dsh_dir().join("fixture-tools.ts"),
+            "config": { "abortFile": sessions.with_file_name("slow.txt") },
+        }),
         json!({ "id": "fixture-agent", "name": dsh_dir().join("fixture-needs-agent.ts") }),
         json!({ "id": "adapter", "name": dsh_dir().join("dsh-tools-adapter.ts") }),
         json!({ "id": "dialogs", "name": dsh_dir().join("host-dialogs.ts") }),
@@ -1124,22 +1133,27 @@ async fn a_stand_in_agent_gives_dsh_plugins_a_workspace_turns_and_approvals() {
     // Both generations' sessions are in the log, with their turns and the
     // approvals' audit pairs (read back through DSH's own jsonl backend).
     let logs = read_logs(&dir.path().join("sessions"));
-    let first: Vec<String> = serde_json::from_value(logs[&first_agent].clone()).unwrap();
+    let first: Vec<_> = logs[&first_agent]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|event| event["type"].as_str().unwrap())
+        .collect();
     for want in [
         "turn/start",
         "approval/asked",
         "approval/decided",
         "turn/end",
     ] {
-        assert!(first.iter().any(|t| t == want), "{want}: {first:?}");
+        assert!(first.contains(&want), "{want}: {first:?}");
     }
     assert_eq!(
-        first.iter().filter(|t| *t == "turn/end").count(),
+        first.iter().filter(|t| **t == "turn/end").count(),
         2,
         "{first:?}"
     );
     assert_eq!(
-        first.iter().filter(|t| *t == "approval/decided").count(),
+        first.iter().filter(|t| **t == "approval/decided").count(),
         3,
         "{first:?}"
     );
@@ -1150,7 +1164,7 @@ async fn a_stand_in_agent_gives_dsh_plugins_a_workspace_turns_and_approvals() {
     );
 }
 
-/// The event types of every session stored under `sessions`, by session id,
+/// The events of every session stored under `sessions`, by session id,
 /// read with DSH's jsonl backend (in a Node process over `plugins/dsh`).
 fn read_logs(sessions: &Path) -> Value {
     let script = format!(
@@ -1164,7 +1178,7 @@ const out = {{}}
 for (const snap of await store.list()) {{
   const handle = await store.open(snap.header.id, 'read')
   const read = await handle.read()
-  out[snap.header.id] = read.events.map((e) => e.type)
+  out[snap.header.id] = read.events
   await handle[Symbol.asyncDispose]?.()
 }}
 console.log(JSON.stringify(out))
@@ -1186,6 +1200,294 @@ process.exit(0)
     let stdout = String::from_utf8(output.stdout).unwrap();
     serde_json::from_str(stdout.lines().last().unwrap_or_default())
         .unwrap_or_else(|_| panic!("{stdout}"))
+}
+
+/// Pin complete start/end pairs, in order, from the persisted events.
+fn assert_logged_turns(logs: &Value, id: &str, ends: &[Value]) {
+    let actual: Vec<_> = logs[id]
+        .as_array()
+        .unwrap_or_else(|| panic!("no session {id}: {logs}"))
+        .iter()
+        .filter(|event| matches!(event["type"].as_str(), Some("turn/start" | "turn/end")))
+        .map(|event| json!([event["type"], event["data"]]))
+        .collect();
+    let expected: Vec<_> = ends
+        .iter()
+        .enumerate()
+        .flat_map(|(i, reason)| {
+            let turn = i + 1;
+            [
+                json!(["turn/start", { "turn": turn }]),
+                json!(["turn/end", { "turn": turn, "reason": reason }]),
+            ]
+        })
+        .collect();
+    assert_eq!(actual, expected, "session {id}: {logs}");
+}
+
+fn stand_in_id(agent: &yoagent::Agent) -> String {
+    let results = tool_results(agent.messages());
+    let (_, text, failed) = results.iter().find(|r| r.0 == "fixture_where").unwrap();
+    assert!(!failed, "{results:?}");
+    text.split_whitespace().next().unwrap().to_owned()
+}
+
+async fn finish_prompt(agent: &mut yoagent::Agent, mut rx: mpsc::UnboundedReceiver<AgentEvent>) {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while rx.recv().await.is_some() {}
+        agent.finish().await;
+    })
+    .await
+    .expect("the run and its finish end");
+}
+
+/// Pause once after a real DSH call has returned, before the next model
+/// response. The turn is open, and the test controls when finish can run.
+struct PausedAfterDsh {
+    inner: MockProvider,
+    paused: AtomicBool,
+    entered: Arc<Notify>,
+    resume: Arc<Notify>,
+}
+
+#[async_trait::async_trait]
+impl StreamProvider for PausedAfterDsh {
+    async fn stream(
+        &self,
+        config: StreamConfig,
+        tx: mpsc::UnboundedSender<StreamEvent>,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<Message, ProviderError> {
+        if config
+            .messages
+            .iter()
+            .any(|m| matches!(m, Message::ToolResult { .. }))
+            && !self.paused.swap(true, Ordering::SeqCst)
+        {
+            self.entered.notify_one();
+            tokio::select! {
+                _ = self.resume.notified() => {}
+                _ = cancel.cancelled() => {}
+            }
+        }
+        self.inner.stream(config, tx, cancel).await
+    }
+}
+
+fn paused_agent(
+    host: &Host,
+    next: Vec<MockResponse>,
+) -> (yoagent::Agent, Arc<Notify>, Arc<Notify>) {
+    let entered = Arc::new(Notify::new());
+    let resume = Arc::new(Notify::new());
+    let mut responses = vec![call("fixture_where", json!({}))];
+    responses.extend(next);
+    let agent = yoagent::Agent::from_provider(
+        PausedAfterDsh {
+            inner: MockProvider::new(responses),
+            paused: AtomicBool::new(false),
+            entered: entered.clone(),
+            resume: resume.clone(),
+        },
+        ModelConfig::mock(),
+    )
+    .with_extension(host.bridge.extension());
+    (agent, entered, resume)
+}
+
+async fn wait_paused(entered: &Notify) {
+    tokio::time::timeout(Duration::from_secs(30), entered.notified())
+        .await
+        .expect("the DSH call completed and its turn is still open");
+}
+
+/// A top-level run cancelled during a DSH call ends its turn `aborted` by the
+/// user, and the next run opens the next turn in the same session.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancelled_run_ends_its_dsh_turn_as_aborted_by_the_user() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let host = stand_in_host(&runtime, dir.path(), fake_session(), Arc::default()).await;
+    let mut agent = agent_again(
+        &host,
+        vec![
+            call("fixture_where", json!({})),
+            call("fixture_slow", json!({})),
+            text("not reached"),
+        ],
+    );
+    let rx = agent.prompt("go").await;
+    let marker = dir.path().join("slow.txt");
+    wait_file(&marker, |text| text == "started").await;
+    agent.abort();
+    finish_prompt(&mut agent, rx).await;
+    assert_eq!(
+        wait_file(&marker, |text| text.starts_with("aborted:")).await,
+        "aborted: AbortError"
+    );
+    let id = stand_in_id(&agent);
+    let mut next = agent_again(&host, vec![call("fixture_turns", json!({})), text("done")]);
+    let (_, results) = run(&mut next, "again").await;
+    assert_eq!(
+        turns(&results[0].1),
+        (2, vec!["aborted:user".into()]),
+        "{results:?}"
+    );
+    host.root.shutdown().await.unwrap();
+    let logs = read_logs(&dir.path().join("sessions"));
+    assert_eq!(logs.as_object().unwrap().len(), 1, "{logs}");
+    assert_logged_turns(
+        &logs,
+        &id,
+        &[
+            json!({ "kind": "aborted", "reason": { "kind": "user" } }),
+            json!({ "kind": "completed" }),
+        ],
+    );
+}
+
+#[derive(Clone)]
+struct FailAtStop;
+
+#[async_trait::async_trait]
+impl RunHooks for FailAtStop {
+    async fn on_stop(&mut self, _stop: &StopContext<'_>) -> StopDecision {
+        StopDecision::Fail("lifecycle failure".into())
+    }
+}
+
+/// A run a required extension fails ends its turn `error`, with the run's
+/// error and the extension that failed it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_run_records_its_error_and_extension_in_the_dsh_turn() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let host = stand_in_host(&runtime, dir.path(), fake_session(), Arc::default()).await;
+    let mut agent = agent_again(&host, vec![call("fixture_where", json!({})), text("done")])
+        .with_extension(ClonedHooks::new("fixture-failure", FailAtStop).required());
+    run(&mut agent, "go").await;
+    let error = run_error(&agent).expect("the required extension failed the run");
+    assert!(error.contains("lifecycle failure"), "{error}");
+    let id = stand_in_id(&agent);
+    host.root.shutdown().await.unwrap();
+    let logs = read_logs(&dir.path().join("sessions"));
+    assert_logged_turns(
+        &logs,
+        &id,
+        &[
+            json!({ "kind": "error", "error": { "message": format!("{error} (extension fixture-failure)"), "code": "UNKNOWN" } }),
+        ],
+    );
+}
+
+/// A second top-level run that finds the first's turn still open closes it
+/// `aborted` (hook) and opens its own; the first run's late `finish` must not
+/// close the second's turn (the owner guard — fails without it).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_overlapping_run_aborts_the_old_dsh_turn_and_keeps_its_own() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let host = stand_in_host(&runtime, dir.path(), fake_session(), Arc::default()).await;
+    let (mut first, entered, resume) = paused_agent(&host, vec![text("first done")]);
+    let first_rx = first.prompt("first").await;
+    wait_paused(&entered).await;
+    let (mut second, second_entered, second_resume) = paused_agent(
+        &host,
+        vec![call("fixture_turns", json!({})), text("second done")],
+    );
+    let second_rx = second.prompt("second").await;
+    wait_paused(&second_entered).await;
+    // The old finish must not close the second run's still-open turn.
+    resume.notify_one();
+    finish_prompt(&mut first, first_rx).await;
+    second_resume.notify_one();
+    finish_prompt(&mut second, second_rx).await;
+    let results = tool_results(second.messages());
+    assert_eq!(
+        turns(&results[1].1),
+        (2, vec!["aborted:hook".into()]),
+        "{results:?}"
+    );
+    let id = stand_in_id(&first);
+    assert_eq!(id, stand_in_id(&second));
+    host.root.shutdown().await.unwrap();
+    assert_logged_turns(
+        &read_logs(&dir.path().join("sessions")),
+        &id,
+        &[
+            json!({ "kind": "aborted", "reason": { "kind": "hook", "reason": "another top-level yoagent run needed the stand-in" } }),
+            json!({ "kind": "completed" }),
+        ],
+    );
+}
+
+/// A host session reset (a new generation) closes the open turn `aborted`
+/// (disposed) in the old session; the new generation starts its own.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reset_disposes_the_open_dsh_turn_before_starting_a_new_generation() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let session = fake_session();
+    let host = stand_in_host(&runtime, dir.path(), session.clone(), Arc::default()).await;
+    let (mut first, entered, _resume) = paused_agent(&host, vec![text("not reached")]);
+    let rx = first.prompt("first").await;
+    wait_paused(&entered).await;
+    session.generation.store(2, Ordering::SeqCst);
+    let mut next = agent_again(
+        &host,
+        vec![
+            call("fixture_where", json!({})),
+            call("fixture_turns", json!({})),
+            text("done"),
+        ],
+    );
+    let (_, results) = run(&mut next, "after reset").await;
+    assert_eq!(turns(&results[1].1), (1, vec![]), "{results:?}");
+    first.abort();
+    finish_prompt(&mut first, rx).await;
+    let old_id = stand_in_id(&first);
+    let new_id = stand_in_id(&next);
+    assert_ne!(old_id, new_id);
+    host.root.shutdown().await.unwrap();
+    let logs = read_logs(&dir.path().join("sessions"));
+    assert_eq!(logs.as_object().unwrap().len(), 2, "{logs}");
+    assert_logged_turns(
+        &logs,
+        &old_id,
+        &[json!({ "kind": "aborted", "reason": { "kind": "disposed" } })],
+    );
+    assert_logged_turns(&logs, &new_id, &[json!({ "kind": "completed" })]);
+}
+
+/// Unloading the host closes the open turn `aborted` (disposed).
+#[tokio::test(flavor = "multi_thread")]
+async fn unloading_the_host_disposes_its_open_dsh_turn() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let host = stand_in_host(&runtime, dir.path(), fake_session(), Arc::default()).await;
+    let (mut agent, entered, _resume) = paused_agent(&host, vec![text("not reached")]);
+    let rx = agent.prompt("go").await;
+    wait_paused(&entered).await;
+    host.root.shutdown().await.unwrap();
+    agent.abort();
+    finish_prompt(&mut agent, rx).await;
+    let logs = read_logs(&dir.path().join("sessions"));
+    assert_eq!(logs.as_object().unwrap().len(), 1, "{logs}");
+    assert_logged_turns(
+        &logs,
+        &stand_in_id(&agent),
+        &[json!({ "kind": "aborted", "reason": { "kind": "disposed" } })],
+    );
 }
 
 /// The runs a top-level run delegates to, at any depth, join its DSH turn:
