@@ -151,18 +151,8 @@ fn models_dev_fixture_maps_into_our_schema() {
     // Against the built-in data: every overlapping model agrees as billed
     // (gpt-5.5's implicit cache_write equals its explicit input-rate one), so
     // only new models are reported.
+    // (Mistral Large 4 agrees too since its launch sale ended, 2026-10-23.)
     let changes = t.changes_from(&PriceTable::builtin());
-    // Except a model on a vendor promotion: the snapshot carries the regular
-    // rate, models.dev the promotional half (what a live fetch installs).
-    let promo = |c: &yoagent::provider::prices::PriceChange| {
-        c.provider == "mistral" && c.model == "mistral-large-4"
-    };
-    let mistral = changes.iter().find(|c| promo(c)).expect("the promotion");
-    assert_eq!(
-        mistral.after.as_ref().map(|a| a.input_per_million),
-        Some(0.68)
-    );
-    let changes: Vec<_> = changes.into_iter().filter(|c| !promo(c)).collect();
     assert!(
         changes.iter().all(|c| c.before.is_none()),
         "{:?}",

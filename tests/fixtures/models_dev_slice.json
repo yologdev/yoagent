@@ -403,9 +403,9 @@
     },
     "status": "beta",
     "cost": {
-     "input": 0.68,
-     "output": 2.09,
-     "cache_read": 0.07
+     "input": 1.36,
+     "output": 4.18,
+     "cache_read": 0.14
     },
     "canonical_model_id": "mistral/mistral-large-4"
    }
