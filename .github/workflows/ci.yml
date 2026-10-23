@@ -245,12 +245,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.86
       - uses: Swatinem/rust-cache@v2
       # resolver = "3" skips dependency versions whose declared rust-version is
-      # too new, but a crate that declares none is taken at its newest.
-      # yoke-derive 0.8.3 (2026-09-15, no rust-version) needs a std API newer
-      # than 1.86; hold it at 0.8.2 here only — published consumers resolve
-      # their own lockfile and are unaffected.
-      - name: Pin transitive deps that dropped 1.86 without declaring it
-        run: cargo update -p yoke-derive --precise 0.8.2
+      # too new, but a crate that declares none is taken at its newest. (A
+      # yoke-derive pin lived here until 0.8.3, which declared none and needed
+      # a newer std, was yanked; 0.8.4 declares 1.82 and yoke 0.8.4 requires
+      # it, so the pin broke resolution, 2026-10-23.)
       - name: Check
         run: cargo check --all-features
 
@@ -292,8 +290,8 @@ jobs:
         run: cargo run --manifest-path integrations/yoagent-rutis/examples/rutis-agent-tools/Cargo.toml
 
   # The bridge declares rust-version 1.88, the rutis 0.12 release train's MSRV
-  # (yoagent's own is 1.86). Mirrors the `msrv` job above, including its
-  # yoke-derive pin; the language features build there too.
+  # (yoagent's own is 1.86). Mirrors the `msrv` job above; the language
+  # features build there too.
   rutis-bridge-msrv:
     name: yoagent-rutis MSRV (1.88)
     needs: changes
@@ -308,11 +306,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: integrations/yoagent-rutis
-      # yoke-derive 0.8.3 declares no rust-version; held at 0.8.2 as in `msrv`.
-      - name: Pin transitive deps that declare no rust-version
-        run: |
-          cargo generate-lockfile --manifest-path "$MANIFEST"
-          cargo update --manifest-path "$MANIFEST" -p yoke-derive --precise 0.8.2
       - name: Check
         run: cargo check --manifest-path "$MANIFEST" --all-targets
       - name: Check with the language features (rutis-bridge 0.12)
