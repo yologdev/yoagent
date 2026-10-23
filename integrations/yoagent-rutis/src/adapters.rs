@@ -8,7 +8,7 @@
 //! adapters import `../yoagent.d.ts`) and run `npm ci` in the copy's `pi/`
 //! and `dsh/`; that copy is what the `probe` module (feature `probe`) takes. The paths are where
 //! the crate was built: a binary run on another machine must ship them. With
-//! the `embedded-adapters` feature, [`files`] has the pi and DSH adapters and
+//! the `embedded-adapters` feature, `files()` has the pi and DSH adapters and
 //! `yoagent.d.ts` (no test fixtures or example plugins) built in, to write out.
 //!
 //! ```no_run
