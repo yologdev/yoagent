@@ -9,6 +9,12 @@ adheres to [Semantic Versioning](https://semver.org/).
 - **Bedrock, Gemini and Vertex no longer send an empty message** (#369). An assistant turn that errored, was refused or was cancelled with no content (the loop's error message is one empty text block, which the builders filter) — or whose only content is thinking the provider does not replay (on Gemini and Vertex any thinking; on Bedrock unsigned reasoning to a Claude model, or another API's) — went out as `content: []` / `parts: []`, which both APIs reject (as did a user message with only empty text); the Anthropic provider already skipped such an assistant turn. So the prompt after a failed or cancelled run was rejected too. Empty messages of either role are now dropped before consecutive same-role messages are merged (#368), so the user turns around a dropped one go back as one.
 - **Bedrock, Gemini and Vertex: a parallel tool call's results go back in one message** (#223). Each tool result was sent as its own user-role message, and a steering message, stop marker or compaction summary after them added another, while Bedrock's Converse requires roles to alternate and Gemini requires a turn's function responses in one content, as many as its function calls. So the request after any turn with two or more tool calls (the default parallel strategy) could be rejected. The three request builders now merge consecutive same-role messages, keeping every block in order: the results in call order, then whatever followed; on Gemini and Vertex a merged turn's function responses come first, then any images and text (images among the responses are a reported cause of Gemini's response-count 400). Pinned by request-body tests; not run against a live endpoint.
 
+## yoagent-rutis Unreleased
+
+yoagent-rutis only; requires yoagent 0.25, rutis 0.12 and Rust 1.88, as 0.8.1. Additive.
+
+- **`adapters::files()`** (feature `embedded-adapters`): the pi and DSH adapter files built into the binary — `(path relative to plugins/, contents)`, everything under `plugins/pi` and `plugins/dsh` but the test fixtures, with each folder's `package.json` / `package-lock.json`, plus `yoagent.d.ts` — so a host installed without this crate's source (`cargo install`, a release binary) can write them under one folder and `npm ci`. About 380 KB, opt-in. A test keeps the list equal to the files on disk. Asked for by yobuild (M4).
+
 ## 0.25.12 (2026-10-21)
 
 Additive: one new function.

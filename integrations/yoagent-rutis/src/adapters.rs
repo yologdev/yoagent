@@ -7,7 +7,9 @@
 //! dependencies — never install into them. Copy the whole `root` (the
 //! adapters import `../yoagent.d.ts`) and run `npm ci` in the copy's `pi/`
 //! and `dsh/`; that copy is what the `probe` module (feature `probe`) takes. The paths are where
-//! the crate was built: a binary run on another machine must ship a copy.
+//! the crate was built: a binary run on another machine must ship a copy —
+//! with the `embedded-adapters` feature, [`files`] is that copy, built into
+//! the binary.
 //!
 //! ```no_run
 //! let adapters = yoagent_rutis::adapters::adapters();
@@ -90,6 +92,81 @@ pub fn dsh_host_rows(dsh: &Path, sessions: &Path) -> std::io::Result<Vec<serde_j
         }
     }
     Ok(rows)
+}
+
+/// The files of `plugins/` a host ships, built into the binary (feature
+/// `embedded-adapters`): `(path relative to plugins/, contents)`.
+///
+/// The pi and DSH adapters with what they load beside them (the host-service
+/// rows and helpers, the probe's scripts), each folder's `package.json` and
+/// `package-lock.json`, and `yoagent.d.ts`, which the adapters import as
+/// `../yoagent.d.ts` — everything under [`Adapters`]' `pi` and `dsh` but the
+/// test fixtures. Write them under one folder (keeping the paths) and run
+/// `npm ci` in its `pi/` and `dsh/`: the folder is then laid out like
+/// [`adapters`]' `root`, and is what the `probe` module takes.
+#[cfg(feature = "embedded-adapters")]
+#[cfg_attr(docsrs, doc(cfg(feature = "embedded-adapters")))]
+pub fn files() -> &'static [(&'static str, &'static [u8])] {
+    FILES
+}
+
+#[cfg(feature = "embedded-adapters")]
+macro_rules! embedded {
+    ($($path:literal),* $(,)?) => {
+        &[$(($path, include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/plugins/", $path)))),*]
+    };
+}
+
+#[cfg(feature = "embedded-adapters")]
+static FILES: &[(&str, &[u8])] = embedded![
+    "yoagent.d.ts",
+    "pi/package.json",
+    "pi/package-lock.json",
+    "pi/pi-extensions-adapter.ts",
+    "pi/host-ui.ts",
+    "pi/host-approval.ts",
+    "pi/host-session.ts",
+    "pi/resolve-package.mjs",
+    "dsh/package.json",
+    "dsh/package-lock.json",
+    "dsh/dsh-tools-adapter.ts",
+    "dsh/dsh-host.ts",
+    "dsh/dsh-host.json",
+    "dsh/host-dialogs.ts",
+    "dsh/host-services.json",
+    "dsh/inspect-package.mjs",
+    "dsh/probe-services.ts",
+];
+
+/// Every non-fixture file under `pi/` and `dsh/` (and `yoagent.d.ts`) is
+/// embedded, and each embedded file is the file on disk.
+#[cfg(all(test, feature = "embedded-adapters"))]
+mod embedded_tests {
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn files_are_every_shipped_adapter_file() {
+        let root = super::adapters().root;
+        let mut on_disk = BTreeSet::from(["yoagent.d.ts".to_string()]);
+        for folder in ["pi", "dsh"] {
+            for entry in std::fs::read_dir(root.join(folder)).unwrap() {
+                let entry = entry.unwrap();
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if entry.file_type().unwrap().is_file() && !name.starts_with("fixture-") {
+                    on_disk.insert(format!("{folder}/{name}"));
+                }
+            }
+        }
+        let embedded: BTreeSet<String> =
+            super::files().iter().map(|(p, _)| p.to_string()).collect();
+        assert_eq!(
+            embedded, on_disk,
+            "list every shipped file in `FILES`, and only those"
+        );
+        for (path, bytes) in super::files() {
+            assert_eq!(*bytes, std::fs::read(root.join(path)).unwrap(), "{path}");
+        }
+    }
 }
 
 #[cfg(test)]

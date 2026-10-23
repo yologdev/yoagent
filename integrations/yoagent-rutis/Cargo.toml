@@ -54,7 +54,7 @@ tempfile = { version = "3", optional = true }
 tracing-subscriber = { version = "0.3", optional = true, default-features = false, features = ["registry"] }
 
 [package.metadata.docs.rs]
-features = ["node", "python", "bun", "go", "websocket", "loader", "probe"]
+features = ["node", "python", "bun", "go", "websocket", "loader", "probe", "embedded-adapters"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
@@ -75,6 +75,10 @@ websocket = ["rutis-bridge/websocket"]
 # `yoagent_rutis::rows`: wait for plugin rows a host loaded with
 # rutis-loader to run, naming the services a waiting row lacks.
 loader = ["dep:rutis-loader", "dep:rutis-bridge"]
+# `yoagent_rutis::adapters::files`: the pi and DSH adapter files built into
+# the binary (about 380 KB, mostly the two npm lock files), for hosts that
+# run without this crate's source on disk.
+embedded-adapters = []
 # `yoagent_rutis::probe`: load a pi or DSH package through its adapter and
 # report what an agent gets, without calling a tool or a model (Unix).
 probe = ["node", "loader", "dep:tempfile", "dep:tracing-subscriber"]
