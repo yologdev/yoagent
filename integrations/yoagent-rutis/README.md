@@ -319,8 +319,10 @@ the whole `root` (the adapters import `../yoagent.d.ts`) and run `npm ci`
 in the copy's `pi/` and `dsh/`; never install into the registry's. A host
 that runs without this crate's source (a `cargo install`ed or released
 binary) enables the `embedded-adapters` feature: `adapters::files()` is the
-same files built in, `(path relative to plugins/, contents)`, to write under
-one folder before `npm ci`.
+pi and DSH adapter files and `yoagent.d.ts` (without the test fixtures)
+built in, `(path relative to plugins/, contents)`; write them under one
+folder — a new one per yoagent-rutis version — and run `npm ci` in its
+`pi/` and `dsh/`.
 
 With the `probe` feature, `yoagent_rutis::probe` loads a pi or DSH package
 through its adapter and reports what an agent gets — tools, prompt

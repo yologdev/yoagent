@@ -387,7 +387,9 @@ jobs:
       - name: Documentation
         run: RUSTDOCFLAGS="-Dwarnings" cargo doc --manifest-path "$MANIFEST" --no-deps --features node,python,bun,go,websocket,loader,probe,embedded-adapters
       # `probe` adds tests/probe_test.rs: the pi and DSH adapters' fixtures
-      # through `yoagent_rutis::probe`.
+      # through `yoagent_rutis::probe`; `embedded-adapters` the check that
+      # `adapters::files()` lists every adapter file, and a probe through a
+      # written-out copy of them.
       - name: Test
         run: cargo test --manifest-path "$MANIFEST" --features node,python,bun,go,websocket,loader,probe,embedded-adapters
       - name: Example

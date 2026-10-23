@@ -322,3 +322,29 @@ async fn probe_options_set_the_runtime_s_environment() {
         "{seen}"
     );
 }
+
+/// The embedded adapter files (feature `embedded-adapters`), written out as a
+/// host installed without this crate's source would: the probe loads a pi
+/// extension through the copy. The copy's `node_modules` link to the
+/// installed ones (`npm ci` there would fetch the same packages).
+#[cfg(all(feature = "embedded-adapters", unix))]
+#[tokio::test(flavor = "multi_thread")]
+async fn the_embedded_adapter_files_work_written_out() {
+    let pi = adapters().pi;
+    if !installed(&pi) {
+        return;
+    }
+    let copy = tempfile::tempdir().unwrap();
+    for (path, bytes) in yoagent_rutis::adapters::files() {
+        let file = copy.path().join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, bytes).unwrap();
+    }
+    std::os::unix::fs::symlink(pi.join("node_modules"), copy.path().join("pi/node_modules"))
+        .unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let extension = pi.join("fixture-extension.ts").display().to_string();
+    let report = probe::pi(copy.path(), cwd.path(), &[extension], &[], None).await;
+    assert_eq!(report.problem(), None, "{report:?}");
+    assert!(report.tools.iter().any(|t| t == "pi_echo"), "{report:?}");
+}

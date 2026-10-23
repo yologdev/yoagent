@@ -7,9 +7,9 @@
 //! dependencies — never install into them. Copy the whole `root` (the
 //! adapters import `../yoagent.d.ts`) and run `npm ci` in the copy's `pi/`
 //! and `dsh/`; that copy is what the `probe` module (feature `probe`) takes. The paths are where
-//! the crate was built: a binary run on another machine must ship a copy —
-//! with the `embedded-adapters` feature, [`files`] is that copy, built into
-//! the binary.
+//! the crate was built: a binary run on another machine must ship them. With
+//! the `embedded-adapters` feature, [`files`] has the pi and DSH adapters and
+//! `yoagent.d.ts` (no test fixtures or example plugins) built in, to write out.
 //!
 //! ```no_run
 //! let adapters = yoagent_rutis::adapters::adapters();
@@ -94,16 +94,21 @@ pub fn dsh_host_rows(dsh: &Path, sessions: &Path) -> std::io::Result<Vec<serde_j
     Ok(rows)
 }
 
-/// The files of `plugins/` a host ships, built into the binary (feature
-/// `embedded-adapters`): `(path relative to plugins/, contents)`.
+/// The adapter files a host needs, built into the binary (feature
+/// `embedded-adapters`): `(path relative to plugins/, contents)`, paths
+/// `/`-separated (`Path::join` takes them on every platform).
 ///
-/// The pi and DSH adapters with what they load beside them (the host-service
-/// rows and helpers, the probe's scripts), each folder's `package.json` and
-/// `package-lock.json`, and `yoagent.d.ts`, which the adapters import as
-/// `../yoagent.d.ts` — everything under [`Adapters`]' `pi` and `dsh` but the
-/// test fixtures. Write them under one folder (keeping the paths) and run
-/// `npm ci` in its `pi/` and `dsh/`: the folder is then laid out like
-/// [`adapters`]' `root`, and is what the `probe` module takes.
+/// Every file under [`Adapters`]' `pi` and `dsh` but the test fixtures — the
+/// pi and DSH adapters with what they load beside them (the host-service rows
+/// and helpers, the scripts the probe and the compatibility matrix run), each
+/// folder's `package.json` and `package-lock.json` — and `yoagent.d.ts`, which
+/// the adapters import as `../yoagent.d.ts`. Write them under one folder,
+/// keeping the paths, and run `npm ci` in its `pi/` and `dsh/`: the folder is
+/// then laid out like the `pi/` and `dsh/` of [`adapters`]' `root`, which is
+/// what the `probe` module takes. A host that keeps the folder between runs
+/// should key it by this crate's version (or a hash of the files) and write a
+/// new one rather than over an old one, so a file a later version dropped
+/// does not linger.
 #[cfg(feature = "embedded-adapters")]
 #[cfg_attr(docsrs, doc(cfg(feature = "embedded-adapters")))]
 pub fn files() -> &'static [(&'static str, &'static [u8])] {
@@ -138,30 +143,50 @@ static FILES: &[(&str, &[u8])] = embedded![
     "dsh/probe-services.ts",
 ];
 
-/// Every non-fixture file under `pi/` and `dsh/` (and `yoagent.d.ts`) is
-/// embedded, and each embedded file is the file on disk.
+/// Every file under `pi/` and `dsh/`, subfolders included, is embedded but
+/// the test fixtures, installed `node_modules` and stray local files
+/// (dotfiles, editor backups), and the embedded paths resolve to those files.
 #[cfg(all(test, feature = "embedded-adapters"))]
 mod embedded_tests {
     use std::collections::BTreeSet;
+    use std::path::Path;
+
+    /// A file a checkout may hold that never ships: macOS `.DS_Store`, swap
+    /// and backup files.
+    fn stray(name: &str) -> bool {
+        name.starts_with('.')
+            || name.ends_with('~')
+            || name.ends_with(".swp")
+            || name.ends_with(".orig")
+    }
+
+    fn walk(root: &Path, relative: &str, found: &mut BTreeSet<String>) {
+        for entry in std::fs::read_dir(root.join(relative)).unwrap() {
+            let entry = entry.unwrap();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let path = format!("{relative}/{name}");
+            let kind = entry.file_type().unwrap();
+            if kind.is_dir() && name != "node_modules" {
+                walk(root, &path, found);
+            } else if kind.is_file() && !name.starts_with("fixture-") && !stray(&name) {
+                found.insert(path);
+            }
+        }
+    }
 
     #[test]
     fn files_are_every_shipped_adapter_file() {
         let root = super::adapters().root;
         let mut on_disk = BTreeSet::from(["yoagent.d.ts".to_string()]);
         for folder in ["pi", "dsh"] {
-            for entry in std::fs::read_dir(root.join(folder)).unwrap() {
-                let entry = entry.unwrap();
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if entry.file_type().unwrap().is_file() && !name.starts_with("fixture-") {
-                    on_disk.insert(format!("{folder}/{name}"));
-                }
-            }
+            walk(&root, folder, &mut on_disk);
         }
         let embedded: BTreeSet<String> =
             super::files().iter().map(|(p, _)| p.to_string()).collect();
         assert_eq!(
             embedded, on_disk,
-            "list every shipped file in `FILES`, and only those"
+            "list every adapter file in `FILES`, and only those (a local file that \
+             does not ship — not a fixture, dotfile or backup — fails this too)"
         );
         for (path, bytes) in super::files() {
             assert_eq!(*bytes, std::fs::read(root.join(path)).unwrap(), "{path}");
