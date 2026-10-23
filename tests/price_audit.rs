@@ -241,7 +241,8 @@ const PEAK_IS_TWICE_UPSTREAM: &[&str] = &["deepseek"];
 const PROMO_IS_HALF_REGULAR: &[(&str, &str)] = &[
     ("google", "gemini-4-argon"),
     ("google", "gemini-3.8-flash"),
-    ("mistral", "mistral-large-4"),
+    // Mistral Large 4 left on 2026-10-23: its launch sale ended, and
+    // models.dev lists the regular rate the crate carries.
 ];
 
 /// Whether the crate's `input`/`output`/`cache_read` are twice models.dev's
@@ -909,11 +910,12 @@ fn the_audit_logic_runs_offline_against_the_fixture() {
     // Muse Spark 1.2, and the three DeepSeek entries; and Mistral Large 4's,
     // unset on both sides.
     assert_eq!(o.absent, 7);
-    // A promotional entry is compared at twice models.dev's rate.
+    // Mistral Large 4's launch sale is over: compared at models.dev's own
+    // rate, with no promotion note.
     assert!(
-        o.notes
+        !o.notes
             .iter()
-            .any(|n| n.starts_with("mistral/mistral-large-4: regular rate")),
+            .any(|n| n.starts_with("mistral/mistral-large-4")),
         "{:?}",
         o.notes
     );
@@ -960,17 +962,17 @@ fn the_audit_logic_runs_offline_against_the_fixture() {
             .any(|d| d.contains("twice models.dev's off-peak")),
         "{off_peak:?}"
     );
-    // A promotional entry carried at the promotional rate is drift: the
-    // crate carries the regular one.
-    let promo = drift_after(&|p| {
+    // An entry left at a sale price after the sale ended is drift, compared
+    // directly (Mistral Large 4 left `PROMO_IS_HALF_REGULAR` on 2026-10-23).
+    let stale_sale = drift_after(&|p| {
         if p.model == "mistral-large-4" {
             p.cost.input_per_million = 0.68;
         }
     });
-    assert_eq!(promo.len(), 1, "{promo:?}");
+    assert_eq!(stale_sale.len(), 1, "{stale_sale:?}");
     assert!(
-        promo[0].contains("twice models.dev's off-peak or promotional rate"),
-        "{promo:?}"
+        stale_sale[0].contains("input is 0.68 in the crate, 1.36 in models.dev"),
+        "{stale_sale:?}"
     );
     // Without the recorded gap, models.dev's `reasoning` rate is unknown
     // structure.

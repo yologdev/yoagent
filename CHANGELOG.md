@@ -4,12 +4,14 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.25.13 (2026-10-23)
+
+Two provider fixes; no API change.
 
 - **Bedrock, Gemini and Vertex no longer send an empty message** (#369). An assistant turn that errored, was refused or was cancelled with no content (the loop's error message is one empty text block, which the builders filter) — or whose only content is thinking the provider does not replay (on Gemini and Vertex any thinking; on Bedrock unsigned reasoning to a Claude model, or another API's) — went out as `content: []` / `parts: []`, which both APIs reject (as did a user message with only empty text); the Anthropic provider already skipped such an assistant turn. So the prompt after a failed or cancelled run was rejected too. Empty messages of either role are now dropped before consecutive same-role messages are merged (#368), so the user turns around a dropped one go back as one.
 - **Bedrock, Gemini and Vertex: a parallel tool call's results go back in one message** (#223). Each tool result was sent as its own user-role message, and a steering message, stop marker or compaction summary after them added another, while Bedrock's Converse requires roles to alternate and Gemini requires a turn's function responses in one content, as many as its function calls. So the request after any turn with two or more tool calls (the default parallel strategy) could be rejected. The three request builders now merge consecutive same-role messages, keeping every block in order: the results in call order, then whatever followed; on Gemini and Vertex a merged turn's function responses come first, then any images and text (images among the responses are a reported cause of Gemini's response-count 400). Pinned by request-body tests; not run against a live endpoint.
 
-## yoagent-rutis Unreleased
+## yoagent-rutis 0.8.2 (2026-10-23)
 
 yoagent-rutis only; requires yoagent 0.25, rutis 0.12 and Rust 1.88, as 0.8.1. Additive.
 

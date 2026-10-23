@@ -267,9 +267,9 @@
         "input": 1.36,
         "output": 4.18,
         "cache_read": 0.14,
-        "note": "Regular price. Mistral's launch sale (50% off for two weeks from 2026-10-06) bills half of it until about 2026-10-20.",
+        "note": "Regular price; Mistral's launch sale (50% off from 2026-10-06) has ended.",
         "source": "https://docs.mistral.ai/models/mistral-large-4-0",
-        "verified": "2026-10-18"
+        "verified": "2026-10-23"
       }
     },
     "qwen": {
