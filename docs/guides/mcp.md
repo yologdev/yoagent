@@ -55,7 +55,8 @@ How the stdio transport behaves:
 
 - Each request waits for the response carrying its own id. Messages the server
   sends in between are handled: notifications (`notifications/message`,
-  progress, `list_changed`) are skipped, a `ping` is answered, and any other
+  progress) are skipped — `notifications/tools/list_changed` is counted (see
+  *Servers Whose Tools Change*) — a `ping` is answered, and any other
   server request (sampling, roots) is declined with "method not found" (logged
   at `WARN`) so the server does not wait. A response for another id (a call
   that timed out earlier) is dropped. Server messages are only read while a
@@ -158,6 +159,31 @@ Streamable HTTP), which servers generally accept.
 `McpClient::close()` is what sends the `DELETE`. `Agent::with_mcp_server_http`
 does not call it, so sessions opened that way are released by the server's own
 timeout rather than explicitly.
+
+## Servers Whose Tools Change
+
+`with_mcp_server_*` lists a server's tools once, when you connect. For a
+server whose tools change — one that loads more tools when asked, or adds and
+removes them as a session goes on — install it as a
+[`ToolSource`](../concepts/tools.md#tools-that-change-at-runtime-toolsource)
+instead, with `McpToolSource`:
+
+```rust,no_run
+use yoagent::mcp::{McpClient, McpToolSource};
+
+let client = McpClient::connect_stdio("my-mcp-server", &[], None).await?;
+let agent = Agent::from_config(config)
+    .with_tool_source(McpToolSource::new(client).with_prefix("srv"));
+```
+
+It lists the server's tools at the start of every run and, whenever the
+server sends `notifications/tools/list_changed`, again before the run's next
+model request — the same run sees the new tools. The transports read the
+server's notifications while they wait for a call's answer, so a change a
+tool call caused (the usual case) is seen right after that call; one the
+server sends while no call is open is counted at the next call to it
+(`McpClient::tools_list_changes` tells how many were read). A failed
+`tools/list` offers none of the server's tools until a later one succeeds.
 
 ## How MCP Tools Work
 

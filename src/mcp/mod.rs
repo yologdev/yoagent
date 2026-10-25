@@ -16,11 +16,13 @@
 //! ```
 
 pub mod client;
+pub mod source;
 pub mod tool_adapter;
 pub mod transport;
 pub mod types;
 
 pub use client::McpClient;
+pub use source::McpToolSource;
 pub use tool_adapter::McpToolAdapter;
 #[cfg(feature = "native")]
 #[cfg_attr(docsrs, doc(cfg(feature = "native")))]

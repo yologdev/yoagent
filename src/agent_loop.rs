@@ -156,6 +156,13 @@ pub struct AgentLoopConfig {
     pub(crate) delegated_by: Option<String>,
     /// The calling run's extension run id, for a delegated run.
     pub(crate) parent_run_id: Option<String>,
+
+    /// The run's [`ToolSource`](crate::ToolSource)s with the tools they gave
+    /// (already merged into the context's tools), asked again between turns
+    /// when their generation moves.
+    pub(crate) sourced: crate::tool_source::Sourced,
+    /// How many leading context tools are not sourced (the agent's own).
+    pub(crate) static_tools: usize,
 }
 
 impl AgentLoopConfig {
@@ -198,6 +205,8 @@ impl AgentLoopConfig {
             depth: 0,
             delegated_by: None,
             parent_run_id: None,
+            sourced: crate::tool_source::Sourced::default(),
+            static_tools: 0,
         }
     }
 
@@ -665,18 +674,34 @@ async fn run_with_extensions(
         fail_run(&failure, exts, config, tx, context, new_messages, true);
         return SessionStats::default();
     }
-    let base_tools = context.tools.len();
+    let mut base_tools = context.tools.len();
+    let mut extension_tools = Vec::new();
     if !exts.is_empty() {
         let tools = exts.tools().await;
         if !tools.is_empty() {
+            extension_tools = tools.clone();
             crate::tool_source::merge(&mut context.tools, tools);
         }
     }
+    let mut run_tools = crate::tool_source::RunTools {
+        sourced: config.sourced.clone(),
+        static_len: config.static_tools,
+        extension_tools,
+    };
     let stats = {
         use tracing::Instrument;
-        run_loop(context, new_messages, config, tx, cancel, exts)
-            .instrument(tracing::info_span!("agent_loop", model = %config.model))
-            .await
+        run_loop(
+            context,
+            new_messages,
+            config,
+            tx,
+            cancel,
+            exts,
+            &mut run_tools,
+            &mut base_tools,
+        )
+        .instrument(tracing::info_span!("agent_loop", model = %config.model))
+        .await
     };
     // Extension tools belong to this run only.
     context.tools.truncate(base_tools);
@@ -1035,6 +1060,7 @@ pub(crate) async fn agent_loop_continue_with_stats(
 ///
 /// Outer loop: continues when follow-up messages arrive after agent would stop.
 /// Inner loop: process tool calls and steering messages.
+#[allow(clippy::too_many_arguments)]
 async fn run_loop(
     context: &mut AgentContext,
     new_messages: &mut Vec<AgentMessage>,
@@ -1042,6 +1068,8 @@ async fn run_loop(
     tx: &mpsc::UnboundedSender<AgentEvent>,
     cancel: &tokio_util::sync::CancellationToken,
     exts: &crate::extension::ActiveExtensions,
+    run_tools: &mut crate::tool_source::RunTools,
+    base_tools: &mut usize,
 ) -> SessionStats {
     let mut stats = SessionStats::default();
     let mut first_turn = true;
@@ -1146,6 +1174,15 @@ async fn run_loop(
             if turn_number > 0 {
                 if let Some(delay) = config.turn_delay {
                     crate::rt::sleep(delay).await;
+                }
+            }
+
+            // Every tool call of the last turn has returned (its results are
+            // in the history): a source whose tools changed is asked again,
+            // and the next request offers its new list (see `tool_source`).
+            if turn_number > 0 {
+                if let Some(base) = run_tools.refresh(&mut context.tools, cancel).await {
+                    *base_tools = base;
                 }
             }
 

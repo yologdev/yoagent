@@ -585,3 +585,301 @@ async fn a_parent_abort_interrupts_a_sub_agents_hung_source() {
         .unwrap();
     assert!(matches!(outcome, Err(ToolError::Cancelled)), "{outcome:?}");
 }
+
+// ---------------------------------------------------------------------------
+// Generation: a source asked again between turns when it changed
+// ---------------------------------------------------------------------------
+
+type Tools = Vec<Arc<dyn AgentTool>>;
+
+/// A source with a generation that moves when its tools change; counts how
+/// often it is asked.
+#[derive(Clone, Default)]
+struct Generational {
+    tools: Arc<Mutex<Tools>>,
+    generation: Arc<std::sync::atomic::AtomicU64>,
+    calls: Arc<AtomicUsize>,
+    panics: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Generational {
+    fn new(tools: Tools) -> Self {
+        let source = Self::default();
+        *source.tools.lock().unwrap() = tools;
+        source
+    }
+    /// Replace the tools and move the generation, as a plugin load would.
+    fn change(&self, tools: Tools) {
+        *self.tools.lock().unwrap() = tools;
+        self.generation.fetch_add(1, Ordering::SeqCst);
+    }
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolSource for Generational {
+    async fn tools(&self) -> Vec<Arc<dyn AgentTool>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.panics.load(Ordering::SeqCst) {
+            panic!("source exploded when asked again");
+        }
+        self.tools.lock().unwrap().clone()
+    }
+    fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+}
+
+/// A static tool `load`: when called, it runs `then` (changing a source).
+struct Load(Mutex<Option<Box<dyn FnOnce() + Send>>>);
+
+fn load(then: impl FnOnce() + Send + 'static) -> Box<dyn AgentTool> {
+    Box::new(Load(Mutex::new(Some(Box::new(then)))))
+}
+
+#[async_trait::async_trait]
+impl AgentTool for Load {
+    fn name(&self) -> &str {
+        "load"
+    }
+    fn label(&self) -> &str {
+        "load"
+    }
+    fn description(&self) -> &str {
+        "loads more tools"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object", "properties": {}})
+    }
+    async fn execute(&self, _: serde_json::Value, _: ToolContext) -> Result<ToolResult, ToolError> {
+        if let Some(then) = self.0.lock().unwrap().take() {
+            then();
+        }
+        Ok(ToolResult {
+            content: vec![Content::Text {
+                text: "loaded".into(),
+            }],
+            details: serde_json::Value::Null,
+        })
+    }
+}
+
+fn calls(names: &[&str]) -> MockResponse {
+    MockResponse::ToolCalls(
+        names
+            .iter()
+            .map(|name| MockToolCall {
+                provider_metadata: None,
+                name: (*name).into(),
+                arguments: serde_json::json!({}),
+            })
+            .collect(),
+    )
+}
+
+/// A tool loaded mid-run is offered from the next request — after every call
+/// of the turn that loaded it has returned — and only the source that changed
+/// is asked again; a source whose generation stays 0 is asked once per run.
+#[tokio::test]
+async fn a_source_that_changes_mid_run_is_asked_again_at_the_next_turn() {
+    let source = Generational::new(vec![named("alpha", "alpha ran")]);
+    let steady = Swappable::default();
+    steady.set(vec![named("steady", "steady ran")]);
+    let changes = source.clone();
+    let (provider, seen) = recording(vec![
+        // One turn: `load` and `alpha` together; `beta` exists only after.
+        calls(&["load", "alpha"]),
+        call("beta"),
+        MockResponse::Text("done".into()),
+        MockResponse::Text("again".into()),
+    ]);
+    let mut agent = Agent::from_provider(provider, ModelConfig::mock())
+        .with_tools(vec![load(move || {
+            changes.change(vec![named("alpha", "alpha ran"), named("beta", "beta ran")])
+        })])
+        .with_tool_source(source.clone())
+        .with_tool_source(steady.clone());
+    run(&mut agent, "go").await;
+
+    assert_eq!(
+        tool_results(agent.messages()),
+        vec![
+            ("load".into(), "loaded".into(), false),
+            ("alpha".into(), "alpha ran".into(), false),
+            ("beta".into(), "beta ran".into(), false),
+        ]
+    );
+    {
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen[0], vec!["load", "alpha", "steady"], "{seen:?}");
+        assert_eq!(seen[1], vec!["load", "alpha", "beta", "steady"], "{seen:?}");
+        assert_eq!(seen[2], seen[1]);
+    }
+    assert_eq!(
+        source.calls(),
+        2,
+        "asked at the start, then once after it changed"
+    );
+    assert_eq!(
+        steady.calls(),
+        1,
+        "a source whose generation stays 0 is asked once"
+    );
+
+    // The next run starts from the source's current list, asked once more.
+    run(&mut agent, "again").await;
+    assert_eq!(
+        seen.lock().unwrap()[3],
+        vec!["load", "alpha", "beta", "steady"]
+    );
+    assert_eq!(source.calls(), 3);
+    assert_eq!(steady.calls(), 2);
+}
+
+/// A source's new list replaces its old one even when shorter (a server that
+/// went away): a later call to a withdrawn tool is answered as an unknown tool.
+#[tokio::test]
+async fn a_shorter_list_withdraws_tools_mid_run() {
+    let source = Generational::new(vec![named("alpha", "alpha ran"), named("beta", "beta ran")]);
+    let changes = source.clone();
+    let (provider, seen) = recording(vec![
+        call("load"),
+        call("beta"),
+        MockResponse::Text("done".into()),
+    ]);
+    let mut agent = Agent::from_provider(provider, ModelConfig::mock())
+        .with_tools(vec![load(move || {
+            changes.change(vec![named("alpha", "alpha ran")])
+        })])
+        .with_tool_source(source.clone());
+    run(&mut agent, "go").await;
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen[0], vec!["load", "alpha", "beta"]);
+    assert_eq!(seen[1], vec!["load", "alpha"], "{seen:?}");
+    let results = tool_results(agent.messages());
+    assert!(
+        results[1].2 && results[1].1.contains("not found"),
+        "{results:?}"
+    );
+}
+
+/// The collision rules are applied again over the whole list: a changed source
+/// cannot shadow the agent's own tool, nor an earlier source's.
+#[tokio::test]
+async fn collisions_are_resolved_again_after_a_change() {
+    let first = Swappable::default();
+    first.set(vec![named("shared", "first's shared")]);
+    let source = Generational::new(vec![]);
+    let changes = source.clone();
+    let (provider, seen) = recording(vec![
+        call("load"),
+        calls(&["load", "shared"]),
+        MockResponse::Text("done".into()),
+    ]);
+    let mut agent = Agent::from_provider(provider, ModelConfig::mock())
+        .with_tools(vec![load(move || {
+            changes.change(vec![
+                named("load", "an impostor"),
+                named("shared", "an impostor"),
+                named("gamma", "gamma ran"),
+            ])
+        })])
+        .with_tool_source(first)
+        .with_tool_source(source);
+    run(&mut agent, "go").await;
+    let seen = seen.lock().unwrap().clone();
+    // Sourced tools are sorted by name; each name appears once.
+    assert_eq!(seen[1], vec!["load", "gamma", "shared"], "{seen:?}");
+    let results = tool_results(agent.messages());
+    // The agent's own `load` and the first source's `shared` answer.
+    assert_eq!(results[1], ("load".into(), "loaded".into(), false));
+    assert_eq!(
+        results[2],
+        ("shared".into(), "first's shared".into(), false)
+    );
+}
+
+/// Extensions' per-run tools are not asked again mid-run, and stay offered
+/// after the sources' tools are rebuilt.
+#[tokio::test]
+async fn extension_tools_are_not_asked_again_mid_run() {
+    use yoagent::extension::*;
+
+    struct Offers(Arc<AtomicUsize>);
+    #[async_trait::async_trait]
+    impl RunHooks for Offers {
+        async fn tools(&mut self, _: &RunContext<'_>) -> Vec<Arc<dyn AgentTool>> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            vec![
+                named("ext_tool", "ext ran"),
+                named("delta", "the extension's delta"),
+            ]
+        }
+    }
+    struct Ext(Arc<AtomicUsize>);
+    #[async_trait::async_trait]
+    impl Extension for Ext {
+        fn name(&self) -> &str {
+            "offers"
+        }
+        async fn start_run(&self, _: &RunContext<'_>) -> Result<Box<dyn RunHooks>, ExtensionError> {
+            Ok(Box::new(Offers(self.0.clone())))
+        }
+    }
+
+    let asked = Arc::new(AtomicUsize::new(0));
+    let source = Generational::new(vec![]);
+    let changes = source.clone();
+    let (provider, seen) = recording(vec![
+        call("load"),
+        call("delta"),
+        MockResponse::Text("done".into()),
+    ]);
+    let mut agent = Agent::from_provider(provider, ModelConfig::mock())
+        .with_tools(vec![load(move || {
+            changes.change(vec![named("delta", "the source's delta")])
+        })])
+        .with_tool_source(source)
+        .with_extension(Ext(asked.clone()));
+    run(&mut agent, "go").await;
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen[0], vec!["load", "delta", "ext_tool"], "{seen:?}");
+    assert_eq!(seen[1], vec!["load", "delta", "ext_tool"], "{seen:?}");
+    assert_eq!(asked.load(Ordering::SeqCst), 1, "per-run tools: asked once");
+    // A source comes before the extensions: its `delta` wins after the change.
+    let results = tool_results(agent.messages());
+    assert_eq!(
+        results[1],
+        ("delta".into(), "the source's delta".into(), false)
+    );
+}
+
+/// A source that panics when asked again gives no tools from then on, and is
+/// not asked again until its generation moves once more.
+#[tokio::test]
+async fn a_source_that_panics_when_asked_again_gives_nothing() {
+    let source = Generational::new(vec![named("alpha", "alpha ran")]);
+    let changes = source.clone();
+    let (provider, seen) = recording(vec![
+        call("load"),
+        call("load"),
+        MockResponse::Text("done".into()),
+    ]);
+    let mut agent = Agent::from_provider(provider, ModelConfig::mock())
+        .with_tools(vec![load(move || {
+            changes.panics.store(true, Ordering::SeqCst);
+            changes.change(vec![]);
+        })])
+        .with_tool_source(source.clone());
+    run(&mut agent, "go").await;
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen[1], vec!["load"], "{seen:?}");
+    assert_eq!(seen[2], vec!["load"], "{seen:?}");
+    assert_eq!(
+        source.calls(),
+        2,
+        "asked at the start and once after the change"
+    );
+}

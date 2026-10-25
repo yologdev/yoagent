@@ -487,9 +487,9 @@ impl Agent {
     ///
     /// Awaited before any agent state is touched, so a caller that drops the
     /// prompt future here leaves the agent as it was.
-    async fn collect_sourced_tools(&self) -> Vec<Arc<dyn AgentTool>> {
+    async fn collect_sourced_tools(&self) -> crate::tool_source::Sourced {
         if self.tool_sources.is_empty() {
-            return Vec::new();
+            return crate::tool_source::Sourced::default();
         }
         crate::tool_source::collect(&self.tool_sources).await
     }
@@ -1207,7 +1207,7 @@ impl Agent {
         self.cancel = Some(cancel.clone());
         self.is_streaming = true;
 
-        let (tools, own_tools) = self.take_tools(sourced);
+        let (tools, own_tools) = self.take_tools(sourced.all());
         let mut context = AgentContext {
             system_prompt: self.system_prompt.clone(),
             messages: self.messages.clone(),
@@ -1216,6 +1216,9 @@ impl Agent {
 
         let mut config = self.build_config();
         config.output_schema = output_schema;
+        // Asked again between turns when a source's generation moves.
+        config.sourced = sourced;
+        config.static_tools = own_tools;
 
         // The run's spans stay children of the caller's span, and go to the
         // caller's subscriber: a scoped one (`tracing::subscriber::with_default`)

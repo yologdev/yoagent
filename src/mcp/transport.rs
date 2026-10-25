@@ -45,6 +45,28 @@ pub trait McpTransport: crate::rt::MaybeSend + crate::rt::MaybeSync {
     }
     /// Close the transport.
     async fn close(&self) -> Result<(), McpError>;
+
+    /// Count each `notifications/tools/list_changed` the server sends in
+    /// `changed` (the client hands every transport its counter, which
+    /// [`McpToolSource`](crate::mcp::McpToolSource) reports as its
+    /// generation). The built-in transports count the notifications they read
+    /// while a call is answered; the default ignores them.
+    fn watch_tools_changed(&mut self, changed: std::sync::Arc<std::sync::atomic::AtomicU64>) {
+        let _ = changed;
+    }
+}
+
+/// The notification a server sends when its tool list changed.
+pub(crate) const TOOLS_LIST_CHANGED: &str = "notifications/tools/list_changed";
+
+/// Count a server notification if it says the tool list changed.
+fn note_notification(method: &str, changed: Option<&std::sync::atomic::AtomicU64>) {
+    if method == TOOLS_LIST_CHANGED {
+        if let Some(changed) = changed {
+            changed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            debug!("MCP server: its tool list changed");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -71,6 +93,9 @@ pub struct StdioTransport {
     /// words are in the tail before the error is built.
     stderr_drain: Mutex<Option<tokio::task::JoinHandle<()>>>,
     command: String,
+    /// Counts `notifications/tools/list_changed` (see
+    /// [`McpTransport::watch_tools_changed`]).
+    tools_changed: Option<Arc<std::sync::atomic::AtomicU64>>,
 }
 
 /// The server's stdin, and whether a write was cut off mid-message (a call
@@ -162,6 +187,7 @@ impl StdioTransport {
             stderr_tail,
             stderr_drain: Mutex::new(stderr_drain),
             command: command.to_string(),
+            tools_changed: None,
         })
     }
 
@@ -351,7 +377,10 @@ impl McpTransport for StdioTransport {
                         let reply = server_request_reply(server_method, id);
                         self.write_message(&reply.to_string()).await?;
                     }
-                    None => debug!("MCP stdio: server notification '{server_method}'"),
+                    None => {
+                        debug!("MCP stdio: server notification '{server_method}'");
+                        note_notification(server_method, self.tools_changed.as_deref());
+                    }
                 }
                 continue;
             }
@@ -376,6 +405,10 @@ impl McpTransport for StdioTransport {
     async fn notify(&self, notification: JsonRpcNotification) -> Result<(), McpError> {
         self.write_message(&serde_json::to_string(&notification)?)
             .await
+    }
+
+    fn watch_tools_changed(&mut self, changed: Arc<std::sync::atomic::AtomicU64>) {
+        self.tools_changed = Some(changed);
     }
 
     async fn close(&self) -> Result<(), McpError> {
@@ -432,6 +465,9 @@ pub struct HttpTransport {
     /// Session assigned by the server on `initialize`, replayed on subsequent
     /// requests. `Mutex` because [`McpTransport::send`] takes `&self`.
     session_id: Mutex<Option<String>>,
+    /// Counts `notifications/tools/list_changed` read on a POST stream (see
+    /// [`McpTransport::watch_tools_changed`]).
+    tools_changed: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
 
 impl HttpTransport {
@@ -461,6 +497,7 @@ impl HttpTransport {
             base_url: url.trim_end_matches('/').to_string(),
             headers: reqwest::header::HeaderMap::new(),
             session_id: Mutex::new(None),
+            tools_changed: None,
         })
     }
 
@@ -589,10 +626,18 @@ impl HttpTransport {
     /// progress-heavy stream can emit thousands of identical frame names.
     /// Reaches a caller only on the EOF path — a mid-stream read error reports
     /// its own cause instead.
-    fn note_skipped(payload: &str, method: &str, skipped: &mut BTreeMap<String, usize>) {
+    fn note_skipped(
+        payload: &str,
+        method: &str,
+        skipped: &mut BTreeMap<String, usize>,
+        changed: Option<&std::sync::atomic::AtomicU64>,
+    ) {
         let what = match serde_json::from_str::<serde_json::Value>(payload) {
             Ok(value) => match value.get("method").and_then(|m| m.as_str()) {
-                Some(m) => m.to_string(),
+                Some(m) => {
+                    note_notification(m, changed);
+                    m.to_string()
+                }
                 None => match value.get("id").and_then(|i| i.as_u64()) {
                     Some(id) => format!("response for id {id}"),
                     None => "unrecognized JSON-RPC frame".to_string(),
@@ -681,6 +726,7 @@ impl HttpTransport {
         request_id: u64,
         method: &str,
         status: reqwest::StatusCode,
+        changed: Option<&std::sync::atomic::AtomicU64>,
     ) -> Result<JsonRpcResponse, McpError> {
         // Both `application/json` and `text/event-stream` mandate UTF-8, and
         // reading the body as a byte stream gives up the charset transcoding
@@ -773,7 +819,7 @@ impl HttpTransport {
                 if let Some(response) = Self::response_for(&payload, request_id) {
                     return Ok(response);
                 }
-                Self::note_skipped(&payload, method, &mut skipped);
+                Self::note_skipped(&payload, method, &mut skipped, changed);
             }
         }
 
@@ -816,7 +862,7 @@ impl HttpTransport {
                 if let Some(response) = Self::response_for(&payload, request_id) {
                     return Ok(response);
                 }
-                Self::note_skipped(&payload, method, &mut skipped);
+                Self::note_skipped(&payload, method, &mut skipped, changed);
             }
         }
 
@@ -892,7 +938,14 @@ impl McpTransport for HttpTransport {
             None => {}
         }
 
-        Self::read_response(resp, request_id, &method, status).await
+        Self::read_response(
+            resp,
+            request_id,
+            &method,
+            status,
+            self.tools_changed.as_deref(),
+        )
+        .await
     }
 
     async fn notify(&self, notification: JsonRpcNotification) -> Result<(), McpError> {
@@ -925,6 +978,10 @@ impl McpTransport for HttpTransport {
                 )
             }))
         }
+    }
+
+    fn watch_tools_changed(&mut self, changed: std::sync::Arc<std::sync::atomic::AtomicU64>) {
+        self.tools_changed = Some(changed);
     }
 
     async fn close(&self) -> Result<(), McpError> {

@@ -6,6 +6,7 @@ use super::transport::{HttpTransport, McpTransport};
 use super::types::*;
 #[cfg(feature = "native")]
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -19,6 +20,17 @@ pub struct McpClient {
     server_info: Option<ServerInfo>,
     capabilities: Option<ServerCapabilities>,
     call_timeout: Option<Duration>,
+    /// How many `notifications/tools/list_changed` the server has sent (read
+    /// by the transport while calls are answered).
+    tools_changed: Arc<AtomicU64>,
+}
+
+/// The counter a client hands its transport (see
+/// [`McpTransport::watch_tools_changed`]).
+fn watch(transport: &mut dyn McpTransport) -> Arc<AtomicU64> {
+    let changed = Arc::new(AtomicU64::new(0));
+    transport.watch_tools_changed(changed.clone());
+    changed
 }
 
 impl McpClient {
@@ -30,9 +42,11 @@ impl McpClient {
         args: &[&str],
         env: Option<HashMap<String, String>>,
     ) -> Result<Self, McpError> {
-        let transport = StdioTransport::new(command, args, env).await?;
+        let mut transport = StdioTransport::new(command, args, env).await?;
+        let tools_changed = watch(&mut transport);
         let mut client = Self {
             transport: Arc::new(Mutex::new(Box::new(transport))),
+            tools_changed,
             server_info: None,
             capabilities: None,
             // Nothing else bounds a stdio call: a server that stops answering
@@ -51,9 +65,11 @@ impl McpClient {
     /// Connect over a configured [`HttpTransport`] — with request headers
     /// ([`HttpTransport::with_header`]), say. The handshake and timeouts are
     /// those of [`connect_http`](Self::connect_http).
-    pub async fn connect_http_with(transport: HttpTransport) -> Result<Self, McpError> {
+    pub async fn connect_http_with(mut transport: HttpTransport) -> Result<Self, McpError> {
+        let tools_changed = watch(&mut transport);
         let mut client = Self {
             transport: Arc::new(Mutex::new(Box::new(transport))),
+            tools_changed,
             server_info: None,
             capabilities: None,
             // The HTTP transport's idle read timeout already ends a stalled
@@ -65,9 +81,11 @@ impl McpClient {
     }
 
     /// Create from an existing transport (useful for testing).
-    pub fn from_transport(transport: Box<dyn McpTransport>) -> Self {
+    pub fn from_transport(mut transport: Box<dyn McpTransport>) -> Self {
+        let tools_changed = watch(transport.as_mut());
         Self {
             transport: Arc::new(Mutex::new(transport)),
+            tools_changed,
             server_info: None,
             capabilities: None,
             call_timeout: None,
@@ -159,6 +177,20 @@ impl McpClient {
     /// Close the connection.
     pub async fn close(&self) -> Result<(), McpError> {
         self.transport.lock().await.close().await
+    }
+
+    /// How many times the server has announced that its tool list changed
+    /// (`notifications/tools/list_changed`), as read so far: the transport
+    /// reads the server's notifications while it waits for a call's answer,
+    /// so one sent while no call is open is counted at the next call. Also the
+    /// generation of a [`McpToolSource`](crate::mcp::McpToolSource) on this
+    /// client.
+    pub fn tools_list_changes(&self) -> u64 {
+        self.tools_changed.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn tools_changed_counter(&self) -> Arc<AtomicU64> {
+        self.tools_changed.clone()
     }
 
     /// Get server info (available after initialize).

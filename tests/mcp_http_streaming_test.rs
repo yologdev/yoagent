@@ -95,3 +95,30 @@ async fn returns_at_the_result_frame_despite_leading_notifications() {
         "the result must be selected over the notifications"
     );
 }
+
+/// A `notifications/tools/list_changed` frame ahead of the result is counted
+/// in the counter the client handed the transport (`McpToolSource`'s
+/// generation), and other notifications are not.
+#[tokio::test]
+async fn a_list_changed_notification_on_the_stream_is_counted() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    let request = JsonRpcRequest::new("tools/call", None);
+    let frames = format!(
+        concat!(
+            "event: message\ndata: {{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{{\"progress\":1}}}}\n\n",
+            "event: message\ndata: {{\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}}\n\n",
+            "event: message\ndata: {{\"jsonrpc\":\"2.0\",\"id\":{},\"result\":{{\"content\":[]}}}}\n\n"
+        ),
+        request.id
+    );
+    let addr = serve_then_hold_open(frames).await;
+    let mut transport = HttpTransport::new(&addr).unwrap();
+    let changed = Arc::new(AtomicU64::new(0));
+    transport.watch_tools_changed(changed.clone());
+    tokio::time::timeout(Duration::from_secs(10), transport.send(request))
+        .await
+        .expect("send returns at the result frame")
+        .expect("the response parses");
+    assert_eq!(changed.load(Ordering::SeqCst), 1);
+}

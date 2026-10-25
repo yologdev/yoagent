@@ -473,35 +473,57 @@ server that reconnects with a different list, a feature flag — add a
 `ToolSource` instead:
 
 ```rust
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use yoagent::{Agent, AgentTool, ToolSource};
 
-struct Swappable(Mutex<Vec<Arc<dyn AgentTool>>>);
+/// Tools the application swaps at runtime; `swap` moves the generation, so a
+/// swap during a run is seen before its next request.
+struct Swappable(Mutex<Vec<Arc<dyn AgentTool>>>, AtomicU64);
+
+impl Swappable {
+    fn swap(&self, tools: Vec<Arc<dyn AgentTool>>) {
+        *self.0.lock().unwrap() = tools;
+        self.1.fetch_add(1, Ordering::SeqCst);
+    }
+}
 
 #[async_trait::async_trait]
 impl ToolSource for Swappable {
     async fn tools(&self) -> Vec<Arc<dyn AgentTool>> {
         self.0.lock().unwrap().clone()
     }
+    fn generation(&self) -> u64 {
+        self.1.load(Ordering::SeqCst)
+    }
 }
 
 let agent = Agent::from_provider(provider, config)
     .with_tools(my_static_tools)
-    .with_tool_source(Arc::new(Swappable(Mutex::new(vec![]))));
+    .with_tool_source(Arc::new(Swappable(Mutex::new(vec![]), AtomicU64::new(0))));
 ```
 
 The contract:
 
-- **Consulted once per run.** Every `prompt*` and `continue_loop*` call asks
-  each source for its tools before the first request; the list is then fixed
-  for that run. A tool withdrawn mid-run stays offered until the run ends (make
-  it fail cleanly if its backend is gone); a tool added mid-run is offered from
-  the next run. Changing the list turn to turn could strand a call the model
-  already made.
+- **Consulted once per run — and again when it says it changed.** Every
+  `prompt*` and `continue_loop*` call asks each source for its tools before
+  the first request. A source whose tools can change while a run goes on
+  (a plugin loaded mid-run, a tool that loads others on demand, an MCP server
+  that announces a new list) also implements `generation()`: a number that
+  moves whenever its tools change. Before each later request — once every
+  tool call of the last turn has returned, so no call the model made is left
+  without its tool — the loop asks again only the sources whose generation
+  moved; their new tools (a shorter list too) are offered from that request,
+  and the collision rules below are applied again. Extensions' per-run tools
+  are not asked again. A source that keeps the default generation (0) is
+  asked once per run: its list is fixed for the run, a tool withdrawn stays
+  offered until the run ends (make it fail cleanly if its backend is gone),
+  and a tool added is offered from the next run.
 - **Prompt caching.** Tool definitions open the provider's cached prefix, so
-  *any* change to the offered set rewrites the whole cache. Per-run
-  consultation bounds that cost to run boundaries — it does not prevent it: a
-  run whose set differs from the previous run's pays a full prefix rewrite.
+  *any* change to the offered set rewrites the whole cache — once per change,
+  mid-run too. Consulting per run, and again only on a change, bounds that
+  cost — it does not prevent it: a run whose set differs from the previous
+  run's pays a full prefix rewrite.
   Order alone never costs anything: sourced tools are sorted by name after
   collisions are resolved (the agent's own tools keep their order).
 - **No timeout.** The run waits for every source. On an `Agent`, dropping the

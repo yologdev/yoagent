@@ -567,13 +567,15 @@ impl AgentTool for SubAgentTool {
 
         // Tools resolved for this run come after the static ones (which win
         // a name collision).
+        let static_tools = tools.len();
+        let mut sourced = crate::tool_source::Sourced::default();
         if !self.tool_sources.is_empty() {
             // A hung source must not outlive the parent's abort.
-            let sourced = tokio::select! {
+            sourced = tokio::select! {
                 sourced = crate::tool_source::collect(&self.tool_sources) => sourced,
                 _ = cancel.cancelled() => return Err(ToolError::Cancelled),
             };
-            crate::tool_source::merge(&mut tools, sourced);
+            crate::tool_source::merge(&mut tools, sourced.all());
         }
 
         // Fresh context for the sub-agent
@@ -596,6 +598,9 @@ impl AgentTool for SubAgentTool {
 
         // Config with Arc'd provider
         let mut config = AgentLoopConfig::new(provider, self.model.clone());
+        // Asked again between the child's turns when a source's generation moves.
+        config.sourced = sourced;
+        config.static_tools = static_tools;
         config.api_key = if self.api_key.is_empty() {
             crate::provider::resolve_api_key_or_warn(self.model_config.as_ref())
         } else {

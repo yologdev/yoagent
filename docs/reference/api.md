@@ -76,7 +76,7 @@ All return `Self` for chaining (unless noted as `Result`).
 | Method | Description |
 |--------|-------------|
 | `with_tools(tools: Vec<Box<dyn AgentTool>>) -> Self` | Set tools (replaces existing) |
-| `with_tool_source(source: impl ToolSource) -> Self` | Add a tool source consulted once at the start of every run; its tools are offered for that run only (the agent's own tools win on name collisions). See [Tools](../concepts/tools.md#tools-that-change-at-runtime-toolsource) |
+| `with_tool_source(source: impl ToolSource) -> Self` | Add a tool source consulted at the start of every run (and again before a later request when its `generation()` moved); its tools are offered for that run only (the agent's own tools win on name collisions). See [Tools](../concepts/tools.md#tools-that-change-at-runtime-toolsource) |
 | `with_tool_middleware(m: impl ToolMiddleware) -> Self` | Add an approve/modify/deny hook gating every tool call |
 | `with_sub_agent(sub: SubAgentTool) -> Self` | Add a sub-agent tool |
 | `with_shared_state(state: SharedState) -> Self` | Register the `shared_state` tool and stash truncated tool output under a retrievable key |
