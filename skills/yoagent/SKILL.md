@@ -5,7 +5,7 @@ description: Use when building, extending or upgrading an agent on the yoagent R
 
 # yoagent: which feature for which job
 
-Written for **yoagent 0.25.13** (and yoagent-rutis 0.8.2); the recipes
+Written for **yoagent 0.25.14** (and yoagent-rutis 0.8.2); the recipes
 below are compiled by `tests/skill_test.rs`, line for line. Check what you
 build against: `cargo tree -p yoagent` or `Cargo.lock`. If you are on an
 older version, read [What changed](#what-changed) first.
@@ -198,6 +198,12 @@ and its examples.
 
 Newest first; the full list is `CHANGELOG.md`.
 
+- **0.25.14** — a `ToolSource` can change mid-run: implement `generation()`
+  (a counter that moves when its tools change) and the loop asks it again
+  before the next model request, once every tool call of the turn has
+  returned. `mcp::McpToolSource` is an MCP server whose tools follow
+  `notifications/tools/list_changed`; a custom `McpTransport` opts in with
+  `report_notifications`. `with_mcp_server_*` still list once.
 - **0.25.13** — Bedrock, Gemini and Vertex: a parallel tool call's
   results go back in one message (consecutive same-role messages are
   merged; on Gemini/Vertex the function responses come first), and an
