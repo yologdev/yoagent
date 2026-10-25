@@ -883,3 +883,172 @@ async fn a_source_that_panics_when_asked_again_gives_nothing() {
         "asked at the start and once after the change"
     );
 }
+
+/// A sub-agent's source that changes during a delegation is asked again
+/// between the child's turns; the injected `shared_state` tool survives the
+/// rebuild.
+#[tokio::test]
+async fn a_sub_agents_source_that_changes_mid_delegation() {
+    let source = Generational::new(vec![named("alpha", "alpha ran")]);
+    let changes = source.clone();
+    let (child, child_seen) = recording(vec![
+        call("load"),
+        call("beta"),
+        MockResponse::Text("child done".into()),
+    ]);
+    let sub = SubAgentTool::from_provider("helper", Arc::new(child), ModelConfig::mock())
+        .with_tools(vec![Arc::from(load(move || {
+            changes.change(vec![named("alpha", "alpha ran"), named("beta", "beta ran")])
+        }))])
+        .with_shared_state(yoagent::shared_state::SharedState::new())
+        .with_tool_source(source.clone());
+    let parent = MockProvider::new(vec![
+        MockResponse::ToolCalls(vec![MockToolCall {
+            provider_metadata: None,
+            name: "helper".into(),
+            arguments: serde_json::json!({"task": "do it"}),
+        }]),
+        MockResponse::Text("parent done".into()),
+    ]);
+    let mut agent = Agent::from_provider(parent, ModelConfig::mock()).with_sub_agent(sub);
+    run(&mut agent, "go").await;
+    let child_seen = child_seen.lock().unwrap().clone();
+    assert_eq!(
+        child_seen[0],
+        vec!["load", "shared_state", "alpha"],
+        "{child_seen:?}"
+    );
+    assert_eq!(
+        child_seen[1],
+        vec!["load", "shared_state", "alpha", "beta"],
+        "{child_seen:?}"
+    );
+    assert_eq!(source.calls(), 2);
+}
+
+/// After a run with a rebuild, the agent's own tools (the injected
+/// `shared_state` included) are exactly as before: the next run, with the
+/// sources now empty, offers only them — nothing sourced or from an extension
+/// leaked into the agent's list.
+#[tokio::test]
+async fn a_rebuild_leaves_the_agents_own_tools_as_they_were() {
+    use yoagent::extension::*;
+    struct Offers;
+    #[async_trait::async_trait]
+    impl RunHooks for Offers {
+        async fn tools(&mut self, _: &RunContext<'_>) -> Vec<Arc<dyn AgentTool>> {
+            vec![named("ext_tool", "ext ran")]
+        }
+    }
+    struct Ext(Arc<AtomicUsize>);
+    #[async_trait::async_trait]
+    impl Extension for Ext {
+        fn name(&self) -> &str {
+            "offers"
+        }
+        async fn start_run(&self, _: &RunContext<'_>) -> Result<Box<dyn RunHooks>, ExtensionError> {
+            // Offers its tool in the first run only.
+            if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                Ok(Box::new(Offers))
+            } else {
+                Ok(Box::new(NoHooks))
+            }
+        }
+    }
+    struct NoHooks;
+    impl RunHooks for NoHooks {}
+
+    let source = Generational::new(vec![named("alpha", "alpha ran")]);
+    let changes = source.clone();
+    let (provider, seen) = recording(vec![
+        call("load"),
+        MockResponse::ToolCalls(vec![MockToolCall {
+            provider_metadata: None,
+            name: "shared_state".into(),
+            arguments: serde_json::json!({"action": "list"}),
+        }]),
+        MockResponse::Text("done".into()),
+        MockResponse::Text("again".into()),
+    ]);
+    let mut agent = Agent::from_provider(provider, ModelConfig::mock())
+        .with_tools(vec![load(move || {
+            changes.change(vec![named("beta", "beta ran")])
+        })])
+        .with_shared_state(yoagent::shared_state::SharedState::new())
+        .with_tool_source(source.clone())
+        .with_extension(Ext(Arc::new(AtomicUsize::new(0))));
+    run(&mut agent, "go").await;
+    {
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen[0], vec!["load", "shared_state", "alpha", "ext_tool"]);
+        assert_eq!(
+            seen[1],
+            vec!["load", "shared_state", "beta", "ext_tool"],
+            "{seen:?}"
+        );
+    }
+    // `shared_state` was still callable after the rebuild.
+    assert!(
+        !tool_results(agent.messages())[1].2,
+        "{:?}",
+        tool_results(agent.messages())
+    );
+    source.change(vec![]);
+    run(&mut agent, "again").await;
+    assert_eq!(seen.lock().unwrap()[3], vec!["load", "shared_state"]);
+}
+
+/// Any change of the generation counts, a smaller value too.
+#[tokio::test]
+async fn a_generation_that_goes_backwards_still_counts() {
+    let source = Generational::new(vec![named("alpha", "alpha ran")]);
+    source.generation.store(5, Ordering::SeqCst);
+    let changes = source.clone();
+    let (provider, seen) = recording(vec![call("load"), MockResponse::Text("done".into())]);
+    let mut agent = Agent::from_provider(provider, ModelConfig::mock())
+        .with_tools(vec![load(move || {
+            *changes.tools.lock().unwrap() = vec![named("beta", "beta ran")];
+            changes.generation.store(3, Ordering::SeqCst);
+        })])
+        .with_tool_source(source.clone());
+    run(&mut agent, "go").await;
+    assert_eq!(seen.lock().unwrap()[1], vec!["load", "beta"]);
+    assert_eq!(source.calls(), 2);
+}
+
+/// A `generation()` that panics counts as unchanged: the source is not asked
+/// again (no re-ask, no cache rewrite) on any turn.
+#[tokio::test]
+async fn a_panicking_generation_is_read_as_unchanged() {
+    struct Fragile(Arc<AtomicUsize>, Arc<AtomicUsize>);
+    #[async_trait::async_trait]
+    impl ToolSource for Fragile {
+        async fn tools(&self) -> Vec<Arc<dyn AgentTool>> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            vec![named("alpha", "alpha ran")]
+        }
+        fn generation(&self) -> u64 {
+            // Answers once (at the start), then panics.
+            if self.1.fetch_add(1, Ordering::SeqCst) == 0 {
+                7
+            } else {
+                panic!("generation exploded")
+            }
+        }
+    }
+    let asked = Arc::new(AtomicUsize::new(0));
+    let (provider, seen) = recording(vec![
+        call("alpha"),
+        call("alpha"),
+        MockResponse::Text("done".into()),
+    ]);
+    let mut agent = Agent::from_provider(provider, ModelConfig::mock())
+        .with_tool_source(Fragile(asked.clone(), Arc::new(AtomicUsize::new(0))));
+    run(&mut agent, "go").await;
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
+    let seen = seen.lock().unwrap();
+    assert!(
+        seen.iter().all(|t| t == &vec!["alpha".to_string()]),
+        "{seen:?}"
+    );
+}

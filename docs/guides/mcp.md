@@ -180,10 +180,19 @@ It lists the server's tools at the start of every run and, whenever the
 server sends `notifications/tools/list_changed`, again before the run's next
 model request — the same run sees the new tools. The transports read the
 server's notifications while they wait for a call's answer, so a change a
-tool call caused (the usual case) is seen right after that call; one the
-server sends while no call is open is counted at the next call to it
-(`McpClient::tools_list_changes` tells how many were read). A failed
-`tools/list` offers none of the server's tools until a later one succeeds.
+tool call caused (the usual case) is seen right after that call
+(`McpClient::tools_list_changes` tells how many were read):
+
+- over **stdio**, a change announced while no call is open is counted at the
+  next call to the server;
+- over **HTTP**, only a notification that arrives on a call's SSE response,
+  ahead of its answer, is counted. The transport opens no standalone `GET`
+  stream, so a change announced while idle — or by a server that answers in
+  plain JSON — is not seen mid-run; the next run lists the tools again.
+
+The listing is bounded by the client's call timeout. One that fails or times
+out keeps the last list that succeeded (logged), so the server's tools stay
+offered and a call reports the server's real error.
 
 ## How MCP Tools Work
 

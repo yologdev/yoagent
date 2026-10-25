@@ -328,8 +328,8 @@ impl McpTransport for StdioTransport {
             .await?;
 
         // Read until this request's response. The server may interleave its
-        // own messages: notifications (logging, progress, list_changed) are
-        // skipped, requests (ping, sampling, roots) are answered, and a
+        // own messages: notifications (logging, progress) are skipped —
+        // `tools/list_changed` is counted first — requests (ping, sampling, roots) are answered, and a
         // response for another id — one whose caller timed out — is dropped.
         let mut stdout = self.stdout.lock().await;
         let mut non_json = 0usize;

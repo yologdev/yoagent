@@ -180,11 +180,12 @@ impl McpClient {
     }
 
     /// How many times the server has announced that its tool list changed
-    /// (`notifications/tools/list_changed`), as read so far: the transport
-    /// reads the server's notifications while it waits for a call's answer,
-    /// so one sent while no call is open is counted at the next call. Also the
-    /// generation of a [`McpToolSource`](crate::mcp::McpToolSource) on this
-    /// client.
+    /// (`notifications/tools/list_changed`), as read so far. The transport
+    /// reads the server's notifications while it waits for a call's answer:
+    /// over stdio, one sent while no call is open is counted at the next call;
+    /// over HTTP, only one on a call's SSE response ahead of its answer is
+    /// counted (no standalone `GET` stream). Also the generation of a
+    /// [`McpToolSource`](crate::mcp::McpToolSource) on this client.
     pub fn tools_list_changes(&self) -> u64 {
         self.tools_changed.load(Ordering::SeqCst)
     }

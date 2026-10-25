@@ -344,3 +344,49 @@ async fn an_agent_offers_a_tool_the_server_adds_mid_run() {
         ]
     );
 }
+
+/// Like `LOADING_SERVER`, but every `tools/list` after the first fails.
+const FAILING_LIST_SERVER: &str = r#"
+read -r line; id=$(id_of "$line")
+echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{\"listChanged\":true}},\"serverInfo\":{\"name\":\"flaky\",\"version\":\"1\"}}}"
+read -r note
+listed=0
+while read -r line; do
+  id=$(id_of "$line")
+  case "$line" in
+    *'"tools/list"'*)
+      if [ "$listed" = 0 ]; then
+        listed=1
+        echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"tools\":[{\"name\":\"load\",\"description\":\"load\",\"inputSchema\":{\"type\":\"object\"}}]}}"
+      else
+        echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"error\":{\"code\":-32603,\"message\":\"listing broke\"}}"
+      fi;;
+    *'"name":"load"'*)
+      echo '{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}'
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"loaded\"}]}}";;
+  esac
+done
+"#;
+
+/// A `tools/list` that fails after a change keeps the last list that
+/// succeeded: the server's tools stay offered.
+#[tokio::test]
+async fn a_failed_relisting_keeps_the_last_good_list() {
+    use yoagent::mcp::McpToolSource;
+    use yoagent::ToolSource;
+    let source = McpToolSource::new(connect(FAILING_LIST_SERVER).await.unwrap());
+    let tools = source.tools().await;
+    assert_eq!(tools.len(), 1);
+    tools[0]
+        .execute(serde_json::json!({}), ToolContext::new("c1", "load"))
+        .await
+        .unwrap();
+    assert_eq!(source.generation(), 1);
+    let names: Vec<String> = source
+        .tools()
+        .await
+        .iter()
+        .map(|t| t.name().to_string())
+        .collect();
+    assert_eq!(names, ["load"], "the failed listing kept the last good one");
+}

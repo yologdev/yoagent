@@ -23,11 +23,19 @@ use crate::types::AgentTool;
 /// **When a change is seen.** The transport reads the server's notifications
 /// while it waits for a call's answer — so a change a tool call caused (a
 /// server that loads more tools when asked, the usual case) is seen right
-/// after that call, and its tools are offered from the next request. One the
-/// server sends while no call is open is counted at the next call to it.
+/// after that call, and its tools are offered from the next request.
+/// - Over **stdio**, one the server sends while no call is open is counted at
+///   the next call to it.
+/// - Over **HTTP**, only one that arrives on a call's SSE response, ahead of
+///   its answer, is counted: the transport opens no standalone `GET` stream,
+///   so a change announced while idle — or by a server that answers in plain
+///   JSON — is not seen mid-run (the next run lists the tools again).
 ///
-/// A `tools/list` that fails gives no tools (logged): the server's tools are
-/// withdrawn until a later listing succeeds.
+/// **Failures.** The listing is bounded by the client's
+/// [`call_timeout`](McpClient::call_timeout). A listing that fails or times
+/// out (logged) keeps the last list that succeeded — the server's tools stay
+/// offered, and a call to one reports the server's real error — or, with no
+/// earlier list, gives none. It is asked again at the server's next change.
 ///
 /// ```no_run
 /// # #[cfg(feature = "native")]
@@ -45,6 +53,8 @@ pub struct McpToolSource {
     client: Arc<Mutex<McpClient>>,
     changed: Arc<AtomicU64>,
     prefix: Option<String>,
+    /// The last list that succeeded, kept when a later listing fails.
+    last: std::sync::Mutex<Vec<Arc<dyn AgentTool>>>,
 }
 
 impl McpToolSource {
@@ -56,6 +66,7 @@ impl McpToolSource {
             client: Arc::new(Mutex::new(client)),
             changed,
             prefix: None,
+            last: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -78,9 +89,23 @@ impl ToolSource for McpToolSource {
     async fn tools(&self) -> Vec<Arc<dyn AgentTool>> {
         let (listed, timeout) = {
             let client = self.client.lock().await;
-            (client.list_tools().await, client.call_timeout())
+            let timeout = client.call_timeout();
+            let listed = match timeout {
+                // Asked between turns: a server that stops answering must not
+                // hang the run.
+                Some(limit) => crate::rt::timeout(limit, client.list_tools())
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(super::McpError::Transport(format!(
+                            "tools/list did not answer within {}s",
+                            limit.as_secs()
+                        )))
+                    }),
+                None => client.list_tools().await,
+            };
+            (listed, timeout)
         };
-        match listed {
+        let tools: Vec<Arc<dyn AgentTool>> = match listed {
             Ok(tools) => tools
                 .into_iter()
                 .map(|tool| {
@@ -94,12 +119,16 @@ impl ToolSource for McpToolSource {
                 })
                 .collect(),
             Err(e) => {
+                let last = self.last.lock().unwrap_or_else(|p| p.into_inner()).clone();
                 tracing::warn!(
-                    "MCP tool source: tools/list failed, offering none of its tools: {e}"
+                    kept = last.len(),
+                    "MCP tool source: tools/list failed; keeping the last list that succeeded: {e}"
                 );
-                Vec::new()
+                return last;
             }
-        }
+        };
+        *self.last.lock().unwrap_or_else(|p| p.into_inner()) = tools.clone();
+        tools
     }
 
     fn generation(&self) -> u64 {

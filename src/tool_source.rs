@@ -104,11 +104,14 @@ pub trait ToolSource: crate::rt::MaybeSend + crate::rt::MaybeSync {
     /// again.
     async fn tools(&self) -> Vec<Arc<dyn AgentTool>>;
 
-    /// A number that changes whenever this source's tools change (any
-    /// change; it need not grow). The loop reads it before asking for the
-    /// tools and, before each later request in the run, asks again only when
-    /// it moved. Cheap and non-blocking: it is read every turn. Default `0`:
-    /// a source that never changes mid-run is asked once per run.
+    /// A number that changes whenever this source's tools change. The loop
+    /// reads it before asking for the tools and, before each later request in
+    /// the run, asks again only when it differs from the value it read then —
+    /// so use a counter that only moves forward: a value that changes and
+    /// comes back between two turns would be missed. Cheap and non-blocking:
+    /// it is read every turn. Default `0`: a source that never changes mid-run
+    /// is asked once per run. A `generation()` that panics counts as
+    /// unchanged (logged once).
     fn generation(&self) -> u64 {
         0
     }
@@ -160,6 +163,8 @@ pub(crate) struct Sourced {
     sources: Vec<Arc<dyn ToolSource>>,
     generations: Vec<u64>,
     tools: Vec<Vec<Arc<dyn AgentTool>>>,
+    /// Sources whose `generation()` panicked (logged once each).
+    generation_panicked: Vec<bool>,
 }
 
 impl Sourced {
@@ -178,7 +183,15 @@ impl Sourced {
     pub(crate) async fn refresh(&mut self, cancel: &tokio_util::sync::CancellationToken) -> bool {
         let mut changed = false;
         for index in 0..self.sources.len() {
-            let now = generation_of(&self.sources[index], index);
+            // A `generation()` that panics counts as unchanged: a panic must
+            // not cost a re-ask (and a prompt-cache rewrite) every turn.
+            let Some(now) = generation_of(
+                &self.sources[index],
+                index,
+                &mut self.generation_panicked[index],
+            ) else {
+                continue;
+            };
             if now == self.generations[index] {
                 continue;
             }
@@ -201,18 +214,24 @@ impl Sourced {
     }
 }
 
-/// A source's generation; a `generation()` that panics reads as 0 (logged).
-fn generation_of(source: &Arc<dyn ToolSource>, index: usize) -> u64 {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| source.generation())).unwrap_or_else(
-        |payload| {
-            tracing::warn!(
-                source = index,
-                panic = %panic_message(payload.as_ref()),
-                "tool source's generation() panicked; read as 0"
-            );
-            0
-        },
-    )
+/// A source's generation, or `None` when `generation()` panicked (logged the
+/// first time, `panicked` remembering it).
+fn generation_of(source: &Arc<dyn ToolSource>, index: usize, panicked: &mut bool) -> Option<u64> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| source.generation())) {
+        Ok(generation) => Some(generation),
+        Err(payload) => {
+            if !*panicked {
+                *panicked = true;
+                tracing::warn!(
+                    source = index,
+                    panic = %panic_message(payload.as_ref()),
+                    "tool source's generation() panicked; its tools are not asked for again \
+                     until it answers (logged once)"
+                );
+            }
+            None
+        }
+    }
 }
 
 /// One source's tools; a panic — while building its future or while it runs
@@ -241,7 +260,11 @@ async fn ask(source: &Arc<dyn ToolSource>, index: usize) -> Vec<Arc<dyn AgentToo
 pub(crate) async fn collect(sources: &[Arc<dyn ToolSource>]) -> Sourced {
     let mut sourced = Sourced::default();
     for (index, source) in sources.iter().enumerate() {
-        sourced.generations.push(generation_of(source, index));
+        let mut panicked = false;
+        sourced
+            .generations
+            .push(generation_of(source, index, &mut panicked).unwrap_or(0));
+        sourced.generation_panicked.push(panicked);
         sourced.tools.push(ask(source, index).await);
         sourced.sources.push(source.clone());
     }
