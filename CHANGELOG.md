@@ -6,7 +6,7 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased (yoagent-rutis)
 
-- **pi: a run's `agent_end` is no longer lost when the plugins unload right after it** (#374). The bridge delivers `agentEnd` after the run's `finish`, so it could arrive after unloading began; the pi adapter, already closed, dropped it, and a tracer saw `session_shutdown` without the run's end. Unloading now waits — within the same `OBSERVER_DRAIN_MS` bound (5 s) — for the `agent_end` of every run that already finished, then for the observer queue, before `session_shutdown`. On the bridge side, a run's `AgentEnd` reaches every handler that got its `finish`, even one whose plugin has begun unloading since.
+- **pi: a run's `agent_end` is no longer lost when the plugins unload right after it** (#374). The bridge delivers `agentEnd` after the run's `finish`, so it could arrive after unloading began; the pi adapter, already closed, dropped it, and a tracer saw `session_shutdown` without the run's end. Unloading now waits — within the same `OBSERVER_DRAIN_MS` bound (5 s) — for the `agent_end` of every run that finished in the last 5 s, then for the observer queue, before `session_shutdown`; a run whose `agent_end` never came (its observer switched off) is forgotten after 5 s, so it neither leaks nor holds up a later unload. On the bridge side, a run's `AgentEnd` reaches every handler whose plugin was still loaded when the run's `finish` began, even if it has begun unloading since.
 
 ## 0.25.14 (2026-10-25)
 

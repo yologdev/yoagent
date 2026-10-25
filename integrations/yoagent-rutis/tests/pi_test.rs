@@ -2254,6 +2254,7 @@ export default function (pi) {
 #[derive(Clone)]
 struct UnloadAtFinish {
     root: Ctx,
+    bridge: RutisBridge,
     unloading: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
@@ -2264,8 +2265,18 @@ impl yoagent::extension::RunHooks for UnloadAtFinish {
         *self.unloading.lock().unwrap() = Some(tokio::spawn(async move {
             root.shutdown().await.unwrap();
         }));
-        // Let unloading reach the adapter before the run sends `agentEnd`.
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        // Until the pi handler is gone from the registry (what makes the
+        // bridge's gate drop events), then a little longer so the adapter's
+        // drain has begun, before the run sends `agentEnd`.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        while !self.bridge.registry().handlers().is_empty() {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "unloading never removed the handler"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }
 
@@ -2292,6 +2303,7 @@ export default function (pi) {
     host.load(adapter_row(json!({ "extensions": [ext] }))).await;
     let unload = UnloadAtFinish {
         root: host.root.clone(),
+        bridge: host.bridge.clone(),
         unloading: Arc::default(),
     };
     let (agent, _) = agent(vec![text("done")]);

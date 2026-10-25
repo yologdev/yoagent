@@ -249,6 +249,7 @@ impl Extension for RutisExtension {
                         handler: h.clone(),
                         sink,
                         off: AtomicBool::new(false),
+                        at_finish: AtomicBool::new(false),
                     })
             })
             .collect();
@@ -284,6 +285,9 @@ struct Observer {
     sink: Box<dyn EventSink>,
     /// Panicked once: not called again this run.
     off: AtomicBool,
+    /// Its plugin was still loaded when the run's `finish` began: it gets
+    /// the run's `AgentEnd` even if the plugin has begun unloading since.
+    at_finish: AtomicBool,
 }
 
 /// One run's hooks over the snapshot of handlers.
@@ -777,14 +781,17 @@ impl RunHooks for RunState {
         if !self.closed {
             crate::events::publish(&self.host, &self.run, event);
         }
-        // `AgentEnd` comes after `finish`, which every handler of the run
-        // got: a handler whose plugin began unloading since still gets it,
-        // so the run's end is not lost to the race (#374).
+        // `AgentEnd` comes after `finish`: a handler whose plugin was still
+        // loaded when `finish` began gets it even if the plugin has begun
+        // unloading since, so the run's end is not lost to the race (#374).
         let last = matches!(event, AgentEvent::AgentEnd { .. });
         for observer in &self.events {
-            if observer.off.load(Ordering::Relaxed)
-                || (!last && !observer.handler.gate.is_available())
-            {
+            let live = if last {
+                observer.at_finish.load(Ordering::Relaxed)
+            } else {
+                observer.handler.gate.is_available()
+            };
+            if observer.off.load(Ordering::Relaxed) || !live {
                 continue;
             }
             let timer = observer.handler.time("on_event");
@@ -817,6 +824,10 @@ impl RunHooks for RunState {
     }
 
     async fn finish(&mut self, outcome: &RunOutcome) {
+        for observer in &self.events {
+            let live = observer.handler.gate.is_available();
+            observer.at_finish.store(live, Ordering::Relaxed);
+        }
         let this = &*self;
         // Every event sent so far reaches its handler before `finish` does.
         let closing = this.events.iter().map(|o| async move {

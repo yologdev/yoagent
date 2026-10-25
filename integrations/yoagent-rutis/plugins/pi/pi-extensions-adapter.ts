@@ -1799,7 +1799,16 @@ export default definePlugin<Config>({
     /** Per run: the turn index, and each running tool call's pi name and arguments. */
     const turns = new Map<string, number>()
     /** A run's tools kept past `finish` for its `agentEnd` (delivered after it), when subscribed. */
-    const ending = new Map<string, { offered: Map<string, PiTool>; model?: string }>()
+    const ending = new Map<string, { offered: Map<string, PiTool>; model?: string; finishedAt: number }>()
+    /**
+     * Forget runs whose `agentEnd` never came (an observer the bridge switched off, a delivery that
+     * failed): it follows `finish` at once, so one older than OBSERVER_DRAIN_MS is not coming, and
+     * must neither leak nor hold up unloading.
+     */
+    const forgetStranded = () => {
+      const now = Date.now()
+      for (const [runId, entry] of ending) if (now - entry.finishedAt >= OBSERVER_DRAIN_MS) ending.delete(runId)
+    }
     const running = new Map<string, { toolName: string; args: unknown }>()
     const observerFailed = new Set<string>()
     /** A yoagent tool call as pi names it: a pi tool keeps its name, a built-in gets pi's name and argument shape. */
@@ -1995,6 +2004,7 @@ export default definePlugin<Config>({
     const observe = async (event: Record<string, unknown> & { type: string; run: RunInfo }) => {
       if (refusal || closed) {
         ending.clear()
+        endingSettled?.()
         return
       }
       // Unloading: a run that already finished still gets its `agent_end` (the bridge delivers
@@ -2043,6 +2053,8 @@ export default definePlugin<Config>({
     }
     drainObservers = async () => {
       closing = true
+      // Only runs that finished just now: an older one's `agent_end` is not coming.
+      forgetStranded()
       let timer: ReturnType<typeof setTimeout> | undefined
       const done = await Promise.race([
         (async () => {
@@ -2307,7 +2319,10 @@ export default definePlugin<Config>({
           for (const key of judged.keys()) if (key.startsWith(`${outcome.run_id}/`)) judged.delete(key)
           // `agentEnd` comes after `finish`: it names tools from what this run offered.
           const snapshot = snapshots.get(outcome.run_id)
-          if (snapshot && subscribed.has('agentEnd')) ending.set(outcome.run_id, { ...snapshot, model: runModels.get(outcome.run_id) })
+          forgetStranded()
+          if (snapshot && subscribed.has('agentEnd')) {
+            ending.set(outcome.run_id, { ...snapshot, model: runModels.get(outcome.run_id), finishedAt: Date.now() })
+          }
           snapshots.delete(outcome.run_id)
           runModels.delete(outcome.run_id)
           // Observer bookkeeping: whatever event types are subscribed (the bridge delivers the
