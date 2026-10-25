@@ -7,9 +7,9 @@ adheres to [Semantic Versioning](https://semver.org/).
 ## Unreleased (yoagent-rutis)
 
 - **pi: a run's `agent_end` survives the plugins unloading right after the run** (#374). The bridge delivers `agentEnd` after the run's `finish`, so it could arrive after unloading began; the pi adapter, already closed, dropped it, and a tracer saw `session_shutdown` without the run's end. Now:
-  - **Bridge:** a run's `AgentEnd` goes to every handler its `finish` reached (or, without a `finish` hook, whose plugin was still loaded once `finish` was done), even if the plugin has begun unloading since; a plugin unloaded mid-run gets nothing, as before. A delivery that fails because the plugin has gone since is logged at debug, not as the handler's failure.
+  - **Bridge:** a run's `AgentEnd` goes to every handler the run's end reached — its plugin was loaded when the run's `finish` began and, with a `finish` hook, when that hook was called (even if the call failed or the plugin unloaded during it) — even if the plugin has begun unloading since; a plugin unloaded before that gets nothing, as before. A delivery that fails because the plugin has gone since is logged at debug, not as the handler's failure.
   - **pi adapter:** unloading waits — within the same `OBSERVER_DRAIN_MS` bound (5 s) — for the `agent_end` of every run whose `finish` reached it before unloading began, then for the observer queue, before `session_shutdown`. A run whose `agent_end` has not come 5 s after its `finish` is presumed lost and logged at info, so it neither leaks nor holds up a later unload. The timeout warning names the runs and what was still queued or dropped; events not taken while unloading are reported once (info when an `agent_end` is among them).
-  - Not covered: a run whose `finish` and the unload cross (the adapter does not see the `finish` before unloading begins); its `agent_end` is reported as not delivered.
+  - Not covered: a run whose `finish` and the unload cross so that the adapter takes the `finish` only after unloading began; its `agent_end` is not delivered to observers and is logged at info.
 
 ## 0.25.14 (2026-10-25)
 

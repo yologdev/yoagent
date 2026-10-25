@@ -85,7 +85,7 @@ embedded-adapters = []
 probe = ["node", "loader", "dep:tempfile", "dep:tracing-subscriber"]
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "test-util"] }
 # Loads language plugins as rows in the end-to-end tests. The bridge never
 # loads plugins itself: that is the host's job.
 rutis-loader = { version = "0.12", features = ["node", "python", "bun", "go"] }

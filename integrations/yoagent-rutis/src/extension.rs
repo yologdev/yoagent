@@ -285,10 +285,10 @@ struct Observer {
     sink: Box<dyn EventSink>,
     /// Panicked once: not called again this run.
     off: AtomicBool,
-    /// The run's end reached it — its `finish` was called, or (without a
-    /// `finish` hook) its plugin was still loaded once the run's `finish`
-    /// was done: it gets the run's `AgentEnd` even if the plugin has begun
-    /// unloading since. False until then.
+    /// The run's end reached it — its plugin was loaded when the run's
+    /// `finish` began and, with a `finish` hook, when that hook was called:
+    /// it gets the run's `AgentEnd` even if the plugin has begun unloading
+    /// since. Set by `finish` (yoagent always calls it before `AgentEnd`).
     got_end: AtomicBool,
 }
 
@@ -833,6 +833,14 @@ impl RunHooks for RunState {
 
     async fn finish(&mut self, outcome: &RunOutcome) {
         let this = &*self;
+        // Whom the run's `AgentEnd`, sent after this, goes to (see
+        // `on_event`): for now every handler whose plugin is loaded, refined
+        // below for those with a `finish` hook. Stored first, so it holds
+        // if yoagent drops this future (it bounds `finish`).
+        for observer in &this.events {
+            let live = observer.handler.gate.is_available();
+            observer.got_end.store(live, Ordering::Relaxed);
+        }
         // Every event sent so far reaches its handler before `finish` does.
         let closing = this.events.iter().map(|o| async move {
             let flush = o.sink.flush();
@@ -863,6 +871,14 @@ impl RunHooks for RunState {
             }
         }
         let finishing = this.with(|h| h.hooks.finish).map(|h| async move {
+            // Sent to a loaded plugin, it learns that the run ended — even if
+            // the call fails or the plugin unloads during it.
+            let dispatched = h.gate.is_available();
+            for observer in this.events.iter() {
+                if Arc::ptr_eq(&observer.handler.handler, &h.handler) {
+                    observer.got_end.store(dispatched, Ordering::Relaxed);
+                }
+            }
             let done = call(
                 h,
                 "finish",
@@ -870,8 +886,6 @@ impl RunHooks for RunState {
                 h.handler.finish(outcome.clone(), this.run.clone()),
             )
             .await;
-            // Called, even if it failed: the handler knows the run ended.
-            let reached = !matches!(done, Err(Missed::Unavailable(_)));
             match done {
                 Ok(()) => {}
                 Err(Missed::Unavailable(why)) => {
@@ -879,19 +893,7 @@ impl RunHooks for RunState {
                 }
                 Err(Missed::Failed(why)) => tracing::warn!(run_id = %this.run.run_id, "{why}"),
             }
-            (h, reached)
         });
-        let finished = futures::future::join_all(finishing).await;
-        // Whom the run's `AgentEnd`, sent after this, goes to (see `on_event`).
-        for observer in &this.events {
-            let got_end = finished
-                .iter()
-                .find(|(h, _)| Arc::ptr_eq(&h.handler, &observer.handler.handler))
-                .map_or_else(
-                    || observer.handler.gate.is_available(),
-                    |(_, reached)| *reached,
-                );
-            observer.got_end.store(got_end, Ordering::Relaxed);
-        }
+        futures::future::join_all(finishing).await;
     }
 }

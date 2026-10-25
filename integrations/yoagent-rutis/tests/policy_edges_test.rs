@@ -920,3 +920,32 @@ async fn a_plugin_unloaded_after_finish_is_still_sent_the_runs_end() {
     );
     root.shutdown().await.unwrap();
 }
+
+/// A handler's `finish` that never answers makes yoagent drop the bridge's
+/// `finish` (it bounds every extension's): the run's `AgentEnd`, sent after,
+/// still reaches the plugins that were loaded — this one and a tracer.
+#[tokio::test(start_paused = true)]
+async fn the_runs_end_survives_a_finish_that_never_answers() {
+    let (root, bridge) = setup();
+    let (stuck, stuck_kinds) = observed("stuck");
+    let stuck = stuck.with_finish_async(|_, _| {
+        std::future::pending::<Result<(), yoagent::extension::ExtensionError>>()
+    });
+    let (tracer, tracer_kinds) = observed("tracer");
+    let a = root.plugin(plugin(stuck));
+    let b = root.plugin(plugin(tracer));
+    wait_active(&a).await;
+    wait_active(&b).await;
+    let (agent, _) = agent(vec![text("done")]);
+    let mut agent = agent.with_extension(bridge.extension());
+    run(&mut agent, "go").await;
+    for kinds in [stuck_kinds, tracer_kinds] {
+        let kinds = kinds.lock().unwrap().clone();
+        assert_eq!(
+            kinds.last().map(String::as_str),
+            Some("agentEnd"),
+            "{kinds:?}"
+        );
+    }
+    root.shutdown().await.unwrap();
+}

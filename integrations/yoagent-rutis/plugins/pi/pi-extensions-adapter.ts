@@ -2020,6 +2020,10 @@ export default definePlugin<Config>({
      */
     const observe = async (event: Record<string, unknown> & { type: string; run: RunInfo }) => {
       if (refusal || closed) {
+        // A run whose `finish` crossed the unload: its end came after the drain. Rare; said.
+        if (closed && !refusal && event.type === 'agentEnd') {
+          report('info', `[pi] agent_end of run ${event.run.run_id} came after unloading; not delivered to observers`)
+        }
         ending.clear()
         endingSettled?.()
         return
