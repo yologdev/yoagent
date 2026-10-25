@@ -266,8 +266,9 @@ impl SubAgentTool {
         self
     }
 
-    /// Add a [`ToolSource`], consulted once per delegation (each delegation
-    /// is one run of the sub-agent). Mirrors
+    /// Add a [`ToolSource`], consulted at the start of every delegation (each
+    /// delegation is one run of the sub-agent) and again between the child's
+    /// turns when its [`generation`](ToolSource::generation) moves. Mirrors
     /// [`Agent::with_tool_source`](crate::Agent::with_tool_source): the
     /// sub-agent's own tools win a name collision, then earlier sources.
     pub fn with_tool_source(mut self, source: impl ToolSource + 'static) -> Self {
@@ -567,13 +568,14 @@ impl AgentTool for SubAgentTool {
 
         // Tools resolved for this run come after the static ones (which win
         // a name collision).
+        let mut sourced = crate::tool_source::Sourced::default();
         if !self.tool_sources.is_empty() {
             // A hung source must not outlive the parent's abort.
-            let sourced = tokio::select! {
+            sourced = tokio::select! {
                 sourced = crate::tool_source::collect(&self.tool_sources) => sourced,
                 _ = cancel.cancelled() => return Err(ToolError::Cancelled),
             };
-            crate::tool_source::merge(&mut tools, sourced);
+            sourced.merge_into(&mut tools);
         }
 
         // Fresh context for the sub-agent
@@ -596,6 +598,8 @@ impl AgentTool for SubAgentTool {
 
         // Config with Arc'd provider
         let mut config = AgentLoopConfig::new(provider, self.model.clone());
+        // Asked again between the child's turns when a source's generation moves.
+        *config.sourced.get_mut().unwrap_or_else(|p| p.into_inner()) = Some(sourced);
         config.api_key = if self.api_key.is_empty() {
             crate::provider::resolve_api_key_or_warn(self.model_config.as_ref())
         } else {

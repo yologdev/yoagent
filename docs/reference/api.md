@@ -76,7 +76,7 @@ All return `Self` for chaining (unless noted as `Result`).
 | Method | Description |
 |--------|-------------|
 | `with_tools(tools: Vec<Box<dyn AgentTool>>) -> Self` | Set tools (replaces existing) |
-| `with_tool_source(source: impl ToolSource) -> Self` | Add a tool source consulted once at the start of every run; its tools are offered for that run only (the agent's own tools win on name collisions). See [Tools](../concepts/tools.md#tools-that-change-at-runtime-toolsource) |
+| `with_tool_source(source: impl ToolSource) -> Self` | Add a tool source consulted at the start of every run (and again before a later request when its `generation()` moved); its tools are offered for that run only (the agent's own tools win on name collisions). See [Tools](../concepts/tools.md#tools-that-change-at-runtime-toolsource) |
 | `with_tool_middleware(m: impl ToolMiddleware) -> Self` | Add an approve/modify/deny hook gating every tool call |
 | `with_sub_agent(sub: SubAgentTool) -> Self` | Add a sub-agent tool |
 | `with_shared_state(state: SharedState) -> Self` | Register the `shared_state` tool and stash truncated tool output under a retrievable key |
@@ -211,7 +211,7 @@ All return `Self` for chaining.
 | `with_system_prompt(prompt) -> Self` | The sub-agent's own instructions |
 | `with_api_key(key) -> Self` | Override the env-resolved API key |
 | `with_tools(tools: Vec<Arc<dyn AgentTool>>) -> Self` | Tools available to the sub-agent |
-| `with_tool_source(source: impl ToolSource) -> Self` | Add a tool source, consulted once per delegation |
+| `with_tool_source(source: impl ToolSource) -> Self` | Add a tool source, consulted at the start of every delegation (and between the child's turns when its `generation()` moved) |
 | `with_tool_middleware(m: impl ToolMiddleware) -> Self` | Gate the sub-agent's own tool calls |
 | `with_turn_hook(hook: impl TurnHook) -> Self` | Per-request hook for the sub-agent's own LLM requests |
 | `with_async_input_filter(f: impl AsyncInputFilter) -> Self` | Filter the task the parent hands over; a rejection fails the tool call |

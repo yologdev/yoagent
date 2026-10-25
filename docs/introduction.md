@@ -46,7 +46,7 @@ output, and skills.
 
 - [7 API protocols, 20+ providers](providers/overview.md) — Anthropic, OpenAI Completions and Responses, Azure, Gemini, Vertex, Bedrock, plus OpenAI-compatible gateways, each with a real implementation rather than a shared shim
 - [Built-in tools](concepts/tools.md) — bash, file read/write/edit, list, ripgrep search (native hosts); add your own via the `AgentTool` trait
-- [Tools that change at runtime](concepts/tools.md#tools-that-change-at-runtime-toolsource) — `ToolSource`, consulted at the start of every run (plugins, reconnecting MCP servers)
+- [Tools that change at runtime](concepts/tools.md#tools-that-change-at-runtime-toolsource) — `ToolSource`, consulted at the start of every run and again mid-run when it changed (plugins, reconnecting MCP servers)
 - [MCP](guides/mcp.md) servers and [OpenAPI](guides/openapi.md) specs become tools transparently
 - [Structured outputs](concepts/structured-outputs.md) — typed, schema-validated replies enforced natively where the provider supports it
 - [Prompt caching](concepts/prompt-caching.md)

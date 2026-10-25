@@ -2,7 +2,7 @@
 
 #[cfg(feature = "native")]
 use super::transport::StdioTransport;
-use super::transport::{HttpTransport, McpTransport};
+use super::transport::{HttpTransport, McpTransport, ServerNotifications};
 use super::types::*;
 #[cfg(feature = "native")]
 use std::collections::HashMap;
@@ -19,9 +19,28 @@ pub struct McpClient {
     server_info: Option<ServerInfo>,
     capabilities: Option<ServerCapabilities>,
     call_timeout: Option<Duration>,
+    /// The server notifications the transport has read.
+    notifications: ServerNotifications,
+    /// Whether the transport reports them at all.
+    reports_notifications: bool,
 }
 
 impl McpClient {
+    /// The one place a client is built: hands the transport its
+    /// [`ServerNotifications`] handle.
+    fn build(mut transport: Box<dyn McpTransport>, call_timeout: Option<Duration>) -> Self {
+        let notifications = ServerNotifications::new();
+        let reports_notifications = transport.report_notifications(notifications.clone());
+        Self {
+            transport: Arc::new(Mutex::new(transport)),
+            server_info: None,
+            capabilities: None,
+            call_timeout,
+            notifications,
+            reports_notifications,
+        }
+    }
+
     /// Connect to an MCP server via stdio (spawn a child process). Native hosts only.
     #[cfg(feature = "native")]
     #[cfg_attr(docsrs, doc(cfg(feature = "native")))]
@@ -31,14 +50,12 @@ impl McpClient {
         env: Option<HashMap<String, String>>,
     ) -> Result<Self, McpError> {
         let transport = StdioTransport::new(command, args, env).await?;
-        let mut client = Self {
-            transport: Arc::new(Mutex::new(Box::new(transport))),
-            server_info: None,
-            capabilities: None,
-            // Nothing else bounds a stdio call: a server that stops answering
-            // would hang the agent.
-            call_timeout: Some(crate::mcp::McpToolAdapter::DEFAULT_CALL_TIMEOUT),
-        };
+        // Nothing else bounds a stdio call: a server that stops answering
+        // would hang the agent.
+        let mut client = Self::build(
+            Box::new(transport),
+            Some(crate::mcp::McpToolAdapter::DEFAULT_CALL_TIMEOUT),
+        );
         client.handshake().await?;
         Ok(client)
     }
@@ -52,26 +69,16 @@ impl McpClient {
     /// ([`HttpTransport::with_header`]), say. The handshake and timeouts are
     /// those of [`connect_http`](Self::connect_http).
     pub async fn connect_http_with(transport: HttpTransport) -> Result<Self, McpError> {
-        let mut client = Self {
-            transport: Arc::new(Mutex::new(Box::new(transport))),
-            server_info: None,
-            capabilities: None,
-            // The HTTP transport's idle read timeout already ends a stalled
-            // call; a long one that keeps streaming must not be cut off.
-            call_timeout: None,
-        };
+        // The HTTP transport's idle read timeout already ends a stalled call;
+        // a long one that keeps streaming must not be cut off.
+        let mut client = Self::build(Box::new(transport), None);
         client.handshake().await?;
         Ok(client)
     }
 
     /// Create from an existing transport (useful for testing).
     pub fn from_transport(transport: Box<dyn McpTransport>) -> Self {
-        Self {
-            transport: Arc::new(Mutex::new(transport)),
-            server_info: None,
-            capabilities: None,
-            call_timeout: None,
-        }
+        Self::build(transport, None)
     }
 
     /// The bound tool adapters built from this client apply to each call
@@ -159,6 +166,31 @@ impl McpClient {
     /// Close the connection.
     pub async fn close(&self) -> Result<(), McpError> {
         self.transport.lock().await.close().await
+    }
+
+    /// How many times the server has announced that its tool list changed
+    /// (`notifications/tools/list_changed`), as read so far. The transport
+    /// reads the server's notifications while it waits for a call's answer:
+    /// over stdio, one sent while no call is open is counted at the next call;
+    /// over HTTP, only one on a call's SSE response ahead of its answer is
+    /// counted (no standalone `GET` stream); a custom transport counts only
+    /// if it implements [`McpTransport::report_notifications`]. Also the
+    /// generation of a [`McpToolSource`](crate::mcp::McpToolSource) on this
+    /// client.
+    pub fn tools_list_changes(&self) -> u64 {
+        self.notifications.tools_list_changed()
+    }
+
+    /// Whether the transport reports the server's notifications — `false`
+    /// for a custom transport that does not implement
+    /// [`McpTransport::report_notifications`], whose tool-list changes are
+    /// then never seen.
+    pub fn reports_notifications(&self) -> bool {
+        self.reports_notifications
+    }
+
+    pub(crate) fn notifications(&self) -> ServerNotifications {
+        self.notifications.clone()
     }
 
     /// Get server info (available after initialize).

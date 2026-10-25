@@ -37,8 +37,9 @@ pub struct Agent {
     model_config: Option<ModelConfig>,
     messages: Vec<AgentMessage>,
     tools: Vec<Box<dyn AgentTool>>,
-    // Consulted at the start of every run; their tools are appended after
-    // `tools` for that run only (see `tool_source`).
+    // Consulted at the start of every run (and mid-run when one's generation
+    // moves); their tools are appended after `tools` for that run only (see
+    // `tool_source`).
     tool_sources: Vec<Arc<dyn crate::tool_source::ToolSource>>,
     provider: Arc<dyn StreamProvider>,
     /// Whether `provider` was supplied explicitly by the caller (`new` /
@@ -410,7 +411,9 @@ impl Agent {
     }
 
     /// Add a [`ToolSource`](crate::ToolSource): tools resolved at the start
-    /// of every run (each `prompt*` and `continue_loop*` call) and offered
+    /// of every run (each `prompt*` and `continue_loop*` call) — and again
+    /// before a later request of the run when the source's
+    /// [`generation`](crate::ToolSource::generation) moved — and offered
     /// alongside this agent's own tools for that run only.
     ///
     /// For tool sets that change while the agent lives — plugins loaded and
@@ -471,7 +474,10 @@ impl Agent {
     /// the list and how many leading entries are the agent's own — the run's
     /// list is truncated back to that length before it is stored again, so
     /// sourced tools never outlive their run.
-    fn take_tools(&mut self, sourced: Vec<Arc<dyn AgentTool>>) -> (Vec<Box<dyn AgentTool>>, usize) {
+    fn take_tools(
+        &mut self,
+        sourced: &mut crate::tool_source::Sourced,
+    ) -> (Vec<Box<dyn AgentTool>>, usize) {
         let mut tools = std::mem::take(&mut self.tools);
         if let Some(state) = &self.shared_state {
             if !tools.iter().any(|t| t.name() == "shared_state") {
@@ -479,7 +485,7 @@ impl Agent {
             }
         }
         let own = tools.len();
-        crate::tool_source::merge(&mut tools, sourced);
+        sourced.merge_into(&mut tools);
         (tools, own)
     }
 
@@ -487,9 +493,9 @@ impl Agent {
     ///
     /// Awaited before any agent state is touched, so a caller that drops the
     /// prompt future here leaves the agent as it was.
-    async fn collect_sourced_tools(&self) -> Vec<Arc<dyn AgentTool>> {
+    async fn collect_sourced_tools(&self) -> crate::tool_source::Sourced {
         if self.tool_sources.is_empty() {
-            return Vec::new();
+            return crate::tool_source::Sourced::default();
         }
         crate::tool_source::collect(&self.tool_sources).await
     }
@@ -1201,13 +1207,13 @@ impl Agent {
         }
 
         // Resolve this run's sourced tools before touching any state.
-        let sourced = self.collect_sourced_tools().await;
+        let mut sourced = self.collect_sourced_tools().await;
 
         let cancel = CancellationToken::new();
         self.cancel = Some(cancel.clone());
         self.is_streaming = true;
 
-        let (tools, own_tools) = self.take_tools(sourced);
+        let (tools, own_tools) = self.take_tools(&mut sourced);
         let mut context = AgentContext {
             system_prompt: self.system_prompt.clone(),
             messages: self.messages.clone(),
@@ -1216,6 +1222,8 @@ impl Agent {
 
         let mut config = self.build_config();
         config.output_schema = output_schema;
+        // Asked again between turns when a source's generation moves.
+        *config.sourced.get_mut().unwrap_or_else(|p| p.into_inner()) = Some(sourced);
 
         // The run's spans stay children of the caller's span, and go to the
         // caller's subscriber: a scoped one (`tracing::subscriber::with_default`)

@@ -473,41 +473,69 @@ server that reconnects with a different list, a feature flag — add a
 `ToolSource` instead:
 
 ```rust
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use yoagent::{Agent, AgentTool, ToolSource};
 
-struct Swappable(Mutex<Vec<Arc<dyn AgentTool>>>);
+/// Tools the application swaps at runtime; `swap` moves the generation, so a
+/// swap during a run is seen before its next request.
+struct Swappable(Mutex<Vec<Arc<dyn AgentTool>>>, AtomicU64);
+
+impl Swappable {
+    fn swap(&self, tools: Vec<Arc<dyn AgentTool>>) {
+        *self.0.lock().unwrap() = tools;
+        self.1.fetch_add(1, Ordering::SeqCst);
+    }
+}
 
 #[async_trait::async_trait]
 impl ToolSource for Swappable {
     async fn tools(&self) -> Vec<Arc<dyn AgentTool>> {
         self.0.lock().unwrap().clone()
     }
+    fn generation(&self) -> u64 {
+        self.1.load(Ordering::SeqCst)
+    }
 }
 
+let swappable = Arc::new(Swappable(Mutex::new(vec![]), AtomicU64::new(0)));
 let agent = Agent::from_provider(provider, config)
     .with_tools(my_static_tools)
-    .with_tool_source(Arc::new(Swappable(Mutex::new(vec![]))));
+    .with_tool_source(swappable.clone());
+
+// Later — between runs, or during one (seen before its next request):
+swappable.swap(new_tools);
 ```
 
 The contract:
 
-- **Consulted once per run.** Every `prompt*` and `continue_loop*` call asks
-  each source for its tools before the first request; the list is then fixed
-  for that run. A tool withdrawn mid-run stays offered until the run ends (make
-  it fail cleanly if its backend is gone); a tool added mid-run is offered from
-  the next run. Changing the list turn to turn could strand a call the model
-  already made.
+- **Consulted once per run — and again when it says it changed.** Every
+  `prompt*` and `continue_loop*` call asks each source for its tools before
+  the first request. A source whose tools can change while a run goes on
+  (a plugin loaded mid-run, a tool that loads others on demand, an MCP server
+  that announces a new list) also implements `generation()`: a number that
+  moves whenever its tools change. Before each later request — once every
+  tool call of the last turn has returned, so no call the model made is left
+  without its tool — the loop asks again only the sources whose generation
+  moved; their new tools (a shorter list too) are offered from that request,
+  and the collision rules below are applied again. Extensions' per-run tools
+  are not asked again. A source that keeps the default generation (0) is
+  asked only at the start of each run: its list is fixed for the run, a tool withdrawn stays
+  offered until the run ends (make it fail cleanly if its backend is gone),
+  and a tool added is offered from the next run.
 - **Prompt caching.** Tool definitions open the provider's cached prefix, so
-  *any* change to the offered set rewrites the whole cache. Per-run
-  consultation bounds that cost to run boundaries — it does not prevent it: a
-  run whose set differs from the previous run's pays a full prefix rewrite.
+  *any* change to the offered set rewrites the whole cache — once per change,
+  mid-run too. Consulting per run, and again only on a change, bounds that
+  cost — it does not prevent it: a run whose set differs from the previous
+  run's pays a full prefix rewrite.
   Order alone never costs anything: sourced tools are sorted by name after
   collisions are resolved (the agent's own tools keep their order).
-- **No timeout.** The run waits for every source. On an `Agent`, dropping the
-  prompt future while it waits is the escape (sources are consulted before
-  any agent state is touched); a `SubAgentTool` stops waiting when the parent
-  run is cancelled.
+- **No timeout.** The run waits for every source. At the start of a run on
+  an `Agent`, dropping the prompt future while it waits is the escape
+  (sources are consulted before any agent state is touched); a `SubAgentTool`
+  stops waiting when the parent run is cancelled. A source asked again
+  mid-run is raced against the run's cancel, and keeps its previous tools if
+  the run is cancelled while it answers.
 - **For that run only.** Sourced tools are appended after the agent's own
   tools and dropped again when the run ends; they never join `with_tools`'
   list. A model that calls a tool that is no longer offered gets the usual
@@ -515,18 +543,22 @@ The contract:
 - **Name collisions.** Providers reject two tools with one name, so exactly
   one survives: the agent's own tools (including the injected `shared_state`
   tool) win, then earlier sources in installation order, then the earlier
-  tool within one source. Each dropped duplicate is logged with
+  tool within one source; an [extension](extensions.md)'s per-run tools come
+  after all of them. Each dropped duplicate is logged with
   `tracing::warn!`; the run is never refused. (The agent's own tools —
   `with_tools`, MCP adapters included — are not de-duplicated: give clashing
   MCP or OpenAPI tools a prefix with `McpToolAdapter::with_prefix` or
   `OpenApiConfig::with_name_prefix`.)
 - **Failures.** A source that panics — while building its future or while it
   runs — is contained, logged with the panic message, and contributes no
-  tools to that run.
+  tools to that run (asked again mid-run: from then on, until its generation
+  moves again). A `generation()` that panics counts as unchanged, logged once
+  per run.
 
 Several sources may be added. `SubAgentTool::with_tool_source` mirrors it —
-consulted once per delegation. An [extension](extensions.md)'s `tools` hook
-follows the same once-per-run rule; the [rutis bridge](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis)
+consulted at the start of every delegation, and between the child's turns
+when its generation moves. An [extension](extensions.md)'s `tools` hook is
+asked only at the start of a run, never again mid-run; the [rutis bridge](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis)
 (`yoagent-rutis`) uses it, so an agent sees exactly the tools of the plugins
 loaded at each run start.
 

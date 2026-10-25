@@ -51,7 +51,7 @@ Batteries-included single-agent layer. Most users interact with this.
 - Context management — token estimation, smart truncation, execution limits
 - Built-in tools — bash, read_file, write_file, edit_file, list_files, search (feature `native`)
 - MCP client — stdio (feature `native`) + HTTP transports, tool adapter
-- `ToolSource` — per-run tool sources, consulted at the start of every run
+- `ToolSource` — tool sources, consulted at the start of every run and again before a later request when their `generation()` moved
 - `rt` — runtime shims (Tokio on native targets, the host executor on wasm32)
 - `Agent` struct — stateful builder wrapping it all together
 
@@ -86,7 +86,7 @@ yoagent/
 │   ├── agent_loop.rs           # Core loop: prompt → LLM → tools → repeat
 │   │
 │   ├── rt.rs                   # spawn/sleep/timeout/Instant, MaybeSend/MaybeSync
-│   ├── tool_source.rs          # ToolSource (tools resolved per run)
+│   ├── tool_source.rs          # ToolSource (tools resolved per run, again on a change)
 │   ├── extension.rs            # Extension / RunHooks, Budget (the plug-in contract)
 │   │
 │   │── Layer 2: Agent + Providers ─────────────

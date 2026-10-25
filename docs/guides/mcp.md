@@ -55,7 +55,8 @@ How the stdio transport behaves:
 
 - Each request waits for the response carrying its own id. Messages the server
   sends in between are handled: notifications (`notifications/message`,
-  progress, `list_changed`) are skipped, a `ping` is answered, and any other
+  progress) are skipped — `notifications/tools/list_changed` is counted (see
+  *Servers Whose Tools Change*) — a `ping` is answered, and any other
   server request (sampling, roots) is declined with "method not found" (logged
   at `WARN`) so the server does not wait. A response for another id (a call
   that timed out earlier) is dropped. Server messages are only read while a
@@ -146,10 +147,10 @@ an SSE-framed response, whether or not they then close the stream:
   the host's own request limits apply.)
 
 **Not supported:** the `GET` server→client stream and `Last-Event-ID`
-resumability. `McpTransport` is `send`/`close` only, with nowhere to deliver a
-server-initiated message — supporting them would mean growing the trait an
-inbound channel. Notifications arriving on the POST stream *before* the response
-are read and skipped; any that trail it are not, since the call has already
+resumability: the transport reads the server only while a call is answered.
+Notifications arriving on the POST stream *before* the response are read —
+`notifications/tools/list_changed` is counted (see *Servers Whose Tools
+Change*), the rest skipped; any that trail it are not, since the call has already
 returned — so a server that blocks awaiting a reply to a `sampling/createMessage`
 it sent on this stream will time out rather than be answered. Note also that the
 handshake still negotiates `protocolVersion: 2024-11-05` (the revision predating
@@ -158,6 +159,48 @@ Streamable HTTP), which servers generally accept.
 `McpClient::close()` is what sends the `DELETE`. `Agent::with_mcp_server_http`
 does not call it, so sessions opened that way are released by the server's own
 timeout rather than explicitly.
+
+## Servers Whose Tools Change
+
+`with_mcp_server_*` lists a server's tools once, when you connect. For a
+server whose tools change — one that loads more tools when asked, or adds and
+removes them as a session goes on — install it as a
+[`ToolSource`](../concepts/tools.md#tools-that-change-at-runtime-toolsource)
+instead, with `McpToolSource`:
+
+```rust,no_run
+use yoagent::mcp::{McpClient, McpToolSource};
+
+let client = McpClient::connect_stdio("my-mcp-server", &[], None).await?;
+let agent = Agent::from_config(config)
+    .with_tool_source(McpToolSource::new(client).with_prefix("srv"));
+```
+
+It lists the server's tools at the start of every run and, whenever the
+server sends `notifications/tools/list_changed`, again before the run's next
+model request — the same run sees the new tools. The transports read the
+server's notifications while they wait for a call's answer, so a change a
+tool call caused (the usual case), announced before that call's answer, is
+seen when the call returns (`McpClient::tools_list_changes` tells how many
+were read). One announced at another time:
+
+- over **stdio**, a change announced while no call is open is counted at the
+  next call to the server;
+- over **HTTP**, only a notification that arrives on a call's SSE response,
+  ahead of its answer, is counted. The transport opens no standalone `GET`
+  stream, so a change announced while idle — or by a server that answers in
+  plain JSON — is not seen mid-run; the next run lists the tools again;
+- over a **custom** `McpTransport`, only if it implements
+  `report_notifications` (record each notification's method on the
+  `ServerNotifications` handle it is given, and return `true`). By default it
+  does not: `McpClient::reports_notifications()` is `false`, `McpToolSource`
+  logs a warning when built, and the tools are listed once per run.
+
+The listing is bounded by the client's call timeout over stdio (five
+minutes), by the idle read timeout over HTTP, and by nothing but the run's
+cancel over a custom transport. One that fails or times out keeps the last
+list that succeeded (logged), so the server's tools stay offered and a call
+reports the server's real error.
 
 ## How MCP Tools Work
 

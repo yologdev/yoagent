@@ -234,3 +234,159 @@ while read -r line; do :; done"#,
         assert!(err.contains("Connection closed"), "{err}");
     }
 }
+
+/// A server whose tool list grows when its `load` tool is called: it sends
+/// `notifications/tools/list_changed` ahead of the call's answer, and lists
+/// `extra` from then on.
+const LOADING_SERVER: &str = r#"
+read -r line; id=$(id_of "$line")
+echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{\"listChanged\":true}},\"serverInfo\":{\"name\":\"loader\",\"version\":\"1\"}}}"
+read -r note
+loaded=0
+tool() { printf '{"name":"%s","description":"%s","inputSchema":{"type":"object"}}' "$1" "$1"; }
+while read -r line; do
+  id=$(id_of "$line")
+  case "$line" in
+    *'"tools/list"'*)
+      if [ "$loaded" = 1 ]; then tools="[$(tool load),$(tool extra)]"; else tools="[$(tool load)]"; fi
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"tools\":$tools}}";;
+    *'"name":"load"'*)
+      loaded=1
+      echo '{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}'
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"loaded\"}]}}";;
+    *'"name":"extra"'*)
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"extra ran\"}]}}";;
+  esac
+done
+"#;
+
+/// `McpToolSource`: its generation counts the server's
+/// `notifications/tools/list_changed`, read while a call is answered, and a
+/// listing after it has the new tools.
+#[tokio::test]
+async fn a_tool_source_follows_the_servers_list_changed() {
+    use yoagent::mcp::McpToolSource;
+    use yoagent::ToolSource;
+    let source = McpToolSource::new(connect(LOADING_SERVER).await.unwrap());
+    assert_eq!(source.generation(), 0);
+    let tools = source.tools().await;
+    let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+    assert_eq!(names, ["load"]);
+    let result = tools[0]
+        .execute(serde_json::json!({}), ToolContext::new("c1", "load"))
+        .await
+        .unwrap();
+    assert_eq!(text_of(&result, 0), "loaded");
+    assert_eq!(
+        source.generation(),
+        1,
+        "the notification ahead of the answer was counted"
+    );
+    assert_eq!(source.client().lock().await.tools_list_changes(), 1);
+    let names: Vec<String> = source
+        .tools()
+        .await
+        .iter()
+        .map(|t| t.name().to_string())
+        .collect();
+    assert_eq!(names, ["load", "extra"]);
+}
+
+/// Through an agent: the model calls `load`, and in the same run its next
+/// request offers — and can call — the tool the server added.
+#[tokio::test]
+async fn an_agent_offers_a_tool_the_server_adds_mid_run() {
+    use yoagent::mcp::McpToolSource;
+    use yoagent::provider::mock::{MockResponse, MockToolCall};
+    use yoagent::provider::{MockProvider, ModelConfig};
+    let call = |name: &str| {
+        MockResponse::ToolCalls(vec![MockToolCall {
+            provider_metadata: None,
+            name: name.into(),
+            arguments: serde_json::json!({}),
+        }])
+    };
+    let provider = MockProvider::new(vec![
+        call("srv__load"),
+        call("srv__extra"),
+        MockResponse::Text("done".into()),
+    ]);
+    let source = McpToolSource::new(connect(LOADING_SERVER).await.unwrap()).with_prefix("srv");
+    let mut agent =
+        yoagent::Agent::from_provider(provider, ModelConfig::mock()).with_tool_source(source);
+    let mut rx = agent.prompt("go").await;
+    while rx.recv().await.is_some() {}
+    agent.finish().await;
+    let results: Vec<(String, bool)> = agent
+        .messages()
+        .iter()
+        .filter_map(|m| match m {
+            AgentMessage::Llm(Message::ToolResult {
+                content, is_error, ..
+            }) => Some((
+                content
+                    .iter()
+                    .filter_map(|c| match c {
+                        Content::Text { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect(),
+                *is_error,
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        results,
+        vec![
+            ("loaded".to_string(), false),
+            ("extra ran".to_string(), false)
+        ]
+    );
+}
+
+/// Like `LOADING_SERVER`, but every `tools/list` after the first fails.
+const FAILING_LIST_SERVER: &str = r#"
+read -r line; id=$(id_of "$line")
+echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{\"listChanged\":true}},\"serverInfo\":{\"name\":\"flaky\",\"version\":\"1\"}}}"
+read -r note
+listed=0
+while read -r line; do
+  id=$(id_of "$line")
+  case "$line" in
+    *'"tools/list"'*)
+      if [ "$listed" = 0 ]; then
+        listed=1
+        echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"tools\":[{\"name\":\"load\",\"description\":\"load\",\"inputSchema\":{\"type\":\"object\"}}]}}"
+      else
+        echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"error\":{\"code\":-32603,\"message\":\"listing broke\"}}"
+      fi;;
+    *'"name":"load"'*)
+      echo '{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}'
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"loaded\"}]}}";;
+  esac
+done
+"#;
+
+/// A `tools/list` that fails after a change keeps the last list that
+/// succeeded: the server's tools stay offered.
+#[tokio::test]
+async fn a_failed_relisting_keeps_the_last_good_list() {
+    use yoagent::mcp::McpToolSource;
+    use yoagent::ToolSource;
+    let source = McpToolSource::new(connect(FAILING_LIST_SERVER).await.unwrap());
+    let tools = source.tools().await;
+    assert_eq!(tools.len(), 1);
+    tools[0]
+        .execute(serde_json::json!({}), ToolContext::new("c1", "load"))
+        .await
+        .unwrap();
+    assert_eq!(source.generation(), 1);
+    let names: Vec<String> = source
+        .tools()
+        .await
+        .iter()
+        .map(|t| t.name().to_string())
+        .collect();
+    assert_eq!(names, ["load"], "the failed listing kept the last good one");
+}

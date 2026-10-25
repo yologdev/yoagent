@@ -45,6 +45,63 @@ pub trait McpTransport: crate::rt::MaybeSend + crate::rt::MaybeSync {
     }
     /// Close the transport.
     async fn close(&self) -> Result<(), McpError>;
+
+    /// Report the server notifications this transport reads to `to`
+    /// ([`ServerNotifications::record`] each one's method), and return
+    /// whether it will. The client calls this once, when it is built; what it
+    /// learns backs [`McpClient::tools_list_changes`](crate::mcp::McpClient::tools_list_changes)
+    /// and an [`McpToolSource`](crate::mcp::McpToolSource)'s generation.
+    ///
+    /// The default reports nothing and returns `false`, so a custom
+    /// transport's server is taken never to change its tools
+    /// ([`McpClient::reports_notifications`](crate::mcp::McpClient::reports_notifications)
+    /// says so). The built-in transports report the notifications they read
+    /// while a call is answered.
+    fn report_notifications(&mut self, to: ServerNotifications) -> bool {
+        let _ = to;
+        false
+    }
+}
+
+/// The notification a server sends when its tool list changed.
+const TOOLS_LIST_CHANGED: &str = "notifications/tools/list_changed";
+
+/// Where a transport reports the server notifications it reads (see
+/// [`McpTransport::report_notifications`]). Cheap to clone; clones share the
+/// counts.
+#[derive(Clone, Debug, Default)]
+pub struct ServerNotifications {
+    tools_list_changed: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl ServerNotifications {
+    /// A fresh handle, nothing recorded.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a notification the server sent, by its JSON-RPC `method`.
+    /// Methods the client does not act on are ignored.
+    pub fn record(&self, method: &str) {
+        if method == TOOLS_LIST_CHANGED {
+            self.tools_list_changed
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            debug!("MCP server: its tool list changed");
+        }
+    }
+
+    /// How many `notifications/tools/list_changed` were recorded.
+    pub fn tools_list_changed(&self) -> u64 {
+        self.tools_list_changed
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// Record a notification on `to`, when the transport has been given one.
+fn note_notification(method: &str, to: Option<&ServerNotifications>) {
+    if let Some(to) = to {
+        to.record(method);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -71,6 +128,9 @@ pub struct StdioTransport {
     /// words are in the tail before the error is built.
     stderr_drain: Mutex<Option<tokio::task::JoinHandle<()>>>,
     command: String,
+    /// Where server notifications are reported (see
+    /// [`McpTransport::report_notifications`]).
+    notifications: Option<ServerNotifications>,
 }
 
 /// The server's stdin, and whether a write was cut off mid-message (a call
@@ -162,6 +222,7 @@ impl StdioTransport {
             stderr_tail,
             stderr_drain: Mutex::new(stderr_drain),
             command: command.to_string(),
+            notifications: None,
         })
     }
 
@@ -302,8 +363,8 @@ impl McpTransport for StdioTransport {
             .await?;
 
         // Read until this request's response. The server may interleave its
-        // own messages: notifications (logging, progress, list_changed) are
-        // skipped, requests (ping, sampling, roots) are answered, and a
+        // own messages: notifications (logging, progress) are skipped —
+        // `tools/list_changed` is counted first — requests (ping, sampling, roots) are answered, and a
         // response for another id — one whose caller timed out — is dropped.
         let mut stdout = self.stdout.lock().await;
         let mut non_json = 0usize;
@@ -351,7 +412,10 @@ impl McpTransport for StdioTransport {
                         let reply = server_request_reply(server_method, id);
                         self.write_message(&reply.to_string()).await?;
                     }
-                    None => debug!("MCP stdio: server notification '{server_method}'"),
+                    None => {
+                        debug!("MCP stdio: server notification '{server_method}'");
+                        note_notification(server_method, self.notifications.as_ref());
+                    }
                 }
                 continue;
             }
@@ -376,6 +440,11 @@ impl McpTransport for StdioTransport {
     async fn notify(&self, notification: JsonRpcNotification) -> Result<(), McpError> {
         self.write_message(&serde_json::to_string(&notification)?)
             .await
+    }
+
+    fn report_notifications(&mut self, to: ServerNotifications) -> bool {
+        self.notifications = Some(to);
+        true
     }
 
     async fn close(&self) -> Result<(), McpError> {
@@ -432,6 +501,9 @@ pub struct HttpTransport {
     /// Session assigned by the server on `initialize`, replayed on subsequent
     /// requests. `Mutex` because [`McpTransport::send`] takes `&self`.
     session_id: Mutex<Option<String>>,
+    /// Where notifications read on a POST stream are reported (see
+    /// [`McpTransport::report_notifications`]).
+    notifications: Option<ServerNotifications>,
 }
 
 impl HttpTransport {
@@ -461,6 +533,7 @@ impl HttpTransport {
             base_url: url.trim_end_matches('/').to_string(),
             headers: reqwest::header::HeaderMap::new(),
             session_id: Mutex::new(None),
+            notifications: None,
         })
     }
 
@@ -589,10 +662,18 @@ impl HttpTransport {
     /// progress-heavy stream can emit thousands of identical frame names.
     /// Reaches a caller only on the EOF path — a mid-stream read error reports
     /// its own cause instead.
-    fn note_skipped(payload: &str, method: &str, skipped: &mut BTreeMap<String, usize>) {
+    fn note_skipped(
+        payload: &str,
+        method: &str,
+        skipped: &mut BTreeMap<String, usize>,
+        notifications: Option<&ServerNotifications>,
+    ) {
         let what = match serde_json::from_str::<serde_json::Value>(payload) {
             Ok(value) => match value.get("method").and_then(|m| m.as_str()) {
-                Some(m) => m.to_string(),
+                Some(m) => {
+                    note_notification(m, notifications);
+                    m.to_string()
+                }
                 None => match value.get("id").and_then(|i| i.as_u64()) {
                     Some(id) => format!("response for id {id}"),
                     None => "unrecognized JSON-RPC frame".to_string(),
@@ -681,6 +762,7 @@ impl HttpTransport {
         request_id: u64,
         method: &str,
         status: reqwest::StatusCode,
+        notifications: Option<&ServerNotifications>,
     ) -> Result<JsonRpcResponse, McpError> {
         // Both `application/json` and `text/event-stream` mandate UTF-8, and
         // reading the body as a byte stream gives up the charset transcoding
@@ -773,7 +855,7 @@ impl HttpTransport {
                 if let Some(response) = Self::response_for(&payload, request_id) {
                     return Ok(response);
                 }
-                Self::note_skipped(&payload, method, &mut skipped);
+                Self::note_skipped(&payload, method, &mut skipped, notifications);
             }
         }
 
@@ -816,7 +898,7 @@ impl HttpTransport {
                 if let Some(response) = Self::response_for(&payload, request_id) {
                     return Ok(response);
                 }
-                Self::note_skipped(&payload, method, &mut skipped);
+                Self::note_skipped(&payload, method, &mut skipped, notifications);
             }
         }
 
@@ -892,7 +974,14 @@ impl McpTransport for HttpTransport {
             None => {}
         }
 
-        Self::read_response(resp, request_id, &method, status).await
+        Self::read_response(
+            resp,
+            request_id,
+            &method,
+            status,
+            self.notifications.as_ref(),
+        )
+        .await
     }
 
     async fn notify(&self, notification: JsonRpcNotification) -> Result<(), McpError> {
@@ -925,6 +1014,11 @@ impl McpTransport for HttpTransport {
                 )
             }))
         }
+    }
+
+    fn report_notifications(&mut self, to: ServerNotifications) -> bool {
+        self.notifications = Some(to);
+        true
     }
 
     async fn close(&self) -> Result<(), McpError> {

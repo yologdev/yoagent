@@ -95,3 +95,28 @@ async fn returns_at_the_result_frame_despite_leading_notifications() {
         "the result must be selected over the notifications"
     );
 }
+
+/// A `notifications/tools/list_changed` frame ahead of the result is
+/// reported to the handle the client gives the transport (`McpToolSource`'s
+/// generation), and other notifications are not counted.
+#[tokio::test]
+async fn a_list_changed_notification_on_the_stream_is_counted() {
+    let request = JsonRpcRequest::new("tools/call", None);
+    let frames = format!(
+        concat!(
+            "event: message\ndata: {{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{{\"progress\":1}}}}\n\n",
+            "event: message\ndata: {{\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}}\n\n",
+            "event: message\ndata: {{\"jsonrpc\":\"2.0\",\"id\":{},\"result\":{{\"content\":[]}}}}\n\n"
+        ),
+        request.id
+    );
+    let addr = serve_then_hold_open(frames).await;
+    let mut transport = HttpTransport::new(&addr).unwrap();
+    let notifications = yoagent::mcp::ServerNotifications::new();
+    assert!(transport.report_notifications(notifications.clone()));
+    tokio::time::timeout(Duration::from_secs(10), transport.send(request))
+        .await
+        .expect("send returns at the result frame")
+        .expect("the response parses");
+    assert_eq!(notifications.tools_list_changed(), 1);
+}

@@ -400,7 +400,7 @@ That is a consequence of the work above rather than an argument against the mode
 ## Best Practices
 
 1. **Keep system prompts stable** — changing the system prompt between turns invalidates the cache
-2. **Don't shuffle tools** — tool order matters for cache prefix matching. Sourced tools ([`ToolSource`](tools.md#tools-that-change-at-runtime-toolsource)) are sorted by name, so order alone never costs anything, but any change to the *set* a source returns rewrites the cached prefix at the next run start
+2. **Don't shuffle tools** — tool order matters for cache prefix matching. Sourced tools ([`ToolSource`](tools.md#tools-that-change-at-runtime-toolsource)) are sorted by name, so order alone never costs anything, but any change to the *set* a source returns rewrites the cached prefix — at the next run start, or at the next request when the source reports the change mid-run through `generation()`
 3. **Let it work automatically** — the default `CacheStrategy::Auto` is optimal for most use cases
 4. **Monitor `cache_hit_rate()`** — if it's consistently low, check if your system prompt or tools are changing unexpectedly
 5. **Don't rewrite history yourself** — a custom `CompactionStrategy` or `transform_context` that edits already-sent messages costs the whole prefix from that point on. Append, or cut at a boundary and leave everything before it byte-identical.

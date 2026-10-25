@@ -48,8 +48,9 @@
 //!   via the [`AgentTool`] trait. [MCP](mcp) servers and
 //!   [OpenAPI specs](https://docs.rs/yoagent/latest/yoagent/openapi/index.html)
 //!   (feature `openapi`) become tools transparently. A [`ToolSource`]
-//!   supplies tools resolved at the start of every run, for tool sets that
-//!   change while the agent lives (plugins, reconnecting servers).
+//!   supplies tools resolved at the start of every run — and again mid-run
+//!   when it reports a change — for tool sets that change while the agent
+//!   lives (plugins, MCP servers that announce a new list).
 //! - **Steering** — inject guidance into a running agent ([`Agent::steer`]);
 //!   picked up between tool executions (per batch under the default parallel
 //!   strategy). Queue follow-ups, inspect/edit the queues.
