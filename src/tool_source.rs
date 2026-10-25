@@ -1,12 +1,13 @@
-//! Tools resolved per run.
+//! Tools resolved per run — and again mid-run when a source says they changed.
 //!
 //! An [`Agent`](crate::Agent)'s own tools ([`with_tools`](crate::Agent::with_tools))
 //! are fixed until you replace them. A [`ToolSource`] is for tools that come
 //! and go while the agent lives: a plugin system loading and unloading
 //! extensions, an MCP server that reconnects with a different tool list, a
-//! feature flag. The agent asks each source for its tools **once at the start
-//! of every run** — every `prompt*` and `continue_loop*` call — and offers the
-//! model the static tools plus whatever the sources returned.
+//! feature flag. The agent asks each source for its tools **at the start of
+//! every run** — every `prompt*` and `continue_loop*` call — and offers the
+//! model the static tools plus whatever the sources returned; a source that
+//! reports a change is asked again mid-run (below).
 //!
 //! # Per run — and again when a source says it changed
 //!
@@ -26,9 +27,9 @@
 //! list too: a server that went away), and the name-collision rules below are
 //! applied again over the whole list. Extensions'
 //! [per-run tools](crate::extension::RunHooks::tools) are not asked again. A
-//! source whose generation stays 0 (the default) is asked once per run, as
-//! before. A tool the model calls after it was withdrawn is answered as an
-//! unknown tool.
+//! source whose generation stays 0 (the default) is asked only at the start
+//! of the run. A tool the model calls after it was withdrawn is answered as
+//! an unknown tool.
 //!
 //! **Prompt caching.** Tool definitions open the provider's cached prefix, so
 //! any change to the offered set rewrites the whole cache — once per change,
@@ -40,11 +41,14 @@
 //! A source whose tools can go stale mid-run should make them fail cleanly
 //! (return an error result) rather than rely on being withdrawn.
 //!
-//! **No timeout.** The run waits for every source. On an
-//! [`Agent`](crate::Agent), dropping the prompt future while it waits is the
-//! escape hatch — sources are consulted before any agent state is touched, so
-//! the agent is left as it was. A [`SubAgentTool`](crate::SubAgentTool)
-//! stops waiting when the parent run is cancelled.
+//! **No timeout.** The run waits for every source. At the start of a run on
+//! an [`Agent`](crate::Agent), dropping the prompt future while it waits is
+//! the escape hatch — sources are consulted before any agent state is
+//! touched, so the agent is left as it was. A
+//! [`SubAgentTool`](crate::SubAgentTool) stops waiting when the parent run
+//! is cancelled. Asked again mid-run, a source is raced against the run's
+//! cancel: a cancelled run stops waiting, and that source keeps its previous
+//! tools while the run ends.
 //!
 //! # Name collisions
 //!
@@ -56,22 +60,29 @@
 //!    shadow them.
 //! 2. **Then earlier sources win** (installation order), and within one
 //!    source, the earlier tool in its list.
+//! 3. **Extensions' per-run tools come last** (see
+//!    [`RunHooks::tools`](crate::extension::RunHooks::tools)): a name the
+//!    agent or a source already offers is dropped from them — after a
+//!    mid-run change too, so a source can take a name over from an extension.
 //!
 //! The surviving sourced tools are then sorted by name (see *Prompt
 //! caching* above). Every dropped duplicate is logged with `tracing::warn!` naming the tool.
 //! The run is never refused over a collision: a misbehaving source must not be
 //! able to take the whole agent down.
 //!
-//! A source that **panics** is contained, logged, and contributes no tools
-//! for that run — or, asked again mid-run, from then on; its generation is
-//! recorded, so it is not asked again until it moves once more.
+//! A source that **panics** is contained, logged each time, and contributes
+//! no tools for that run — or, asked again mid-run, from then on; its
+//! generation is recorded, so it is not asked again until it moves once
+//! more. A [`generation`](ToolSource::generation) that panics counts as
+//! unchanged (logged once per run).
 
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use crate::types::{AgentTool, ToolContext, ToolError, ToolResult};
 
-/// A provider of tools consulted at the start of every run.
+/// A provider of tools consulted at the start of every run, and again
+/// mid-run when its [`generation`](Self::generation) moves.
 ///
 /// Install with [`Agent::with_tool_source`](crate::Agent::with_tool_source)
 /// or [`SubAgentTool::with_tool_source`](crate::SubAgentTool::with_tool_source).
@@ -110,8 +121,8 @@ pub trait ToolSource: crate::rt::MaybeSend + crate::rt::MaybeSync {
     /// so use a counter that only moves forward: a value that changes and
     /// comes back between two turns would be missed. Cheap and non-blocking:
     /// it is read every turn. Default `0`: a source that never changes mid-run
-    /// is asked once per run. A `generation()` that panics counts as
-    /// unchanged (logged once).
+    /// is asked only at the start of each run. A `generation()` that panics
+    /// counts as unchanged (logged once per run).
     fn generation(&self) -> u64 {
         0
     }
@@ -156,58 +167,69 @@ impl AgentTool for ArcTool {
     }
 }
 
-/// A run's sources, each with the generation its tools were read at and
-/// the tools it gave.
-#[derive(Clone, Default)]
+/// One source of a run: the generation its tools were read at, the tools it
+/// gave, and whether its `generation()` has panicked (logged once per run).
+#[derive(Clone)]
+struct SourceState {
+    source: Arc<dyn ToolSource>,
+    generation: u64,
+    tools: Vec<Arc<dyn AgentTool>>,
+    generation_panicked: bool,
+}
+
+/// A run's sources, and how many of the context's tools come before theirs
+/// (the agent's own, measured where the sourced tools are merged in).
+#[derive(Default)]
 pub(crate) struct Sourced {
-    sources: Vec<Arc<dyn ToolSource>>,
-    generations: Vec<u64>,
-    tools: Vec<Vec<Arc<dyn AgentTool>>>,
-    /// Sources whose `generation()` panicked (logged once each).
-    generation_panicked: Vec<bool>,
+    states: Vec<SourceState>,
+    static_len: usize,
 }
 
 impl Sourced {
-    /// Every source's tools, in installation order (for [`merge`]).
-    pub(crate) fn all(&self) -> Vec<Arc<dyn AgentTool>> {
-        self.tools.iter().flatten().cloned().collect()
+    /// Every source's tools, in installation order.
+    fn all(&self) -> Vec<Arc<dyn AgentTool>> {
+        self.states
+            .iter()
+            .flat_map(|s| s.tools.iter().cloned())
+            .collect()
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
-        self.sources.is_empty()
+    /// Append the sources' tools to `tools` (see [`merge`]), recording how
+    /// many tools were there before them: what a rebuild keeps.
+    pub(crate) fn merge_into(&mut self, tools: &mut Vec<Box<dyn AgentTool>>) {
+        self.static_len = tools.len();
+        merge(tools, self.all());
     }
 
     /// Ask again every source whose generation moved since its tools were
-    /// read; returns whether any did. A cancel stops the asking: the sources
-    /// not asked yet keep their tools (and are asked at the next boundary).
-    pub(crate) async fn refresh(&mut self, cancel: &tokio_util::sync::CancellationToken) -> bool {
+    /// read; returns whether any did. A cancel stops the asking: the source
+    /// being asked and those after it keep their previous tools and
+    /// generation (the run is ending).
+    async fn refresh(&mut self, cancel: &tokio_util::sync::CancellationToken) -> bool {
         let mut changed = false;
-        for index in 0..self.sources.len() {
+        for (index, state) in self.states.iter_mut().enumerate() {
             // A `generation()` that panics counts as unchanged: a panic must
             // not cost a re-ask (and a prompt-cache rewrite) every turn.
-            let Some(now) = generation_of(
-                &self.sources[index],
-                index,
-                &mut self.generation_panicked[index],
-            ) else {
+            let Some(now) = generation_of(&state.source, index, &mut state.generation_panicked)
+            else {
                 continue;
             };
-            if now == self.generations[index] {
+            if now == state.generation {
                 continue;
             }
             let asked = tokio::select! {
-                tools = ask(&self.sources[index], index) => tools,
+                tools = ask(&state.source, index) => tools,
                 _ = cancel.cancelled() => return changed,
             };
             tracing::info!(
                 source = index,
-                from = self.generations[index],
+                from = state.generation,
                 to = now,
                 tools = asked.len(),
                 "tool source changed; its tools are offered again from this request"
             );
-            self.generations[index] = now;
-            self.tools[index] = asked;
+            state.generation = now;
+            state.tools = asked;
             changed = true;
         }
         changed
@@ -215,7 +237,7 @@ impl Sourced {
 }
 
 /// A source's generation, or `None` when `generation()` panicked (logged the
-/// first time, `panicked` remembering it).
+/// first time in the run, `panicked` remembering it).
 fn generation_of(source: &Arc<dyn ToolSource>, index: usize, panicked: &mut bool) -> Option<u64> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| source.generation())) {
         Ok(generation) => Some(generation),
@@ -225,8 +247,8 @@ fn generation_of(source: &Arc<dyn ToolSource>, index: usize, panicked: &mut bool
                 tracing::warn!(
                     source = index,
                     panic = %panic_message(payload.as_ref()),
-                    "tool source's generation() panicked; its tools are not asked for again \
-                     until it answers (logged once)"
+                    "tool source's generation() panicked; counted as unchanged \
+                     (logged once per run)"
                 );
             }
             None
@@ -256,50 +278,75 @@ async fn ask(source: &Arc<dyn ToolSource>, index: usize) -> Vec<Arc<dyn AgentToo
 
 /// Ask every source for its tools, in installation order, reading each one's
 /// generation first (so a change while it answers is seen at the next
-/// boundary).
+/// boundary). Merge them with [`Sourced::merge_into`].
 pub(crate) async fn collect(sources: &[Arc<dyn ToolSource>]) -> Sourced {
     let mut sourced = Sourced::default();
     for (index, source) in sources.iter().enumerate() {
-        let mut panicked = false;
-        sourced
-            .generations
-            .push(generation_of(source, index, &mut panicked).unwrap_or(0));
-        sourced.generation_panicked.push(panicked);
-        sourced.tools.push(ask(source, index).await);
-        sourced.sources.push(source.clone());
+        let mut generation_panicked = false;
+        let generation = generation_of(source, index, &mut generation_panicked).unwrap_or(0);
+        let tools = ask(source, index).await;
+        sourced.states.push(SourceState {
+            source: source.clone(),
+            generation,
+            tools,
+            generation_panicked,
+        });
     }
     sourced
 }
 
-/// The tool list a run rebuilds when a source changed: the tools that are not
-/// sourced (the agent's own, `static_len` of them), then the sources' tools,
-/// then the extensions' per-run tools — merged in that order, so the
-/// collision rules hold over the whole list.
+/// A run's tool list, kept rebuildable: the agent's own tools, then the
+/// sources' tools ([`Sourced::merge_into`] put them there), then the
+/// extensions' per-run tools — merged in that order, so the collision rules
+/// hold over the whole list whenever a source changes.
 pub(crate) struct RunTools {
-    pub(crate) sourced: Sourced,
-    pub(crate) static_len: usize,
-    pub(crate) extension_tools: Vec<Arc<dyn AgentTool>>,
+    sourced: Sourced,
+    extension_tools: Vec<Arc<dyn AgentTool>>,
+    /// The length of the non-extension part of the list.
+    base_len: usize,
 }
 
 impl RunTools {
-    /// Ask the changed sources again and rebuild `tools` when any changed.
-    /// Returns the length of the non-extension part of `tools` (what the run
-    /// truncates back to at its end).
+    /// Start a run's list: `tools` holds the agent's own tools and the
+    /// sources' (merged by `sourced`); the extensions' are merged after them.
+    pub(crate) fn start(
+        tools: &mut Vec<Box<dyn AgentTool>>,
+        sourced: Sourced,
+        extension_tools: Vec<Arc<dyn AgentTool>>,
+    ) -> Self {
+        debug_assert!(sourced.static_len <= tools.len());
+        let base_len = tools.len();
+        if !extension_tools.is_empty() {
+            merge(tools, extension_tools.clone());
+        }
+        Self {
+            sourced,
+            extension_tools,
+            base_len,
+        }
+    }
+
+    /// The length of the non-extension part of the list: what the run
+    /// truncates back to at its end.
+    pub(crate) fn base_len(&self) -> usize {
+        self.base_len
+    }
+
+    /// Ask the changed sources again and, when any changed, rebuild `tools`.
     pub(crate) async fn refresh(
         &mut self,
         tools: &mut Vec<Box<dyn AgentTool>>,
         cancel: &tokio_util::sync::CancellationToken,
-    ) -> Option<usize> {
-        if self.sourced.is_empty() || !self.sourced.refresh(cancel).await {
-            return None;
+    ) {
+        if self.sourced.states.is_empty() || !self.sourced.refresh(cancel).await {
+            return;
         }
-        tools.truncate(self.static_len);
+        tools.truncate(self.sourced.static_len);
         merge(tools, self.sourced.all());
-        let base = tools.len();
+        self.base_len = tools.len();
         if !self.extension_tools.is_empty() {
             merge(tools, self.extension_tools.clone());
         }
-        Some(base)
     }
 }
 

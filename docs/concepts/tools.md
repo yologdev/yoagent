@@ -498,9 +498,13 @@ impl ToolSource for Swappable {
     }
 }
 
+let swappable = Arc::new(Swappable(Mutex::new(vec![]), AtomicU64::new(0)));
 let agent = Agent::from_provider(provider, config)
     .with_tools(my_static_tools)
-    .with_tool_source(Arc::new(Swappable(Mutex::new(vec![]), AtomicU64::new(0))));
+    .with_tool_source(swappable.clone());
+
+// Later — between runs, or during one (seen before its next request):
+swappable.swap(new_tools);
 ```
 
 The contract:
@@ -516,7 +520,7 @@ The contract:
   moved; their new tools (a shorter list too) are offered from that request,
   and the collision rules below are applied again. Extensions' per-run tools
   are not asked again. A source that keeps the default generation (0) is
-  asked once per run: its list is fixed for the run, a tool withdrawn stays
+  asked only at the start of each run: its list is fixed for the run, a tool withdrawn stays
   offered until the run ends (make it fail cleanly if its backend is gone),
   and a tool added is offered from the next run.
 - **Prompt caching.** Tool definitions open the provider's cached prefix, so
@@ -526,10 +530,12 @@ The contract:
   run's pays a full prefix rewrite.
   Order alone never costs anything: sourced tools are sorted by name after
   collisions are resolved (the agent's own tools keep their order).
-- **No timeout.** The run waits for every source. On an `Agent`, dropping the
-  prompt future while it waits is the escape (sources are consulted before
-  any agent state is touched); a `SubAgentTool` stops waiting when the parent
-  run is cancelled.
+- **No timeout.** The run waits for every source. At the start of a run on
+  an `Agent`, dropping the prompt future while it waits is the escape
+  (sources are consulted before any agent state is touched); a `SubAgentTool`
+  stops waiting when the parent run is cancelled. A source asked again
+  mid-run is raced against the run's cancel, and keeps its previous tools if
+  the run is cancelled while it answers.
 - **For that run only.** Sourced tools are appended after the agent's own
   tools and dropped again when the run ends; they never join `with_tools`'
   list. A model that calls a tool that is no longer offered gets the usual
@@ -537,18 +543,22 @@ The contract:
 - **Name collisions.** Providers reject two tools with one name, so exactly
   one survives: the agent's own tools (including the injected `shared_state`
   tool) win, then earlier sources in installation order, then the earlier
-  tool within one source. Each dropped duplicate is logged with
+  tool within one source; an [extension](extensions.md)'s per-run tools come
+  after all of them. Each dropped duplicate is logged with
   `tracing::warn!`; the run is never refused. (The agent's own tools —
   `with_tools`, MCP adapters included — are not de-duplicated: give clashing
   MCP or OpenAPI tools a prefix with `McpToolAdapter::with_prefix` or
   `OpenApiConfig::with_name_prefix`.)
 - **Failures.** A source that panics — while building its future or while it
   runs — is contained, logged with the panic message, and contributes no
-  tools to that run.
+  tools to that run (asked again mid-run: from then on, until its generation
+  moves again). A `generation()` that panics counts as unchanged, logged once
+  per run.
 
 Several sources may be added. `SubAgentTool::with_tool_source` mirrors it —
-consulted once per delegation. An [extension](extensions.md)'s `tools` hook
-follows the same once-per-run rule; the [rutis bridge](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis)
+consulted at the start of every delegation, and between the child's turns
+when its generation moves. An [extension](extensions.md)'s `tools` hook is
+asked only at the start of a run, never again mid-run; the [rutis bridge](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis)
 (`yoagent-rutis`) uses it, so an agent sees exactly the tools of the plugins
 loaded at each run start.
 

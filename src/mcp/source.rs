@@ -1,12 +1,11 @@
 //! An MCP server's tools as a [`ToolSource`]: asked again mid-run when the
 //! server announces that its tool list changed.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use super::{McpClient, McpToolAdapter};
+use super::{McpClient, McpToolAdapter, ServerNotifications};
 use crate::tool_source::ToolSource;
 use crate::types::AgentTool;
 
@@ -22,17 +21,24 @@ use crate::types::AgentTool;
 ///
 /// **When a change is seen.** The transport reads the server's notifications
 /// while it waits for a call's answer — so a change a tool call caused (a
-/// server that loads more tools when asked, the usual case) is seen right
-/// after that call, and its tools are offered from the next request.
+/// server that loads more tools when asked, the usual case), announced before
+/// that call's answer, is seen when the call returns, and its tools are
+/// offered from the next request. One announced after the answer is seen at
+/// the next call (stdio) or not mid-run (HTTP):
 /// - Over **stdio**, one the server sends while no call is open is counted at
 ///   the next call to it.
 /// - Over **HTTP**, only one that arrives on a call's SSE response, ahead of
 ///   its answer, is counted: the transport opens no standalone `GET` stream,
 ///   so a change announced while idle — or by a server that answers in plain
 ///   JSON — is not seen mid-run (the next run lists the tools again).
+/// - A **custom** transport is seen only if it implements
+///   [`McpTransport::report_notifications`](crate::mcp::McpTransport::report_notifications);
+///   otherwise the source logs it when built and lists once per run.
 ///
 /// **Failures.** The listing is bounded by the client's
-/// [`call_timeout`](McpClient::call_timeout). A listing that fails or times
+/// [`call_timeout`](McpClient::call_timeout) — five minutes over stdio; over
+/// HTTP by the transport's idle read timeout instead; a custom transport's
+/// by nothing but the run's cancel. A listing that fails or times
 /// out (logged) keeps the last list that succeeded — the server's tools stay
 /// offered, and a call to one reports the server's real error — or, with no
 /// earlier list, gives none. It is asked again at the server's next change.
@@ -51,7 +57,7 @@ use crate::types::AgentTool;
 /// ```
 pub struct McpToolSource {
     client: Arc<Mutex<McpClient>>,
-    changed: Arc<AtomicU64>,
+    notifications: ServerNotifications,
     prefix: Option<String>,
     /// The last list that succeeded, kept when a later listing fails.
     last: std::sync::Mutex<Vec<Arc<dyn AgentTool>>>,
@@ -60,11 +66,21 @@ pub struct McpToolSource {
 impl McpToolSource {
     /// A source over `client`'s tools, each bound by the client's
     /// [`call_timeout`](McpClient::call_timeout).
+    ///
+    /// A client whose transport does not report notifications
+    /// ([`McpClient::reports_notifications`] is `false`, a custom transport)
+    /// is logged: its tools are then listed once per run, never mid-run.
     pub fn new(client: McpClient) -> Self {
-        let changed = client.tools_changed_counter();
+        if !client.reports_notifications() {
+            tracing::warn!(
+                "MCP tool source: the client's transport does not report server \
+                 notifications; its tools are listed once per run, never mid-run"
+            );
+        }
+        let notifications = client.notifications();
         Self {
             client: Arc::new(Mutex::new(client)),
-            changed,
+            notifications,
             prefix: None,
             last: std::sync::Mutex::new(Vec::new()),
         }
@@ -77,7 +93,10 @@ impl McpToolSource {
         self
     }
 
-    /// The client, shared with the tools this source gives.
+    /// The client, shared with the tools this source gives. Use it to call
+    /// the server directly; do not replace the client behind the lock — the
+    /// source keeps reading the notifications of the one it was built with,
+    /// so a swapped-in client's changes would never be seen.
     pub fn client(&self) -> &Arc<Mutex<McpClient>> {
         &self.client
     }
@@ -97,8 +116,7 @@ impl ToolSource for McpToolSource {
                     .await
                     .unwrap_or_else(|_| {
                         Err(super::McpError::Transport(format!(
-                            "tools/list did not answer within {}s",
-                            limit.as_secs()
+                            "tools/list did not answer within {limit:?}"
                         )))
                     }),
                 None => client.list_tools().await,
@@ -132,6 +150,6 @@ impl ToolSource for McpToolSource {
     }
 
     fn generation(&self) -> u64 {
-        self.changed.load(Ordering::SeqCst)
+        self.notifications.tools_list_changed()
     }
 }

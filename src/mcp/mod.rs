@@ -27,5 +27,5 @@ pub use tool_adapter::McpToolAdapter;
 #[cfg(feature = "native")]
 #[cfg_attr(docsrs, doc(cfg(feature = "native")))]
 pub use transport::StdioTransport;
-pub use transport::{HttpTransport, McpTransport};
+pub use transport::{HttpTransport, McpTransport, ServerNotifications};
 pub use types::{McpContent, McpError, McpToolCallResult, McpToolInfo, ServerInfo};

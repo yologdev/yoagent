@@ -73,7 +73,7 @@ When the parent LLM calls multiple sub-agents in a single response, they run con
 | `from_config(name, config)` / `from_provider(name, provider, config)` | Set the sub-agent's model, provider, and metadata from a `ModelConfig` — resolves the env key automatically and can use a different model than the parent |
 | `with_api_key()` | Override the env-resolved API key explicitly |
 | `with_tools()` | Tools available to the sub-agent (accepts `Vec<Arc<dyn AgentTool>>`) |
-| `with_tool_source()` | A `ToolSource` consulted once per delegation (and again between the child's turns when its `generation()` moved); its tools are offered for that run only, and the sub-agent's own tools win a name collision (see [Tools](tools.md#tools-that-change-at-runtime-toolsource)) |
+| `with_tool_source()` | A `ToolSource` consulted at the start of every delegation (and again between the child's turns when its `generation()` moved); its tools are offered for that run only, and the sub-agent's own tools win a name collision (see [Tools](tools.md#tools-that-change-at-runtime-toolsource)) |
 | `with_tool_middleware()` | Approve/deny/modify the sub-agent's own tool calls |
 | `with_turn_hook()` | A `TurnHook` for the sub-agent's own LLM requests |
 | `with_async_input_filter()` | Screen the task before the sub-agent runs; a `Reject` fails the tool call |

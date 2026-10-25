@@ -96,13 +96,11 @@ async fn returns_at_the_result_frame_despite_leading_notifications() {
     );
 }
 
-/// A `notifications/tools/list_changed` frame ahead of the result is counted
-/// in the counter the client handed the transport (`McpToolSource`'s
-/// generation), and other notifications are not.
+/// A `notifications/tools/list_changed` frame ahead of the result is
+/// reported to the handle the client gives the transport (`McpToolSource`'s
+/// generation), and other notifications are not counted.
 #[tokio::test]
 async fn a_list_changed_notification_on_the_stream_is_counted() {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::Arc;
     let request = JsonRpcRequest::new("tools/call", None);
     let frames = format!(
         concat!(
@@ -114,11 +112,11 @@ async fn a_list_changed_notification_on_the_stream_is_counted() {
     );
     let addr = serve_then_hold_open(frames).await;
     let mut transport = HttpTransport::new(&addr).unwrap();
-    let changed = Arc::new(AtomicU64::new(0));
-    transport.watch_tools_changed(changed.clone());
+    let notifications = yoagent::mcp::ServerNotifications::new();
+    assert!(transport.report_notifications(notifications.clone()));
     tokio::time::timeout(Duration::from_secs(10), transport.send(request))
         .await
         .expect("send returns at the result frame")
         .expect("the response parses");
-    assert_eq!(changed.load(Ordering::SeqCst), 1);
+    assert_eq!(notifications.tools_list_changed(), 1);
 }

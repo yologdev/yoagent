@@ -211,7 +211,7 @@ All return `Self` for chaining.
 | `with_system_prompt(prompt) -> Self` | The sub-agent's own instructions |
 | `with_api_key(key) -> Self` | Override the env-resolved API key |
 | `with_tools(tools: Vec<Arc<dyn AgentTool>>) -> Self` | Tools available to the sub-agent |
-| `with_tool_source(source: impl ToolSource) -> Self` | Add a tool source, consulted once per delegation |
+| `with_tool_source(source: impl ToolSource) -> Self` | Add a tool source, consulted at the start of every delegation (and between the child's turns when its `generation()` moved) |
 | `with_tool_middleware(m: impl ToolMiddleware) -> Self` | Gate the sub-agent's own tool calls |
 | `with_turn_hook(hook: impl TurnHook) -> Self` | Per-request hook for the sub-agent's own LLM requests |
 | `with_async_input_filter(f: impl AsyncInputFilter) -> Self` | Filter the task the parent hands over; a rejection fails the tool call |

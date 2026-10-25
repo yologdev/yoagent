@@ -159,10 +159,9 @@ pub struct AgentLoopConfig {
 
     /// The run's [`ToolSource`](crate::ToolSource)s with the tools they gave
     /// (already merged into the context's tools), asked again between turns
-    /// when their generation moves.
-    pub(crate) sourced: crate::tool_source::Sourced,
-    /// How many leading context tools are not sourced (the agent's own).
-    pub(crate) static_tools: usize,
+    /// when their generation moves. Taken by the run (never cloned), so the
+    /// tools of a source asked again are not held until the run ends.
+    pub(crate) sourced: std::sync::Mutex<Option<crate::tool_source::Sourced>>,
 }
 
 impl AgentLoopConfig {
@@ -205,8 +204,7 @@ impl AgentLoopConfig {
             depth: 0,
             delegated_by: None,
             parent_run_id: None,
-            sourced: crate::tool_source::Sourced::default(),
-            static_tools: 0,
+            sourced: std::sync::Mutex::new(None),
         }
     }
 
@@ -674,20 +672,19 @@ async fn run_with_extensions(
         fail_run(&failure, exts, config, tx, context, new_messages, true);
         return SessionStats::default();
     }
-    let mut base_tools = context.tools.len();
-    let mut extension_tools = Vec::new();
-    if !exts.is_empty() {
-        let tools = exts.tools().await;
-        if !tools.is_empty() {
-            extension_tools = tools.clone();
-            crate::tool_source::merge(&mut context.tools, tools);
-        }
-    }
-    let mut run_tools = crate::tool_source::RunTools {
-        sourced: config.sourced.clone(),
-        static_len: config.static_tools,
-        extension_tools,
+    let extension_tools = if exts.is_empty() {
+        Vec::new()
+    } else {
+        exts.tools().await
     };
+    let sourced = config
+        .sourced
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .take()
+        .unwrap_or_default();
+    let mut run_tools =
+        crate::tool_source::RunTools::start(&mut context.tools, sourced, extension_tools);
     let stats = {
         use tracing::Instrument;
         run_loop(
@@ -698,13 +695,12 @@ async fn run_with_extensions(
             cancel,
             exts,
             &mut run_tools,
-            &mut base_tools,
         )
         .instrument(tracing::info_span!("agent_loop", model = %config.model))
         .await
     };
     // Extension tools belong to this run only.
-    context.tools.truncate(base_tools);
+    context.tools.truncate(run_tools.base_len());
     // However the loop ended (a limit, a cancel, a stop, a provider error), a
     // required extension's failure it did not act on still fails the run.
     if let Some(failure) = exts.settle().await {
@@ -1069,7 +1065,6 @@ async fn run_loop(
     cancel: &tokio_util::sync::CancellationToken,
     exts: &crate::extension::ActiveExtensions,
     run_tools: &mut crate::tool_source::RunTools,
-    base_tools: &mut usize,
 ) -> SessionStats {
     let mut stats = SessionStats::default();
     let mut first_turn = true;
@@ -1181,9 +1176,7 @@ async fn run_loop(
             // in the history): a source whose tools changed is asked again,
             // and the next request offers its new list (see `tool_source`).
             if turn_number > 0 {
-                if let Some(base) = run_tools.refresh(&mut context.tools, cancel).await {
-                    *base_tools = base;
-                }
+                run_tools.refresh(&mut context.tools, cancel).await;
             }
 
             turn_number += 1;
