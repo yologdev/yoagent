@@ -2249,24 +2249,47 @@ export default function (pi) {
     );
 }
 
+/// An unload's task and when it began.
+type Unloading = Arc<Mutex<Option<(tokio::task::JoinHandle<()>, std::time::Instant)>>>;
+
 /// Starts unloading the plugins while the run finishes: after the bridge's
-/// `finish`, before the run's `agentEnd` is even sent.
+/// `finish`, before the run's `agentEnd` is even sent. Keeps the unload's
+/// task and when it began.
 #[derive(Clone)]
 struct UnloadAtFinish {
     root: Ctx,
     bridge: RutisBridge,
-    unloading: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    unloading: Unloading,
+}
+
+impl UnloadAtFinish {
+    fn new(host: &Host) -> Self {
+        Self {
+            root: host.root.clone(),
+            bridge: host.bridge.clone(),
+            unloading: Arc::default(),
+        }
+    }
+
+    /// Wait for the unload; how long it took. Well under `OBSERVER_DRAIN_MS`
+    /// (5 s) when nothing makes the adapter wait in vain.
+    async fn unloaded(&self) -> Duration {
+        let (task, began) = self.unloading.lock().unwrap().take().expect("finish ran");
+        task.await.unwrap();
+        began.elapsed()
+    }
 }
 
 #[async_trait::async_trait]
 impl yoagent::extension::RunHooks for UnloadAtFinish {
     async fn finish(&mut self, _outcome: &yoagent::extension::RunOutcome) {
         let root = self.root.clone();
-        *self.unloading.lock().unwrap() = Some(tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             root.shutdown().await.unwrap();
-        }));
-        // Until the pi handler is gone from the registry (what makes the
-        // bridge's gate drop events), then a little longer so the adapter's
+        });
+        *self.unloading.lock().unwrap() = Some((task, std::time::Instant::now()));
+        // Until the pi handler is unavailable (`handlers()` filters on the
+        // gate the bridge checks), then a little longer so the adapter's
         // drain has begun, before the run sends `agentEnd`.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         while !self.bridge.registry().handlers().is_empty() {
@@ -2280,9 +2303,10 @@ impl yoagent::extension::RunHooks for UnloadAtFinish {
     }
 }
 
-/// A run that finished before unloading began still gets its `agent_end`,
-/// before `session_shutdown`, even when the bridge delivers it (it always
-/// comes after `finish`) once unloading is under way (#374).
+/// A run whose `finish` reached the adapter before unloading began still gets
+/// its `agent_end`, before `session_shutdown`, even when the bridge delivers
+/// it (it always comes after `finish`) once unloading is under way (#374) —
+/// and unloading does not sit out its 5 s bound for it.
 #[tokio::test(flavor = "multi_thread")]
 async fn agent_end_delivered_after_unloading_began_still_comes_first() {
     let Some(runtime) = node_runtime() else {
@@ -2301,11 +2325,7 @@ export default function (pi) {
     let ext = extension(dir.path(), "late.ts", &source);
     let host = host(&runtime).await;
     host.load(adapter_row(json!({ "extensions": [ext] }))).await;
-    let unload = UnloadAtFinish {
-        root: host.root.clone(),
-        bridge: host.bridge.clone(),
-        unloading: Arc::default(),
-    };
+    let unload = UnloadAtFinish::new(&host);
     let (agent, _) = agent(vec![text("done")]);
     let mut agent = agent
         .with_extension(host.bridge.extension())
@@ -2314,10 +2334,46 @@ export default function (pi) {
             unload.clone(),
         ));
     run(&mut agent, "go").await;
-    let unloading = unload.unloading.lock().unwrap().take().expect("finish ran");
-    unloading.await.unwrap();
+    let took = unload.unloaded().await;
     let seen = std::fs::read_to_string(&log).unwrap_or_default();
     assert_eq!(seen.lines().collect::<Vec<_>>(), ["agent_end", "shutdown"]);
+    assert!(took < Duration::from_secs(3), "unloading took {took:?}");
+}
+
+/// A run the adapter refused (a `message_end` rewrite): its observers do not
+/// run, and unloading right after it does not wait for its `agent_end`.
+#[tokio::test(flavor = "multi_thread")]
+async fn unloading_after_a_refused_run_does_not_wait_for_its_agent_end() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("refused.jsonl");
+    let source = r#"
+import { appendFileSync } from 'node:fs'
+export default function (pi) {
+  pi.on('message_end', (e) => (e.message.role === 'assistant' ? { message: { ...e.message, content: [] } } : undefined))
+  pi.on('agent_end', () => appendFileSync(LOG, 'agent_end\n'))
+  pi.on('session_shutdown', () => appendFileSync(LOG, 'shutdown\n'))
+}
+"#
+    .replace("LOG", &format!("{:?}", log.display().to_string()));
+    let ext = extension(dir.path(), "refused.ts", &source);
+    let host = host(&runtime).await;
+    host.load(adapter_row(json!({ "extensions": [ext] }))).await;
+    let unload = UnloadAtFinish::new(&host);
+    let (agent, _) = agent(vec![text("done")]);
+    let mut agent = agent
+        .with_extension(host.bridge.extension())
+        .with_extension(yoagent::extension::ClonedHooks::new(
+            "unload-at-finish",
+            unload.clone(),
+        ));
+    run(&mut agent, "go").await;
+    let took = unload.unloaded().await;
+    let seen = std::fs::read_to_string(&log).unwrap_or_default();
+    assert_eq!(seen.lines().collect::<Vec<_>>(), ["shutdown"]);
+    assert!(took < Duration::from_secs(3), "unloading took {took:?}");
 }
 
 /// `execFor` grants `pi.exec` per extension file, over the row-wide `exec`:

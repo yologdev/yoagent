@@ -249,7 +249,7 @@ impl Extension for RutisExtension {
                         handler: h.clone(),
                         sink,
                         off: AtomicBool::new(false),
-                        at_finish: AtomicBool::new(false),
+                        got_end: AtomicBool::new(false),
                     })
             })
             .collect();
@@ -285,9 +285,11 @@ struct Observer {
     sink: Box<dyn EventSink>,
     /// Panicked once: not called again this run.
     off: AtomicBool,
-    /// Its plugin was still loaded when the run's `finish` began: it gets
-    /// the run's `AgentEnd` even if the plugin has begun unloading since.
-    at_finish: AtomicBool,
+    /// The run's end reached it — its `finish` was called, or (without a
+    /// `finish` hook) its plugin was still loaded once the run's `finish`
+    /// was done: it gets the run's `AgentEnd` even if the plugin has begun
+    /// unloading since. False until then.
+    got_end: AtomicBool,
 }
 
 /// One run's hooks over the snapshot of handlers.
@@ -781,13 +783,13 @@ impl RunHooks for RunState {
         if !self.closed {
             crate::events::publish(&self.host, &self.run, event);
         }
-        // `AgentEnd` comes after `finish`: a handler whose plugin was still
-        // loaded when `finish` began gets it even if the plugin has begun
-        // unloading since, so the run's end is not lost to the race (#374).
+        // `AgentEnd` comes after `finish`: a handler the run's end reached
+        // gets it even if its plugin has begun unloading since, so the run's
+        // end is not lost to the race (#374).
         let last = matches!(event, AgentEvent::AgentEnd { .. });
         for observer in &self.events {
             let live = if last {
-                observer.at_finish.load(Ordering::Relaxed)
+                observer.got_end.load(Ordering::Relaxed)
             } else {
                 observer.handler.gate.is_available()
             };
@@ -795,7 +797,13 @@ impl RunHooks for RunState {
                 continue;
             }
             let timer = observer.handler.time("on_event");
-            let sent = std::panic::catch_unwind(AssertUnwindSafe(|| observer.sink.send(event)));
+            let sent = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                if last {
+                    observer.sink.send_last(event, &observer.handler.gate)
+                } else {
+                    observer.sink.send(event)
+                }
+            }));
             let failed = match sent {
                 // A Rust handler panicked.
                 Err(payload) => {
@@ -824,10 +832,6 @@ impl RunHooks for RunState {
     }
 
     async fn finish(&mut self, outcome: &RunOutcome) {
-        for observer in &self.events {
-            let live = observer.handler.gate.is_available();
-            observer.at_finish.store(live, Ordering::Relaxed);
-        }
         let this = &*self;
         // Every event sent so far reaches its handler before `finish` does.
         let closing = this.events.iter().map(|o| async move {
@@ -866,6 +870,8 @@ impl RunHooks for RunState {
                 h.handler.finish(outcome.clone(), this.run.clone()),
             )
             .await;
+            // Called, even if it failed: the handler knows the run ended.
+            let reached = !matches!(done, Err(Missed::Unavailable(_)));
             match done {
                 Ok(()) => {}
                 Err(Missed::Unavailable(why)) => {
@@ -873,7 +879,19 @@ impl RunHooks for RunState {
                 }
                 Err(Missed::Failed(why)) => tracing::warn!(run_id = %this.run.run_id, "{why}"),
             }
+            (h, reached)
         });
-        futures::future::join_all(finishing).await;
+        let finished = futures::future::join_all(finishing).await;
+        // Whom the run's `AgentEnd`, sent after this, goes to (see `on_event`).
+        for observer in &this.events {
+            let got_end = finished
+                .iter()
+                .find(|(h, _)| Arc::ptr_eq(&h.handler, &observer.handler.handler))
+                .map_or_else(
+                    || observer.handler.gate.is_available(),
+                    |(_, reached)| *reached,
+                );
+            observer.got_end.store(got_end, Ordering::Relaxed);
+        }
     }
 }

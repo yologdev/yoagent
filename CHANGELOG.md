@@ -6,7 +6,10 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased (yoagent-rutis)
 
-- **pi: a run's `agent_end` is no longer lost when the plugins unload right after it** (#374). The bridge delivers `agentEnd` after the run's `finish`, so it could arrive after unloading began; the pi adapter, already closed, dropped it, and a tracer saw `session_shutdown` without the run's end. Unloading now waits — within the same `OBSERVER_DRAIN_MS` bound (5 s) — for the `agent_end` of every run that finished in the last 5 s, then for the observer queue, before `session_shutdown`; a run whose `agent_end` never came (its observer switched off) is forgotten after 5 s, so it neither leaks nor holds up a later unload. On the bridge side, a run's `AgentEnd` reaches every handler whose plugin was still loaded when the run's `finish` began, even if it has begun unloading since.
+- **pi: a run's `agent_end` survives the plugins unloading right after the run** (#374). The bridge delivers `agentEnd` after the run's `finish`, so it could arrive after unloading began; the pi adapter, already closed, dropped it, and a tracer saw `session_shutdown` without the run's end. Now:
+  - **Bridge:** a run's `AgentEnd` goes to every handler its `finish` reached (or, without a `finish` hook, whose plugin was still loaded once `finish` was done), even if the plugin has begun unloading since; a plugin unloaded mid-run gets nothing, as before. A delivery that fails because the plugin has gone since is logged at debug, not as the handler's failure.
+  - **pi adapter:** unloading waits — within the same `OBSERVER_DRAIN_MS` bound (5 s) — for the `agent_end` of every run whose `finish` reached it before unloading began, then for the observer queue, before `session_shutdown`. A run whose `agent_end` has not come 5 s after its `finish` is presumed lost and logged at info, so it neither leaks nor holds up a later unload. The timeout warning names the runs and what was still queued or dropped; events not taken while unloading are reported once (info when an `agent_end` is among them).
+  - Not covered: a run whose `finish` and the unload cross (the adapter does not see the `finish` before unloading begins); its `agent_end` is reported as not delivered.
 
 ## 0.25.14 (2026-10-25)
 

@@ -848,3 +848,75 @@ async fn only_a_handler_that_asked_gets_the_conversation() {
         ],
     );
 }
+
+/// Records the kind of every event a plugin's observer gets.
+fn observed(name: &str) -> (yoagent_rutis::Handler, Arc<std::sync::Mutex<Vec<String>>>) {
+    let kinds: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let seen = kinds.clone();
+    let h = handler(name).with_on_event(move |_, event| {
+        let kind = serde_json::to_value(event).unwrap()["type"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        seen.lock().unwrap().push(kind);
+    });
+    (h, kinds)
+}
+
+/// A plugin that unloaded mid-run is not sent the run's `AgentEnd`: its end
+/// never reached it (no `finish`), so it is not told afterwards.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plugin_unloaded_mid_run_is_not_sent_the_runs_end() {
+    let (root, bridge) = setup();
+    let (observer, kinds) = observed("observer");
+    let view = root.plugin(plugin(observer));
+    wait_active(&view).await;
+    let (agent, _) = agent(vec![call("read", serde_json::json!({})), text("done")]);
+    let mut agent = agent
+        .with_tools(vec![Box::new(UnloadsThenReplies(std::sync::Mutex::new(
+            Some(view),
+        )))])
+        .with_extension(bridge.extension());
+    run(&mut agent, "go").await;
+    let kinds = kinds.lock().unwrap().clone();
+    assert!(!kinds.iter().any(|k| k == "agentEnd"), "{kinds:?}");
+    root.shutdown().await.unwrap();
+}
+
+/// Unloads a plugin from inside the run's `finish` — after the bridge's.
+#[derive(Clone)]
+struct UnloadInFinish(Arc<std::sync::Mutex<Option<rutis::FiberView>>>);
+
+#[async_trait::async_trait]
+impl RunHooks for UnloadInFinish {
+    async fn finish(&mut self, _outcome: &yoagent::extension::RunOutcome) {
+        let view = self.0.lock().unwrap().take();
+        if let Some(view) = view {
+            view.dispose().await.unwrap();
+        }
+    }
+}
+
+/// A plugin that unloads after the run's `finish` reached it is still sent
+/// the run's `AgentEnd`, which yoagent sends after `finish` (#374).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_plugin_unloaded_after_finish_is_still_sent_the_runs_end() {
+    let (root, bridge) = setup();
+    let (observer, kinds) = observed("observer");
+    let view = root.plugin(plugin(observer));
+    wait_active(&view).await;
+    let unload = UnloadInFinish(Arc::new(std::sync::Mutex::new(Some(view))));
+    let (agent, _) = agent(vec![text("done")]);
+    let mut agent = agent.with_extension(bridge.extension()).with_extension(
+        yoagent::extension::ClonedHooks::new("unload-in-finish", unload.clone()),
+    );
+    run(&mut agent, "go").await;
+    assert!(unload.0.lock().unwrap().is_none(), "finish unloaded it");
+    let kinds = kinds.lock().unwrap().clone();
+    assert_eq!(
+        kinds.last().map(String::as_str),
+        Some("agentEnd"),
+        "{kinds:?}"
+    );
+    root.shutdown().await.unwrap();
+}

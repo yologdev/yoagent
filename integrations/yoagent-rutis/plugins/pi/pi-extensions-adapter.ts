@@ -486,7 +486,11 @@ const STREAMING_EVENTS = new Set(['message_update', 'tool_execution_update'])
  */
 const OBSERVER_HANDLER_BUDGET_MS = 30_000
 
-/** How long unloading waits for queued observer events before `session_shutdown`. */
+/**
+ * How long unloading waits, before `session_shutdown`, for the `agent_end` of runs that just
+ * finished and then for queued observer events. Also how long a finished run waits for its
+ * `agentEnd` before it is presumed lost (`forgetStranded`).
+ */
 const OBSERVER_DRAIN_MS = 5_000
 
 /** pi's names for yoagent's stream deltas (`message_update`'s `assistantMessageEvent.type`). */
@@ -1763,8 +1767,9 @@ export default definePlugin<Config>({
         started.push(`${short(ext.path)}: ${message(error)}`)
       }
     }
-    // Set once the observers exist: stops them and waits (bounded) for what is queued, so a
-    // tracer's `agent_end` comes before its `session_shutdown`, as in pi.
+    // Set once the observers exist: stops taking new events (a run that just finished still gets
+    // its `agent_end`) and waits (bounded) for it and for what is queued, so a tracer's
+    // `agent_end` comes before its `session_shutdown`, as in pi.
     let drainObservers: () => Promise<void> = async () => {}
     // Registered first, so a refusal below still shuts the extensions down.
     ctx.effect(async () => {
@@ -1801,13 +1806,23 @@ export default definePlugin<Config>({
     /** A run's tools kept past `finish` for its `agentEnd` (delivered after it), when subscribed. */
     const ending = new Map<string, { offered: Map<string, PiTool>; model?: string; finishedAt: number }>()
     /**
-     * Forget runs whose `agentEnd` never came (an observer the bridge switched off, a delivery that
-     * failed): it follows `finish` at once, so one older than OBSERVER_DRAIN_MS is not coming, and
-     * must neither leak nor hold up unloading.
+     * Forget runs whose `agentEnd` has not come within OBSERVER_DRAIN_MS of their `finish`: an
+     * observer the bridge switched off, a delivery that failed, or one held up longer by later
+     * extensions' `finish` (yoagent allows each up to 5 s). Presumed lost, logged: it must neither
+     * leak nor hold up unloading.
      */
     const forgetStranded = () => {
       const now = Date.now()
-      for (const [runId, entry] of ending) if (now - entry.finishedAt >= OBSERVER_DRAIN_MS) ending.delete(runId)
+      const forgotten: string[] = []
+      for (const [runId, entry] of ending) {
+        if (now - entry.finishedAt >= OBSERVER_DRAIN_MS) {
+          ending.delete(runId)
+          forgotten.push(runId)
+        }
+      }
+      if (forgotten.length === 0) return
+      report('info', `[pi] no agent_end within ${OBSERVER_DRAIN_MS / 1000} s of the finish of run(s) ${forgotten.join(', ')}; not waiting for it`)
+      if (ending.size === 0) endingSettled?.()
     }
     const running = new Map<string, { toolName: string; args: unknown }>()
     const observerFailed = new Set<string>()
@@ -1938,6 +1953,8 @@ export default definePlugin<Config>({
     let closed = false
     /** Unloading has begun: only a finished run's `agent_end` is still taken (see drainObservers). */
     let closing = false
+    /** Events not taken while unloading, by type (reported when the drain ends). */
+    const droppedWhileClosing = new Map<string, number>()
     /** Wakes drainObservers once every finished run's `agentEnd` has arrived. */
     let endingSettled: (() => void) | undefined
     const mappingFailed = new Set<string>()
@@ -2007,10 +2024,14 @@ export default definePlugin<Config>({
         endingSettled?.()
         return
       }
-      // Unloading: a run that already finished still gets its `agent_end` (the bridge delivers
-      // `agentEnd` after `finish`, so it can arrive after unloading began); nothing else is taken.
+      // Unloading: a run whose `finish` came before unloading began still gets its `agent_end`
+      // (the bridge delivers `agentEnd` after `finish`, so it can arrive after unloading began);
+      // nothing else is taken (counted, reported when the drain ends).
       const lastOfRun = event.type === 'agentEnd' && ending.has(event.run.run_id)
-      if (closing && !lastOfRun) return
+      if (closing && !lastOfRun) {
+        droppedWhileClosing.set(event.type, (droppedWhileClosing.get(event.type) ?? 0) + 1)
+        return
+      }
       // The run's model now, not when the handler runs: by then the run may have ended
       // (`agentEnd` always comes after `finish`) and another run made the latest request.
       const model = runModels.get(event.run.run_id) ?? ending.get(event.run.run_id)?.model ?? latestModel
@@ -2053,7 +2074,7 @@ export default definePlugin<Config>({
     }
     drainObservers = async () => {
       closing = true
-      // Only runs that finished just now: an older one's `agent_end` is not coming.
+      // Only runs that finished just now: an older one's `agent_end` is presumed lost.
       forgetStranded()
       let timer: ReturnType<typeof setTimeout> | undefined
       const done = await Promise.race([
@@ -2071,8 +2092,20 @@ export default definePlugin<Config>({
       clearTimeout(timer)
       closed = true
       if (!done) {
-        const missing = ending.size > 0 ? `; ${ending.size} finished runs' agent_end never arrived` : ''
-        report('warn', `[pi] unloading with ${backlog} observer events still queued${missing}`)
+        const why = [
+          ...(ending.size > 0
+            ? [`no agent_end within ${OBSERVER_DRAIN_MS / 1000} s for run(s) ${[...ending.keys()].join(', ')} (dropped if it comes later)`]
+            : []),
+          ...(backlog > 0 ? [`${backlog} observer event(s) still queued`] : []),
+          ...(dropped > 0 ? [`${dropped} event(s) dropped while the observers were behind`] : []),
+        ]
+        report('warn', `[pi] unloading before the observers were done: ${why.join('; ') || 'timed out'}`)
+      }
+      // Events of runs still going when unloading began: expected, so not a warning; an
+      // `agentEnd` among them is a run whose end came too late to be waited for.
+      if (droppedWhileClosing.size > 0) {
+        const counts = [...droppedWhileClosing].map(([type, n]) => `${n} ${type}`).join(', ')
+        report(droppedWhileClosing.has('agentEnd') ? 'info' : 'debug', `[pi] not delivered to observers while unloading: ${counts}`)
       }
       ending.clear()
     }
@@ -2320,7 +2353,9 @@ export default definePlugin<Config>({
           // `agentEnd` comes after `finish`: it names tools from what this run offered.
           const snapshot = snapshots.get(outcome.run_id)
           forgetStranded()
-          if (snapshot && subscribed.has('agentEnd')) {
+          // Not once unloading began: the drain may already be past waiting, and the bridge may
+          // not send this run's `agentEnd` at all (its `finish` raced the unload).
+          if (snapshot && subscribed.has('agentEnd') && !closing && !closed) {
             ending.set(outcome.run_id, { ...snapshot, model: runModels.get(outcome.run_id), finishedAt: Date.now() })
           }
           snapshots.delete(outcome.run_id)
