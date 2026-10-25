@@ -2249,6 +2249,65 @@ export default function (pi) {
     );
 }
 
+/// Starts unloading the plugins while the run finishes: after the bridge's
+/// `finish`, before the run's `agentEnd` is even sent.
+#[derive(Clone)]
+struct UnloadAtFinish {
+    root: Ctx,
+    unloading: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+}
+
+#[async_trait::async_trait]
+impl yoagent::extension::RunHooks for UnloadAtFinish {
+    async fn finish(&mut self, _outcome: &yoagent::extension::RunOutcome) {
+        let root = self.root.clone();
+        *self.unloading.lock().unwrap() = Some(tokio::spawn(async move {
+            root.shutdown().await.unwrap();
+        }));
+        // Let unloading reach the adapter before the run sends `agentEnd`.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+/// A run that finished before unloading began still gets its `agent_end`,
+/// before `session_shutdown`, even when the bridge delivers it (it always
+/// comes after `finish`) once unloading is under way (#374).
+#[tokio::test(flavor = "multi_thread")]
+async fn agent_end_delivered_after_unloading_began_still_comes_first() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("late.jsonl");
+    let source = r#"
+import { appendFileSync } from 'node:fs'
+export default function (pi) {
+  pi.on('agent_end', () => appendFileSync(LOG, 'agent_end\n'))
+  pi.on('session_shutdown', () => appendFileSync(LOG, 'shutdown\n'))
+}
+"#
+    .replace("LOG", &format!("{:?}", log.display().to_string()));
+    let ext = extension(dir.path(), "late.ts", &source);
+    let host = host(&runtime).await;
+    host.load(adapter_row(json!({ "extensions": [ext] }))).await;
+    let unload = UnloadAtFinish {
+        root: host.root.clone(),
+        unloading: Arc::default(),
+    };
+    let (agent, _) = agent(vec![text("done")]);
+    let mut agent = agent
+        .with_extension(host.bridge.extension())
+        .with_extension(yoagent::extension::ClonedHooks::new(
+            "unload-at-finish",
+            unload.clone(),
+        ));
+    run(&mut agent, "go").await;
+    let unloading = unload.unloading.lock().unwrap().take().expect("finish ran");
+    unloading.await.unwrap();
+    let seen = std::fs::read_to_string(&log).unwrap_or_default();
+    assert_eq!(seen.lines().collect::<Vec<_>>(), ["agent_end", "shutdown"]);
+}
+
 /// `execFor` grants `pi.exec` per extension file, over the row-wide `exec`:
 /// one extension may run `echo`, its neighbour may not. A key is resolved like
 /// `extensions` (relative to `cwd`); a key naming no loaded extension refuses

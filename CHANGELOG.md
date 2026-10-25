@@ -4,6 +4,10 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased (yoagent-rutis)
+
+- **pi: a run's `agent_end` is no longer lost when the plugins unload right after it** (#374). The bridge delivers `agentEnd` after the run's `finish`, so it could arrive after unloading began; the pi adapter, already closed, dropped it, and a tracer saw `session_shutdown` without the run's end. Unloading now waits — within the same `OBSERVER_DRAIN_MS` bound (5 s) — for the `agent_end` of every run that already finished, then for the observer queue, before `session_shutdown`. On the bridge side, a run's `AgentEnd` reaches every handler that got its `finish`, even one whose plugin has begun unloading since.
+
 ## 0.25.14 (2026-10-25)
 
 - **Tool sources can change mid-run** (asked for by yobuild, for plugins loaded during a run). `ToolSource` gains `generation() -> u64` (default `0`, so existing sources are unchanged): a number that moves whenever the source's tools change. Before each model request after the first — once every tool call of the last turn has returned, so no call is left without its tool — the loop asks again only the sources whose generation moved; their new tools (a shorter list too) are offered from that request, and the collision rules (static tools, then earlier sources, then extensions' per-run tools) are applied again. Extensions' per-run tools are not asked again. Each change rewrites the prompt cache once. Sub-agents' sources work the same way within a delegation.

@@ -119,7 +119,9 @@
 // handler gets OBSERVER_HANDLER_BUDGET_MS before the chain moves on; past
 // MAX_OBSERVER_BACKLOG waiting, streaming events are dropped, lifecycle ones
 // past twice that, counted and reported per burst; unloading waits up to
-// OBSERVER_DRAIN_MS for the queue before `session_shutdown`), a result ignored
+// OBSERVER_DRAIN_MS for the queue — and for the `agent_end` of every run that
+// already finished, which the bridge delivers after `finish` — before
+// `session_shutdown`), a result ignored
 // (`turn_end`'s `continue` / `entries` reported once), a throw reported once per run; tool calls under pi's names and argument shapes, in the tool
 // events and inside messages; `turn_end` only for a turn that ended with an
 // assistant message (the index advances at every turn's end), with generated
@@ -1925,6 +1927,10 @@ export default definePlugin<Config>({
     let backlog = 0
     let dropped = 0
     let closed = false
+    /** Unloading has begun: only a finished run's `agent_end` is still taken (see drainObservers). */
+    let closing = false
+    /** Wakes drainObservers once every finished run's `agentEnd` has arrived. */
+    let endingSettled: (() => void) | undefined
     const mappingFailed = new Set<string>()
     /** Once per run, extension and kind of trouble: a failure in a later run is reported again. */
     const once = (key: string, level: 'warn' | 'info', text: string) => {
@@ -1991,6 +1997,10 @@ export default definePlugin<Config>({
         ending.clear()
         return
       }
+      // Unloading: a run that already finished still gets its `agent_end` (the bridge delivers
+      // `agentEnd` after `finish`, so it can arrive after unloading began); nothing else is taken.
+      const lastOfRun = event.type === 'agentEnd' && ending.has(event.run.run_id)
+      if (closing && !lastOfRun) return
       // The run's model now, not when the handler runs: by then the run may have ended
       // (`agentEnd` always comes after `finish`) and another run made the latest request.
       const model = runModels.get(event.run.run_id) ?? ending.get(event.run.run_id)?.model ?? latestModel
@@ -2003,6 +2013,11 @@ export default definePlugin<Config>({
           report('warn', `[pi] could not map ${event.type} events for pi observers (reported once): ${message(error)}`)
         }
         return
+      } finally {
+        if (lastOfRun) {
+          ending.delete(event.run.run_id)
+          if (ending.size === 0) endingSettled?.()
+        }
       }
       if (!pi) return
       const limit = STREAMING_EVENTS.has(pi.type as string) ? MAX_OBSERVER_BACKLOG : 2 * MAX_OBSERVER_BACKLOG
@@ -2027,16 +2042,27 @@ export default definePlugin<Config>({
         })
     }
     drainObservers = async () => {
-      closed = true
+      closing = true
       let timer: ReturnType<typeof setTimeout> | undefined
       const done = await Promise.race([
-        chain.then(() => true),
+        (async () => {
+          // First every finished run's `agent_end` (still on its way from the bridge), then the
+          // chain it joins.
+          if (ending.size > 0) await new Promise<void>((resolve) => (endingSettled = resolve))
+          await chain
+          return true
+        })(),
         new Promise<false>((resolve) => {
           timer = setTimeout(() => resolve(false), OBSERVER_DRAIN_MS)
         }),
       ])
       clearTimeout(timer)
-      if (!done) report('warn', `[pi] unloading with ${backlog} observer events still queued`)
+      closed = true
+      if (!done) {
+        const missing = ending.size > 0 ? `; ${ending.size} finished runs' agent_end never arrived` : ''
+        report('warn', `[pi] unloading with ${backlog} observer events still queued${missing}`)
+      }
+      ending.clear()
     }
 
     ctx.effect(

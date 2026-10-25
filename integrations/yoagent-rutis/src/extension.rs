@@ -777,8 +777,14 @@ impl RunHooks for RunState {
         if !self.closed {
             crate::events::publish(&self.host, &self.run, event);
         }
+        // `AgentEnd` comes after `finish`, which every handler of the run
+        // got: a handler whose plugin began unloading since still gets it,
+        // so the run's end is not lost to the race (#374).
+        let last = matches!(event, AgentEvent::AgentEnd { .. });
         for observer in &self.events {
-            if observer.off.load(Ordering::Relaxed) || !observer.handler.gate.is_available() {
+            if observer.off.load(Ordering::Relaxed)
+                || (!last && !observer.handler.gate.is_available())
+            {
                 continue;
             }
             let timer = observer.handler.time("on_event");
