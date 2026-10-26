@@ -545,6 +545,7 @@ impl McpTransport for StdioTransport {
         // again, the stderr tail read again) until the drain has read the
         // tail or `EXIT_TAIL_GRACE` since first sight, then it is latched.
         let first_seen = std::sync::Mutex::new(None::<std::time::Instant>);
+        // The reason last seen, without the stderr tail (added once below).
         let provisional = std::sync::Mutex::new(None::<String>);
         let latched = std::sync::Mutex::new(None::<String>);
         Some(ExitWatch::new(move || {
@@ -582,13 +583,17 @@ impl McpTransport for StdioTransport {
                 *latched = Some(why.clone());
                 return Some(why);
             };
-            let why = why.map(|why| format!("{why}{}", stderr_suffix(&tail)))?;
+            let why = why?;
             *provisional = Some(why.clone());
+            // Before the tail is read: the drain pushes its last line, then
+            // sets `stderr_done`, so a tail read after seeing it is complete.
+            let done = ended.stderr_done.load(SeqCst);
+            let why = format!("{why}{}", stderr_suffix(&tail));
             let first = *first_seen
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .get_or_insert_with(std::time::Instant::now);
-            if ended.stderr_done.load(SeqCst) || first.elapsed() >= EXIT_TAIL_GRACE {
+            if done || first.elapsed() >= EXIT_TAIL_GRACE {
                 *latched = Some(why.clone());
             }
             Some(why)
@@ -1206,6 +1211,32 @@ impl McpTransport for HttpTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Before the answer is latched (stderr still held open by a process the
+    /// server left behind), a busy child gives the last answer unchanged.
+    #[cfg(all(feature = "native", unix))]
+    #[tokio::test]
+    async fn a_busy_child_repeats_the_provisional_answer() {
+        let transport =
+            StdioTransport::new("bash", &["-c", "echo bye >&2; sleep 3 & exit 5"], None)
+                .await
+                .unwrap();
+        let watch = transport.exit_watch().unwrap();
+        let mut first = None;
+        for _ in 0..200 {
+            first = watch.exited();
+            if first.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let first = first.expect("the exit was seen");
+        let busy = transport.child.lock().await;
+        assert_eq!(watch.exited().as_deref(), Some(first.as_str()));
+        assert_eq!(watch.exited().as_deref(), Some(first.as_str()));
+        drop(busy);
+        assert_eq!(first.matches("last stderr").count(), 1, "{first}");
+    }
 
     /// The watch never waits on the child's lock: busy (a call reaping the
     /// server, or `close`) reads as not known yet, then the exit is seen —
