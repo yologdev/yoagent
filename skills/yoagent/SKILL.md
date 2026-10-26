@@ -32,7 +32,7 @@ Before writing loop code of your own, find the hook below.
 | cap turns / tokens / time | `ExecutionLimits` | `docs/concepts/context-management.md` |
 | delegate to a child agent | `SubAgentTool` (own model, tools, limits) | `docs/concepts/sub-agents.md` |
 | apply one policy to every sub-agent | `.with_tree_extension(…)` | `docs/concepts/extensions.md` |
-| offer tools that change between runs — or mid-run | `ToolSource` (consulted at each run start; again mid-run when `generation()` moves); an MCP server whose tools change: `mcp::McpToolSource` | `docs/concepts/tools.md` |
+| offer tools that change between runs — or mid-run | `ToolSource` (consulted at each run start; again mid-run when `generation()` moves); an MCP server whose tools change: `mcp::McpToolSource` (withdraws a stdio server that exits; `McpClient::exited()` says why) | `docs/concepts/tools.md` |
 | load plugins at runtime (Rust, TS on Node/Bun, Python, Go), or pi / DeepSeek Harness plugins unchanged | the **yoagent-rutis** crate (`RutisBridge`, one `Extension`) | [yoagent-rutis README](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis) |
 | use MCP servers | `.with_mcp_server_stdio(…)` / `_http(…)` / `_http_transport(…)` | `docs/guides/mcp.md` |
 | get typed JSON back | `agent.prompt_structured::<T>(text, schema)` | `docs/concepts/structured-outputs.md` |

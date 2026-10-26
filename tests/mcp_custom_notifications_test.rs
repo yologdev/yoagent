@@ -66,6 +66,11 @@ async fn around_load(reports: bool) -> (bool, [(u64, Vec<String>); 2]) {
         ..Server::default()
     }));
     let reported = client.reports_notifications();
+    assert_eq!(
+        client.exited(),
+        None,
+        "a custom transport has no exit watch"
+    );
     let source = McpToolSource::new(client);
     let snapshot = |tools: Vec<Arc<dyn AgentTool>>| -> Vec<String> {
         tools.iter().map(|t| t.name().to_string()).collect()

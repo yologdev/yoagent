@@ -4,6 +4,10 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+- **MCP: a stdio server that exits is noticed** (asked for by yobuild). `McpClient::exited() -> Option<String>`: `None` while the server runs; once it has gone, why — its exit status and the last of its stderr, worded like the error a call gets. It never waits behind a call in flight (the transport hands the client an `ExitWatch` when it is built, read outside the lock a call holds), so a host can poll it — to tell its user a server stopped between calls, or to restart it. `McpToolSource` uses it: a server that exits is seen at the next turn and its tools are withdrawn (logged once), so the model stops calling a dead server. New provided `McpTransport::exit_watch() -> Option<ExitWatch>` (default `None`; the stdio transport watches its child process; HTTP has no process to watch) and `mcp::ExitWatch::new(check)` for custom transports. No restart, no new event: restarting is the host's job.
+
 ## yoagent-rutis 0.8.3 (2026-10-26)
 
 yoagent-rutis only; requires yoagent 0.25, rutis 0.12 and Rust 1.88, as 0.8.2. A fix; no API change.

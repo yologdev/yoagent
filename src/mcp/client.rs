@@ -2,7 +2,7 @@
 
 #[cfg(feature = "native")]
 use super::transport::StdioTransport;
-use super::transport::{HttpTransport, McpTransport, ServerNotifications};
+use super::transport::{ExitWatch, HttpTransport, McpTransport, ServerNotifications};
 use super::types::*;
 #[cfg(feature = "native")]
 use std::collections::HashMap;
@@ -23,6 +23,8 @@ pub struct McpClient {
     notifications: ServerNotifications,
     /// Whether the transport reports them at all.
     reports_notifications: bool,
+    /// Tells that the server has gone, without the transport's lock.
+    exit: Option<ExitWatch>,
 }
 
 impl McpClient {
@@ -31,6 +33,7 @@ impl McpClient {
     fn build(mut transport: Box<dyn McpTransport>, call_timeout: Option<Duration>) -> Self {
         let notifications = ServerNotifications::new();
         let reports_notifications = transport.report_notifications(notifications.clone());
+        let exit = transport.exit_watch();
         Self {
             transport: Arc::new(Mutex::new(transport)),
             server_info: None,
@@ -38,6 +41,7 @@ impl McpClient {
             call_timeout,
             notifications,
             reports_notifications,
+            exit,
         }
     }
 
@@ -187,6 +191,22 @@ impl McpClient {
     /// then never seen.
     pub fn reports_notifications(&self) -> bool {
         self.reports_notifications
+    }
+
+    /// Whether the server has gone, without waiting: `None` while it runs —
+    /// and always over HTTP or a custom transport without an
+    /// [`exit_watch`](McpTransport::exit_watch) — else why, worded like the
+    /// error a call to it gets (its exit status and the last of its stderr).
+    ///
+    /// It never waits behind a call in flight, so a host can poll it — to
+    /// tell its user a server stopped between calls, or to restart it. A
+    /// server stopped by [`close`](Self::close) reads as exited (killed).
+    pub fn exited(&self) -> Option<String> {
+        self.exit.as_ref()?.exited()
+    }
+
+    pub(crate) fn exit_watch(&self) -> Option<ExitWatch> {
+        self.exit.clone()
     }
 
     pub(crate) fn notifications(&self) -> ServerNotifications {

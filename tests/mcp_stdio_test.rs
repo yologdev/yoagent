@@ -390,3 +390,101 @@ async fn a_failed_relisting_keeps_the_last_good_list() {
         .collect();
     assert_eq!(names, ["load"], "the failed listing kept the last good one");
 }
+
+/// Answers `initialize`, then each line it is sent with nothing; `quit`
+/// (a `tools/call` of it) makes it write to stderr and exit 3.
+const QUITTING_SERVER: &str = r#"
+read -r line; id=$(id_of "$line")
+echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"quitter\",\"version\":\"1\"}}}"
+read -r note
+while read -r line; do
+  id=$(id_of "$line")
+  case "$line" in
+    *'"tools/list"'*)
+      echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"tools\":[{\"name\":\"quit\",\"description\":\"quit\",\"inputSchema\":{\"type\":\"object\"}},{\"name\":\"hang\",\"description\":\"hang\",\"inputSchema\":{\"type\":\"object\"}}]}}";;
+    *'"name":"quit"'*)
+      echo 'out of memory' >&2
+      exit 3;;
+  esac
+done
+"#;
+
+/// Poll `exited` until it answers (the process is reaped asynchronously).
+async fn wait_exited(client: &McpClient) -> String {
+    for _ in 0..200 {
+        if let Some(why) = client.exited() {
+            return why;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("the server's exit was never seen");
+}
+
+/// `exited`: `None` while the server runs; once it has gone, its exit status
+/// and the last of its stderr — and it stays so.
+#[tokio::test]
+async fn exited_says_why_a_server_went() {
+    let client = connect(QUITTING_SERVER).await.unwrap();
+    assert_eq!(client.exited(), None);
+    let err = client
+        .call_tool("quit", serde_json::json!({}))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("Connection closed"), "{err}");
+    let why = wait_exited(&client).await;
+    assert!(why.contains("exited with") && why.contains('3'), "{why}");
+    assert!(why.contains("out of memory"), "{why}");
+    assert_eq!(client.exited(), Some(why), "it stays answered");
+}
+
+/// `exited` never waits behind a call in flight: a host polls it.
+#[tokio::test]
+async fn exited_does_not_wait_behind_a_call() {
+    let client = Arc::new(connect(QUITTING_SERVER).await.unwrap());
+    let calling = client.clone();
+    let call = tokio::spawn(async move {
+        let _ = calling.call_tool("hang", serde_json::json!({})).await;
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let asked = std::time::Instant::now();
+    assert_eq!(client.exited(), None);
+    assert!(
+        asked.elapsed() < Duration::from_millis(50),
+        "{:?}",
+        asked.elapsed()
+    );
+    call.abort();
+}
+
+/// A server stopped by `close` reads as exited (killed).
+#[tokio::test]
+async fn a_closed_server_reads_as_exited() {
+    let client = connect(QUITTING_SERVER).await.unwrap();
+    client.close().await.unwrap();
+    let why = wait_exited(&client).await;
+    assert!(why.contains("exited with"), "{why}");
+}
+
+/// `McpToolSource`: a server that exits is withdrawn — its generation moves,
+/// and it gives no tools from then on (not the last good list, whose tools
+/// would only fail).
+#[tokio::test]
+async fn a_tool_source_withdraws_a_server_that_exits() {
+    use yoagent::mcp::McpToolSource;
+    use yoagent::ToolSource;
+    let source = McpToolSource::new(connect(QUITTING_SERVER).await.unwrap());
+    let tools = source.tools().await;
+    let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+    assert_eq!(names, ["quit", "hang"]);
+    assert_eq!(source.generation(), 0);
+    let quit = tools.iter().find(|t| t.name() == "quit").unwrap();
+    let err = quit
+        .execute(serde_json::json!({}), ToolContext::new("c1", "quit"))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("Connection closed"), "{err}");
+    wait_exited(&*source.client().lock().await).await;
+    assert_eq!(source.generation(), 1, "the exit moved the generation");
+    assert!(source.tools().await.is_empty(), "the tools were withdrawn");
+    assert_eq!(source.generation(), 1, "and it moves once");
+}

@@ -202,6 +202,30 @@ cancel over a custom transport. One that fails or times out keeps the last
 list that succeeded (logged), so the server's tools stay offered and a call
 reports the server's real error.
 
+## Servers That Exit
+
+A stdio server can crash between calls. `McpClient::exited()` tells, without
+waiting — `None` while the server runs; once it has gone, its exit status
+and the last of its stderr:
+
+```rust,no_run
+if let Some(why) = client.exited() {
+    eprintln!("MCP server stopped: {why}");
+}
+```
+
+It never waits behind a call in flight, so a host can poll it (to show a
+notice, or to restart the server — yoagent does not restart servers). A server
+stopped with `close()` reads as exited too.
+
+An `McpToolSource` uses it on its own: a server that exits is seen at the next
+turn and its tools are withdrawn (logged once), so the model stops calling a
+dead server. A new client needs a new source.
+
+Over HTTP there is no process to watch: `exited()` is always `None`. A custom
+`McpTransport` can provide one by implementing `exit_watch` (returning an
+`ExitWatch::new(check)`, where `check` must not block).
+
 ## How MCP Tools Work
 
 When you call `with_mcp_server_stdio()` or `with_mcp_server_http()`, yoagent:

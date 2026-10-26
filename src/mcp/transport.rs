@@ -61,6 +61,49 @@ pub trait McpTransport: crate::rt::MaybeSend + crate::rt::MaybeSync {
         let _ = to;
         false
     }
+
+    /// A way to tell, without waiting, that the server has gone — read by
+    /// [`McpClient::exited`](crate::mcp::McpClient::exited) outside the lock
+    /// a call holds, so it never waits behind one. The client asks once,
+    /// when it is built.
+    ///
+    /// The default is `None`: nothing to watch (the HTTP transport — a
+    /// remote server has no process here — and custom transports, unless
+    /// they implement it). The stdio transport watches its child process.
+    fn exit_watch(&self) -> Option<ExitWatch> {
+        None
+    }
+}
+
+/// Tells whether an MCP server has gone, without waiting (see
+/// [`McpTransport::exit_watch`]). Cheap to clone; clones share the check.
+#[derive(Clone)]
+pub struct ExitWatch {
+    check: std::sync::Arc<dyn Fn() -> Option<String> + Send + Sync>,
+}
+
+impl std::fmt::Debug for ExitWatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExitWatch").finish_non_exhaustive()
+    }
+}
+
+impl ExitWatch {
+    /// A watch over `check`: `None` while the server runs, then why it went.
+    /// It must not block (it is polled, and read every turn by an
+    /// [`McpToolSource`](crate::mcp::McpToolSource)), and once it has
+    /// answered `Some` it should keep doing so.
+    pub fn new(check: impl Fn() -> Option<String> + Send + Sync + 'static) -> Self {
+        Self {
+            check: std::sync::Arc::new(check),
+        }
+    }
+
+    /// `None` while the server runs; once it has gone, why (for stdio: its
+    /// exit status and the last of its stderr).
+    pub fn exited(&self) -> Option<String> {
+        (self.check)()
+    }
 }
 
 /// The notification a server sends when its tool list changed.
@@ -273,20 +316,22 @@ impl StdioTransport {
                 _ => "closed its output".to_string(),
             }
         };
-        let tail = self
-            .stderr_tail
-            .lock()
-            .map(|t| t.render())
-            .unwrap_or_default();
-        let tail = if tail.trim().is_empty() {
-            String::new()
-        } else {
-            format!("; last stderr:\n{tail}")
-        };
+        let tail = stderr_suffix(&self.stderr_tail);
         McpError::Transport(format!(
             "Connection closed: MCP server '{}' {status}{skipped}{tail}",
             self.command
         ))
+    }
+}
+
+/// `; last stderr:` and the kept tail, or nothing when the server wrote none.
+#[cfg(feature = "native")]
+fn stderr_suffix(tail: &std::sync::Mutex<StderrTail>) -> String {
+    let tail = tail.lock().map(|t| t.render()).unwrap_or_default();
+    if tail.trim().is_empty() {
+        String::new()
+    } else {
+        format!("; last stderr:\n{tail}")
     }
 }
 
@@ -445,6 +490,36 @@ impl McpTransport for StdioTransport {
     fn report_notifications(&mut self, to: ServerNotifications) -> bool {
         self.notifications = Some(to);
         true
+    }
+
+    fn exit_watch(&self) -> Option<ExitWatch> {
+        let child = self.child.clone();
+        let tail = self.stderr_tail.clone();
+        let command = self.command.clone();
+        let status = Arc::new(std::sync::Mutex::new(None::<std::process::ExitStatus>));
+        Some(ExitWatch::new(move || {
+            let mut known = status.lock().unwrap_or_else(|p| p.into_inner());
+            if known.is_none() {
+                // Held only while a call reaps a server whose output closed,
+                // or by `close`: not known yet, asked again at the next poll.
+                let mut child = child.try_lock().ok()?;
+                match child.try_wait() {
+                    Ok(Some(exited)) => *known = Some(exited),
+                    Ok(None) => return None,
+                    Err(e) => {
+                        debug!("MCP server '{command}': checking whether it exited: {e}");
+                        return None;
+                    }
+                }
+            }
+            let exited = (*known)?;
+            // The tail read each time: the drain may still be reading the
+            // last of it when the exit is first seen.
+            Some(format!(
+                "MCP server '{command}' exited with {exited}{}",
+                stderr_suffix(&tail)
+            ))
+        }))
     }
 
     async fn close(&self) -> Result<(), McpError> {
