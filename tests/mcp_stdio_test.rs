@@ -432,37 +432,116 @@ async fn exited_says_why_a_server_went() {
         .unwrap_err();
     assert!(err.to_string().contains("Connection closed"), "{err}");
     let why = wait_exited(&client).await;
-    assert!(why.contains("exited with") && why.contains('3'), "{why}");
+    assert!(why.contains("exit status: 3"), "{why}");
     assert!(why.contains("out of memory"), "{why}");
     assert_eq!(client.exited(), Some(why), "it stays answered");
 }
 
-/// `exited` never waits behind a call in flight: a host polls it.
+/// `exited` answers while a call is in flight (it does not use the lock a
+/// call holds): a host polls it.
 #[tokio::test]
-async fn exited_does_not_wait_behind_a_call() {
+async fn exited_answers_during_a_call() {
     let client = Arc::new(connect(QUITTING_SERVER).await.unwrap());
     let calling = client.clone();
     let call = tokio::spawn(async move {
         let _ = calling.call_tool("hang", serde_json::json!({})).await;
     });
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let asked = std::time::Instant::now();
+    assert!(!call.is_finished(), "the call is in flight");
     assert_eq!(client.exited(), None);
-    assert!(
-        asked.elapsed() < Duration::from_millis(50),
-        "{:?}",
-        asked.elapsed()
-    );
     call.abort();
 }
 
-/// A server stopped by `close` reads as exited (killed).
+/// A server that exits between calls — no call sees it — is seen by
+/// `exited`, with its last stderr.
 #[tokio::test]
-async fn a_closed_server_reads_as_exited() {
+async fn exited_sees_a_server_that_exits_between_calls() {
+    let client = connect(
+        r#"read -r line; id=$(id_of "$line")
+echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"serverInfo\":{\"name\":\"brief\",\"version\":\"1\"}}}"
+read -r note
+sleep 0.2
+echo bye >&2
+exit 4"#,
+    )
+    .await
+    .unwrap();
+    let why = wait_exited(&client).await;
+    assert!(
+        why.contains("exit status: 4") && why.contains("bye"),
+        "{why}"
+    );
+}
+
+/// A server killed by a signal says so.
+#[tokio::test]
+async fn exited_names_the_signal_that_killed_a_server() {
+    let client = connect(
+        r#"read -r line; id=$(id_of "$line")
+echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"serverInfo\":{\"name\":\"killed\",\"version\":\"1\"}}}"
+read -r note
+kill -9 $$"#,
+    )
+    .await
+    .unwrap();
+    let why = wait_exited(&client).await;
+    assert!(why.contains("signal: 9"), "{why}");
+}
+
+/// An exit watch kept after its client is dropped does not keep the server
+/// alive: dropping the client still kills it.
+#[tokio::test]
+async fn a_kept_exit_watch_does_not_keep_the_server_alive() {
+    use yoagent::mcp::{McpTransport, StdioTransport};
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("pid");
+    let script = format!(
+        "echo $$ > {:?}; while read -r line; do :; done",
+        pid_file.display().to_string()
+    );
+    let transport = StdioTransport::new("bash", &["-c", &script], None)
+        .await
+        .unwrap();
+    let watch = transport.exit_watch().unwrap();
+    let client = McpClient::from_transport(Box::new(transport));
+    let mut pid = String::new();
+    for _ in 0..200 {
+        pid = std::fs::read_to_string(&pid_file).unwrap_or_default();
+        if !pid.trim().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let pid = pid.trim().to_string();
+    assert!(!pid.is_empty(), "the server wrote its pid");
+    drop(client);
+    let alive = || {
+        std::process::Command::new("kill")
+            .args(["-0", &pid])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    };
+    for _ in 0..200 {
+        if !alive() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(!alive(), "the server outlived its client");
+    let why = watch.exited().expect("the watch says it went");
+    assert!(why.contains("its client was dropped"), "{why}");
+}
+
+/// A server stopped by `close` reads as closed, not as a crash: a host that
+/// restarts crashed servers can tell.
+#[tokio::test]
+async fn a_closed_server_reads_as_closed() {
     let client = connect(QUITTING_SERVER).await.unwrap();
     client.close().await.unwrap();
     let why = wait_exited(&client).await;
-    assert!(why.contains("exited with"), "{why}");
+    assert!(why.contains("was closed (`close`)"), "{why}");
 }
 
 /// `McpToolSource`: a server that exits is withdrawn — its generation moves,
@@ -487,4 +566,89 @@ async fn a_tool_source_withdraws_a_server_that_exits() {
     assert_eq!(source.generation(), 1, "the exit moved the generation");
     assert!(source.tools().await.is_empty(), "the tools were withdrawn");
     assert_eq!(source.generation(), 1, "and it moves once");
+}
+
+/// Answers the first `tools/list`; exits on the second (a listing in flight).
+const EXITS_WHILE_LISTING: &str = r#"
+read -r line; id=$(id_of "$line")
+echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"serverInfo\":{\"name\":\"lister\",\"version\":\"1\"}}}"
+read -r note
+read -r line; id=$(id_of "$line")
+echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"tools\":[{\"name\":\"only\",\"description\":\"only\",\"inputSchema\":{\"type\":\"object\"}}]}}"
+read -r line
+echo 'listing crashed' >&2
+exit 4
+"#;
+
+/// A server that exits during a listing: that listing keeps the last list (a
+/// failed listing does), and the exit withdraws it from the next ask on.
+#[tokio::test]
+async fn a_tool_source_withdraws_a_server_that_exits_while_listing() {
+    use yoagent::mcp::McpToolSource;
+    use yoagent::ToolSource;
+    let source = McpToolSource::new(connect(EXITS_WHILE_LISTING).await.unwrap());
+    assert_eq!(source.tools().await.len(), 1);
+    assert_eq!(
+        source.tools().await.len(),
+        1,
+        "the failed listing kept the last list"
+    );
+    let why = wait_exited(&*source.client().lock().await).await;
+    assert!(
+        why.contains("exit status: 4") && why.contains("listing crashed"),
+        "{why}"
+    );
+    assert_eq!(source.generation(), 1);
+    assert!(source.tools().await.is_empty());
+}
+
+/// Through an agent: the model calls a tool that makes the server exit; the
+/// next request offers none of its tools.
+#[tokio::test]
+async fn an_agent_stops_offering_a_server_that_exits() {
+    use yoagent::mcp::McpToolSource;
+    use yoagent::provider::mock::{MockResponse, MockToolCall};
+    use yoagent::provider::{MockProvider, ModelConfig, StreamConfig, StreamEvent, StreamProvider};
+    type Seen = Arc<std::sync::Mutex<Vec<Vec<String>>>>;
+    struct Recording(MockProvider, Seen);
+    #[async_trait::async_trait]
+    impl StreamProvider for Recording {
+        async fn stream(
+            &self,
+            config: StreamConfig,
+            tx: tokio::sync::mpsc::UnboundedSender<StreamEvent>,
+            cancel: CancellationToken,
+        ) -> Result<Message, yoagent::provider::ProviderError> {
+            self.1
+                .lock()
+                .unwrap()
+                .push(config.tools.iter().map(|t| t.name.clone()).collect());
+            self.0.stream(config, tx, cancel).await
+        }
+    }
+    let seen = Seen::default();
+    let provider = Recording(
+        MockProvider::new(vec![
+            MockResponse::ToolCalls(vec![MockToolCall {
+                name: "quit".into(),
+                arguments: serde_json::json!({}),
+                provider_metadata: None,
+            }]),
+            MockResponse::Text("done".into()),
+        ]),
+        seen.clone(),
+    );
+    let source = McpToolSource::new(connect(QUITTING_SERVER).await.unwrap());
+    let mut agent =
+        yoagent::Agent::from_provider(provider, ModelConfig::mock()).with_tool_source(source);
+    let mut rx = agent.prompt("go").await;
+    while rx.recv().await.is_some() {}
+    agent.finish().await;
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert_eq!(seen[0], ["hang", "quit"]);
+    assert!(
+        seen[1].is_empty(),
+        "the dead server's tools were withdrawn: {seen:?}"
+    );
 }

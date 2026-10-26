@@ -195,12 +195,20 @@ impl McpClient {
 
     /// Whether the server has gone, without waiting: `None` while it runs —
     /// and always over HTTP or a custom transport without an
-    /// [`exit_watch`](McpTransport::exit_watch) — else why, worded like the
-    /// error a call to it gets (its exit status and the last of its stderr).
+    /// [`exit_watch`](McpTransport::exit_watch) — else why, the same answer
+    /// from then on. Over stdio:
+    /// - `… exited with <status>` (a code, or the signal that killed it),
+    ///   then the last of its stderr — read once its stderr reached its end,
+    ///   at most 0.5 s after the exit;
+    /// - `… closed its output (its process is still running)`: a call found
+    ///   its output closed while a wrapper process lives on;
+    /// - `… has gone (exit status unknown: …)`: the process cannot be waited
+    ///   on (`SIGCHLD` ignored, or reaped elsewhere);
+    /// - `… was closed (`close`)` after [`close`](Self::close): not a crash,
+    ///   so a host that restarts crashed servers can tell.
     ///
     /// It never waits behind a call in flight, so a host can poll it — to
-    /// tell its user a server stopped between calls, or to restart it. A
-    /// server stopped by [`close`](Self::close) reads as exited (killed).
+    /// tell its user a server stopped between calls, or to restart it.
     pub fn exited(&self) -> Option<String> {
         self.exit.as_ref()?.exited()
     }

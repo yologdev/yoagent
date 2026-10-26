@@ -129,7 +129,16 @@ impl ToolSource for McpToolSource {
                 .exit_logged
                 .swap(true, std::sync::atomic::Ordering::SeqCst)
             {
+                // Which server: the command alone is often `npx` or `uvx`.
+                let server = self
+                    .client
+                    .lock()
+                    .await
+                    .server_info()
+                    .map(|info| info.name.clone());
                 tracing::warn!(
+                    server = server.as_deref().unwrap_or("?"),
+                    prefix = self.prefix.as_deref().unwrap_or(""),
                     "MCP tool source: the server has gone; its tools are withdrawn: {why}"
                 );
             }

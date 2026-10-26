@@ -215,12 +215,21 @@ if let Some(why) = client.exited() {
 ```
 
 It never waits behind a call in flight, so a host can poll it (to show a
-notice, or to restart the server — yoagent does not restart servers). A server
-stopped with `close()` reads as exited too.
+notice, or to restart the server — yoagent does not restart servers). The
+answer stays the same once given; its stderr part is read once the server's
+stderr has reached its end, at most half a second after the exit. It also
+reports a server whose output closed while a wrapper process lives on, and
+one that cannot be waited on. A server stopped with `close()` reads as
+"was closed", not as a crash, so a restart policy can tell the two apart.
 
 An `McpToolSource` uses it on its own: a server that exits is seen at the next
-turn and its tools are withdrawn (logged once), so the model stops calling a
-dead server. A new client needs a new source.
+turn and its tools are withdrawn (logged once, naming the server and its
+prefix), so the model stops calling a dead server — a later call to one of
+its tools is answered as an unknown tool. A new client needs a new source.
+
+`with_mcp_server_stdio` gets neither: it lists the tools once and keeps no
+client handle. Connect an `McpClient` yourself and install it with
+`McpToolSource` to have the tools withdrawn and `exited()` to poll.
 
 Over HTTP there is no process to watch: `exited()` is always `None`. A custom
 `McpTransport` can provide one by implementing `exit_watch` (returning an
