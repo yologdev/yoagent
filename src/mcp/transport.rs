@@ -92,7 +92,7 @@ impl ExitWatch {
     /// A watch over `check`: `None` while the server runs, then why it went.
     /// It must not block (it is polled, and read every turn by an
     /// [`McpToolSource`](crate::mcp::McpToolSource)), and once it has
-    /// answered `Some` it should keep doing so.
+    /// answered `Some` it must keep doing so (the text may still change).
     pub fn new(check: impl Fn() -> Option<String> + Send + Sync + 'static) -> Self {
         Self {
             check: std::sync::Arc::new(check),
@@ -100,7 +100,7 @@ impl ExitWatch {
     }
 
     /// `None` while the server runs; once it has gone, why (for stdio: its
-    /// exit status and the last of its stderr). The same answer from then on.
+    /// exit status and the last of its stderr). `Some` from then on.
     pub fn exited(&self) -> Option<String> {
         (self.check)()
     }
@@ -191,8 +191,8 @@ struct Ended {
     stderr_done: std::sync::atomic::AtomicBool,
 }
 
-/// How long an exit waits for the stderr drain before it is reported
-/// without the last of its stderr.
+/// How long, after an exit is first seen, its answer may still change (gain
+/// the last of the server's stderr) before it is latched.
 #[cfg(feature = "native")]
 const EXIT_TAIL_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
 
@@ -332,9 +332,6 @@ impl StdioTransport {
     /// it has exited) and the last of its stderr, which is where servers say
     /// why they failed (a missing package, a missing API key, a traceback).
     async fn closed_error(&self, skipped: &str) -> McpError {
-        self.ended
-            .output_closed
-            .store(true, std::sync::atomic::Ordering::SeqCst);
         // Stdout closing can be seen before the drain has read the last of
         // stderr; give it a moment to reach the end.
         // Taken, not borrowed: a finished JoinHandle must not be polled again
@@ -349,7 +346,14 @@ impl StdioTransport {
             let mut child = self.child.lock().await;
             match tokio::time::timeout(std::time::Duration::from_millis(500), child.wait()).await {
                 Ok(Ok(status)) => format!("exited with {status}"),
-                _ => "closed its output".to_string(),
+                _ => {
+                    // Still running after the wait: a wrapper outliving the
+                    // server (the exit watch reports it as gone).
+                    self.ended
+                        .output_closed
+                        .store(true, std::sync::atomic::Ordering::SeqCst);
+                    "closed its output".to_string()
+                }
             }
         };
         let tail = stderr_suffix(&self.stderr_tail);
@@ -537,9 +541,11 @@ impl McpTransport for StdioTransport {
             self.ended.clone(),
             self.command.clone(),
         );
-        // Once answered, the same answer: (why, first seen) until the stderr
-        // tail is complete, then latched.
-        let seen = std::sync::Mutex::new(None::<(String, std::time::Instant)>);
+        // Gone is reported at once; the answer settles (the reason looked up
+        // again, the stderr tail read again) until the drain has read the
+        // tail or `EXIT_TAIL_GRACE` since first sight, then it is latched.
+        let first_seen = std::sync::Mutex::new(None::<std::time::Instant>);
+        let provisional = std::sync::Mutex::new(None::<String>);
         let latched = std::sync::Mutex::new(None::<String>);
         Some(ExitWatch::new(move || {
             use std::sync::atomic::Ordering::SeqCst;
@@ -547,40 +553,44 @@ impl McpTransport for StdioTransport {
             if let Some(why) = latched.as_ref() {
                 return Some(why.clone());
             }
-            let mut seen = seen.lock().unwrap_or_else(|p| p.into_inner());
-            if seen.is_none() {
-                let why = if ended.closed_by_host.load(SeqCst) {
-                    format!("MCP server '{command}' was closed (`close`)")
-                } else if let Some(child) = child.upgrade() {
-                    // Held only while a call reaps a server whose output
-                    // closed, or by `close`: asked again at the next poll.
-                    let mut child = child.try_lock().ok()?;
-                    match child.try_wait() {
-                        Ok(Some(status)) => format!("MCP server '{command}' exited with {status}"),
-                        Ok(None) if ended.output_closed.load(SeqCst) => format!(
+            let mut provisional = provisional.lock().unwrap_or_else(|p| p.into_inner());
+            let why = if ended.closed_by_host.load(SeqCst) {
+                Some(format!("MCP server '{command}' was closed (`close`)"))
+            } else if let Some(child) = child.upgrade() {
+                // Held only while a call reaps a server whose output closed,
+                // or by `close`: the last answer, or not known yet.
+                match child.try_lock() {
+                    Err(_) => provisional.clone(),
+                    Ok(mut child) => match child.try_wait() {
+                        Ok(Some(status)) => {
+                            Some(format!("MCP server '{command}' exited with {status}"))
+                        }
+                        Ok(None) if ended.output_closed.load(SeqCst) => Some(format!(
                             "MCP server '{command}' closed its output (its process is still running)"
-                        ),
-                        Ok(None) => return None,
-                        // Not waitable any more (`ECHILD`: SIGCHLD ignored, or
-                        // reaped elsewhere): it will not answer again either.
-                        Err(e) => format!("MCP server '{command}' has gone (exit status unknown: {e})"),
-                    }
-                } else {
-                    // Its transport was dropped, killing it.
-                    let why = format!("MCP server '{command}' was closed: its client was dropped");
-                    *latched = Some(why.clone());
-                    return Some(why);
-                };
-                *seen = Some((why, std::time::Instant::now()));
+                        )),
+                        Ok(None) => None,
+                        // Not waitable (`ECHILD`: SIGCHLD ignored, or reaped
+                        // elsewhere): it will not answer again either.
+                        Err(e) => Some(format!(
+                            "MCP server '{command}' has gone (exit status unknown: {e})"
+                        )),
+                    },
+                }
+            } else {
+                // Its transport was dropped, killing it: nothing to wait for.
+                let why = format!("MCP server '{command}' was closed: its client was dropped");
+                *latched = Some(why.clone());
+                return Some(why);
+            };
+            let why = why.map(|why| format!("{why}{}", stderr_suffix(&tail)))?;
+            *provisional = Some(why.clone());
+            let first = *first_seen
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .get_or_insert_with(std::time::Instant::now);
+            if ended.stderr_done.load(SeqCst) || first.elapsed() >= EXIT_TAIL_GRACE {
+                *latched = Some(why.clone());
             }
-            let (why, first) = seen.as_ref()?;
-            // Its last words are what tells why: wait (briefly) for the
-            // drain to read them, so the answer does not change after.
-            if !ended.stderr_done.load(SeqCst) && first.elapsed() < EXIT_TAIL_GRACE {
-                return None;
-            }
-            let why = format!("{why}{}", stderr_suffix(&tail));
-            *latched = Some(why.clone());
             Some(why)
         }))
     }

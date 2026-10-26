@@ -652,3 +652,48 @@ async fn an_agent_stops_offering_a_server_that_exits() {
         "the dead server's tools were withdrawn: {seen:?}"
     );
 }
+
+/// An exit is answered at the first poll that sees it, even while the
+/// server's stderr is still held open by a process it left behind (the text
+/// may still gain stderr): a tool source must withdraw it at once.
+#[tokio::test]
+async fn an_exit_is_answered_at_first_sight() {
+    let client = connect(
+        r#"read -r line; id=$(id_of "$line")
+echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"serverInfo\":{\"name\":\"parent\",\"version\":\"1\"}}}"
+read -r note
+sleep 3 &
+exit 6"#,
+    )
+    .await
+    .unwrap();
+    // Long enough for bash to have exited; its child keeps the pipes.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let why = client.exited().expect("seen at the first poll");
+    assert!(why.contains("exit status: 6"), "{why}");
+}
+
+/// A server that closes its output but whose process lives on (a wrapper
+/// outliving the real server) reads as gone once a call has found it so.
+#[tokio::test]
+async fn a_server_whose_output_closed_reads_as_gone() {
+    let client = connect(
+        r#"read -r line; id=$(id_of "$line")
+echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"serverInfo\":{\"name\":\"wrapper\",\"version\":\"1\"}}}"
+read -r note
+exec 1>&-
+sleep 3"#,
+    )
+    .await
+    .unwrap();
+    assert_eq!(client.exited(), None);
+    let err = client.list_tools().await.unwrap_err();
+    assert!(err.to_string().contains("closed its output"), "{err}");
+    let why = client
+        .exited()
+        .expect("gone once a call found its output closed");
+    assert!(
+        why.contains("closed its output (its process is still running)"),
+        "{why}"
+    );
+}

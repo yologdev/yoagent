@@ -215,9 +215,10 @@ if let Some(why) = client.exited() {
 ```
 
 It never waits behind a call in flight, so a host can poll it (to show a
-notice, or to restart the server — yoagent does not restart servers). The
-answer stays the same once given; its stderr part is read once the server's
-stderr has reached its end, at most half a second after the exit. It also
+notice, or to restart the server — yoagent does not restart servers). It
+answers from the first poll that sees the exit; the text settles within half
+a second of that (it gains the last of the server's stderr), then stays the
+same. It also
 reports a server whose output closed while a wrapper process lives on, and
 one that cannot be waited on. A server stopped with `close()` reads as
 "was closed", not as a crash, so a restart policy can tell the two apart.

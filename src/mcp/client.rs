@@ -195,13 +195,15 @@ impl McpClient {
 
     /// Whether the server has gone, without waiting: `None` while it runs —
     /// and always over HTTP or a custom transport without an
-    /// [`exit_watch`](McpTransport::exit_watch) — else why, the same answer
-    /// from then on. Over stdio:
+    /// [`exit_watch`](McpTransport::exit_watch) — else why, from the first
+    /// poll that sees it. Over stdio the text settles within 0.5 s of being
+    /// first seen (it gains the last of the server's stderr), then stays the
+    /// same:
     /// - `… exited with <status>` (a code, or the signal that killed it),
-    ///   then the last of its stderr — read once its stderr reached its end,
-    ///   at most 0.5 s after the exit;
+    ///   then the last of its stderr;
     /// - `… closed its output (its process is still running)`: a call found
-    ///   its output closed while a wrapper process lives on;
+    ///   its output closed, and the process still running half a second
+    ///   later (a wrapper outliving the server);
     /// - `… has gone (exit status unknown: …)`: the process cannot be waited
     ///   on (`SIGCHLD` ignored, or reaped elsewhere);
     /// - `… was closed (`close`)` after [`close`](Self::close): not a crash,
