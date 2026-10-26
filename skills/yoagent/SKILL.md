@@ -5,7 +5,7 @@ description: Use when building, extending or upgrading an agent on the yoagent R
 
 # yoagent: which feature for which job
 
-Written for **yoagent 0.25.14** (and yoagent-rutis 0.8.3); the recipes
+Written for **yoagent 0.25.15** (and yoagent-rutis 0.8.3); the recipes
 below are compiled by `tests/skill_test.rs`, line for line. Check what you
 build against: `cargo tree -p yoagent` or `Cargo.lock`. If you are on an
 older version, read [What changed](#what-changed) first.
@@ -198,6 +198,10 @@ and its examples.
 
 Newest first; the full list is `CHANGELOG.md`.
 
+- **0.25.15** — `McpClient::exited()`: whether a stdio MCP server has gone
+  (its exit status and last stderr), read without waiting behind a call, so
+  a host can poll it. `McpToolSource` withdraws an exited server's tools at
+  the next turn. `with_mcp_server_*` get neither: they keep no client.
 - **0.25.14** — a `ToolSource` can change mid-run: implement `generation()`
   (a counter that moves when its tools change) and the loop asks it again
   before the next model request, once every tool call of the turn has
