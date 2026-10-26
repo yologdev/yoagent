@@ -610,6 +610,13 @@ pub(crate) trait EventSink: Send + Sync {
     /// Must not block. Whether the event was taken: called, or queued for
     /// delivery (`false` for an event the handler did not subscribe to).
     fn send(&self, event: &AgentEvent) -> bool;
+    /// The run's `AgentEnd`, sent to a handler the run's end reached even if
+    /// its plugin has begun unloading since (`gate`): a delivery that fails
+    /// once that plugin is gone is expected, not the handler's failure.
+    fn send_last(&self, event: &AgentEvent, gate: &crate::registry::Gate) -> bool {
+        let _ = gate;
+        self.send(event)
+    }
     /// Wait (bounded by the caller) until every event sent so far was
     /// delivered. More may follow: yoagent sends `AgentEnd` after `finish`.
     fn flush(&self) -> BoxFuture<'static, ()> {

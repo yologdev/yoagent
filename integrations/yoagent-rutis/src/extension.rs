@@ -249,6 +249,7 @@ impl Extension for RutisExtension {
                         handler: h.clone(),
                         sink,
                         off: AtomicBool::new(false),
+                        got_end: AtomicBool::new(false),
                     })
             })
             .collect();
@@ -284,6 +285,11 @@ struct Observer {
     sink: Box<dyn EventSink>,
     /// Panicked once: not called again this run.
     off: AtomicBool,
+    /// The run's end reached it — its plugin was loaded when the run's
+    /// `finish` began and, with a `finish` hook, when that hook was called:
+    /// it gets the run's `AgentEnd` even if the plugin has begun unloading
+    /// since. Set by `finish` (yoagent always calls it before `AgentEnd`).
+    got_end: AtomicBool,
 }
 
 /// One run's hooks over the snapshot of handlers.
@@ -777,12 +783,27 @@ impl RunHooks for RunState {
         if !self.closed {
             crate::events::publish(&self.host, &self.run, event);
         }
+        // `AgentEnd` comes after `finish`: a handler the run's end reached
+        // gets it even if its plugin has begun unloading since, so the run's
+        // end is not lost to the race (#374).
+        let last = matches!(event, AgentEvent::AgentEnd { .. });
         for observer in &self.events {
-            if observer.off.load(Ordering::Relaxed) || !observer.handler.gate.is_available() {
+            let live = if last {
+                observer.got_end.load(Ordering::Relaxed)
+            } else {
+                observer.handler.gate.is_available()
+            };
+            if observer.off.load(Ordering::Relaxed) || !live {
                 continue;
             }
             let timer = observer.handler.time("on_event");
-            let sent = std::panic::catch_unwind(AssertUnwindSafe(|| observer.sink.send(event)));
+            let sent = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                if last {
+                    observer.sink.send_last(event, &observer.handler.gate)
+                } else {
+                    observer.sink.send(event)
+                }
+            }));
             let failed = match sent {
                 // A Rust handler panicked.
                 Err(payload) => {
@@ -812,6 +833,14 @@ impl RunHooks for RunState {
 
     async fn finish(&mut self, outcome: &RunOutcome) {
         let this = &*self;
+        // Whom the run's `AgentEnd`, sent after this, goes to (see
+        // `on_event`): for now every handler whose plugin is loaded, refined
+        // below for those with a `finish` hook. Stored first, so it holds
+        // if yoagent drops this future (it bounds `finish`).
+        for observer in &this.events {
+            let live = observer.handler.gate.is_available();
+            observer.got_end.store(live, Ordering::Relaxed);
+        }
         // Every event sent so far reaches its handler before `finish` does.
         let closing = this.events.iter().map(|o| async move {
             let flush = o.sink.flush();
@@ -842,6 +871,14 @@ impl RunHooks for RunState {
             }
         }
         let finishing = this.with(|h| h.hooks.finish).map(|h| async move {
+            // Sent to a loaded plugin, it learns that the run ended — even if
+            // the call fails or the plugin unloads during it.
+            let dispatched = h.gate.is_available();
+            for observer in this.events.iter() {
+                if Arc::ptr_eq(&observer.handler.handler, &h.handler) {
+                    observer.got_end.store(dispatched, Ordering::Relaxed);
+                }
+            }
             let done = call(
                 h,
                 "finish",

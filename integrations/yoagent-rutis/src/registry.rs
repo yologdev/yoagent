@@ -22,7 +22,10 @@
 //! - its `before_tool` denies every call, its `on_input` rejects, its
 //!   `after_tool` withholds the result (fail closed — but an unload is not a
 //!   failure, so a [`required`](crate::RutisExtension::required) run goes on);
-//! - its `before_model`, `on_stop`, `on_event` and `finish` are skipped.
+//! - its `before_model`, `on_stop`, `on_event` and `finish` are skipped —
+//!   except the run's `AgentEnd` (yoagent sends it after `finish`), which
+//!   still goes to a handler the run's `finish` reached before its plugin
+//!   began unloading.
 //!
 //! The same holds for a restart or config update: the run keeps the old
 //! generation's handler and gets those errors; the new generation's handler

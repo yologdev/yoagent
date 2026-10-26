@@ -903,7 +903,9 @@ fn outcome_json(outcome: &RunOutcome, run: &RunInfo) -> Json {
 
 /// What the delivery task of one run and handler receives.
 enum Delivery {
-    Event(Json),
+    /// An event; for the run's `AgentEnd`, its handler's gate (see
+    /// [`EventSink::send_last`]).
+    Event(Json, Option<crate::registry::Gate>),
     /// Acknowledge once every event queued before it was delivered.
     Flush(tokio::sync::oneshot::Sender<()>),
 }
@@ -997,8 +999,8 @@ impl RemoteEvents {
         tokio::spawn(async move {
             let name = task_name;
             while let Some(delivery) = rx.recv().await {
-                let event = match delivery {
-                    Delivery::Event(event) => event,
+                let (event, last) = match delivery {
+                    Delivery::Event(event, gate) => (event, gate),
                     Delivery::Flush(done) => {
                         let _ = done.send(());
                         continue;
@@ -1019,6 +1021,12 @@ impl RemoteEvents {
                 };
                 let why = match outcome {
                     Ok(Ok(_)) => continue,
+                    // The run's `AgentEnd` to a plugin that has unloaded
+                    // since its `finish`: expected, not a failure.
+                    Ok(Err(error)) if last.as_ref().is_some_and(|g| !g.is_available()) => {
+                        tracing::debug!(run_id = %run_id, "plugin handler `{name}`: its plugin unloaded before the run's AgentEnd reached it: {error}");
+                        continue;
+                    }
                     Ok(Err(error)) => format!(
                         "plugin handler `{name}` failed in `on_event`: {error} (not called again this run)"
                     ),
@@ -1051,8 +1059,8 @@ impl RemoteEvents {
     }
 }
 
-impl EventSink for RemoteEvents {
-    fn send(&self, event: &AgentEvent) -> bool {
+impl RemoteEvents {
+    fn queue(&self, event: &AgentEvent, last: Option<crate::registry::Gate>) -> bool {
         if self.failure().is_some() {
             return false;
         }
@@ -1065,7 +1073,7 @@ impl EventSink for RemoteEvents {
             fields.insert("run".into(), Json::Object(run));
         }
         use tokio::sync::mpsc::error::TrySendError;
-        match self.tx.try_send(Delivery::Event(json)) {
+        match self.tx.try_send(Delivery::Event(json, last)) {
             Ok(()) => true,
             Err(TrySendError::Full(_)) => {
                 record_failure(
@@ -1082,6 +1090,16 @@ impl EventSink for RemoteEvents {
                 false
             }
         }
+    }
+}
+
+impl EventSink for RemoteEvents {
+    fn send(&self, event: &AgentEvent) -> bool {
+        self.queue(event, None)
+    }
+
+    fn send_last(&self, event: &AgentEvent, gate: &crate::registry::Gate) -> bool {
+        self.queue(event, Some(gate.clone()))
     }
 
     fn failure(&self) -> Option<String> {
