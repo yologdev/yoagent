@@ -4,7 +4,9 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased (yoagent-rutis)
+## yoagent-rutis 0.8.3 (2026-10-26)
+
+yoagent-rutis only; requires yoagent 0.25, rutis 0.12 and Rust 1.88, as 0.8.2. A fix; no API change.
 
 - **pi: a run's `agent_end` survives the plugins unloading right after the run** (#374). The bridge delivers `agentEnd` after the run's `finish`, so it could arrive after unloading began; the pi adapter, already closed, dropped it, and a tracer saw `session_shutdown` without the run's end. Now:
   - **Bridge:** a run's `AgentEnd` goes to every handler the run's end reached — its plugin was loaded when the run's `finish` began and, with a `finish` hook, when that hook was called (even if the call failed or the plugin unloaded during it) — even if the plugin has begun unloading since; a plugin unloaded before that gets nothing, as before. A delivery that fails because the plugin has gone since is logged at debug, not as the handler's failure.
