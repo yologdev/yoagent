@@ -66,6 +66,11 @@ async fn around_load(reports: bool) -> (bool, [(u64, Vec<String>); 2]) {
         ..Server::default()
     }));
     let reported = client.reports_notifications();
+    assert_eq!(
+        client.exited(),
+        None,
+        "a custom transport has no exit watch"
+    );
     let source = McpToolSource::new(client);
     let snapshot = |tools: Vec<Arc<dyn AgentTool>>| -> Vec<String> {
         tools.iter().map(|t| t.name().to_string()).collect()
@@ -98,4 +103,40 @@ async fn a_custom_transport_by_default_reports_nothing() {
     // so a run never asks it again mid-run.
     assert_eq!(before.0, 0);
     assert_eq!(after.0, 0);
+}
+
+/// A custom transport with an exit watch: once it says the server went, the
+/// client says so and the source withdraws its tools (generation + 1).
+#[tokio::test]
+async fn a_custom_exit_watch_withdraws_the_tools() {
+    use yoagent::mcp::ExitWatch;
+    struct Gone(Server, Arc<AtomicBool>);
+    #[async_trait::async_trait]
+    impl McpTransport for Gone {
+        async fn send(&self, request: JsonRpcRequest) -> Result<JsonRpcResponse, McpError> {
+            self.0.send(request).await
+        }
+        async fn close(&self) -> Result<(), McpError> {
+            Ok(())
+        }
+        fn exit_watch(&self) -> Option<ExitWatch> {
+            let gone = self.1.clone();
+            Some(ExitWatch::new(move || {
+                gone.load(Ordering::SeqCst).then(|| "gone".to_string())
+            }))
+        }
+    }
+    let gone = Arc::new(AtomicBool::new(false));
+    let client = McpClient::from_transport(Box::new(Gone(Server::default(), gone.clone())));
+    assert_eq!(client.exited(), None);
+    let source = McpToolSource::new(client);
+    assert_eq!(source.tools().await.len(), 1);
+    assert_eq!(source.generation(), 0);
+    gone.store(true, Ordering::SeqCst);
+    assert_eq!(source.generation(), 1);
+    assert!(source.tools().await.is_empty());
+    assert_eq!(
+        source.client().lock().await.exited().as_deref(),
+        Some("gone")
+    );
 }

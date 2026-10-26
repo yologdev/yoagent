@@ -2,7 +2,7 @@
 
 #[cfg(feature = "native")]
 use super::transport::StdioTransport;
-use super::transport::{HttpTransport, McpTransport, ServerNotifications};
+use super::transport::{ExitWatch, HttpTransport, McpTransport, ServerNotifications};
 use super::types::*;
 #[cfg(feature = "native")]
 use std::collections::HashMap;
@@ -23,6 +23,8 @@ pub struct McpClient {
     notifications: ServerNotifications,
     /// Whether the transport reports them at all.
     reports_notifications: bool,
+    /// Tells that the server has gone, without the transport's lock.
+    exit: Option<ExitWatch>,
 }
 
 impl McpClient {
@@ -31,6 +33,7 @@ impl McpClient {
     fn build(mut transport: Box<dyn McpTransport>, call_timeout: Option<Duration>) -> Self {
         let notifications = ServerNotifications::new();
         let reports_notifications = transport.report_notifications(notifications.clone());
+        let exit = transport.exit_watch();
         Self {
             transport: Arc::new(Mutex::new(transport)),
             server_info: None,
@@ -38,6 +41,7 @@ impl McpClient {
             call_timeout,
             notifications,
             reports_notifications,
+            exit,
         }
     }
 
@@ -187,6 +191,32 @@ impl McpClient {
     /// then never seen.
     pub fn reports_notifications(&self) -> bool {
         self.reports_notifications
+    }
+
+    /// Whether the server has gone, without waiting: `None` while it runs —
+    /// and always over HTTP or a custom transport without an
+    /// [`exit_watch`](McpTransport::exit_watch) — else why, from the first
+    /// poll that sees it. Over stdio the text settles within 0.5 s of being
+    /// first seen (it gains the last of the server's stderr), then stays the
+    /// same:
+    /// - `… exited with <status>` (a code, or the signal that killed it),
+    ///   then the last of its stderr;
+    /// - `… closed its output (its process is still running)`: a call found
+    ///   its output closed, and the process still running half a second
+    ///   later (a wrapper outliving the server);
+    /// - `… has gone (exit status unknown: …)`: the process cannot be waited
+    ///   on (`SIGCHLD` ignored, or reaped elsewhere);
+    /// - `… was closed (`close`)` after [`close`](Self::close): not a crash,
+    ///   so a host that restarts crashed servers can tell.
+    ///
+    /// It never waits behind a call in flight, so a host can poll it — to
+    /// tell its user a server stopped between calls, or to restart it.
+    pub fn exited(&self) -> Option<String> {
+        self.exit.as_ref()?.exited()
+    }
+
+    pub(crate) fn exit_watch(&self) -> Option<ExitWatch> {
+        self.exit.clone()
     }
 
     pub(crate) fn notifications(&self) -> ServerNotifications {

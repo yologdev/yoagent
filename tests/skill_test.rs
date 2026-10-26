@@ -286,6 +286,7 @@ fn prose_names() {
     let _ = |a: Agent, s: std::sync::Arc<dyn yoagent::ToolSource>| a.with_tool_source(s);
     let _ = |s: &dyn yoagent::ToolSource| s.generation();
     let _ = |c: yoagent::mcp::McpClient| yoagent::mcp::McpToolSource::new(c).with_prefix("docs");
+    let _ = |c: &yoagent::mcp::McpClient| -> Option<String> { c.exited() };
     #[cfg(feature = "native")]
     let _ = Agent::with_mcp_server_stdio;
     let _ = Agent::with_mcp_server_http;

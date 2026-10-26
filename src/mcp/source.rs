@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use super::{McpClient, McpToolAdapter, ServerNotifications};
+use super::{ExitWatch, McpClient, McpToolAdapter, ServerNotifications};
 use crate::tool_source::ToolSource;
 use crate::types::AgentTool;
 
@@ -35,6 +35,13 @@ use crate::types::AgentTool;
 ///   [`McpTransport::report_notifications`](crate::mcp::McpTransport::report_notifications);
 ///   otherwise the source logs it when built and lists once per run.
 ///
+/// **A server that exits.** Over stdio, a server that exits on its own —
+/// a crash, between calls or during one — is seen at the next turn: its
+/// tools are withdrawn (the source gives none from then on, logged once),
+/// so the model stops calling a dead server. Restarting it is the host's
+/// job ([`McpClient::exited`] tells why it went); a new client needs a new
+/// source. Over HTTP there is no process to watch.
+///
 /// **Failures.** The listing is bounded by the client's
 /// [`call_timeout`](McpClient::call_timeout) — five minutes over stdio; over
 /// HTTP by the transport's idle read timeout instead; a custom transport's
@@ -58,6 +65,9 @@ use crate::types::AgentTool;
 pub struct McpToolSource {
     client: Arc<Mutex<McpClient>>,
     notifications: ServerNotifications,
+    exit: Option<ExitWatch>,
+    /// The exit was logged (once).
+    exit_logged: std::sync::atomic::AtomicBool,
     prefix: Option<String>,
     /// The last list that succeeded, kept when a later listing fails.
     last: std::sync::Mutex<Vec<Arc<dyn AgentTool>>>,
@@ -78,9 +88,12 @@ impl McpToolSource {
             );
         }
         let notifications = client.notifications();
+        let exit = client.exit_watch();
         Self {
             client: Arc::new(Mutex::new(client)),
             notifications,
+            exit,
+            exit_logged: std::sync::atomic::AtomicBool::new(false),
             prefix: None,
             last: std::sync::Mutex::new(Vec::new()),
         }
@@ -91,6 +104,11 @@ impl McpToolSource {
     pub fn with_prefix(mut self, prefix: impl Into<String>) -> Self {
         self.prefix = Some(prefix.into());
         self
+    }
+
+    /// Why the server has gone, if it has (see [`McpClient::exited`]).
+    fn exited(&self) -> Option<String> {
+        self.exit.as_ref()?.exited()
     }
 
     /// The client, shared with the tools this source gives. Use it to call
@@ -106,6 +124,28 @@ impl McpToolSource {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl ToolSource for McpToolSource {
     async fn tools(&self) -> Vec<Arc<dyn AgentTool>> {
+        if let Some(why) = self.exited() {
+            if !self
+                .exit_logged
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                // Which server: the command alone is often `npx` or `uvx`.
+                let server = self
+                    .client
+                    .lock()
+                    .await
+                    .server_info()
+                    .map(|info| info.name.clone());
+                tracing::warn!(
+                    server = server.as_deref().unwrap_or("?"),
+                    prefix = self.prefix.as_deref().unwrap_or(""),
+                    "MCP tool source: the server has gone; its tools are withdrawn: {why}"
+                );
+            }
+            // Not the last good list: its tools would only fail.
+            self.last.lock().unwrap_or_else(|p| p.into_inner()).clear();
+            return Vec::new();
+        }
         let (listed, timeout) = {
             let client = self.client.lock().await;
             let timeout = client.call_timeout();
@@ -149,7 +189,9 @@ impl ToolSource for McpToolSource {
         tools
     }
 
+    /// The server's `notifications/tools/list_changed` so far, plus one
+    /// once it has exited (its tools are then withdrawn).
     fn generation(&self) -> u64 {
-        self.notifications.tools_list_changed()
+        self.notifications.tools_list_changed() + u64::from(self.exited().is_some())
     }
 }
