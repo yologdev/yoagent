@@ -5,7 +5,7 @@ description: Use when building, extending or upgrading an agent on the yoagent R
 
 # yoagent: which feature for which job
 
-Written for **yoagent 0.25.15** (and yoagent-rutis 0.9.0); the recipes
+Written for **yoagent 0.25.16** (and yoagent-rutis 0.9.0); the recipes
 below are compiled by `tests/skill_test.rs`, line for line. Check what you
 build against: `cargo tree -p yoagent` or `Cargo.lock`. If you are on an
 older version, read [What changed](#what-changed) first.
@@ -198,6 +198,11 @@ and its examples.
 
 Newest first; the full list is `CHANGELOG.md`.
 
+- **0.25.16** — MCP stdio: `McpClient::connect_stdio_with(.., StdioOptions::new()
+  .own_process_group(true))` (Unix) keeps a host terminal's Ctrl+C from the
+  server and kills what it started (`npx` → `node`) on close/drop — catch
+  Ctrl+C and drop your clients. A server that stops reading its input reads
+  as gone (`exited()`).
 - **0.25.15** — `McpClient::exited()`: whether a stdio MCP server has gone
   (its exit status and last stderr), read without waiting behind a call, so
   a host can poll it. `McpToolSource` withdraws an exited server's tools at
