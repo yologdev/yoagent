@@ -217,10 +217,14 @@ impl McpClient {
     /// - `… closed its output (its process is still running)`: a call found
     ///   its output closed, and the process still running half a second
     ///   later (a wrapper outliving the server);
+    /// - `… no longer reads its input (its process is still running)`: a
+    ///   write to its input failed (it closed its stdin);
     /// - `… has gone (exit status unknown: …)`: the process cannot be waited
     ///   on (`SIGCHLD` ignored, or reaped elsewhere);
     /// - `… was closed (`close`)` after [`close`](Self::close): not a crash,
-    ///   so a host that restarts crashed servers can tell.
+    ///   so a host that restarts crashed servers can tell;
+    /// - `… was closed: its client was dropped`, for a watch kept past its
+    ///   client.
     ///
     /// It never waits behind a call in flight, so a host can poll it — to
     /// tell its user a server stopped between calls, or to restart it.

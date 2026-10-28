@@ -76,9 +76,11 @@ How the stdio transport behaves:
   server runs in a process group of its own:
   `McpClient::connect_stdio_with(command, args, env, StdioOptions::new().own_process_group(true))`
   (Unix). Then `close()` and drop kill the whole group, and a Ctrl+C in the
-  host's terminal no longer reaches the server; but a host that dies without
-  dropping its clients leaves it running, and a wrapper that already exited on
-  its own leaves what it started.
+  host's terminal no longer reaches the server. But when the host exits without
+  dropping its clients (killed, an uncaught Ctrl+C, `process::exit`), whatever
+  ignores its closed input keeps running — a terminal host should catch Ctrl+C
+  and drop its clients — and a wrapper that already exited on its own leaves
+  what it started.
 
 ### HTTP Transport
 

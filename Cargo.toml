@@ -188,8 +188,9 @@ inherits = "test"
 debug = false
 opt-level = 1
 
-# `BashTool` kills a command's whole process group on timeout or cancel
-# (`killpg`). Already in the tree through tokio.
+# `BashTool` (on timeout or cancel) and `StdioTransport` (with
+# `own_process_group`) kill a whole process group (`killpg`). Already in the
+# tree through tokio.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
