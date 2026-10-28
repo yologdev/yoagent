@@ -4,7 +4,9 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.25.16 (2026-10-28)
+
+Additive.
 
 - **MCP stdio: a process group of its own, as an option** (asked for by yobuild). `StdioOptions::new().own_process_group(true)` with `StdioTransport::with_options` / `McpClient::connect_stdio_with` (Unix): a Ctrl+C in the host's terminal no longer reaches the server, and `close()` and dropping the client kill the whole group — what the server started (`npx` → `node`, `uvx` → `python`) goes with it, where by default only the command is killed and a child that ignores its closed input lives on. The costs: when the host exits without dropping its clients (killed, an uncaught Ctrl+C, `process::exit`, an abort), whatever in the group ignores its closed input keeps running — catch Ctrl+C and drop or close the clients; and the group is killed only while the command itself is still the transport's — running, or exited and not yet collected (`waitid` with `WNOWAIT` asks without collecting), so its id is safe to signal; a wrapper already collected (by a call or `exited()`) leaves what it started. Default unchanged.
 - **MCP stdio: a server that no longer reads its input reads as gone.** A failed write to it marks it, so `McpClient::exited()` answers "… no longer reads its input (its process is still running)" and an `McpToolSource` withdraws its tools.
