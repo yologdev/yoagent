@@ -311,6 +311,72 @@ sits inside every run of every agent using the extension:
 The end-to-end tests cover local Node and Python runtimes; a remote node over
 `wss` is not tested here.
 
+### Restricted runtimes: tools only
+
+For plugins trusted with their tools and nothing else — a package found on npm
+and allowed for one session, say — mark their runtime **restricted** before it
+starts:
+
+```rust,ignore
+let runtime = LocalRuntime::node(runtime_dir, anchor);
+bridge.restrict_runtime(runtime.handle());
+root.plugin(runtime);
+```
+
+Every handler registered over that runtime's connections — from any row, after
+a restart — then gets only:
+
+- `tools` and its tool calls;
+- `before_tool` for calls to **its own** tools: called inside the tool as it
+  runs, after every policy passed the call, under the tool's own name and with
+  the call alone (no request text, no conversation). It can deny or adjust its
+  own call; it never sees another plugin's or the agent's calls — a tool that
+  only shares a name with one of its own included — and it is no policy for
+  `require_policy`;
+- `finish`.
+
+Never `after_tool`, `before_model`, `on_input`, `on_stop` or `on_event`, and
+never the conversation. `HandlerInfo::restricted()` says which handlers are;
+their `hooks()` are the ones they get. A failing `tools` offers nothing and
+never fails the run, even a `required()` one.
+
+Their tools are offered as `<handler>__<tool>`, after every trusted handler's
+(a clash drops the restricted tool). The host names them — or leaves some out —
+with `RutisExtension::with_restricted_tools(|handler, tool| …)`; the plugin is
+still called with its own name (`ToolOwner::plugin_name()`). Keep host names
+apart from the agent's own tools: those win a clash, and `offered_by` still
+reads a clashing name as the plugin's.
+
+A trusted plugin registering a handler name a restricted one holds evicts the
+restricted handler; a restricted one is refused a trusted one's name. Static
+tool names need to be unique among trusted plugins only.
+
+**Mid-run.** A run works with the handlers registered when it started. A
+restricted handler that registers while one of the extension's own runs is
+going can join it, with `RutisExtension::late_tools()`: a yoagent `ToolSource`
+installed on the same agent, offering the late handler's tools from the run's
+next turn; the run calls its `before_tool` (own tools) and `finish`. A late
+tool never takes a name the run's requests already offered — the agent's,
+its sources' or any extension's tools (as a tool source it would win over an
+extension's tool).
+
+```rust,ignore
+let extension = bridge
+    .extension()
+    .with_restricted_tools(|handler, tool| Some(format!("{handler}__{tool}")));
+let late = extension.late_tools();
+let agent = agent.with_extension(extension).with_tool_source(late);
+```
+
+One extension per agent: while two of its own runs go at once, a late handler
+waits for the next run (logged once per overlap). Handlers with other hooks
+always wait for the next run. Install `late_tools()` after the agent's other
+tool sources: on a name clash the earlier source wins.
+
+Services a restricted runtime's rows *provide* are published like any row's
+(rutis-loader); restricting what they provide is rutis's to do, not the
+bridge's.
+
 ## Tools from other agent ecosystems
 
 The adapters below ship in the crate (`plugins/pi`, `plugins/dsh`,

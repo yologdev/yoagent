@@ -110,6 +110,10 @@ name = "pi_test"
 required-features = ["node"]
 
 [[test]]
+name = "restricted_test"
+required-features = ["node"]
+
+[[test]]
 name = "plugin_log_test"
 required-features = ["node"]
 

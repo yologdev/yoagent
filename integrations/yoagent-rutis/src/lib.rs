@@ -167,6 +167,7 @@ mod host;
     )))
 )]
 pub mod languages;
+mod late;
 pub mod plugin;
 #[cfg(feature = "probe")]
 #[cfg_attr(docsrs, doc(cfg(feature = "probe")))]
@@ -182,6 +183,7 @@ pub use extension::{
     RutisExtension, DEFAULT_INPUT_TIMEOUT, DEFAULT_POLICY_TIMEOUT, DEFAULT_TURN_TIMEOUT,
 };
 pub use handler::{Handler, Input, RunInfo, Stop, ToolCall, Turn};
+pub use late::LateTools;
 pub use plugin::{AgentPlugin, PluginCtxExt};
 pub use registry::{HandlerInfo, HookTiming, Registry, ToolOwner};
 

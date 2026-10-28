@@ -71,7 +71,8 @@ use crate::handler::{
     join_notes, llm_messages, EventSink, Input, Messages, Offer, RunInfo, Stop, ToolCall, Turn,
 };
 use crate::host::{Host, NOT_RUNNING};
-use crate::registry::{LiveTool, Outcome, Registered, Registry, ToolOwner};
+use crate::late::{Late, LateRun, LateTools};
+use crate::registry::{Outcome, Registered, Registry, ToolOwner};
 
 /// Default bound on one handler's `before_tool`, `after_tool` and `on_stop`
 /// call (the tool call is denied / the result withheld / the handler skipped
@@ -103,13 +104,15 @@ pub struct RutisExtension {
     rechecks_modified_calls: bool,
     require_policy: bool,
     timeouts: Timeouts,
+    /// Shared with this extension's [`LateTools`] (and its clones).
+    late: Arc<Late>,
 }
 
 #[derive(Clone, Copy)]
-struct Timeouts {
-    policy: Option<Duration>,
-    input: Option<Duration>,
-    turn: Option<Duration>,
+pub(crate) struct Timeouts {
+    pub(crate) policy: Option<Duration>,
+    pub(crate) input: Option<Duration>,
+    pub(crate) turn: Option<Duration>,
 }
 
 impl RutisExtension {
@@ -127,6 +130,42 @@ impl RutisExtension {
                 input: Some(DEFAULT_INPUT_TIMEOUT),
                 turn: Some(DEFAULT_TURN_TIMEOUT),
             },
+            late: Arc::default(),
+        }
+    }
+
+    /// Name — or leave out — the tools of **restricted** handlers (see the
+    /// [`registry`](crate::registry) docs): `name(handler, tool)` gives the
+    /// name to offer `tool` of the handler named `handler` under, or `None`
+    /// to leave it out (without this: `<handler>__<tool>`). The plugin is
+    /// still called with its own name. For a host that offers only the
+    /// tools its user approved, or names them its way — apart from the
+    /// agent's own and its sources' tools, which win a clash. Applies to
+    /// [`late_tools`](Self::late_tools) too. Other handlers' tools keep
+    /// their names.
+    pub fn with_restricted_tools(
+        self,
+        name: impl Fn(&str, &str) -> Option<String> + Send + Sync + 'static,
+    ) -> Self {
+        *self.late.names.lock().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(name));
+        self
+    }
+
+    /// A yoagent `ToolSource` offering the tools of restricted handlers that
+    /// register while one of this extension's runs is going, from the run's
+    /// next turn: see [`LateTools`]. Install it on the agent this extension
+    /// is installed on.
+    pub fn late_tools(&self) -> LateTools {
+        if !self
+            .late
+            .watched
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.registry.watch_late(&self.late);
+        }
+        LateTools {
+            late: self.late.clone(),
+            registry: self.registry.clone(),
         }
     }
 
@@ -233,12 +272,21 @@ impl Extension for RutisExtension {
     async fn start_run(&self, run: &RunContext<'_>) -> Result<Box<dyn RunHooks>, ExtensionError> {
         let info = RunInfo::from_context(run);
         let closed = self.host.is_closed();
+        // Tracked before the snapshot: a restricted handler registering in
+        // between is in the snapshot or pending, never in neither.
+        let late = self
+            .late
+            .started(&info, run.inherited, self.timeouts)
+            .map(|run| (self.late.clone(), run));
         let handlers = if closed {
             tracing::warn!(run_id = %info.run_id, "{NOT_RUNNING}: tool calls are denied and input rejected");
             Vec::new()
         } else {
             self.registry.snapshot()
         };
+        if let Some((_, run)) = &late {
+            run.snapshot(&handlers);
+        }
         let events = handlers
             .iter()
             .filter(|h| h.hooks.on_event)
@@ -253,7 +301,12 @@ impl Extension for RutisExtension {
                     })
             })
             .collect();
-        let unjudged = self.require_policy && !handlers.iter().any(|h| h.hooks.before_tool);
+        // A restricted handler's `before_tool` judges only its own tools: not
+        // a policy.
+        let unjudged = self.require_policy
+            && !handlers
+                .iter()
+                .any(|h| h.hooks.before_tool && !h.restricted);
         Ok(Box::new(RunState {
             registry: self.registry.clone(),
             offered: Arc::default(),
@@ -264,8 +317,15 @@ impl Extension for RutisExtension {
             closed,
             unjudged,
             timeouts: self.timeouts,
+            names: self
+                .late
+                .names
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
             handlers,
             events,
+            late,
             failure: Mutex::new(None),
         }))
     }
@@ -273,8 +333,12 @@ impl Extension for RutisExtension {
 
 impl Drop for RunState {
     fn drop(&mut self) {
-        if self.recorded {
+        // Late tools record offers for the run too.
+        if self.recorded || self.late.is_some() {
             self.registry.forget_offers(&self.run.run_id);
+        }
+        if let Some((late, _)) = &self.late {
+            late.ended(&self.run.run_id);
         }
     }
 }
@@ -306,8 +370,13 @@ struct RunState {
     closed: bool,
     unjudged: bool,
     timeouts: Timeouts,
+    /// The host's naming of restricted handlers' tools.
+    names: Option<crate::late::Names>,
     handlers: Vec<Registered>,
     events: Vec<Observer>,
+    /// The run as late (restricted) handlers join it, when it is the
+    /// extension's own and late tools are in use.
+    late: Option<(Arc<Late>, Arc<LateRun>)>,
     /// A required failure not yet handed to yoagent: one in `before_model` /
     /// `on_stop` (returned as `Fail` right away), or one in `tools` /
     /// `on_event`, which have no way to fail the run themselves. While it is
@@ -317,7 +386,7 @@ struct RunState {
 }
 
 /// Why a handler's hook gave no answer.
-enum Missed {
+pub(crate) enum Missed {
     /// Its plugin unloaded before the call, or during it.
     Unavailable(String),
     /// It errored, panicked or timed out.
@@ -325,7 +394,7 @@ enum Missed {
 }
 
 impl Missed {
-    fn reason(&self) -> &str {
+    pub(crate) fn reason(&self) -> &str {
         match self {
             Missed::Unavailable(r) | Missed::Failed(r) => r,
         }
@@ -343,7 +412,7 @@ fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
 
 /// Call one handler's hook: unavailable if its plugin is gone, contained if
 /// it panics, abandoned past `limit` or when its plugin unloads mid-call.
-async fn call<T>(
+pub(crate) async fn call<T>(
     h: &Registered,
     hook: &'static str,
     limit: Option<Duration>,
@@ -436,6 +505,22 @@ impl RunState {
         }
     }
 
+    /// Which handler offered the run `tool`: at its start, or late.
+    fn owner_of(&self, tool: &str) -> Option<ToolOwner> {
+        self.offered
+            .get(tool)
+            .cloned()
+            .or_else(|| self.late.as_ref().and_then(|(_, late)| late.offered(tool)))
+    }
+
+    /// The restricted handlers that joined the run late.
+    fn joined(&self) -> Vec<Registered> {
+        self.late
+            .as_ref()
+            .map(|(_, late)| late.joined())
+            .unwrap_or_default()
+    }
+
     /// The pending required failure, without taking it.
     fn pending(&self) -> Option<String> {
         self.check_sinks();
@@ -503,41 +588,25 @@ impl RunHooks for RunState {
     async fn tools(&mut self, _run: &RunContext<'_>) -> Vec<Arc<dyn AgentTool>> {
         let mut tools: Vec<Arc<dyn AgentTool>> = Vec::new();
         let mut offered = HashMap::new();
-        let mut offer = |tool: Arc<dyn AgentTool>,
-                         source: Option<String>,
-                         h: &Registered,
-                         tools: &mut Vec<_>| {
-            if !offered.contains_key(tool.name()) {
-                offered.insert(
-                    tool.name().to_string(),
-                    ToolOwner {
-                        handler: h.name.to_string(),
-                        owner: h.owner.to_string(),
-                        source,
-                    },
-                );
-                tools.push(Arc::new(LiveTool {
-                    inner: tool,
-                    gate: h.gate.clone(),
-                    handler: h.clone(),
-                }) as Arc<dyn AgentTool>);
-            } else {
-                tracing::warn!(
-                    run_id = %self.run.run_id,
-                    tool = tool.name(),
-                    handler = %h.name,
-                    "a plugin tool's name is taken by an earlier handler's tool; dropped for this run"
-                );
-            }
-        };
-        for h in &self.handlers {
+        // Restricted handlers last: their tools never take a name a trusted
+        // handler's tool has.
+        let order: Vec<&Registered> = self
+            .handlers
+            .iter()
+            .filter(|h| !h.restricted)
+            .chain(self.handlers.iter().filter(|h| h.restricted))
+            .collect();
+        for h in order {
             if !h.gate.is_available() {
                 tracing::debug!(run_id = %self.run.run_id, handler = %h.name, "its plugin unloaded; offering none of its tools");
                 continue;
             }
-            for tool in h.handler.static_tools() {
-                offer(tool, None, h, &mut tools);
-            }
+            let mut offers: Vec<Offer> = h
+                .handler
+                .static_tools()
+                .into_iter()
+                .map(|tool| Offer { tool, source: None })
+                .collect();
             if h.hooks.tools {
                 match call(
                     h,
@@ -547,18 +616,51 @@ impl RunHooks for RunState {
                 )
                 .await
                 {
-                    Ok(dynamic) => {
-                        for Offer { tool, source } in dynamic {
-                            offer(tool, source, h, &mut tools);
-                        }
+                    Ok(dynamic) => offers.extend(dynamic),
+                    // A restricted handler offers nothing then; it never
+                    // fails the run (tools only).
+                    Err(missed) if h.restricted => {
+                        tracing::warn!(run_id = %self.run.run_id, handler = %h.name, "a restricted handler's tools: {}; none offered", missed.reason())
                     }
                     // Not raised as a panic: recorded, and handed to yoagent
                     // at the next decision point (`before_model` comes next).
                     Err(missed) => self.skipped(&missed),
                 }
             }
+            for Offer { tool, source } in offers {
+                let own = tool.name().to_string();
+                let Some(name) = crate::late::offered_name(&self.names, h, &own) else {
+                    tracing::debug!(run_id = %self.run.run_id, handler = %h.name, tool = %own, "left out by the host");
+                    continue;
+                };
+                if offered.contains_key(&name) {
+                    tracing::warn!(
+                        run_id = %self.run.run_id,
+                        tool = %name,
+                        handler = %h.name,
+                        "a plugin tool's name is taken by an earlier handler's tool; dropped for this run"
+                    );
+                    continue;
+                }
+                let (owner, tool) = crate::late::live(
+                    h,
+                    tool,
+                    source,
+                    name.clone(),
+                    &self.run,
+                    self.timeouts.policy,
+                );
+                offered.insert(name, owner);
+                tools.push(tool);
+            }
         }
         (self.offered, self.recorded) = self.registry.record_offers(&self.run.run_id, offered);
+        if let Some((_, late)) = &self.late {
+            late.taken
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend(self.offered.keys().cloned());
+        }
         tools
     }
 
@@ -592,6 +694,15 @@ impl RunHooks for RunState {
     }
 
     async fn before_model(&mut self, turn: &TurnContext<'_>) -> TurnDecision {
+        // Every tool the request offers — the agent's, its sources', every
+        // extension's: a late tool may not take one of their names (as a
+        // tool source it would win over an extension's tool).
+        if let Some((_, late)) = &self.late {
+            late.taken
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend(turn.tools.iter().map(|t| t.name.clone()));
+        }
         if let Some(why) = self.take_failure() {
             return TurnDecision::Fail(why);
         }
@@ -641,12 +752,17 @@ impl RunHooks for RunState {
             tracing::warn!(run_id = %self.run.run_id, tool = request.tool_name, "{UNJUDGED}; denying (require_policy)");
             return ToolDecision::Deny(UNJUDGED.into());
         }
-        let handlers: Vec<&Registered> = self.with(|h| h.hooks.before_tool).collect();
+        // A restricted handler judges its own tool's calls inside the tool
+        // (see `LiveTool`), never here: here it could be handed a call of a
+        // tool that only shares a name with one of its own.
+        let handlers: Vec<&Registered> = self
+            .with(|h| h.hooks.before_tool && !h.restricted)
+            .collect();
         let mut event = ToolCall::from_request(
             request,
             &self.run,
             wants_messages(&handlers),
-            self.offered.get(request.tool_name).cloned(),
+            self.owner_of(request.tool_name),
         );
         for h in handlers {
             let decision = call(
@@ -682,12 +798,8 @@ impl RunHooks for RunState {
         if let Some(why) = self.pending() {
             return Err(ExtensionError::new(why));
         }
-        let event = ToolCall::from_request(
-            request,
-            &self.run,
-            false,
-            self.offered.get(request.tool_name).cloned(),
-        );
+        let event =
+            ToolCall::from_request(request, &self.run, false, self.owner_of(request.tool_name));
         for h in self.with(|h| h.hooks.after_tool) {
             let edited = call(
                 h,
@@ -870,7 +982,11 @@ impl RunHooks for RunState {
                 tracing::error!(run_id = %this.run.run_id, "a required plugin handler failed with no later point to fail the run: {why}");
             }
         }
-        let finishing = this.with(|h| h.hooks.finish).map(|h| async move {
+        let joined = this.joined();
+        let finishing = this
+            .with(|h| h.hooks.finish)
+            .chain(joined.iter().filter(|h| h.hooks.finish))
+            .map(|h| async move {
             // Sent to a loaded plugin, it learns that the run ended — even if
             // the call fails or the plugin unloads during it.
             let dispatched = h.gate.is_available();
