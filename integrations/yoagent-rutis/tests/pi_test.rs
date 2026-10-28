@@ -110,6 +110,16 @@ async fn host_with_ui(runtime: &Path, ui: Option<Arc<dyn HostDispatch>>) -> Host
 
 /// [`host`], with these host services (shared by name).
 async fn host_with(runtime: &Path, services: Vec<(&str, Arc<dyn HostDispatch>)>) -> Host {
+    host_full(runtime, services, false).await
+}
+
+/// [`host_with`], the Node runtime marked restricted (tools only) when
+/// `restricted`.
+async fn host_full(
+    runtime: &Path,
+    services: Vec<(&str, Arc<dyn HostDispatch>)>,
+    restricted: bool,
+) -> Host {
     let root = Ctx::root().unwrap();
     let bridge = RutisBridge::install(&root).unwrap();
     let mut catalog = ServiceCatalog::new();
@@ -120,6 +130,9 @@ async fn host_with(runtime: &Path, services: Vec<(&str, Arc<dyn HostDispatch>)>)
             .unwrap();
     }
     let node = LocalRuntime::node(runtime, pi_dir().join("package.json"));
+    if restricted {
+        bridge.restrict_runtime(node.handle());
+    }
     let resolver = Arc::new(RuntimeResolver::node(node.handle()).with_catalog(&catalog));
     root.plugin(node);
     let plugin = LoaderPlugin::new(
@@ -3220,5 +3233,57 @@ export default function (pi) {{
         "{results:?}"
     );
     assert_eq!(wait_file(&log, |t| !t.is_empty()).await, "start=false\n");
+    host.root.shutdown().await.unwrap();
+}
+
+/// A pi extension in a restricted runtime (tools only): its tool runs, its
+/// `tool_call` policy sees its own tool's calls only, and its `tool_result`
+/// and `before_agent_start` handlers are never called.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restricted_pi_extension_gets_its_tools_only() {
+    let Some(runtime) = node_runtime() else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("restricted.log");
+    let source = r#"
+import { appendFileSync } from 'node:fs'
+export default function (pi) {
+  pi.registerTool({
+    name: 'pi_note', label: 'note', description: 'notes', parameters: { type: 'object', properties: {} },
+    async execute() { return { content: [{ type: 'text', text: 'noted' }], details: {} } },
+  })
+  pi.on('tool_call', (e) => appendFileSync(LOG, `tool_call ${e.toolName}\n`))
+  pi.on('tool_result', (e) => appendFileSync(LOG, `tool_result ${e.toolName}\n`))
+  pi.on('before_agent_start', () => appendFileSync(LOG, 'before_agent_start\n'))
+}
+"#
+    .replace("LOG", &format!("{:?}", log.display().to_string()));
+    let ext = extension(dir.path(), "restricted.ts", &source);
+    let host = host_full(&runtime, Vec::new(), true).await;
+    host.load(adapter_row(json!({ "extensions": [ext] }))).await;
+    let own = common::Reply::new("own", "own ran");
+    let (agent, _) = agent(vec![
+        call("pi_note", json!({})),
+        call("own", json!({})),
+        text("done"),
+    ]);
+    let mut agent = agent
+        .with_tools(vec![Box::new(own)])
+        .with_extension(host.bridge.extension());
+    let (_, results) = run(&mut agent, "go").await;
+    assert_eq!(
+        results,
+        vec![
+            ("pi_note".into(), "noted".into(), false),
+            ("own".into(), "own ran".into(), false),
+        ]
+    );
+    let seen = std::fs::read_to_string(&log).unwrap_or_default();
+    assert_eq!(
+        seen.lines().collect::<Vec<_>>(),
+        ["tool_call pi_note"],
+        "{seen}"
+    );
     host.root.shutdown().await.unwrap();
 }

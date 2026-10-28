@@ -295,6 +295,14 @@ impl Service {
                  owned by its session, removed when the session closes or by its disposer"
             );
         }
+        // Marked by the runtime it comes from, whatever row (or none) it
+        // registers from: decided here, once, for the handler's life.
+        let restricted = caller
+            .as_ref()
+            .is_some_and(|connection| self.registry.is_restricted_session(connection.tag()));
+        if restricted {
+            tracing::info!(handler = %name, owner = %owner, "registered from a restricted runtime: tools only");
+        }
         let handler = Arc::new(RemoteHandler {
             name: name.clone(),
             target: Arc::new(target),
@@ -309,7 +317,7 @@ impl Service {
         };
         let (seq, _gate) = self
             .registry
-            .insert(name.clone(), owner, handler, lifetime.clone())
+            .insert(name.clone(), owner, handler, lifetime.clone(), restricted)
             .map_err(session::native_error)?;
         // Removed when the row unloads or restarts, while its runtime runs
         // on, whether or not the plugin hands the disposer to `ctx.effect`:
@@ -1580,6 +1588,7 @@ mod tests {
                 "test".into(),
                 handler.clone(),
                 CancellationToken::new(),
+                false,
             )
             .unwrap();
         let extension = if required {

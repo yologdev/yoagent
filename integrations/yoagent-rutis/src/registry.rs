@@ -30,6 +30,24 @@
 //! The same holds for a restart or config update: the run keeps the old
 //! generation's handler and gets those errors; the new generation's handler
 //! serves the next run. The bridge never rebinds a run to a newer generation.
+//!
+//! # Restricted handlers: tools only
+//!
+//! A handler registered from a runtime the host marked restricted
+//! ([`RutisBridge::restrict_runtime`](crate::RutisBridge::restrict_runtime),
+//! for plugins it does not trust beyond their tools) gets only:
+//!
+//! - `tools` and its tool calls (`call_tool`);
+//! - `before_tool` for calls to **its own** tools (to check or adjust their
+//!   arguments): never another handler's or the agent's, and it does not
+//!   count as a policy for
+//!   [`require_policy`](crate::RutisExtension::require_policy);
+//! - `finish`.
+//!
+//! Its `after_tool`, `before_model`, `on_input`, `on_stop` and `on_event`
+//! are never called, and it never gets the run's conversation. The host can
+//! rename or leave out its tools
+//! ([`RutisExtension::with_restricted_tools`](crate::RutisExtension::with_restricted_tools)).
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
@@ -64,6 +82,31 @@ pub struct Registry {
     timings: Arc<Timings>,
     /// Per run in progress: which handler offered each plugin tool.
     offers: Mutex<HashMap<String, Arc<HashMap<String, ToolOwner>>>>,
+    /// Extensions whose late tools are in use: told of restricted handlers.
+    late: Mutex<Vec<std::sync::Weak<crate::late::Late>>>,
+    /// The runtimes whose handlers are restricted (tools only).
+    restricted_runtimes: Mutex<Vec<rutis_bridge_handle::RuntimeHandle>>,
+}
+
+/// `RuntimeHandle`, when a language feature brings rutis-bridge in; a type
+/// that never exists otherwise (no runtime can be restricted then).
+mod rutis_bridge_handle {
+    #[cfg(any(
+        feature = "node",
+        feature = "python",
+        feature = "bun",
+        feature = "go",
+        feature = "websocket"
+    ))]
+    pub(crate) use rutis_bridge::runtime::RuntimeHandle;
+    #[cfg(not(any(
+        feature = "node",
+        feature = "python",
+        feature = "bun",
+        feature = "go",
+        feature = "websocket"
+    )))]
+    pub(crate) enum RuntimeHandle {}
 }
 
 #[derive(Default)]
@@ -80,6 +123,23 @@ struct Entry {
     handler: Arc<dyn HandlerImpl>,
     tool_names: Vec<String>,
     gate: Gate,
+    /// Tools only (see the module docs).
+    restricted: bool,
+}
+
+/// The hooks a handler gets: all it implements, or, restricted, only
+/// `tools`, `before_tool` (for its own tools, decided per call) and
+/// `finish` — and never the conversation.
+pub(crate) fn granted(hooks: Hooks, restricted: bool) -> Hooks {
+    if !restricted {
+        return hooks;
+    }
+    Hooks {
+        tools: hooks.tools,
+        before_tool: hooks.before_tool,
+        finish: hooks.finish,
+        ..Hooks::default()
+    }
 }
 
 /// Whether a registered handler can still be called: its plugin generation
@@ -125,6 +185,9 @@ pub(crate) struct Registered {
     pub(crate) hooks: Hooks,
     pub(crate) gate: Gate,
     pub(crate) timings: Arc<Timings>,
+    /// Tools only: `hooks` are already narrowed; `before_tool` is called
+    /// for its own tools alone.
+    pub(crate) restricted: bool,
 }
 
 impl Registered {
@@ -331,6 +394,10 @@ pub struct ToolOwner {
     pub(crate) owner: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) source: Option<String>,
+    /// The plugin's own name for the tool, when the host offers it under
+    /// another ([`RutisExtension::with_restricted_tools`](crate::RutisExtension::with_restricted_tools)).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) plugin_name: Option<String>,
 }
 
 impl ToolOwner {
@@ -340,6 +407,7 @@ impl ToolOwner {
             handler: handler.into(),
             owner: owner.into(),
             source: None,
+            plugin_name: None,
         }
     }
 
@@ -364,6 +432,12 @@ impl ToolOwner {
     pub fn source(&self) -> Option<&str> {
         self.source.as_deref()
     }
+
+    /// The plugin's own name for the tool, when the host offers it under
+    /// another; `None` when they are the same.
+    pub fn plugin_name(&self) -> Option<&str> {
+        self.plugin_name.as_deref()
+    }
 }
 
 /// A registered handler, for diagnostics.
@@ -373,6 +447,7 @@ pub struct HandlerInfo {
     owner: String,
     hooks: Vec<&'static str>,
     tools: Vec<String>,
+    restricted: bool,
 }
 
 impl HandlerInfo {
@@ -394,6 +469,13 @@ impl HandlerInfo {
     /// The static tools it offers.
     pub fn tools(&self) -> &[String] {
         &self.tools
+    }
+
+    /// Registered from a restricted runtime: tools only (see the
+    /// [`registry`](crate::registry) docs). Its [`hooks`](Self::hooks) are
+    /// the ones it gets.
+    pub fn restricted(&self) -> bool {
+        self.restricted
     }
 }
 
@@ -429,6 +511,7 @@ impl Registry {
             owner,
             Arc::new(handler),
             ctx.cancellation_token(),
+            false,
         )?;
         let registry = Arc::downgrade(self);
         let registered = ctx.effect_named(format!("yoagent handler: {name}"), move || {
@@ -453,6 +536,7 @@ impl Registry {
         owner: String,
         handler: Arc<dyn HandlerImpl>,
         generation: CancellationToken,
+        restricted: bool,
     ) -> Result<(u64, Gate), CordisError> {
         let tool_names: Vec<String> = handler
             .static_tools()
@@ -506,7 +590,22 @@ impl Registry {
             handler,
             tool_names,
             gate: gate.clone(),
+            restricted,
         });
+        if restricted {
+            let registered = self.registered(inner.entries.last().expect("just pushed"));
+            drop(inner);
+            let late: Vec<_> = self
+                .late
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .filter_map(std::sync::Weak::upgrade)
+                .collect();
+            for late in late {
+                late.registered(registered.clone());
+            }
+        }
         Ok((seq, gate))
     }
 
@@ -528,15 +627,79 @@ impl Registry {
             .entries
             .iter()
             .filter(|e| e.gate.is_available())
-            .map(|e| Registered {
-                name: e.name.as_str().into(),
-                owner: e.owner.as_str().into(),
-                hooks: e.handler.hooks(),
-                handler: e.handler.clone(),
-                gate: e.gate.clone(),
-                timings: self.timings.clone(),
-            })
+            .map(|e| self.registered(e))
             .collect()
+    }
+
+    fn registered(&self, e: &Entry) -> Registered {
+        Registered {
+            name: e.name.as_str().into(),
+            owner: e.owner.as_str().into(),
+            hooks: granted(e.handler.hooks(), e.restricted),
+            handler: e.handler.clone(),
+            gate: e.gate.clone(),
+            timings: self.timings.clone(),
+            restricted: e.restricted,
+        }
+    }
+
+    /// Tell `late` of every restricted handler registered from now on.
+    pub(crate) fn watch_late(&self, late: &Arc<crate::late::Late>) {
+        let mut watching = self.late.lock().unwrap_or_else(|e| e.into_inner());
+        watching.retain(|w| w.strong_count() > 0);
+        watching.push(Arc::downgrade(late));
+    }
+
+    /// Add late tools' owners to the run's record ([`offered_by`](Self::offered_by)).
+    pub(crate) fn add_offers(&self, run_id: &str, more: HashMap<String, ToolOwner>) {
+        let mut offers = self.offers.lock().unwrap_or_else(|e| e.into_inner());
+        let mut all = offers
+            .get(run_id)
+            .map(|first| (**first).clone())
+            .unwrap_or_default();
+        all.extend(more);
+        offers.insert(run_id.to_string(), Arc::new(all));
+    }
+
+    /// Mark `runtime` restricted: see
+    /// [`RutisBridge::restrict_runtime`](crate::RutisBridge::restrict_runtime).
+    #[cfg_attr(
+        not(any(
+            feature = "node",
+            feature = "python",
+            feature = "bun",
+            feature = "go",
+            feature = "websocket"
+        )),
+        allow(dead_code)
+    )]
+    pub(crate) fn restrict_runtime(&self, runtime: rutis_bridge_handle::RuntimeHandle) {
+        self.restricted_runtimes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(runtime);
+    }
+
+    /// Whether the session `tag` is the running process of a restricted
+    /// runtime. A plugin's code runs only once its runtime is ready, so a
+    /// call from it finds its runtime ready, with this session's tag.
+    #[cfg(any(
+        feature = "node",
+        feature = "python",
+        feature = "bun",
+        feature = "go",
+        feature = "websocket"
+    ))]
+    pub(crate) fn is_restricted_session(&self, tag: &str) -> bool {
+        use rutis_bridge::runtime::RuntimeState;
+        self.restricted_runtimes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .any(|runtime| match runtime.state() {
+                RuntimeState::Ready(process) => process.connection().tag() == tag,
+                _ => false,
+            })
     }
 
     /// The time each handler spent in each kind of hook, as the agent
@@ -566,8 +729,9 @@ impl Registry {
             .map(|e| HandlerInfo {
                 name: e.name.clone(),
                 owner: e.owner.clone(),
-                hooks: e.handler.hooks().names(),
+                hooks: granted(e.handler.hooks(), e.restricted).names(),
                 tools: e.tool_names.clone(),
+                restricted: e.restricted,
             })
             .collect()
     }
@@ -628,6 +792,9 @@ impl Registry {
 /// A plugin tool bound to the handler (and plugin generation) that offered it.
 pub(crate) struct LiveTool {
     pub(crate) inner: Arc<dyn AgentTool>,
+    /// The name it is offered under, when the host renamed it (the plugin
+    /// is still called with its own).
+    pub(crate) offered_as: Option<String>,
     pub(crate) gate: Gate,
     /// The handler that offered it, to time its executions.
     pub(crate) handler: Registered,
@@ -645,7 +812,9 @@ impl LiveTool {
 #[async_trait::async_trait]
 impl AgentTool for LiveTool {
     fn name(&self) -> &str {
-        self.inner.name()
+        self.offered_as
+            .as_deref()
+            .unwrap_or_else(|| self.inner.name())
     }
     fn label(&self) -> &str {
         self.inner.label()

@@ -71,6 +71,25 @@ impl RutisBridge {
         self.host.ctx()
     }
 
+    /// Mark a runtime **restricted**: every handler registered over its
+    /// connections — from a row or from none, from a Cordis child, after a
+    /// restart — is tools only (see the [`registry`](crate::registry) docs).
+    /// For plugins trusted with their tools and nothing else: a package
+    /// found on npm and allowed for one session, say.
+    ///
+    /// Mark it **before it starts**: a handler is judged when it registers,
+    /// and keeps that for its life. The mark stays for the bridge's life.
+    #[cfg(any(
+        feature = "node",
+        feature = "python",
+        feature = "bun",
+        feature = "go",
+        feature = "websocket"
+    ))]
+    pub fn restrict_runtime(&self, runtime: rutis_bridge::runtime::RuntimeHandle) {
+        self.registry.restrict_runtime(runtime);
+    }
+
     /// The registry plugins add handlers to.
     pub fn registry(&self) -> &Arc<Registry> {
         &self.registry
