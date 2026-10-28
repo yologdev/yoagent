@@ -697,3 +697,247 @@ sleep 3"#,
         "{why}"
     );
 }
+
+/// `path` as a double-quoted shell word.
+fn quoted(path: &std::path::Path) -> String {
+    format!("{:?}", path.display().to_string())
+}
+
+/// A server like `npx`: a wrapper whose child (the real server) ignores
+/// its input closing — and TERM, HUP and INT: only SIGKILL ends it. The
+/// child holds none of the wrapper's pipes. Each writes its pid to
+/// `<dir>/<name>`.
+fn wrapper_server(dir: &std::path::Path) -> String {
+    format!(
+        r#"echo $$ > {wrapper}; sh -c 'trap "" TERM HUP INT; echo $$ > {child}; exec sleep 300' < /dev/null > /dev/null 2>&1 &
+read -r line; id=$(id_of "$line")
+echo "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{{}},\"serverInfo\":{{\"name\":\"wrapper\",\"version\":\"1\"}}}}}}"
+read -r note
+while read -r line; do :; done"#,
+        wrapper = quoted(&dir.join("wrapper")),
+        child = quoted(&dir.join("child")),
+    )
+}
+
+async fn pid_in(path: &std::path::Path) -> String {
+    for _ in 0..200 {
+        let pid = std::fs::read_to_string(path).unwrap_or_default();
+        if !pid.trim().is_empty() {
+            return pid.trim().to_string();
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("no pid in {}", path.display());
+}
+
+/// Running: it exists and is not a zombie waiting to be reaped.
+fn alive(pid: &str) -> bool {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", pid])
+        .output();
+    let stat = out
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    !stat.is_empty() && !stat.starts_with('Z')
+}
+
+/// Kills the pids it holds when dropped: a failed assertion leaves no
+/// `sleep 300` behind.
+struct Reap(Vec<String>);
+
+impl Drop for Reap {
+    fn drop(&mut self) {
+        for pid in &self.0 {
+            let _ = std::process::Command::new("kill")
+                .args(["-9", pid])
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+    }
+}
+
+/// Polls until `pid` is gone (killed processes are reaped asynchronously).
+async fn until_gone(pid: &str) -> bool {
+    for _ in 0..200 {
+        if !alive(pid) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    false
+}
+
+fn pgid(pid: &str) -> String {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "pgid=", "-p", pid])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+async fn connect_with(script: &str, group: bool) -> McpClient {
+    use yoagent::mcp::StdioOptions;
+    let script = format!("{ID_OF}\n{script}");
+    McpClient::connect_stdio_with(
+        "bash",
+        &["-c", &script],
+        None,
+        StdioOptions::new().own_process_group(group),
+    )
+    .await
+    .unwrap()
+}
+
+/// With a process group of its own: the server is outside the host's group
+/// (a Ctrl+C in the host's terminal does not reach it), and dropping the
+/// client kills what the server started too.
+#[tokio::test]
+async fn an_own_process_group_isolates_the_server_and_goes_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    let client = connect_with(&wrapper_server(dir.path()), true).await;
+    let wrapper = pid_in(&dir.path().join("wrapper")).await;
+    let child = pid_in(&dir.path().join("child")).await;
+    let _reap = Reap(vec![wrapper.clone(), child.clone()]);
+    let ours = pgid(&std::process::id().to_string());
+    assert_eq!(pgid(&wrapper), wrapper, "it leads its own group");
+    assert_ne!(pgid(&wrapper), ours);
+    drop(client);
+    assert!(until_gone(&child).await, "the server's child went with it");
+    assert!(until_gone(&wrapper).await);
+}
+
+/// `close` kills the whole group too.
+#[tokio::test]
+async fn close_kills_an_own_process_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let client = connect_with(&wrapper_server(dir.path()), true).await;
+    let child = pid_in(&dir.path().join("child")).await;
+    let _reap = Reap(vec![child.clone()]);
+    client.close().await.unwrap();
+    assert!(until_gone(&child).await, "the server's child went with it");
+}
+
+/// By default (the host's group), dropping the client kills the command
+/// alone: a child that ignores its closed input lives on — what
+/// `own_process_group` is for.
+#[tokio::test]
+async fn by_default_only_the_command_is_killed() {
+    let dir = tempfile::tempdir().unwrap();
+    let client = connect_with(&wrapper_server(dir.path()), false).await;
+    let wrapper = pid_in(&dir.path().join("wrapper")).await;
+    let child = pid_in(&dir.path().join("child")).await;
+    let _reap = Reap(vec![child.clone()]);
+    assert_eq!(
+        pgid(&wrapper),
+        pgid(&std::process::id().to_string()),
+        "by default the server is in the host's group"
+    );
+    drop(client);
+    assert!(until_gone(&wrapper).await);
+    assert!(alive(&child), "the default leaves it");
+}
+
+/// A wrapper that exits on its own and is not collected yet (nobody polled
+/// `exited()`): it still holds its pid, so `close` kills its group — what
+/// it started goes too.
+#[tokio::test]
+async fn an_uncollected_wrappers_group_is_killed() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = wrapper_server(dir.path()).replace("while read -r line; do :; done", "exit 0");
+    let client = connect_with(&script, true).await;
+    let wrapper = pid_in(&dir.path().join("wrapper")).await;
+    let child = pid_in(&dir.path().join("child")).await;
+    let _reap = Reap(vec![child.clone()]);
+    assert!(until_gone(&wrapper).await, "the wrapper exited (a zombie)");
+    client.close().await.unwrap();
+    assert!(until_gone(&child).await, "its group was killed");
+}
+
+/// A wrapper that exits on its own, collected by the exit watch: its group
+/// is left alone (its id may be reused once it is collected) — what it
+/// started keeps running, as the option's docs say.
+#[tokio::test]
+async fn a_collected_leaders_group_is_left_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = wrapper_server(dir.path()).replace("while read -r line; do :; done", "exit 0");
+    let client = connect_with(&script, true).await;
+    let child = pid_in(&dir.path().join("child")).await;
+    let _reap = Reap(vec![child.clone()]);
+    let why = wait_exited(&client).await;
+    assert!(why.contains("exited with"), "{why}");
+    client.close().await.unwrap();
+    drop(client);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(alive(&child), "a collected leader's group is not signalled");
+}
+
+/// A server that closes its input while its process lives on reads as gone
+/// once a call fails to write to it.
+#[tokio::test]
+async fn a_server_that_stops_reading_reads_as_gone() {
+    let dir = tempfile::tempdir().unwrap();
+    let closed = dir.path().join("closed");
+    let client = connect(&deaf_server(&closed, false)).await.unwrap();
+    until_file(&closed).await;
+    assert_eq!(client.exited(), None);
+    let err = client.list_tools().await.unwrap_err().to_string();
+    assert!(
+        err.contains("Write error") || err.contains("Flush error"),
+        "{err}"
+    );
+    let why = client.exited().expect("gone once a write failed");
+    assert!(why.contains("no longer reads its input"), "{why}");
+}
+
+/// Answers `initialize` (and, with `list`, one `tools/list`), then closes
+/// its input, touches `closed` and lives on.
+fn deaf_server(closed: &std::path::Path, list: bool) -> String {
+    let list = if list {
+        r#"read -r line; id=$(id_of "$line")
+echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"tools\":[{\"name\":\"only\",\"description\":\"only\",\"inputSchema\":{\"type\":\"object\"}}]}}"
+"#
+    } else {
+        ""
+    };
+    format!(
+        r#"read -r line; id=$(id_of "$line")
+echo "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{{}},\"serverInfo\":{{\"name\":\"deaf\",\"version\":\"1\"}}}}}}"
+read -r note
+{list}exec 0<&-
+: > {closed}
+exec sleep 30"#,
+        closed = quoted(closed),
+    )
+}
+
+async fn until_file(path: &std::path::Path) {
+    for _ in 0..200 {
+        if path.exists() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("{} never appeared", path.display());
+}
+
+/// An `McpToolSource` over a server that stops reading: its next listing
+/// fails (keeping the last list), the failed write marks it gone, and its
+/// tools are withdrawn from the next ask.
+#[tokio::test]
+async fn a_tool_source_withdraws_a_server_that_stops_reading() {
+    use yoagent::mcp::McpToolSource;
+    use yoagent::ToolSource;
+    let dir = tempfile::tempdir().unwrap();
+    let closed = dir.path().join("closed");
+    let source = McpToolSource::new(connect(&deaf_server(&closed, true)).await.unwrap());
+    assert_eq!(source.tools().await.len(), 1);
+    until_file(&closed).await;
+    assert_eq!(source.generation(), 0);
+    assert_eq!(
+        source.tools().await.len(),
+        1,
+        "the failed listing kept the last list"
+    );
+    assert_eq!(source.generation(), 1, "the failed write marked it gone");
+    assert!(source.tools().await.is_empty());
+}

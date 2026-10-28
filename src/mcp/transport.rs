@@ -159,7 +159,8 @@ fn note_notification(method: &str, to: Option<&ServerNotifications>) {
 /// other server requests declined). The server's stderr is drained
 /// continuously — the last few KB are kept, so an error from a server that
 /// exited can say why — and the process is killed when the transport is
-/// dropped.
+/// dropped: the command alone, or its whole process group with
+/// [`StdioOptions::own_process_group`] (see [`with_options`](Self::with_options)).
 #[cfg(feature = "native")]
 #[cfg_attr(docsrs, doc(cfg(feature = "native")))]
 pub struct StdioTransport {
@@ -177,6 +178,50 @@ pub struct StdioTransport {
     /// What the exit watch needs besides the process (see
     /// [`McpTransport::exit_watch`]).
     ended: Arc<Ended>,
+    /// The server's own process group ([`StdioOptions::own_process_group`]):
+    /// killed whole, once, on `close` or drop — while its leader is unreaped.
+    group: std::sync::Mutex<Option<u32>>,
+}
+
+/// How [`StdioTransport::with_options`] starts the server. Native hosts only.
+#[cfg(feature = "native")]
+#[cfg_attr(docsrs, doc(cfg(feature = "native")))]
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct StdioOptions {
+    own_process_group: bool,
+}
+
+#[cfg(feature = "native")]
+impl StdioOptions {
+    /// The defaults: the server runs in the host's process group.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Run the server in a process group of its own (Unix; ignored
+    /// elsewhere):
+    /// - a Ctrl+C (or another signal) sent to the host's terminal no longer
+    ///   reaches it — the host decides when it stops;
+    /// - [`close`](McpTransport::close) and dropping the transport kill the
+    ///   whole group: what the server started (`npx` → `node`, `uvx` →
+    ///   `python`) goes with it, where by default only the command itself is
+    ///   killed and a child that ignores its closed input lives on.
+    ///
+    /// The costs:
+    /// - when the host exits without dropping its clients — killed, an
+    ///   uncaught Ctrl+C, `process::exit`, an abort — whatever in the group
+    ///   ignores its closed input keeps running, where a terminal's Ctrl+C or
+    ///   hangup would have reached it in the host's group. A terminal host
+    ///   should catch Ctrl+C and drop (or close) its clients;
+    /// - the group is killed only while the command itself is still the
+    ///   transport's — running, or exited and not yet collected — so its id
+    ///   is safe to signal: a wrapper that exited and was collected (by a
+    ///   call or the exit watch) leaves what it started.
+    pub fn own_process_group(mut self, yes: bool) -> Self {
+        self.own_process_group = yes;
+        self
+    }
 }
 
 /// How a stdio server's end shows, besides its process exiting.
@@ -185,6 +230,8 @@ pub struct StdioTransport {
 struct Ended {
     /// A call found its output closed (a wrapper can outlive the server).
     output_closed: std::sync::atomic::AtomicBool,
+    /// A write to its input failed: it no longer reads it.
+    input_closed: std::sync::atomic::AtomicBool,
     /// `close` stopped it: not a crash.
     closed_by_host: std::sync::atomic::AtomicBool,
     /// The stderr drain read to the end: the tail is complete.
@@ -239,7 +286,27 @@ impl StdioTransport {
         args: &[&str],
         env: Option<HashMap<String, String>>,
     ) -> Result<Self, McpError> {
-        let mut cmd = Command::new(command);
+        Self::with_options(command, args, env, StdioOptions::default()).await
+    }
+
+    /// [`new`](Self::new), started as `options` says (a process group of
+    /// its own, say).
+    pub async fn with_options(
+        command: &str,
+        args: &[&str],
+        env: Option<HashMap<String, String>>,
+        options: StdioOptions,
+    ) -> Result<Self, McpError> {
+        #[cfg_attr(not(unix), allow(unused_mut))]
+        let mut cmd = std::process::Command::new(command);
+        // std's `process_group` (Rust 1.64) on a std command, converted: tokio's
+        // own `process_group` needs tokio 1.40 and `as_std_mut` 1.39, newer than
+        // the `tokio = "1"` this crate asks for.
+        #[cfg(unix)]
+        if options.own_process_group {
+            std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+        }
+        let mut cmd = Command::from(cmd);
         cmd.args(args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -256,6 +323,12 @@ impl StdioTransport {
         let mut child = cmd
             .spawn()
             .map_err(|e| McpError::Transport(format!("Failed to spawn '{}': {}", command, e)))?;
+        // The group's id is the leader's pid.
+        let group = if cfg!(unix) && options.own_process_group {
+            child.id()
+        } else {
+            None
+        };
 
         let stdin = child
             .stdin
@@ -299,7 +372,69 @@ impl StdioTransport {
             command: command.to_string(),
             notifications: None,
             ended,
+            group: std::sync::Mutex::new(group),
         })
+    }
+
+    /// Kill the server's own process group, everything in it (with
+    /// [`StdioOptions::own_process_group`]) — once, and only while its leader
+    /// (`child`, the server's command) is still ours: running, or exited and
+    /// not yet collected (a zombie). Either way it holds its pid, the
+    /// group's id, so the signal cannot reach an unrelated group. Asked
+    /// without collecting it (`waitid` with `WNOWAIT`), so a wrapper that
+    /// exited uncollected still has its children killed. A leader already
+    /// collected — by a call or the exit watch — or not ours any more (a
+    /// host ignoring SIGCHLD has it reaped unseen) leaves its group alone.
+    fn kill_group(&self, child: &mut Child) {
+        let Some(group) = self.group.lock().unwrap_or_else(|e| e.into_inner()).take() else {
+            return;
+        };
+        // `None` once tokio collected it.
+        let Some(pid) = child.id() else {
+            debug!(
+                "MCP server '{}': its command already exited and was collected; its process group is left alone",
+                self.command
+            );
+            return;
+        };
+        #[cfg(unix)]
+        if let (Ok(pgid), Ok(pid)) = (libc::pid_t::try_from(group), libc::id_t::try_from(pid)) {
+            // SAFETY: `info` is a zeroed `siginfo_t` we own, written by
+            // `waitid` only; `WNOWAIT` leaves a zombie for its owner to
+            // collect, `WNOHANG` never blocks.
+            let ours = unsafe {
+                let mut info: libc::siginfo_t = std::mem::zeroed();
+                libc::waitid(
+                    libc::P_PID,
+                    pid,
+                    &mut info,
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                ) == 0
+            };
+            if !ours {
+                let e = std::io::Error::last_os_error();
+                debug!(
+                    "MCP server '{}': its command is no longer ours to signal ({e}); its process group is left alone",
+                    self.command
+                );
+                return;
+            }
+            // SAFETY: `killpg` takes two integers and touches no memory of
+            // ours. The leader is ours and uncollected (just asked, under
+            // the lock): the id is still its group's.
+            if unsafe { libc::killpg(pgid, libc::SIGKILL) } == -1 {
+                let e = std::io::Error::last_os_error();
+                // ESRCH: the group is already gone.
+                if e.raw_os_error() != Some(libc::ESRCH) {
+                    debug!(
+                        "MCP server '{}': killing its process group: {e}",
+                        self.command
+                    );
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = (group, pid);
     }
 
     /// Write one newline-terminated message to the server.
@@ -314,16 +449,24 @@ impl StdioTransport {
             format!("{json}\n")
         };
         writer.interrupted = true; // until the write completes
+        let input_closed = |what: &str, e: std::io::Error| {
+            // It no longer reads its input: gone, though its process may
+            // live on (see the exit watch).
+            self.ended
+                .input_closed
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            McpError::Transport(format!("{what} error: {e}"))
+        };
         writer
             .stdin
             .write_all(message.as_bytes())
             .await
-            .map_err(|e| McpError::Transport(format!("Write error: {}", e)))?;
+            .map_err(|e| input_closed("Write", e))?;
         writer
             .stdin
             .flush()
             .await
-            .map_err(|e| McpError::Transport(format!("Flush error: {}", e)))?;
+            .map_err(|e| input_closed("Flush", e))?;
         writer.interrupted = false;
         Ok(())
     }
@@ -372,6 +515,36 @@ fn stderr_suffix(tail: &std::sync::Mutex<StderrTail>) -> String {
         String::new()
     } else {
         format!("; last stderr:\n{tail}")
+    }
+}
+
+#[cfg(feature = "native")]
+impl Drop for StdioTransport {
+    fn drop(&mut self) {
+        if self
+            .group
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_none()
+        {
+            return;
+        }
+        // Before the child (`kill_on_drop` kills the command alone). Only
+        // an exit-watch poll can hold the lock now (calls and `close`
+        // borrow the transport), and only for a `try_wait`: wait for it
+        // briefly — `blocking_lock` would panic inside a runtime.
+        for _ in 0..1000 {
+            if let Ok(mut child) = self.child.try_lock() {
+                self.kill_group(&mut child);
+                return;
+            }
+            std::thread::yield_now();
+        }
+        warn!(
+            "MCP server '{}': its process stayed locked at drop; its process group was not \
+             killed (what it started may still run)",
+            self.command
+        );
     }
 }
 
@@ -559,7 +732,8 @@ impl McpTransport for StdioTransport {
                 Some(format!("MCP server '{command}' was closed (`close`)"))
             } else if let Some(child) = child.upgrade() {
                 // Held only while a call reaps a server whose output closed,
-                // or by `close`: the last answer, or not known yet.
+                // by `close`, or by the transport's drop: the last answer, or
+                // not known yet.
                 match child.try_lock() {
                     Err(_) => provisional.clone(),
                     Ok(mut child) => match child.try_wait() {
@@ -568,6 +742,9 @@ impl McpTransport for StdioTransport {
                         }
                         Ok(None) if ended.output_closed.load(SeqCst) => Some(format!(
                             "MCP server '{command}' closed its output (its process is still running)"
+                        )),
+                        Ok(None) if ended.input_closed.load(SeqCst) => Some(format!(
+                            "MCP server '{command}' no longer reads its input (its process is still running)"
                         )),
                         Ok(None) => None,
                         // Not waitable (`ECHILD`: SIGCHLD ignored, or reaped
@@ -607,6 +784,7 @@ impl McpTransport for StdioTransport {
         // Kill the server and reap it. An error here means it had already
         // exited, which is what close wants anyway: logged, not returned.
         let mut child = self.child.lock().await;
+        self.kill_group(&mut child);
         if let Err(e) = child.kill().await {
             debug!("MCP server '{}': kill on close: {e}", self.command);
         }
@@ -1212,6 +1390,28 @@ impl McpTransport for HttpTransport {
 mod tests {
     use super::*;
 
+    /// A transport dropped while its process is locked (an exit-watch poll
+    /// on another thread) gives up the group kill after its bounded retries:
+    /// no panic, no hang.
+    #[cfg(all(feature = "native", unix))]
+    #[tokio::test]
+    async fn a_drop_with_the_child_locked_does_not_hang() {
+        let transport = StdioTransport::with_options(
+            "sleep",
+            &["30"],
+            None,
+            StdioOptions::new().own_process_group(true),
+        )
+        .await
+        .unwrap();
+        let child = transport.child.clone();
+        let held = child.try_lock().unwrap();
+        let started = std::time::Instant::now();
+        drop(transport);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        drop(held);
+    }
+
     /// Before the answer is latched (stderr still held open by a process the
     /// server left behind), a busy child gives the last answer unchanged.
     #[cfg(all(feature = "native", unix))]
@@ -1222,15 +1422,17 @@ mod tests {
                 .await
                 .unwrap();
         let watch = transport.exit_watch().unwrap();
+        // Until the answer carries the tail (the exit can be seen before the
+        // drain has read it): the provisional answer, not yet latched.
         let mut first = None;
         for _ in 0..200 {
-            first = watch.exited();
+            first = watch.exited().filter(|why| why.contains("bye"));
             if first.is_some() {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
-        let first = first.expect("the exit was seen");
+        let first = first.expect("the exit was seen, with its stderr");
         let busy = transport.child.lock().await;
         assert_eq!(watch.exited().as_deref(), Some(first.as_str()));
         assert_eq!(watch.exited().as_deref(), Some(first.as_str()));

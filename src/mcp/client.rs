@@ -1,8 +1,8 @@
 //! High-level MCP client.
 
-#[cfg(feature = "native")]
-use super::transport::StdioTransport;
 use super::transport::{ExitWatch, HttpTransport, McpTransport, ServerNotifications};
+#[cfg(feature = "native")]
+use super::transport::{StdioOptions, StdioTransport};
 use super::types::*;
 #[cfg(feature = "native")]
 use std::collections::HashMap;
@@ -53,7 +53,20 @@ impl McpClient {
         args: &[&str],
         env: Option<HashMap<String, String>>,
     ) -> Result<Self, McpError> {
-        let transport = StdioTransport::new(command, args, env).await?;
+        Self::connect_stdio_with(command, args, env, StdioOptions::default()).await
+    }
+
+    /// [`connect_stdio`](Self::connect_stdio), started as `options` says: a
+    /// process group of its own ([`StdioOptions::own_process_group`]), say.
+    #[cfg(feature = "native")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "native")))]
+    pub async fn connect_stdio_with(
+        command: &str,
+        args: &[&str],
+        env: Option<HashMap<String, String>>,
+        options: StdioOptions,
+    ) -> Result<Self, McpError> {
+        let transport = StdioTransport::with_options(command, args, env, options).await?;
         // Nothing else bounds a stdio call: a server that stops answering
         // would hang the agent.
         let mut client = Self::build(
@@ -204,10 +217,14 @@ impl McpClient {
     /// - `… closed its output (its process is still running)`: a call found
     ///   its output closed, and the process still running half a second
     ///   later (a wrapper outliving the server);
+    /// - `… no longer reads its input (its process is still running)`: a
+    ///   write to its input failed (it closed its stdin);
     /// - `… has gone (exit status unknown: …)`: the process cannot be waited
     ///   on (`SIGCHLD` ignored, or reaped elsewhere);
     /// - `… was closed (`close`)` after [`close`](Self::close): not a crash,
-    ///   so a host that restarts crashed servers can tell.
+    ///   so a host that restarts crashed servers can tell;
+    /// - `… was closed: its client was dropped`, for a watch kept past its
+    ///   client.
     ///
     /// It never waits behind a call in flight, so a host can poll it — to
     /// tell its user a server stopped between calls, or to restart it.

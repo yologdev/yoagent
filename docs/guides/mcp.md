@@ -71,7 +71,16 @@ How the stdio transport behaves:
   at `DEBUG` (target `yoagent::mcp::stderr`), so a server that logs heavily
   cannot block. The last few KB are kept: when the server exits, the error
   carries its exit status and that stderr, which is usually where it says why.
-- Dropping the client ends the server process.
+- Dropping the client ends the server process — the command itself. What it
+  started (`npx` → `node`) lives on if it ignores its closed input, unless the
+  server runs in a process group of its own:
+  `McpClient::connect_stdio_with(command, args, env, StdioOptions::new().own_process_group(true))`
+  (Unix). Then `close()` and drop kill the whole group, and a Ctrl+C in the
+  host's terminal no longer reaches the server. But when the host exits without
+  dropping its clients (killed, an uncaught Ctrl+C, `process::exit`), whatever
+  ignores its closed input keeps running — a terminal host should catch Ctrl+C
+  and drop its clients — and a wrapper that already exited on its own leaves
+  what it started.
 
 ### HTTP Transport
 
@@ -219,8 +228,9 @@ notice, or to restart the server — yoagent does not restart servers). It
 answers from the first poll that sees the exit; the text settles within half
 a second of that (it gains the last of the server's stderr), then stays the
 same. It also
-reports a server whose output closed while a wrapper process lives on, and
-one that cannot be waited on. A server stopped with `close()` reads as
+reports a server whose output closed while a wrapper process lives on, one
+that no longer reads its input (a write to it failed), and one that cannot be
+waited on. A server stopped with `close()` reads as
 "was closed", not as a crash, so a restart policy can tell the two apart.
 
 An `McpToolSource` uses it on its own: a server that exits is seen at the next
