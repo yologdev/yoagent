@@ -3264,7 +3264,7 @@ export default function (pi) {
     host.load(adapter_row(json!({ "extensions": [ext] }))).await;
     let own = common::Reply::new("own", "own ran");
     let (agent, _) = agent(vec![
-        call("pi_note", json!({})),
+        call("pi-extensions__pi_note", json!({})),
         call("own", json!({})),
         text("done"),
     ]);
@@ -3275,7 +3275,7 @@ export default function (pi) {
     assert_eq!(
         results,
         vec![
-            ("pi_note".into(), "noted".into(), false),
+            ("pi-extensions__pi_note".into(), "noted".into(), false),
             ("own".into(), "own ran".into(), false),
         ]
     );

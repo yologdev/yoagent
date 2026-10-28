@@ -327,18 +327,29 @@ Every handler registered over that runtime's connections — from any row, after
 a restart — then gets only:
 
 - `tools` and its tool calls;
-- `before_tool` for calls to **its own** tools, under its own names (to check
-  or adjust their arguments) — never another plugin's or the agent's calls, and
-  it is no policy for `require_policy`;
+- `before_tool` for calls to **its own** tools: called inside the tool as it
+  runs, after every policy passed the call, under the tool's own name and with
+  the call alone (no request text, no conversation). It can deny or adjust its
+  own call; it never sees another plugin's or the agent's calls — a tool that
+  only shares a name with one of its own included — and it is no policy for
+  `require_policy`;
 - `finish`.
 
 Never `after_tool`, `before_model`, `on_input`, `on_stop` or `on_event`, and
 never the conversation. `HandlerInfo::restricted()` says which handlers are;
-their `hooks()` are the ones they get.
+their `hooks()` are the ones they get. A failing `tools` offers nothing and
+never fails the run, even a `required()` one.
 
-The host names their tools — or leaves some out — with
-`RutisExtension::with_restricted_tools(|handler, tool| …)` (the plugin is still
-called with its own name; `ToolOwner::plugin_name()` gives it).
+Their tools are offered as `<handler>__<tool>`, after every trusted handler's
+(a clash drops the restricted tool). The host names them — or leaves some out —
+with `RutisExtension::with_restricted_tools(|handler, tool| …)`; the plugin is
+still called with its own name (`ToolOwner::plugin_name()`). Keep host names
+apart from the agent's own tools: those win a clash, and `offered_by` still
+reads a clashing name as the plugin's.
+
+A trusted plugin registering a handler or static tool name a restricted one
+holds evicts the restricted handler; a restricted one is refused a trusted
+one's name.
 
 **Mid-run.** A run works with the handlers registered when it started. A
 restricted handler that registers while one of the extension's own runs is
@@ -355,8 +366,9 @@ let agent = agent.with_extension(extension).with_tool_source(late);
 ```
 
 One extension per agent: while two of its own runs go at once, a late handler
-waits for the next run (logged once). Handlers with other hooks always wait
-for the next run.
+waits for the next run (logged once per overlap). Handlers with other hooks
+always wait for the next run. Install `late_tools()` after the agent's other
+tool sources: on a name clash the earlier source wins.
 
 Services a restricted runtime's rows *provide* are published like any row's
 (rutis-loader); restricting what they provide is rutis's to do, not the

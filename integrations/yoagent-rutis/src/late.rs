@@ -19,12 +19,60 @@ use yoagent::{AgentTool, ToolSource};
 
 use crate::extension::{call, Missed, Timeouts};
 use crate::handler::{Offer, RunInfo};
-use crate::registry::{LiveTool, Registered, ToolOwner};
+use crate::registry::{Judge, LiveTool, Registered, ToolOwner};
 
 /// The host's naming of a restricted handler's tools: given the handler's
 /// name and the tool's own, the name to offer it under, or `None` to leave
 /// it out.
 pub(crate) type Names = Arc<dyn Fn(&str, &str) -> Option<String> + Send + Sync>;
+
+/// The name `own` (a tool of `h`) is offered under: a restricted handler's
+/// as the host names it ([`RutisExtension::with_restricted_tools`](crate::RutisExtension::with_restricted_tools)),
+/// else `<handler>__<tool>` — kept apart from the names the host and trusted
+/// plugins use; `None` when the host leaves it out. Other handlers' tools
+/// keep their own names.
+pub(crate) fn offered_name(names: &Option<Names>, h: &Registered, own: &str) -> Option<String> {
+    if !h.restricted {
+        return Some(own.to_string());
+    }
+    match names {
+        Some(names) => names(&h.name, own),
+        None => Some(format!("{}__{own}", h.name)),
+    }
+}
+
+/// `tool` of `h`, offered as `name` in `run`: its owner record, and the tool
+/// — for a restricted handler with `before_tool`, one that has it judge its
+/// own calls when they run.
+pub(crate) fn live(
+    h: &Registered,
+    tool: Arc<dyn AgentTool>,
+    source: Option<String>,
+    name: String,
+    run: &RunInfo,
+    policy: Option<std::time::Duration>,
+) -> (ToolOwner, Arc<dyn AgentTool>) {
+    let own = tool.name().to_string();
+    let owner = ToolOwner {
+        handler: h.name.to_string(),
+        owner: h.owner.to_string(),
+        source,
+        plugin_name: (name != own).then(|| own.clone()),
+    };
+    let judge = (h.restricted && h.hooks.before_tool).then(|| Judge {
+        run: run.clone(),
+        owner: owner.clone(),
+        timeout: policy,
+    });
+    let tool = Arc::new(LiveTool {
+        inner: tool,
+        offered_as: (name != own).then_some(name),
+        judge,
+        gate: h.gate.clone(),
+        handler: h.clone(),
+    });
+    (owner, tool)
+}
 
 /// An extension's state shared with its [`LateTools`]: the extension's own
 /// runs in progress.
@@ -46,7 +94,7 @@ pub(crate) struct LateRun {
     timeouts: Timeouts,
     names: Option<Names>,
     /// Handlers the run started with: they are not late.
-    snapshot: HashSet<Arc<str>>,
+    snapshot: Mutex<HashSet<Arc<str>>>,
     /// Registered since, not yet asked for their tools.
     pending: Mutex<Vec<Registered>>,
     /// Asked: called for their own tools' `before_tool`, and `finish`.
@@ -60,6 +108,17 @@ pub(crate) struct LateRun {
 }
 
 impl LateRun {
+    /// The handlers the run started with (taken just after it was tracked):
+    /// one that registered meanwhile is in both, and is not late.
+    pub(crate) fn snapshot(&self, handlers: &[Registered]) {
+        let names: HashSet<Arc<str>> = handlers.iter().map(|h| h.name.clone()).collect();
+        self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|h| !names.contains(&h.name));
+        *self.snapshot.lock().unwrap_or_else(|e| e.into_inner()) = names;
+    }
+
     pub(crate) fn joined(&self) -> Vec<Registered> {
         self.joined
             .lock()
@@ -84,7 +143,6 @@ impl Late {
         run: &RunInfo,
         inherited: bool,
         timeouts: Timeouts,
-        handlers: &[Registered],
     ) -> Option<Arc<LateRun>> {
         if inherited || !self.watched.load(Ordering::SeqCst) {
             return None;
@@ -93,7 +151,7 @@ impl Late {
             run: run.clone(),
             timeouts,
             names: self.names.lock().unwrap_or_else(|e| e.into_inner()).clone(),
-            snapshot: handlers.iter().map(|h| h.name.clone()).collect(),
+            snapshot: Mutex::default(),
             pending: Mutex::default(),
             joined: Mutex::default(),
             tools: Mutex::default(),
@@ -109,10 +167,12 @@ impl Late {
 
     /// The run `run_id` ended (its hooks dropped).
     pub(crate) fn ended(&self, run_id: &str) {
-        self.runs
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .retain(|r| r.run.run_id != run_id);
+        let mut runs = self.runs.lock().unwrap_or_else(|e| e.into_inner());
+        runs.retain(|r| r.run.run_id != run_id);
+        if runs.len() <= 1 {
+            // Logged again the next time runs overlap.
+            self.crowded.store(false, Ordering::SeqCst);
+        }
     }
 
     /// A restricted handler registered: it joins the run in progress, when
@@ -121,7 +181,13 @@ impl Late {
         let runs = self.runs.lock().unwrap_or_else(|e| e.into_inner());
         match runs.as_slice() {
             [] => {}
-            [run] if !run.snapshot.contains(&h.name) => {
+            [run]
+                if !run
+                    .snapshot
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .contains(&h.name) =>
+            {
                 tracing::info!(run_id = %run.run.run_id, handler = %h.name, "a restricted handler registered mid-run: its tools are offered from the next turn");
                 run.pending
                     .lock()
@@ -222,12 +288,9 @@ impl ToolSource for LateTools {
             }
             for Offer { tool, source } in offers {
                 let own = tool.name().to_string();
-                let name = match &run.names {
-                    Some(names) => match names(&h.name, &own) {
-                        Some(name) => name,
-                        None => continue,
-                    },
-                    None => own.clone(),
+                let Some(name) = offered_name(&run.names, &h, &own) else {
+                    tracing::debug!(run_id = %run.run.run_id, handler = %h.name, tool = %own, "left out by the host");
+                    continue;
                 };
                 let taken = run
                     .taken
@@ -239,25 +302,20 @@ impl ToolSource for LateTools {
                     tracing::warn!(run_id = %run.run.run_id, tool = %name, handler = %h.name, "a late plugin tool's name is taken in this run; left out");
                     continue;
                 }
-                offered.insert(
+                let (owner, tool) = live(
+                    &h,
+                    tool,
+                    source,
                     name.clone(),
-                    ToolOwner {
-                        handler: h.name.to_string(),
-                        owner: h.owner.to_string(),
-                        source,
-                        plugin_name: (name != own).then(|| own.clone()),
-                    },
+                    &run.run,
+                    run.timeouts.policy,
                 );
+                offered.insert(name, owner);
                 drop(offered);
                 run.tools
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .push(Arc::new(LiveTool {
-                        inner: tool,
-                        offered_as: (name != own).then_some(name),
-                        gate: h.gate.clone(),
-                        handler: h.clone(),
-                    }));
+                    .push(tool);
             }
             run.joined.lock().unwrap_or_else(|e| e.into_inner()).push(h);
         }
@@ -455,7 +513,7 @@ mod tests {
         let seen = Arc::default();
         let provider = Recording(
             MockProvider::new(vec![
-                calls("boxed_tool"),
+                calls("boxed__boxed_tool"),
                 calls("plain_tool"),
                 MockResponse::Text("done".into()),
             ]),
@@ -472,7 +530,7 @@ mod tests {
         for hook in [
             "plain on_input",
             "plain before_model",
-            "plain before_tool boxed_tool",
+            "plain before_tool boxed__boxed_tool",
             "plain before_tool plain_tool",
             "plain after_tool",
             "plain on_stop",
@@ -535,7 +593,10 @@ mod tests {
         let log = Log::default();
         insert(bridge.registry(), logged("boxed", &log), true);
         let provider = Recording(
-            MockProvider::new(vec![calls("boxed_tool"), MockResponse::Text("done".into())]),
+            MockProvider::new(vec![
+                calls("boxed__boxed_tool"),
+                MockResponse::Text("done".into()),
+            ]),
             Arc::default(),
         );
         let mut agent = Agent::from_provider(provider, ModelConfig::mock())
@@ -613,6 +674,197 @@ mod tests {
         );
         let owner = owners.lock().unwrap().clone().expect("offered_by names it");
         assert_eq!(owner.handler(), "late");
+        root.shutdown().await.unwrap();
+    }
+
+    /// A restricted handler offering a tool named like the agent's own never
+    /// judges the agent's calls: its check runs inside its own tool, which
+    /// yoagent dropped for the agent's.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_restricted_handler_never_judges_a_tool_sharing_its_name() {
+        let root = rutis::Ctx::root().unwrap();
+        let bridge = RutisBridge::install(&root).unwrap();
+        let log = Log::default();
+        insert(
+            bridge.registry(),
+            logged("boxed", &log).with_tool(tool("shell")),
+            true,
+        );
+        let provider = Recording(
+            MockProvider::new(vec![calls("shell"), MockResponse::Text("done".into())]),
+            Arc::default(),
+        );
+        let extension = bridge
+            .extension()
+            .with_restricted_tools(|_, tool| Some(tool.to_string()));
+        let mut agent = Agent::from_provider(provider, ModelConfig::mock())
+            .with_tools(vec![Box::new(tool("shell"))])
+            .with_extension(extension);
+        go(&mut agent).await;
+        assert_eq!(lines(&log, "boxed"), ["boxed finish"]);
+        root.shutdown().await.unwrap();
+    }
+
+    /// A restricted handler's check of its own call gets the call alone: no
+    /// request text, no conversation.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_restricted_handler_never_sees_the_users_text() {
+        let root = rutis::Ctx::root().unwrap();
+        let bridge = RutisBridge::install(&root).unwrap();
+        let seen: Log = Log::default();
+        let record = seen.clone();
+        let boxed = Handler::new("boxed")
+            .with_tool(tool("t"))
+            .with_messages()
+            .with_before_tool(move |call| {
+                record.lock().unwrap().push(format!(
+                    "{:?} {:?} {}",
+                    call.user_request,
+                    call.latest_user_text,
+                    call.messages.is_some()
+                ));
+                ToolDecision::Allow
+            });
+        insert(bridge.registry(), boxed, true);
+        let provider = Recording(
+            MockProvider::new(vec![calls("boxed__t"), MockResponse::Text("done".into())]),
+            Arc::default(),
+        );
+        let mut agent =
+            Agent::from_provider(provider, ModelConfig::mock()).with_extension(bridge.extension());
+        go(&mut agent).await;
+        assert_eq!(*seen.lock().unwrap(), ["None None false"]);
+        root.shutdown().await.unwrap();
+    }
+
+    /// A restricted handler whose `tools` fails offers nothing; it does not
+    /// fail a required extension's run.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failing_restricted_handler_does_not_fail_the_run() {
+        let root = rutis::Ctx::root().unwrap();
+        let bridge = RutisBridge::install(&root).unwrap();
+        let broken = Handler::new("broken").with_tools(|_| panic!("tools broke"));
+        insert(bridge.registry(), broken, true);
+        let provider = Recording(
+            MockProvider::new(vec![MockResponse::Text("done".into())]),
+            Arc::default(),
+        );
+        let mut agent = Agent::from_provider(provider, ModelConfig::mock())
+            .with_extension(bridge.extension().required());
+        go(&mut agent).await;
+        let last = agent.messages().last().cloned();
+        assert!(
+            matches!(
+                &last,
+                Some(yoagent::AgentMessage::Llm(Message::Assistant {
+                    stop_reason: yoagent::StopReason::Stop,
+                    ..
+                }))
+            ),
+            "{last:?}"
+        );
+        root.shutdown().await.unwrap();
+    }
+
+    /// A trusted registration evicts a restricted handler holding its name
+    /// (or a static tool's); a restricted one never evicts a trusted one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_trusted_handler_evicts_a_restricted_squatter() {
+        let root = rutis::Ctx::root().unwrap();
+        let bridge = RutisBridge::install(&root).unwrap();
+        let registry = bridge.registry();
+        insert(registry, Handler::new("policy").with_tool(tool("t")), true);
+        insert(registry, Handler::new("policy"), false);
+        insert(registry, Handler::new("other").with_tool(tool("u")), true);
+        insert(registry, Handler::new("owner").with_tool(tool("u")), false);
+        let info = registry.handlers();
+        let names: Vec<(&str, bool)> = info.iter().map(|h| (h.name(), h.restricted())).collect();
+        assert_eq!(names, [("policy", false), ("owner", false)]);
+        let refused = registry.insert(
+            "policy".into(),
+            "test".into(),
+            Arc::new(Handler::new("policy")),
+            CancellationToken::new(),
+            true,
+        );
+        assert!(
+            refused.is_err(),
+            "a restricted handler never takes a trusted name"
+        );
+        root.shutdown().await.unwrap();
+    }
+
+    /// Two restricted handlers registered mid-run, on different turns: both
+    /// are offered from then on (the source's list grows), a tool the host
+    /// leaves out is not, every late handler is finished, and `offered_by`
+    /// forgets the run's late tools when it ends.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn late_handlers_accumulate_and_are_forgotten_with_the_run() {
+        let root = rutis::Ctx::root().unwrap();
+        let bridge = RutisBridge::install(&root).unwrap();
+        let log = Log::default();
+        let (registry, first_log) = (bridge.registry().clone(), log.clone());
+        let first = tool("first");
+        *first.then.lock().unwrap() = Some(Box::new(move || {
+            insert(
+                &registry,
+                logged("one", &first_log).with_tool(tool("hidden")),
+                true,
+            )
+        }));
+        let (registry, second_log) = (bridge.registry().clone(), log.clone());
+        let second = tool("second");
+        *second.then.lock().unwrap() = Some(Box::new(move || {
+            insert(&registry, logged("two", &second_log), true)
+        }));
+        let seen: Arc<StdMutex<Vec<Vec<String>>>> = Arc::default();
+        let provider = Recording(
+            MockProvider::new(vec![
+                calls("first"),
+                calls("second"),
+                MockResponse::Text("done".into()),
+            ]),
+            seen.clone(),
+        );
+        let extension = bridge
+            .extension()
+            .with_restricted_tools(|h, t| (t != "hidden").then(|| format!("{h}__{t}")));
+        let late = extension.late_tools();
+        let mut agent = Agent::from_provider(provider, ModelConfig::mock())
+            .with_tools(vec![Box::new(first), Box::new(second)])
+            .with_extension(extension)
+            .with_tool_source(late);
+        let run_id: Arc<StdMutex<Option<String>>> = Arc::default();
+        let record = run_id.clone();
+        insert(
+            bridge.registry(),
+            Handler::new("ids").with_finish(move |_, run| {
+                *record.lock().unwrap() = Some(run.run_id.clone());
+            }),
+            false,
+        );
+        go(&mut agent).await;
+        let seen = seen.lock().unwrap().clone();
+        let has = |i: usize, t: &str| seen[i].iter().any(|s| s == t);
+        assert!(
+            has(1, "one__one_tool") && !has(1, "two__two_tool"),
+            "{seen:?}"
+        );
+        assert!(
+            has(2, "one__one_tool") && has(2, "two__two_tool"),
+            "{seen:?}"
+        );
+        assert!(
+            !seen.iter().flatten().any(|t| t.contains("hidden")),
+            "{seen:?}"
+        );
+        assert_eq!(lines(&log, "one"), ["one finish"]);
+        assert_eq!(lines(&log, "two"), ["two finish"]);
+        let run_id = run_id.lock().unwrap().clone().unwrap();
+        assert!(bridge
+            .registry()
+            .offered_by(&run_id, "one__one_tool")
+            .is_none());
         root.shutdown().await.unwrap();
     }
 }

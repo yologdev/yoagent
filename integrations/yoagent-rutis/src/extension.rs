@@ -72,7 +72,7 @@ use crate::handler::{
 };
 use crate::host::{Host, NOT_RUNNING};
 use crate::late::{Late, LateRun, LateTools};
-use crate::registry::{LiveTool, Outcome, Registered, Registry, ToolOwner};
+use crate::registry::{Outcome, Registered, Registry, ToolOwner};
 
 /// Default bound on one handler's `before_tool`, `after_tool` and `on_stop`
 /// call (the tool call is denied / the result withheld / the handler skipped
@@ -137,10 +137,12 @@ impl RutisExtension {
     /// Name — or leave out — the tools of **restricted** handlers (see the
     /// [`registry`](crate::registry) docs): `name(handler, tool)` gives the
     /// name to offer `tool` of the handler named `handler` under, or `None`
-    /// to leave it out. The plugin is still called with its own name. For a
-    /// host that offers a loaded plugin's tools as `<plugin>__<tool>`, or
-    /// only the ones its user approved. Applies to [`late_tools`](Self::late_tools)
-    /// too. Other handlers' tools keep their names.
+    /// to leave it out (without this: `<handler>__<tool>`). The plugin is
+    /// still called with its own name. For a host that offers only the
+    /// tools its user approved, or names them its way — apart from the
+    /// agent's own and its sources' tools, which win a clash. Applies to
+    /// [`late_tools`](Self::late_tools) too. Other handlers' tools keep
+    /// their names.
     pub fn with_restricted_tools(
         self,
         name: impl Fn(&str, &str) -> Option<String> + Send + Sync + 'static,
@@ -270,12 +272,21 @@ impl Extension for RutisExtension {
     async fn start_run(&self, run: &RunContext<'_>) -> Result<Box<dyn RunHooks>, ExtensionError> {
         let info = RunInfo::from_context(run);
         let closed = self.host.is_closed();
+        // Tracked before the snapshot: a restricted handler registering in
+        // between is in the snapshot or pending, never in neither.
+        let late = self
+            .late
+            .started(&info, run.inherited, self.timeouts)
+            .map(|run| (self.late.clone(), run));
         let handlers = if closed {
             tracing::warn!(run_id = %info.run_id, "{NOT_RUNNING}: tool calls are denied and input rejected");
             Vec::new()
         } else {
             self.registry.snapshot()
         };
+        if let Some((_, run)) = &late {
+            run.snapshot(&handlers);
+        }
         let events = handlers
             .iter()
             .filter(|h| h.hooks.on_event)
@@ -296,10 +307,6 @@ impl Extension for RutisExtension {
             && !handlers
                 .iter()
                 .any(|h| h.hooks.before_tool && !h.restricted);
-        let late = self
-            .late
-            .started(&info, run.inherited, self.timeouts, &handlers)
-            .map(|run| (self.late.clone(), run));
         Ok(Box::new(RunState {
             registry: self.registry.clone(),
             offered: Arc::default(),
@@ -387,7 +394,7 @@ pub(crate) enum Missed {
 }
 
 impl Missed {
-    fn reason(&self) -> &str {
+    pub(crate) fn reason(&self) -> &str {
         match self {
             Missed::Unavailable(r) | Missed::Failed(r) => r,
         }
@@ -581,52 +588,25 @@ impl RunHooks for RunState {
     async fn tools(&mut self, _run: &RunContext<'_>) -> Vec<Arc<dyn AgentTool>> {
         let mut tools: Vec<Arc<dyn AgentTool>> = Vec::new();
         let mut offered = HashMap::new();
-        let names = self.names.clone();
-        let mut offer = |tool: Arc<dyn AgentTool>,
-                         source: Option<String>,
-                         h: &Registered,
-                         tools: &mut Vec<_>| {
-            let own = tool.name().to_string();
-            let name = match (&names, h.restricted) {
-                (Some(names), true) => match names(&h.name, &own) {
-                    Some(name) => name,
-                    None => return,
-                },
-                _ => own.clone(),
-            };
-            if !offered.contains_key(&name) {
-                offered.insert(
-                    name.clone(),
-                    ToolOwner {
-                        handler: h.name.to_string(),
-                        owner: h.owner.to_string(),
-                        source,
-                        plugin_name: (name != own).then(|| own.clone()),
-                    },
-                );
-                tools.push(Arc::new(LiveTool {
-                    inner: tool,
-                    offered_as: (name != own).then_some(name),
-                    gate: h.gate.clone(),
-                    handler: h.clone(),
-                }) as Arc<dyn AgentTool>);
-            } else {
-                tracing::warn!(
-                    run_id = %self.run.run_id,
-                    tool = %name,
-                    handler = %h.name,
-                    "a plugin tool's name is taken by an earlier handler's tool; dropped for this run"
-                );
-            }
-        };
-        for h in &self.handlers {
+        // Restricted handlers last: their tools never take a name a trusted
+        // handler's tool has.
+        let order: Vec<&Registered> = self
+            .handlers
+            .iter()
+            .filter(|h| !h.restricted)
+            .chain(self.handlers.iter().filter(|h| h.restricted))
+            .collect();
+        for h in order {
             if !h.gate.is_available() {
                 tracing::debug!(run_id = %self.run.run_id, handler = %h.name, "its plugin unloaded; offering none of its tools");
                 continue;
             }
-            for tool in h.handler.static_tools() {
-                offer(tool, None, h, &mut tools);
-            }
+            let mut offers: Vec<Offer> = h
+                .handler
+                .static_tools()
+                .into_iter()
+                .map(|tool| Offer { tool, source: None })
+                .collect();
             if h.hooks.tools {
                 match call(
                     h,
@@ -636,15 +616,42 @@ impl RunHooks for RunState {
                 )
                 .await
                 {
-                    Ok(dynamic) => {
-                        for Offer { tool, source } in dynamic {
-                            offer(tool, source, h, &mut tools);
-                        }
+                    Ok(dynamic) => offers.extend(dynamic),
+                    // A restricted handler offers nothing then; it never
+                    // fails the run (tools only).
+                    Err(missed) if h.restricted => {
+                        tracing::warn!(run_id = %self.run.run_id, handler = %h.name, "a restricted handler's tools: {}; none offered", missed.reason())
                     }
                     // Not raised as a panic: recorded, and handed to yoagent
                     // at the next decision point (`before_model` comes next).
                     Err(missed) => self.skipped(&missed),
                 }
+            }
+            for Offer { tool, source } in offers {
+                let own = tool.name().to_string();
+                let Some(name) = crate::late::offered_name(&self.names, h, &own) else {
+                    tracing::debug!(run_id = %self.run.run_id, handler = %h.name, tool = %own, "left out by the host");
+                    continue;
+                };
+                if offered.contains_key(&name) {
+                    tracing::warn!(
+                        run_id = %self.run.run_id,
+                        tool = %name,
+                        handler = %h.name,
+                        "a plugin tool's name is taken by an earlier handler's tool; dropped for this run"
+                    );
+                    continue;
+                }
+                let (owner, tool) = crate::late::live(
+                    h,
+                    tool,
+                    source,
+                    name.clone(),
+                    &self.run,
+                    self.timeouts.policy,
+                );
+                offered.insert(name, owner);
+                tools.push(tool);
             }
         }
         (self.offered, self.recorded) = self.registry.record_offers(&self.run.run_id, offered);
@@ -734,30 +741,25 @@ impl RunHooks for RunState {
             tracing::warn!(run_id = %self.run.run_id, tool = request.tool_name, "{UNJUDGED}; denying (require_policy)");
             return ToolDecision::Deny(UNJUDGED.into());
         }
-        let owner = self.owner_of(request.tool_name);
-        let joined = self.joined();
-        // A restricted handler judges calls to its own tools only.
+        // A restricted handler judges its own tool's calls inside the tool
+        // (see `LiveTool`), never here: here it could be handed a call of a
+        // tool that only shares a name with one of its own.
         let handlers: Vec<&Registered> = self
-            .with(|h| h.hooks.before_tool)
-            .chain(joined.iter().filter(|h| h.hooks.before_tool))
-            .filter(|h| !h.restricted || owner.as_ref().is_some_and(|o| *o.handler == *h.name))
+            .with(|h| h.hooks.before_tool && !h.restricted)
             .collect();
-        let plugin_name = owner.as_ref().and_then(|o| o.plugin_name.clone());
-        let mut event =
-            ToolCall::from_request(request, &self.run, wants_messages(&handlers), owner);
+        let mut event = ToolCall::from_request(
+            request,
+            &self.run,
+            wants_messages(&handlers),
+            self.owner_of(request.tool_name),
+        );
         for h in handlers {
-            let mut seen = for_handler(h, &event, |e| &mut e.messages);
-            // A restricted handler judges its own tool: by its own name.
-            if h.restricted {
-                if let Some(own) = &plugin_name {
-                    seen.tool = own.clone();
-                }
-            }
             let decision = call(
                 h,
                 "before_tool",
                 self.timeouts.policy,
-                h.handler.before_tool(seen),
+                h.handler
+                    .before_tool(for_handler(h, &event, |e| &mut e.messages)),
             )
             .await;
             match decision {

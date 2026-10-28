@@ -38,16 +38,23 @@
 //! for plugins it does not trust beyond their tools) gets only:
 //!
 //! - `tools` and its tool calls (`call_tool`);
-//! - `before_tool` for calls to **its own** tools (to check or adjust their
-//!   arguments): never another handler's or the agent's, and it does not
-//!   count as a policy for
+//! - `before_tool` for calls to **its own** tools, called inside the tool
+//!   when it runs — after every policy has passed the call — under the
+//!   tool's own name, with the call alone (no request text, no
+//!   conversation): it can deny its own call or adjust its arguments, and
+//!   never sees another handler's or the agent's calls (a tool that merely
+//!   shares a name with one of its own included). It is no policy for
 //!   [`require_policy`](crate::RutisExtension::require_policy);
 //! - `finish`.
 //!
-//! Its `after_tool`, `before_model`, `on_input`, `on_stop` and `on_event`
-//! are never called, and it never gets the run's conversation. The host can
-//! rename or leave out its tools
-//! ([`RutisExtension::with_restricted_tools`](crate::RutisExtension::with_restricted_tools)).
+//! Its `after_tool`, `before_model`, `on_input`, `on_stop` and `on_event` are
+//! never called, and it never gets the run's conversation. Its tools are
+//! offered as `<handler>__<tool>` unless the host names them
+//! ([`RutisExtension::with_restricted_tools`](crate::RutisExtension::with_restricted_tools)),
+//! after every trusted handler's (a name clash drops the restricted one). Its
+//! `tools` failing offers nothing; it never fails a run. A trusted handler
+//! registering a name (or a static tool's) a restricted one holds evicts it;
+//! a restricted one never takes a trusted one's.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
@@ -86,6 +93,20 @@ pub struct Registry {
     late: Mutex<Vec<std::sync::Weak<crate::late::Late>>>,
     /// The runtimes whose handlers are restricted (tools only).
     restricted_runtimes: Mutex<Vec<rutis_bridge_handle::RuntimeHandle>>,
+    /// Every session a restricted runtime has run as, seen so far: a call
+    /// from an earlier process (a restart's) or one seen while the runtime
+    /// is between states still reads as restricted.
+    #[cfg_attr(
+        not(any(
+            feature = "node",
+            feature = "python",
+            feature = "bun",
+            feature = "go",
+            feature = "websocket"
+        )),
+        allow(dead_code)
+    )]
+    restricted_sessions: Mutex<std::collections::HashSet<String>>,
 }
 
 /// `RuntimeHandle`, when a language feature brings rutis-bridge in; a type
@@ -544,41 +565,63 @@ impl Registry {
             .map(|t| t.name().to_string())
             .collect();
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        // A restricted holder never keeps a name a trusted plugin wants: it
+        // is evicted (a restricted plugin must not lock a policy out by
+        // squatting its name). Any other clash refuses.
+        let mut evict: Vec<u64> = Vec::new();
         for tool in &tool_names {
-            let holder = inner
-                .entries
-                .iter()
-                .find(|e| e.tool_names.contains(tool))
-                .map(|e| e.owner.clone())
-                .or_else(|| {
-                    // Two static tools of one handler with the same name.
-                    (tool_names.iter().filter(|t| *t == tool).count() > 1).then(|| owner.clone())
-                });
-            if let Some(holder) = holder {
+            if tool_names.iter().filter(|t| *t == tool).count() > 1 {
+                tracing::warn!(tool = %tool, refused = %owner, "two static tools of one handler with the same name; registration refused");
+                return Err(CordisError::ServiceExists(format!(
+                    "yoagent tool `{tool}` (already provided by plugin `{owner}`)"
+                )));
+            }
+            if let Some(holder) = inner.entries.iter().find(|e| e.tool_names.contains(tool)) {
+                if holder.restricted && !restricted {
+                    evict.push(holder.seq);
+                    continue;
+                }
                 tracing::warn!(
                     tool = %tool,
-                    holder = %holder,
+                    holder = %holder.owner,
                     refused = %owner,
                     "plugin tool name already taken; registration refused \
                      (the refused plugin is not retried when the holder unloads)"
                 );
                 return Err(CordisError::ServiceExists(format!(
-                    "yoagent tool `{tool}` (already provided by plugin `{holder}`)"
+                    "yoagent tool `{tool}` (already provided by plugin `{}`)",
+                    holder.owner
                 )));
             }
         }
         if let Some(existing) = inner.entries.iter().find(|e| e.name == name) {
-            tracing::warn!(
-                handler = %name,
-                holder = %existing.owner,
-                refused = %owner,
-                "plugin handler name already taken; registration refused \
-                 (the refused plugin is not retried when the holder unloads)"
-            );
-            return Err(CordisError::ServiceExists(format!(
-                "yoagent handler `{name}` (already registered by plugin `{}`)",
-                existing.owner
-            )));
+            if existing.restricted && !restricted {
+                evict.push(existing.seq);
+            } else {
+                tracing::warn!(
+                    handler = %name,
+                    holder = %existing.owner,
+                    refused = %owner,
+                    "plugin handler name already taken; registration refused \
+                     (the refused plugin is not retried when the holder unloads)"
+                );
+                return Err(CordisError::ServiceExists(format!(
+                    "yoagent handler `{name}` (already registered by plugin `{}`)",
+                    existing.owner
+                )));
+            }
+        }
+        for seq in evict {
+            if let Some(at) = inner.entries.iter().position(|e| e.seq == seq) {
+                let evicted = inner.entries.remove(at);
+                tracing::warn!(
+                    handler = %evicted.name,
+                    holder = %evicted.owner,
+                    by = %owner,
+                    "a restricted plugin held a name a trusted plugin registers: the restricted handler is removed"
+                );
+                evicted.gate.remove();
+            }
         }
         let seq = inner.next_seq;
         inner.next_seq += 1;
@@ -692,14 +735,33 @@ impl Registry {
     ))]
     pub(crate) fn is_restricted_session(&self, tag: &str) -> bool {
         use rutis_bridge::runtime::RuntimeState;
-        self.restricted_runtimes
+        let runtimes = self
+            .restricted_runtimes
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .any(|runtime| match runtime.state() {
-                RuntimeState::Ready(process) => process.connection().tag() == tag,
-                _ => false,
-            })
+            .unwrap_or_else(|e| e.into_inner());
+        let mut sessions = self
+            .restricted_sessions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut settling = false;
+        for runtime in runtimes.iter() {
+            match runtime.state() {
+                RuntimeState::Ready(process) => {
+                    sessions.insert(process.connection().tag().to_string());
+                }
+                RuntimeState::Starting => settling = true,
+                _ => {}
+            }
+        }
+        let restricted = sessions.contains(tag);
+        if !restricted && settling {
+            tracing::warn!(
+                session = %tag,
+                "a handler registered while a restricted runtime is starting, from a session not known \
+                 to be restricted: registered unrestricted"
+            );
+        }
+        restricted
     }
 
     /// The time each handler spent in each kind of hook, as the agent
@@ -792,12 +854,24 @@ impl Registry {
 /// A plugin tool bound to the handler (and plugin generation) that offered it.
 pub(crate) struct LiveTool {
     pub(crate) inner: Arc<dyn AgentTool>,
+    /// A restricted handler's own check of its own tool's calls: its
+    /// `before_tool`, called here, when the tool really runs (after every
+    /// policy), never from the extension's `before_tool` — so it can only
+    /// ever see, deny or adjust a call of this tool.
+    pub(crate) judge: Option<Judge>,
     /// The name it is offered under, when the host renamed it (the plugin
     /// is still called with its own).
     pub(crate) offered_as: Option<String>,
     pub(crate) gate: Gate,
     /// The handler that offered it, to time its executions.
     pub(crate) handler: Registered,
+}
+
+/// What a restricted handler's `before_tool` gets for its own tool's call.
+pub(crate) struct Judge {
+    pub(crate) run: crate::handler::RunInfo,
+    pub(crate) owner: ToolOwner,
+    pub(crate) timeout: Option<Duration>,
 }
 
 impl LiveTool {
@@ -827,11 +901,36 @@ impl AgentTool for LiveTool {
     }
     async fn execute(
         &self,
-        params: serde_json::Value,
+        mut params: serde_json::Value,
         ctx: yoagent::ToolContext,
     ) -> Result<yoagent::ToolResult, yoagent::ToolError> {
         if !self.gate.is_available() {
             return Err(self.gone());
+        }
+        if let Some(judge) = &self.judge {
+            // Its own name, its own call: no request text, no conversation.
+            let call = crate::handler::ToolCall::new(
+                ctx.tool_call_id.clone(),
+                self.inner.name(),
+                params.clone(),
+            )
+            .with_run(judge.run.clone())
+            .with_offered_by(judge.owner.clone());
+            let decision = crate::extension::call(
+                &self.handler,
+                "before_tool",
+                judge.timeout,
+                self.handler.handler.before_tool(call),
+            )
+            .await;
+            match decision {
+                Ok(yoagent::ToolDecision::Allow) => {}
+                Ok(yoagent::ToolDecision::Modify(args)) => params = args,
+                Ok(yoagent::ToolDecision::Deny(reason)) => {
+                    return Err(yoagent::ToolError::Failed(reason))
+                }
+                Err(missed) => return Err(yoagent::ToolError::Failed(missed.reason().to_string())),
+            }
         }
         // A panic unwinds through `timer`, which records it as failed.
         let timer = self.handler.time_tool(self.inner.name());

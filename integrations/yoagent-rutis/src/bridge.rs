@@ -77,8 +77,10 @@ impl RutisBridge {
     /// For plugins trusted with their tools and nothing else: a package
     /// found on npm and allowed for one session, say.
     ///
-    /// Mark it **before it starts**: a handler is judged when it registers,
-    /// and keeps that for its life. The mark stays for the bridge's life.
+    /// Mark it **before it starts**: a handler is judged when it registers
+    /// (its session against every session the runtime has run as — a
+    /// restart's earlier process included), and keeps that for its life.
+    /// The mark stays for the bridge's life.
     #[cfg(any(
         feature = "node",
         feature = "python",

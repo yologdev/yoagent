@@ -239,7 +239,7 @@ async fn a_restricted_runtimes_handler_gets_tools_only() {
     wait_active(&watch).await;
     let own = Reply::new("own", "own ran");
     let (agent, seen) = agent(vec![
-        call("boxed_tool", json!({})),
+        call("boxed__boxed_tool", json!({})),
         call("own", json!({})),
         text("done"),
     ]);
@@ -249,11 +249,11 @@ async fn a_restricted_runtimes_handler_gets_tools_only() {
     let (_, results) = run(&mut agent, "go").await;
     assert!(seen.lock().unwrap()[0]
         .tools
-        .contains(&"boxed_tool".to_string()));
+        .contains(&"boxed__boxed_tool".to_string()));
     assert_eq!(
         results,
         vec![
-            ("boxed_tool".into(), "boxed_tool ran".into(), false),
+            ("boxed__boxed_tool".into(), "boxed_tool ran".into(), false),
             ("own".into(), "own ran".into(), false),
         ]
     );
@@ -267,7 +267,7 @@ async fn a_restricted_runtimes_handler_gets_tools_only() {
     );
     assert_eq!(
         *plain.lock().unwrap(),
-        ["boxed_tool", "own"],
+        ["boxed__boxed_tool", "own"],
         "an unrestricted policy sees every call"
     );
     host.root.shutdown().await.unwrap();
