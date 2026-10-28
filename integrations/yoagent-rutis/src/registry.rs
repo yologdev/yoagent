@@ -53,8 +53,10 @@
 //! ([`RutisExtension::with_restricted_tools`](crate::RutisExtension::with_restricted_tools)),
 //! after every trusted handler's (a name clash drops the restricted one). Its
 //! `tools` failing offers nothing; it never fails a run. A trusted handler
-//! registering a name (or a static tool's) a restricted one holds evicts it;
-//! a restricted one never takes a trusted one's.
+//! registering a handler name a restricted one holds evicts it; a restricted
+//! one never takes a trusted one's. Static tool names are unique among
+//! trusted handlers only (a restricted handler's are offered under other
+//! names). Cancelling the run ends its check, and the tool does not run.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
@@ -565,9 +567,12 @@ impl Registry {
             .map(|t| t.name().to_string())
             .collect();
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        // A restricted holder never keeps a name a trusted plugin wants: it
-        // is evicted (a restricted plugin must not lock a policy out by
-        // squatting its name). Any other clash refuses.
+        // A restricted holder never keeps a handler name a trusted plugin
+        // wants: it is evicted (a restricted plugin must not lock a policy
+        // out by squatting its name). Static tool names are unique among
+        // trusted handlers; a restricted handler's are offered under other
+        // names (`<handler>__<tool>`, or the host's), so their clashes are
+        // settled when offered. Any other clash refuses.
         let mut evict: Vec<u64> = Vec::new();
         for tool in &tool_names {
             if tool_names.iter().filter(|t| *t == tool).count() > 1 {
@@ -576,11 +581,14 @@ impl Registry {
                     "yoagent tool `{tool}` (already provided by plugin `{owner}`)"
                 )));
             }
-            if let Some(holder) = inner.entries.iter().find(|e| e.tool_names.contains(tool)) {
-                if holder.restricted && !restricted {
-                    evict.push(holder.seq);
-                    continue;
-                }
+            if restricted {
+                continue;
+            }
+            if let Some(holder) = inner
+                .entries
+                .iter()
+                .find(|e| !e.restricted && e.tool_names.contains(tool))
+            {
                 tracing::warn!(
                     tool = %tool,
                     holder = %holder.owner,
@@ -755,7 +763,7 @@ impl Registry {
         }
         let restricted = sessions.contains(tag);
         if !restricted && settling {
-            tracing::warn!(
+            tracing::debug!(
                 session = %tag,
                 "a handler registered while a restricted runtime is starting, from a session not known \
                  to be restricted: registered unrestricted"
@@ -916,13 +924,16 @@ impl AgentTool for LiveTool {
             )
             .with_run(judge.run.clone())
             .with_offered_by(judge.owner.clone());
-            let decision = crate::extension::call(
-                &self.handler,
-                "before_tool",
-                judge.timeout,
-                self.handler.handler.before_tool(call),
-            )
-            .await;
+            // The run's cancel ends the check too (yoagent's own hooks race it).
+            let decision = tokio::select! {
+                decision = crate::extension::call(
+                    &self.handler,
+                    "before_tool",
+                    judge.timeout,
+                    self.handler.handler.before_tool(call),
+                ) => decision,
+                _ = ctx.cancel.cancelled() => return Err(yoagent::ToolError::Cancelled),
+            };
             match decision {
                 Ok(yoagent::ToolDecision::Allow) => {}
                 Ok(yoagent::ToolDecision::Modify(args)) => params = args,
@@ -930,6 +941,9 @@ impl AgentTool for LiveTool {
                     return Err(yoagent::ToolError::Failed(reason))
                 }
                 Err(missed) => return Err(yoagent::ToolError::Failed(missed.reason().to_string())),
+            }
+            if ctx.cancel.is_cancelled() {
+                return Err(yoagent::ToolError::Cancelled);
             }
         }
         // A panic unwinds through `timer`, which records it as failed.

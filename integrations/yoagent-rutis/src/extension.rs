@@ -656,8 +656,10 @@ impl RunHooks for RunState {
         }
         (self.offered, self.recorded) = self.registry.record_offers(&self.run.run_id, offered);
         if let Some((_, late)) = &self.late {
-            *late.taken.lock().unwrap_or_else(|e| e.into_inner()) =
-                self.offered.keys().cloned().collect();
+            late.taken
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend(self.offered.keys().cloned());
         }
         tools
     }
@@ -692,6 +694,15 @@ impl RunHooks for RunState {
     }
 
     async fn before_model(&mut self, turn: &TurnContext<'_>) -> TurnDecision {
+        // Every tool the request offers — the agent's, its sources', every
+        // extension's: a late tool may not take one of their names (as a
+        // tool source it would win over an extension's tool).
+        if let Some((_, late)) = &self.late {
+            late.taken
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend(turn.tools.iter().map(|t| t.name.clone()));
+        }
         if let Some(why) = self.take_failure() {
             return TurnDecision::Fail(why);
         }

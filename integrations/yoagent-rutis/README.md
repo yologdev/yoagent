@@ -347,15 +347,18 @@ still called with its own name (`ToolOwner::plugin_name()`). Keep host names
 apart from the agent's own tools: those win a clash, and `offered_by` still
 reads a clashing name as the plugin's.
 
-A trusted plugin registering a handler or static tool name a restricted one
-holds evicts the restricted handler; a restricted one is refused a trusted
-one's name.
+A trusted plugin registering a handler name a restricted one holds evicts the
+restricted handler; a restricted one is refused a trusted one's name. Static
+tool names need to be unique among trusted plugins only.
 
 **Mid-run.** A run works with the handlers registered when it started. A
 restricted handler that registers while one of the extension's own runs is
 going can join it, with `RutisExtension::late_tools()`: a yoagent `ToolSource`
 installed on the same agent, offering the late handler's tools from the run's
-next turn; the run calls its `before_tool` (own tools) and `finish`.
+next turn; the run calls its `before_tool` (own tools) and `finish`. A late
+tool never takes a name the run's requests already offered — the agent's,
+its sources' or any extension's tools (as a tool source it would win over an
+extension's tool).
 
 ```rust,ignore
 let extension = bridge

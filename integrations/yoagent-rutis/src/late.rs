@@ -338,6 +338,7 @@ impl ToolSource for LateTools {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex as StdMutex;
 
     use tokio_util::sync::CancellationToken;
@@ -766,8 +767,10 @@ mod tests {
         root.shutdown().await.unwrap();
     }
 
-    /// A trusted registration evicts a restricted handler holding its name
-    /// (or a static tool's); a restricted one never evicts a trusted one.
+    /// A trusted registration evicts a restricted handler holding its name;
+    /// a restricted one never evicts a trusted one. Static tool names clash
+    /// only between trusted handlers: a restricted handler's are offered
+    /// under other names.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_trusted_handler_evicts_a_restricted_squatter() {
         let root = rutis::Ctx::root().unwrap();
@@ -778,8 +781,17 @@ mod tests {
         insert(registry, Handler::new("other").with_tool(tool("u")), true);
         insert(registry, Handler::new("owner").with_tool(tool("u")), false);
         let info = registry.handlers();
+        insert(registry, Handler::new("also").with_tool(tool("u")), true);
         let names: Vec<(&str, bool)> = info.iter().map(|h| (h.name(), h.restricted())).collect();
-        assert_eq!(names, [("policy", false), ("owner", false)]);
+        assert_eq!(
+            names,
+            [("policy", false), ("other", true), ("owner", false)]
+        );
+        assert_eq!(
+            registry.handlers().len(),
+            4,
+            "two restricted `u` tools coexist"
+        );
         let refused = registry.insert(
             "policy".into(),
             "test".into(),
@@ -865,6 +877,116 @@ mod tests {
             .registry()
             .offered_by(&run_id, "one__one_tool")
             .is_none());
+        root.shutdown().await.unwrap();
+    }
+
+    /// Cancelling the run ends a restricted handler's check of its own call:
+    /// the run does not wait for it, and the tool does not run.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cancelled_run_does_not_wait_for_a_restricted_check() {
+        let root = rutis::Ctx::root().unwrap();
+        let bridge = RutisBridge::install(&root).unwrap();
+        let ran = Arc::new(AtomicBool::new(false));
+        let flag = ran.clone();
+        let slow = Tool {
+            name: "slow".into(),
+            then: StdMutex::new(Some(Box::new(move || flag.store(true, Ordering::SeqCst)))),
+        };
+        let boxed = Handler::new("boxed")
+            .with_tool(slow)
+            .with_before_tool_async(|_| async {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                Ok(ToolDecision::Allow)
+            });
+        insert(bridge.registry(), boxed, true);
+        let provider = Recording(
+            MockProvider::new(vec![
+                calls("boxed__slow"),
+                MockResponse::Text("done".into()),
+            ]),
+            Arc::default(),
+        );
+        let mut agent =
+            Agent::from_provider(provider, ModelConfig::mock()).with_extension(bridge.extension());
+        let mut rx = agent.prompt("go").await;
+        let started = std::time::Instant::now();
+        while let Some(event) = rx.recv().await {
+            if matches!(event, AgentEvent::ToolExecutionStart { .. }) {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                agent.abort();
+            }
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), agent.finish())
+            .await
+            .expect("the run ends");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert!(!ran.load(Ordering::SeqCst), "the tool never ran");
+        root.shutdown().await.unwrap();
+    }
+
+    /// Offers one tool from an extension of its own.
+    #[derive(Clone)]
+    struct Offers(&'static str);
+
+    #[async_trait::async_trait]
+    impl yoagent::RunHooks for Offers {
+        async fn tools(
+            &mut self,
+            _: &yoagent::extension::RunContext<'_>,
+        ) -> Vec<Arc<dyn AgentTool>> {
+            vec![Arc::new(tool(self.0))]
+        }
+    }
+
+    /// A late restricted tool never takes the name of a tool another
+    /// extension offers (as a tool source it would win over it).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_late_tool_never_takes_another_extensions_name() {
+        let root = rutis::Ctx::root().unwrap();
+        let bridge = RutisBridge::install(&root).unwrap();
+        let log = Log::default();
+        let (registry, late_log) = (bridge.registry().clone(), log.clone());
+        let load = tool("load");
+        *load.then.lock().unwrap() = Some(Box::new(move || {
+            insert(
+                &registry,
+                logged("acme", &late_log).with_tool(tool("deploy")),
+                true,
+            )
+        }));
+        let seen: Arc<StdMutex<Vec<Vec<String>>>> = Arc::default();
+        let provider = Recording(
+            MockProvider::new(vec![
+                calls("load"),
+                calls("acme__deploy"),
+                MockResponse::Text("done".into()),
+            ]),
+            seen.clone(),
+        );
+        let extension = bridge.extension();
+        let late = extension.late_tools();
+        let mut agent = Agent::from_provider(provider, ModelConfig::mock())
+            .with_tools(vec![Box::new(load)])
+            .with_extension(extension)
+            .with_extension(yoagent::extension::ClonedHooks::new(
+                "other",
+                Offers("acme__deploy"),
+            ))
+            .with_tool_source(late);
+        go(&mut agent).await;
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(
+            seen[1].iter().filter(|t| *t == "acme__deploy").count(),
+            1,
+            "{seen:?}"
+        );
+        assert!(
+            !lines(&log, "acme")
+                .iter()
+                .any(|l| l.contains("before_tool")),
+            "the other extension's tool ran, not the plugin's: {:?}",
+            lines(&log, "acme")
+        );
         root.shutdown().await.unwrap();
     }
 }
