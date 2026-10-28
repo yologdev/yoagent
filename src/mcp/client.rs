@@ -1,8 +1,8 @@
 //! High-level MCP client.
 
-#[cfg(feature = "native")]
-use super::transport::StdioTransport;
 use super::transport::{ExitWatch, HttpTransport, McpTransport, ServerNotifications};
+#[cfg(feature = "native")]
+use super::transport::{StdioOptions, StdioTransport};
 use super::types::*;
 #[cfg(feature = "native")]
 use std::collections::HashMap;
@@ -53,7 +53,20 @@ impl McpClient {
         args: &[&str],
         env: Option<HashMap<String, String>>,
     ) -> Result<Self, McpError> {
-        let transport = StdioTransport::new(command, args, env).await?;
+        Self::connect_stdio_with(command, args, env, StdioOptions::default()).await
+    }
+
+    /// [`connect_stdio`](Self::connect_stdio), started as `options` says: a
+    /// process group of its own ([`StdioOptions::own_process_group`]), say.
+    #[cfg(feature = "native")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "native")))]
+    pub async fn connect_stdio_with(
+        command: &str,
+        args: &[&str],
+        env: Option<HashMap<String, String>>,
+        options: StdioOptions,
+    ) -> Result<Self, McpError> {
+        let transport = StdioTransport::with_options(command, args, env, options).await?;
         // Nothing else bounds a stdio call: a server that stops answering
         // would hang the agent.
         let mut client = Self::build(

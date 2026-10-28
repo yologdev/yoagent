@@ -4,6 +4,12 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+- **MCP stdio: a process group of its own, as an option** (asked for by yobuild). `StdioOptions::new().own_process_group(true)` with `StdioTransport::with_options` / `McpClient::connect_stdio_with` (Unix): a Ctrl+C in the host's terminal no longer reaches the server, and `close()` and dropping the client kill the whole group — what the server started (`npx` → `node`, `uvx` → `python`) goes with it, where by default only the command is killed and a child that ignores its closed input lives on. The cost: a host that dies without dropping its clients leaves such servers running. Default unchanged.
+- **MCP stdio: a server that no longer reads its input reads as gone.** A failed write to it marks it, so `McpClient::exited()` answers "… no longer reads its input (its process is still running)" and an `McpToolSource` withdraws its tools.
+- Test fix: `a_busy_child_repeats_the_provisional_answer` waited only for the exit, not its stderr tail, and failed on Linux when the exit was seen first.
+
 ## Unreleased (yoagent-rutis)
 
 - **Restricted runtimes: tools only** (asked for by yobuild, for plugins found on npm and allowed for one session). `RutisBridge::restrict_runtime(handle)` marks a runtime before it starts; every handler registered over its connections (from any row, after a restart — matched by the caller's session against the runtime's running process) gets only `tools` and its tool calls, `before_tool` for calls to its own tools — called inside the tool when it runs, after every policy, under its own name, with the call alone (no request text, no conversation), so it never sees a call of another tool, one sharing a name included; not a policy for `require_policy` — and `finish`; never `after_tool`, `before_model`, `on_input`, `on_stop`, `on_event` or the conversation. Its tools are offered as `<handler>__<tool>` after every trusted handler's; a failing `tools` offers nothing and never fails a run; a trusted registration evicts a restricted handler holding its handler name; cancelling the run ends its check. `HandlerInfo::restricted()`; `RutisExtension::with_restricted_tools(|handler, tool| …)` names or leaves out their tools (the plugin is called with its own name; `ToolOwner::plugin_name()`).

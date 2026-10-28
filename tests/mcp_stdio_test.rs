@@ -697,3 +697,139 @@ sleep 3"#,
         "{why}"
     );
 }
+
+/// `path` as a double-quoted shell word.
+fn quoted(path: &std::path::Path) -> String {
+    format!("{:?}", path.display().to_string())
+}
+
+/// A server like `npx`: a wrapper whose child (the real server) ignores
+/// its input closing. Each writes its pid to `<dir>/<name>`.
+fn wrapper_server(dir: &std::path::Path) -> String {
+    format!(
+        r#"echo $$ > {wrapper}; sh -c 'echo $$ > {child}; exec sleep 300' < /dev/null &
+read -r line; id=$(id_of "$line")
+echo "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{{}},\"serverInfo\":{{\"name\":\"wrapper\",\"version\":\"1\"}}}}}}"
+read -r note
+while read -r line; do :; done"#,
+        wrapper = quoted(&dir.join("wrapper")),
+        child = quoted(&dir.join("child")),
+    )
+}
+
+async fn pid_in(path: &std::path::Path) -> String {
+    for _ in 0..200 {
+        let pid = std::fs::read_to_string(path).unwrap_or_default();
+        if !pid.trim().is_empty() {
+            return pid.trim().to_string();
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("no pid in {}", path.display());
+}
+
+fn alive(pid: &str) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", pid])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// Polls until `pid` is gone (killed processes are reaped asynchronously).
+async fn until_gone(pid: &str) -> bool {
+    for _ in 0..200 {
+        if !alive(pid) {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    false
+}
+
+fn pgid(pid: &str) -> String {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "pgid=", "-p", pid])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+async fn connect_with(script: &str, group: bool) -> McpClient {
+    use yoagent::mcp::StdioOptions;
+    let script = format!("{ID_OF}\n{script}");
+    McpClient::connect_stdio_with(
+        "bash",
+        &["-c", &script],
+        None,
+        StdioOptions::new().own_process_group(group),
+    )
+    .await
+    .unwrap()
+}
+
+/// With a process group of its own: the server is outside the host's group
+/// (a Ctrl+C in the host's terminal does not reach it), and dropping the
+/// client kills what the server started too.
+#[tokio::test]
+async fn an_own_process_group_isolates_the_server_and_goes_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    let client = connect_with(&wrapper_server(dir.path()), true).await;
+    let wrapper = pid_in(&dir.path().join("wrapper")).await;
+    let child = pid_in(&dir.path().join("child")).await;
+    let ours = pgid(&std::process::id().to_string());
+    assert_eq!(pgid(&wrapper), wrapper, "it leads its own group");
+    assert_ne!(pgid(&wrapper), ours);
+    drop(client);
+    assert!(until_gone(&child).await, "the server's child went with it");
+    assert!(until_gone(&wrapper).await);
+}
+
+/// `close` kills the whole group too.
+#[tokio::test]
+async fn close_kills_an_own_process_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let client = connect_with(&wrapper_server(dir.path()), true).await;
+    let child = pid_in(&dir.path().join("child")).await;
+    client.close().await.unwrap();
+    assert!(until_gone(&child).await, "the server's child went with it");
+}
+
+/// By default (the host's group), dropping the client kills the command
+/// alone: a child that ignores its closed input lives on — what
+/// `own_process_group` is for.
+#[tokio::test]
+async fn by_default_only_the_command_is_killed() {
+    let dir = tempfile::tempdir().unwrap();
+    let client = connect_with(&wrapper_server(dir.path()), false).await;
+    let wrapper = pid_in(&dir.path().join("wrapper")).await;
+    let child = pid_in(&dir.path().join("child")).await;
+    drop(client);
+    assert!(until_gone(&wrapper).await);
+    assert!(alive(&child), "the default leaves it");
+    std::process::Command::new("kill")
+        .args(["-9", &child])
+        .status()
+        .unwrap();
+}
+
+/// A server that closes its input while its process lives on reads as gone
+/// once a call fails to write to it.
+#[tokio::test]
+async fn a_server_that_stops_reading_reads_as_gone() {
+    let client = connect(
+        r#"read -r line; id=$(id_of "$line")
+echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"serverInfo\":{\"name\":\"deaf\",\"version\":\"1\"}}}"
+read -r note
+exec 0<&-
+sleep 3"#,
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(client.exited(), None);
+    let err = client.list_tools().await.unwrap_err();
+    assert!(err.to_string().contains("error"), "{err}");
+    let why = client.exited().expect("gone once a write failed");
+    assert!(why.contains("no longer reads its input"), "{why}");
+}

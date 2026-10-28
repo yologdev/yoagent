@@ -177,6 +177,44 @@ pub struct StdioTransport {
     /// What the exit watch needs besides the process (see
     /// [`McpTransport::exit_watch`]).
     ended: Arc<Ended>,
+    /// The server's own process group ([`StdioOptions::own_process_group`]):
+    /// killed whole on `close` and drop.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    group: Option<u32>,
+}
+
+/// How [`StdioTransport::with_options`] starts the server. Native hosts only.
+#[cfg(feature = "native")]
+#[cfg_attr(docsrs, doc(cfg(feature = "native")))]
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct StdioOptions {
+    own_process_group: bool,
+}
+
+#[cfg(feature = "native")]
+impl StdioOptions {
+    /// The defaults: the server runs in the host's process group.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Run the server in a process group of its own (Unix; ignored
+    /// elsewhere):
+    /// - a Ctrl+C (or another signal) sent to the host's terminal no longer
+    ///   reaches it — the host decides when it stops;
+    /// - [`close`](McpTransport::close) and dropping the transport kill the
+    ///   whole group: what the server started (`npx` → `node`, `uvx` →
+    ///   `python`) goes with it, where by default only the command itself is
+    ///   killed and a child that ignores its closed input lives on.
+    ///
+    /// The cost: a host that dies without dropping its clients (killed, or
+    /// aborting) leaves such servers running, where a terminal's Ctrl+C or
+    /// hangup would have reached them in the host's group.
+    pub fn own_process_group(mut self, yes: bool) -> Self {
+        self.own_process_group = yes;
+        self
+    }
 }
 
 /// How a stdio server's end shows, besides its process exiting.
@@ -185,6 +223,8 @@ pub struct StdioTransport {
 struct Ended {
     /// A call found its output closed (a wrapper can outlive the server).
     output_closed: std::sync::atomic::AtomicBool,
+    /// A write to its input failed: it no longer reads it.
+    input_closed: std::sync::atomic::AtomicBool,
     /// `close` stopped it: not a crash.
     closed_by_host: std::sync::atomic::AtomicBool,
     /// The stderr drain read to the end: the tail is complete.
@@ -239,7 +279,23 @@ impl StdioTransport {
         args: &[&str],
         env: Option<HashMap<String, String>>,
     ) -> Result<Self, McpError> {
+        Self::with_options(command, args, env, StdioOptions::default()).await
+    }
+
+    /// [`new`](Self::new), started as `options` says (a process group of
+    /// its own, say).
+    pub async fn with_options(
+        command: &str,
+        args: &[&str],
+        env: Option<HashMap<String, String>>,
+        options: StdioOptions,
+    ) -> Result<Self, McpError> {
         let mut cmd = Command::new(command);
+        #[cfg(unix)]
+        if options.own_process_group {
+            // std's `process_group` (Rust 1.64): tokio's own needs tokio 1.40.
+            std::os::unix::process::CommandExt::process_group(cmd.as_std_mut(), 0);
+        }
         cmd.args(args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -256,6 +312,12 @@ impl StdioTransport {
         let mut child = cmd
             .spawn()
             .map_err(|e| McpError::Transport(format!("Failed to spawn '{}': {}", command, e)))?;
+        // The group's id is the leader's pid.
+        let group = if cfg!(unix) && options.own_process_group {
+            child.id()
+        } else {
+            None
+        };
 
         let stdin = child
             .stdin
@@ -299,7 +361,22 @@ impl StdioTransport {
             command: command.to_string(),
             notifications: None,
             ended,
+            group,
         })
+    }
+
+    /// Kill the server's own process group, everything in it (with
+    /// [`StdioOptions::own_process_group`]).
+    fn kill_group(&self) {
+        #[cfg(unix)]
+        if let Some(pgid) = self.group.and_then(|p| libc::pid_t::try_from(p).ok()) {
+            // SAFETY: `killpg` takes two integers and touches no memory of
+            // ours; a failure (the group already gone) is fine to ignore. The
+            // id stays reserved while any member of the group lives.
+            unsafe {
+                libc::killpg(pgid, libc::SIGKILL);
+            }
+        }
     }
 
     /// Write one newline-terminated message to the server.
@@ -314,16 +391,24 @@ impl StdioTransport {
             format!("{json}\n")
         };
         writer.interrupted = true; // until the write completes
+        let input_closed = |what: &str, e: std::io::Error| {
+            // It no longer reads its input: gone, though its process may
+            // live on (see the exit watch).
+            self.ended
+                .input_closed
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            McpError::Transport(format!("{what} error: {e}"))
+        };
         writer
             .stdin
             .write_all(message.as_bytes())
             .await
-            .map_err(|e| McpError::Transport(format!("Write error: {}", e)))?;
+            .map_err(|e| input_closed("Write", e))?;
         writer
             .stdin
             .flush()
             .await
-            .map_err(|e| McpError::Transport(format!("Flush error: {}", e)))?;
+            .map_err(|e| input_closed("Flush", e))?;
         writer.interrupted = false;
         Ok(())
     }
@@ -372,6 +457,14 @@ fn stderr_suffix(tail: &std::sync::Mutex<StderrTail>) -> String {
         String::new()
     } else {
         format!("; last stderr:\n{tail}")
+    }
+}
+
+#[cfg(feature = "native")]
+impl Drop for StdioTransport {
+    fn drop(&mut self) {
+        // Before the child (`kill_on_drop` kills the command alone).
+        self.kill_group();
     }
 }
 
@@ -569,6 +662,9 @@ impl McpTransport for StdioTransport {
                         Ok(None) if ended.output_closed.load(SeqCst) => Some(format!(
                             "MCP server '{command}' closed its output (its process is still running)"
                         )),
+                        Ok(None) if ended.input_closed.load(SeqCst) => Some(format!(
+                            "MCP server '{command}' no longer reads its input (its process is still running)"
+                        )),
                         Ok(None) => None,
                         // Not waitable (`ECHILD`: SIGCHLD ignored, or reaped
                         // elsewhere): it will not answer again either.
@@ -604,6 +700,7 @@ impl McpTransport for StdioTransport {
         self.ended
             .closed_by_host
             .store(true, std::sync::atomic::Ordering::SeqCst);
+        self.kill_group();
         // Kill the server and reap it. An error here means it had already
         // exited, which is what close wants anyway: logged, not returned.
         let mut child = self.child.lock().await;
@@ -1222,15 +1319,17 @@ mod tests {
                 .await
                 .unwrap();
         let watch = transport.exit_watch().unwrap();
+        // Until the answer carries the tail (the exit can be seen before the
+        // drain has read it): the provisional answer, not yet latched.
         let mut first = None;
         for _ in 0..200 {
-            first = watch.exited();
+            first = watch.exited().filter(|why| why.contains("bye"));
             if first.is_some() {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
-        let first = first.expect("the exit was seen");
+        let first = first.expect("the exit was seen, with its stderr");
         let busy = transport.child.lock().await;
         assert_eq!(watch.exited().as_deref(), Some(first.as_str()));
         assert_eq!(watch.exited().as_deref(), Some(first.as_str()));
