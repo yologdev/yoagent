@@ -5,7 +5,7 @@ description: Use when building, extending or upgrading an agent on the yoagent R
 
 # yoagent: which feature for which job
 
-Written for **yoagent 0.25.15** (and yoagent-rutis 0.8.3); the recipes
+Written for **yoagent 0.25.15** (and yoagent-rutis 0.9.0); the recipes
 below are compiled by `tests/skill_test.rs`, line for line. Check what you
 build against: `cargo tree -p yoagent` or `Cargo.lock`. If you are on an
 older version, read [What changed](#what-changed) first.
@@ -289,6 +289,11 @@ Newest first; the full list is `CHANGELOG.md`.
 - **0.24.2** — built-in tool sandbox fixes (path escapes, `search` flag
   injection, Gemini key out of the URL, tool panics contained).
 - **0.24.1** — `retry_safe_events`.
+- **yoagent-rutis 0.9.0** — restricted runtimes: `bridge.restrict_runtime(handle)`
+  before a runtime starts makes its plugins tools only (their tools as
+  `<handler>__<tool>`, their own `before_tool` run inside their tool, never
+  any other hook). `RutisExtension::late_tools()` (a `ToolSource` for the
+  same agent) offers a restricted plugin loaded mid-run from the next turn.
 - **yoagent-rutis 0.8.3** — pi: a run's `agent_end` reaches the
   observers even when the plugins unload right after the run (it comes
   after `finish`; unloading now waits for it, bounded at 5 s).
