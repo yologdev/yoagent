@@ -179,7 +179,6 @@ pub struct StdioTransport {
     ended: Arc<Ended>,
     /// The server's own process group ([`StdioOptions::own_process_group`]):
     /// killed whole, once, on `close` or drop — while its leader is unreaped.
-    #[cfg_attr(not(unix), allow(dead_code))]
     group: std::sync::Mutex<Option<u32>>,
 }
 
@@ -228,6 +227,9 @@ struct Ended {
     output_closed: std::sync::atomic::AtomicBool,
     /// A write to its input failed: it no longer reads it.
     input_closed: std::sync::atomic::AtomicBool,
+    /// It cannot be waited on (`ECHILD`): its pid, so its group's id, may
+    /// be someone else's by now.
+    unwaitable: std::sync::atomic::AtomicBool,
     /// `close` stopped it: not a crash.
     closed_by_host: std::sync::atomic::AtomicBool,
     /// The stderr drain read to the end: the tail is complete.
@@ -377,7 +379,12 @@ impl StdioTransport {
     fn kill_group(&self, child: &Child) {
         let group = self.group.lock().unwrap_or_else(|e| e.into_inner()).take();
         #[cfg(unix)]
-        if child.id().is_some() {
+        if child.id().is_some()
+            && !self
+                .ended
+                .unwaitable
+                .load(std::sync::atomic::Ordering::SeqCst)
+        {
             if let Some(pgid) = group.and_then(|p| libc::pid_t::try_from(p).ok()) {
                 // SAFETY: `killpg` takes two integers and touches no memory
                 // of ours; the leader is unreaped, so the id is still its
@@ -475,12 +482,21 @@ fn stderr_suffix(tail: &std::sync::Mutex<StderrTail>) -> String {
 #[cfg(feature = "native")]
 impl Drop for StdioTransport {
     fn drop(&mut self) {
-        // Before the child (`kill_on_drop` kills the command alone). Not
-        // locked by anyone once the transport is dropped; if it were, the
-        // group is left alone rather than risked.
-        if let Ok(child) = self.child.try_lock() {
-            self.kill_group(&child);
+        // Before the child (`kill_on_drop` kills the command alone). Only
+        // an exit-watch poll can hold the lock now (calls and `close`
+        // borrow the transport), and only for a `try_wait`: wait for it
+        // briefly — `blocking_lock` would panic inside a runtime.
+        for _ in 0..1000 {
+            if let Ok(child) = self.child.try_lock() {
+                self.kill_group(&child);
+                return;
+            }
+            std::thread::yield_now();
         }
+        tracing::debug!(
+            "MCP server '{}': its process stayed locked; its group is left alone",
+            self.command
+        );
     }
 }
 
@@ -684,9 +700,12 @@ impl McpTransport for StdioTransport {
                         Ok(None) => None,
                         // Not waitable (`ECHILD`: SIGCHLD ignored, or reaped
                         // elsewhere): it will not answer again either.
-                        Err(e) => Some(format!(
-                            "MCP server '{command}' has gone (exit status unknown: {e})"
-                        )),
+                        Err(e) => {
+                            ended.unwaitable.store(true, SeqCst);
+                            Some(format!(
+                                "MCP server '{command}' has gone (exit status unknown: {e})"
+                            ))
+                        }
                     },
                 }
             } else {
