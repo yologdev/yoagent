@@ -178,9 +178,9 @@ pub struct StdioTransport {
     /// [`McpTransport::exit_watch`]).
     ended: Arc<Ended>,
     /// The server's own process group ([`StdioOptions::own_process_group`]):
-    /// killed whole on `close` and drop.
+    /// killed whole, once, on `close` or drop — while its leader is unreaped.
     #[cfg_attr(not(unix), allow(dead_code))]
-    group: Option<u32>,
+    group: std::sync::Mutex<Option<u32>>,
 }
 
 /// How [`StdioTransport::with_options`] starts the server. Native hosts only.
@@ -208,9 +208,12 @@ impl StdioOptions {
     ///   `python`) goes with it, where by default only the command itself is
     ///   killed and a child that ignores its closed input lives on.
     ///
-    /// The cost: a host that dies without dropping its clients (killed, or
+    /// The costs: a host that dies without dropping its clients (killed, or
     /// aborting) leaves such servers running, where a terminal's Ctrl+C or
-    /// hangup would have reached them in the host's group.
+    /// hangup would have reached them in the host's group; and the group is
+    /// killed only while the command itself has not exited (its id is then
+    /// safe to signal) — a wrapper that exits on its own, leaving what it
+    /// started running, leaves that running.
     pub fn own_process_group(mut self, yes: bool) -> Self {
         self.own_process_group = yes;
         self
@@ -361,22 +364,31 @@ impl StdioTransport {
             command: command.to_string(),
             notifications: None,
             ended,
-            group,
+            group: std::sync::Mutex::new(group),
         })
     }
 
     /// Kill the server's own process group, everything in it (with
-    /// [`StdioOptions::own_process_group`]).
-    fn kill_group(&self) {
+    /// [`StdioOptions::own_process_group`]) — once, and only while its
+    /// leader (`child`, the server's command) is not reaped: until then its
+    /// pid, the group's id, cannot be reused, so the signal cannot reach an
+    /// unrelated group. A leader already reaped (it exited on its own and a
+    /// call or the exit watch collected it) leaves what it started running.
+    fn kill_group(&self, child: &Child) {
+        let group = self.group.lock().unwrap_or_else(|e| e.into_inner()).take();
         #[cfg(unix)]
-        if let Some(pgid) = self.group.and_then(|p| libc::pid_t::try_from(p).ok()) {
-            // SAFETY: `killpg` takes two integers and touches no memory of
-            // ours; a failure (the group already gone) is fine to ignore. The
-            // id stays reserved while any member of the group lives.
-            unsafe {
-                libc::killpg(pgid, libc::SIGKILL);
+        if child.id().is_some() {
+            if let Some(pgid) = group.and_then(|p| libc::pid_t::try_from(p).ok()) {
+                // SAFETY: `killpg` takes two integers and touches no memory
+                // of ours; the leader is unreaped, so the id is still its
+                // group's. A failure is fine to ignore.
+                unsafe {
+                    libc::killpg(pgid, libc::SIGKILL);
+                }
             }
         }
+        #[cfg(not(unix))]
+        let _ = (group, child);
     }
 
     /// Write one newline-terminated message to the server.
@@ -463,8 +475,12 @@ fn stderr_suffix(tail: &std::sync::Mutex<StderrTail>) -> String {
 #[cfg(feature = "native")]
 impl Drop for StdioTransport {
     fn drop(&mut self) {
-        // Before the child (`kill_on_drop` kills the command alone).
-        self.kill_group();
+        // Before the child (`kill_on_drop` kills the command alone). Not
+        // locked by anyone once the transport is dropped; if it were, the
+        // group is left alone rather than risked.
+        if let Ok(child) = self.child.try_lock() {
+            self.kill_group(&child);
+        }
     }
 }
 
@@ -700,10 +716,10 @@ impl McpTransport for StdioTransport {
         self.ended
             .closed_by_host
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        self.kill_group();
         // Kill the server and reap it. An error here means it had already
         // exited, which is what close wants anyway: logged, not returned.
         let mut child = self.child.lock().await;
+        self.kill_group(&child);
         if let Err(e) = child.kill().await {
             debug!("MCP server '{}': kill on close: {e}", self.command);
         }
