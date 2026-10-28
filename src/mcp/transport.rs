@@ -214,9 +214,10 @@ impl StdioOptions {
     ///   ignores its closed input keeps running, where a terminal's Ctrl+C or
     ///   hangup would have reached it in the host's group. A terminal host
     ///   should catch Ctrl+C and drop (or close) its clients;
-    /// - the group is killed only while the command itself is still running
-    ///   (its id is then safe to signal): a wrapper that exits on its own —
-    ///   collected by a call or the exit watch — leaves what it started.
+    /// - the group is killed only while the command itself is still the
+    ///   transport's — running, or exited and not yet collected — so its id
+    ///   is safe to signal: a wrapper that exited and was collected (by a
+    ///   call or the exit watch) leaves what it started.
     pub fn own_process_group(mut self, yes: bool) -> Self {
         self.own_process_group = yes;
         self
@@ -377,40 +378,51 @@ impl StdioTransport {
 
     /// Kill the server's own process group, everything in it (with
     /// [`StdioOptions::own_process_group`]) — once, and only while its leader
-    /// (`child`, the server's command) is still running, as `try_wait` asked
-    /// under the lock says: a running (or not yet collected) leader keeps
-    /// its pid, the group's id, from being reused, so the signal cannot
-    /// reach an unrelated group. A leader that exited and was collected —
-    /// by a call, the exit watch, or here — or that cannot be waited on
-    /// (`ECHILD`: the host ignores SIGCHLD) leaves what it started running.
+    /// (`child`, the server's command) is still ours: running, or exited and
+    /// not yet collected (a zombie). Either way it holds its pid, the
+    /// group's id, so the signal cannot reach an unrelated group. Asked
+    /// without collecting it (`waitid` with `WNOWAIT`), so a wrapper that
+    /// exited uncollected still has its children killed. A leader already
+    /// collected — by a call or the exit watch — or not ours any more (a
+    /// host ignoring SIGCHLD has it reaped unseen) leaves its group alone.
     fn kill_group(&self, child: &mut Child) {
         let Some(group) = self.group.lock().unwrap_or_else(|e| e.into_inner()).take() else {
             return;
         };
-        match child.try_wait() {
-            Ok(None) => {}
-            Ok(Some(_)) => {
-                debug!(
-                    "MCP server '{}': its command already exited and was collected; its process group is left alone",
-                    self.command
-                );
-                return;
-            }
-            Err(e) => {
-                debug!(
-                    "MCP server '{}': its command cannot be waited on ({e}); its process group is left alone",
-                    self.command
-                );
-                return;
-            }
-        }
+        // `None` once tokio collected it.
+        let Some(pid) = child.id() else {
+            debug!(
+                "MCP server '{}': its command already exited and was collected; its process group is left alone",
+                self.command
+            );
+            return;
+        };
         #[cfg(unix)]
-        if let Ok(pgid) = libc::pid_t::try_from(group) {
+        if let (Ok(pgid), Ok(pid)) = (libc::pid_t::try_from(group), libc::id_t::try_from(pid)) {
+            // SAFETY: `info` is a zeroed `siginfo_t` we own, written by
+            // `waitid` only; `WNOWAIT` leaves a zombie for its owner to
+            // collect, `WNOHANG` never blocks.
+            let ours = unsafe {
+                let mut info: libc::siginfo_t = std::mem::zeroed();
+                libc::waitid(
+                    libc::P_PID,
+                    pid,
+                    &mut info,
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                ) == 0
+            };
+            if !ours {
+                let e = std::io::Error::last_os_error();
+                debug!(
+                    "MCP server '{}': its command is no longer ours to signal ({e}); its process group is left alone",
+                    self.command
+                );
+                return;
+            }
             // SAFETY: `killpg` takes two integers and touches no memory of
-            // ours. The leader was running just now, under the lock, and is
-            // not collected until we collect it: the id is still its group's.
-            let killed = unsafe { libc::killpg(pgid, libc::SIGKILL) };
-            if killed == -1 {
+            // ours. The leader is ours and uncollected (just asked, under
+            // the lock): the id is still its group's.
+            if unsafe { libc::killpg(pgid, libc::SIGKILL) } == -1 {
                 let e = std::io::Error::last_os_error();
                 // ESRCH: the group is already gone.
                 if e.raw_os_error() != Some(libc::ESRCH) {
@@ -422,7 +434,7 @@ impl StdioTransport {
             }
         }
         #[cfg(not(unix))]
-        let _ = group;
+        let _ = (group, pid);
     }
 
     /// Write one newline-terminated message to the server.

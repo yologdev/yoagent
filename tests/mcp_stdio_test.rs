@@ -837,6 +837,22 @@ async fn by_default_only_the_command_is_killed() {
     assert!(alive(&child), "the default leaves it");
 }
 
+/// A wrapper that exits on its own and is not collected yet (nobody polled
+/// `exited()`): it still holds its pid, so `close` kills its group — what
+/// it started goes too.
+#[tokio::test]
+async fn an_uncollected_wrappers_group_is_killed() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = wrapper_server(dir.path()).replace("while read -r line; do :; done", "exit 0");
+    let client = connect_with(&script, true).await;
+    let wrapper = pid_in(&dir.path().join("wrapper")).await;
+    let child = pid_in(&dir.path().join("child")).await;
+    let _reap = Reap(vec![child.clone()]);
+    assert!(until_gone(&wrapper).await, "the wrapper exited (a zombie)");
+    client.close().await.unwrap();
+    assert!(until_gone(&child).await, "its group was killed");
+}
+
 /// A wrapper that exits on its own, collected by the exit watch: its group
 /// is left alone (its id may be reused once it is collected) — what it
 /// started keeps running, as the option's docs say.
