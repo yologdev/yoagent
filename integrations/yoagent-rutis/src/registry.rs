@@ -34,7 +34,7 @@
 //! # Restricted handlers: tools only
 //!
 //! A handler registered from a runtime the host marked restricted
-//! ([`RutisBridge::restrict_runtime`](crate::RutisBridge::restrict_runtime),
+//! (`RutisBridge::restrict_runtime` (with a language feature),
 //! for plugins it does not trust beyond their tools) gets only:
 //!
 //! - `tools` and its tool calls (`call_tool`);
@@ -713,7 +713,7 @@ impl Registry {
     }
 
     /// Mark `runtime` restricted: see
-    /// [`RutisBridge::restrict_runtime`](crate::RutisBridge::restrict_runtime).
+    /// `RutisBridge::restrict_runtime` (with a language feature).
     #[cfg_attr(
         not(any(
             feature = "node",
