@@ -102,8 +102,9 @@ pub(crate) struct LateRun {
     tools: Mutex<Vec<Arc<dyn AgentTool>>>,
     /// Which late handler offered each late tool.
     offered: Mutex<HashMap<String, ToolOwner>>,
-    /// The names the extension offered the run (taken: a late tool may not
-    /// reuse one).
+    /// The names the run already offers — the extension's tools, and every
+    /// tool its requests offered (the agent's, its sources', every
+    /// extension's): a late tool may not take one.
     pub(crate) taken: Mutex<HashSet<String>>,
 }
 
