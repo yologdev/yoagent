@@ -355,7 +355,7 @@ let adapters = McpToolAdapter::from_client(client).await?;
 
 ## Error Handling
 
-MCP operations return `McpError`:
+MCP operations return `McpError` (`#[non_exhaustive]`: a `match` needs a `_` arm):
 
 - `McpError::Transport` — connection or I/O failure
 - `McpError::Http { status, message }` — the server answered with a
