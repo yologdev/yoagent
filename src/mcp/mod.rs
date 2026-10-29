@@ -24,7 +24,7 @@ pub mod types;
 pub use client::McpClient;
 pub use source::McpToolSource;
 pub use tool_adapter::McpToolAdapter;
-pub use transport::{ExitWatch, HttpTransport, McpTransport, ServerNotifications};
+pub use transport::{ExitWatch, HttpTransport, McpTransport, Redirects, ServerNotifications};
 #[cfg(feature = "native")]
 #[cfg_attr(docsrs, doc(cfg(feature = "native")))]
 pub use transport::{StdioOptions, StdioTransport};
