@@ -79,8 +79,10 @@ How the stdio transport behaves:
   host's terminal no longer reaches the server. But when the host exits without
   dropping its clients (killed, an uncaught Ctrl+C, `process::exit`), whatever
   ignores its closed input keeps running — a terminal host should catch Ctrl+C
-  and drop its clients — and a wrapper that already exited on its own leaves
-  what it started.
+  and drop its clients. A command that exits on its own (an `npx` or launcher
+  wrapper) has its group killed as soon as its exit is seen (`exited()`, a tool
+  source's turn, a call finding its output closed): the server is gone, and so
+  is what it left behind — including a real server a launcher backgrounded.
 
 ### HTTP Transport
 

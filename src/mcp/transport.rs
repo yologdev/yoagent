@@ -180,7 +180,7 @@ pub struct StdioTransport {
     ended: Arc<Ended>,
     /// The server's own process group ([`StdioOptions::own_process_group`]):
     /// killed whole, once, on `close` or drop — while its leader is unreaped.
-    group: std::sync::Mutex<Option<u32>>,
+    group: Arc<std::sync::Mutex<Option<u32>>>,
 }
 
 /// How [`StdioTransport::with_options`] starts the server. Native hosts only.
@@ -206,7 +206,12 @@ impl StdioOptions {
     /// - [`close`](McpTransport::close) and dropping the transport kill the
     ///   whole group: what the server started (`npx` → `node`, `uvx` →
     ///   `python`) goes with it, where by default only the command itself is
-    ///   killed and a child that ignores its closed input lives on.
+    ///   killed and a child that ignores its closed input lives on;
+    /// - so does the command exiting on its own, as soon as it is seen (the
+    ///   exit watch, or a call finding its output closed): the server is
+    ///   gone, and what it left in its group has no client. A launcher that
+    ///   backgrounds the real server on its own pipes and exits takes that
+    ///   server down too — it reads as gone the moment the launcher exits.
     ///
     /// The costs:
     /// - when the host exits without dropping its clients — killed, an
@@ -214,10 +219,10 @@ impl StdioOptions {
     ///   ignores its closed input keeps running, where a terminal's Ctrl+C or
     ///   hangup would have reached it in the host's group. A terminal host
     ///   should catch Ctrl+C and drop (or close) its clients;
-    /// - the group is killed only while the command itself is still the
+    /// - the group is signalled only while the command itself is still the
     ///   transport's — running, or exited and not yet collected — so its id
-    ///   is safe to signal: a wrapper that exited and was collected (by a
-    ///   call or the exit watch) leaves what it started.
+    ///   is safe to signal; under a host that ignores SIGCHLD the command is
+    ///   reaped unseen, and its group is left alone.
     pub fn own_process_group(mut self, yes: bool) -> Self {
         self.own_process_group = yes;
         self
@@ -372,7 +377,7 @@ impl StdioTransport {
             command: command.to_string(),
             notifications: None,
             ended,
-            group: std::sync::Mutex::new(group),
+            group: Arc::new(std::sync::Mutex::new(group)),
         })
     }
 
@@ -386,55 +391,7 @@ impl StdioTransport {
     /// collected — by a call or the exit watch — or not ours any more (a
     /// host ignoring SIGCHLD has it reaped unseen) leaves its group alone.
     fn kill_group(&self, child: &mut Child) {
-        let Some(group) = self.group.lock().unwrap_or_else(|e| e.into_inner()).take() else {
-            return;
-        };
-        // `None` once tokio collected it.
-        let Some(pid) = child.id() else {
-            debug!(
-                "MCP server '{}': its command already exited and was collected; its process group is left alone",
-                self.command
-            );
-            return;
-        };
-        #[cfg(unix)]
-        if let (Ok(pgid), Ok(pid)) = (libc::pid_t::try_from(group), libc::id_t::try_from(pid)) {
-            // SAFETY: `info` is a zeroed `siginfo_t` we own, written by
-            // `waitid` only; `WNOWAIT` leaves a zombie for its owner to
-            // collect, `WNOHANG` never blocks.
-            let ours = unsafe {
-                let mut info: libc::siginfo_t = std::mem::zeroed();
-                libc::waitid(
-                    libc::P_PID,
-                    pid,
-                    &mut info,
-                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-                ) == 0
-            };
-            if !ours {
-                let e = std::io::Error::last_os_error();
-                debug!(
-                    "MCP server '{}': its command is no longer ours to signal ({e}); its process group is left alone",
-                    self.command
-                );
-                return;
-            }
-            // SAFETY: `killpg` takes two integers and touches no memory of
-            // ours. The leader is ours and uncollected (just asked, under
-            // the lock): the id is still its group's.
-            if unsafe { libc::killpg(pgid, libc::SIGKILL) } == -1 {
-                let e = std::io::Error::last_os_error();
-                // ESRCH: the group is already gone.
-                if e.raw_os_error() != Some(libc::ESRCH) {
-                    debug!(
-                        "MCP server '{}': killing its process group: {e}",
-                        self.command
-                    );
-                }
-            }
-        }
-        #[cfg(not(unix))]
-        let _ = (group, pid);
+        kill_group(&self.group, child, &self.command);
     }
 
     /// Write one newline-terminated message to the server.
@@ -487,6 +444,28 @@ impl StdioTransport {
         // briefly for its exit status rather than report it as still running.
         let status = {
             let mut child = self.child.lock().await;
+            // With an own group: see the leader exit (within the same 500 ms)
+            // before collecting it, and kill what it left in its group.
+            if self
+                .group
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some()
+            {
+                let started = std::time::Instant::now();
+                while started.elapsed() < std::time::Duration::from_millis(500) {
+                    kill_group_if_exited(&self.group, &mut child, &self.command);
+                    if self
+                        .group
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .is_none()
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            }
             match tokio::time::timeout(std::time::Duration::from_millis(500), child.wait()).await {
                 Ok(Ok(status)) => format!("exited with {status}"),
                 _ => {
@@ -505,6 +484,80 @@ impl StdioTransport {
             self.command
         ))
     }
+}
+
+/// Kill `group` (taken once) while its leader `child` is still ours — see
+/// [`StdioTransport::kill_group`]. Shared with the exit watch, which kills it
+/// when it first sees the leader exited, before collecting it.
+#[cfg(feature = "native")]
+fn kill_group(group: &std::sync::Mutex<Option<u32>>, child: &mut Child, command: &str) {
+    let Some(group) = group.lock().unwrap_or_else(|e| e.into_inner()).take() else {
+        return;
+    };
+    // `None` once tokio collected it.
+    let Some(pid) = child.id() else {
+        debug!(
+            "MCP server '{command}': its command already exited and was collected; its process group is left alone"
+        );
+        return;
+    };
+    #[cfg(unix)]
+    if let (Ok(pgid), Some(_)) = (libc::pid_t::try_from(group), leader_state(pid)) {
+        // SAFETY: `killpg` takes two integers and touches no memory of
+        // ours. The leader is ours and uncollected (just asked, under the
+        // lock): the id is still its group's.
+        if unsafe { libc::killpg(pgid, libc::SIGKILL) } == -1 {
+            let e = std::io::Error::last_os_error();
+            // ESRCH: the group is already gone.
+            if e.raw_os_error() != Some(libc::ESRCH) {
+                debug!("MCP server '{command}': killing its process group: {e}");
+            }
+        }
+    } else {
+        debug!("MCP server '{command}': its command is no longer ours to signal; its process group is left alone");
+    }
+    #[cfg(not(unix))]
+    let _ = (group, pid);
+}
+
+/// The leader `pid` as `waitid` sees it without collecting it (`WNOWAIT`):
+/// `Some(true)` exited (a zombie, its pid still held), `Some(false)`
+/// running, `None` not ours (collected, or reaped unseen under an ignored
+/// SIGCHLD).
+#[cfg(all(feature = "native", unix))]
+fn leader_state(pid: u32) -> Option<bool> {
+    let pid = libc::id_t::try_from(pid).ok()?;
+    // SAFETY: `info` is a zeroed `siginfo_t` we own, written by `waitid`
+    // only; `WNOWAIT` leaves a zombie for its owner to collect, `WNOHANG`
+    // never blocks. `si_signo` stays 0 while the child runs (the struct
+    // was zeroed; some systems do not fill it then) and is SIGCHLD once
+    // it has exited.
+    unsafe {
+        let mut info: libc::siginfo_t = std::mem::zeroed();
+        let ok = libc::waitid(
+            libc::P_PID,
+            pid,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        ) == 0;
+        ok.then_some(info.si_signo == libc::SIGCHLD)
+    }
+}
+
+/// With an own process group: if the leader has exited (not yet collected),
+/// kill its group now — the server is gone, and what it left in its group
+/// has no client — before the caller collects it and the id may be reused.
+#[cfg(feature = "native")]
+fn kill_group_if_exited(group: &std::sync::Mutex<Option<u32>>, child: &mut Child, command: &str) {
+    if group.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
+        return;
+    }
+    #[cfg(unix)]
+    if child.id().and_then(leader_state) == Some(true) {
+        kill_group(group, child, command);
+    }
+    #[cfg(not(unix))]
+    let _ = (child, command);
 }
 
 /// `; last stderr:` and the kept tail, or nothing when the server wrote none.
@@ -709,10 +762,11 @@ impl McpTransport for StdioTransport {
         // Weak: a watch kept after its client is dropped must not keep the
         // process alive (it is killed when the transport goes).
         let child = Arc::downgrade(&self.child);
-        let (tail, ended, command) = (
+        let (tail, ended, command, group) = (
             self.stderr_tail.clone(),
             self.ended.clone(),
             self.command.clone(),
+            self.group.clone(),
         );
         // Gone is reported at once; the answer settles (the reason looked up
         // again, the stderr tail read again) until the drain has read the
@@ -736,7 +790,12 @@ impl McpTransport for StdioTransport {
                 // not known yet.
                 match child.try_lock() {
                     Err(_) => provisional.clone(),
-                    Ok(mut child) => match child.try_wait() {
+                    Ok(mut child) => {
+                        // With an own group: an exited leader's group goes
+                        // before `try_wait` collects it (its id is then free).
+                        kill_group_if_exited(&group, &mut child, &command);
+                        let state = child.try_wait();
+                        match state {
                         Ok(Some(status)) => {
                             Some(format!("MCP server '{command}' exited with {status}"))
                         }
@@ -752,7 +811,8 @@ impl McpTransport for StdioTransport {
                         Err(e) => Some(format!(
                             "MCP server '{command}' has gone (exit status unknown: {e})"
                         )),
-                    },
+                        }
+                    }
                 }
             } else {
                 // Its transport was dropped, killing it: nothing to wait for.

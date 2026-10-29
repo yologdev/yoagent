@@ -853,11 +853,12 @@ async fn an_uncollected_wrappers_group_is_killed() {
     assert!(until_gone(&child).await, "its group was killed");
 }
 
-/// A wrapper that exits on its own, collected by the exit watch: its group
-/// is left alone (its id may be reused once it is collected) — what it
-/// started keeps running, as the option's docs say.
+/// A wrapper that exits on its own, seen by the exit watch: its group is
+/// killed then, before the watch collects it — the server is gone, and what
+/// it left in its group has no client (and its id is safe to signal only
+/// until it is collected).
 #[tokio::test]
-async fn a_collected_leaders_group_is_left_alone() {
+async fn a_wrapper_seen_exited_by_the_watch_takes_its_group() {
     let dir = tempfile::tempdir().unwrap();
     let script = wrapper_server(dir.path()).replace("while read -r line; do :; done", "exit 0");
     let client = connect_with(&script, true).await;
@@ -865,10 +866,28 @@ async fn a_collected_leaders_group_is_left_alone() {
     let _reap = Reap(vec![child.clone()]);
     let why = wait_exited(&client).await;
     assert!(why.contains("exited with"), "{why}");
-    client.close().await.unwrap();
-    drop(client);
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert!(alive(&child), "a collected leader's group is not signalled");
+    assert!(
+        until_gone(&child).await,
+        "its group went when the exit was seen"
+    );
+}
+
+/// A wrapper that exits while a call waits on it: the call finds its output
+/// closed, and its group goes before the call collects it.
+#[tokio::test]
+async fn a_wrapper_exiting_during_a_call_takes_its_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = wrapper_server(dir.path())
+        .replace("while read -r line; do :; done", "read -r line; exit 0");
+    let client = connect_with(&script, true).await;
+    let child = pid_in(&dir.path().join("child")).await;
+    let _reap = Reap(vec![child.clone()]);
+    let err = client.list_tools().await.unwrap_err().to_string();
+    assert!(err.contains("Connection closed"), "{err}");
+    assert!(
+        until_gone(&child).await,
+        "its group went before the call collected it"
+    );
 }
 
 /// A server that closes its input while its process lives on reads as gone

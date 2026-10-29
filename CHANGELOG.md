@@ -4,6 +4,10 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+- **MCP stdio, own process group: the group goes when the command exits** (asked for by yobuild). With `own_process_group`, a command that exits on its own (an `npx` or launcher wrapper) now has its group killed as soon as its exit is seen — by the exit watch (`exited()`, an `McpToolSource` turn) or a call finding its output closed — before it is collected, while its id is still safe to signal. Before, a poll that collected it left what it started running for good. A launcher that backgrounds the real server and exits takes that server down with it (yoagent already reports it gone then).
+
 ## 0.25.16 (2026-10-28)
 
 Additive.
