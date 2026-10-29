@@ -455,8 +455,15 @@ impl StdioTransport {
                     .output_closed
                     .load(std::sync::atomic::Ordering::SeqCst)
             {
-                // An earlier call waited its window: it runs on.
-                None
+                // An earlier call waited its window: one look (no waiting) —
+                // gone since, its group goes and it is collected.
+                match settle_group(&self.group, &mut child, &self.command) {
+                    Some(false) => None,
+                    _ => tokio::time::timeout(std::time::Duration::from_millis(500), child.wait())
+                        .await
+                        .ok()
+                        .and_then(Result::ok),
+                }
             } else if own_group {
                 // One 500 ms window, without collecting a running leader: its
                 // exit is seen first (its group killed), then it is collected.
@@ -808,6 +815,16 @@ impl McpTransport for StdioTransport {
         Some(ExitWatch::new(move || {
             use std::sync::atomic::Ordering::SeqCst;
             let mut latched = latched.lock().unwrap_or_else(|p| p.into_inner());
+            // With a group still to kill, every poll looks once (no waiting,
+            // nothing collected): a leader that outlived its first sight and
+            // exits later still takes its group then.
+            if group.lock().unwrap_or_else(|p| p.into_inner()).is_some() {
+                if let Some(child) = child.upgrade() {
+                    if let Ok(mut child) = child.try_lock() {
+                        let _ = settle_group(&group, &mut child, &command);
+                    }
+                }
+            }
             if let Some(why) = latched.as_ref() {
                 return Some(why.clone());
             }

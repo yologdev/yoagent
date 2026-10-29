@@ -987,3 +987,75 @@ exec sleep 30"#,
         started.elapsed()
     );
 }
+
+/// With an own group: a wrapper that closes its output, outlives the first
+/// call's window (and the exit watch latching "closed its output") and then
+/// exits still takes its group when the watch is polled next — not only at
+/// close.
+#[tokio::test]
+async fn a_wrapper_exiting_after_its_window_still_takes_its_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let go = dir.path().join("go");
+    let script = wrapper_server(dir.path()).replace(
+        "while read -r line; do :; done",
+        &format!(
+            "exec 1>&-; while [ ! -e {} ]; do sleep 0.05; done; exit 0",
+            quoted(&go)
+        ),
+    );
+    let client = connect_with(&script, true).await;
+    let child = pid_in(&dir.path().join("child")).await;
+    let _reap = Reap(vec![child.clone()]);
+    let err = client.list_tools().await.unwrap_err().to_string();
+    assert!(err.contains("closed its output"), "{err}");
+    // The watch answers, and latches its answer (after its 0.5 s grace).
+    let first = client.exited().expect("gone: its output closed");
+    assert!(first.contains("closed its output"), "{first}");
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(client.exited(), Some(first), "latched");
+    assert!(alive(&child));
+    std::fs::write(&go, "").unwrap();
+    let mut gone = false;
+    for _ in 0..200 {
+        let _ = client.exited();
+        if !alive(&child) {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(gone, "its group went when the watch next looked");
+}
+
+/// The same through a later call: one that fails at once (its window spent)
+/// still looks, and takes the group of a wrapper that exited since. (The
+/// child keeps the server's input open, so the call's write succeeds and it
+/// reaches the closed output.)
+#[tokio::test]
+async fn a_later_call_takes_the_group_of_a_wrapper_that_exited_since() {
+    let dir = tempfile::tempdir().unwrap();
+    let go = dir.path().join("go");
+    let child_file = dir.path().join("child");
+    let script = format!(
+        r#"sh -c 'trap "" TERM HUP INT; echo $$ > {child}; exec sleep 300' 0<&0 > /dev/null 2>&1 &
+read -r line; id=$(id_of "$line")
+echo "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{{}},\"serverInfo\":{{\"name\":\"wrapper\",\"version\":\"1\"}}}}}}"
+read -r note
+exec 1>&-; while [ ! -e {go} ]; do sleep 0.05; done; exit 0"#,
+        child = quoted(&child_file),
+        go = quoted(&go),
+    );
+    let client = connect_with(&script, true).await;
+    let child = pid_in(&child_file).await;
+    let _reap = Reap(vec![child.clone()]);
+    let err = client.list_tools().await.unwrap_err().to_string();
+    assert!(err.contains("closed its output"), "{err}");
+    std::fs::write(&go, "").unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let err = client.list_tools().await.unwrap_err().to_string();
+    assert!(
+        err.contains("exited with"),
+        "the later call saw the exit: {err}"
+    );
+    assert!(until_gone(&child).await, "the later call took its group");
+}
