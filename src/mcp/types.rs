@@ -252,10 +252,20 @@ fn shrink_payloads(value: &mut serde_json::Value) {
 // MCP Error
 // ---------------------------------------------------------------------------
 
+/// What went wrong talking to an MCP server. `#[non_exhaustive]`: match
+/// with a wildcard arm.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum McpError {
     #[error("Transport error: {0}")]
     Transport(String),
+    /// The server answered with a non-success HTTP status (the HTTP
+    /// transport): `status` is its code — 401 or 403, it wants a credential
+    /// or a sign-in; 404 on a session, the session expired — and `message`
+    /// the whole report, what the server said included (its text is what a
+    /// `Transport` error read before).
+    #[error("Transport error: {message}")]
+    Http { status: u16, message: String },
     #[error("Protocol error: {0}")]
     Protocol(String),
     #[error("JSON-RPC error {code}: {message}")]
@@ -266,6 +276,16 @@ pub enum McpError {
     Io(#[from] std::io::Error),
     #[error("Connection closed")]
     ConnectionClosed,
+}
+
+impl McpError {
+    /// The HTTP status of an [`Http`](Self::Http) error; `None` for any other.
+    pub fn http_status(&self) -> Option<u16> {
+        match self {
+            Self::Http { status, .. } => Some(*status),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]

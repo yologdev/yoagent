@@ -358,6 +358,10 @@ let adapters = McpToolAdapter::from_client(client).await?;
 MCP operations return `McpError`:
 
 - `McpError::Transport` — connection or I/O failure
+- `McpError::Http { status, message }` — the server answered with a
+  non-success HTTP status (HTTP transport): match on `status` (or
+  `err.http_status()`) — 401/403, it wants a credential or a sign-in; 404 on a
+  session, the session expired. `message` reads as the `Transport` text did.
 - `McpError::Protocol` — unexpected response format
 - `McpError::JsonRpc` — server returned a JSON-RPC error
 - `McpError::Serialization` — a message could not be (de)serialized as JSON
