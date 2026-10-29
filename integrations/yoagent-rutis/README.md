@@ -939,8 +939,8 @@ as `yoagent-rutis`: a crates.io `yoagent` next to a git `yoagent-rutis` is two
 `yoagent` crates whose types do not match.
 
 ```toml
-yoagent = "0.25"
-yoagent-rutis = "0.9"
+yoagent = "0.26"
+yoagent-rutis = "0.10"
 ```
 
 ## License

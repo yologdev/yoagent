@@ -6,7 +6,7 @@ removes what needs an operating system:
 
 ```toml
 [dependencies]
-yoagent = { version = "0.24", default-features = false }
+yoagent = { version = "0.26", default-features = false }
 ```
 
 ```bash

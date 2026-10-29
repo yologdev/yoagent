@@ -1,6 +1,6 @@
 [package]
 name = "yoagent-workers"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 resolver = "3"
 description = "Run yoagent on Cloudflare Workers through the Worker's own bindings: Workers AI decision models (Clef) via env.AI"
@@ -24,7 +24,7 @@ targets = ["wasm32-unknown-unknown"]
 # Workers runtime hands the Worker. On other targets the crate is empty.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # 0.25.0: pricing is opt-in (`prices::global::pricing_enabled`).
-yoagent = { path = "../..", version = "0.25.0", default-features = false, features = ["decision"] }
+yoagent = { path = "../..", version = "0.26.0", default-features = false, features = ["decision"] }
 async-trait = "0.1"
 js-sys = "0.3"
 serde_json = "1"

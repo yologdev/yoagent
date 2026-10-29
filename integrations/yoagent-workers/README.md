@@ -31,8 +31,8 @@ binding = "AI"
 ```toml
 # Cargo.toml
 [dependencies]
-yoagent = { version = "0.25", default-features = false, features = ["decision"] }
-yoagent-workers = "0.1"
+yoagent = { version = "0.26", default-features = false, features = ["decision"] }
+yoagent-workers = "0.3"
 ```
 
 Take both from the same source: crates.io for both as above, or git for both.

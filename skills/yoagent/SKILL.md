@@ -5,7 +5,7 @@ description: Use when building, extending or upgrading an agent on the yoagent R
 
 # yoagent: which feature for which job
 
-Written for **yoagent 0.25.16** (and yoagent-rutis 0.9.0); the recipes
+Written for **yoagent 0.26.0** (and yoagent-rutis 0.10.0); the recipes
 below are compiled by `tests/skill_test.rs`, line for line. Check what you
 build against: `cargo tree -p yoagent` or `Cargo.lock`. If you are on an
 older version, read [What changed](#what-changed) first.
@@ -198,6 +198,13 @@ and its examples.
 
 Newest first; the full list is `CHANGELOG.md`.
 
+- **0.26.0** (breaking: `McpError` is `#[non_exhaustive]` — add a `_` arm)
+  — MCP over HTTP: a non-success status is `McpError::Http { status, .. }`
+  (`err.http_status()`: 401/403 wants a credential; a call's 404 with a
+  session = expired, reconnect); redirects stay within the server's origin
+  unless `HttpTransport::with_redirects(Redirects::Any)`. A stdio server in
+  its own process group has the group killed as soon as its command's exit
+  is seen. Take yoagent-rutis 0.10 / yoagent-workers 0.3 with it.
 - **0.25.16** — MCP stdio: `McpClient::connect_stdio_with(.., StdioOptions::new()
   .own_process_group(true))` (Unix) keeps a host terminal's Ctrl+C from the
   server and kills what it started (`npx` → `node`) on close/drop — catch
@@ -294,6 +301,7 @@ Newest first; the full list is `CHANGELOG.md`.
 - **0.24.2** — built-in tool sandbox fixes (path escapes, `search` flag
   injection, Gemini key out of the URL, tool panics contained).
 - **0.24.1** — `retry_safe_events`.
+- **yoagent-rutis 0.10.0** — requires yoagent 0.26; no other change.
 - **yoagent-rutis 0.9.0** — restricted runtimes: `bridge.restrict_runtime(handle)`
   before a runtime starts makes its plugins tools only (their tools as
   `<handler>__<tool>`, their own `before_tool` run inside their tool, never
