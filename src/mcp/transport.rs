@@ -906,6 +906,92 @@ impl McpTransport for StdioTransport {
 // HTTP Transport
 // ---------------------------------------------------------------------------
 
+/// Which HTTP redirects an [`HttpTransport`] follows ([`HttpTransport::with_redirects`]).
+/// Native targets only: on wasm32 the host's `fetch` follows redirects itself.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Redirects {
+    /// None: a redirect is an error naming where it pointed.
+    None,
+    /// Within the URL's own origin — scheme, host and port — up to 10: a
+    /// server moving `/mcp` to `/mcp/` with a 307 or 308 works (a 301, 302
+    /// or 303 makes the HTTP client resend the POST as a GET, without its
+    /// body, which no MCP endpoint answers), while one pointing at another
+    /// host, or from `https` to `http`, is an error naming where it pointed,
+    /// so the transport's headers never leave for it. The default.
+    #[default]
+    SameOrigin,
+    /// Any, up to 10 (what earlier versions did). The HTTP client drops
+    /// `Authorization` and `Cookie` on a hop to another host, but **not**
+    /// other headers: an API key set with
+    /// [`with_header`](HttpTransport::with_header) goes to wherever the
+    /// server points.
+    Any,
+}
+
+/// The redirect policy for `redirects`.
+#[cfg(not(target_arch = "wasm32"))]
+fn redirect_policy(redirects: Redirects) -> reqwest::redirect::Policy {
+    use reqwest::redirect::Policy;
+    match redirects {
+        Redirects::None => Policy::custom(|attempt| {
+            let to = attempt.url().to_string();
+            attempt.error(RedirectRefused(format!(
+                "the server redirected to {to}; redirects are off (HttpTransport::with_redirects)"
+            )))
+        }),
+        Redirects::SameOrigin => Policy::custom(|attempt| {
+            if attempt.previous().len() > 10 {
+                return attempt.error(RedirectRefused("more than 10 redirects".into()));
+            }
+            let Some(origin) = attempt.previous().first().map(|from| from.origin()) else {
+                return attempt.follow();
+            };
+            if attempt.url().origin() == origin {
+                attempt.follow()
+            } else {
+                let to = attempt.url().to_string();
+                let from = origin.ascii_serialization();
+                attempt.error(RedirectRefused(format!(
+                    "the server redirected to {to}, outside {from}; refused, so the \
+                     transport's headers do not go there (HttpTransport::with_redirects)"
+                )))
+            }
+        }),
+        Redirects::Any => Policy::limited(10),
+    }
+}
+
+/// Why a redirect was not followed.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+struct RedirectRefused(String);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::fmt::Display for RedirectRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::error::Error for RedirectRefused {}
+
+/// A failed request as an error: `context`, then the HTTP client's error —
+/// with, for a redirect not followed, why (its source).
+fn http_error(context: &str, e: reqwest::Error) -> McpError {
+    let mut text = e.to_string();
+    if e.is_redirect() {
+        let mut source = std::error::Error::source(&e);
+        while let Some(cause) = source {
+            text.push_str(": ");
+            text.push_str(&cause.to_string());
+            source = cause.source();
+        }
+    }
+    McpError::Transport(format!("{context}: {text}"))
+}
+
 /// Communicates with an MCP server via HTTP POST (JSON-RPC over HTTP).
 ///
 /// Covers the **request/response subset of Streamable HTTP** — servers that
@@ -962,16 +1048,11 @@ impl HttpTransport {
     #[cfg(not(target_arch = "wasm32"))]
     const READ_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
-    /// Create a new HTTP transport.
+    /// Create a new HTTP transport. It follows redirects within the URL's own
+    /// origin only ([`Redirects::SameOrigin`]); see
+    /// [`with_redirects`](Self::with_redirects).
     pub fn new(url: &str) -> Result<Self, McpError> {
-        let builder = reqwest::Client::builder();
-        // The fetch-based wasm client has no read timeout; the host's own
-        // request limits apply there instead.
-        #[cfg(not(target_arch = "wasm32"))]
-        let builder = builder.read_timeout(Self::READ_IDLE_TIMEOUT);
-        let client = builder
-            .build()
-            .map_err(|e| McpError::Transport(format!("Failed to build HTTP client: {e}")))?;
+        let client = Self::client_for(Redirects::default())?;
         Ok(Self {
             client,
             base_url: url.trim_end_matches('/').to_string(),
@@ -979,6 +1060,30 @@ impl HttpTransport {
             session_id: Mutex::new(None),
             notifications: None,
         })
+    }
+
+    fn client_for(redirects: Redirects) -> Result<reqwest::Client, McpError> {
+        let builder = reqwest::Client::builder();
+        // The fetch-based wasm client has no read timeout and no redirect
+        // policy; the host's own request limits and `fetch` apply there.
+        #[cfg(not(target_arch = "wasm32"))]
+        let builder = builder
+            .read_timeout(Self::READ_IDLE_TIMEOUT)
+            .redirect(redirect_policy(redirects));
+        #[cfg(target_arch = "wasm32")]
+        let _ = redirects;
+        builder
+            .build()
+            .map_err(|e| McpError::Transport(format!("Failed to build HTTP client: {e}")))
+    }
+
+    /// Which redirects to follow (native targets; on wasm32 the host's
+    /// `fetch` decides). The default, [`Redirects::SameOrigin`], keeps the
+    /// transport's headers — [`with_header`](Self::with_header)'s credentials —
+    /// from following a redirect to another host, or from `https` to `http`.
+    pub fn with_redirects(mut self, redirects: Redirects) -> Result<Self, McpError> {
+        self.client = Self::client_for(redirects)?;
+        Ok(self)
     }
 
     /// Headers the transport or the HTTP client sets itself; a caller's header
@@ -1375,7 +1480,7 @@ impl McpTransport for HttpTransport {
         let resp = builder
             .send()
             .await
-            .map_err(|e| McpError::Transport(format!("HTTP error: {}", e)))?;
+            .map_err(|e| http_error("HTTP error", e))?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -1442,7 +1547,7 @@ impl McpTransport for HttpTransport {
         let resp = builder
             .send()
             .await
-            .map_err(|e| McpError::Transport(format!("HTTP error on '{method}': {e}")))?;
+            .map_err(|e| http_error(&format!("HTTP error on '{method}'"), e))?;
         let status = resp.status();
         if status.is_success() {
             Ok(())
@@ -1486,9 +1591,10 @@ impl McpTransport for HttpTransport {
                     resp.status()
                 ),
                 Err(e) => warn!(
-                    "MCP session {session} teardown did not reach {}: {e}; \
+                    "MCP session {session} teardown did not reach {}: {}; \
                      the session may leak server-side",
-                    self.base_url
+                    self.base_url,
+                    http_error("DELETE", e)
                 ),
             }
         }

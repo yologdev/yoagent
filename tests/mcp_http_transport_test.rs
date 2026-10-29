@@ -936,3 +936,116 @@ async fn a_plain_transport_sends_no_caller_headers() {
         .unwrap();
     server.verify().await;
 }
+
+/// Answers any POST at `at` with a JSON-RPC result for the request's own id.
+async fn mount_answer(server: &MockServer, at: &'static str) {
+    Mock::given(method("POST"))
+        .and(wiremock::matchers::path(at))
+        .respond_with(|request: &Request| {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"jsonrpc": "2.0", "id": body["id"], "result": {"ok": true}}),
+            )
+        })
+        .mount(server)
+        .await;
+}
+
+/// Answers a POST at `at` with a 307 to `to`.
+async fn mount_redirect(server: &MockServer, at: &'static str, to: String) {
+    Mock::given(method("POST"))
+        .and(wiremock::matchers::path(at))
+        .respond_with(ResponseTemplate::new(307).insert_header("Location", to.as_str()))
+        .mount(server)
+        .await;
+}
+
+/// By default a redirect to another origin is refused, naming it, and the
+/// transport's headers never reach it.
+#[tokio::test]
+async fn a_redirect_to_another_origin_is_refused_by_default() {
+    let server = MockServer::start().await;
+    let elsewhere = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&elsewhere)
+        .await;
+    mount_redirect(&server, "/mcp", format!("{}/mcp", elsewhere.uri())).await;
+    let transport = HttpTransport::new(&format!("{}/mcp", server.uri()))
+        .unwrap()
+        .with_header("x-api-key", "s3cret")
+        .unwrap();
+    let err = transport
+        .send(JsonRpcRequest::new("tools/list", None))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("outside") && err.contains(&elsewhere.uri()),
+        "{err}"
+    );
+    assert!(!err.contains("s3cret"), "{err}");
+}
+
+/// A redirect within the origin (`/mcp` → `/mcp/`) is followed.
+#[tokio::test]
+async fn a_redirect_within_the_origin_is_followed() {
+    let server = MockServer::start().await;
+    mount_redirect(&server, "/mcp", format!("{}/mcp/", server.uri())).await;
+    mount_answer(&server, "/mcp/").await;
+    let transport = HttpTransport::new(&format!("{}/mcp", server.uri())).unwrap();
+    let response = transport
+        .send(JsonRpcRequest::new("tools/list", None))
+        .await
+        .unwrap();
+    assert_eq!(response.result, Some(serde_json::json!({"ok": true})));
+}
+
+/// `Redirects::None` refuses even one within the origin.
+#[tokio::test]
+async fn redirects_off_refuses_every_redirect() {
+    let server = MockServer::start().await;
+    mount_redirect(&server, "/mcp", format!("{}/mcp/", server.uri())).await;
+    mount_answer(&server, "/mcp/").await;
+    let transport = HttpTransport::new(&format!("{}/mcp", server.uri()))
+        .unwrap()
+        .with_redirects(yoagent::mcp::Redirects::None)
+        .unwrap();
+    let err = transport
+        .send(JsonRpcRequest::new("tools/list", None))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("redirects are off"), "{err}");
+}
+
+/// `Redirects::Any` follows one to another origin — and, as documented, a
+/// custom header goes with it.
+#[tokio::test]
+async fn redirects_any_follows_another_origin_headers_included() {
+    let server = MockServer::start().await;
+    let elsewhere = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(header("x-api-key", "s3cret"))
+        .respond_with(|request: &Request| {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({"jsonrpc": "2.0", "id": body["id"], "result": {"ok": true}}),
+            )
+        })
+        .expect(1)
+        .mount(&elsewhere)
+        .await;
+    mount_redirect(&server, "/mcp", format!("{}/mcp", elsewhere.uri())).await;
+    let transport = HttpTransport::new(&format!("{}/mcp", server.uri()))
+        .unwrap()
+        .with_header("x-api-key", "s3cret")
+        .unwrap()
+        .with_redirects(yoagent::mcp::Redirects::Any)
+        .unwrap();
+    transport
+        .send(JsonRpcRequest::new("tools/list", None))
+        .await
+        .unwrap();
+}

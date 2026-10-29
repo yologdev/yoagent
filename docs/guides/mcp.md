@@ -123,6 +123,13 @@ let agent = agent.with_mcp_server_http_transport(transport).await?;
   them; a browser may drop some, such as `User-Agent`.
 - The headers are fixed for the transport's lifetime. A token that expires
   during a session (OAuth refresh) needs a new transport and client.
+- Redirects are followed within the URL's own origin only (scheme, host and
+  port; up to 10; use 307/308 — a 301/302/303 turns the POST into a GET), so the headers never follow a server pointing at another
+  host, or from `https` to `http`: such a redirect is an error naming where it
+  pointed. `with_redirects(Redirects::None)` refuses every redirect;
+  `Redirects::Any` follows them anywhere — then a custom header goes along (the
+  HTTP client drops only `Authorization` and `Cookie` on a hop to another
+  host). Native targets; on wasm32 the host's `fetch` follows redirects.
 
 `HttpTransport` handles both the plain JSON-RPC-over-POST shape and the
 **request/response subset of Streamable HTTP** — servers that answer a POST with
