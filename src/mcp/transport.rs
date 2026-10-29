@@ -914,7 +914,9 @@ pub enum Redirects {
     /// None: a redirect is an error naming where it pointed.
     None,
     /// Within the URL's own origin — scheme, host and port — up to 10: a
-    /// server moving `/mcp` to `/mcp/` works, while one pointing at another
+    /// server moving `/mcp` to `/mcp/` with a 307 or 308 works (a 301, 302
+    /// or 303 makes the HTTP client resend the POST as a GET, without its
+    /// body, which no MCP endpoint answers), while one pointing at another
     /// host, or from `https` to `http`, is an error naming where it pointed,
     /// so the transport's headers never leave for it. The default.
     #[default]
@@ -1589,9 +1591,10 @@ impl McpTransport for HttpTransport {
                     resp.status()
                 ),
                 Err(e) => warn!(
-                    "MCP session {session} teardown did not reach {}: {e}; \
+                    "MCP session {session} teardown did not reach {}: {}; \
                      the session may leak server-side",
-                    self.base_url
+                    self.base_url,
+                    http_error("DELETE", e)
                 ),
             }
         }

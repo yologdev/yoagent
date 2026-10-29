@@ -124,7 +124,7 @@ let agent = agent.with_mcp_server_http_transport(transport).await?;
 - The headers are fixed for the transport's lifetime. A token that expires
   during a session (OAuth refresh) needs a new transport and client.
 - Redirects are followed within the URL's own origin only (scheme, host and
-  port; up to 10), so the headers never follow a server pointing at another
+  port; up to 10; use 307/308 — a 301/302/303 turns the POST into a GET), so the headers never follow a server pointing at another
   host, or from `https` to `http`: such a redirect is an error naming where it
   pointed. `with_redirects(Redirects::None)` refuses every redirect;
   `Redirects::Any` follows them anywhere — then a custom header goes along (the
