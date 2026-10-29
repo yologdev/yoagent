@@ -261,8 +261,8 @@ pub enum McpError {
     Transport(String),
     /// The server answered with a non-success HTTP status (the HTTP
     /// transport). `status` is its code: 401 or 403, it wants a credential or
-    /// a sign-in; 404, the session expired when one was held (the message
-    /// says so), else most likely a wrong URL. `message` is the whole report
+    /// a sign-in; 404, the session expired when one was held (a call's
+    /// message says so), else most likely a wrong URL. `message` is the whole report
     /// as a `Transport` error read before — the server's body (first 200
     /// chars) included when there was one.
     ///
