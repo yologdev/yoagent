@@ -444,31 +444,48 @@ impl StdioTransport {
         // briefly for its exit status rather than report it as still running.
         let status = {
             let mut child = self.child.lock().await;
-            // With an own group: see the leader exit (within the same 500 ms)
-            // before collecting it, and kill what it left in its group.
-            if self
+            let own_group = self
                 .group
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .is_some()
+                .is_some();
+            let exited = if own_group
+                && self
+                    .ended
+                    .output_closed
+                    .load(std::sync::atomic::Ordering::SeqCst)
             {
+                // An earlier call waited its window: it runs on.
+                None
+            } else if own_group {
+                // One 500 ms window, without collecting a running leader: its
+                // exit is seen first (its group killed), then it is collected.
                 let started = std::time::Instant::now();
+                let mut running = true;
                 while started.elapsed() < std::time::Duration::from_millis(500) {
-                    kill_group_if_exited(&self.group, &mut child, &self.command);
-                    if self
-                        .group
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .is_none()
-                    {
+                    if settle_group(&self.group, &mut child, &self.command) != Some(false) {
+                        running = false;
                         break;
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }
-            }
-            match tokio::time::timeout(std::time::Duration::from_millis(500), child.wait()).await {
-                Ok(Ok(status)) => format!("exited with {status}"),
-                _ => {
+                if running {
+                    None
+                } else {
+                    tokio::time::timeout(std::time::Duration::from_millis(500), child.wait())
+                        .await
+                        .ok()
+                        .and_then(Result::ok)
+                }
+            } else {
+                tokio::time::timeout(std::time::Duration::from_millis(500), child.wait())
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+            };
+            match exited {
+                Some(status) => format!("exited with {status}"),
+                None => {
                     // Still running after the wait: a wrapper outliving the
                     // server (the exit watch reports it as gone).
                     self.ended
@@ -544,20 +561,33 @@ fn leader_state(pid: u32) -> Option<bool> {
     }
 }
 
-/// With an own process group: if the leader has exited (not yet collected),
-/// kill its group now — the server is gone, and what it left in its group
-/// has no client — before the caller collects it and the id may be reused.
+/// With an own process group still to kill: where the leader stands, its
+/// group handled first. `Some(true)`: it exited, its group was killed — now
+/// collect it. `Some(false)`: it runs — do not collect it (a collect racing
+/// its exit would free its id with the group left). `None`: no group to
+/// handle, or the leader cannot be judged — collect as usual.
 #[cfg(feature = "native")]
-fn kill_group_if_exited(group: &std::sync::Mutex<Option<u32>>, child: &mut Child, command: &str) {
+fn settle_group(
+    group: &std::sync::Mutex<Option<u32>>,
+    child: &mut Child,
+    command: &str,
+) -> Option<bool> {
     if group.lock().unwrap_or_else(|e| e.into_inner()).is_none() {
-        return;
+        return None;
     }
     #[cfg(unix)]
-    if child.id().and_then(leader_state) == Some(true) {
-        kill_group(group, child, command);
+    {
+        let exited = child.id().and_then(leader_state)?;
+        if exited {
+            kill_group(group, child, command);
+        }
+        Some(exited)
     }
     #[cfg(not(unix))]
-    let _ = (child, command);
+    {
+        let _ = (child, command);
+        None
+    }
 }
 
 /// `; last stderr:` and the kept tail, or nothing when the server wrote none.
@@ -792,9 +822,12 @@ impl McpTransport for StdioTransport {
                     Err(_) => provisional.clone(),
                     Ok(mut child) => {
                         // With an own group: an exited leader's group goes
-                        // before `try_wait` collects it (its id is then free).
-                        kill_group_if_exited(&group, &mut child, &command);
-                        let state = child.try_wait();
+                        // before `try_wait` collects it (its id is then
+                        // free); a running one is not collected at all.
+                        let state = match settle_group(&group, &mut child, &command) {
+                            Some(false) => Ok(None),
+                            _ => child.try_wait(),
+                        };
                         match state {
                         Ok(Some(status)) => {
                             Some(format!("MCP server '{command}' exited with {status}"))

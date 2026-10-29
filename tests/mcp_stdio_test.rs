@@ -960,3 +960,30 @@ async fn a_tool_source_withdraws_a_server_that_stops_reading() {
     assert_eq!(source.generation(), 1, "the failed write marked it gone");
     assert!(source.tools().await.is_empty());
 }
+
+/// With an own group, a server whose output closed but whose process runs on:
+/// the first call waits its window once; later calls fail at once (they do
+/// not wait it again).
+#[tokio::test]
+async fn an_own_group_server_that_closed_its_output_fails_later_calls_at_once() {
+    let client = connect_with(
+        r#"read -r line; id=$(id_of "$line")
+echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"serverInfo\":{\"name\":\"mute\",\"version\":\"1\"}}}"
+read -r note
+exec 1>&-
+exec sleep 30"#,
+        true,
+    )
+    .await;
+    let err = client.list_tools().await.unwrap_err().to_string();
+    assert!(err.contains("closed its output"), "{err}");
+    let started = std::time::Instant::now();
+    for _ in 0..3 {
+        let _ = client.list_tools().await;
+    }
+    assert!(
+        started.elapsed() < Duration::from_millis(400),
+        "later calls waited again: {:?}",
+        started.elapsed()
+    );
+}
