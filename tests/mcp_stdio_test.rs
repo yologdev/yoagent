@@ -1036,22 +1036,25 @@ async fn a_later_call_takes_the_group_of_a_wrapper_that_exited_since() {
     let dir = tempfile::tempdir().unwrap();
     let go = dir.path().join("go");
     let child_file = dir.path().join("child");
+    let wrapper_file = dir.path().join("wrapper");
     let script = format!(
-        r#"sh -c 'trap "" TERM HUP INT; echo $$ > {child}; exec sleep 300' 0<&0 > /dev/null 2>&1 &
+        r#"echo $$ > {wrapper}; sh -c 'trap "" TERM HUP INT; echo $$ > {child}; exec sleep 300' 0<&0 > /dev/null 2>&1 &
 read -r line; id=$(id_of "$line")
 echo "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{{}},\"serverInfo\":{{\"name\":\"wrapper\",\"version\":\"1\"}}}}}}"
 read -r note
 exec 1>&-; while [ ! -e {go} ]; do sleep 0.05; done; exit 0"#,
         child = quoted(&child_file),
+        wrapper = quoted(&wrapper_file),
         go = quoted(&go),
     );
     let client = connect_with(&script, true).await;
     let child = pid_in(&child_file).await;
+    let wrapper = pid_in(&wrapper_file).await;
     let _reap = Reap(vec![child.clone()]);
     let err = client.list_tools().await.unwrap_err().to_string();
     assert!(err.contains("closed its output"), "{err}");
     std::fs::write(&go, "").unwrap();
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(until_gone(&wrapper).await, "the wrapper exited (a zombie)");
     let err = client.list_tools().await.unwrap_err().to_string();
     assert!(
         err.contains("exited with"),
