@@ -432,6 +432,7 @@ async fn expired_session_is_cleared_and_named() {
         err.to_string().contains("session expired"),
         "the error must name the cause, got: {err}"
     );
+    assert_eq!(err.http_status(), Some(404), "{err:?}");
 
     // The dead session is gone: the next request goes out without one, so a
     // caller that rebuilds the handshake can recover. (Asserted on the wire
@@ -537,6 +538,41 @@ async fn non_2xx_preserves_the_server_explanation() {
         err.to_string().contains("Mcp-Session-Id header required"),
         "the server's explanation must survive, got: {err}"
     );
+    assert_eq!(err.http_status(), Some(400), "the status, typed: {err:?}");
+}
+
+/// A server wanting a credential: its 401 reaches the caller as a status
+/// to match on — on a call, a notification, and `connect` (whose
+/// `initialize` it refuses here).
+#[tokio::test]
+async fn a_401_is_an_http_error_with_its_status() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("sign in first"))
+        .mount(&server)
+        .await;
+    let transport = HttpTransport::new(&server.uri()).unwrap();
+    let err = transport
+        .send(JsonRpcRequest::new("tools/list", None))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, yoagent::mcp::McpError::Http { status: 401, message, .. } if message.contains("sign in first")),
+        "{err:?}"
+    );
+    let err = transport
+        .notify(yoagent::mcp::types::JsonRpcNotification::new(
+            "notifications/initialized",
+            None,
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(err.http_status(), Some(401), "{err:?}");
+    let Err(err) = McpClient::connect_http(&server.uri()).await else {
+        panic!("a 401 must refuse the connect");
+    };
+    assert_eq!(err.http_status(), Some(401), "connect: {err:?}");
+    assert!(err.to_string().contains("HTTP 401"), "{err}");
 }
 
 /// `close()` releases the session server-side.
@@ -716,11 +752,15 @@ async fn a_rejected_initialized_notification_fails_the_connect() {
     let err = McpClient::connect_http(&server.uri())
         .await
         .err()
-        .expect("the handshake did not complete")
-        .to_string();
+        .expect("the handshake did not complete");
     assert!(
-        err.contains("400") && err.contains("bad notification"),
+        err.to_string().contains("400") && err.to_string().contains("bad notification"),
         "{err}"
+    );
+    assert_eq!(
+        err.http_status(),
+        Some(400),
+        "typed, through connect: {err:?}"
     );
 }
 

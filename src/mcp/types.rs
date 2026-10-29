@@ -252,10 +252,26 @@ fn shrink_payloads(value: &mut serde_json::Value) {
 // MCP Error
 // ---------------------------------------------------------------------------
 
+/// What went wrong talking to an MCP server. `#[non_exhaustive]`: match
+/// with a wildcard arm.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum McpError {
     #[error("Transport error: {0}")]
     Transport(String),
+    /// The server answered with a non-success HTTP status (the HTTP
+    /// transport). `status` is its code: 401 or 403, it wants a credential or
+    /// a sign-in; 404, the session expired when one was held (a call's
+    /// message says so), else most likely a wrong URL. `message` is the whole report
+    /// as a `Transport` error read before — the server's body (first 200
+    /// chars) included when there was one.
+    ///
+    /// `#[non_exhaustive]`: match with `Http { status, .. }` and build one
+    /// with [`McpError::http`], so fields can be added (a 401's
+    /// `WWW-Authenticate`, say) without a breaking change.
+    #[error("Transport error: {message}")]
+    #[non_exhaustive]
+    Http { status: u16, message: String },
     #[error("Protocol error: {0}")]
     Protocol(String),
     #[error("JSON-RPC error {code}: {message}")]
@@ -268,9 +284,39 @@ pub enum McpError {
     ConnectionClosed,
 }
 
+impl McpError {
+    /// An [`Http`](Self::Http) error, for a custom [`McpTransport`](super::McpTransport)
+    /// reporting a non-success HTTP status.
+    pub fn http(status: u16, message: impl Into<String>) -> Self {
+        Self::Http {
+            status,
+            message: message.into(),
+        }
+    }
+
+    /// The HTTP status of an [`Http`](Self::Http) error; `None` for any other.
+    pub fn http_status(&self) -> Option<u16> {
+        match self {
+            Self::Http { status, .. } => Some(*status),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn http_errors_carry_their_status() {
+        let err = McpError::http(401, "HTTP 401 Unauthorized from server on 'tools/list'");
+        assert_eq!(err.http_status(), Some(401));
+        assert_eq!(
+            err.to_string(),
+            "Transport error: HTTP 401 Unauthorized from server on 'tools/list'"
+        );
+        assert_eq!(McpError::Transport("x".into()).http_status(), None);
+    }
 
     #[test]
     fn test_json_rpc_request_serialization() {
