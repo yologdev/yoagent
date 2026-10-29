@@ -542,7 +542,8 @@ async fn non_2xx_preserves_the_server_explanation() {
 }
 
 /// A server wanting a credential: its 401 reaches the caller as a status
-/// to match on — on a call, and on a notification (`connect`'s handshake).
+/// to match on — on a call, a notification, and `connect` (whose
+/// `initialize` it refuses here).
 #[tokio::test]
 async fn a_401_is_an_http_error_with_its_status() {
     let server = MockServer::start().await;
@@ -556,7 +557,7 @@ async fn a_401_is_an_http_error_with_its_status() {
         .await
         .unwrap_err();
     assert!(
-        matches!(&err, yoagent::mcp::McpError::Http { status: 401, message } if message.contains("sign in first")),
+        matches!(&err, yoagent::mcp::McpError::Http { status: 401, message, .. } if message.contains("sign in first")),
         "{err:?}"
     );
     let err = transport
@@ -751,11 +752,15 @@ async fn a_rejected_initialized_notification_fails_the_connect() {
     let err = McpClient::connect_http(&server.uri())
         .await
         .err()
-        .expect("the handshake did not complete")
-        .to_string();
+        .expect("the handshake did not complete");
     assert!(
-        err.contains("400") && err.contains("bad notification"),
+        err.to_string().contains("400") && err.to_string().contains("bad notification"),
         "{err}"
+    );
+    assert_eq!(
+        err.http_status(),
+        Some(400),
+        "typed, through connect: {err:?}"
     );
 }
 

@@ -1492,21 +1492,21 @@ impl McpTransport for HttpTransport {
                     warn!(
                         "MCP session {dead} was rejected (HTTP 404); reconnect to start a new one"
                     );
-                    return Err(McpError::Http {
-                        status: 404,
-                        message: format!(
+                    return Err(McpError::http(
+                        404,
+                        format!(
                             "MCP session expired (HTTP 404 on '{method}'); reconnect to start a new session"
                         ),
-                    });
+                    ));
                 }
             }
             // Carry the body: servers explain themselves in it, and dropping it
             // leaves the caller with a bare status to guess from.
             let body = resp.text().await.unwrap_or_default();
             let detail = body.trim();
-            return Err(McpError::Http {
-                status: status.as_u16(),
-                message: if detail.is_empty() {
+            return Err(McpError::http(
+                status.as_u16(),
+                if detail.is_empty() {
                     format!("HTTP {status} from server on '{method}'")
                 } else {
                     format!(
@@ -1514,7 +1514,7 @@ impl McpTransport for HttpTransport {
                         detail.chars().take(200).collect::<String>()
                     )
                 },
-            });
+            ));
         }
 
         // Servers assign the session on `initialize`; any response carrying one
@@ -1560,9 +1560,9 @@ impl McpTransport for HttpTransport {
         } else {
             let body = resp.text().await.unwrap_or_default();
             let detail = body.trim();
-            Err(McpError::Http {
-                status: status.as_u16(),
-                message: if detail.is_empty() {
+            Err(McpError::http(
+                status.as_u16(),
+                if detail.is_empty() {
                     format!("HTTP {status} from server on notification '{method}'")
                 } else {
                     format!(
@@ -1570,7 +1570,7 @@ impl McpTransport for HttpTransport {
                         detail.chars().take(200).collect::<String>()
                     )
                 },
-            })
+            ))
         }
     }
 

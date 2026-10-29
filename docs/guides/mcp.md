@@ -358,10 +358,13 @@ let adapters = McpToolAdapter::from_client(client).await?;
 MCP operations return `McpError` (`#[non_exhaustive]`: a `match` needs a `_` arm):
 
 - `McpError::Transport` — connection or I/O failure
-- `McpError::Http { status, message }` — the server answered with a
+- `McpError::Http { status, .. }` — the server answered with a
   non-success HTTP status (HTTP transport): match on `status` (or
-  `err.http_status()`) — 401/403, it wants a credential or a sign-in; 404 on a
-  session, the session expired. `message` reads as the `Transport` text did.
+  `err.http_status()`) — 401/403, it wants a credential or a sign-in; 404, the
+  session expired when one was held (else most likely a wrong URL). `message`
+  reads as the `Transport` text did. A custom transport builds one with
+  `McpError::http(status, message)`. Typed on `McpClient` and connect calls; a
+  tool call the agent loop runs reports the text to the model instead.
 - `McpError::Protocol` — unexpected response format
 - `McpError::JsonRpc` — server returned a JSON-RPC error
 - `McpError::Serialization` — a message could not be (de)serialized as JSON
