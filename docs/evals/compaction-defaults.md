@@ -750,7 +750,11 @@ falls back to `keep_protected`, which keeps, in order:
 
 When 1–3 alone exceed the target they are kept anyway, up to the budget: the
 target is a headroom aim, the budget the only hard limit. Past the budget the
-head goes first, then the ask.
+head goes first (an ask inside it is still kept as the ask), then the ask;
+the newest turn is cut last, from its start, and when none of it fits, the
+marker and the ask remain. Separately, the kept head never ends partway
+through a multi-call turn's results (`safe_head_end`), which could leave a
+call unanswered on the normal path too.
 
 The same sweep, `MIN_HEADROOM_RATIO` 0.30, every other default as shipped
 (`cargo run --release --example compaction_sweep`; before = `main` at
@@ -763,7 +767,7 @@ The same sweep, `MIN_HEADROOM_RATIO` 0.30, every other default as shipped
 | coding, before | 13.3 | 77.0 | 4.94 | 15.7 | 100% | 82% | 43 |
 | coding, after | 15.2 | 76.3 | 5.50 | 26.6 | 0% | 0% | 0 |
 | mixed, before | 8.1 | 85.8 | 3.52 | 16.3 | 100% | 58% | 23 |
-| mixed, after | 9.0 | 84.8 | 3.84 | 25.9 | 0% | 0% | 0 |
+| mixed, after | 9.0 | 84.8 | 3.84 | 25.8 | 0% | 0% | 0 |
 
 - **Every session keeps its task and its latest ask**, in every cell of every
   axis, as long as the newest turn fits the budget. Marker-only compactions are
@@ -779,10 +783,11 @@ The same sweep, `MIN_HEADROOM_RATIO` 0.30, every other default as shipped
   `records` @ 26K and trigger 0.35, briefings spliced rise from 37% to 82%
   and briefings billed but never spliced fall from 45 to 10: a collapse to the
   marker no longer re-triggers compaction on the very next turn.
-- **Still lossy when the newest turn alone exceeds the budget.** With the
+- **Still lossy when the newest turn alone nears the budget.** With the
   append-path cap off or at 800 lines, `coding` @ 26K still drops the head in
   31–89% of compactions (from 100%): a single turn that large cannot fit with
-  anything else.
+  anything else. The latest ask survives there too (35% lost → 0%), and no
+  compaction is marker-only (42 → 0).
 
 ## Caveats
 
