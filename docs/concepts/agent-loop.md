@@ -110,7 +110,7 @@ pub struct AgentLoopConfig {
 | `model` | Model identifier (e.g., `"claude-sonnet-5"`) |
 | `api_key` | API key for the provider |
 | `thinking_level` | `Off`, `Minimal`, `Low`, `Medium`, `High`, `XHigh`, `Max` |
-| `max_tokens` | Output token cap per request; `None`: Anthropic and OpenAI-compatible send the `model_config`'s `max_tokens`, the other providers send no cap (the API's default) |
+| `max_tokens` | Output token cap per request; `None`: OpenAI-compatible sends the `model_config`'s `max_tokens`; Anthropic too, or 8,192 without a `model_config` (more when a thinking budget needs it); the other providers send no cap (the API's default) |
 | `temperature` | Sampling temperature; `None` = not sent |
 | `model_config` | Optional `ModelConfig` for multi-provider support (base URL, headers, compat flags) |
 | `convert_to_llm` | Custom `AgentMessage[] → Message[]` conversion |

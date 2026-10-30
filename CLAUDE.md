@@ -100,7 +100,7 @@ Cloudflare Workers bindings (`env.AI` → Clef `AiBackend`), wasm32-only, publis
 
 ### rutis bridge (`integrations/yoagent-rutis/`, separate crate)
 
-yoagent agents extended at runtime by rutis plugins (Rust, TypeScript, Python), as one `Extension`; the DSH and pi adapters live under its `plugins/`. Published as `yoagent-rutis`. yoagent's core must never depend on rutis. Details: `integrations/yoagent-rutis/CLAUDE.md`.
+yoagent agents extended at runtime by rutis plugins (Rust, TypeScript, Python, Go), as one `Extension`; the DSH and pi adapters live under its `plugins/`. Published as `yoagent-rutis`. yoagent's core must never depend on rutis. Details: `integrations/yoagent-rutis/CLAUDE.md`.
 
 ### Frontend (moved)
 
