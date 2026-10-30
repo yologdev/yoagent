@@ -76,7 +76,7 @@ Bedrock is the one non-SSE provider: ConverseStream answers with binary `applica
 ### Context Management (`context.rs`)
 
 - **`ContextTracker`** — hybrid real-usage + estimation; the loop uses it to calibrate the compaction budget against real provider usage
-- **`compact_messages()`** — tiered compaction: Level 1 (truncate tool outputs) → Level 2 (summarize old turns) → Level 3 (drop middle turns)
+- **`compact_messages()`** — tiered compaction: Level 1 (truncate tool outputs) → Level 2 (summarize old turns) → Level 3 (drop middle turns; the latest real user message (`latest_ask`, skips `is_loop_injected`) survives a cut, after the marker; when the `keep_first` head + `keep_recent` tail exceed the target, `keep_protected` keeps head → ask → newest turn → as much tail as fits the target, overshooting the target up to the budget; past the budget drops the head (an ask inside it still counts), then the ask, then cuts the newest turn from its start (last resort: marker + ask) — never packing to the target (the removed `keep_within_budget(…, target)` dropped the task and collapsed to the marker, #150); `safe_head_end` also steps back off a head ending mid-results; the guaranteed tail is `keep_recent` messages and never less than the newest turn (`newest_turn` → `Option`; `None` — no assistant after the head, e.g. `keep_recent: 0` — protects no turn); property test `compaction_is_well_formed_within_budget_and_keeps_what_fits` (3,000 random sessions: well formed, ≤ budget, never marker-only, task + ask + newest turn kept whenever they fit together after levels 1–2); measured in `docs/evals/compaction-defaults.md`)
 - **`ExecutionLimits`/`ExecutionTracker`** — max turns (50), max tokens (1M), max duration (10 min)
 
 ### Tool Execution (`agent_loop.rs`)

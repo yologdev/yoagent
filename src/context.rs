@@ -410,7 +410,9 @@ impl CompactionStrategy for DefaultCompaction {
 ///
 /// - Level 1: Truncate tool outputs (keep head + tail)
 /// - Level 2: Summarize old turns (replace details with one-liner)
-/// - Level 3: Drop old messages (keep first + recent only)
+/// - Level 3: Drop the middle (keep first + recent, and the latest user
+///   message). When those exceed the target: the head, the latest user
+///   message and the newest turn, over the target if need be, up to the budget
 ///
 /// Each level is tried in order. Returns as soon as messages fit.
 ///
@@ -473,7 +475,7 @@ pub fn compact_messages(messages: Vec<AgentMessage>, config: &ContextConfig) -> 
     }
 
     // Level 3: Drop the smallest middle span that reaches the target
-    level3_drop_middle(&compacted, config, target)
+    level3_drop_middle(&compacted, config, target, budget)
 }
 
 /// Level 1: Truncate long tool outputs to head + tail.
@@ -926,10 +928,13 @@ fn is_tool_result(msg: &AgentMessage) -> bool {
 }
 
 /// Pull a kept-head boundary back so the head never ends on an assistant
-/// message whose tool results are about to be dropped — providers reject a
-/// `tool_use` with no matching `tool_result`.
+/// message whose tool results are about to be dropped, nor partway through
+/// those results — providers reject a `tool_use` with no matching
+/// `tool_result`, and a result with no call.
 pub(crate) fn safe_head_end(messages: &[AgentMessage], mut end: usize) -> usize {
-    while end > 0 && opens_tool_calls(&messages[end - 1]) {
+    while end > 0
+        && (opens_tool_calls(&messages[end - 1]) || messages.get(end).is_some_and(is_tool_result))
+    {
         end -= 1;
     }
     end
@@ -958,20 +963,25 @@ pub(crate) fn safe_turn_start(messages: &[AgentMessage], mut start: usize) -> us
 /// Keeps `keep_first` messages at the front and at least `keep_recent` at the
 /// back, and removes only as much of the middle as the target requires — the
 /// old fixed `first + recent` shape discarded everything in between even when
-/// a fraction of it would have done.
+/// a fraction of it would have done. The latest user message stays when the
+/// cut passes it, after the marker. When the head and that tail alone exceed
+/// the target, [`keep_protected`] decides what stays.
 fn level3_drop_middle(
     messages: &[AgentMessage],
     config: &ContextConfig,
     target: usize,
+    budget: usize,
 ) -> Vec<AgentMessage> {
     let len = messages.len();
     let head_end = safe_head_end(messages, config.keep_first.min(len));
-    // The furthest the cut may go: everything past it is the guaranteed tail.
-    let max_cut = len.saturating_sub(config.keep_recent);
+    // The furthest the cut may go: everything past it is the guaranteed tail
+    // — `keep_recent` messages, and never less than the newest turn.
+    let max_cut = len
+        .saturating_sub(config.keep_recent)
+        .min(newest_turn(messages, head_end).unwrap_or(len));
 
     if head_end >= max_cut {
-        // Can't split — just keep as many recent as fit
-        return keep_within_budget(messages, target);
+        return keep_protected(messages, config, target, budget);
     }
 
     // suffix[i] = tokens of messages[i..]
@@ -982,12 +992,19 @@ fn level3_drop_middle(
     let head_tokens: usize = messages[..head_end].iter().map(message_tokens).sum();
     let marker_tokens = message_tokens(&compaction_marker(0));
     let fixed = head_tokens + marker_tokens;
+    // The latest user message is kept even when the cut passes it.
+    let ask = latest_ask(messages, head_end, len);
+    let size = |cut: usize| {
+        let ask = ask
+            .filter(|&i| i < cut)
+            .map_or(0, |i| message_tokens(&messages[i]));
+        fixed + ask + suffix[cut]
+    };
 
     // Smallest cut that reaches the target — the least history destroyed.
-    let cut = suffix[head_end..=max_cut]
-        .iter()
-        .position(|&tokens| fixed + tokens <= target)
-        .map_or(max_cut, |offset| head_end + offset);
+    let cut = (head_end..=max_cut)
+        .find(|&c| size(c) <= target)
+        .unwrap_or(max_cut);
     // Snapping forward only drops more, so the target still holds.
     let cut = safe_tail_start(messages, cut).max(head_end);
 
@@ -1004,48 +1021,134 @@ fn level3_drop_middle(
 
     let mut result = messages[..head_end].to_vec();
     result.push(compaction_marker(message_timestamp(&messages[head_end])));
+    if let Some(i) = ask.filter(|&i| i < cut) {
+        result.push(messages[i].clone());
+    }
     result.extend_from_slice(&messages[cut..]);
 
-    // If still too big, progressively drop from recent
+    // The head and the guaranteed tail alone miss the target.
     if total_tokens(&result) > target {
-        return keep_within_budget(&result, target);
+        return keep_protected(messages, config, target, budget);
     }
 
     result
 }
 
-/// Keep as many recent messages as fit within budget.
-fn keep_within_budget(messages: &[AgentMessage], budget: usize) -> Vec<AgentMessage> {
-    if messages.is_empty() {
+/// Where the newest turn starts: the last assistant message at or after
+/// `from` (its results and any user message after them follow it); `None`
+/// when there is none — level 2 summarizes every assistant message when
+/// `keep_recent` is 0.
+fn newest_turn(messages: &[AgentMessage], from: usize) -> Option<usize> {
+    (from..messages.len())
+        .rev()
+        .find(|&i| matches!(messages[i], AgentMessage::Llm(Message::Assistant { .. })))
+}
+
+/// The latest user message in `messages[from..to]` that a person wrote — not
+/// one the loop injected (a summary, the compaction marker, a nudge).
+fn latest_ask(messages: &[AgentMessage], from: usize, to: usize) -> Option<usize> {
+    (from..to).rev().find(|&i| match &messages[i] {
+        AgentMessage::Llm(Message::User { content, .. }) => !content
+            .iter()
+            .any(|c| matches!(c, Content::Text { text } if crate::types::is_loop_injected(text))),
+        _ => false,
+    })
+}
+
+/// What level 3 keeps when the head and the `keep_recent` tail alone exceed
+/// the target — a small budget, or bulky tool results. In order: the head
+/// (the task prompt), the latest user message (the current ask), the newest
+/// turn (the call the model is waiting on and its results), then as much of
+/// the remaining tail as fits the target.
+///
+/// The target is a headroom aim; only `budget` is a hard limit. So when the
+/// head, the ask and the newest turn alone exceed the target, they are kept
+/// anyway, up to the budget, rather than cut to fit: keeping the newest
+/// messages that fit the target dropped the task prompt first, and when the
+/// newest turn alone exceeded the target, everything but the marker (#150).
+/// Past the budget the head goes first (an ask inside it is still the ask),
+/// then the ask; the newest turn is cut last, from its start, down to the
+/// marker and the ask.
+fn keep_protected(
+    messages: &[AgentMessage],
+    config: &ContextConfig,
+    target: usize,
+    budget: usize,
+) -> Vec<AgentMessage> {
+    let len = messages.len();
+    if len == 0 {
         return Vec::new();
     }
-    let mut kept = 0usize;
-    let mut remaining = budget;
+    let head_end = safe_head_end(messages, config.keep_first.min(len));
+    // No assistant after the head: no turn to protect, only the head and
+    // the ask.
+    let turn = newest_turn(messages, head_end).unwrap_or(len);
+    let ask = latest_ask(messages, head_end, len);
 
-    for msg in messages.iter().rev() {
-        let tokens = message_tokens(msg);
-        if tokens > remaining {
-            break;
-        }
-        remaining -= tokens;
-        kept += 1;
+    let mut suffix = vec![0usize; len + 1];
+    for i in (0..len).rev() {
+        suffix[i] = suffix[i + 1] + message_tokens(&messages[i]);
     }
+    let head_tokens: usize = messages[..head_end].iter().map(message_tokens).sum();
+    let marker_tokens = message_tokens(&compaction_marker(0));
+    // An ask's tokens, when it sits before the kept tail (and so is placed
+    // after the marker); inside the tail it is counted there.
+    let ask_tokens = |ask: Option<usize>, start: usize| {
+        ask.filter(|&i| i < start)
+            .map_or(0, |i| message_tokens(&messages[i]))
+    };
 
-    // Never open on a tool result whose tool call was just dropped.
-    let start = safe_tail_start(messages, messages.len() - kept);
-    let mut result = messages[start..].to_vec();
+    // Head, ask (when not inside the kept tail) and the tail from `start`.
+    let build = |keep_head: bool, ask: Option<usize>, start: usize| {
+        let mut out = Vec::new();
+        if keep_head {
+            out.extend_from_slice(&messages[..head_end]);
+        }
+        let from = if keep_head { head_end } else { 0 };
+        if start > from {
+            out.push(compaction_marker(message_timestamp(&messages[from])));
+        }
+        if let Some(i) = ask.filter(|&i| i < start) {
+            out.push(messages[i].clone());
+        }
+        out.extend_from_slice(&messages[start..]);
+        out
+    };
+    let size = |start: usize| head_tokens + marker_tokens + ask_tokens(ask, start) + suffix[start];
 
-    if start > 0 {
+    if size(turn) <= budget {
+        // The longest tail, back towards the head, that still fits the target;
+        // never shorter than the newest turn, never opening on a tool result.
+        let start = (head_end..turn)
+            .filter(|&s| !is_tool_result(&messages[s]))
+            .find(|&s| size(s) <= target)
+            .unwrap_or(turn);
         tracing::debug!(
-            "compaction: keeping {} of {} messages within {} tokens",
-            result.len(),
-            messages.len(),
+            "compaction level 3: keeping head, ask and {} of {} messages ({} tokens; target {}, budget {})",
+            len - start,
+            len,
+            size(start),
+            target,
             budget
         );
-        result.insert(0, compaction_marker(message_timestamp(&messages[0])));
+        return build(true, ask, start);
     }
-
-    result
+    // Over the budget even so: the head goes first (an ask inside it is
+    // still the ask), then the ask; the newest turn is cut last, from its
+    // start, never opening on a tool result.
+    let ask = latest_ask(messages, 0, len);
+    let fits = |ask: Option<usize>, start: usize| {
+        marker_tokens + ask_tokens(ask, start) + suffix[start] <= budget
+    };
+    let starts = (turn..=len).filter(|&s| s == len || !is_tool_result(&messages[s]));
+    let whole = [(ask, turn), (None, turn)].into_iter();
+    let cut = [ask, None]
+        .into_iter()
+        .flat_map(|ask| starts.clone().map(move |s| (ask, s)));
+    match whole.chain(cut).find(|&(ask, start)| fits(ask, start)) {
+        Some((ask, start)) => build(false, ask, start),
+        None => vec![compaction_marker(message_timestamp(&messages[0]))],
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2207,5 +2310,433 @@ mod compaction_retention {
                 "compaction of {before} messages orphaned tool calls {pending:?}"
             );
         }
+    }
+
+    /// Every tool result answers a call of the assistant message before it,
+    /// and every call is answered before anything else follows.
+    fn assert_well_formed(out: &[AgentMessage], ctx: &str) {
+        let mut pending: Vec<String> = Vec::new();
+        for m in out {
+            let AgentMessage::Llm(msg) = m else { continue };
+            match msg {
+                Message::Assistant { content, .. } => {
+                    assert!(pending.is_empty(), "{ctx}: unanswered calls {pending:?}");
+                    pending = content
+                        .iter()
+                        .filter_map(|c| match c {
+                            Content::ToolCall { id, .. } => Some(id.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                }
+                Message::ToolResult { tool_call_id, .. } => {
+                    let at = pending.iter().position(|p| p == tool_call_id);
+                    assert!(at.is_some(), "{ctx}: orphaned result {tool_call_id}");
+                    pending.remove(at.unwrap());
+                }
+                Message::User { .. } => {
+                    assert!(pending.is_empty(), "{ctx}: unanswered calls {pending:?}");
+                }
+            }
+        }
+        assert!(pending.is_empty(), "{ctx}: unanswered calls {pending:?}");
+    }
+
+    /// Random sessions — multi-call turns, text-only turns, asks, summary
+    /// decoys, results from tiny to bulky — under small budgets and every
+    /// `keep_first` / `keep_recent`: compaction stays well formed and within
+    /// the budget, never leaves only the marker, and — whenever the task, the
+    /// latest ask and the newest turn fit the budget together — keeps all
+    /// three (#150).
+    #[test]
+    fn compaction_is_well_formed_within_budget_and_keeps_what_fits() {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move |n: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % n
+        };
+        for case in 0..3_000 {
+            let mut msgs = vec![AgentMessage::Llm(Message::user(format!(
+                "TASK: {}",
+                "t".repeat(4 * (1 + next(400) as usize))
+            )))];
+            let mut call = 0;
+            for turn in 0..(2 + next(24)) {
+                let calls = next(4) as usize;
+                let mut content = Vec::new();
+                if calls == 0 || next(3) == 0 {
+                    content.push(Content::Text {
+                        text: "a".repeat(4 * (1 + next(800) as usize)),
+                    });
+                }
+                let ids: Vec<usize> = (0..calls).map(|k| call + k).collect();
+                call += calls;
+                for &id in &ids {
+                    if let AgentMessage::Llm(Message::Assistant { content: c, .. }) =
+                        assistant_call(id)
+                    {
+                        content.extend(c);
+                    }
+                }
+                msgs.push(AgentMessage::Llm(Message::Assistant {
+                    content,
+                    stop_reason: StopReason::ToolUse,
+                    model: "m".into(),
+                    provider: "p".into(),
+                    usage: Usage::default(),
+                    timestamp: turn,
+                    error_message: None,
+                }));
+                for id in ids {
+                    let tokens = [5, 100, 1_000, 4_000][next(4) as usize];
+                    msgs.push(result_of(id, tokens));
+                }
+                match next(6) {
+                    0 => msgs.push(AgentMessage::Llm(Message::user(format!("ASK {turn}")))),
+                    1 => msgs.push(AgentMessage::Llm(Message::user(format!(
+                        "{SUMMARY_PREFIX}{}",
+                        "s".repeat(4 * 60)
+                    )))),
+                    _ => {}
+                }
+            }
+            let cfg = ContextConfig {
+                max_context_tokens: [800, 2_000, 6_000, 20_000][next(4) as usize],
+                system_prompt_tokens: 0,
+                keep_first: next(5) as usize,
+                keep_recent: next(13) as usize,
+                compact_target_ratio: [0.15, 0.3, 0.5, 0.7][next(4) as usize],
+                ..Default::default()
+            };
+            let ctx = format!(
+                "case {case} (kf {} kr {} ratio {} budget {})",
+                cfg.keep_first, cfg.keep_recent, cfg.compact_target_ratio, cfg.max_context_tokens
+            );
+            // What must survive when it fits: the task (in the head), the
+            // latest ask, and the newest turn — measured on what level 3
+            // receives (levels 1 and 2 run first, as in `compact_messages`).
+            let l1 = level1_truncate_tool_outputs(&msgs, &cfg);
+            let l3_input = if total_tokens(&l1) <= cfg.max_context_tokens {
+                l1
+            } else {
+                level2_summarize_old_turns(&l1, cfg.keep_recent)
+            };
+            let len = l3_input.len();
+            let newest = l3_input
+                .iter()
+                .rposition(|m| matches!(m, AgentMessage::Llm(Message::Assistant { .. })))
+                .filter(|&i| i > 0);
+            let ask = latest_ask(&l3_input, 1, len);
+            // The `keep_first` head goes or stays as a block.
+            let head_end = safe_head_end(&l3_input, cfg.keep_first.min(len));
+            let protected = l3_input[..head_end]
+                .iter()
+                .map(message_tokens)
+                .sum::<usize>()
+                + ask.map_or(0, |i| message_tokens(&l3_input[i]))
+                + message_tokens(&compaction_marker(0))
+                + newest.map_or(0, |n| {
+                    l3_input[n..].iter().map(message_tokens).sum::<usize>()
+                });
+            let must_keep = head_end >= 1 && protected <= cfg.max_context_tokens;
+            let newest_ids: Vec<String> = l3_input[newest.map_or(len, |n| n + 1)..]
+                .iter()
+                .filter_map(|m| match m {
+                    AgentMessage::Llm(Message::ToolResult { tool_call_id, .. }) => {
+                        Some(tool_call_id.clone())
+                    }
+                    _ => None,
+                })
+                .collect();
+            let ask_text = ask.map(|i| message_text(&l3_input[i]));
+            let out = compact_messages(msgs, &cfg);
+            assert!(!out.is_empty(), "{ctx}: emptied");
+            assert_well_formed(&out, &ctx);
+            assert!(
+                total_tokens(&out) <= cfg.max_context_tokens,
+                "{ctx}: {} tokens",
+                total_tokens(&out)
+            );
+            assert!(out.len() > 1, "{ctx}: only the marker survived");
+            if must_keep {
+                assert!(has_text(&out, "TASK:"), "{ctx}: the task was dropped");
+                if let Some(ask) = &ask_text {
+                    assert!(has_text(&out, ask), "{ctx}: the ask was dropped");
+                }
+                for id in &newest_ids {
+                    let kept = out.iter().any(|m| {
+                        matches!(m, AgentMessage::Llm(Message::ToolResult { tool_call_id, .. }) if tool_call_id == id)
+                    });
+                    assert!(kept, "{ctx}: the newest turn's result {id} was dropped");
+                }
+            }
+        }
+    }
+
+    fn result_of(i: usize, tokens: usize) -> AgentMessage {
+        AgentMessage::Llm(Message::ToolResult {
+            tool_call_id: format!("tc-{i}"),
+            tool_name: "fetch_record".into(),
+            content: vec![Content::Text {
+                text: "r".repeat(tokens * 4),
+            }],
+            is_error: false,
+            timestamp: i as u64,
+        })
+    }
+
+    fn has_text(out: &[AgentMessage], needle: &str) -> bool {
+        out.iter().any(|m| match m {
+            AgentMessage::Llm(Message::User { content, .. }) => content
+                .iter()
+                .any(|c| matches!(c, Content::Text { text } if text.contains(needle))),
+            _ => false,
+        })
+    }
+
+    fn has_result(out: &[AgentMessage], i: usize) -> bool {
+        let id = format!("tc-{i}");
+        out.iter().any(
+            |m| matches!(m, AgentMessage::Llm(Message::ToolResult { tool_call_id, .. }) if *tool_call_id == id),
+        )
+    }
+
+    /// The task prompt, an earlier ask, then `pairs` calls whose results
+    /// weigh `tokens` each.
+    fn session(pairs: usize, tokens: usize) -> Vec<AgentMessage> {
+        let mut msgs = vec![AgentMessage::Llm(Message::user("TASK: audit the records"))];
+        for i in 0..pairs {
+            msgs.push(assistant_call(i));
+            msgs.push(result_of(i, tokens));
+            if i == pairs / 2 {
+                msgs.push(AgentMessage::Llm(Message::user(
+                    "ASK: only the failed ones",
+                )));
+            }
+        }
+        msgs
+    }
+
+    fn small_budget() -> ContextConfig {
+        ContextConfig {
+            max_context_tokens: 20_000,
+            system_prompt_tokens: 0,
+            keep_recent: 10,
+            keep_first: 2,
+            // A 6K target: the 10-message tail (5 x 1.5K) alone exceeds it.
+            compact_target_ratio: 0.3,
+            ..Default::default()
+        }
+    }
+
+    /// When the head and the `keep_recent` tail exceed the target, the task
+    /// prompt, the latest ask and the newest turn stay — keeping only the
+    /// newest messages that fit the target used to drop the task first (#150).
+    #[test]
+    fn a_tail_over_the_target_keeps_the_task_the_ask_and_the_newest_turn() {
+        let cfg = small_budget();
+        let out = compact_messages(session(14, 1_500), &cfg);
+        assert!(total_tokens(&out) <= 6_000, "{}", total_tokens(&out));
+        assert!(has_text(&out, "TASK:"), "the task prompt was dropped");
+        assert!(has_text(&out, "failed ones"), "the latest ask was dropped");
+        assert!(has_result(&out, 13), "the newest turn was dropped");
+        assert!(has_text(&out, COMPACTION_MARKER));
+    }
+
+    /// A newest turn bigger than the target is kept, with the task and the
+    /// ask, up to the budget — it used to leave only the marker (#150's
+    /// `22 -> 1` collapse).
+    #[test]
+    fn a_newest_turn_over_the_target_is_kept_up_to_the_budget() {
+        let cfg = small_budget();
+        let mut msgs = session(14, 1_500);
+        msgs.push(assistant_call(14));
+        msgs.push(result_of(14, 9_000));
+        let out = compact_messages(msgs, &cfg);
+        let size = total_tokens(&out);
+        assert!(size > 6_000 && size <= 20_000, "{size}");
+        assert!(has_text(&out, "TASK:") && has_text(&out, "failed ones"));
+        assert!(has_result(&out, 14), "the newest turn was dropped");
+        assert!(out.len() > 1, "only the marker survived");
+    }
+
+    /// Past the budget the head goes first; the ask and the newest turn stay —
+    /// the ask even when it was part of the head (`keep_first: 2`).
+    #[test]
+    fn over_the_budget_the_head_goes_before_the_ask() {
+        let cfg = small_budget();
+        let mut msgs = vec![AgentMessage::Llm(Message::user(format!(
+            "TASK: {}",
+            "t".repeat(4 * 3_000)
+        )))];
+        msgs.push(AgentMessage::Llm(Message::user(
+            "ASK: only the failed ones",
+        )));
+        for i in 0..4 {
+            msgs.push(assistant_call(i));
+            msgs.push(result_of(i, 1_000));
+        }
+        // The bulk is the assistant's own text, which level 1 does not cut.
+        let mut newest = assistant_call(4);
+        if let AgentMessage::Llm(Message::Assistant { content, .. }) = &mut newest {
+            content.insert(
+                0,
+                Content::Text {
+                    text: "a".repeat(4 * 17_000),
+                },
+            );
+        }
+        msgs.push(newest);
+        msgs.push(result_of(4, 100));
+        let out = compact_messages(msgs, &cfg);
+        assert!(total_tokens(&out) <= 20_000, "{}", total_tokens(&out));
+        assert!(!has_text(&out, "TASK:"));
+        assert!(has_text(&out, "failed ones"), "the ask was dropped");
+        assert!(has_result(&out, 4), "the newest turn was dropped");
+    }
+
+    /// A newest turn bigger than the budget cannot be kept; the marker and the
+    /// ask are, so the model still knows what it was asked.
+    #[test]
+    fn a_newest_turn_over_the_budget_leaves_the_marker_and_the_ask() {
+        let cfg = small_budget();
+        let mut newest = assistant_call(0);
+        if let AgentMessage::Llm(Message::Assistant { content, .. }) = &mut newest {
+            content.insert(
+                0,
+                Content::Text {
+                    text: "a".repeat(4 * 25_000),
+                },
+            );
+        }
+        let msgs = vec![
+            AgentMessage::Llm(Message::user("TASK: audit the records")),
+            AgentMessage::Llm(Message::user("ASK: only the failed ones")),
+            newest,
+            result_of(0, 100),
+        ];
+        let out = compact_messages(msgs, &cfg);
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert!(has_text(&out[..1], COMPACTION_MARKER));
+        assert!(has_text(&out[1..], "failed ones"));
+    }
+
+    /// A user message after the newest assistant turn is the latest ask: an
+    /// older one is not brought back after the marker.
+    #[test]
+    fn an_ask_after_the_newest_turn_supersedes_an_older_one() {
+        let cfg = small_budget();
+        let mut msgs = session(14, 1_500);
+        msgs.push(AgentMessage::Llm(Message::assistant(
+            vec![Content::Text {
+                text: "Done: 3 records failed.".into(),
+            }],
+            StopReason::Stop,
+            "m",
+            "p",
+            Usage::default(),
+        )));
+        msgs.push(AgentMessage::Llm(Message::user("NEW: now fix them")));
+        let out = compact_messages(msgs, &cfg);
+        assert!(has_text(&out, "TASK:") && has_text(&out, "NEW: now fix them"));
+        assert!(
+            !has_text(&out, "failed ones"),
+            "a superseded ask was brought back"
+        );
+    }
+
+    /// With `keep_recent: 0` level 2 summarizes every assistant message, so
+    /// level 3 sees no turn to protect: it still cuts to the target and keeps
+    /// the task and the ask.
+    #[test]
+    fn with_no_assistant_left_level_3_still_cuts_to_the_target() {
+        for keep_recent in [0, 1] {
+            let cfg = ContextConfig {
+                keep_recent,
+                ..small_budget()
+            };
+            let mut msgs = vec![AgentMessage::Llm(Message::user("TASK: audit the records"))];
+            for i in 0..14 {
+                msgs.push(assistant_call(i));
+                msgs.push(result_of(i, 200));
+                msgs.push(AgentMessage::Llm(Message::user(format!(
+                    "ASK {i}: {}",
+                    "u".repeat(4 * 1_500)
+                ))));
+            }
+            let out = compact_messages(msgs, &cfg);
+            assert!(
+                total_tokens(&out) <= 6_000,
+                "kr {keep_recent}: {}",
+                total_tokens(&out)
+            );
+            assert!(
+                has_text(&out, "TASK:"),
+                "kr {keep_recent}: the task was dropped"
+            );
+            assert!(
+                has_text(&out, "ASK 13:"),
+                "kr {keep_recent}: the ask was dropped"
+            );
+        }
+    }
+
+    /// Compacting again after more turns keeps the bytes of what was kept at
+    /// the front — the task and the marker — so the prefix cache survives the
+    /// second compaction up to there; the ask is still kept.
+    #[test]
+    fn a_second_compaction_keeps_the_front_byte_for_byte() {
+        let cfg = small_budget();
+        let first = compact_messages(session(14, 1_500), &cfg);
+        let mut next = first.clone();
+        for i in 14..20 {
+            next.push(assistant_call(i));
+            next.push(result_of(i, 1_500));
+        }
+        let second = compact_messages(next, &cfg);
+        let json = |m: &[AgentMessage]| serde_json::to_string(m).unwrap();
+        assert_eq!(json(&second[..2]), json(&first[..2]));
+        assert!(has_text(&second, "failed ones"), "the ask was dropped");
+        assert!(has_result(&second, 19));
+    }
+
+    /// A cut that passes the latest ask keeps it, after the marker — not
+    /// one the loop injected (a summary).
+    #[test]
+    fn a_cut_past_the_latest_ask_keeps_it() {
+        let cfg = ContextConfig {
+            max_context_tokens: 8_000,
+            system_prompt_tokens: 0,
+            keep_recent: 4,
+            keep_first: 1,
+            compact_target_ratio: 0.7,
+            ..Default::default()
+        };
+        let mut msgs = vec![
+            AgentMessage::Llm(Message::user("TASK: audit the records")),
+            AgentMessage::Llm(Message::user("ASK: only the failed ones")),
+        ];
+        for _ in 0..20 {
+            msgs.push(AgentMessage::Llm(Message::user(format!(
+                "{SUMMARY_PREFIX}{}",
+                "s".repeat(4 * 500)
+            ))));
+        }
+        for i in 0..2 {
+            msgs.push(assistant_call(i));
+            msgs.push(result_of(i, 100));
+        }
+        let out = compact_messages(msgs, &cfg);
+        assert!(total_tokens(&out) <= 5_600, "{}", total_tokens(&out));
+        assert!(has_text(&out, COMPACTION_MARKER), "nothing was cut");
+        assert!(has_text(&out, "TASK:") && has_text(&out, "failed ones"));
+        // The ask comes right after the marker, before the kept tail.
+        let at = |needle: &str| {
+            out.iter()
+                .position(|m| has_text(std::slice::from_ref(m), needle))
+        };
+        assert_eq!(at("failed ones"), at(COMPACTION_MARKER).map(|i| i + 1));
     }
 }

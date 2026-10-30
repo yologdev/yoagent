@@ -12,7 +12,10 @@ trade-off quantified), or *inconclusive offline* (with the live experiment
 that would settle it). The sweep itself changed no default. Its one *change*
 verdict was adopted afterwards: `MIN_HEADROOM_RATIO` is 0.30 since 0.22 (it
 was 0.15). The tables below were measured when the floor was 0.15; rows
-labelled `[current]` refer to that value.
+labelled `[current]` refer to that value. The structural fix the floor section
+suggests — level 3 overshoots the target rather than discard the protected
+set — was adopted afterwards; [its section](#level-3-keeps-the-protected-set)
+has the before and after.
 
 ## Method
 
@@ -710,7 +713,8 @@ turns.
     tool-heavy work.
   - More durably, never let the headroom target discard the protected set:
     fall back against the budget, not the target. That is the only variant
-    that removes marker-only collapses at small budgets.
+    that removes marker-only collapses at small budgets. **Adopted**
+    (see the next section).
   - Separately, level 2's all-or-nothing summarization is the remaining cliff
     at 96K. It could summarize the oldest turns only until the target is met,
     mirroring level 3's smallest-span rule.
@@ -729,6 +733,67 @@ turns.
   run once as shipped and once with the floor at 0.30. That needs the constant
   changed on a branch, since it is not configurable. Compare the cache-read
   totals and the final recall answer.
+
+## Level 3 keeps the protected set
+
+Level 3 used to fall back to `keep_within_budget(…, target)` whenever the
+`keep_first` head and the `keep_recent` tail alone exceeded the target: keep
+the newest messages that fit the target, so the head (the task prompt) went
+first, and a newest turn bigger than the target left only the marker. It now
+falls back to `keep_protected`, which keeps, in order:
+
+1. the head (the task prompt);
+2. the latest user message a person wrote (the current ask), placed after the
+   marker when the cut passes it — on the normal path too;
+3. the newest turn (the call the model is waiting on, its results);
+4. as much of the rest of the tail as fits the target.
+
+When 1–3 alone exceed the target they are kept anyway, up to the budget: the
+target is a headroom aim, the budget the only hard limit. Past the budget the
+head goes first (an ask inside it is still kept as the ask), then the ask;
+the newest turn is cut last, from its start, and when none of it fits, the
+marker and the ask remain. Separately, the kept head never ends partway
+through a multi-call turn's results (`safe_head_end`), which could leave a
+call unanswered on the normal path too, and the guaranteed tail is never less
+than the newest turn: with a small `keep_recent` the cut could snap past the
+newest call's results and drop the whole turn (the sweep's
+`keep_recent x MIN_HEADROOM_RATIO` section, `kr 4` rows: minimum left after a
+compaction 0.6% → 3.5% of the budget for `coding` @ 26K). With no assistant
+message left after the head (`keep_recent: 0`, where level 2 summarizes them
+all) there is no turn to protect, and level 3 cuts to the target as before.
+
+The same sweep, `MIN_HEADROOM_RATIO` 0.30, every other default as shipped
+(`cargo run --release --example compaction_sweep`; before = `main` at
+24314df, after = this change):
+
+| @ 26K | cmp/100 | hit% | cost K | after% | head- | ask- | mkr |
+|---|---|---|---|---|---|---|---|
+| records (#150), before | 7.9 | 86.8 | 3.87 | 25.5 | 100% | 42% | 0 |
+| records (#150), after | 7.9 | 86.8 | 3.88 | 25.8 | 0% | 0% | 0 |
+| coding, before | 13.3 | 77.0 | 4.94 | 15.7 | 100% | 82% | 43 |
+| coding, after | 15.2 | 76.3 | 5.50 | 26.6 | 0% | 0% | 0 |
+| mixed, before | 8.1 | 85.8 | 3.52 | 16.3 | 100% | 58% | 23 |
+| mixed, after | 9.0 | 84.8 | 3.84 | 25.8 | 0% | 0% | 0 |
+
+- **Every session keeps its task and its latest ask**, in every cell of every
+  axis, as long as the newest turn fits the budget. Marker-only compactions are
+  gone.
+- **The cost is retention, bought with compactions where the tail is bulky.**
+  `records` is free (+0.3% cost). `coding` keeps 26.6% of the budget after a
+  compaction instead of 15.7%, so it refills sooner: +14% compactions, −0.7 pt
+  ideal hit rate, +11% input cost. The protect-set candidate above, which
+  raises the ratio instead, costs twice the compactions there (26.4 per 100)
+  and still lost the head in 81% of them.
+- **At 96K nothing moves** except `coding`'s 2% of lost asks, now 0%.
+- **`LlmCompaction` benefits.** With a slow summarizer (`L` = 3) at
+  `records` @ 26K and trigger 0.35, briefings spliced rise from 37% to 82%
+  and briefings billed but never spliced fall from 45 to 10: a collapse to the
+  marker no longer re-triggers compaction on the very next turn.
+- **Still lossy when the newest turn alone nears the budget.** With the
+  append-path cap off or at 800 lines, `coding` @ 26K still drops the head in
+  31–89% of compactions (from 100%): a single turn that large cannot fit with
+  anything else. The latest ask survives there too (35% lost → 0%), and no
+  compaction is marker-only (42 → 0).
 
 ## Caveats
 
