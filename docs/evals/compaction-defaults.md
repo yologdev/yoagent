@@ -756,8 +756,11 @@ marker and the ask remain. Separately, the kept head never ends partway
 through a multi-call turn's results (`safe_head_end`), which could leave a
 call unanswered on the normal path too, and the guaranteed tail is never less
 than the newest turn: with a small `keep_recent` the cut could snap past the
-newest call's results and drop the whole turn (the `kr 4` rows: minimum left
-after a compaction 0.6% → 3.5% of the budget for `coding` @ 26K).
+newest call's results and drop the whole turn (the sweep's
+`keep_recent x MIN_HEADROOM_RATIO` section, `kr 4` rows: minimum left after a
+compaction 0.6% → 3.5% of the budget for `coding` @ 26K). With no assistant
+message left after the head (`keep_recent: 0`, where level 2 summarizes them
+all) there is no turn to protect, and level 3 cuts to the target as before.
 
 The same sweep, `MIN_HEADROOM_RATIO` 0.30, every other default as shipped
 (`cargo run --release --example compaction_sweep`; before = `main` at

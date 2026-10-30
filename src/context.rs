@@ -978,7 +978,7 @@ fn level3_drop_middle(
     // — `keep_recent` messages, and never less than the newest turn.
     let max_cut = len
         .saturating_sub(config.keep_recent)
-        .min(newest_turn(messages, head_end));
+        .min(newest_turn(messages, head_end).unwrap_or(len));
 
     if head_end >= max_cut {
         return keep_protected(messages, config, target, budget);
@@ -1035,13 +1035,13 @@ fn level3_drop_middle(
 }
 
 /// Where the newest turn starts: the last assistant message at or after
-/// `from` (its results and any user message after them follow it), else
-/// `from`.
-fn newest_turn(messages: &[AgentMessage], from: usize) -> usize {
+/// `from` (its results and any user message after them follow it); `None`
+/// when there is none — level 2 summarizes every assistant message when
+/// `keep_recent` is 0.
+fn newest_turn(messages: &[AgentMessage], from: usize) -> Option<usize> {
     (from..messages.len())
         .rev()
         .find(|&i| matches!(messages[i], AgentMessage::Llm(Message::Assistant { .. })))
-        .unwrap_or(from)
 }
 
 /// The latest user message in `messages[from..to]` that a person wrote — not
@@ -1080,7 +1080,9 @@ fn keep_protected(
         return Vec::new();
     }
     let head_end = safe_head_end(messages, config.keep_first.min(len));
-    let turn = newest_turn(messages, head_end);
+    // No assistant after the head: no turn to protect, only the head and
+    // the ask.
+    let turn = newest_turn(messages, head_end).unwrap_or(len);
     let ask = latest_ask(messages, head_end, len);
 
     let mut suffix = vec![0usize; len + 1];
@@ -2425,7 +2427,7 @@ mod compaction_retention {
             let newest = l3_input
                 .iter()
                 .rposition(|m| matches!(m, AgentMessage::Llm(Message::Assistant { .. })))
-                .unwrap_or(0);
+                .filter(|&i| i > 0);
             let ask = latest_ask(&l3_input, 1, len);
             // The `keep_first` head goes or stays as a block.
             let head_end = safe_head_end(&l3_input, cfg.keep_first.min(len));
@@ -2435,9 +2437,11 @@ mod compaction_retention {
                 .sum::<usize>()
                 + ask.map_or(0, |i| message_tokens(&l3_input[i]))
                 + message_tokens(&compaction_marker(0))
-                + l3_input[newest..].iter().map(message_tokens).sum::<usize>();
-            let must_keep = head_end >= 1 && newest > 0 && protected <= cfg.max_context_tokens;
-            let newest_ids: Vec<String> = l3_input[newest + 1..]
+                + newest.map_or(0, |n| {
+                    l3_input[n..].iter().map(message_tokens).sum::<usize>()
+                });
+            let must_keep = head_end >= 1 && protected <= cfg.max_context_tokens;
+            let newest_ids: Vec<String> = l3_input[newest.map_or(len, |n| n + 1)..]
                 .iter()
                 .filter_map(|m| match m {
                     AgentMessage::Llm(Message::ToolResult { tool_call_id, .. }) => {
@@ -2641,6 +2645,42 @@ mod compaction_retention {
             !has_text(&out, "failed ones"),
             "a superseded ask was brought back"
         );
+    }
+
+    /// With `keep_recent: 0` level 2 summarizes every assistant message, so
+    /// level 3 sees no turn to protect: it still cuts to the target and keeps
+    /// the task and the ask.
+    #[test]
+    fn with_no_assistant_left_level_3_still_cuts_to_the_target() {
+        for keep_recent in [0, 1] {
+            let cfg = ContextConfig {
+                keep_recent,
+                ..small_budget()
+            };
+            let mut msgs = vec![AgentMessage::Llm(Message::user("TASK: audit the records"))];
+            for i in 0..14 {
+                msgs.push(assistant_call(i));
+                msgs.push(result_of(i, 200));
+                msgs.push(AgentMessage::Llm(Message::user(format!(
+                    "ASK {i}: {}",
+                    "u".repeat(4 * 1_500)
+                ))));
+            }
+            let out = compact_messages(msgs, &cfg);
+            assert!(
+                total_tokens(&out) <= 6_000,
+                "kr {keep_recent}: {}",
+                total_tokens(&out)
+            );
+            assert!(
+                has_text(&out, "TASK:"),
+                "kr {keep_recent}: the task was dropped"
+            );
+            assert!(
+                has_text(&out, "ASK 13:"),
+                "kr {keep_recent}: the ask was dropped"
+            );
+        }
     }
 
     /// Compacting again after more turns keeps the bytes of what was kept at
