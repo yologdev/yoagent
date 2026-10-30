@@ -151,7 +151,7 @@ fn models_dev_fixture_maps_into_our_schema() {
     // Against the built-in data: every overlapping model agrees as billed
     // (gpt-5.5's implicit cache_write equals its explicit input-rate one), so
     // only new models are reported.
-    // (Mistral Large 4 agrees too since its launch sale ended, 2026-10-23.)
+    // (Mistral Large 4 agrees too: both carry its 2026-10-30 rate.)
     let changes = t.changes_from(&PriceTable::builtin());
     assert!(
         changes.iter().all(|c| c.before.is_none()),

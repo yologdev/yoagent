@@ -123,7 +123,7 @@ fn pinned() -> Vec<(&'static str, ModelConfig, CostConfig)> {
         (
             "mistral_large_4",
             ModelConfig::mistral_large_4(),
-            read_only(1.36, 4.18, 0.14),
+            read_only(0.7, 2.1, 0.07),
         ),
         ("glm_5_3", ModelConfig::glm_5_3(), read_only(1.4, 4.4, 0.26)),
         (
