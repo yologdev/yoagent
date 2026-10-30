@@ -4,10 +4,14 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.26.2 (2026-10-30)
+
+Patch release: a compaction fix, a price correction, maintenance and a docs review; no API change. yoagent-rutis (0.10.0) and yoagent-workers (0.3.0) are unchanged.
 
 - **`mistral_large_4` repriced to $0.70 / $2.10 per million tokens, cached $0.07** (was $1.36 / $4.18 / $0.14). Mistral's model page and models.dev both list the new rate, with no sale marking; the release price audit caught the drift. The pricing docs no longer describe Mistral's launch sale as running (it ended about 2026-10-20).
 - **Dependency floor: `rand` 0.10.1** (was 0.10.0), past RUSTSEC-2026-0097. yoagent only calls `rand::random` (retry jitter), so it was not affected; the floor keeps a fresh resolve off the unsound release.
+- **Docs:** a full review of every page against the code (#398) — errors fixed (among them: `prompt()` during a run waits rather than panicking; `DecisionError::Refused` ends a fallback chain; the `extensions` spend bucket; a non-compiling `OpenAiCompat` example; Bedrock has no default base URL) and gaps filled (0.26.1's URL redaction in the MCP guide, `ModelConfig::preset` / `generic`, the extension builders in the API reference, the synchronous `InputFilter`); `llms.txt` lists every page.
+- **CI:** every `actions/*` step on its current major, off the deprecated Node 20 runtime (#397).
 - **Compaction keeps the task prompt and the latest ask** (#150). When the `keep_first` head and the `keep_recent` tail alone exceed the compaction target (a small budget, bulky tool results), level 3 kept only the newest messages that fit the target — dropping the task prompt first, and leaving only the `[Context compacted]` marker when the newest turn alone exceeded the target (#150's `22 msgs -> 1 msg`). It now keeps, in order, the head, the latest user message a person wrote, the newest turn and as much of the rest of the tail as fits — overshooting the target, up to the budget, rather than cutting into them; past the budget the head goes first, then the ask, and the newest turn is cut last (a turn bigger than the budget leaves the marker and the ask). A cut past the latest user message on the normal path keeps it too, right after the marker. The kept head also never ends partway through a multi-call turn's results, which could leave a tool call unanswered, and the guaranteed tail is never less than the newest turn: with a small `keep_recent` the cut could drop the turn whose results the model was waiting on. In the offline sweep (`docs/evals/compaction-defaults.md`) task-prompt loss goes from 100% to 0% at a 26K budget, with no marker-only compactions; tool-heavy sessions compact ~14% more often there (they now keep more). At the default 96K the only change is that tool-heavy sessions no longer lose the latest ask (2% of compactions before).
 
 ## 0.26.1 (2026-10-30)

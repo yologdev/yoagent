@@ -5,7 +5,7 @@ description: Use when building, extending or upgrading an agent on the yoagent R
 
 # yoagent: which feature for which job
 
-Written for **yoagent 0.26.1** (and yoagent-rutis 0.10.0); the recipes
+Written for **yoagent 0.26.2** (and yoagent-rutis 0.10.0); the recipes
 below are compiled by `tests/skill_test.rs`, line for line. Check what you
 build against: `cargo tree -p yoagent` or `Cargo.lock`. If you are on an
 older version, read [What changed](#what-changed) first.
@@ -205,6 +205,13 @@ and its examples.
 
 Newest first; the full list is `CHANGELOG.md`.
 
+- **0.26.2** — compaction keeps the task prompt, the latest user message
+  and the newest turn when the `keep_first` + `keep_recent` messages exceed
+  its target (small budgets, bulky tool results): it overshoots the target,
+  never the budget, instead of dropping the task or leaving only the
+  `[Context compacted]` marker (#150). Small-budget tool-heavy sessions
+  compact ~14% more often; nothing changes at the default 96K.
+  `mistral_large_4` is priced at $0.70 / $2.10 (Mistral's new rate).
 - **0.26.1** — MCP over HTTP: a key in the server URL (path, query,
   userinfo) stays out of errors — they read `HTTP error reaching
   <scheme://host:port>` — and out of server bodies / JSON-RPC error
