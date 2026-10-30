@@ -5,7 +5,7 @@ description: Use when building, extending or upgrading an agent on the yoagent R
 
 # yoagent: which feature for which job
 
-Written for **yoagent 0.26.2** (and yoagent-rutis 0.10.0); the recipes
+Written for **yoagent 0.26.3** (and yoagent-rutis 0.10.0); the recipes
 below are compiled by `tests/skill_test.rs`, line for line. Check what you
 build against: `cargo tree -p yoagent` or `Cargo.lock`. If you are on an
 older version, read [What changed](#what-changed) first.
@@ -205,6 +205,9 @@ and its examples.
 
 Newest first; the full list is `CHANGELOG.md`.
 
+- **0.26.3** — Gemini and Vertex keep text, thinking and tool arguments
+  intact when an HTTP chunk ends inside a UTF-8 character (Chinese, emoji
+  came back as U+FFFD); their SSE parser now scans each event once.
 - **0.26.2** — compaction keeps the task prompt, the latest user message
   and the newest turn when the `keep_first` + `keep_recent` messages exceed
   its target (small budgets, bulky tool results): it overshoots the target,
