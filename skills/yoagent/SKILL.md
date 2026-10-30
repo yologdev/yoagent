@@ -5,7 +5,7 @@ description: Use when building, extending or upgrading an agent on the yoagent R
 
 # yoagent: which feature for which job
 
-Written for **yoagent 0.26.0** (and yoagent-rutis 0.10.0); the recipes
+Written for **yoagent 0.26.1** (and yoagent-rutis 0.10.0); the recipes
 below are compiled by `tests/skill_test.rs`, line for line. Check what you
 build against: `cargo tree -p yoagent` or `Cargo.lock`. If you are on an
 older version, read [What changed](#what-changed) first.
@@ -198,6 +198,11 @@ and its examples.
 
 Newest first; the full list is `CHANGELOG.md`.
 
+- **0.26.1** — MCP over HTTP: a key in the server URL (path, query,
+  userinfo) stays out of errors — they read `HTTP error reaching
+  <scheme://host:port>` — and out of server bodies / JSON-RPC error
+  messages quoted in them (`[redacted]`); a notification's 404 clears an
+  expired session like a call's. Don't match on the old error text.
 - **0.26.0** (breaking: `McpError` is `#[non_exhaustive]` — add a `_` arm)
   — MCP over HTTP: a non-success status is `McpError::Http { status, .. }`
   (`err.http_status()`: 401/403 wants a credential; a call's 404 with a
