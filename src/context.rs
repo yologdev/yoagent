@@ -974,8 +974,11 @@ fn level3_drop_middle(
 ) -> Vec<AgentMessage> {
     let len = messages.len();
     let head_end = safe_head_end(messages, config.keep_first.min(len));
-    // The furthest the cut may go: everything past it is the guaranteed tail.
-    let max_cut = len.saturating_sub(config.keep_recent);
+    // The furthest the cut may go: everything past it is the guaranteed tail
+    // — `keep_recent` messages, and never less than the newest turn.
+    let max_cut = len
+        .saturating_sub(config.keep_recent)
+        .min(newest_turn(messages, head_end));
 
     if head_end >= max_cut {
         return keep_protected(messages, config, target, budget);
@@ -1031,6 +1034,16 @@ fn level3_drop_middle(
     result
 }
 
+/// Where the newest turn starts: the last assistant message at or after
+/// `from` (its results and any user message after them follow it), else
+/// `from`.
+fn newest_turn(messages: &[AgentMessage], from: usize) -> usize {
+    (from..messages.len())
+        .rev()
+        .find(|&i| matches!(messages[i], AgentMessage::Llm(Message::Assistant { .. })))
+        .unwrap_or(from)
+}
+
 /// The latest user message in `messages[from..to]` that a person wrote — not
 /// one the loop injected (a summary, the compaction marker, a nudge).
 fn latest_ask(messages: &[AgentMessage], from: usize, to: usize) -> Option<usize> {
@@ -1067,12 +1080,7 @@ fn keep_protected(
         return Vec::new();
     }
     let head_end = safe_head_end(messages, config.keep_first.min(len));
-    // The newest turn: from the last assistant message after the head (with
-    // its results and any user message after them) to the end.
-    let turn = (head_end..len)
-        .rev()
-        .find(|&i| matches!(messages[i], AgentMessage::Llm(Message::Assistant { .. })))
-        .unwrap_or(head_end);
+    let turn = newest_turn(messages, head_end);
     let ask = latest_ask(messages, head_end, len);
 
     let mut suffix = vec![0usize; len + 1];
@@ -2334,10 +2342,12 @@ mod compaction_retention {
 
     /// Random sessions — multi-call turns, text-only turns, asks, summary
     /// decoys, results from tiny to bulky — under small budgets and every
-    /// `keep_first` / `keep_recent`: compaction stays well formed, within the
-    /// budget, and a second pass changes nothing (the prefix cache).
+    /// `keep_first` / `keep_recent`: compaction stays well formed and within
+    /// the budget, never leaves only the marker, and — whenever the task, the
+    /// latest ask and the newest turn fit the budget together — keeps all
+    /// three (#150).
     #[test]
-    fn compaction_is_well_formed_within_budget_and_stable_on_random_sessions() {
+    fn compaction_is_well_formed_within_budget_and_keeps_what_fits() {
         let mut state = 0x9E37_79B9_7F4A_7C15u64;
         let mut next = move |n: u64| {
             state ^= state << 13;
@@ -2402,6 +2412,41 @@ mod compaction_retention {
                 "case {case} (kf {} kr {} ratio {} budget {})",
                 cfg.keep_first, cfg.keep_recent, cfg.compact_target_ratio, cfg.max_context_tokens
             );
+            // What must survive when it fits: the task (in the head), the
+            // latest ask, and the newest turn — measured on what level 3
+            // receives (levels 1 and 2 run first, as in `compact_messages`).
+            let l1 = level1_truncate_tool_outputs(&msgs, &cfg);
+            let l3_input = if total_tokens(&l1) <= cfg.max_context_tokens {
+                l1
+            } else {
+                level2_summarize_old_turns(&l1, cfg.keep_recent)
+            };
+            let len = l3_input.len();
+            let newest = l3_input
+                .iter()
+                .rposition(|m| matches!(m, AgentMessage::Llm(Message::Assistant { .. })))
+                .unwrap_or(0);
+            let ask = latest_ask(&l3_input, 1, len);
+            // The `keep_first` head goes or stays as a block.
+            let head_end = safe_head_end(&l3_input, cfg.keep_first.min(len));
+            let protected = l3_input[..head_end]
+                .iter()
+                .map(message_tokens)
+                .sum::<usize>()
+                + ask.map_or(0, |i| message_tokens(&l3_input[i]))
+                + message_tokens(&compaction_marker(0))
+                + l3_input[newest..].iter().map(message_tokens).sum::<usize>();
+            let must_keep = head_end >= 1 && newest > 0 && protected <= cfg.max_context_tokens;
+            let newest_ids: Vec<String> = l3_input[newest + 1..]
+                .iter()
+                .filter_map(|m| match m {
+                    AgentMessage::Llm(Message::ToolResult { tool_call_id, .. }) => {
+                        Some(tool_call_id.clone())
+                    }
+                    _ => None,
+                })
+                .collect();
+            let ask_text = ask.map(|i| message_text(&l3_input[i]));
             let out = compact_messages(msgs, &cfg);
             assert!(!out.is_empty(), "{ctx}: emptied");
             assert_well_formed(&out, &ctx);
@@ -2410,12 +2455,19 @@ mod compaction_retention {
                 "{ctx}: {} tokens",
                 total_tokens(&out)
             );
-            let again = compact_messages(out.clone(), &cfg);
-            assert_eq!(
-                serde_json::to_string(&again).unwrap(),
-                serde_json::to_string(&out).unwrap(),
-                "{ctx}: a second pass changed the transcript"
-            );
+            assert!(out.len() > 1, "{ctx}: only the marker survived");
+            if must_keep {
+                assert!(has_text(&out, "TASK:"), "{ctx}: the task was dropped");
+                if let Some(ask) = &ask_text {
+                    assert!(has_text(&out, ask), "{ctx}: the ask was dropped");
+                }
+                for id in &newest_ids {
+                    let kept = out.iter().any(|m| {
+                        matches!(m, AgentMessage::Llm(Message::ToolResult { tool_call_id, .. }) if tool_call_id == id)
+                    });
+                    assert!(kept, "{ctx}: the newest turn's result {id} was dropped");
+                }
+            }
         }
     }
 
@@ -2589,6 +2641,25 @@ mod compaction_retention {
             !has_text(&out, "failed ones"),
             "a superseded ask was brought back"
         );
+    }
+
+    /// Compacting again after more turns keeps the bytes of what was kept at
+    /// the front — the task and the marker — so the prefix cache survives the
+    /// second compaction up to there; the ask is still kept.
+    #[test]
+    fn a_second_compaction_keeps_the_front_byte_for_byte() {
+        let cfg = small_budget();
+        let first = compact_messages(session(14, 1_500), &cfg);
+        let mut next = first.clone();
+        for i in 14..20 {
+            next.push(assistant_call(i));
+            next.push(result_of(i, 1_500));
+        }
+        let second = compact_messages(next, &cfg);
+        let json = |m: &[AgentMessage]| serde_json::to_string(m).unwrap();
+        assert_eq!(json(&second[..2]), json(&first[..2]));
+        assert!(has_text(&second, "failed ones"), "the ask was dropped");
+        assert!(has_result(&second, 19));
     }
 
     /// A cut that passes the latest ask keeps it, after the marker — not

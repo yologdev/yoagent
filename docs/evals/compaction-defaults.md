@@ -754,7 +754,10 @@ head goes first (an ask inside it is still kept as the ask), then the ask;
 the newest turn is cut last, from its start, and when none of it fits, the
 marker and the ask remain. Separately, the kept head never ends partway
 through a multi-call turn's results (`safe_head_end`), which could leave a
-call unanswered on the normal path too.
+call unanswered on the normal path too, and the guaranteed tail is never less
+than the newest turn: with a small `keep_recent` the cut could snap past the
+newest call's results and drop the whole turn (the `kr 4` rows: minimum left
+after a compaction 0.6% → 3.5% of the budget for `coding` @ 26K).
 
 The same sweep, `MIN_HEADROOM_RATIO` 0.30, every other default as shipped
 (`cargo run --release --example compaction_sweep`; before = `main` at
