@@ -4,7 +4,9 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.26.3 (2026-10-30)
+
+Patch release: a Gemini/Vertex streaming fix, no API change. yoagent-rutis (0.10.0) and yoagent-workers (0.3.0) are unchanged.
 
 - **Gemini and Vertex preserve split UTF-8.** Chinese, emoji, thinking text and function-call arguments remain intact when an HTTP chunk ends inside a character; the shared SSE parser buffers bytes until a complete event is available (#391, #392 — thanks @jihtsan).
 
