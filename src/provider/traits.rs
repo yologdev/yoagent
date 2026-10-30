@@ -864,8 +864,8 @@ mod tests {
         use crate::context::{compact_messages, ContextConfig};
 
         let cfg = ContextConfig {
-            // Small enough that the retained tail alone busts the target, which
-            // is what re-enters `keep_within_budget` and drops the head.
+            // Small enough that the head (the bulky first message) alone busts
+            // the budget, which is what makes compaction drop it.
             max_context_tokens: 400,
             system_prompt_tokens: 0,
             ..ContextConfig::default()
@@ -874,9 +874,10 @@ mod tests {
         let conversation = |tag: &str| -> Vec<crate::types::AgentMessage> {
             (0..80)
                 .map(|i| {
+                    let filler = if i == 0 { 300 } else { 40 };
                     crate::types::AgentMessage::Llm(Message::User {
                         content: vec![Content::Text {
-                            text: format!("{tag} message {i} {}", "filler ".repeat(40)),
+                            text: format!("{tag} message {i} {}", "filler ".repeat(filler)),
                         }],
                         timestamp: i as u64,
                     })
