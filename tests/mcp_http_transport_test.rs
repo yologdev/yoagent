@@ -1089,3 +1089,119 @@ async fn redirects_any_follows_another_origin_headers_included() {
         .await
         .unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// The configured URL stays out of error text (it may carry a key)
+// ---------------------------------------------------------------------------
+
+/// A URL whose path, query and userinfo all carry a secret, for a server
+/// that cannot be reached: the errors of a call, a notification and the
+/// connect name only scheme, host and port.
+#[tokio::test]
+async fn an_unreachable_server_is_named_without_its_url() {
+    // Bind and drop a listener: nothing listens on that port now.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let url = format!("http://user:pw-SECRET@127.0.0.1:{port}/mcp/path-SECRET?api_key=q-SECRET");
+    let transport = HttpTransport::new(&url).unwrap();
+    let call = transport
+        .send(JsonRpcRequest::new("tools/list", None))
+        .await
+        .unwrap_err()
+        .to_string();
+    let notify = transport
+        .notify(yoagent::mcp::types::JsonRpcNotification::new(
+            "notifications/initialized",
+            None,
+        ))
+        .await
+        .unwrap_err()
+        .to_string();
+    let Err(connect) = McpClient::connect_http(&url).await else {
+        panic!("nothing listens there");
+    };
+    for err in [call, notify, connect.to_string()] {
+        assert!(!err.contains("SECRET"), "the URL leaked: {err}");
+        assert!(err.starts_with("Transport error: HTTP error"), "{err}");
+    }
+}
+
+/// A refused redirect names where it pointed by origin only: a server that
+/// keeps the query on its redirect (`/mcp?key=…` → `/mcp/?key=…`) does not
+/// put the key in the error.
+#[tokio::test]
+async fn a_refused_redirect_names_origins_only() {
+    let server = MockServer::start().await;
+    let elsewhere = MockServer::start().await;
+    mount_redirect(
+        &server,
+        "/mcp",
+        format!("{}/mcp/to-SECRET?api_key=q-SECRET", elsewhere.uri()),
+    )
+    .await;
+    let url = format!("{}/mcp?api_key=q-SECRET", server.uri());
+    for redirects in [
+        yoagent::mcp::Redirects::SameOrigin,
+        yoagent::mcp::Redirects::None,
+    ] {
+        let err = HttpTransport::new(&url)
+            .unwrap()
+            .with_redirects(redirects)
+            .unwrap()
+            .send(JsonRpcRequest::new("tools/list", None))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains("SECRET"), "{redirects:?} leaked: {err}");
+        assert!(err.contains(&elsewhere.uri()), "{redirects:?}: {err}");
+    }
+}
+
+/// A 404 on a notification carrying a session clears it too, as on a call.
+#[tokio::test]
+async fn a_404_on_a_notification_clears_the_session() {
+    let server = MockServer::start().await;
+    let first = JsonRpcRequest::new("initialize", None);
+    Mock::given(method("POST"))
+        .and(HeaderAbsent("mcp-session-id"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("Mcp-Session-Id", "sess-dead")
+                .set_body_raw(
+                    format!(r#"{{"jsonrpc":"2.0","id":{},"result":{{}}}}"#, first.id),
+                    "application/json",
+                ),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(header("mcp-session-id", "sess-dead"))
+        .respond_with(ResponseTemplate::new(404))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let transport = HttpTransport::new(&server.uri()).unwrap();
+    transport.send(first).await.expect("initialize");
+    let err = transport
+        .notify(yoagent::mcp::types::JsonRpcNotification::new(
+            "notifications/initialized",
+            None,
+        ))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("session expired"), "{err}");
+    assert_eq!(err.http_status(), Some(404), "{err:?}");
+
+    let _ = transport
+        .send(JsonRpcRequest::new("initialize", None))
+        .await;
+    let last = server.received_requests().await.unwrap().pop().unwrap();
+    assert!(
+        !last.headers.contains_key("mcp-session-id"),
+        "the expired session must not be replayed"
+    );
+}

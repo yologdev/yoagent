@@ -935,9 +935,9 @@ fn redirect_policy(redirects: Redirects) -> reqwest::redirect::Policy {
     use reqwest::redirect::Policy;
     match redirects {
         Redirects::None => Policy::custom(|attempt| {
-            let to = attempt.url().to_string();
+            let to = url_origin(attempt.url());
             attempt.error(RedirectRefused(format!(
-                "the server redirected to {to}; redirects are off (HttpTransport::with_redirects)"
+                "the server redirected (to {to}); redirects are off (HttpTransport::with_redirects)"
             )))
         }),
         Redirects::SameOrigin => Policy::custom(|attempt| {
@@ -950,7 +950,7 @@ fn redirect_policy(redirects: Redirects) -> reqwest::redirect::Policy {
             if attempt.url().origin() == origin {
                 attempt.follow()
             } else {
-                let to = attempt.url().to_string();
+                let to = url_origin(attempt.url());
                 let from = origin.ascii_serialization();
                 attempt.error(RedirectRefused(format!(
                     "the server redirected to {to}, outside {from}; refused, so the \
@@ -977,9 +977,27 @@ impl std::fmt::Display for RedirectRefused {
 #[cfg(not(target_arch = "wasm32"))]
 impl std::error::Error for RedirectRefused {}
 
+/// Where a URL points, and nothing that may be a credential: its scheme,
+/// host and port. The path (some services put a key in it), query, fragment
+/// and userinfo are left out, so error text and logs — which reach the model
+/// as a failed tool result — never carry a key from the configured URL.
+fn url_origin(url: &reqwest::Url) -> String {
+    url.origin().ascii_serialization()
+}
+
+/// [`url_origin`] of a configured URL; one that does not parse is named only
+/// as "the server".
+fn named_origin(url: &str) -> String {
+    reqwest::Url::parse(url)
+        .map(|u| url_origin(&u))
+        .unwrap_or_else(|_| "the server".into())
+}
+
 /// A failed request as an error: `context`, then the HTTP client's error —
-/// with, for a redirect not followed, why (its source).
+/// with, for a redirect not followed, why (its source). The client's error
+/// names the request's URL; that is dropped (see [`url_origin`]).
 fn http_error(context: &str, e: reqwest::Error) -> McpError {
+    let e = e.without_url();
     let mut text = e.to_string();
     if e.is_redirect() {
         let mut source = std::error::Error::source(&e);
@@ -1060,6 +1078,24 @@ impl HttpTransport {
             session_id: Mutex::new(None),
             notifications: None,
         })
+    }
+
+    /// Per the spec, a 404 on a request carrying a session means the server
+    /// dropped it. Keeping the dead id would make every later request fail
+    /// identically, with an error that reads like a bad URL — so it is cleared
+    /// and named. `None` when `status` is not a 404 or no session was held.
+    async fn expired_session(&self, status: reqwest::StatusCode, method: &str) -> Option<McpError> {
+        if status != reqwest::StatusCode::NOT_FOUND {
+            return None;
+        }
+        let dead = self.session_id.lock().await.take()?;
+        warn!("MCP session {dead} was rejected (HTTP 404); reconnect to start a new one");
+        Some(McpError::http(
+            404,
+            format!(
+                "MCP session expired (HTTP 404 on '{method}'); reconnect to start a new session"
+            ),
+        ))
     }
 
     fn client_for(redirects: Redirects) -> Result<reqwest::Client, McpError> {
@@ -1359,6 +1395,7 @@ impl HttpTransport {
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| {
+                let e = e.without_url();
                 McpError::Transport(format!(
                     "Response read error on '{method}' after {} byte(s){}: {e}",
                     buf.len(),
@@ -1484,21 +1521,8 @@ impl McpTransport for HttpTransport {
 
         let status = resp.status();
         if !status.is_success() {
-            // Per the spec, 404 on a request carrying a session means the
-            // server dropped it. Keeping the dead id would make every later
-            // call fail identically, with an error that reads like a bad URL.
-            if status == reqwest::StatusCode::NOT_FOUND {
-                if let Some(dead) = self.session_id.lock().await.take() {
-                    warn!(
-                        "MCP session {dead} was rejected (HTTP 404); reconnect to start a new one"
-                    );
-                    return Err(McpError::http(
-                        404,
-                        format!(
-                            "MCP session expired (HTTP 404 on '{method}'); reconnect to start a new session"
-                        ),
-                    ));
-                }
+            if let Some(expired) = self.expired_session(status, &method).await {
+                return Err(expired);
             }
             // Carry the body: servers explain themselves in it, and dropping it
             // leaves the caller with a bare status to guess from.
@@ -1557,6 +1581,8 @@ impl McpTransport for HttpTransport {
         let status = resp.status();
         if status.is_success() {
             Ok(())
+        } else if let Some(expired) = self.expired_session(status, &method).await {
+            Err(expired)
         } else {
             let body = resp.text().await.unwrap_or_default();
             let detail = body.trim();
@@ -1602,7 +1628,7 @@ impl McpTransport for HttpTransport {
                 Err(e) => warn!(
                     "MCP session {session} teardown did not reach {}: {}; \
                      the session may leak server-side",
-                    self.base_url,
+                    named_origin(&self.base_url),
                     http_error("DELETE", e)
                 ),
             }

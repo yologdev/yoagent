@@ -8,6 +8,11 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 yoagent-rutis only; requires yoagent 0.26 (was 0.25), rutis 0.12 and Rust 1.88. No code change: yoagent's types are in its API, so a yoagent minor bump is a minor bump here — this is the release that lets a host take yoagent 0.26 with it. Released with **yoagent-workers 0.3.0**, likewise a requirement bump to yoagent 0.26 and nothing else.
 
+## Unreleased
+
+- **MCP over HTTP: the configured URL stays out of error text** (asked for by yobuild; a security fix). An unreachable server's error carried the HTTP client's ` for url (<full URL>)`, so a key in the URL (`https://host/mcp?api_key=…`) reached the error — and, from a tool call in a run, the model and the logs as a failed tool result. Errors (calls, notifications, the connect handshake, a body read failing, a refused redirect, the session-teardown warning) now name a server by scheme, host and port only: no path (some services put a key there), query or userinfo.
+- **MCP over HTTP: a 404 on a notification clears an expired session**, as one on a call does (`McpError::Http { status: 404 }`, "MCP session expired …"), instead of keeping the dead id for the next request to fail on.
+
 ## 0.26.0 (2026-10-29)
 
 **Breaking (one change):** `McpError` is now `#[non_exhaustive]` and has a new variant — a `match` over it needs a wildcard arm. Ships with yoagent-rutis 0.10.0 and yoagent-workers 0.3.0 (requirement bumps only, above).
