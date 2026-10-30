@@ -10,7 +10,7 @@ yoagent-rutis only; requires yoagent 0.26 (was 0.25), rutis 0.12 and Rust 1.88. 
 
 ## Unreleased
 
-- **MCP over HTTP: the configured URL stays out of error text** (asked for by yobuild; a security fix). An unreachable server's error carried the HTTP client's ` for url (<full URL>)`, so a key in the URL (`https://host/mcp?api_key=…`) reached the error — and, from a tool call in a run, the model and the logs as a failed tool result. Errors (calls, notifications, the connect handshake, a body read failing, a refused redirect, the session-teardown warning) now name a server by scheme, host and port only: no path (some services put a key there), query or userinfo.
+- **MCP over HTTP: the configured URL stays out of error text** (asked for by yobuild; a security fix). An unreachable server's error carried the HTTP client's ` for url (<full URL>)`, so a key in the URL (`https://host/mcp?api_key=…`) reached the error — and, from a tool call in a run, the model and the logs as a failed tool result. Errors (calls, notifications, the connect handshake, a body read failing, a refused redirect, the session-teardown warning) now name a server by scheme, host and port only: no path (some services put a key there), query or userinfo. A server's own body quoted into an error (`Cannot POST /mcp/<key>`, an echoed `api_key=…`) has the URL's path, query and userinfo replaced with `[redacted]` first, and session ids are no longer logged.
 - **MCP over HTTP: a 404 on a notification clears an expired session**, as one on a call does (`McpError::Http { status: 404 }`, "MCP session expired …"), instead of keeping the dead id for the next request to fail on.
 
 ## 0.26.0 (2026-10-29)

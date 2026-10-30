@@ -1205,3 +1205,83 @@ async fn a_404_on_a_notification_clears_the_session() {
         "the expired session must not be replayed"
     );
 }
+
+/// A server's body quoted into an error has the URL's key-bearing parts
+/// replaced first: a 404 page echoing the path, a 401 echoing the query, a
+/// 2xx body with no JSON-RPC in it, and a notification's rejection.
+#[tokio::test]
+async fn a_server_body_echoing_the_url_is_scrubbed() {
+    let server = MockServer::start().await;
+    let echo = "Cannot POST /mcp/zap-SECRET-0123 (api_key=q-SECRET-4567, user pw%2DSECRET%21)";
+    Mock::given(method("POST"))
+        .and(body_string_contains("tools/list"))
+        .respond_with(ResponseTemplate::new(404).set_body_string(echo))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("notifications/"))
+        .respond_with(ResponseTemplate::new(401).set_body_string(echo))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("ping"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(echo, "application/json"))
+        .mount(&server)
+        .await;
+    let base = server
+        .uri()
+        .replace("http://", "http://user:pw%2DSECRET%21@");
+    let transport =
+        HttpTransport::new(&format!("{base}/mcp/zap-SECRET-0123?api_key=q-SECRET-4567")).unwrap();
+    let call = transport
+        .send(JsonRpcRequest::new("tools/list", None))
+        .await
+        .unwrap_err();
+    assert_eq!(call.http_status(), Some(404), "{call:?}");
+    let notify = transport
+        .notify(yoagent::mcp::types::JsonRpcNotification::new(
+            "notifications/initialized",
+            None,
+        ))
+        .await
+        .unwrap_err();
+    let ping = transport
+        .send(JsonRpcRequest::new("ping", None))
+        .await
+        .unwrap_err();
+    for err in [call.to_string(), notify.to_string(), ping.to_string()] {
+        assert!(!err.contains("SECRET"), "the body leaked the URL: {err}");
+        assert!(err.contains("Cannot POST [redacted]"), "{err}");
+    }
+}
+
+/// A body that breaks off mid-read (a declared length never sent) fails
+/// without the URL in the error. (reqwest 0.13's body errors carry no URL;
+/// the transport strips one anyway, and this guards a reqwest that adds it.)
+#[tokio::test]
+async fn a_body_read_error_is_named_without_its_url() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0u8; 4096];
+        let _ = socket.read(&mut request).await;
+        let _ = socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 1000\r\n\r\n{\"jsonrpc\"",
+            )
+            .await;
+        // Dropped: the body ends 990 bytes short.
+    });
+    let err = HttpTransport::new(&format!(
+        "http://127.0.0.1:{port}/mcp/path-SECRET?api_key=q-SECRET"
+    ))
+    .unwrap()
+    .send(JsonRpcRequest::new("tools/list", None))
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("Response read error"), "{err}");
+    assert!(!err.contains("SECRET"), "the URL leaked: {err}");
+}
