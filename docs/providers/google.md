@@ -5,6 +5,9 @@ Two providers for Google's Gemini models:
 - `GoogleProvider` — Google AI Studio (Generative AI API)
 - `GoogleVertexProvider` — Google Cloud Vertex AI
 
+Both providers buffer SSE event bytes before decoding UTF-8, so text, thinking and
+function-call arguments remain intact across arbitrary HTTP chunk boundaries.
+
 ## Google AI Studio
 
 ```rust

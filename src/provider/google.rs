@@ -140,7 +140,7 @@ pub(crate) async fn parse_stream(
 
     // Parse SSE stream
     let mut stream = response.bytes_stream();
-    let mut buffer = String::new();
+    let mut buffer = Vec::new();
 
     loop {
         tokio::select! {
@@ -171,7 +171,9 @@ pub(crate) async fn parse_stream(
                         return Err(provider_err);
                     }
                     Some(Ok(bytes)) => {
-                        buffer.push_str(&String::from_utf8_lossy(&bytes));
+                        // A transport chunk may end inside a UTF-8 code point.
+                        // Decode only once the complete SSE event is buffered.
+                        buffer.extend_from_slice(&bytes);
 
                         // Process complete SSE events (handle both \n\n and \r\n\r\n)
                         while let Some(data) = next_sse_data(&mut buffer) {
@@ -366,17 +368,17 @@ pub(crate) async fn parse_stream(
 /// `\n\n` and `\r\n\r\n` event separators, splitting at whichever occurs
 /// first. Returns `None` until a complete event is buffered. Only the first
 /// `data:` line of an event is returned.
-fn next_sse_data(buffer: &mut String) -> Option<String> {
-    let lf = buffer.find("\n\n");
-    let crlf = buffer.find("\r\n\r\n");
+fn next_sse_data(buffer: &mut Vec<u8>) -> Option<String> {
+    let lf = buffer.windows(2).position(|bytes| bytes == b"\n\n");
+    let crlf = buffer.windows(4).position(|bytes| bytes == b"\r\n\r\n");
     let (pos, sep_len) = match (lf, crlf) {
         (Some(l), Some(c)) if c < l => (c, 4),
         (Some(l), _) => (l, 2),
         (None, Some(c)) => (c, 4),
         (None, None) => return None,
     };
-    let event_str = buffer[..pos].to_string();
-    *buffer = buffer[pos + sep_len..].to_string();
+    let event_str = String::from_utf8_lossy(&buffer[..pos]).into_owned();
+    buffer.drain(..pos + sep_len);
     let data = event_str
         .lines()
         .map(|l| l.trim_end_matches('\r'))
@@ -1109,7 +1111,7 @@ mod tests {
     fn test_parse_chunk_with_crlf_sse() {
         // Full pipeline: next_sse_data (the production splitter) on a CRLF
         // stream, then chunk parsing.
-        let mut buf = "data: {\"candidates\": [{\"content\": {\"parts\": [{\"text\": \"Blue\"}], \"role\": \"model\"}, \"finishReason\": \"STOP\", \"index\": 0}]}\r\n\r\n".to_string();
+        let mut buf = "data: {\"candidates\": [{\"content\": {\"parts\": [{\"text\": \"Blue\"}], \"role\": \"model\"}, \"finishReason\": \"STOP\", \"index\": 0}]}\r\n\r\n".as_bytes().to_vec();
 
         let data = next_sse_data(&mut buf).expect("complete CRLF event");
         assert!(buf.is_empty(), "event consumed from buffer");
@@ -1123,11 +1125,11 @@ mod tests {
 
     #[test]
     fn test_next_sse_data_partial_events_stay_buffered() {
-        let mut buf = "data: {\"a\":1}\n\ndata: partial".to_string();
+        let mut buf = "data: {\"a\":1}\n\ndata: partial".as_bytes().to_vec();
         assert_eq!(next_sse_data(&mut buf).as_deref(), Some("{\"a\":1}"));
         assert_eq!(next_sse_data(&mut buf), None, "incomplete event waits");
-        assert_eq!(buf, "data: partial");
-        buf.push_str("\n\n");
+        assert_eq!(buf, b"data: partial");
+        buf.extend_from_slice(b"\n\n");
         assert_eq!(next_sse_data(&mut buf).as_deref(), Some("partial"));
     }
 
@@ -1136,7 +1138,7 @@ mod tests {
         // SSE comments/keepalives and leading separators must be CONSUMED
         // (returning Some("")), never None — returning None would wedge the
         // buffer and drop every subsequent event.
-        let mut buf = ": keepalive\n\n\n\ndata: x\n\n".to_string();
+        let mut buf = ": keepalive\n\n\n\ndata: x\n\n".as_bytes().to_vec();
         assert_eq!(next_sse_data(&mut buf).as_deref(), Some(""));
         assert_eq!(next_sse_data(&mut buf).as_deref(), Some(""));
         assert_eq!(next_sse_data(&mut buf).as_deref(), Some("x"));
@@ -1157,7 +1159,7 @@ mod tests {
         // A CRLF-separated event earlier in the buffer must split before a
         // later LF separator (the old inline logic preferred the LF match and
         // merged the two events).
-        let mut buf = "data: one\r\n\r\ndata: two\n\n".to_string();
+        let mut buf = "data: one\r\n\r\ndata: two\n\n".as_bytes().to_vec();
         assert_eq!(next_sse_data(&mut buf).as_deref(), Some("one"));
         assert_eq!(next_sse_data(&mut buf).as_deref(), Some("two"));
         assert_eq!(next_sse_data(&mut buf), None);
