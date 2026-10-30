@@ -997,9 +997,9 @@ fn named_origin(url: &str) -> String {
 /// The parts of a configured URL that may be a key — its path, query and
 /// userinfo: every piece of 8 or more characters (a segment, a query pair or
 /// value, the user name, the password; raw and percent-decoded), and the
-/// whole part around one — so a server's body quoted into an error
+/// whole path or query around one — so a server's body quoted into an error
 /// (`Cannot POST /mcp/<key>`, an echoed `api_key=…`) and a JSON-RPC error's
-/// message have them replaced first. Built from the URL as sent (trailing
+/// `message` (not its `data`) have them replaced first. Built from the URL as sent (trailing
 /// `/` trimmed). Longest first, so a whole part is
 /// replaced before its pieces.
 #[derive(Default)]
