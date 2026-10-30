@@ -51,7 +51,7 @@ jobs:
             key_env: DEEPSEEK_API_KEY
             smoke_model: deepseek
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref || github.ref }}
 

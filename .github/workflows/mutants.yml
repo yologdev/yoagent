@@ -61,7 +61,7 @@ jobs:
       - name: Disk and memory before the run
         run: df -h / && free -m
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref || github.ref }}
 
@@ -107,7 +107,7 @@ jobs:
 
       - name: Upload mutants.out
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: mutants-out-shard-${{ matrix.shard }}
           path: mutants.out
@@ -121,7 +121,7 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: mutants-out-shard-*
           path: shards

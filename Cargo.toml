@@ -46,7 +46,7 @@ tracing = "0.1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }
 reqwest-eventsource = { package = "kameleoon-reqwest-eventsource", version = "0.6" }
 futures = "0.3"
-rand = "0.10.0"
+rand = "0.10.1"
 base64 = "0.22"
 # `Instant`/`SystemTime` that work on wasm32 too; plain re-exports of
 # `std::time` on native targets.

@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # The packages' code runs in this job: no token left in .git/config.
           persist-credentials: false
@@ -33,7 +33,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: integrations/yoagent-rutis
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
       - name: Install the adapters' runtimes
@@ -44,7 +44,7 @@ jobs:
         env:
           TOP: ${{ inputs.top }}
         run: node scripts/ecosystem-matrix.mjs --top "$TOP" --out "$RUNNER_TEMP/matrix/plugin-compatibility.md"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: plugin-compatibility
           path: ${{ runner.temp }}/matrix/
