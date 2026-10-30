@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
+- **Gemini and Vertex preserve split UTF-8.** Chinese, emoji, thinking text and function-call arguments remain intact when an HTTP chunk ends inside a character; the shared SSE parser buffers bytes until a complete event is available (#391).
+
 - **MCP over HTTP: the configured URL stays out of error text** (asked for by yobuild; a security fix). An unreachable server's error carried the HTTP client's ` for url (<full URL>)`, so a key in the URL (`https://host/mcp?api_key=…`) reached the error — and, from a tool call in a run, the model and the logs as a failed tool result. Errors now name a server by scheme, host and port only — calls, notifications and the connect handshake (`HTTP error reaching https://host: …`), a refused redirect (both ends), the session-teardown warning — with no path (some services put a key there), query or userinfo; a body read failing carries no URL. A server's own body quoted into an error (`Cannot POST /mcp/<key>`, an echoed `api_key=…`), and a JSON-RPC error's message, have the URL's key-like parts — any path segment, query pair or value, user name or password of 8+ characters, and the whole path or query holding one — replaced with `[redacted]` first (a plain `/mcp` stays readable), and session ids are no longer logged.
 - **MCP over HTTP: a 404 on a notification clears an expired session**, as one on a call does (`McpError::Http { status: 404 }`, "MCP session expired …"), instead of keeping the dead id for the next request to fail on.
 
