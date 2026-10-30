@@ -934,7 +934,7 @@ nobody provides waits in rutis instead of reading as started —
 0.25 and rutis 0.12 too (0.7 closes the pi adapter's `pi.exec` by default;
 0.8 adds values and settings to its grants); 0.10 requires yoagent 0.26
 (rutis 0.12, Rust 1.88; no code change). rutis's release
-train (`rutis`, `rutis-bridge`, `rutis-loader`, the npm and PyPI runtimes)
+train (`rutis`, `rutis-bridge`, `rutis-loader`, the npm, PyPI and Go runtimes)
 shares one version: move the host and the language runtimes together.
 yoagent and rutis types are in its API, so a minor bump of either is a
 minor bump of yoagent-rutis. Take `yoagent` from the same source

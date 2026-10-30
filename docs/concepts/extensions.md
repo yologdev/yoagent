@@ -77,7 +77,7 @@ Every `RunHooks` method has a no-op default; implement only what you need.
 | `on_stop` | When the model ends with `StopReason::Stop` and nothing is queued (not for an answer cut off at the output limit) | A required extension's `Fail` ends the run; otherwise every `Continue` is sent, one line each |
 | `on_event` | Every `AgentEvent` of the run, in order, before the consumer gets it | All |
 | `take_failure` | At every point the loop acts on failures: before each turn, before a response's tools run, before `on_stop`, and when the run ends | Each extension asked; a failure returned counts as that extension's |
-| `finish` | When the run ends, however it ends; bounded by `FINISH_TIMEOUT`. On an `Agent` the run is its own task, so a dropped prompt future still ends the run (cancelled) and `finish` runs; only a dropped raw `agent_loop` future, or an `Agent` dropped mid-run (which aborts the task), skips it | All |
+| `finish` | When the run ends, however it ends; bounded by `FINISH_TIMEOUT`. On an `Agent` the run is its own task: a dropped `_with_sender` future cancels the run and `finish` still runs, and a `prompt()` run keeps going after its receiver is dropped; only a dropped raw `agent_loop` future, or an `Agent` dropped mid-run (which aborts the task), skips it | All |
 
 `finish` gets a `RunOutcome`: `end()` is a `RunEnd` (`Completed`, `Stopped { reason }`, `Rejected { reason }`, `Cancelled`, `Failed { error, extension }`), and `stop_reason()` the last assistant message's.
 

@@ -118,7 +118,7 @@ All return `Self` for chaining (unless noted as `Result`).
 | Method | Description |
 |--------|-------------|
 | `with_extension(ext: impl Extension) -> Self` | Add an extension for this agent's runs; installation order, after the tree extensions and the older hooks |
-| `with_tree_extension(ext: impl Extension) -> Self` | Add an extension for this agent's runs and every run they delegate to, at any depth; runs first; its tools are not offered to child runs |
+| `with_tree_extension(ext: impl Extension) -> Self` | Add an extension for this agent's runs and every run they delegate to, at any depth; runs ahead of this agent's ordinary extensions; its tools are not offered to child runs |
 | `with_max_stop_continues(max: usize) -> Self` | How many times per run an extension's `on_stop` may continue it (default 3) |
 | `with_run_label(label) -> Self` | The host's label for this agent's runs, passed to extensions as `RunContext::label` |
 | `delegated_from(ctx: &ToolContext) -> Self` | Make this agent's runs delegated runs of the calling tool's run (its tree extensions apply, at its depth, under its label unless this agent has one) — for a custom delegation tool that runs an `Agent` |
@@ -149,7 +149,7 @@ All return `Self` for chaining (unless noted as `Result`).
 | Method | Description |
 |--------|-------------|
 | `messages() -> &[AgentMessage]` | Get the full message history |
-| `is_streaming() -> bool` | Whether the agent is currently running |
+| `is_streaming() -> bool` | Whether a run is in flight or not yet joined: true from a prompt until `finish()`, `reset()` or the next prompt joins the run |
 | `session_cost_usd() -> Option<f64>` | Cost of the current history at the current rates (excludes sub-agents); `None` = unpriced |
 | `sub_agent_spend() -> &SubAgentSpend` | What sub-agents spent on this agent's behalf since construction or `reset()` |
 | `compaction_spend() -> &CompactionSpend` | What `LlmCompaction`'s summarization requests cost over the same window (sub-agents' included) |

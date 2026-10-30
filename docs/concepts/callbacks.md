@@ -87,8 +87,8 @@ let agent = agent.with_input_filter(NoSecrets);
 
 `text` is the text blocks of the run's user prompts, joined with newlines.
 Filters run in installation order: `Pass` lets the prompt through unchanged;
-`Warn` adds `[Warning: …]` as a text block on the last user prompt (warnings
-from several filters accumulate); the first `Reject` ends the run before any
+`Warn` adds one text block to the last user prompt, a `[Warning: …]` line per
+warning (from every filter that warned); the first `Reject` ends the run before any
 model call with `AgentEvent::InputRejected` and discards the warnings.
 
 ## Async Input Filters

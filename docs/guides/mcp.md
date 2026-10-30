@@ -375,8 +375,9 @@ MCP operations return `McpError` (`#[non_exhaustive]`: a `match` needs a `_` arm
 
 A key in an HTTP server's URL (path, query or userinfo) stays out of error
 text (since 0.26.1): errors name the server by scheme, host and port only —
-`HTTP error reaching https://host: …` for calls, notifications and the
-connect handshake, and a refused redirect — and a server body quoted into an
+`HTTP error reaching https://host: …` for calls (the connect handshake's
+`initialize` included), `HTTP error on '<method>' reaching …` for
+notifications, and a refused redirect — and a server body quoted into an
 error, or a JSON-RPC error's message, has the URL's key-like parts (any path
 segment, query pair or value, user name or password of 8+ characters) replaced
 with `[redacted]`. Still, pass credentials with `with_header` rather than in

@@ -50,7 +50,7 @@ yoagent 有意停在循环这里。产品在循环之外需要的东西，归产
                        │  和其他扩展一样的一个 Extension
                        ▼
    yoagent-rutis（配套 crate）：插件宿主
-   Rust · TypeScript · Python 处理器、图片、日志
+   Rust · TypeScript · Python · Go 处理器、图片、日志
                        │
         ┌──────────────┼──────────────┐
         ▼              ▼              ▼
@@ -77,7 +77,7 @@ agent 会在真实世界里行动，所以一个可能失败的扩展点，必�
 
 ## 5. 插件和其他生态，在核心之外
 
-核心从不依赖任何插件系统。[yoagent-rutis](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis) 是一个独立的 crate，它把 [rutis](https://github.com/arcships/rutis) 插件——进程内的 Rust，以及在各自运行时中的 TypeScript 和 Python——变成**一个** `Extension`。插件注册一个处理器；桥接把它变成钩子；循环分辨不出差别。
+核心从不依赖任何插件系统。[yoagent-rutis](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis) 是一个独立的 crate，它把 [rutis](https://github.com/arcships/rutis) 插件——进程内的 Rust，以及在各自运行时中的 TypeScript（Node 或 Bun）、Python 和 Go——变成**一个** `Extension`。插件注册一个处理器；桥接把它变成钩子；循环分辨不出差别。
 
 其他 agent 生态就是通过这座桥接入 yoagent 的。DeepSeek harness（DSH）的工具插件、rutis-agent 的工具和 pi 的扩展，都通过小型适配器接入，**循环不做任何改动**。每个适配器映射循环能兑现的部分（工具、策略、说明、图片、日志），其余部分拒绝或报告。
 
@@ -100,7 +100,7 @@ agent 会在真实世界里行动，所以一个可能失败的扩展点，必�
 - **产品要你自己组装。** yoagent 不提供 UI、命令系统和会话产品。做一个完整的 agent 应用，比从自带这些的框架起步要多花功夫。
 - **有些事在扩展里刻意做不到。** 扩展不能改写历史、替换系统提示，也不能在运行之间维持一个 UI。需要其他生态中这些部分的插件（pi 的 plan 模式、DSH 的网页应用）在这里只能部分工作。
 - **失败即关闭拒绝得更多。** 无法兑现的安全策略会阻止加载或调用。这更安全，偶尔也不方便。
-- **跨进程插件有延迟成本。** TypeScript 或 Python 处理器实现的每个钩子，都是一次对另一个进程的调用；热路径应该用 Rust 写。
+- **跨进程插件有延迟成本。** TypeScript、Python 或 Go 处理器实现的每个钩子，都是一次对另一个进程的调用；热路径应该用 Rust 写。
 - **生态适配器是局部的，而且变化快。** 它们覆盖循环能兑现的部分，并跟随其他项目的版本发布。
 
 ## 8. 原则，以及判断新能力的标准

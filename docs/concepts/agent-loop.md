@@ -110,7 +110,7 @@ pub struct AgentLoopConfig {
 | `model` | Model identifier (e.g., `"claude-sonnet-5"`) |
 | `api_key` | API key for the provider |
 | `thinking_level` | `Off`, `Minimal`, `Low`, `Medium`, `High`, `XHigh`, `Max` |
-| `max_tokens` | Output token cap per request; `None` = the `model_config`'s `max_tokens` |
+| `max_tokens` | Output token cap per request; `None`: Anthropic and OpenAI-compatible send the `model_config`'s `max_tokens`, the other providers send no cap (the API's default) |
 | `temperature` | Sampling temperature; `None` = not sent |
 | `model_config` | Optional `ModelConfig` for multi-provider support (base URL, headers, compat flags) |
 | `convert_to_llm` | Custom `AgentMessage[] → Message[]` conversion |
@@ -132,7 +132,7 @@ pub struct AgentLoopConfig {
 | `compaction_strategy` | Custom compaction strategy (see [Custom Compaction](#custom-compaction) below) |
 | `turn_delay` | Optional inter-turn delay to throttle API calls. Skips the first turn. Useful for rate-limit-sensitive providers (e.g., OAuth tokens with low RPM caps) |
 | `extensions` | Extensions for this run, dispatched after `tree_extensions` (see [Extensions](extensions.md)) |
-| `tree_extensions` | Extensions for this run and every run it delegates to, at any depth; they run first |
+| `tree_extensions` | Extensions for this run and every run it delegates to, at any depth; they run ahead of this agent's ordinary extensions (after any inherited from a parent run) |
 | `max_stop_continues` | How many times per run an extension's `on_stop` may continue it (default 3) |
 | `run_label` | The host's label for the run, passed to extensions as `RunContext::label` |
 
