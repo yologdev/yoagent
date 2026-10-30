@@ -130,10 +130,13 @@ yoagent/
 │   │   └── shared_state_tool.rs # SharedStateTool
 │   ├── mcp/
 │   │   ├── client.rs           # MCP client (stdio on native, HTTP everywhere)
+│   │   ├── source.rs           # McpToolSource (tools that follow list_changed)
 │   │   ├── tool_adapter.rs     # McpToolAdapter (MCP tool → AgentTool)
 │   │   ├── transport.rs        # Transport implementations
 │   │   └── types.rs            # MCP protocol types
 │   ├── openapi/                # OpenAPI 3.0 → tools (feature openapi)
+│   │   ├── adapter.rs          # OpenApiToolAdapter (one AgentTool per operation)
+│   │   └── types.rs            # OpenApiConfig, OpenApiAuth, OperationFilter, OpenApiError
 │   └── decision/               # Decision models (feature decision)
 ```
 
@@ -170,9 +173,13 @@ Events flow back via mpsc::UnboundedSender<AgentEvent>
 ## How Providers Plug In
 
 1. Implement `StreamProvider` trait (Layer 1 interface)
-2. Register with `ProviderRegistry` under an `ApiProtocol` (Layer 2)
-3. Set `ModelConfig.api` to match that protocol
-4. The registry dispatches `stream()` calls to the right provider
+2. Hand it to the agent: `Agent` holds one concrete provider —
+   `Agent::from_config(config)` picks the built-in one for `config.api`,
+   `Agent::from_provider(provider, config)` takes yours
+3. Or route through a `ProviderRegistry` (Layer 2): register the provider
+   under an `ApiProtocol`, set `ModelConfig.api` to match, and build with
+   `Agent::from_config_with(&registry, config)`, which resolves the provider
+   for that protocol
 
 Each provider translates between yoagent's `Message`/`Content` types and the provider's native API format. All providers emit `StreamEvent`s through the channel for real-time updates.
 

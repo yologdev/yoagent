@@ -9,7 +9,8 @@ Book: https://yologdev.github.io/yoagent/ · API: https://docs.rs/yoagent · Sou
 - [Skill: which feature for which job](skills/yoagent/SKILL.md): agent-facing map, tips, pitfalls, what changed
 - [Quick start](docs/getting-started/quick-start.md): an agent with tools in a few lines
 - [Installation](docs/getting-started/installation.md): features (`native`, `openapi`, `gasp`, `decision`)
-- [Design philosophy](docs/design-philosophy.md): what belongs in yoagent and what does not
+- [Introduction](docs/introduction.md): what yoagent is, at a glance
+- [Design philosophy](docs/design-philosophy.md): what belongs in yoagent and what does not ([中文](docs/design-philosophy.zh-CN.md))
 
 ## Concepts
 
@@ -35,6 +36,12 @@ Book: https://yologdev.github.io/yoagent/ · API: https://docs.rs/yoagent · Sou
 - [MCP](docs/guides/mcp.md) · [OpenAPI](docs/guides/openapi.md)
 - [WebAssembly and Cloudflare Workers](docs/guides/wasm-workers.md)
 
+## Reference
+
+- [API](docs/reference/api.md): Agent and SubAgentTool methods, SharedState, re-exports
+- [Configuration](docs/reference/configuration.md): AgentLoopConfig, StreamConfig, ContextConfig, limits
+- [Built-in tools](docs/reference/tools.md): bash, read/write/edit files, list, search, shared_state
+
 ## Providers
 
 - [Overview](docs/providers/overview.md) · [Model presets](docs/providers/model-presets.md)
@@ -49,4 +56,5 @@ Book: https://yologdev.github.io/yoagent/ · API: https://docs.rs/yoagent · Sou
 ## Optional
 
 - [Architecture overview](docs/architecture/overview.md): module map
+- [Compaction defaults](docs/evals/compaction-defaults.md) · [LlmCompaction live](docs/evals/llm-compaction-live.md) · [Mutation baseline](docs/evals/mutation-baseline.md): evaluation reports
 - [CHANGELOG](CHANGELOG.md)

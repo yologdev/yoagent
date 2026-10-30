@@ -199,7 +199,7 @@ yoagent's own budget, tool gate and input guard are built the same way. Six runn
 audit logs ([guide](https://yologdev.github.io/yoagent/concepts/extensions.html)).
 
 **Plugins and other ecosystems.** [`yoagent-rutis`](integrations/yoagent-rutis/) turns
-[rutis](https://github.com/arcships/rutis) plugins — Rust, TypeScript or Python, loaded,
+[rutis](https://github.com/arcships/rutis) plugins — Rust, TypeScript (Node or Bun), Python or Go, loaded,
 reloaded and unloaded at runtime — into one `Extension`. Through small adapters it also runs many
 [pi](https://github.com/earendil-works/pi) extensions and DeepSeek harness (DSH) tool plugins unchanged, with no
 change to yoagent's core: tools, tool policies, input checks, prompt additions and images cross

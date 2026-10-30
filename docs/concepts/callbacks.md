@@ -59,6 +59,38 @@ let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude
     .on_error(|err| eprintln!("Error: {}", err));
 ```
 
+## Input Filters
+
+An `InputFilter` screens a run's prompt text before the first LLM call —
+injection checks, moderation, PII rules. It is synchronous and runs in the
+hot path, so keep it fast:
+
+```rust
+use yoagent::{FilterResult, InputFilter};
+
+struct NoSecrets;
+
+impl InputFilter for NoSecrets {
+    fn filter(&self, text: &str) -> FilterResult {
+        if text.contains("BEGIN PRIVATE KEY") {
+            FilterResult::Reject("prompt contains a private key".into())
+        } else if text.contains("password") {
+            FilterResult::Warn("the user may have pasted a password".into())
+        } else {
+            FilterResult::Pass
+        }
+    }
+}
+
+let agent = agent.with_input_filter(NoSecrets);
+```
+
+`text` is the text blocks of the run's user prompts, joined with newlines.
+Filters run in installation order: `Pass` lets the prompt through unchanged;
+`Warn` adds `[Warning: …]` as a text block on the last user prompt (warnings
+from several filters accumulate); the first `Reject` ends the run before any
+model call with `AgentEvent::InputRejected` and discards the warnings.
+
 ## Async Input Filters
 
 `InputFilter` is synchronous. A filter that awaits — a moderation API, a

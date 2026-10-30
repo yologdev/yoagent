@@ -125,8 +125,8 @@ let agent = agent.with_mcp_server_http_transport(transport).await?;
   during a session (OAuth refresh) needs a new transport and client.
 - Redirects are followed within the URL's own origin only (scheme, host and
   port; up to 10; use 307/308 — a 301/302/303 turns the POST into a GET), so the headers never follow a server pointing at another
-  host, or from `https` to `http`: such a redirect is an error naming where it
-  pointed. `with_redirects(Redirects::None)` refuses every redirect;
+  host, or from `https` to `http`: such a redirect is an error naming both
+  ends by origin only (scheme, host and port; since 0.26.1). `with_redirects(Redirects::None)` refuses every redirect;
   `Redirects::Any` follows them anywhere — then a custom header goes along (the
   HTTP client drops only `Authorization` and `Cookie` on a hop to another
   host). Native targets; on wasm32 the host's `fetch` follows redirects.
@@ -372,5 +372,15 @@ MCP operations return `McpError` (`#[non_exhaustive]`: a `match` needs a `_` arm
 - `McpError::ConnectionClosed` — the connection ended (the stdio transport
   now reports a server that exited as `McpError::Transport("Connection closed:
   MCP server '…' exited with …; last stderr: …")`, carrying the reason)
+
+A key in an HTTP server's URL (path, query or userinfo) stays out of error
+text (since 0.26.1): errors name the server by scheme, host and port only —
+`HTTP error reaching https://host: …` for calls, notifications and the
+connect handshake, and a refused redirect — and a server body quoted into an
+error, or a JSON-RPC error's message, has the URL's key-like parts (any path
+segment, query pair or value, user name or password of 8+ characters) replaced
+with `[redacted]`. Still, pass credentials with `with_header` rather than in
+the URL, and don't parse error text: match `McpError::Http { status, .. }` or
+call `http_status()`.
 
 When an MCP tool returns `isError: true`, the adapter converts it to a `ToolError::Failed`, which the agent loop sends back to the LLM with `is_error: true` so it can self-correct.

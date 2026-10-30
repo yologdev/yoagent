@@ -147,7 +147,7 @@ endpoint.
 ## API Details
 
 - **Endpoint**: `{base_url}/model/{model}/converse-stream` (model id percent-encoded)
-- **Default base URL**: `https://bedrock-runtime.us-east-1.amazonaws.com`
+- **Base URL**: no default — set it on the `ModelConfig` (`ModelConfig::custom`), e.g. `https://bedrock-runtime.us-east-1.amazonaws.com`
 - **Protocol**: `ApiProtocol::BedrockConverseStream`
 
 ## Message Format

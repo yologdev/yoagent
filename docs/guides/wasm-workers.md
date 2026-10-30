@@ -70,8 +70,10 @@ The same holds everywhere yoagent would read the environment (see
   (SigV4) or a Bedrock API key with `with_api_key`, and use a regional
   `base_url` (`https://bedrock-runtime.<region>.amazonaws.com`): the signing
   region cannot fall back to `AWS_REGION`.
-- **Decision models**: `DecisionModel::jev()` and the OpenCode presets find no
-  key; pass one with `.with_api_key(..)`.
+- **Decision models**: `DecisionModel::jev()`, the OpenCode presets,
+  `clef*()` (`CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_AUTH_TOKEN`) and
+  `gpt_6_luna()` (`OPENAI_API_KEY`) find no key; pass one with
+  `.with_api_key(..)`.
 - **Prices**: nothing is priced by default; `prices::enable_bundled()`
   works on wasm32 (the live `enable_live*` are native-only — fetch with
   `PriceTable::fetch` and `global::install_fetched` if you need fresh prices).

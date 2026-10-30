@@ -169,7 +169,7 @@ let state = SharedState::new();                          // 10MB default
 let state = SharedState::with_max_bytes(50 * 1024 * 1024); // 50MB
 ```
 
-A `set` call that would exceed capacity returns `Err(CapacityError)`.
+A `set` call that would exceed capacity returns `Err(SharedStateError::Capacity(CapacityError))`.
 
 **FileBackend** (requires the default `native` feature; not available on wasm32) — one file per key, persistent across process restarts:
 
@@ -217,6 +217,15 @@ let analyst = SubAgentTool::from_config("analyst", model_config)
 ```
 
 This works with all providers: OpenAI, Groq, DeepSeek, Gemini, Mistral, xAI, and more. See [Model Presets](../providers/model-presets.md) for the full list of first-class factory methods.
+
+## Spend
+
+A sub-agent's turns are priced at its own model's rates and kept apart from
+the parent's: `SessionStats::sub_agents` (`SubAgentSpend { usage, cost_usd,
+runs }`, the whole delegation tree) and `Agent::sub_agent_spend()`;
+`total_cost_usd()` / `total_usage()` add them in. A delegation that fails
+still reports its spend. See [Model Pricing](pricing.md) for the buckets and
+for enabling prices.
 
 ## Design Decisions
 

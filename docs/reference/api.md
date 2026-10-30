@@ -83,6 +83,7 @@ All return `Self` for chaining (unless noted as `Result`).
 | `with_skills(skills: SkillSet) -> Self` | Load skills and append their index to the system prompt |
 | `async with_mcp_server_stdio(command, args, env) -> Result<Self, McpError>` | Connect to MCP server via stdio and add its tools *(feature `native`)* |
 | `async with_mcp_server_http(url) -> Result<Self, McpError>` | Connect to MCP server via HTTP and add its tools |
+| `async with_mcp_server_http_transport(transport: HttpTransport) -> Result<Self, McpError>` | The same over a configured transport (auth headers via `HttpTransport::with_header`, redirect policy) |
 | `async with_openapi_file(path, config, filter) -> Result<Self, OpenApiError>` | Load tools from an OpenAPI spec file *(requires `openapi` feature)* |
 | `async with_openapi_url(url, config, filter) -> Result<Self, OpenApiError>` | Fetch spec from URL and add tools *(requires `openapi` feature)* |
 | `with_openapi_spec(spec_str, config, filter) -> Result<Self, OpenApiError>` | Parse spec string and add tools *(requires `openapi` feature)* |
@@ -111,6 +112,16 @@ All return `Self` for chaining (unless noted as `Result`).
 | `with_decision_advisory(advisory: Advisory) -> Self` | *(feature `decision`)* The same, with explicit thresholds and timeout |
 | `with_tool_gate(gate: ToolGate) -> Self` | *(feature `decision`)* Deny destructive, unrequested tool calls; runs last; fails closed |
 | `with_input_guard(guard: InputGuard) -> Self` | *(feature `decision`)* Reject injection / harmful prompts; fails closed; panics if the guard has no checks |
+
+**Extensions** (see [Extensions](../concepts/extensions.md))
+
+| Method | Description |
+|--------|-------------|
+| `with_extension(ext: impl Extension) -> Self` | Add an extension for this agent's runs; installation order, after the tree extensions and the older hooks |
+| `with_tree_extension(ext: impl Extension) -> Self` | Add an extension for this agent's runs and every run they delegate to, at any depth; runs first; its tools are not offered to child runs |
+| `with_max_stop_continues(max: usize) -> Self` | How many times per run an extension's `on_stop` may continue it (default 3) |
+| `with_run_label(label) -> Self` | The host's label for this agent's runs, passed to extensions as `RunContext::label` |
+| `delegated_from(ctx: &ToolContext) -> Self` | Make this agent's runs delegated runs of the calling tool's run (its tree extensions apply, at its depth, under its label unless this agent has one) — for a custom delegation tool that runs an `Agent` |
 
 **Callbacks**
 
@@ -142,7 +153,8 @@ All return `Self` for chaining (unless noted as `Result`).
 | `session_cost_usd() -> Option<f64>` | Cost of the current history at the current rates (excludes sub-agents); `None` = unpriced |
 | `sub_agent_spend() -> &SubAgentSpend` | What sub-agents spent on this agent's behalf since construction or `reset()` |
 | `compaction_spend() -> &CompactionSpend` | What `LlmCompaction`'s summarization requests cost over the same window (sub-agents' included) |
-| `total_cost_usd() -> Option<f64>` | Everything this agent's runs spent: own turns, sub-agents, compaction summaries and decision-model requests |
+| `extension_spend() -> &ExtensionSpend` | What extensions recorded through a `SpendHandle` (model calls outside the runs' own turns) over the same window |
+| `total_cost_usd() -> Option<f64>` | Everything this agent's runs spent: own turns, sub-agents, compaction summaries, extension-recorded calls and decision-model requests |
 | `total_usage() -> Usage` | Token usage over the same window as `total_cost_usd()` (decision-model tokens excluded) |
 
 ### State Mutation
@@ -219,7 +231,11 @@ All return `Self` for chaining.
 | `with_shared_state(state: SharedState) -> Self` | Attach a shared key-value store (injects `shared_state` tool automatically) |
 | `with_scoped_shared_state(state: SharedState, scope) -> Self` | Same, restricted to keys under `scope` |
 | `with_context_config(config: ContextConfig) -> Self` | Give the child loop its own context management (truncation, compaction) |
-| `with_max_turns(N) -> Self` | Turn limit (default: 10) |
+| `with_max_turns(N) -> Self` | Turn limit (default: 10); changes only the turns |
+| `with_execution_limits(limits: ExecutionLimits) -> Self` | Replace every limit, per delegation (default 10 turns, 1M tokens, 5 minutes, loop detection on) |
+| `with_extension(ext: impl Extension) -> Self` | Add an extension for the sub-agent's runs |
+| `with_tree_extension(ext: impl Extension) -> Self` | Add an extension for the sub-agent's runs and every run they delegate to |
+| `with_max_stop_continues(max: usize) -> Self` | How many times per run an extension's `on_stop` may continue it (default 3) |
 | `with_thinking(level: ThinkingLevel) -> Self` | Enable extended thinking |
 | `with_max_tokens(max: u32) -> Self` | Set max output tokens |
 | `with_temperature(t: f32) -> Self` | Set the sampling temperature |
@@ -300,6 +316,7 @@ The crate re-exports key types from `lib.rs`:
 pub use agent::{Agent, AgentBuildError, StructuredPromptError};
 pub use agent_loop::{agent_loop, agent_loop_continue};
 pub use context::{CompactionStrategy, DefaultCompaction};
+pub use extension::{Extension, ExtensionMode, RunHooks};
 pub use llm_compaction::LlmCompaction;
 pub use retry::RetryConfig;
 pub use session::{Session, SessionEntry, SessionError};

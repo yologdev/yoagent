@@ -77,7 +77,7 @@ Every `RunHooks` method has a no-op default; implement only what you need.
 | `on_stop` | When the model ends with `StopReason::Stop` and nothing is queued (not for an answer cut off at the output limit) | A required extension's `Fail` ends the run; otherwise every `Continue` is sent, one line each |
 | `on_event` | Every `AgentEvent` of the run, in order, before the consumer gets it | All |
 | `take_failure` | At every point the loop acts on failures: before each turn, before a response's tools run, before `on_stop`, and when the run ends | Each extension asked; a failure returned counts as that extension's |
-| `finish` | When the run ends, however it ends (not if the run's future is dropped); bounded by `FINISH_TIMEOUT` | All |
+| `finish` | When the run ends, however it ends; bounded by `FINISH_TIMEOUT`. On an `Agent` the run is its own task, so a dropped prompt future still ends the run (cancelled) and `finish` runs; only a dropped raw `agent_loop` future, or an `Agent` dropped mid-run (which aborts the task), skips it | All |
 
 `finish` gets a `RunOutcome`: `end()` is a `RunEnd` (`Completed`, `Stopped { reason }`, `Rejected { reason }`, `Cancelled`, `Failed { error, extension }`), and `stop_reason()` the last assistant message's.
 
@@ -167,7 +167,7 @@ async fn start_run(&self, run: &RunContext<'_>) -> Result<Box<dyn RunHooks>, Ext
 }
 ```
 
-`add(&usage, &model)` prices the call at the model's `cost` (`add_priced` takes a `CostConfig` instead); never pass dollars. A `Budget` counts it at its next check (before the next request), and the run's `SessionStats` holds it in `extensions`, inside `total_usage()` and `total_cost_usd()` (an unpriced call makes the total `None`, as an unpriced turn does); `Agent::extension_spend()` sums it across runs. Spend recorded after the run ended — after the extensions' `finish` — is not counted, with a warning; spend recorded in a `finish` that runs after a `Budget`'s own is in the run's stats but not in that budget's total. `run.spend_handle()` is `None` outside a loop (a `RunContext::new` in a test).
+`add(&usage, &model)` prices the call at the model's `cost` (`add_priced(&usage, cost: Option<&CostConfig>)` takes the rates instead, `None` = unpriced); never pass dollars. A `Budget` counts it at its next check (before the next request), and the run's `SessionStats` holds it in `extensions`, inside `total_usage()` and `total_cost_usd()` (an unpriced call makes the total `None`, as an unpriced turn does); `Agent::extension_spend()` sums it across runs. Spend recorded after the run ended — after the extensions' `finish` — is not counted, with a warning; spend recorded in a `finish` that runs after a `Budget`'s own is in the run's stats but not in that budget's total. `run.spend_handle()` is `None` outside a loop (a `RunContext::new` in a test).
 
 ## Built on extensions
 

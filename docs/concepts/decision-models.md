@@ -162,7 +162,9 @@ names, or a request that cannot be built, such as a malformed URL),
 failed; see below), `Transport { message, source }`, `MissingApiKey`
 (names the variable, never a value), `Backend { message, source }` (a custom
 backend's own failure; build it with `DecisionError::backend(..)` or
-`backend_with_source(..)`), `BadResponse` (including a success whose body
+`backend_with_source(..)`), `Refused { message }` (the model declined to
+answer — OpenAI's `refusal`, or a custom backend's equivalent; never retried,
+and terminal in a fallback chain), `BadResponse` (including a success whose body
 could not be read — not retried, since it was already processed). 429, 529
 and transport errors are retried with the crate's `RetryConfig` backoff, and a
 server `retry-after` wins over the backoff (capped at `max_delay_ms`).
@@ -303,7 +305,10 @@ member asks with its own model id.**
 - **Every error a member returns falls back** — outages, rate limits, a
   missing key, unusable answers, `Unsupported` (a fallback may support the
   question kind), a member's own timeout, and `Invalid` too: a 422 is that
-  server's limit, and the next may accept the request.
+  server's limit, and the next may accept the request — **except
+  `Refused`**, which ends the chain and is returned as is: a model declining
+  to judge is an answer about the input, and asking the next model would turn
+  it into a yes or a no.
 - **Each member is validated against its own capabilities.** A request
   invalid everywhere (no questions, a one-option Choice, ...) fails with
   `Invalid` at once, nothing sent. One that only exceeds a member's limits —
