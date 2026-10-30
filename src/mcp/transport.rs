@@ -911,14 +911,14 @@ impl McpTransport for StdioTransport {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Redirects {
-    /// None: a redirect is an error naming where it pointed.
+    /// None: a redirect is an error naming the origin it pointed to.
     None,
     /// Within the URL's own origin — scheme, host and port — up to 10: a
     /// server moving `/mcp` to `/mcp/` with a 307 or 308 works (a 301, 302
     /// or 303 makes the HTTP client resend the POST as a GET, without its
     /// body, which no MCP endpoint answers), while one pointing at another
-    /// host, or from `https` to `http`, is an error naming where it pointed,
-    /// so the transport's headers never leave for it. The default.
+    /// host, or from `https` to `http`, is an error naming the origin it
+    /// pointed to, so the transport's headers never leave for it. The default.
     #[default]
     SameOrigin,
     /// Any, up to 10 (what earlier versions did). The HTTP client drops
@@ -935,9 +935,9 @@ fn redirect_policy(redirects: Redirects) -> reqwest::redirect::Policy {
     use reqwest::redirect::Policy;
     match redirects {
         Redirects::None => Policy::custom(|attempt| {
-            let to = attempt.url().to_string();
+            let to = url_origin(attempt.url());
             attempt.error(RedirectRefused(format!(
-                "the server redirected to {to}; redirects are off (HttpTransport::with_redirects)"
+                "the server redirected (to {to}); redirects are off (HttpTransport::with_redirects)"
             )))
         }),
         Redirects::SameOrigin => Policy::custom(|attempt| {
@@ -950,7 +950,7 @@ fn redirect_policy(redirects: Redirects) -> reqwest::redirect::Policy {
             if attempt.url().origin() == origin {
                 attempt.follow()
             } else {
-                let to = attempt.url().to_string();
+                let to = url_origin(attempt.url());
                 let from = origin.ascii_serialization();
                 attempt.error(RedirectRefused(format!(
                     "the server redirected to {to}, outside {from}; refused, so the \
@@ -977,9 +977,127 @@ impl std::fmt::Display for RedirectRefused {
 #[cfg(not(target_arch = "wasm32"))]
 impl std::error::Error for RedirectRefused {}
 
+/// Where a URL points, and nothing that may be a credential: its scheme,
+/// host and port. The path (some services put a key in it), query, fragment
+/// and userinfo are left out, so error text and logs — which reach the model
+/// as a failed tool result — carry no key from the configured URL (one in a
+/// host name, `https://<key>.example.com`, would still show).
+fn url_origin(url: &reqwest::Url) -> String {
+    url.origin().ascii_serialization()
+}
+
+/// [`url_origin`] of a configured URL; one that does not parse is named only
+/// as "the server".
+fn named_origin(url: &str) -> String {
+    reqwest::Url::parse(url)
+        .map(|u| url_origin(&u))
+        .unwrap_or_else(|_| "the server".into())
+}
+
+/// The parts of a configured URL that may be a key — its path, query and
+/// userinfo: every piece of 8 or more characters (a segment, a query pair or
+/// value, the user name, the password; raw and percent-decoded), and the
+/// whole path or query around one — so a server's body quoted into an error
+/// (`Cannot POST /mcp/<key>`, an echoed `api_key=…`) and a JSON-RPC error's
+/// `message` (not its `data`) have them replaced first. Built from the URL as
+/// sent (trailing `/` trimmed). Longest first, so a whole part is replaced
+/// before its pieces.
+#[derive(Default)]
+struct UrlSecrets(Vec<String>);
+
+impl UrlSecrets {
+    const MIN_PIECE: usize = 8;
+
+    fn of(url: &str) -> Self {
+        let Ok(url) = reqwest::Url::parse(url) else {
+            return Self::default();
+        };
+        let mut all = Vec::new();
+        // A part's pieces worth hiding, raw and decoded; the whole part goes
+        // with them only when it has one, so a key-free `/mcp` stays readable.
+        let mut part = |whole: &str, pieces: Vec<String>| {
+            let pieces: Vec<String> = pieces
+                .iter()
+                .flat_map(|p| [p.clone(), percent_decoded(p)])
+                .filter(|p| p.chars().count() >= Self::MIN_PIECE)
+                .collect();
+            if !pieces.is_empty() {
+                all.push(whole.to_owned());
+                all.extend(pieces);
+            }
+        };
+        part(
+            url.path(),
+            url.path().split('/').map(str::to_owned).collect(),
+        );
+        if let Some(query) = url.query() {
+            let mut pieces = Vec::new();
+            for pair in query.split('&') {
+                pieces.push(pair.to_owned());
+                if let Some((_, value)) = pair.split_once('=') {
+                    pieces.push(value.to_owned());
+                }
+            }
+            pieces.extend(url.query_pairs().map(|(_, value)| value.into_owned()));
+            part(query, pieces);
+        }
+        part(url.username(), vec![url.username().to_owned()]);
+        if let Some(password) = url.password() {
+            part(password, vec![password.to_owned()]);
+        }
+        all.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        all.dedup();
+        Self(all)
+    }
+
+    /// `text` with every secret replaced.
+    fn scrub(&self, text: &str) -> String {
+        let mut text = text.to_owned();
+        for secret in &self.0 {
+            if text.contains(secret.as_str()) {
+                text = text.replace(secret.as_str(), "[redacted]");
+            }
+        }
+        text
+    }
+
+    /// `body`, trimmed and scrubbed, cut to 200 characters.
+    fn excerpt(&self, body: &str) -> String {
+        self.scrub(body.trim()).chars().take(200).collect()
+    }
+}
+
+/// `raw` with its `%XX` escapes decoded (lossy UTF-8); a malformed escape is
+/// kept as written.
+fn percent_decoded(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |b: u8| (b as char).to_digit(16);
+        match (
+            bytes[i],
+            bytes.get(i + 1).copied().and_then(hex),
+            bytes.get(i + 2).copied().and_then(hex),
+        ) {
+            (b'%', Some(hi), Some(lo)) => {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+            }
+            (b, _, _) => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// A failed request as an error: `context`, then the HTTP client's error —
-/// with, for a redirect not followed, why (its source).
+/// with, for a redirect not followed, why (its source). The client's error
+/// names the request's URL; that is dropped (see [`url_origin`]).
 fn http_error(context: &str, e: reqwest::Error) -> McpError {
+    let e = e.without_url();
     let mut text = e.to_string();
     if e.is_redirect() {
         let mut source = std::error::Error::source(&e);
@@ -1026,6 +1144,11 @@ fn http_error(context: &str, e: reqwest::Error) -> McpError {
 pub struct HttpTransport {
     client: reqwest::Client,
     base_url: String,
+    /// The server as errors name it: scheme, host and port ([`url_origin`]).
+    origin: String,
+    /// What to scrub from a server's body, or a JSON-RPC error's message,
+    /// before handing it on.
+    secrets: UrlSecrets,
     /// The caller's headers, on every request. Values are marked sensitive.
     headers: reqwest::header::HeaderMap,
     /// Session assigned by the server on `initialize`, replayed on subsequent
@@ -1056,10 +1179,31 @@ impl HttpTransport {
         Ok(Self {
             client,
             base_url: url.trim_end_matches('/').to_string(),
+            origin: named_origin(url),
+            secrets: UrlSecrets::of(url.trim_end_matches('/')),
             headers: reqwest::header::HeaderMap::new(),
             session_id: Mutex::new(None),
             notifications: None,
         })
+    }
+
+    /// Per the spec, a 404 on a request carrying a session means the server
+    /// dropped it. Keeping the dead id would make every later request fail
+    /// identically, with an error that reads like a bad URL — so it is cleared
+    /// and named. `None` when `status` is not a 404 or no session was held.
+    async fn expired_session(&self, status: reqwest::StatusCode, method: &str) -> Option<McpError> {
+        if status != reqwest::StatusCode::NOT_FOUND {
+            return None;
+        }
+        // The id is not logged: the server treats it as a bearer of the session.
+        self.session_id.lock().await.take()?;
+        warn!("MCP session was rejected (HTTP 404 on '{method}'); reconnect to start a new one");
+        Some(McpError::http(
+            404,
+            format!(
+                "MCP session expired (HTTP 404 on '{method}'); reconnect to start a new session"
+            ),
+        ))
     }
 
     fn client_for(redirects: Redirects) -> Result<reqwest::Client, McpError> {
@@ -1312,6 +1456,7 @@ impl HttpTransport {
         method: &str,
         status: reqwest::StatusCode,
         notifications: Option<&ServerNotifications>,
+        secrets: &UrlSecrets,
     ) -> Result<JsonRpcResponse, McpError> {
         // Both `application/json` and `text/event-stream` mandate UTF-8, and
         // reading the body as a byte stream gives up the charset transcoding
@@ -1359,6 +1504,7 @@ impl HttpTransport {
 
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| {
+                let e = e.without_url();
                 McpError::Transport(format!(
                     "Response read error on '{method}' after {} byte(s){}: {e}",
                     buf.len(),
@@ -1454,7 +1600,7 @@ impl HttpTransport {
         Err(McpError::Transport(format!(
             "HTTP {status}: no JSON-RPC response for '{method}' (id {request_id}) in the body{}: {}",
             Self::describe_skipped(&skipped),
-            body.chars().take(200).collect::<String>()
+            secrets.excerpt(&body)
         )))
     }
 }
@@ -1480,25 +1626,12 @@ impl McpTransport for HttpTransport {
         let resp = builder
             .send()
             .await
-            .map_err(|e| http_error("HTTP error", e))?;
+            .map_err(|e| http_error(&format!("HTTP error reaching {}", self.origin), e))?;
 
         let status = resp.status();
         if !status.is_success() {
-            // Per the spec, 404 on a request carrying a session means the
-            // server dropped it. Keeping the dead id would make every later
-            // call fail identically, with an error that reads like a bad URL.
-            if status == reqwest::StatusCode::NOT_FOUND {
-                if let Some(dead) = self.session_id.lock().await.take() {
-                    warn!(
-                        "MCP session {dead} was rejected (HTTP 404); reconnect to start a new one"
-                    );
-                    return Err(McpError::http(
-                        404,
-                        format!(
-                            "MCP session expired (HTTP 404 on '{method}'); reconnect to start a new session"
-                        ),
-                    ));
-                }
+            if let Some(expired) = self.expired_session(status, &method).await {
+                return Err(expired);
             }
             // Carry the body: servers explain themselves in it, and dropping it
             // leaves the caller with a bare status to guess from.
@@ -1511,7 +1644,7 @@ impl McpTransport for HttpTransport {
                 } else {
                     format!(
                         "HTTP {status} from server on '{method}': {}",
-                        detail.chars().take(200).collect::<String>()
+                        self.secrets.excerpt(detail)
                     )
                 },
             ));
@@ -1535,8 +1668,16 @@ impl McpTransport for HttpTransport {
             &method,
             status,
             self.notifications.as_ref(),
+            &self.secrets,
         )
         .await
+        .map(|mut response| {
+            // A server's JSON-RPC error may echo its request target too.
+            if let Some(error) = response.error.as_mut() {
+                error.message = self.secrets.scrub(&error.message);
+            }
+            response
+        })
     }
 
     async fn notify(&self, notification: JsonRpcNotification) -> Result<(), McpError> {
@@ -1550,13 +1691,17 @@ impl McpTransport for HttpTransport {
         }
         // A notification is acknowledged with 202 and no body; nothing waits
         // for anything after the status.
-        let resp = builder
-            .send()
-            .await
-            .map_err(|e| http_error(&format!("HTTP error on '{method}'"), e))?;
+        let resp = builder.send().await.map_err(|e| {
+            http_error(
+                &format!("HTTP error on '{method}' reaching {}", self.origin),
+                e,
+            )
+        })?;
         let status = resp.status();
         if status.is_success() {
             Ok(())
+        } else if let Some(expired) = self.expired_session(status, &method).await {
+            Err(expired)
         } else {
             let body = resp.text().await.unwrap_or_default();
             let detail = body.trim();
@@ -1567,7 +1712,7 @@ impl McpTransport for HttpTransport {
                 } else {
                     format!(
                         "HTTP {status} from server on notification '{method}': {}",
-                        detail.chars().take(200).collect::<String>()
+                        self.secrets.excerpt(detail)
                     )
                 },
             ))
@@ -1600,9 +1745,9 @@ impl McpTransport for HttpTransport {
                     resp.status()
                 ),
                 Err(e) => warn!(
-                    "MCP session {session} teardown did not reach {}: {}; \
+                    "MCP session teardown did not reach {}: {}; \
                      the session may leak server-side",
-                    self.base_url,
+                    named_origin(&self.base_url),
                     http_error("DELETE", e)
                 ),
             }
@@ -1614,6 +1759,28 @@ impl McpTransport for HttpTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn url_secrets_hide_keys_and_leave_a_plain_path_readable() {
+        let plain = UrlSecrets::of("https://host/mcp?v=1");
+        assert_eq!(
+            plain.excerpt("Cannot POST /mcp?v=1"),
+            "Cannot POST /mcp?v=1"
+        );
+
+        let keyed = UrlSecrets::of(
+            "https://u:pa%24%24word-long@host/zap/k3y-0123456789/mcp?api_key=s3cr3t%2Bvalue&v=1",
+        );
+        let text = keyed.excerpt(
+            "POST /zap/k3y-0123456789/mcp?api_key=s3cr3t%2Bvalue&v=1 / k3y-0123456789 / \
+             s3cr3t+value / pa$$word-long / v=1",
+        );
+        assert_eq!(
+            text,
+            "POST [redacted]?[redacted] / [redacted] / [redacted] / [redacted] / v=1"
+        );
+        assert_eq!(percent_decoded("a%2Fb%zz%"), "a/b%zz%");
+    }
 
     /// A transport dropped while its process is locked (an exit-watch poll
     /// on another thread) gives up the group kill after its bounded retries:

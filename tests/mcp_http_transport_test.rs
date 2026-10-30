@@ -1089,3 +1089,229 @@ async fn redirects_any_follows_another_origin_headers_included() {
         .await
         .unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// The configured URL stays out of error text (it may carry a key)
+// ---------------------------------------------------------------------------
+
+/// A URL whose path, query and userinfo all carry a secret, for a server
+/// that cannot be reached: the errors of a call, a notification and the
+/// connect name the server by scheme, host and port, and carry no more of it.
+#[tokio::test]
+async fn an_unreachable_server_is_named_without_its_url() {
+    // Bind and drop a listener: nothing listens on that port now.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let url = format!("http://user:pw-SECRET@127.0.0.1:{port}/mcp/path-SECRET?api_key=q-SECRET");
+    let transport = HttpTransport::new(&url).unwrap();
+    let call = transport
+        .send(JsonRpcRequest::new("tools/list", None))
+        .await
+        .unwrap_err()
+        .to_string();
+    let notify = transport
+        .notify(yoagent::mcp::types::JsonRpcNotification::new(
+            "notifications/initialized",
+            None,
+        ))
+        .await
+        .unwrap_err()
+        .to_string();
+    let Err(connect) = McpClient::connect_http(&url).await else {
+        panic!("nothing listens there");
+    };
+    for err in [call, notify, connect.to_string()] {
+        assert!(!err.contains("SECRET"), "the URL leaked: {err}");
+        assert!(err.starts_with("Transport error: HTTP error"), "{err}");
+        assert!(
+            err.contains(&format!("reaching http://127.0.0.1:{port}")),
+            "{err}"
+        );
+    }
+}
+
+/// A refused redirect names both ends by origin only: one to another origin
+/// whose path and query carry a key (`→ other/mcp/<key>?api_key=…`), from a
+/// URL with a key in its query, puts neither key in the error.
+#[tokio::test]
+async fn a_refused_redirect_names_origins_only() {
+    let server = MockServer::start().await;
+    let elsewhere = MockServer::start().await;
+    mount_redirect(
+        &server,
+        "/mcp",
+        format!("{}/mcp/to-SECRET?api_key=q-SECRET", elsewhere.uri()),
+    )
+    .await;
+    let url = format!("{}/mcp?api_key=q-SECRET", server.uri());
+    for redirects in [
+        yoagent::mcp::Redirects::SameOrigin,
+        yoagent::mcp::Redirects::None,
+    ] {
+        let err = HttpTransport::new(&url)
+            .unwrap()
+            .with_redirects(redirects)
+            .unwrap()
+            .send(JsonRpcRequest::new("tools/list", None))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains("SECRET"), "{redirects:?} leaked: {err}");
+        assert!(err.contains(&elsewhere.uri()), "{redirects:?}: {err}");
+    }
+}
+
+/// A 404 on a notification carrying a session clears it too, as on a call.
+#[tokio::test]
+async fn a_404_on_a_notification_clears_the_session() {
+    let server = MockServer::start().await;
+    let first = JsonRpcRequest::new("initialize", None);
+    Mock::given(method("POST"))
+        .and(HeaderAbsent("mcp-session-id"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("Mcp-Session-Id", "sess-dead")
+                .set_body_raw(
+                    format!(r#"{{"jsonrpc":"2.0","id":{},"result":{{}}}}"#, first.id),
+                    "application/json",
+                ),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(header("mcp-session-id", "sess-dead"))
+        .respond_with(ResponseTemplate::new(404))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let transport = HttpTransport::new(&server.uri()).unwrap();
+    transport.send(first).await.expect("initialize");
+    let err = transport
+        .notify(yoagent::mcp::types::JsonRpcNotification::new(
+            "notifications/initialized",
+            None,
+        ))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("session expired"), "{err}");
+    assert_eq!(err.http_status(), Some(404), "{err:?}");
+
+    let _ = transport
+        .send(JsonRpcRequest::new("initialize", None))
+        .await;
+    let last = server.received_requests().await.unwrap().pop().unwrap();
+    assert!(
+        !last.headers.contains_key("mcp-session-id"),
+        "the expired session must not be replayed"
+    );
+}
+
+/// A server's body quoted into an error has the URL's key-bearing parts
+/// replaced first: a call's 404, a notification's 401 and a 2xx body with no
+/// JSON-RPC in it, each echoing the path, query and password.
+#[tokio::test]
+async fn a_server_body_echoing_the_url_is_scrubbed() {
+    let server = MockServer::start().await;
+    let echo = "Cannot POST /mcp/zap-SECRET-0123 (api_key=q-SECRET-4567, user pw%2DSECRET%21)";
+    Mock::given(method("POST"))
+        .and(body_string_contains("tools/list"))
+        .respond_with(ResponseTemplate::new(404).set_body_string(echo))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("notifications/"))
+        .respond_with(ResponseTemplate::new(401).set_body_string(echo))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(body_string_contains("ping"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(echo, "application/json"))
+        .mount(&server)
+        .await;
+    let base = server
+        .uri()
+        .replace("http://", "http://user:pw%2DSECRET%21@");
+    let transport =
+        HttpTransport::new(&format!("{base}/mcp/zap-SECRET-0123?api_key=q-SECRET-4567")).unwrap();
+    let call = transport
+        .send(JsonRpcRequest::new("tools/list", None))
+        .await
+        .unwrap_err();
+    assert_eq!(call.http_status(), Some(404), "{call:?}");
+    let notify = transport
+        .notify(yoagent::mcp::types::JsonRpcNotification::new(
+            "notifications/initialized",
+            None,
+        ))
+        .await
+        .unwrap_err();
+    let ping = transport
+        .send(JsonRpcRequest::new("ping", None))
+        .await
+        .unwrap_err();
+    for err in [call.to_string(), notify.to_string(), ping.to_string()] {
+        assert!(!err.contains("SECRET"), "the body leaked the URL: {err}");
+        assert!(err.contains("Cannot POST [redacted]"), "{err}");
+    }
+}
+
+/// A body that breaks off mid-read (a declared length never sent) fails
+/// without the URL in the error. (reqwest 0.13's body errors carry no URL;
+/// the transport strips one anyway, and this guards a reqwest that adds it.)
+#[tokio::test]
+async fn a_body_read_error_is_named_without_its_url() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0u8; 4096];
+        let _ = socket.read(&mut request).await;
+        let _ = socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 1000\r\n\r\n{\"jsonrpc\"",
+            )
+            .await;
+        // Dropped: the body ends 990 bytes short.
+    });
+    let err = HttpTransport::new(&format!(
+        "http://127.0.0.1:{port}/mcp/path-SECRET?api_key=q-SECRET"
+    ))
+    .unwrap()
+    .send(JsonRpcRequest::new("tools/list", None))
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("Response read error"), "{err}");
+    assert!(!err.contains("SECRET"), "the URL leaked: {err}");
+}
+
+/// A server's JSON-RPC error echoing its request target is scrubbed too, and
+/// with a trailing `/` (trimmed from the request) the whole path is still
+/// replaced.
+#[tokio::test]
+async fn a_json_rpc_error_echoing_the_url_is_scrubbed() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(|request: &Request| {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": body["id"],
+                "error": {"code": -32601, "message": "no such method at /mcp/k-SECRET-89"},
+            }))
+        })
+        .mount(&server)
+        .await;
+    let transport = HttpTransport::new(&format!("{}/mcp/k-SECRET-89/", server.uri())).unwrap();
+    let response = transport
+        .send(JsonRpcRequest::new("tools/list", None))
+        .await
+        .unwrap();
+    let message = response.error.unwrap().message;
+    assert_eq!(message, "no such method at [redacted]");
+}
