@@ -1096,7 +1096,7 @@ async fn redirects_any_follows_another_origin_headers_included() {
 
 /// A URL whose path, query and userinfo all carry a secret, for a server
 /// that cannot be reached: the errors of a call, a notification and the
-/// connect name only scheme, host and port.
+/// connect name the server by scheme, host and port, and carry no more of it.
 #[tokio::test]
 async fn an_unreachable_server_is_named_without_its_url() {
     // Bind and drop a listener: nothing listens on that port now.
@@ -1126,12 +1126,16 @@ async fn an_unreachable_server_is_named_without_its_url() {
     for err in [call, notify, connect.to_string()] {
         assert!(!err.contains("SECRET"), "the URL leaked: {err}");
         assert!(err.starts_with("Transport error: HTTP error"), "{err}");
+        assert!(
+            err.contains(&format!("reaching http://127.0.0.1:{port}")),
+            "{err}"
+        );
     }
 }
 
-/// A refused redirect names where it pointed by origin only: a server that
-/// keeps the query on its redirect (`/mcp?key=…` → `/mcp/?key=…`) does not
-/// put the key in the error.
+/// A refused redirect names both ends by origin only: one to another origin
+/// whose path and query carry a key (`→ other/mcp/<key>?api_key=…`), from a
+/// URL with a key in its query, puts neither key in the error.
 #[tokio::test]
 async fn a_refused_redirect_names_origins_only() {
     let server = MockServer::start().await;
@@ -1207,8 +1211,8 @@ async fn a_404_on_a_notification_clears_the_session() {
 }
 
 /// A server's body quoted into an error has the URL's key-bearing parts
-/// replaced first: a 404 page echoing the path, a 401 echoing the query, a
-/// 2xx body with no JSON-RPC in it, and a notification's rejection.
+/// replaced first: a call's 404, a notification's 401 and a 2xx body with no
+/// JSON-RPC in it, each echoing the path, query and password.
 #[tokio::test]
 async fn a_server_body_echoing_the_url_is_scrubbed() {
     let server = MockServer::start().await;
@@ -1287,7 +1291,8 @@ async fn a_body_read_error_is_named_without_its_url() {
 }
 
 /// A server's JSON-RPC error echoing its request target is scrubbed too, and
-/// a key just before a trailing `/` (trimmed from the request) is caught.
+/// with a trailing `/` (trimmed from the request) the whole path is still
+/// replaced.
 #[tokio::test]
 async fn a_json_rpc_error_echoing_the_url_is_scrubbed() {
     let server = MockServer::start().await;

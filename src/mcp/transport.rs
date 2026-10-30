@@ -917,8 +917,8 @@ pub enum Redirects {
     /// server moving `/mcp` to `/mcp/` with a 307 or 308 works (a 301, 302
     /// or 303 makes the HTTP client resend the POST as a GET, without its
     /// body, which no MCP endpoint answers), while one pointing at another
-    /// host, or from `https` to `http`, is an error naming the origin it pointed to,
-    /// so the transport's headers never leave for it. The default.
+    /// host, or from `https` to `http`, is an error naming the origin it
+    /// pointed to, so the transport's headers never leave for it. The default.
     #[default]
     SameOrigin,
     /// Any, up to 10 (what earlier versions did). The HTTP client drops
@@ -978,10 +978,10 @@ impl std::fmt::Display for RedirectRefused {
 impl std::error::Error for RedirectRefused {}
 
 /// Where a URL points, and nothing that may be a credential: its scheme,
-/// host and port (a key in a host name, `https://<key>.example.com`, would
-/// still show; nothing else does). The path (some services put a key in it), query, fragment
+/// host and port. The path (some services put a key in it), query, fragment
 /// and userinfo are left out, so error text and logs — which reach the model
-/// as a failed tool result — never carry a key from the configured URL.
+/// as a failed tool result — carry no key from the configured URL (one in a
+/// host name, `https://<key>.example.com`, would still show).
 fn url_origin(url: &reqwest::Url) -> String {
     url.origin().ascii_serialization()
 }
@@ -999,9 +999,9 @@ fn named_origin(url: &str) -> String {
 /// value, the user name, the password; raw and percent-decoded), and the
 /// whole path or query around one — so a server's body quoted into an error
 /// (`Cannot POST /mcp/<key>`, an echoed `api_key=…`) and a JSON-RPC error's
-/// `message` (not its `data`) have them replaced first. Built from the URL as sent (trailing
-/// `/` trimmed). Longest first, so a whole part is
-/// replaced before its pieces.
+/// `message` (not its `data`) have them replaced first. Built from the URL as
+/// sent (trailing `/` trimmed). Longest first, so a whole part is replaced
+/// before its pieces.
 #[derive(Default)]
 struct UrlSecrets(Vec<String>);
 
@@ -1144,7 +1144,10 @@ fn http_error(context: &str, e: reqwest::Error) -> McpError {
 pub struct HttpTransport {
     client: reqwest::Client,
     base_url: String,
-    /// What to scrub from a server's body before quoting it in an error.
+    /// The server as errors name it: scheme, host and port ([`url_origin`]).
+    origin: String,
+    /// What to scrub from a server's body, or a JSON-RPC error's message,
+    /// before handing it on.
     secrets: UrlSecrets,
     /// The caller's headers, on every request. Values are marked sensitive.
     headers: reqwest::header::HeaderMap,
@@ -1176,6 +1179,7 @@ impl HttpTransport {
         Ok(Self {
             client,
             base_url: url.trim_end_matches('/').to_string(),
+            origin: named_origin(url),
             secrets: UrlSecrets::of(url.trim_end_matches('/')),
             headers: reqwest::header::HeaderMap::new(),
             session_id: Mutex::new(None),
@@ -1622,7 +1626,7 @@ impl McpTransport for HttpTransport {
         let resp = builder
             .send()
             .await
-            .map_err(|e| http_error("HTTP error", e))?;
+            .map_err(|e| http_error(&format!("HTTP error reaching {}", self.origin), e))?;
 
         let status = resp.status();
         if !status.is_success() {
@@ -1687,10 +1691,12 @@ impl McpTransport for HttpTransport {
         }
         // A notification is acknowledged with 202 and no body; nothing waits
         // for anything after the status.
-        let resp = builder
-            .send()
-            .await
-            .map_err(|e| http_error(&format!("HTTP error on '{method}'"), e))?;
+        let resp = builder.send().await.map_err(|e| {
+            http_error(
+                &format!("HTTP error on '{method}' reaching {}", self.origin),
+                e,
+            )
+        })?;
         let status = resp.status();
         if status.is_success() {
             Ok(())
