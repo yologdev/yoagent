@@ -971,7 +971,7 @@ fn the_audit_logic_runs_offline_against_the_fixture() {
     });
     assert_eq!(stale_sale.len(), 1, "{stale_sale:?}");
     assert!(
-        stale_sale[0].contains("input is 0.68 in the crate, 1.36 in models.dev"),
+        stale_sale[0].contains("input is 0.68 in the crate, 0.7 in models.dev"),
         "{stale_sale:?}"
     );
     // Without the recorded gap, models.dev's `reasoning` rate is unknown

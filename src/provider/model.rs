@@ -1786,9 +1786,9 @@ impl ModelConfig {
     /// Reasoning (`reasoning_effort` `high` or `none`) is not sent by this
     /// preset: the model runs at its own default.
     ///
-    /// Priced at the **regular** rate, $1.36 / $4.18, cached $0.14 (read
-    /// 2026-10-18) — Mistral's launch sale bills half until about 2026-10-20.
-    /// See [`CostConfig`].
+    /// Priced at $0.70 / $2.10, cached $0.07 (Mistral's model page,
+    /// 2026-10-30; it listed $1.36 / $4.18 after the launch sale ended). See
+    /// [`CostConfig`].
     pub fn mistral_large_4() -> Self {
         Self {
             context_window: 1_000_000,
