@@ -415,6 +415,7 @@ impl SseBuffer {
     }
 }
 
+#[cfg(test)]
 impl From<&[u8]> for SseBuffer {
     fn from(bytes: &[u8]) -> Self {
         Self {
@@ -1226,6 +1227,64 @@ mod tests {
         }
         assert_eq!(got, ["你", "好"]);
         assert!(buf.bytes.is_empty());
+    }
+
+    #[test]
+    fn test_sse_buffer_finds_every_event_a_push_completes() {
+        // A search that found nothing leaves `searched` at the end; the next
+        // push may complete several events, and each must be found — the
+        // second one starts before where the first search stopped.
+        let mut buf = SseBuffer::default();
+        buf.push(b"data: aaaaaaaa");
+        assert_eq!(buf.next_data(), None);
+        buf.push(b"\n\ndata: b\n\n");
+        assert_eq!(buf.next_data().as_deref(), Some("aaaaaaaa"));
+        assert_eq!(buf.next_data().as_deref(), Some("b"));
+        assert!(buf.bytes.is_empty());
+    }
+
+    #[test]
+    fn test_sse_buffer_splits_the_same_however_the_stream_is_chunked() {
+        // Differential: random streams over separator bytes (and a
+        // multi-byte character), cut into random chunks — empty ones
+        // included — must split exactly as the whole stream does at once.
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move |n: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % n
+        };
+        let alphabet: [&[u8]; 6] = [b"\r", b"\n", b"\n", b"a", b"data: ", "好".as_bytes()];
+        let drain = |buf: &mut SseBuffer, out: &mut Vec<String>| {
+            while let Some(data) = buf.next_data() {
+                out.push(data);
+            }
+        };
+        for case in 0..5_000 {
+            let mut stream = Vec::new();
+            for _ in 0..next(24) {
+                stream.extend_from_slice(alphabet[next(6) as usize]);
+            }
+            let mut whole = Vec::new();
+            drain(&mut SseBuffer::from(&stream[..]), &mut whole);
+
+            let mut chunked = Vec::new();
+            let mut buf = SseBuffer::default();
+            let mut at = 0;
+            while at < stream.len() {
+                let end = (at + next(8) as usize).min(stream.len());
+                buf.push(&stream[at..end]);
+                drain(&mut buf, &mut chunked);
+                at = end;
+            }
+            assert_eq!(
+                chunked,
+                whole,
+                "case {case}: {:?}",
+                String::from_utf8_lossy(&stream)
+            );
+        }
     }
 
     #[test]
