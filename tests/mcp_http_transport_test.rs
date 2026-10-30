@@ -1285,3 +1285,28 @@ async fn a_body_read_error_is_named_without_its_url() {
     assert!(err.contains("Response read error"), "{err}");
     assert!(!err.contains("SECRET"), "the URL leaked: {err}");
 }
+
+/// A server's JSON-RPC error echoing its request target is scrubbed too, and
+/// a key just before a trailing `/` (trimmed from the request) is caught.
+#[tokio::test]
+async fn a_json_rpc_error_echoing_the_url_is_scrubbed() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(|request: &Request| {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": body["id"],
+                "error": {"code": -32601, "message": "no such method at /mcp/k-SECRET-89"},
+            }))
+        })
+        .mount(&server)
+        .await;
+    let transport = HttpTransport::new(&format!("{}/mcp/k-SECRET-89/", server.uri())).unwrap();
+    let response = transport
+        .send(JsonRpcRequest::new("tools/list", None))
+        .await
+        .unwrap();
+    let message = response.error.unwrap().message;
+    assert_eq!(message, "no such method at [redacted]");
+}

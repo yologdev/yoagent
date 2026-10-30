@@ -995,10 +995,12 @@ fn named_origin(url: &str) -> String {
 }
 
 /// The parts of a configured URL that may be a key — its path, query and
-/// userinfo, whole and piece by piece (a segment, a query value, a user name
-/// or password of 8 or more characters, raw and percent-decoded) — so a
-/// server's body quoted into an error (`Cannot POST /mcp/<key>`, an echoed
-/// `api_key=…`) has them replaced first. Longest first, so a whole part is
+/// userinfo: every piece of 8 or more characters (a segment, a query pair or
+/// value, the user name, the password; raw and percent-decoded), and the
+/// whole part around one — so a server's body quoted into an error
+/// (`Cannot POST /mcp/<key>`, an echoed `api_key=…`) and a JSON-RPC error's
+/// message have them replaced first. Built from the URL as sent (trailing
+/// `/` trimmed). Longest first, so a whole part is
 /// replaced before its pieces.
 #[derive(Default)]
 struct UrlSecrets(Vec<String>);
@@ -1010,14 +1012,26 @@ impl UrlSecrets {
         let Ok(url) = reqwest::Url::parse(url) else {
             return Self::default();
         };
-        let mut wholes = Vec::new();
-        let mut pieces = Vec::new();
-        if url.path() != "/" {
-            wholes.push(url.path().to_owned());
-            pieces.extend(url.path().split('/').map(str::to_owned));
-        }
+        let mut all = Vec::new();
+        // A part's pieces worth hiding, raw and decoded; the whole part goes
+        // with them only when it has one, so a key-free `/mcp` stays readable.
+        let mut part = |whole: &str, pieces: Vec<String>| {
+            let pieces: Vec<String> = pieces
+                .iter()
+                .flat_map(|p| [p.clone(), percent_decoded(p)])
+                .filter(|p| p.chars().count() >= Self::MIN_PIECE)
+                .collect();
+            if !pieces.is_empty() {
+                all.push(whole.to_owned());
+                all.extend(pieces);
+            }
+        };
+        part(
+            url.path(),
+            url.path().split('/').map(str::to_owned).collect(),
+        );
         if let Some(query) = url.query() {
-            wholes.push(query.to_owned());
+            let mut pieces = Vec::new();
             for pair in query.split('&') {
                 pieces.push(pair.to_owned());
                 if let Some((_, value)) = pair.split_once('=') {
@@ -1025,30 +1039,31 @@ impl UrlSecrets {
                 }
             }
             pieces.extend(url.query_pairs().map(|(_, value)| value.into_owned()));
+            part(query, pieces);
         }
-        pieces.push(url.username().to_owned());
-        pieces.extend(url.password().map(str::to_owned));
-        let pieces: Vec<String> = pieces
-            .iter()
-            .flat_map(|p| [p.clone(), percent_decoded(p)])
-            .filter(|p| p.chars().count() >= Self::MIN_PIECE)
-            .collect();
-        let mut all: Vec<String> = wholes.into_iter().filter(|w| !w.is_empty()).collect();
-        all.extend(pieces);
+        part(url.username(), vec![url.username().to_owned()]);
+        if let Some(password) = url.password() {
+            part(password, vec![password.to_owned()]);
+        }
         all.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
         all.dedup();
         Self(all)
     }
 
-    /// `body`, trimmed, with every secret replaced, cut to 200 characters.
-    fn excerpt(&self, body: &str) -> String {
-        let mut text = body.trim().to_owned();
+    /// `text` with every secret replaced.
+    fn scrub(&self, text: &str) -> String {
+        let mut text = text.to_owned();
         for secret in &self.0 {
             if text.contains(secret.as_str()) {
                 text = text.replace(secret.as_str(), "[redacted]");
             }
         }
-        text.chars().take(200).collect()
+        text
+    }
+
+    /// `body`, trimmed and scrubbed, cut to 200 characters.
+    fn excerpt(&self, body: &str) -> String {
+        self.scrub(body.trim()).chars().take(200).collect()
     }
 }
 
@@ -1161,7 +1176,7 @@ impl HttpTransport {
         Ok(Self {
             client,
             base_url: url.trim_end_matches('/').to_string(),
-            secrets: UrlSecrets::of(url),
+            secrets: UrlSecrets::of(url.trim_end_matches('/')),
             headers: reqwest::header::HeaderMap::new(),
             session_id: Mutex::new(None),
             notifications: None,
@@ -1652,6 +1667,13 @@ impl McpTransport for HttpTransport {
             &self.secrets,
         )
         .await
+        .map(|mut response| {
+            // A server's JSON-RPC error may echo its request target too.
+            if let Some(error) = response.error.as_mut() {
+                error.message = self.secrets.scrub(&error.message);
+            }
+            response
+        })
     }
 
     async fn notify(&self, notification: JsonRpcNotification) -> Result<(), McpError> {
@@ -1731,6 +1753,28 @@ impl McpTransport for HttpTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn url_secrets_hide_keys_and_leave_a_plain_path_readable() {
+        let plain = UrlSecrets::of("https://host/mcp?v=1");
+        assert_eq!(
+            plain.excerpt("Cannot POST /mcp?v=1"),
+            "Cannot POST /mcp?v=1"
+        );
+
+        let keyed = UrlSecrets::of(
+            "https://u:pa%24%24word-long@host/zap/k3y-0123456789/mcp?api_key=s3cr3t%2Bvalue&v=1",
+        );
+        let text = keyed.excerpt(
+            "POST /zap/k3y-0123456789/mcp?api_key=s3cr3t%2Bvalue&v=1 / k3y-0123456789 / \
+             s3cr3t+value / pa$$word-long / v=1",
+        );
+        assert_eq!(
+            text,
+            "POST [redacted]?[redacted] / [redacted] / [redacted] / [redacted] / v=1"
+        );
+        assert_eq!(percent_decoded("a%2Fb%zz%"), "a/b%zz%");
+    }
 
     /// A transport dropped while its process is locked (an exit-watch poll
     /// on another thread) gives up the group kill after its bounded retries:
