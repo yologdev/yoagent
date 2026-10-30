@@ -26,7 +26,7 @@ jobs:
       workers: ${{ steps.paths.outputs.workers }}
       rutis: ${{ steps.paths.outputs.rutis }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - id: paths
@@ -57,7 +57,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -129,7 +129,7 @@ jobs:
           - name: no-default
             flags: "--no-default-features"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -150,7 +150,7 @@ jobs:
       # Bans calls that compile for wasm32 but panic there (std clocks, Tokio).
       CLIPPY_CONF_DIR: .github/clippy-wasm32
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -187,7 +187,7 @@ jobs:
       # Absolute: clippy reads it from the nested package's directory.
       CLIPPY_CONF_DIR: ${{ github.workspace }}/.github/clippy-wasm32
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -231,7 +231,7 @@ jobs:
     name: Check (windows)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Check
@@ -241,7 +241,7 @@ jobs:
     name: MSRV (1.86)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.86
       - uses: Swatinem/rust-cache@v2
       # resolver = "3" skips dependency versions whose declared rust-version is
@@ -264,7 +264,7 @@ jobs:
     env:
       MANIFEST: integrations/yoagent-rutis/Cargo.toml
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -301,7 +301,7 @@ jobs:
     env:
       MANIFEST: integrations/yoagent-rutis/Cargo.toml
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.88
       - uses: Swatinem/rust-cache@v2
         with:
@@ -328,14 +328,14 @@ jobs:
       PLUGINS: integrations/yoagent-rutis/plugins
       YOAGENT_RUTIS_REQUIRE_RUNTIMES: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: integrations/yoagent-rutis
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           # npm's download cache (~/.npm), keyed on the three lockfiles: the
@@ -345,7 +345,7 @@ jobs:
             integrations/yoagent-rutis/plugins/package-lock.json
             integrations/yoagent-rutis/plugins/dsh/package-lock.json
             integrations/yoagent-rutis/plugins/pi/package-lock.json
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       # The Bun runtime's tests (languages_test `a_bun_…`): rutis-bun needs 1.4+.
@@ -354,7 +354,7 @@ jobs:
           bun-version: "1.4"
       # The Go plugin's test (tests/go_test.rs) builds plugins/go: the rutis
       # Go SDK's floor.
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.24"
           cache-dependency-path: integrations/yoagent-rutis/plugins/go/go.sum
@@ -397,7 +397,7 @@ jobs:
     name: GASP conformance
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Emit agent repo via the gasp bridge
@@ -406,7 +406,7 @@ jobs:
           git config --global user.name "yoagent-ci"
           cargo run --example gasp_emit --features gasp -- /tmp/emitted-repo
       - name: Checkout gasp (conformance checker)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: yologdev/gasp
           # Pinned so a checker change cannot break yoagent CI silently — bump
