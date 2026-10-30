@@ -4,6 +4,10 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+- **Compaction keeps the task prompt and the latest ask** (#150). When the `keep_first` head and the `keep_recent` tail alone exceed the compaction target (a small budget, bulky tool results), level 3 kept only the newest messages that fit the target — dropping the task prompt first, and leaving only the `[Context compacted]` marker when the newest turn alone exceeded the target (#150's `22 msgs -> 1 msg`). It now keeps, in order, the head, the latest user message a person wrote, the newest turn and as much of the rest of the tail as fits — overshooting the target, up to the budget, rather than cutting into them; past the budget the head goes first, then the ask. A cut past the latest user message on the normal path keeps it too, right after the marker. In the offline sweep (`docs/evals/compaction-defaults.md`) task-prompt loss goes from 100% to 0% at a 26K budget, with no marker-only compactions; tool-heavy sessions compact ~14% more often there (they now keep more), and nothing changes at the default 96K.
+
 ## 0.26.1 (2026-10-30)
 
 Patch release: security fixes, no API change. yoagent-rutis (0.10.0) and yoagent-workers (0.3.0) are unchanged.

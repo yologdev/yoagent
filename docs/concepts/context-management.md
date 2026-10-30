@@ -158,7 +158,9 @@ Keeps the last `keep_recent` messages in full detail. Older assistant messages a
 
 ### Level 3: Drop Middle Messages
 
-Drops the smallest span of middle messages that reaches the target, keeping at least `keep_first` from the start and `keep_recent` from the end. A constant marker message stands in for what was removed; the count goes to the debug log rather than into the marker, so the text does not change from pass to pass.
+Drops the smallest span of middle messages that reaches the target, keeping at least `keep_first` from the start and `keep_recent` from the end. A constant marker message stands in for what was removed; the count goes to the debug log rather than into the marker, so the text does not change from pass to pass. The latest user message a person wrote stays even when the span passes it, right after the marker.
+
+When the first and recent messages alone exceed the target (a small budget, bulky tool results), level 3 keeps, in order: the `keep_first` head (the task prompt), the latest user message, the newest turn (the call the model is waiting on and its results), then as much of the rest as fits the target. The target is a headroom aim; only the budget is a hard limit, so when those three alone exceed the target they are kept anyway, up to the budget. Past the budget the head goes first, then the ask.
 
 ## Retrievable tool output
 
