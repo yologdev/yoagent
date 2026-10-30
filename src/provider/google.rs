@@ -140,7 +140,7 @@ pub(crate) async fn parse_stream(
 
     // Parse SSE stream
     let mut stream = response.bytes_stream();
-    let mut buffer = Vec::new();
+    let mut buffer = SseBuffer::default();
 
     loop {
         tokio::select! {
@@ -173,10 +173,10 @@ pub(crate) async fn parse_stream(
                     Some(Ok(bytes)) => {
                         // A transport chunk may end inside a UTF-8 code point.
                         // Decode only once the complete SSE event is buffered.
-                        buffer.extend_from_slice(&bytes);
+                        buffer.push(&bytes);
 
                         // Process complete SSE events (handle both \n\n and \r\n\r\n)
-                        while let Some(data) = next_sse_data(&mut buffer) {
+                        while let Some(data) = buffer.next_data() {
                             if data.is_empty() {
                                 continue;
                             }
@@ -363,29 +363,65 @@ pub(crate) async fn parse_stream(
     Ok(message)
 }
 
-/// Pop the next complete SSE event from `buffer` and return its `data:`
-/// payload (empty string when the event carries no data line). Handles both
-/// `\n\n` and `\r\n\r\n` event separators, splitting at whichever occurs
-/// first. Returns `None` until a complete event is buffered. Only the first
-/// `data:` line of an event is returned.
-fn next_sse_data(buffer: &mut Vec<u8>) -> Option<String> {
-    let lf = buffer.windows(2).position(|bytes| bytes == b"\n\n");
-    let crlf = buffer.windows(4).position(|bytes| bytes == b"\r\n\r\n");
-    let (pos, sep_len) = match (lf, crlf) {
-        (Some(l), Some(c)) if c < l => (c, 4),
-        (Some(l), _) => (l, 2),
-        (None, Some(c)) => (c, 4),
-        (None, None) => return None,
-    };
-    let event_str = String::from_utf8_lossy(&buffer[..pos]).into_owned();
-    buffer.drain(..pos + sep_len);
-    let data = event_str
-        .lines()
-        .map(|l| l.trim_end_matches('\r'))
-        .find(|l| l.starts_with("data: "))
-        .map(|l| l[6..].to_string())
-        .unwrap_or_default();
-    Some(data)
+/// Bytes of an SSE stream not yet split into events. Bytes, not text: a
+/// transport chunk may end inside a UTF-8 code point, so each event is
+/// decoded only once it is complete.
+#[derive(Default)]
+struct SseBuffer {
+    bytes: Vec<u8>,
+    /// How far a separator has been searched for: a search resumes there
+    /// (less the three bytes a split `\r\n\r\n` can leave), so a large
+    /// event arriving in small chunks is scanned once, not once per chunk.
+    searched: usize,
+}
+
+impl SseBuffer {
+    fn push(&mut self, chunk: &[u8]) {
+        self.bytes.extend_from_slice(chunk);
+    }
+
+    /// Pop the next complete SSE event and return its `data:` payload (empty
+    /// string when the event carries no data line). Handles both `\n\n` and
+    /// `\r\n\r\n` event separators, splitting at whichever occurs first.
+    /// Returns `None` until a complete event is buffered. Only the first
+    /// `data:` line of an event is returned; invalid UTF-8 in it decodes
+    /// lossily.
+    fn next_data(&mut self) -> Option<String> {
+        let from = self.searched.saturating_sub(3);
+        let found = (from..self.bytes.len()).find_map(|i| {
+            let rest = &self.bytes[i..];
+            if rest.starts_with(b"\r\n\r\n") {
+                Some((i, 4))
+            } else if rest.starts_with(b"\n\n") {
+                Some((i, 2))
+            } else {
+                None
+            }
+        });
+        let Some((pos, sep_len)) = found else {
+            self.searched = self.bytes.len();
+            return None;
+        };
+        let event_str = String::from_utf8_lossy(&self.bytes[..pos]).into_owned();
+        self.bytes.drain(..pos + sep_len);
+        self.searched = 0;
+        let data = event_str
+            .lines()
+            .map(|l| l.trim_end_matches('\r'))
+            .find(|l| l.starts_with("data: "))
+            .map(|l| l[6..].to_string())
+            .unwrap_or_default();
+        Some(data)
+    }
+}
+
+impl From<&[u8]> for SseBuffer {
+    fn from(bytes: &[u8]) -> Self {
+        Self {
+            bytes: bytes.to_vec(),
+            searched: 0,
+        }
+    }
 }
 
 /// Whether an SSE data payload is a Google error envelope
@@ -1109,13 +1145,13 @@ mod tests {
 
     #[test]
     fn test_parse_chunk_with_crlf_sse() {
-        // Full pipeline: next_sse_data (the production splitter) on a CRLF
+        // Full pipeline: SseBuffer (the production splitter) on a CRLF
         // stream, then chunk parsing.
-        let mut buf = "data: {\"candidates\": [{\"content\": {\"parts\": [{\"text\": \"Blue\"}], \"role\": \"model\"}, \"finishReason\": \"STOP\", \"index\": 0}]}\r\n\r\n".as_bytes().to_vec();
+        let mut buf = SseBuffer::from("data: {\"candidates\": [{\"content\": {\"parts\": [{\"text\": \"Blue\"}], \"role\": \"model\"}, \"finishReason\": \"STOP\", \"index\": 0}]}\r\n\r\n".as_bytes());
 
-        let data = next_sse_data(&mut buf).expect("complete CRLF event");
-        assert!(buf.is_empty(), "event consumed from buffer");
-        assert_eq!(next_sse_data(&mut buf), None);
+        let data = buf.next_data().expect("complete CRLF event");
+        assert!(buf.bytes.is_empty(), "event consumed from buffer");
+        assert_eq!(buf.next_data(), None);
 
         let chunk: GoogleChunk = serde_json::from_str(&data).unwrap();
         let candidates = chunk.candidates.unwrap();
@@ -1125,12 +1161,12 @@ mod tests {
 
     #[test]
     fn test_next_sse_data_partial_events_stay_buffered() {
-        let mut buf = "data: {\"a\":1}\n\ndata: partial".as_bytes().to_vec();
-        assert_eq!(next_sse_data(&mut buf).as_deref(), Some("{\"a\":1}"));
-        assert_eq!(next_sse_data(&mut buf), None, "incomplete event waits");
-        assert_eq!(buf, b"data: partial");
-        buf.extend_from_slice(b"\n\n");
-        assert_eq!(next_sse_data(&mut buf).as_deref(), Some("partial"));
+        let mut buf = SseBuffer::from("data: {\"a\":1}\n\ndata: partial".as_bytes());
+        assert_eq!(buf.next_data().as_deref(), Some("{\"a\":1}"));
+        assert_eq!(buf.next_data(), None, "incomplete event waits");
+        assert_eq!(buf.bytes, b"data: partial");
+        buf.push(b"\n\n");
+        assert_eq!(buf.next_data().as_deref(), Some("partial"));
     }
 
     #[test]
@@ -1138,11 +1174,11 @@ mod tests {
         // SSE comments/keepalives and leading separators must be CONSUMED
         // (returning Some("")), never None — returning None would wedge the
         // buffer and drop every subsequent event.
-        let mut buf = ": keepalive\n\n\n\ndata: x\n\n".as_bytes().to_vec();
-        assert_eq!(next_sse_data(&mut buf).as_deref(), Some(""));
-        assert_eq!(next_sse_data(&mut buf).as_deref(), Some(""));
-        assert_eq!(next_sse_data(&mut buf).as_deref(), Some("x"));
-        assert_eq!(next_sse_data(&mut buf), None);
+        let mut buf = SseBuffer::from(": keepalive\n\n\n\ndata: x\n\n".as_bytes());
+        assert_eq!(buf.next_data().as_deref(), Some(""));
+        assert_eq!(buf.next_data().as_deref(), Some(""));
+        assert_eq!(buf.next_data().as_deref(), Some("x"));
+        assert_eq!(buf.next_data(), None);
     }
 
     #[test]
@@ -1159,10 +1195,37 @@ mod tests {
         // A CRLF-separated event earlier in the buffer must split before a
         // later LF separator (the old inline logic preferred the LF match and
         // merged the two events).
-        let mut buf = "data: one\r\n\r\ndata: two\n\n".as_bytes().to_vec();
-        assert_eq!(next_sse_data(&mut buf).as_deref(), Some("one"));
-        assert_eq!(next_sse_data(&mut buf).as_deref(), Some("two"));
-        assert_eq!(next_sse_data(&mut buf), None);
+        let mut buf = SseBuffer::from("data: one\r\n\r\ndata: two\n\n".as_bytes());
+        assert_eq!(buf.next_data().as_deref(), Some("one"));
+        assert_eq!(buf.next_data().as_deref(), Some("two"));
+        assert_eq!(buf.next_data(), None);
+    }
+
+    #[test]
+    fn test_sse_buffer_decodes_invalid_utf8_lossily_and_moves_on() {
+        // A malformed byte must not wedge the buffer (`None` means "wait
+        // for more"): the event decodes with U+FFFD and the next one follows.
+        let mut buf = SseBuffer::from(&b"data: {\"a\":\"\xFF\"}\n\ndata: x\n\n"[..]);
+        let first = buf.next_data().expect("the malformed event is consumed");
+        assert!(first.contains('\u{FFFD}'), "{first:?}");
+        assert_eq!(buf.next_data().as_deref(), Some("x"));
+        assert!(buf.bytes.is_empty());
+    }
+
+    #[test]
+    fn test_sse_buffer_joins_a_code_point_and_a_separator_split_across_pushes() {
+        // `你` is three bytes; every push ends mid-character or mid-separator.
+        let bytes = "data: 你\r\n\r\ndata: 好\n\n".as_bytes();
+        let mut buf = SseBuffer::default();
+        let mut got = Vec::new();
+        for b in bytes {
+            buf.push(std::slice::from_ref(b));
+            while let Some(data) = buf.next_data() {
+                got.push(data);
+            }
+        }
+        assert_eq!(got, ["你", "好"]);
+        assert!(buf.bytes.is_empty());
     }
 
     #[test]
