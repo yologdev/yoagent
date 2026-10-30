@@ -229,7 +229,7 @@ The `Cargo.toml` uses paths so CI checks it against the code beside it. In
 your own Worker use the published crates:
 
 ```toml
-yoagent = { version = "0.24", default-features = false, features = ["decision"] }
-yoagent-workers = "0.1"
+yoagent = { version = "0.26", default-features = false, features = ["decision"] }
+yoagent-workers = "0.3"
 worker = "0.8"
 ```

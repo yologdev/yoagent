@@ -21,14 +21,18 @@ Before writing loop code of your own, find the hook below.
 | You want to… | Use | Read |
 |---|---|---|
 | build an agent | `Agent::from_config(ModelConfig::…)` (provider and API key follow the config) | `docs/getting-started/quick-start.md` |
+| pick a model from `provider/id` text | `ModelConfig::preset(p, id)`, else `ModelConfig::generic(p, id)` (provider-default limits: tell the user) | `docs/providers/model-presets.md#looking-up-a-preset-by-name` |
+| run on Bedrock or Azure OpenAI | `ModelConfig::custom(ApiProtocol::…)` (Bedrock: SigV4 or API key, `base_url` required) | `docs/providers/bedrock.md`, `docs/providers/azure-openai.md` |
 | give it tools | `impl AgentTool`; `.with_tools(…)` (built-ins: `tools::default_tools()`) | `docs/concepts/tools.md` |
 | allow / rewrite / deny tool calls | `RunHooks::before_tool` in an `Extension` | `docs/concepts/extensions.md` |
 | redact or edit a tool's output | `RunHooks::after_tool` (+ `.filters_tool_output()`) | same |
 | refuse an input before the run | `RunHooks::on_input` | same |
+| gate tool calls / screen input with a small decision model | `.with_tool_gate(ToolGate)`, `.with_input_guard(InputGuard)` (feature `decision`; both fail closed) | `docs/concepts/decision-models.md#blocking-with_tool_gate` |
 | add a note to every model request | `RunHooks::before_model` → `TurnDecision::Note` | same |
 | check the final answer, send the agent back | `RunHooks::on_stop` → `StopDecision::Continue(why)` | same |
 | count, log or record what happened | `RunHooks::on_event` (sync, cheap), `finish` | same |
 | cap spend in dollars | `extension::Budget` | `docs/concepts/extensions.md#budget` |
+| charge an extension's own model calls | `RunContext::spend_handle()` → `SpendHandle::add(&usage, &model)` | `docs/concepts/extensions.md#spend-an-extension-makes` |
 | cap turns / tokens / time | `ExecutionLimits` | `docs/concepts/context-management.md` |
 | delegate to a child agent | `SubAgentTool` (own model, tools, limits) | `docs/concepts/sub-agents.md` |
 | apply one policy to every sub-agent | `.with_tree_extension(…)` | `docs/concepts/extensions.md` |
@@ -40,6 +44,7 @@ Before writing loop code of your own, find the hook below.
 | show streamed text without retry duplicates | `retry::retry_safe_events(rx)` | `docs/concepts/retry.md` |
 | branch / restore history | `session::Session` (a tree, JSONL) | `docs/concepts/session-trees.md` |
 | know what it cost | `agent.total_cost_usd()`, `SessionStats` buckets | `docs/concepts/pricing.md` |
+| record runs to a git repo (GASP) | `gasp::GaspRecorder` + `recording_sender` (feature `gasp`, native) | `docs/concepts/gasp.md` |
 | test without a network | `MockProvider` + `Agent::from_provider` | `docs/guides/testing.md` |
 | run on Cloudflare Workers | `default-features = false` (wasm32) | `docs/guides/wasm-workers.md` |
 
@@ -183,10 +188,12 @@ and its examples.
 - **Limits are per run** and `max_total_tokens` counts the whole prompt
   every turn, so it fills faster than the visible conversation.
 - **Spend is bucketed**: the agent's own, `sub_agents`, `decision`,
-  `compaction`; `total_cost_usd()` adds them. Unknown cost is `None`,
-  never zero.
-- **Plugin messages are capped at 16 MiB** (rutis 0.9 closes the channel
-  above that). Large images in a conversation reach plugins as text.
+  `compaction`, `extensions` (calls an extension records through
+  `RunContext::spend_handle`); `total_cost_usd()` adds them. Unknown cost
+  is `None`, never zero.
+- **Plugin messages are capped at 16 MiB** (rutis closes the channel on a
+  larger one, ending the runtime and its plugins). Large images in a
+  conversation reach plugins as text.
 - **Tests**: script whole multi-turn tool conversations with `MockProvider`
   (`Agent::from_provider(MockProvider::new(…), ModelConfig::mock())`); it
   honours cancellation, so abort and steering paths are testable.

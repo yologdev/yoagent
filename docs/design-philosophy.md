@@ -50,7 +50,7 @@ The same restraint applies to providers. yoagent integrates model APIs — Anthr
                        │  an Extension like any other
                        ▼
    yoagent-rutis (companion crate): a plugin host
-   Rust · TypeScript · Python handlers, images, logs
+   Rust · TypeScript · Python · Go handlers, images, logs
                        │
         ┌──────────────┼──────────────┐
         ▼              ▼              ▼
@@ -77,7 +77,7 @@ Fail-closed costs some convenience: a plugin that would have half-worked elsewhe
 
 ## 5. Plugins and other ecosystems, outside the core
 
-The core never depends on a plugin system. [yoagent-rutis](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis), a separate crate, makes [rutis](https://github.com/arcships/rutis) plugins — Rust in-process, TypeScript and Python in their own runtimes — into **one** `Extension`. A plugin registers a handler; the bridge turns it into hooks; the loop does not know the difference.
+The core never depends on a plugin system. [yoagent-rutis](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis), a separate crate, makes [rutis](https://github.com/arcships/rutis) plugins — Rust in-process, TypeScript (Node or Bun), Python and Go in their own runtimes — into **one** `Extension`. A plugin registers a handler; the bridge turns it into hooks; the loop does not know the difference.
 
 That bridge is how other agent ecosystems reach yoagent. Tool plugins for the DeepSeek harness (DSH), rutis-agent's tools and pi's extensions plug in through small adapters, with **no change to the loop**. Each adapter maps what the loop can honour (tools, policies, notes, images, logs) and refuses or reports the rest.
 
@@ -100,7 +100,7 @@ A few principles run through the whole loop:
 - **You assemble the product.** yoagent gives you no UI, no command system and no session product. A finished agent app is more work than starting from a framework that has them.
 - **Some things are deliberately impossible in an extension.** An extension cannot rewrite history, replace the system prompt or hold a UI open between runs. Plugins that need those parts of another ecosystem (pi's plan mode, DSH's web apps) only partly work here.
 - **Fail-closed denies more.** A safety policy that cannot be honoured stops the load or the call. That is safer, and occasionally inconvenient.
-- **Plugins across processes cost latency.** A TypeScript or Python handler is a call into another process for every hook it implements; hot paths belong in Rust.
+- **Plugins across processes cost latency.** A TypeScript, Python or Go handler is a call into another process for every hook it implements; hot paths belong in Rust.
 - **Ecosystem adapters are partial and move fast.** They cover what the loop can honour and follow other projects' releases.
 
 ## 8. Principles and the test for a new capability

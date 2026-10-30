@@ -71,7 +71,7 @@ cargo run --example cli -- --api-url http://localhost:1234/v1 --model my-model  
 
 ```toml
 [dependencies]
-yoagent = "0.25"
+yoagent = "0.26"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -171,7 +171,7 @@ let agent = agent.with_extension(ClonedHooks::new("no-force-push", NoForcePush))
 
 yoagent 自己的预算、工具闸门和输入守卫也是这样构建的。六个可运行的 `extension_*` 示例涵盖策略、脱敏、校验器、预算、子 agent 策略和审计日志（[指南](https://yologdev.github.io/yoagent/concepts/extensions.html)）。
 
-**插件和其他生态。** [`yoagent-rutis`](integrations/yoagent-rutis/) 把 [rutis](https://github.com/arcships/rutis) 插件——Rust、TypeScript 或 Python，可在运行时加载、重载和卸载——变成一个 `Extension`。通过小型适配器，它还能原样运行许多 [pi](https://github.com/earendil-works/pi) 扩展和 DeepSeek harness（DSH）工具插件，yoagent 的核心不做任何改动：工具、工具策略、输入检查、提示补充和图片可以跨过来；命令和 UI 不行。用到了适配器无法保证执行的钩子的扩展会被拒绝，而不是只跑一半。两个生态中下载量最高的各 20 个包（按月下载量，取 npm 每个关键词的前 1000 条搜索结果）表现如何，有实测：[插件兼容性](https://yologdev.github.io/yoagent/evals/plugin-compatibility.html)。
+**插件和其他生态。** [`yoagent-rutis`](integrations/yoagent-rutis/) 把 [rutis](https://github.com/arcships/rutis) 插件——Rust、TypeScript（Node 或 Bun）、Python 或 Go，可在运行时加载、重载和卸载——变成一个 `Extension`。通过小型适配器，它还能原样运行许多 [pi](https://github.com/earendil-works/pi) 扩展和 DeepSeek harness（DSH）工具插件，yoagent 的核心不做任何改动：工具、工具策略、输入检查、提示补充和图片可以跨过来；命令和 UI 不行。用到了适配器无法保证执行的钩子的扩展会被拒绝，而不是只跑一半。两个生态中下载量最高的各 20 个包（按月下载量，取 npm 每个关键词的前 1000 条搜索结果）表现如何，有实测：[插件兼容性](https://yologdev.github.io/yoagent/evals/plugin-compatibility.html)。
 用这种方式构建的 agent——在浏览器里带 pi 和 DSH 插件的编程 agent、提问却不等待并完成后汇报的交接 agent——在 [yobuild](https://github.com/yologdev/yobuild) 里。
 
 ## agent 在哪里跑，它就在哪里跑

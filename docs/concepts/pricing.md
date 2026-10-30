@@ -7,7 +7,10 @@ the `llm_stream` span's `cost_usd`) from the `CostConfig` on
 Each model is priced at its own rates: a sub-agent's turns at the sub-agent's
 model (`SessionStats::sub_agents`), `LlmCompaction`'s summaries at the
 summarization model (`SessionStats::compaction`), decision-model requests at the
-decision model (`SessionStats::decision`). `SessionStats::total_cost_usd()` and
+decision model (`SessionStats::decision`), and the model calls extensions make
+outside the run's own turns at whatever model each one reports through
+`RunContext::spend_handle` (`SessionStats::extensions`, an `ExtensionSpend`;
+`Agent::extension_spend()`). `SessionStats::total_cost_usd()` and
 `Agent::total_cost_usd()` add them all, and are `None` when any part with
 non-zero usage has no price.
 

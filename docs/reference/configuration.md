@@ -41,9 +41,11 @@ pub struct AgentLoopConfig {
 
 ## StreamConfig
 
-Passed to `StreamProvider::stream()`:
+Passed to `StreamProvider::stream()`. It is `#[non_exhaustive]`: build one
+with `StreamConfig::new(model, api_key)` and set the fields you need.
 
 ```rust
+#[non_exhaustive]
 pub struct StreamConfig {
     pub model: String,
     pub system_prompt: String,

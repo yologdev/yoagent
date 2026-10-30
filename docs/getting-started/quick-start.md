@@ -55,7 +55,7 @@ use yoagent::tools::default_tools;
 #[tokio::main]
 async fn main() {
     // Provider inferred from the preset; key from OPENAI_API_KEY.
-    let mut agent = Agent::from_config(ModelConfig::openai("gpt-5.5", "GPT-5.5"))
+    let mut agent = Agent::from_config(ModelConfig::gpt_5_5())
         .with_system_prompt("You are a helpful assistant.")
         .with_tools(default_tools());
 

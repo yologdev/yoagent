@@ -110,6 +110,8 @@ pub struct AgentLoopConfig {
 | `model` | Model identifier (e.g., `"claude-sonnet-5"`) |
 | `api_key` | API key for the provider |
 | `thinking_level` | `Off`, `Minimal`, `Low`, `Medium`, `High`, `XHigh`, `Max` |
+| `max_tokens` | Output token cap per request; `None`: OpenAI-compatible sends the `model_config`'s `max_tokens`; Anthropic too, or 8,192 without a `model_config` (more when a thinking budget needs it); the other providers send no cap (the API's default) |
+| `temperature` | Sampling temperature; `None` = not sent |
 | `model_config` | Optional `ModelConfig` for multi-provider support (base URL, headers, compat flags) |
 | `convert_to_llm` | Custom `AgentMessage[] → Message[]` conversion |
 | `transform_context` | Pre-processing hook for context pruning |
@@ -126,9 +128,13 @@ pub struct AgentLoopConfig {
 | `before_turn` | Called before each LLM call; return `false` to abort (see [Callbacks](callbacks.md)) |
 | `after_turn` | Called after each turn with messages and usage (see [Callbacks](callbacks.md)) |
 | `on_error` | Called when a turn ends with `StopReason::Error`, with the error string; not on cancellation (`Aborted`) or for retried attempts (see [Callbacks](callbacks.md)) |
-| `input_filters` | Input filters applied to user messages before the LLM call (see [Tools](tools.md)) |
+| `input_filters` | Input filters applied to user messages before the LLM call (see [Input Filters](callbacks.md#input-filters), [Async Input Filters](callbacks.md#async-input-filters)) |
 | `compaction_strategy` | Custom compaction strategy (see [Custom Compaction](#custom-compaction) below) |
 | `turn_delay` | Optional inter-turn delay to throttle API calls. Skips the first turn. Useful for rate-limit-sensitive providers (e.g., OAuth tokens with low RPM caps) |
+| `extensions` | Extensions for this run, dispatched after `tree_extensions` (see [Extensions](extensions.md)) |
+| `tree_extensions` | Extensions for this run and every run it delegates to, at any depth; they run ahead of this agent's ordinary extensions (after any inherited from a parent run) |
+| `max_stop_continues` | How many times per run an extension's `on_stop` may continue it (default 3) |
+| `run_label` | The host's label for the run, passed to extensions as `RunContext::label` |
 
 ## Steering & Follow-Ups
 
@@ -201,7 +207,10 @@ agent.steer_all(queued);                      // requeue the rest under one lock
 These accessors pair with the spawn-based flows (`prompt()`,
 `prompt_messages()`, `continue_loop()`). The `_with_sender` variants borrow
 the agent mutably for the whole run, so the queue cannot be touched while one
-is in flight.
+is in flight. Dropping a `_with_sender` future (a `timeout`, a `select!`)
+cancels the run: it ends aborted, its last events still reach the sender while
+the `Agent` lives, and the next `finish()` or prompt restores the agent's
+messages and tools.
 
 Only the drain is atomic — the edit round trip is not:
 

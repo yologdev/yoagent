@@ -1,10 +1,10 @@
 # yoagent-rutis
 
 Extend [yoagent](https://crates.io/crates/yoagent) agents at runtime with
-[rutis](https://crates.io/crates/rutis) plugins — in Rust, TypeScript or
-Python — through one yoagent `Extension`.
+[rutis](https://crates.io/crates/rutis) plugins — in Rust, TypeScript (on
+Node or Bun), Python or Go — through one yoagent `Extension`.
 
-**Status:** on [crates.io](https://crates.io/crates/yoagent-rutis); needs yoagent's `Extension` (0.25). The DSH and pi adapters below cover tools, tool policies, input checks, prompt additions and images; commands, dialogs and UI belong to the app and are not mapped.
+**Status:** on [crates.io](https://crates.io/crates/yoagent-rutis); needs yoagent's `Extension`: yoagent 0.26 (yoagent-rutis 0.10). The DSH and pi adapters below cover tools, tool policies, input checks, prompt additions and images; commands, dialogs and UI belong to the app and are not mapped.
 
 rutis (a Rust port of the [Cordis](https://github.com/shigma/cordis) plugin
 kernel) loads, unloads, reloads and hot-updates plugins, and tears down
@@ -930,8 +930,11 @@ declaring them now reach rutis, so on a name clash the row providing it
 later fails: rename it or list it in that row's `isolate`; and
 `ServiceCatalog::new()` shares every name, so a row injecting a service
 nobody provides waits in rutis instead of reading as started —
-`share_registered_only()` keeps the old rule). rutis's release
-train (`rutis`, `rutis-bridge`, `rutis-loader`, the npm and PyPI runtimes)
+`share_registered_only()` keeps the old rule); 0.7 to 0.9 require yoagent
+0.25 and rutis 0.12 too (0.7 closes the pi adapter's `pi.exec` by default;
+0.8 adds values and settings to its grants); 0.10 requires yoagent 0.26
+(rutis 0.12, Rust 1.88; no code change). rutis's release
+train (`rutis`, `rutis-bridge`, `rutis-loader`, the npm, PyPI and Go runtimes)
 shares one version: move the host and the language runtimes together.
 yoagent and rutis types are in its API, so a minor bump of either is a
 minor bump of yoagent-rutis. Take `yoagent` from the same source

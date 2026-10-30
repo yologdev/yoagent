@@ -11,7 +11,9 @@ Requires `StreamConfig.model_config`; its `compat` flags are optional (`None` us
 ```rust
 use yoagent::provider::ModelConfig;
 
-let agent = Agent::from_config(ModelConfig::openai("gpt-5.5", "GPT-5.5"));
+// A named preset carries the model's real limits (1M context, 64K output);
+// `ModelConfig::openai(id, name)` works for any id, with generic limits.
+let agent = Agent::from_config(ModelConfig::gpt_5_5());
 ```
 
 ## OpenAiCompat Quirk Flags
@@ -65,18 +67,16 @@ DeepSeek context caching is automatic on DeepSeek's side. yoagent does not send
 
 ## Adding a New Compatible Provider
 
-1. Add a constructor to `OpenAiCompat`:
+1. Start from the defaults and set the quirks your provider has
+   (`OpenAiCompat` is `#[non_exhaustive]`, so no struct literal):
 
 ```rust
-impl OpenAiCompat {
-    pub fn my_provider() -> Self {
-        Self {
-            supports_usage_in_streaming: true,
-            // set flags as needed...
-            ..Default::default()
-        }
-    }
-}
+use yoagent::provider::{model::MaxTokensField, OpenAiCompat};
+
+let mut compat = OpenAiCompat::default();
+compat.supports_usage_in_streaming = true;
+compat.max_tokens_field = MaxTokensField::MaxCompletionTokens;
+// set other flags as needed...
 ```
 
 2. Create a `ModelConfig` that uses it:
@@ -86,7 +86,7 @@ let config = ModelConfig::openai_compat(
     "https://api.myprovider.com/v1",
     "my-model",
     "my-provider",
-    OpenAiCompat::my_provider(),
+    compat,
 );
 ```
 

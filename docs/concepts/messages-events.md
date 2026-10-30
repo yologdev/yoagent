@@ -236,4 +236,4 @@ if let Some(last) = messages.last() {
 }
 ```
 
-The `is_streaming()` flag is `true` between `prompt()`/`continue_loop()` call and completion. While streaming, calling `prompt()` will panic — use `steer()` or `follow_up()` instead.
+The `is_streaming()` flag is `true` from the `prompt()`/`continue_loop()` call until the run is joined — by `finish()`, `reset()` or the next prompt — not merely until the loop ends. Calling `prompt()` while a run is in flight does not panic: it first waits for that run to end (as `finish()` does), then starts a new one. To change a run while it is going, use `steer()` or `follow_up()`.

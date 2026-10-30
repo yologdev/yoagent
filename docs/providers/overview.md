@@ -61,6 +61,9 @@ First-class model presets are documented in [Model Presets](model-presets.md). C
 
 ```rust
 let anthropic = ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5");
+let gpt = ModelConfig::gpt_5_5(); // the preset: 1M context, 64K output
+// OpenAI's generic constructors take any id, with generic limits (128K
+// context, 4,096 / 16,000 output); each provider's are in Model Presets:
 let openai = ModelConfig::openai("gpt-5.5", "GPT-5.5");
 let responses = ModelConfig::openai_responses("gpt-5.5", "GPT-5.5");
 // Any model id works; a model with a named preset (`ModelConfig::gemini_3_8_flash()`,

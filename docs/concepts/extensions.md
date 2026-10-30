@@ -77,7 +77,7 @@ Every `RunHooks` method has a no-op default; implement only what you need.
 | `on_stop` | When the model ends with `StopReason::Stop` and nothing is queued (not for an answer cut off at the output limit) | A required extension's `Fail` ends the run; otherwise every `Continue` is sent, one line each |
 | `on_event` | Every `AgentEvent` of the run, in order, before the consumer gets it | All |
 | `take_failure` | At every point the loop acts on failures: before each turn, before a response's tools run, before `on_stop`, and when the run ends | Each extension asked; a failure returned counts as that extension's |
-| `finish` | When the run ends, however it ends (not if the run's future is dropped); bounded by `FINISH_TIMEOUT` | All |
+| `finish` | When the run ends, however it ends; bounded by `FINISH_TIMEOUT`. On an `Agent` the run is its own task: a dropped `_with_sender` future cancels the run and `finish` still runs, and a `prompt()` run keeps going after its receiver is dropped; only a dropped raw `agent_loop` future, or an `Agent` dropped mid-run (which aborts the task), skips it | All |
 
 `finish` gets a `RunOutcome`: `end()` is a `RunEnd` (`Completed`, `Stopped { reason }`, `Rejected { reason }`, `Cancelled`, `Failed { error, extension }`), and `stop_reason()` the last assistant message's.
 
@@ -167,7 +167,7 @@ async fn start_run(&self, run: &RunContext<'_>) -> Result<Box<dyn RunHooks>, Ext
 }
 ```
 
-`add(&usage, &model)` prices the call at the model's `cost` (`add_priced` takes a `CostConfig` instead); never pass dollars. A `Budget` counts it at its next check (before the next request), and the run's `SessionStats` holds it in `extensions`, inside `total_usage()` and `total_cost_usd()` (an unpriced call makes the total `None`, as an unpriced turn does); `Agent::extension_spend()` sums it across runs. Spend recorded after the run ended — after the extensions' `finish` — is not counted, with a warning; spend recorded in a `finish` that runs after a `Budget`'s own is in the run's stats but not in that budget's total. `run.spend_handle()` is `None` outside a loop (a `RunContext::new` in a test).
+`add(&usage, &model)` prices the call at the model's `cost` (`add_priced(&usage, cost: Option<&CostConfig>)` takes the rates instead, `None` = unpriced); never pass dollars. A `Budget` counts it at its next check (before the next request), and the run's `SessionStats` holds it in `extensions`, inside `total_usage()` and `total_cost_usd()` (an unpriced call makes the total `None`, as an unpriced turn does); `Agent::extension_spend()` sums it across runs. Spend recorded after the run ended — after the extensions' `finish` — is not counted, with a warning; spend recorded in a `finish` that runs after a `Budget`'s own is in the run's stats but not in that budget's total. `run.spend_handle()` is `None` outside a loop (a `RunContext::new` in a test).
 
 ## Built on extensions
 
@@ -188,7 +188,7 @@ So is the [`yoagent-rutis`](https://github.com/yologdev/yoagent/tree/main/integr
 | [rutis-agent](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis#rutis-agent-tools) | Rust tools in a rutis registry | a Rust rutis plugin (`examples/rutis-agent-tools/`) | tools (images by convention), hot-added tools, cancellation |
 | [pi](https://github.com/earendil-works/pi) | TypeScript extensions written against pi's `ExtensionAPI` | an adapter that loads them with pi's own loader ([`plugins/pi/`](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis#pi-extensions-tools-and-tool-policies)) | tools, tool policies, input checks, prompt additions, images |
 
-What the bridge gives every ecosystem alike: TypeScript and Python handlers next to Rust ones, one registration order, **image** tool results both ways (`content` blocks), **plugin logs** in the host's `tracing` output (`yoagent.log`, with the run they belong to), and failures that deny rather than allow. What stays outside the loop on purpose — commands, dialogs, session history, a UI — belongs to the app that hosts the agent.
+What the bridge gives every ecosystem alike: TypeScript, Python and Go handlers next to Rust ones, one registration order, **image** tool results both ways (`content` blocks), **plugin logs** in the host's `tracing` output (`yoagent.log`, with the run they belong to), and failures that deny rather than allow. What stays outside the loop on purpose — commands, dialogs, session history, a UI — belongs to the app that hosts the agent.
 
 **The adapter contract.** An ecosystem rarely maps one-to-one, so an adapter should follow the same rules ([details](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis#writing-an-ecosystem-adapter)): map only what the host can honour; refuse to load when a plugin would decide or rewrite something the host cannot enforce; deny a call when a policy fails; withhold a result when a redaction fails; report — never silently drop — what is ignored.
 

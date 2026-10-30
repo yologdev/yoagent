@@ -53,6 +53,34 @@ The generic constructors (`google(id, name)`, `xai`, `mistral`, …) assume cons
 
 The `claude_*` presets also set `AnthropicCompat::native_structured_output`, so `Agent::prompt_structured` uses the API's native JSON outputs instead of a forced tool call. `claude_fable_5_1` and `claude_opus_5_5` depend on it, because both models reject forced `tool_choice`. `ModelConfig::anthropic(id, name)` infers it (and the thinking mode) from a Claude id, and leaves it off for any other id. See [Structured Outputs](../concepts/structured-outputs.md).
 
+## Looking Up a Preset by Name
+
+For a host that takes the model as text (`openai/gpt-6-sol`, a config file, a
+flag):
+
+- `ModelConfig::presets()` — every named preset, as built configs.
+- `ModelConfig::preset(provider, id)` — the named preset for exactly that
+  provider and id (as the preset's `provider` and `id` spell them), else
+  `None`. Case-sensitive, no aliases: `("openai", "gpt-6-sol")` finds
+  `gpt_6_sol()`; `("openai_responses", "gpt-6-sol")` and `("opencode-zen",
+  "gpt-6-sol")` find nothing.
+- `ModelConfig::generic(provider, id)` — the provider's generic constructor
+  (`anthropic`, `openai`, `google`, `xai`, `groq`, `deepseek`, `mistral`,
+  `zai`, `minimax`, `qwen`, `meta`), **never a preset**: the context window
+  and output limit are the provider's defaults from the table above, not the
+  model's. For `openai`, a reasoning id (anything but `gpt-3*`, `gpt-4*`,
+  `chatgpt-*`, `*-chat*`) gets `openai_responses`. `None` for any other
+  provider (gateways and local servers need a base URL).
+
+```rust
+// Split at the first `/` (Groq's ids contain one).
+let (provider, id) = "groq/openai/gpt-oss-120b".split_once('/').unwrap();
+let config = ModelConfig::preset(provider, id).or_else(|| {
+    // No preset: the limits are guesses. Say so to the user.
+    ModelConfig::generic(provider, id)
+});
+```
+
 ## OpenAI-Compatible Presets
 
 These constructors all use `OpenAiCompatProvider`:
