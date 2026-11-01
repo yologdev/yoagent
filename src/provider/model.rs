@@ -91,8 +91,8 @@ pub(crate) fn openai_id_is_reasoning(id: &str) -> bool {
 /// prompt tokens (`input + cache_read + cache_write`).
 ///
 /// The OpenAI presets set one at 272K: `gpt_5_5`, `gpt_6_astra`,
-/// `gpt_6_sol`, `gpt_6_1_sol` and `gpt_6_luna` (checked 2026-09-25 and
-/// 2026-10-18; `gpt_5_5`'s long-band cache-read rate is unverified — see its
+/// `gpt_6_sol`, `gpt_6_1_sol`, `gpt_6_1_terra` and `gpt_6_luna` (checked
+/// 2026-09-25, 2026-10-18 and 2026-11-01; `gpt_5_5`'s long-band cache-read rate is unverified — see its
 /// docs). `claude_haiku_5_5` sets one at 100K and `grok_4_7` at 200K. The
 /// other Anthropic presets do not: Anthropic bills their full 1M window at
 /// standard rates (Haiku 5.5 is the exception). Meta's page says there is no
@@ -1682,8 +1682,8 @@ impl ModelConfig {
     /// 1,050,000-token context (922,000 input); defaults to 64K of the
     /// model's 128K max output.
     ///
-    /// **Uses the Responses API**, for the same reason as `gpt_6_sol`: tool
-    /// calling needs it.
+    /// **Uses the Responses API**: OpenAI supports tool calling for it only
+    /// there.
     ///
     /// Reasoning effort: `low`/`medium` (default)/`high`/`xhigh`/`max`,
     /// ceiling [`ReasoningEffortCeiling::Max`]; `none` and `minimal` are not
@@ -1699,6 +1699,32 @@ impl ModelConfig {
     /// whole request bills at $4 / $0.20 / $5 / $15. See [`CostConfig`].
     pub fn gpt_6_1_sol() -> Self {
         Self::gpt_6("gpt-6.1-sol", "GPT-6.1 Sol")
+    }
+
+    /// GPT-6.1 Terra (`gpt-6.1-terra`), half
+    /// [`gpt_6_1_sol`](Self::gpt_6_1_sol)'s price.
+    /// 1,050,000-token context; defaults to 64K of the model's 128K max
+    /// output.
+    ///
+    /// **Uses the Responses API**: OpenAI supports tool calling for it only
+    /// there (the model is also served on Chat Completions and Batch).
+    ///
+    /// Reasoning effort: `none`/`low`/`medium` (default)/`high`/`xhigh`/`max`,
+    /// ceiling [`ReasoningEffortCeiling::Max`]; unlike
+    /// [`gpt_6_1_sol`](Self::gpt_6_1_sol) it accepts `none`, which this crate
+    /// never sends — `ThinkingLevel::Off` omits the effort (the model's
+    /// default). Do not set a `temperature`.
+    ///
+    /// **Structured outputs are not enforced:** the Responses provider warns
+    /// and ignores [`Agent::prompt_structured`](crate::Agent::prompt_structured)'s
+    /// schema.
+    ///
+    /// Priced per OpenAI's pricing page (read 2026-11-01): $1 input / $0.05
+    /// cached / $1.25 cache write (30-minute default retention; writes are
+    /// not an additive fee) / $5 output; above 272K prompt tokens the whole
+    /// request bills at $2 / $0.10 / $2.50 / $7.50. See [`CostConfig`].
+    pub fn gpt_6_1_terra() -> Self {
+        Self::gpt_6("gpt-6.1-terra", "GPT-6.1 Terra")
     }
 
     /// Shared shape of the GPT-6 presets. There is no bare `gpt-6` model id.
@@ -1825,6 +1851,21 @@ impl ModelConfig {
         }
     }
 
+    /// GLM-5.3-FlashX, the faster [`glm_5_3_flash`](Self::glm_5_3_flash)
+    /// (~200 tokens/s per Z.ai): the same shape, thinking always on as for
+    /// [`glm_5_3`](Self::glm_5_3), at $0.37 / $1.25, cached $0.075 (Z.ai's
+    /// pricing page, read 2026-11-01). Z.ai lists cached-input storage as
+    /// free for a limited time; storage is not modelled, so costs will read
+    /// low once that ends.
+    pub fn glm_5_3_flashx() -> Self {
+        Self {
+            reasoning: true,
+            context_window: 1_000_000,
+            max_tokens: 128_000,
+            ..Self::zai("glm-5.3-flashx", "GLM-5.3-FlashX")
+        }
+    }
+
     /// Qwen3.8-Max on Alibaba Cloud Model Studio's international endpoint.
     /// 1,000,000-token context (991,808 input), 131,072 max output.
     ///
@@ -1850,6 +1891,36 @@ impl ModelConfig {
             context_window: 1_000_000,
             max_tokens: 131_072,
             ..Self::qwen("qwen3.8-flash", "Qwen3.8-Flash")
+        }
+    }
+
+    /// Qwen3.8-Omni-Flash: [`qwen_3_8_flash`](Self::qwen_3_8_flash)'s shape
+    /// (1M context, 131,072 max output) for an omni model — text, image,
+    /// audio and video in, text out, every input billed at one rate. This
+    /// crate sends text and images only (an image costs 1 token per 32×32
+    /// px).
+    ///
+    /// The model thinks by default (`reasoning_effort` default `xhigh`);
+    /// this crate sends no thinking control for it, so `ThinkingLevel` has
+    /// no effect here. The model supports JSON mode but not JSON Schema, and
+    /// [`Agent::prompt_structured`](crate::Agent::prompt_structured) sends a
+    /// JSON Schema `response_format` on this provider — do not use it with
+    /// this preset.
+    ///
+    /// **Endpoint unconfirmed:** Alibaba's examples use the workspace
+    /// endpoint (`{WorkspaceId}.ap-southeast-1.maas.aliyuncs.com`), and
+    /// nothing confirms the model is served on the `dashscope-intl` base URL
+    /// this preset uses; change `base_url` if it is not.
+    ///
+    /// Priced for the international (Singapore) deployment (read
+    /// 2026-11-01): $0.15 / $0.47, implicit-cache read $0.016, no cache
+    /// creation (implicit cache only); the Global and Beijing scopes bill
+    /// less. See [`CostConfig`].
+    pub fn qwen_3_8_omni_flash() -> Self {
+        Self {
+            context_window: 1_000_000,
+            max_tokens: 131_072,
+            ..Self::qwen("qwen3.8-omni-flash", "Qwen3.8-Omni-Flash")
         }
     }
 
@@ -1901,14 +1972,17 @@ impl ModelConfig {
         ("openai", "gpt-6-sol", Self::gpt_6_sol),
         ("openai", "gpt-6-luna", Self::gpt_6_luna),
         ("openai", "gpt-6.1-sol", Self::gpt_6_1_sol),
+        ("openai", "gpt-6.1-terra", Self::gpt_6_1_terra),
         ("google", "gemini-4-argon", Self::gemini_4_argon),
         ("google", "gemini-3.8-flash", Self::gemini_3_8_flash),
         ("xai", "grok-4.7", Self::grok_4_7),
         ("mistral", "mistral-large-4", Self::mistral_large_4),
         ("zai", "glm-5.3", Self::glm_5_3),
         ("zai", "glm-5.3-flash", Self::glm_5_3_flash),
+        ("zai", "glm-5.3-flashx", Self::glm_5_3_flashx),
         ("qwen", "qwen3.8-max", Self::qwen_3_8_max),
         ("qwen", "qwen3.8-flash", Self::qwen_3_8_flash),
+        ("qwen", "qwen3.8-omni-flash", Self::qwen_3_8_omni_flash),
     ];
 
     /// The named preset for exactly this `provider` and `id` (as
@@ -1997,7 +2071,8 @@ impl ModelConfig {
     /// models have presets with their real limits and protocol —
     /// [`gpt_5_5`](Self::gpt_5_5), and on the Responses API
     /// [`gpt_6_astra`](Self::gpt_6_astra), [`gpt_6_sol`](Self::gpt_6_sol),
-    /// [`gpt_6_luna`](Self::gpt_6_luna), [`gpt_6_1_sol`](Self::gpt_6_1_sol);
+    /// [`gpt_6_luna`](Self::gpt_6_luna), [`gpt_6_1_sol`](Self::gpt_6_1_sol),
+    /// [`gpt_6_1_terra`](Self::gpt_6_1_terra);
     /// prefer them (or [`ModelConfig::preset`]). Given a GPT-6 id, this
     /// constructor still talks Chat Completions, where OpenAI restricts
     /// function calling for those models.
@@ -2037,7 +2112,8 @@ impl ModelConfig {
     /// Generic limits: 128K context, 16K output tokens. The GPT-6 models have
     /// presets with their real limits (1,050,000 / 64K) and effort ceiling —
     /// [`gpt_6_astra`](Self::gpt_6_astra), [`gpt_6_sol`](Self::gpt_6_sol),
-    /// [`gpt_6_luna`](Self::gpt_6_luna), [`gpt_6_1_sol`](Self::gpt_6_1_sol);
+    /// [`gpt_6_luna`](Self::gpt_6_luna), [`gpt_6_1_sol`](Self::gpt_6_1_sol),
+    /// [`gpt_6_1_terra`](Self::gpt_6_1_terra);
     /// prefer them (or [`ModelConfig::preset`]).
     ///
     /// `compat` is `None`, so reasoning effort tops out at `high`
@@ -2274,7 +2350,8 @@ impl ModelConfig {
     /// Models: `glm-4.7`, `glm-4.5-air`, `glm-5`, etc. Generic limits: 128K
     /// context, 4,096 output tokens. GLM-5.3 has presets with its real
     /// limits (1M / 128K) — [`glm_5_3`](Self::glm_5_3),
-    /// [`glm_5_3_flash`](Self::glm_5_3_flash); prefer them (or [`ModelConfig::preset`]), which set those too.
+    /// [`glm_5_3_flash`](Self::glm_5_3_flash),
+    /// [`glm_5_3_flashx`](Self::glm_5_3_flashx); prefer them (or [`ModelConfig::preset`]), which set those too.
     pub fn zai(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -2295,11 +2372,13 @@ impl ModelConfig {
         .priced()
     }
 
-    /// Create a new Meta Model API config (Muse Spark).
+    /// Create a new Meta Model API config (Muse Spark, Muse Wonder).
     ///
-    /// Models: `muse-spark-1.1` — 1,048,576-token context; 128K max output
-    /// per Meta's integration examples (no official model card yet). These
-    /// are this constructor's limits for every id; Meta has no named preset.
+    /// Models: `muse-spark-1.1`/`1.2`/`1.3`, `muse-wonder-1.0`. Meta documents
+    /// a 1,048,576-token context for all of them and a 128K max output for
+    /// Muse Spark (in its integration examples); this constructor uses those
+    /// limits for every id, Muse Wonder's output included (unpublished).
+    /// Meta has no named preset.
     /// US-only public preview as of July 2026. OpenAI-compatible endpoint at
     /// `https://api.meta.ai/v1`. Key resolves from `META_API_KEY`, then
     /// Meta's documented `MODEL_API_KEY`.
@@ -2307,12 +2386,18 @@ impl ModelConfig {
     /// Reasoning: Meta's endpoint defaults to `reasoning_effort: medium`
     /// server-side. Set a [`ThinkingLevel`] to
     /// tune it; `Off` omits the field, which means Meta's default (medium)
-    /// applies — not "no reasoning".
+    /// applies — not "no reasoning". The effort ceiling is `High`, so
+    /// `XHigh` and `Max` are sent as `high`, although Meta documents `xhigh`
+    /// for every Muse model and `max` for `muse-wonder-1.0` and
+    /// `muse-spark-1.3`.
     ///
     /// Priced per model id once the process opts in to prices (see
-    /// [`prices`](crate::provider::prices)); the bundled snapshot lists `muse-spark-1.1` and
-    /// `muse-spark-1.2` carry the standard rates (verified 2026-08-19). Any
-    /// other id is `cost: None` — through 0.19 every id got those rates, so
+    /// [`prices`](crate::provider::prices)); the bundled snapshot lists
+    /// `muse-spark-1.1`, `muse-spark-1.2` and `muse-spark-1.3` at the standard
+    /// rates (verified 2026-08-19; 1.3 on 2026-11-01) and `muse-wonder-1.0`
+    /// (in preview; $4 / $20, verified 2026-11-01). Any other id, the
+    /// `-contributor` ids of 1.2 and 1.3 included, is `cost: None` — through
+    /// 0.19 every id got Muse Spark's standard rates, so
     /// `ModelConfig::meta("muse-spark-1.2-contributor", ..)` overstated the
     /// contributor tier (12x lower on input, 21x on output, 75x on cache
     /// reads) badly; now it is unknown until you set `config.cost`. See
@@ -2368,7 +2453,8 @@ impl ModelConfig {
     /// Generic limits: 128K context, 4,096 output tokens. Qwen3.8 has presets
     /// with its real limits (1M / 131,072) —
     /// [`qwen_3_8_max`](Self::qwen_3_8_max),
-    /// [`qwen_3_8_flash`](Self::qwen_3_8_flash); prefer them (or [`ModelConfig::preset`]), which set those too.
+    /// [`qwen_3_8_flash`](Self::qwen_3_8_flash),
+    /// [`qwen_3_8_omni_flash`](Self::qwen_3_8_omni_flash); prefer them (or [`ModelConfig::preset`]), which set those too.
     pub fn qwen(id: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -2540,6 +2626,8 @@ mod tests {
         ("deepseek", "deepseek-v4-pro"),
         ("meta", "muse-spark-1.1"),
         ("meta", "muse-spark-1.2"),
+        ("meta", "muse-spark-1.3"),
+        ("meta", "muse-wonder-1.0"),
     ];
 
     #[test]
@@ -2584,7 +2672,7 @@ mod tests {
                 config.id
             );
         }
-        assert_eq!(keys.len(), 22);
+        assert_eq!(keys.len(), 25);
     }
 
     #[test]
@@ -2917,6 +3005,7 @@ mod tests {
             (ModelConfig::gpt_6_astra(), "gpt-6-astra"),
             (ModelConfig::gpt_6_sol(), "gpt-6-sol"),
             (ModelConfig::gpt_6_1_sol(), "gpt-6.1-sol"),
+            (ModelConfig::gpt_6_1_terra(), "gpt-6.1-terra"),
             (ModelConfig::gpt_6_luna(), "gpt-6-luna"),
         ] {
             assert_eq!(mc.id, id);
@@ -3631,6 +3720,11 @@ mod tests {
             ModelConfig::glm_5_3_flash(),
             ModelConfig::qwen_3_8_max(),
             ModelConfig::qwen_3_8_flash(),
+            ModelConfig::gpt_6_1_terra(),
+            ModelConfig::glm_5_3_flashx(),
+            ModelConfig::qwen_3_8_omni_flash(),
+            ModelConfig::meta("muse-spark-1.3", "Muse Spark 1.3"),
+            ModelConfig::meta("muse-wonder-1.0", "Muse Wonder 1.0"),
         ] {
             let cost = mc.cost.as_ref();
             assert!(

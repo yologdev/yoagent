@@ -311,6 +311,8 @@ fn every_priced_preset_is_an_audited_entry() {
         ModelConfig::gpt_6_luna(),
         ModelConfig::meta("muse-spark-1.1", "Muse Spark 1.1"),
         ModelConfig::meta("muse-spark-1.2", "Muse Spark 1.2"),
+        ModelConfig::meta("muse-spark-1.3", "Muse Spark 1.3"),
+        ModelConfig::meta("muse-wonder-1.0", "Muse Wonder 1.0"),
         ModelConfig::deepseek("deepseek-flash", "DeepSeek Flash"),
         ModelConfig::deepseek("deepseek-v4-flash", "DeepSeek V4 Flash"),
         ModelConfig::deepseek("deepseek-v4-pro", "DeepSeek V4 Pro"),
@@ -325,6 +327,9 @@ fn every_priced_preset_is_an_audited_entry() {
         ModelConfig::glm_5_3_flash(),
         ModelConfig::qwen_3_8_max(),
         ModelConfig::qwen_3_8_flash(),
+        ModelConfig::gpt_6_1_terra(),
+        ModelConfig::glm_5_3_flashx(),
+        ModelConfig::qwen_3_8_omni_flash(),
     ] {
         let entry = table
             .entry(&config.provider, &config.id)
@@ -883,6 +888,11 @@ fn the_audit_logic_runs_offline_against_the_fixture() {
         "gpt-5.5",
         "gpt-6-sol",
         "muse-spark-1.2",
+        "muse-spark-1.3",
+        "muse-wonder-1.0",
+        "gpt-6.1-terra",
+        "glm-5.3-flashx",
+        "qwen3.8-omni-flash",
         "deepseek-flash",
         "deepseek-v4-pro",
         "mistral-large-4",
@@ -907,9 +917,10 @@ fn the_audit_logic_runs_offline_against_the_fixture() {
         o.notes
     );
     // Unlisted cache_write accepted by the allowance: gpt-5.5 base and tier,
-    // Muse Spark 1.2, and the three DeepSeek entries; and Mistral Large 4's,
-    // unset on both sides.
-    assert_eq!(o.absent, 7);
+    // Muse Spark 1.2 and 1.3, Muse Wonder 1.0, and the three DeepSeek
+    // entries; and Mistral Large 4's and Qwen3.8-Omni-Flash's, unset on both
+    // sides.
+    assert_eq!(o.absent, 10);
     // Mistral Large 4's launch sale is over: compared at models.dev's own
     // rate, with no promotion note.
     assert!(

@@ -4,6 +4,14 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+- **Three new model presets and five new priced models** (after `prices::enable_bundled()`), each read from the vendor's own page on 2026-11-01:
+  - `gpt_6_1_terra()` — GPT-6.1 Terra on the Responses API (tool calling requires it), 1,050,000-token context, 64K of 128K output, effort ceiling `max`; $1 / $5, cached $0.05, cache write $1.25, and above 272K prompt tokens $2 / $7.50 / $0.10 / $2.50.
+  - `glm_5_3_flashx()` — GLM-5.3-FlashX, the faster GLM-5.3-Flash (thinking always on, 1M / 128K): $0.37 / $1.25, cached $0.075.
+  - `qwen_3_8_omni_flash()` — Qwen3.8-Omni-Flash (an omni model; yoagent sends it text and images; 1M / 131,072; JSON Schema structured output unsupported): $0.15 / $0.47, cached $0.016, international deployment. Alibaba documents it on the workspace endpoint; that the `dashscope-intl` base URL serves it is unconfirmed — set `base_url` if it does not.
+  - `ModelConfig::meta` prices `muse-spark-1.3` (Muse Spark 1.2's rates) and `muse-wonder-1.0` ($4 / $20, cached $0.20, cache writes at the input rate; in preview). The `-contributor` ids stay unpriced.
+
 ## 0.26.3 (2026-10-30)
 
 Patch release: a Gemini/Vertex streaming fix, no API change. yoagent-rutis (0.10.0) and yoagent-workers (0.3.0) are unchanged.
