@@ -141,6 +141,31 @@ fn pinned() -> Vec<(&'static str, ModelConfig, CostConfig)> {
             ModelConfig::qwen_3_8_flash(),
             flat(0.15, 0.47, 0.016, 0.2),
         ),
+        (
+            "gpt_6_1_terra",
+            ModelConfig::gpt_6_1_terra(),
+            tiered(flat(1.0, 5.0, 0.05, 1.25), 2.0, 7.5, 0.1, 2.5),
+        ),
+        (
+            "glm_5_3_flashx",
+            ModelConfig::glm_5_3_flashx(),
+            read_only(0.37, 1.25, 0.075),
+        ),
+        (
+            "qwen_3_8_omni_flash",
+            ModelConfig::qwen_3_8_omni_flash(),
+            read_only(0.15, 0.47, 0.016),
+        ),
+        (
+            "meta(muse-spark-1.3)",
+            ModelConfig::meta("muse-spark-1.3", "Muse Spark 1.3"),
+            flat(1.25, 4.25, 0.15, 1.25),
+        ),
+        (
+            "meta(muse-wonder-1.0)",
+            ModelConfig::meta("muse-wonder-1.0", "Muse Wonder 1.0"),
+            flat(4.0, 20.0, 0.2, 4.0),
+        ),
     ]
 }
 
@@ -164,12 +189,17 @@ fn expected_max_tokens(name: &str) -> u32 {
         | "claude_opus_4_8" | "claude_sonnet_5" | "gpt_5_5" | "gpt_6_astra" | "gpt_6_sol"
         | "gpt_6_luna" => 64_000,
         "claude_haiku_4_5" => 32_000,
-        "meta(muse-spark-1.1)" | "meta(muse-spark-1.2)" => 131_072,
-        "claude_sonnet_5_5" | "claude_haiku_5_5" | "gpt_6_1_sol" | "grok_4_7" => 64_000,
+        "meta(muse-spark-1.1)"
+        | "meta(muse-spark-1.2)"
+        | "meta(muse-spark-1.3)"
+        | "meta(muse-wonder-1.0)" => 131_072,
+        "claude_sonnet_5_5" | "claude_haiku_5_5" | "gpt_6_1_sol" | "gpt_6_1_terra" | "grok_4_7" => {
+            64_000
+        }
         "gemini_4_argon" | "gemini_3_8_flash" => 65_536,
         "mistral_large_4" => 32_768,
-        "glm_5_3" | "glm_5_3_flash" => 128_000,
-        "qwen_3_8_max" | "qwen_3_8_flash" => 131_072,
+        "glm_5_3" | "glm_5_3_flash" | "glm_5_3_flashx" => 128_000,
+        "qwen_3_8_max" | "qwen_3_8_flash" | "qwen_3_8_omni_flash" => 131_072,
         _ => panic!("unrecognized pinned preset: {name}"),
     }
 }
@@ -180,16 +210,29 @@ fn expected_context_window(name: &str) -> u32 {
     match name {
         "claude_haiku_4_5" => 200_000,
         "gpt_5_5" => 1_000_000,
-        "gpt_6_astra" | "gpt_6_sol" | "gpt_6_1_sol" | "gpt_6_luna" => 1_050_000,
-        "gemini_4_argon" | "gemini_3_8_flash" | "meta(muse-spark-1.1)" | "meta(muse-spark-1.2)" => {
-            1_048_576
-        }
+        "gpt_6_astra" | "gpt_6_sol" | "gpt_6_1_sol" | "gpt_6_1_terra" | "gpt_6_luna" => 1_050_000,
+        "gemini_4_argon"
+        | "gemini_3_8_flash"
+        | "meta(muse-spark-1.1)"
+        | "meta(muse-spark-1.2)"
+        | "meta(muse-spark-1.3)"
+        | "meta(muse-wonder-1.0)" => 1_048_576,
         "grok_4_7" => 500_000,
-        "claude_fable_5" | "claude_fable_5_1" | "claude_opus_5_5" | "claude_opus_5"
-        | "claude_opus_4_8" | "claude_sonnet_5" | "claude_sonnet_5_5" | "claude_haiku_5_5"
-        | "mistral_large_4" | "glm_5_3" | "glm_5_3_flash" | "qwen_3_8_max" | "qwen_3_8_flash" => {
-            1_000_000
-        }
+        "claude_fable_5"
+        | "claude_fable_5_1"
+        | "claude_opus_5_5"
+        | "claude_opus_5"
+        | "claude_opus_4_8"
+        | "claude_sonnet_5"
+        | "claude_sonnet_5_5"
+        | "claude_haiku_5_5"
+        | "mistral_large_4"
+        | "glm_5_3"
+        | "glm_5_3_flash"
+        | "glm_5_3_flashx"
+        | "qwen_3_8_max"
+        | "qwen_3_8_flash"
+        | "qwen_3_8_omni_flash" => 1_000_000,
         _ => panic!("unrecognized pinned preset: {name}"),
     }
 }
@@ -215,7 +258,9 @@ fn always_thinking_presets_are_marked_reasoning() {
         ModelConfig::grok_4_7(),
         ModelConfig::glm_5_3(),
         ModelConfig::glm_5_3_flash(),
+        ModelConfig::glm_5_3_flashx(),
         ModelConfig::gpt_6_1_sol(),
+        ModelConfig::gpt_6_1_terra(),
     ] {
         assert!(config.reasoning, "{}", config.id);
     }

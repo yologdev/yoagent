@@ -53,7 +53,7 @@ pub struct OpenAiCompat {
 | Mistral | `OpenAiCompat::mistral()` | `max_tokens` field |
 | DeepSeek | `OpenAiCompat::deepseek()` | `max_tokens`, `thinking`, `reasoning_effort`, 1M context window |
 | MiniMax | `OpenAiCompat::minimax()` | Standard defaults, 1M context window |
-| Meta (Muse Spark) | `OpenAiCompat::meta()` | `max_completion_tokens`, `reasoning_effort`, streaming usage |
+| Meta (Muse Spark, Muse Wonder) | `OpenAiCompat::meta()` | `max_completion_tokens`, `reasoning_effort`, streaming usage |
 | Z.ai (Zhipu) | `OpenAiCompat::zai()` | Standard defaults |
 | Qwen | `OpenAiCompat::qwen()` | Qwen reasoning content format, `max_tokens`, streaming usage |
 | Ollama | `OpenAiCompat::ollama()` | Inserts an empty assistant message after tool result runs |

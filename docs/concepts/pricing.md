@@ -186,9 +186,10 @@ every lookup is `None`. Once it has:
 - **Named presets** (`claude_fable_5`, `claude_fable_5_1`, `claude_opus_5_5`,
   `claude_opus_5`, `claude_opus_4_8`, `claude_sonnet_5`, `claude_sonnet_5_5`,
   `claude_haiku_5_5`, `claude_haiku_4_5`, `gpt_5_5`, `gpt_6_astra`,
-  `gpt_6_sol`, `gpt_6_1_sol`, `gpt_6_luna`, `gemini_4_argon`,
-  `gemini_3_8_flash`, `grok_4_7`, `mistral_large_4`, `glm_5_3`,
-  `glm_5_3_flash`, `qwen_3_8_max`, `qwen_3_8_flash`) are all listed in the
+  `gpt_6_sol`, `gpt_6_1_sol`, `gpt_6_1_terra`, `gpt_6_luna`,
+  `gemini_4_argon`, `gemini_3_8_flash`, `grok_4_7`, `mistral_large_4`,
+  `glm_5_3`, `glm_5_3_flash`, `glm_5_3_flashx`, `qwen_3_8_max`,
+  `qwen_3_8_flash`, `qwen_3_8_omni_flash`) are all listed in the
   bundled snapshot. Two carry the **regular** rate during a vendor
   promotion (`gemini_4_argon` to 2026-11-30, `gemini_3_8_flash` to
   2026-12-31), so their costs read up to twice the bill until it ends — an upper bound, like DeepSeek's peak rate.
@@ -200,9 +201,10 @@ every lookup is `None`. Once it has:
   provider `openai`), `google`, `xai`, `groq`, `deepseek`, `mistral`, `zai`,
   `minimax`, `qwen`, `meta` — return `Some` when the table lists the id and
   `None` otherwise. `ModelConfig::anthropic("claude-sonnet-5", ..)` is priced
-  exactly like `claude_sonnet_5()`; `meta` prices `muse-spark-1.1` and
-  `muse-spark-1.2` and leaves any other id (the far cheaper contributor tier,
-  say) unknown. `deepseek` prices `deepseek-flash`, `deepseek-v4-pro` and the
+  exactly like `claude_sonnet_5()`; `meta` prices `muse-spark-1.1`,
+  `muse-spark-1.2`, `muse-spark-1.3` and `muse-wonder-1.0` and leaves any
+  other id (the far cheaper contributor tier, say) unknown.
+  `deepseek` prices `deepseek-flash`, `deepseek-v4-pro` and the
   legacy `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` (see below).
 - **Gateways and custom endpoints** — `custom`, `openai_compat`, `local`,
   `ollama`, `opencode_zen`, `opencode_go`, `mock` — are always `None`, even
