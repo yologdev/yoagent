@@ -5,7 +5,7 @@ description: Use when building, extending or upgrading an agent on the yoagent R
 
 # yoagent: which feature for which job
 
-Written for **yoagent 0.26.3** (and yoagent-rutis 0.10.0); the recipes
+Written for **yoagent 0.26.4** (and yoagent-rutis 0.11.0); the recipes
 below are compiled by `tests/skill_test.rs`, line for line. Check what you
 build against: `cargo tree -p yoagent` or `Cargo.lock`. If you are on an
 older version, read [What changed](#what-changed) first.
@@ -206,6 +206,9 @@ and its examples.
 
 Newest first; the full list is `CHANGELOG.md`.
 
+- **0.26.4** — presets `gpt_6_1_terra()`, `glm_5_3_flashx()`,
+  `qwen_3_8_omni_flash()`; `ModelConfig::meta` prices `muse-spark-1.3` and
+  `muse-wonder-1.0` (after `prices::enable_bundled()`). No API change.
 - **0.26.3** — Gemini and Vertex keep text, thinking and tool arguments
   intact when an HTTP chunk ends inside a UTF-8 character (Chinese, emoji
   came back as U+FFFD); their SSE parser now scans each event once.
@@ -324,6 +327,15 @@ Newest first; the full list is `CHANGELOG.md`.
 - **0.24.2** — built-in tool sandbox fixes (path escapes, `search` flag
   injection, Gemini key out of the URL, tool panics contained).
 - **0.24.1** — `retry_safe_events`.
+- **yoagent-rutis 0.11.0** (breaking) — rutis 0.19.3: move the npm /
+  PyPI (Python 3.12+) / Go runtimes to 0.19.3 with it; 0.12 runtimes are
+  refused at the handshake. The `node` / `python` / `bun` / `go` features
+  no longer start runtimes: start each with rutis-host's `SpawnPlugin` and
+  resolve rows with rutis-loader's `SessionResolver` (the CHANGELOG has the
+  before/after). `rows::wait_running(loader, ids, timeout)`. Agent events
+  no longer go on the rutis bus: `ctx.on::<AgentEventEmitted>` no longer
+  compiles — use `on_agent_event`. A restricted runtime's plugins are
+  restricted from their first call.
 - **yoagent-rutis 0.10.0** — requires yoagent 0.26; no other change.
 - **yoagent-rutis 0.9.0** — restricted runtimes: `bridge.restrict_runtime(handle)`
   before a runtime starts makes its plugins tools only (their tools as
