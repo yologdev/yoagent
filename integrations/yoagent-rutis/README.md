@@ -124,7 +124,7 @@ service `yoagent`:
 | *(default)* | Rust plugins only |
 | `node` | TypeScript / JavaScript plugins in local Node runtimes (Node 22.19+, Linux/macOS) |
 | `bun` | the same TypeScript / JavaScript plugins in local Bun runtimes (Bun 1.4+, Linux/macOS): rows `bun:<module>`, no build step; local only — rutis's Bun runtime cannot listen remotely yet |
-| `python` | Python plugins in local Python runtimes (Python 3.10+, Linux/macOS) |
+| `python` | Python plugins in local Python runtimes (Python 3.12+, Linux/macOS) |
 | `go` | Go plugins built with the rutis Go SDK (Go 1.24+, Linux/macOS): each binary is a runtime, started when a `go:<plugin>` row needs it (rutis-loader's `GoResolver` / `GoRuntimes`). A handler is a map of Go functions; a hook's `context.Context` is cancelled when the host gives the call up, as a JavaScript hook's `signal` aborts — see [`plugins/go/main.go`](plugins/go/main.go) |
 | `websocket` | runtimes and nodes on other machines, over `wss` |
 | `loader` | `rows::wait_running`: wait until the plugin rows a host loaded with rutis-loader run — `reconcile` counts a row still waiting as settled, and since rutis 0.12 a row injecting a service nobody provides waits for good — and name, per row still waiting, the services it injects that do not exist |
@@ -268,8 +268,8 @@ def apply(ctx, config):
   [rutis-loader](https://crates.io/crates/rutis-loader) rows, whose catalog
   must share `yoagent` (rutis 0.12's `ServiceCatalog::new()` shares every
   name; after `share_registered_only()`, `catalog.register_shared("yoagent")`). [`examples/language_plugins.rs`](examples/language_plugins.rs)
-  is a complete host: `npm ci` in `plugins/`, a Python 3.10+ with
-  `rutis==0.12.0` in `plugins/.venv`, then
+  is a complete host: `npm ci` in `plugins/`, a Python 3.12+ with
+  `pip install -r plugins/requirements.txt` in `plugins/.venv`, then
   `cargo run --features node,python --example language_plugins`.
 
 ### Remote handlers: latency and trust

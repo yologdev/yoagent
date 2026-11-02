@@ -16,6 +16,25 @@ use yoagent::provider::{
 };
 use yoagent::*;
 
+/// The rutis release train the npm and PyPI runtimes are pinned to
+/// (`plugins/package-lock.json`, `plugins/requirements.txt`), as the
+/// handshake requires: one version on both sides.
+pub const RUNTIME_TRAIN: &str = "0.19.3";
+
+/// `version` (an installed runtime package's) is on [`RUNTIME_TRAIN`]'s
+/// minor at or after its patch: 0.19.0–0.19.2 named rutis's own services
+/// `loader`/`sessions`, which DSH's `sessions` clashes with.
+pub fn on_runtime_train(version: &str) -> bool {
+    let parse = |v: &str| -> Option<(u32, u32, u32)> {
+        let mut parts = v.split(['.', '-', '+']).map(|n| n.parse::<u32>().ok());
+        Some((parts.next()??, parts.next()??, parts.next()??))
+    };
+    match (parse(version), parse(RUNTIME_TRAIN)) {
+        (Some((a, b, c)), Some((x, y, z))) => (a, b) == (x, y) && c >= z,
+        _ => false,
+    }
+}
+
 /// One request as the provider received it.
 #[derive(Debug, Clone)]
 pub struct Seen {

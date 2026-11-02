@@ -1,15 +1,15 @@
 //! TypeScript and Python plugins, end to end: real Node, Bun and Python
-//! runtimes (rutis-bridge 0.12), loaded as rows by rutis-loader, registering
+//! runtimes (rutis 0.19.3), loaded as rows by rutis-loader, registering
 //! handlers through the `yoagent` host service. The TypeScript fixtures run
 //! on Node and, for the hooks, fail-closed policies and cancel handles, on
 //! Bun too.
 //!
 //! Needs Node 22.19+ with `npm ci` run in `plugins/` (for `@arcships/rutis` and
-//! `@arcships/rutis-runtime` 0.12.0), and Python 3.10+ with `rutis` 0.12 —
+//! `@arcships/rutis-runtime` 0.19.3), and Python 3.12+ with `rutis` 0.19.3 —
 //! `plugins/.venv/bin/python` (`uv venv plugins/.venv --python 3.12 && uv pip
-//! install --python plugins/.venv/bin/python rutis==0.12.0`), or the
+//! install --python plugins/.venv/bin/python -r plugins/requirements.txt`), or the
 //! interpreter in `YOAGENT_RUTIS_PYTHON`; Bun 1.4+ (`YOAGENT_RUTIS_BUN`, else
-//! `bun` on `PATH`) with `@arcships/rutis-bun` 0.12 from that `npm ci`. A test
+//! `bun` on `PATH`) with `@arcships/rutis-bun` 0.19.3 from that `npm ci`. A test
 //! whose runtime is missing
 //! prints why and passes; set `YOAGENT_RUTIS_REQUIRE_RUNTIMES=1` (CI does) to
 //! make a missing runtime fail instead.
@@ -84,11 +84,11 @@ fn node_runtime() -> Option<PathBuf> {
         .and_then(|text| serde_json::from_str::<Value>(&text).ok())
         .and_then(|manifest| manifest["version"].as_str().map(str::to_owned));
     match installed {
-        Some(version) if version.starts_with("0.12.") => Some(runtime),
+        Some(version) if on_runtime_train(&version) => Some(runtime),
         Some(version) => skip(
             "Node",
             format!(
-                "{} is {version}, 0.12 needed: run `npm ci` in plugins/",
+                "{} is {version}, {RUNTIME_TRAIN} needed: run `npm ci` in plugins/",
                 runtime.display()
             ),
         ),
@@ -111,12 +111,12 @@ fn bun_runtime() -> Option<(PathBuf, PathBuf)> {
         .and_then(|text| serde_json::from_str::<Value>(&text).ok())
         .and_then(|manifest| manifest["version"].as_str().map(str::to_owned));
     match installed {
-        Some(version) if version.starts_with("0.12.") => {}
+        Some(version) if on_runtime_train(&version) => {}
         Some(version) => {
             return skip(
                 "Bun",
                 format!(
-                    "{} is {version}, 0.12 needed: run `npm ci` in plugins/",
+                    "{} is {version}, {RUNTIME_TRAIN} needed: run `npm ci` in plugins/",
                     package.display()
                 ),
             )
@@ -158,7 +158,7 @@ fn bun_runtime() -> Option<(PathBuf, PathBuf)> {
     }
 }
 
-/// A Python 3.10+ interpreter with rutis 0.12.
+/// A Python 3.12+ interpreter (rutis 0.19's floor) with rutis on the train.
 fn python() -> Option<PathBuf> {
     let python = std::env::var_os("YOAGENT_RUTIS_PYTHON")
         .map(PathBuf::from)
@@ -167,18 +167,18 @@ fn python() -> Option<PathBuf> {
         .args([
             "-c",
             "import sys, importlib.metadata as m; \
-             print(sys.version_info >= (3, 10), m.version('rutis'))",
+             print(sys.version_info >= (3, 12), m.version('rutis'))",
         ])
         .output();
     match probe {
         Ok(out) if out.status.success() => {
             let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
             match text.split_once(' ') {
-                Some(("True", version)) if version.starts_with("0.12.") => Some(python),
+                Some(("True", version)) if on_runtime_train(version) => Some(python),
                 _ => skip(
                     "Python",
                     format!(
-                        "{} reports `{text}`: Python 3.10+ and rutis 0.12 needed",
+                        "{} reports `{text}`: Python 3.12+ and rutis {RUNTIME_TRAIN} needed",
                         python.display()
                     ),
                 ),

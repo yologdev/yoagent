@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/arcships/rutis/go/rutis"
+	"github.com/arcships/rutis/go/rutis/advanced"
 )
 
 type Config struct {
@@ -49,7 +50,7 @@ var Plugin = rutis.Define(rutis.Plugin[Config]{
 	Name:   "go-policy",
 	Inject: []string{"yoagent"},
 	Apply: func(ctx *rutis.Ctx, config Config) error {
-		var yoagent rutis.Service
+		var yoagent advanced.Service
 		if err := ctx.Use("yoagent", &yoagent); err != nil {
 			return err
 		}
@@ -99,7 +100,7 @@ var Plugin = rutis.Define(rutis.Plugin[Config]{
 				return fmt.Sprintf("go says %v", c["args"]), nil
 			},
 		}
-		var dispose *rutis.Function
+		var dispose *advanced.Function
 		if err := yoagent.Call(ctx, "register", &dispose, "go-policy", handler); err != nil {
 			return err
 		}

@@ -88,9 +88,9 @@ fn node_runtime() -> Option<PathBuf> {
         .ok()
         .and_then(|m| m["version"].as_str().map(str::to_owned))
         .unwrap_or_default();
-    if !version.starts_with("0.12.") {
+    if !on_runtime_train(&version) {
         return skip(format!(
-            "@arcships/rutis-runtime is {version:?}, 0.12 needed: run `npm ci` in plugins/dsh/"
+            "@arcships/rutis-runtime is {version:?}, {RUNTIME_TRAIN} needed: run `npm ci` in plugins/dsh/"
         ));
     }
     Some(runtime)
