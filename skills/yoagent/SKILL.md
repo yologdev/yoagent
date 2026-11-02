@@ -5,7 +5,7 @@ description: Use when building, extending or upgrading an agent on the yoagent R
 
 # yoagent: which feature for which job
 
-Written for **yoagent 0.26.5** (and yoagent-rutis 0.12.0); the recipes
+Written for **yoagent 0.26.6** (and yoagent-rutis 0.12.0); the recipes
 below are compiled by `tests/skill_test.rs`, line for line. Check what you
 build against: `cargo tree -p yoagent` or `Cargo.lock`. If you are on an
 older version, read [What changed](#what-changed) first.
@@ -208,6 +208,12 @@ and its examples.
 
 Newest first; the full list is `CHANGELOG.md`.
 
+- **0.26.6** — MCP over HTTP: `HttpTransport::with_authorization(Arc<dyn
+  AuthorizationSource>)` asks for the `Authorization` value per request and,
+  on a 401, lets the source refresh it (`challenged`) — the request is sent
+  once more on the same session; `McpError::Http` carries the server's
+  `WWW-Authenticate` (`err.www_authenticate()`) on 401/403. Credential
+  headers set with `with_header` are now redacted from quoted server text.
 - **0.26.5** — `max_total_tokens` can count what a run adds to the
   conversation instead of every resent prompt:
   `ExecutionLimits::with_token_accounting(TokenAccounting::Growth)` (the
