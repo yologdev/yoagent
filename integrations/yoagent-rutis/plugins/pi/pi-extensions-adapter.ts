@@ -1010,8 +1010,8 @@ function text(content: Block[] | undefined): string {
 }
 
 /**
- * Most base64 one result may carry in images: rutis (0.9) closes the channel
- * on a message over 16 MiB, which would end this runtime and every plugin in it.
+ * Most base64 one result may carry in images: rutis refuses a message over
+ * 16 MiB (the call fails), so the images past it are named in text instead.
  */
 const MAX_RESULT_IMAGE_CHARS = 12 * 1024 * 1024
 
@@ -1108,8 +1108,8 @@ export default definePlugin<Config>({
   },
   async apply(ctx, config) {
     const yoagent = ctx.use<Yoagent>('yoagent')
-    // rutis gives every service method a stand-in, one that throws when the
-    // host lacks it: so `log` is called, and a throw or a rejection falls back.
+    // `log` never rejects; a call refused all the same (its session
+    // closing) falls back, rather than fail this row unhandled.
     report = (level, message) => {
       try {
         yoagent.log?.(level, message)?.catch(() => console.warn(message))

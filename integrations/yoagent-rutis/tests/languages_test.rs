@@ -1797,9 +1797,10 @@ export default definePlugin({
 })
 "#;
 
-/// rutis (since 0.9) closes a local channel on a message over 16 MiB, ending the
-/// runtime. A conversation holding more than that in images still reaches a
-/// handler that reads it — the images as text — and the runtime lives on.
+/// rutis refuses a message over 16 MiB (since 0.17.2 it fails only that
+/// call). A conversation holding more than that in images still reaches a
+/// handler that reads it — the images as text, not a failed hook — and the
+/// runtime lives on.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_conversation_over_the_message_limit_reaches_a_plugin_without_its_images() {
     let Some(node) = node_runtime() else {

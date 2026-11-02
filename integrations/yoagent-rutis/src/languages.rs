@@ -182,7 +182,8 @@ const MAX_LOG_CHARS: usize = 8 * 1024;
 /// a log viewer — can attribute the line to its run.
 ///
 /// **Never fails.** A plugin calls it fire-and-forget, and a rejected call
-/// it does not catch would end its runtime process. So any value is taken:
+/// it does not catch fails its row (rutis 0.18: an unhandled rejection
+/// fails the row it came from). So any value is taken:
 /// a non-string message is written as JSON, other context fields (a whole
 /// hook argument, say) are ignored, a missing argument is empty, and one with
 /// no JSON form (a `Date`, a `Map`) is empty too, keeping the others in place.
@@ -558,10 +559,12 @@ impl Target {
     }
 }
 
-/// The most a call's arguments may take, serialized. rutis (0.9) closes a
-/// local channel on a message over 16 MiB (`MAX_MESSAGE`; websockets have the
-/// same default), which ends the runtime's session and every plugin in it;
-/// 1 MiB is left for the call's envelope.
+/// The most a call's arguments may take, serialized. rutis refuses a message
+/// over 16 MiB (`MAX_MESSAGE`; websockets have the same default): since
+/// 0.17.2 only that call fails (`bad-value`), the runtime lives on. Under
+/// this limit — 1 MiB is left for the call's envelope — a conversation or an
+/// event still reaches the plugin, its images as text, instead of the hook
+/// failing.
 const MAX_SEND: usize = 15 * 1024 * 1024;
 
 /// What [`fit`] does with arguments over [`MAX_SEND`].
@@ -579,9 +582,10 @@ enum Oversize {
     Refuse,
 }
 
-/// `args` within [`MAX_SEND`], or an error naming the hook. The error fails
-/// the hook as any plugin failure does: a policy denies, a redaction
-/// withholds, a tool call fails.
+/// `args` within [`MAX_SEND`], or an error naming the hook and the size
+/// (what rutis would refuse anyway, said before the message is built). The
+/// error fails the hook as any plugin failure does: a policy denies, a
+/// redaction withholds, a tool call fails.
 fn fit(hook: &str, mut args: Vec<Json>, oversize: Oversize) -> Result<Vec<Json>, ExtensionError> {
     let size = |args: &[Json]| serde_json::to_vec(args).map_or(usize::MAX, |bytes| bytes.len());
     let before = size(&args);
@@ -1267,8 +1271,8 @@ const IMAGE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/w
 
 /// Largest image a plugin may hand over, decoded. Keeps one image under
 /// rutis's 16 MiB message limit once base64-encoded — the whole answer must
-/// stay under it too, or the channel closes; providers may take less
-/// (Anthropic: 5 MB) — plugins should stay under theirs.
+/// stay under it too, or rutis fails the call (`bad-value`); providers may
+/// take less (Anthropic: 5 MB) — plugins should stay under theirs.
 const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 
 /// A handler's content blocks — `{"type": "text", "text"}` and
