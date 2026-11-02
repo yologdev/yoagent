@@ -12,6 +12,48 @@ adheres to [Semantic Versioning](https://semver.org/).
   - `qwen_3_8_omni_flash()` — Qwen3.8-Omni-Flash (an omni model; yoagent sends it text and images; 1M / 131,072; JSON Schema structured output unsupported): $0.15 / $0.47, cached $0.016, international deployment. Alibaba documents it on the workspace endpoint; that the `dashscope-intl` base URL serves it is unconfirmed — set `base_url` if it does not.
   - `ModelConfig::meta` prices `muse-spark-1.3` (Muse Spark 1.2's rates) and `muse-wonder-1.0` ($4 / $20, cached $0.20, cache writes at the input rate; in preview). The `-contributor` ids stay unpriced.
 
+## yoagent-rutis Unreleased
+
+yoagent-rutis only (to ship as 0.11.0); requires rutis 0.19.3 or a later 0.19, yoagent 0.26 and Rust 1.88. Breaking: rutis 0.19 (its types are in this crate's API), runtimes the host starts itself, and `rows::wait_running`'s signature.
+
+- **rutis 0.19.3** (from 0.12). `rutis`, `rutis-bridge` and `rutis-loader` 0.19.3, plus `rutis-host` 0.19.3 (for the `probe` feature); the runtimes move with them: npm `@arcships/rutis`, `@arcships/rutis-runtime`, `@arcships/rutis-bun` 0.19.3, PyPI `rutis` 0.19.3 (**Python 3.12+**, was 3.10+), Go module `github.com/arcships/rutis/go/rutis` v0.19.3 (Go 1.24+). rutis 0.13 and 0.19 changed the protocol: a 0.12 runtime and a 0.19 host refuse each other at the handshake. Not 0.19.0–0.19.2: they named rutis's own services `loader` / `sessions`, which clash with the DSH `sessions` service the DSH host injects (0.19.3 renamed them `rutis/loader` / `rutis/sessions`). Rust plugins follow rutis 0.17's API (`rutis::host::*`, `rutis::Error` / `ErrorKind`, the typed `Plugin` with `type Deps = Arc<Registry>` to wait for the bridge; `rutis-migrate` 0.18 automates most of it).
+- **The language features no longer start runtimes.** rutis-bridge 0.19 carries no language: `node`, `python`, `bun` and `go` each enable only the bridge's `yoagent` host service and `restrict_runtime` (`websocket` also rutis-bridge's WebSocket transport). A host starts each runtime itself with rutis-host's `SpawnPlugin` and resolves rows on them with rutis-loader's `SessionResolver`. Before (0.12):
+
+  ```rust
+  let node = LocalRuntime::node(&runtime_dir, package_json);
+  let rows = Arc::new(RuntimeResolver::node(node.handle()).with_catalog(&catalog));
+  root.plugin(node);
+  let loader = LoaderPlugin::new(Chain::new().with_shared(rows.clone()), options);
+  root.plugin(loader).await?;
+  root.plugin(RuntimeRowsPlugin::new(rows));
+  ```
+
+  After (0.19; add `rutis-host = "0.19.3"`):
+
+  ```rust
+  root.provide(LocalId(PeerId::new("main")?))?; // the id the host greets its runtimes with
+  let node = SpawnPlugin::new("node", languages::node::launcher(&runtime_dir), package_json);
+  let runtime = node.handle();
+  let sessions = Arc::new(SessionResolver::npm(&catalog, "node"));
+  sessions.runtime(node.handle());
+  root.plugin(node);
+  let loader = LoaderPlugin::new(Chain::new().with_shared(sessions.clone()), options);
+  sessions.attach(&loader.handle());
+  root.plugin(loader).await?;
+  sessions.follow_row("node");
+  runtime.ready().await.ok_or("the Node runtime did not start")?; // `reconcile` no longer waits for it
+  ```
+
+  Python: `SpawnPlugin::new("py", languages::python::launcher(&modules), &modules).interpreter(&python)`; Bun: `languages::bun::launcher(bun, package, project)`; Go binaries: rutis-loader's `BinaryResolver::<Go>` / `BinaryRuntimes::<Go>` with a closure that builds each runtime's `SpawnPlugin`. `restrict_runtime` takes the `SpawnPlugin`'s handle. A remote runtime is a session over rutis-bridge's `websocket::dial` (or a `rutis-host/dial` row). `ServiceCatalog::share_registered_only()` is gone; `register_shared("yoagent")` as before. The probe does all of this itself and now pulls rutis-host (with its WebSocket transport and rustls).
+- **`rows::wait_running(loader, ids, timeout)`** (was `(loader, ctx, layers, ids, timeout)`). A waiting row's `missing` is now the services it waits for as rutis-loader's `Loader::waits` reports them, and its `note` the loader's own line on why each is not there (`waiting for db (no row provides it)`, `waiting for runtime node (starting)` — what `rutis-host status` prints); `Display` prints the note. The final `Loader::check` (bounded at 10 s) and the per-name lookup are gone.
+- **Behaviour changes from rutis, accepted:**
+  - Bus listeners of `AgentEventEmitted` run **concurrently** (rutis 0.13+): one event name's calls start in emit order at every listener, so an observer acting as its call starts still sees a run's events in order; one that awaits before acting may finish them in another order. A slow listener no longer holds back later events on the bus. Events are serde (`ctx.emit` / `ctx.on`) and reach listeners in other processes.
+  - A row's configuration is checked against its plugin's `Schema` before `apply` (rutis 0.18): a mistyped pi adapter config (`exec`, `projectTrustedFor`) fails the row with `bad-config` (`config: exec should be …`) before the adapter's own checks.
+  - A row cannot emit during its own cleanup (rutis 0.13+ withdraws it from the bus first). The DSH host stand-in closed its open DSH turn on unload through DSH's `session/event`, so the session log ended at `turn/start`; it now writes the closing `turn/end` through a write handle of its own once the generation's has drained, unless the log has it already.
+  - A message over 16 MiB fails only that call (`bad-value`, rutis 0.17.2), not the whole runtime; an unhandled rejection in a plugin fails its row (rutis 0.18), not the process. The bridge's image stripping and the adapters' 12 MiB image budget stay: they degrade a call rather than fail it.
+- **Cleanups the new rutis allows:** the `yoagent` service refuses bad `register` arguments with rutis's `bad-argument` code and an unknown method with `no-method` (was `bad-value`; messages unchanged), so a plugin can tell them apart by `error.code`; the host reads as closed from `Ctx::is_shutting_down()` and the generation token instead of the root fiber's state; the probe builds its root with `Ctx::root_with_sink`, so rutis's reports about its rows go to `tracing` (warn, target `yoagent_rutis::rutis`) instead of stderr; the bridge's own cleanups use the stable `Ctx::effect` (rutis 0.17 left `effect_named` in its unstable `internal` module). The rutis-agent example moves to rutis-agent at tag v0.19.3 (still unpublished; `[patch.crates-io] rutis` at the same tag).
+- **Unchanged:** a missing Python hook is still detected by its `AttributeError` (rutis 0.19 reads a property with a plain `getattr`, which carries no `no-method` code); the probe's DSH service check (`probe-services.ts`) still reads services inside the runtime, which `Loader::waits` cannot see.
+
 ## 0.26.3 (2026-10-30)
 
 Patch release: a Gemini/Vertex streaming fix, no API change. yoagent-rutis (0.10.0) and yoagent-workers (0.3.0) are unchanged.

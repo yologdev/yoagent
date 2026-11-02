@@ -4,7 +4,7 @@ Extend [yoagent](https://crates.io/crates/yoagent) agents at runtime with
 [rutis](https://crates.io/crates/rutis) plugins — in Rust, TypeScript (on
 Node or Bun), Python or Go — through one yoagent `Extension`.
 
-**Status:** on [crates.io](https://crates.io/crates/yoagent-rutis); needs yoagent's `Extension`: yoagent 0.26 (yoagent-rutis 0.10). The DSH and pi adapters below cover tools, tool policies, input checks, prompt additions and images; commands, dialogs and UI belong to the app and are not mapped.
+**Status:** on [crates.io](https://crates.io/crates/yoagent-rutis); needs yoagent's `Extension`: yoagent 0.26 (yoagent-rutis 0.10 and later), and rutis 0.19.3 or a later 0.19. The DSH and pi adapters below cover tools, tool policies, input checks, prompt additions and images; commands, dialogs and UI belong to the app and are not mapped.
 
 rutis (a Rust port of the [Cordis](https://github.com/shigma/cordis) plugin
 kernel) loads, unloads, reloads and hot-updates plugins, and tears down
@@ -31,10 +31,12 @@ contribute to live agents:
 Every event is also published on the rutis bus as `AgentEventEmitted`.
 
 yoagent does not depend on rutis; this crate uses only yoagent's public API.
-It depends on `rutis = "0.12"` (0.x caret: any 0.12.x, never 0.13) and, with a
-language feature, `rutis-bridge = "0.12"`: since 0.8 the packages in rutis's
-release train share one version. rutis types are part of this crate's API,
-so every rutis or rutis-bridge minor bump is a yoagent-rutis minor bump.
+It depends on `rutis = "0.19.3"` (0.x caret: any 0.19.x from 0.19.3, never
+0.20; 0.19.0–0.19.2 named rutis's own services `loader` / `sessions`, which
+clash with DSH's) and, with a language feature, `rutis-bridge = "0.19.3"`:
+since 0.8 the packages in rutis's release train share one version. rutis
+types are part of this crate's API, so every rutis or rutis-bridge minor bump
+is a yoagent-rutis minor bump.
 
 ## Host
 
@@ -101,11 +103,10 @@ a future of `Result<_, ExtensionError>`. Arguments are plain data:
 decisions are yoagent's (`ToolDecision`, `TurnDecision`, `InputDecision`,
 `StopDecision`).
 
-For per-generation state or config, implement `rutis::Plugin` (or
-`PluginFactory`), build the `Handler` in `apply`, and register it with
-`ctx.register_handler(handler)` (`PluginCtxExt`; also `provide_tool` and
-`on_agent_event`). Declare `TypeKey::of::<Registry>()` in `injects` so the
-plugin waits for the bridge.
+For per-generation state or config, implement `rutis::Plugin` with
+`type Deps = Arc<Registry>` (so the plugin waits for the bridge), build the
+`Handler` in `apply`, and register it with `ctx.register_handler(handler)`
+(`PluginCtxExt`; also `provide_tool` and `on_agent_event`).
 
 Runnable offline: `cargo run --example policy_plugin` from this directory, or
 with `--manifest-path integrations/yoagent-rutis/Cargo.toml` from the repo
@@ -116,23 +117,63 @@ calls per tool, and a redactor).
 
 With a language feature, `RutisBridge::install` also provides the registry
 to plugins in other languages, through
-[rutis-bridge](https://crates.io/crates/rutis-bridge) 0.12, as the host
-service `yoagent`:
+[rutis-bridge](https://crates.io/crates/rutis-bridge) 0.19, as the host
+service `yoagent`. Since rutis 0.19 the bridge carries no language: `node`,
+`bun`, `python` and `go` each enable the same thing — the `yoagent` service
+and `restrict_runtime` — and the **host starts the runtimes**, with
+[rutis-host](https://crates.io/crates/rutis-host)'s `SpawnPlugin` and its
+`languages::*::launcher`s (below). The runtime a feature is named for:
 
-| Feature | Adds (rutis-bridge feature of the same name) |
+| Feature | For |
 |---|---|
 | *(default)* | Rust plugins only |
-| `node` | TypeScript / JavaScript plugins in local Node runtimes (Node 22.19+, Linux/macOS) |
-| `bun` | the same TypeScript / JavaScript plugins in local Bun runtimes (Bun 1.4+, Linux/macOS): rows `bun:<module>`, no build step; local only — rutis's Bun runtime cannot listen remotely yet |
-| `python` | Python plugins in local Python runtimes (Python 3.12+, Linux/macOS) |
-| `go` | Go plugins built with the rutis Go SDK (Go 1.24+, Linux/macOS): each binary is a runtime, started when a `go:<plugin>` row needs it (rutis-loader's `GoResolver` / `GoRuntimes`). A handler is a map of Go functions; a hook's `context.Context` is cancelled when the host gives the call up, as a JavaScript hook's `signal` aborts — see [`plugins/go/main.go`](plugins/go/main.go) |
-| `websocket` | runtimes and nodes on other machines, over `wss` |
-| `loader` | `rows::wait_running`: wait until the plugin rows a host loaded with rutis-loader run — `reconcile` counts a row still waiting as settled, and since rutis 0.12 a row injecting a service nobody provides waits for good — and name, per row still waiting, the services it injects that do not exist |
-| `probe` | `probe::pi` / `probe::dsh` (and `pi_with` / `dsh_with`): load a pi or DSH package through its adapter and report what an agent gets, without calling a tool or a model — see [Tools from other agent ecosystems](#tools-from-other-agent-ecosystems) (Linux/macOS; includes `node` and `loader`) |
+| `node` | TypeScript / JavaScript plugins in local Node runtimes (Node 22.19+, `@arcships/rutis-runtime` 0.19.3, Linux/macOS) |
+| `bun` | the same TypeScript / JavaScript plugins in local Bun runtimes (Bun 1.4+, `@arcships/rutis-bun` 0.19.3, Linux/macOS): rows `bun:<module>`, no build step; local only — rutis's Bun runtime cannot listen remotely yet |
+| `python` | Python plugins in local Python runtimes (Python 3.12+, PyPI `rutis` 0.19.3, Linux/macOS) |
+| `go` | Go plugins built with the rutis Go SDK (Go 1.24+, `github.com/arcships/rutis/go/rutis` v0.19.3, Linux/macOS): each binary is a runtime, started when a `go:<plugin>` row needs it (rutis-loader's `BinaryResolver::<Go>` / `BinaryRuntimes::<Go>`, each runtime a `SpawnPlugin` — see [`tests/go_test.rs`](tests/go_test.rs)). A handler is a map of Go functions; a hook's `context.Context` is cancelled when the host gives the call up, as a JavaScript hook's `signal` aborts — see [`plugins/go/main.go`](plugins/go/main.go) |
+| `websocket` | runtimes and nodes on other machines, over `wss`: also rutis-bridge's WebSocket transport (`websocket::dial` / `listen`) |
+| `loader` | `rows::wait_running`: wait until the plugin rows a host loaded with rutis-loader run — `reconcile` counts a row still waiting as settled, and a row injecting a service nobody provides waits for good — and name, per row still waiting, the services it waits for and why each is not there (rutis-loader's own words) |
+| `probe` | `probe::pi` / `probe::dsh` (and `pi_with` / `dsh_with`): load a pi or DSH package through its adapter and report what an agent gets, without calling a tool or a model — see [Tools from other agent ecosystems](#tools-from-other-agent-ecosystems) (Linux/macOS; includes `node` and `loader`, and pulls in rutis-host, which brings rutis-bridge's WebSocket transport and rustls) |
 | `embedded-adapters` | `adapters::files()`: the pi and DSH adapter files built into the binary (about 370 KB), for hosts installed without this crate's source |
 
 ```toml
 yoagent-rutis = { git = "https://github.com/yologdev/yoagent", features = ["node", "python"] }
+rutis-host = "0.19.3"    # SpawnPlugin and the language launchers
+rutis-loader = "0.19.3"  # rows, resolved on the runtimes
+```
+
+The host's part, as in [`examples/language_plugins.rs`](examples/language_plugins.rs):
+one `SpawnPlugin` per runtime, a loader whose rows run on them, the id the
+host greets its runtimes with, and a wait until each runtime is up
+(`reconcile` does not wait for one still starting):
+
+```rust,ignore
+root.provide(LocalId(PeerId::new("main")?))?;
+let bridge = RutisBridge::install(&root)?;
+let mut catalog = ServiceCatalog::new();
+catalog.register_shared("yoagent");
+let node = SpawnPlugin::new("node", languages::node::launcher(&runtime_dir), package_json);
+let py = SpawnPlugin::new("py", languages::python::launcher(&modules), &modules)
+    .interpreter(&python); // an environment with `pip install rutis==0.19.3`
+// Files and npm names run on `node`; `py:<module>` on `py`.
+let sessions = Arc::new(SessionResolver::npm(&catalog, "node"));
+let runtimes = [node.handle(), py.handle()];
+sessions.runtime(node.handle());
+sessions.runtime(py.handle());
+root.plugin(node);
+root.plugin(py);
+let loader_plugin = LoaderPlugin::new(
+    Chain::new().with_shared(sessions.clone()),
+    LoaderOptions { catalog, ..LoaderOptions::default() },
+);
+let loader = loader_plugin.handle();
+sessions.attach(&loader);
+root.plugin(loader_plugin).await?;
+sessions.follow_row("node");
+sessions.follow_row("py");
+for runtime in &runtimes {
+    runtime.ready().await.ok_or("a runtime did not start")?;
+}
 ```
 
 A plugin injects `yoagent` and registers a handler: an object (in Python, a
@@ -141,7 +182,7 @@ class instance or a dict; in Go, a map of functions — see
 calls them in the plugin's own process. `register(name, handler, options?)`
 returns a function that unregisters it; pass it to `ctx.effect` so the
 handler goes when the plugin unloads. A plugin loaded as a row of a
-runtime is also tied to that row by the host (rutis 0.12's caller row):
+runtime is also tied to that row by the host (rutis's caller row):
 its handlers go when the row unloads or restarts, while the runtime runs
 on, even if the plugin dropped the disposer, and their owner
 (`HandlerInfo::owner`, `ToolOwner::owner`) is the row's loader id.
@@ -234,11 +275,13 @@ def apply(ctx, config):
   to 20 MB) never fails the edit.
   Stay under your provider's own limit too (Anthropic: 5 MB base64): an
   image it refuses sits in the history and fails every later request.
-- **16 MiB per message.** rutis closes a channel on a message over
-  16 MiB, which ends the runtime and every plugin in it. Keep each answer
-  well under it: a result's images together, not only each one (the DSH and
-  pi adapters stop at 12 MiB of base64 and name the rest in text). Going the
-  other way the bridge keeps every call under 15 MiB: the conversation
+- **16 MiB per message.** rutis refuses a message over 16 MiB: since
+  0.17.2 only that call fails (`bad-value`), the runtime lives on — so an
+  answer over it fails its hook (a policy denies, a tool call fails). Keep
+  each answer well under it: a result's images together, not only each one
+  (the DSH and pi adapters stop at 12 MiB of base64 and name the rest in
+  text). Going the other way the bridge keeps every call under 15 MiB rather
+  than have it fail: the conversation
   (`messages`) and events reach the plugin with their images as text
   (`[image/png, 8.0 MB: omitted, …]`) when they would exceed it — a call's
   own `args` never change; an `after_tool` output (sent without its
@@ -259,15 +302,17 @@ def apply(ctx, config):
   attribute the line to its run (the event's `run_id` field) — a host
   recording runs with yoagent's GASP recorder can then keep the line in the
   run's record (`GaspRecorder::plugin_log_layer`). It never
-  rejects (any message, extra context fields ignored). Fire-and-forget in
-  JavaScript; in Python `await yoagent.log(...)` — an un-awaited coroutine
-  is never sent. On a host without it (yoagent-rutis 0.1.0) rutis's
-  stand-in throws (Python: `AttributeError`): wrap the call and fall back
-  to `console.warn` / `print`.
+  rejects for what it is given (any message, extra context fields
+  ignored). Fire-and-forget in JavaScript; in Python `await yoagent.log(...)`
+  — an un-awaited coroutine is never sent. A call made as the session
+  closes can still be refused: catch it (the adapters fall back to
+  `console.warn`), since rutis 0.18 an unhandled rejection fails the
+  row it came from.
 - **The bridge never loads plugins**: the host does, typically with
   [rutis-loader](https://crates.io/crates/rutis-loader) rows, whose catalog
-  must share `yoagent` (rutis 0.12's `ServiceCatalog::new()` shares every
-  name; after `share_registered_only()`, `catalog.register_shared("yoagent")`). [`examples/language_plugins.rs`](examples/language_plugins.rs)
+  must share `yoagent` (`ServiceCatalog::new()` shares every name;
+  `catalog.register_shared("yoagent")` says so explicitly), on runtimes the
+  host starts itself (above). [`examples/language_plugins.rs`](examples/language_plugins.rs)
   is a complete host: `npm ci` in `plugins/`, a Python 3.12+ with
   `pip install -r plugins/requirements.txt` in `plugins/.venv`, then
   `cargo run --features node,python --example language_plugins`.
@@ -275,7 +320,8 @@ def apply(ctx, config):
 ### Remote handlers: latency and trust
 
 With `websocket`, a handler can live on another machine: a runtime there
-(`RuntimePlugin::remote`), or a node the host exports `yoagent` to. It then
+(a session over rutis-bridge's `websocket::dial`, or a `rutis-host/dial`
+connection row), or a node the host exports `yoagent` to. It then
 sits inside every run of every agent using the extension:
 
 - **Latency.** Each hook is a network round trip, and `before_tool` runs for
@@ -318,8 +364,9 @@ and allowed for one session, say — mark their runtime **restricted** before it
 starts:
 
 ```rust,ignore
-let runtime = LocalRuntime::node(runtime_dir, anchor);
+let runtime = SpawnPlugin::new("npm", languages::node::launcher(&runtime_dir), package_json);
 bridge.restrict_runtime(runtime.handle());
+sessions.runtime(runtime.handle());
 root.plugin(runtime);
 ```
 
@@ -457,7 +504,7 @@ lists them as rows (`dsh-fs-local`, `dsh-attachment-local`,
 only for plugins that need them. Attachments, the credentials file
 (`.credentials.yaml`, mode 600) and skills live under `DSH_HOME`, else
 `~/.dsh`, and skills also under `DSH_AGENTS_HOME`, else `~/.agents`: **give
-the runtime homes of the host's own** (rutis's `Launcher::env`;
+the runtime homes of the host's own** (rutis-host's `SpawnPlugin::env`;
 yobuild's frontend: `PluginHostBuilder::env` and `DshHome`) unless the
 plugins should see the user's DSH keys and skills. That keeps those
 directories out, not everything: the runtime inherits the host's
@@ -581,7 +628,7 @@ is withdrawn.
 
 ### rutis-agent tools
 
-[rutis-agent](https://github.com/arcships/rutis/tree/v0.12.0/crates/rutis-agent)
+[rutis-agent](https://github.com/arcships/rutis/tree/v0.19.3/crates/rutis-agent)
 keeps its tools in a `ToolRegistry` service.
 [`examples/rutis-agent-tools/`](examples/rutis-agent-tools/src/main.rs) is a
 Rust rutis plugin that maps every `ToolDef` to a yoagent tool per run
@@ -601,8 +648,8 @@ cargo run --manifest-path examples/rutis-agent-tools/Cargo.toml [-- --live]
 
 > **Pinning caveat.** rutis matches services by Rust type, so rutis-agent and
 > this bridge must share one `rutis` crate. crates.io's `rutis-agent` 0.2.0 is
-> built on rutis 0.2; the one on rutis 0.12 (the rutis repository at tag
-> v0.12.0) is unpublished. The example is therefore its own workspace: it takes
+> built on rutis 0.2; the one on rutis 0.19 (the rutis repository at tag
+> v0.19.3) is unpublished. The example is therefore its own workspace: it takes
 > rutis-agent from git at that tag and patches crates.io's `rutis` to the same
 > tag (`[patch.crates-io]`), leaving one `rutis` in the graph (`cargo tree -d`
 > shows none twice). Move the tag and the patch together.
@@ -855,17 +902,19 @@ the others).
 
 - **Every event of a run is published on the bus** as `AgentEventEmitted`
   (`event()`, `run_id()`, `label()` — the host's `Agent::with_run_label` —
-  and `depth()`), from the extension's `on_event`. Publishing never blocks the
-  agent: `emit` only queues, and does nothing without listeners. Each
-  listener sees a run's events in order; a listener may see an event before
-  or after the run's own consumer does.
-- **Cost**: each event is cloned once and spawns a task while any bus
-  listener is registered, and streaming yields one `MessageUpdate` per text
-  delta.
-- **One queue for the whole bus**: a slow listener delays the delivery of
-  *every* run's later events (not the runs) and can build an unbounded
-  backlog. A handler's `with_on_event` runs synchronously inside the run
-  instead: keep it cheap.
+  and `depth()`), from the extension's `on_event`, with rutis's `emit`.
+  Publishing never blocks the agent: `emit` starts the listeners' calls and
+  returns. A listener may see an event before or after the run's own
+  consumer does.
+- **Started in order, run concurrently** (rutis 0.13+): each listener's calls
+  start in emit order, so one that acts as its call starts (an
+  `on_agent_event` observer) sees a run's events in order; one that awaits
+  before acting may finish them in another order. A slow listener slows
+  neither the runs nor the other listeners.
+- **Cost**: each event is cloned once to publish it, and streaming yields
+  one `MessageUpdate` per text delta; a listener in another process costs
+  one cross-process call per event. A handler's `with_on_event` runs
+  synchronously inside the run instead: keep it cheap.
 
 ### Host
 
@@ -892,7 +941,7 @@ the others).
   handler receives — is the `ToolOwner` of a plugin tool in that run: the
   handler's name, the plugin it registered under (a Rust plugin's name; for a
   language plugin, the loader id of the row that registered it, which the
-  host sees itself — rutis 0.12's caller row — so a policy can trust it;
+  host sees itself — rutis's caller row — so a policy can trust it;
   the runtime session only for a call from outside any row; copies of one
   row in an instanced group share its id, and row ids and Rust plugin names
   (`Plugin::name()`) are one name space; a row is attributed only when the plugin declares
@@ -933,9 +982,18 @@ nobody provides waits in rutis instead of reading as started —
 `share_registered_only()` keeps the old rule); 0.7 to 0.9 require yoagent
 0.25 and rutis 0.12 too (0.7 closes the pi adapter's `pi.exec` by default;
 0.8 adds values and settings to its grants); 0.10 requires yoagent 0.26
-(rutis 0.12, Rust 1.88; no code change). rutis's release
-train (`rutis`, `rutis-bridge`, `rutis-loader`, the npm, PyPI and Go runtimes)
-shares one version: move the host and the language runtimes together.
+(rutis 0.12, Rust 1.88; no code change); 0.11 requires rutis 0.19.3 or a
+later 0.19 (0.19.0–0.19.2 name rutis's own services `loader` / `sessions`,
+which clash with DSH's), yoagent 0.26 and Rust 1.88, with the runtimes at
+0.19.3 too (npm `@arcships/rutis`, `@arcships/rutis-runtime`,
+`@arcships/rutis-bun`, PyPI `rutis` on Python 3.12+, Go
+`github.com/arcships/rutis/go/rutis`: rutis 0.13 and 0.19 changed the
+protocol, and a mixed pair refuses the handshake); hosts start the language
+runtimes themselves with rutis-host's `SpawnPlugin` (see
+[Plugins in other languages](#plugins-in-other-languages)). rutis's release
+train (`rutis`, `rutis-bridge`, `rutis-loader`, `rutis-host`, the npm, PyPI
+and Go runtimes) shares one version: move the host and the language runtimes
+together.
 yoagent and rutis types are in its API, so a minor bump of either is a
 minor bump of yoagent-rutis. Take `yoagent` from the same source
 as `yoagent-rutis`: a crates.io `yoagent` next to a git `yoagent-rutis` is two

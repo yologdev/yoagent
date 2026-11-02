@@ -27,7 +27,7 @@
 //! `register(name, handler, options?)` returns a function that unregisters
 //! the handler: pass it to `ctx.effect`, so the handler goes when the plugin
 //! unloads. A plugin loaded as a row (with `yoagent` in its `inject`) is tied
-//! to that row by the host as well (rutis 0.12's caller row): its handlers go
+//! to that row by the host as well (rutis's caller row): its handlers go
 //! when the row unloads or restarts, and their owner is the row's loader id.
 //! When the plugin's runtime process exits or crashes, its session closes
 //! and every handler it registered is removed too. A handler whose

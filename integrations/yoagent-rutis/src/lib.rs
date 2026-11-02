@@ -2,7 +2,7 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 //! **yoagent-rutis** — extend [yoagent](https://docs.rs/yoagent) agents at
 //! runtime with [rutis](https://docs.rs/rutis) plugins, in Rust, TypeScript
-//! or Python.
+//! (on Node or Bun), Python or Go.
 //!
 //! rutis (a Rust port of the Cordis plugin kernel) loads, unloads, reloads
 //! and hot-updates plugins, and tears down everything a plugin registered
@@ -102,9 +102,11 @@
 //! }))
 //! ```
 //!
-//! The bridge never loads plugins: the host does (with rutis-loader, sharing
-//! `yoagent` in its catalog). See the `languages` module (built with those
-//! features) and `plugins/yoagent.d.ts` in the repository.
+//! The bridge never loads plugins nor starts runtimes: the host does, with
+//! rutis-host's `SpawnPlugin` for each runtime (since rutis 0.19 the
+//! language features enable only the `yoagent` service) and rutis-loader
+//! rows, sharing `yoagent` in its catalog. See the `languages` module (built
+//! with those features) and `plugins/yoagent.d.ts` in the repository.
 //!
 //! # Semantics worth knowing
 //!
