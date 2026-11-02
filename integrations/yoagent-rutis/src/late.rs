@@ -339,6 +339,7 @@ impl ToolSource for LateTools {
 
 #[cfg(test)]
 mod tests {
+    use rutis::host::CtxHost;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex as StdMutex;
 

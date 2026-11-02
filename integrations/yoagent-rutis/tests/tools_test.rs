@@ -8,7 +8,8 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use common::*;
-use rutis::{Ctx, FiberState, FiberView, TypeKey};
+use rutis::host::{CtxHost, FiberState, FiberView, TypeKey};
+use rutis::Ctx;
 use yoagent::extension::InputDecision;
 use yoagent::provider::mock::{MockResponse, MockToolCall};
 use yoagent::{AgentTool, SubAgentTool, ToolContext, ToolDecision, ToolError, ToolResult};

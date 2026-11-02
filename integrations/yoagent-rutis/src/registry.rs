@@ -4,7 +4,7 @@
 //! rutis holds one service per type key, so plugins cannot each `provide`
 //! their own. The bridge provides one [`Registry`] service, and plugins
 //! **add handlers to it**. Every handler a Rust plugin registers is tied to a
-//! cleanup on that plugin's fiber (`Ctx::effect_named`), so rutis removes it
+//! cleanup on that plugin's fiber (`Ctx::effect`), so rutis removes it
 //! exactly when the plugin unloads — on `dispose`, on a restart, on a config
 //! update, and on a dependency-driven eviction.
 //!
@@ -62,7 +62,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use rutis::{CordisError, Ctx, Disposer, Effect};
+use rutis::host::{CtxHost, ErrorKind};
+use rutis::{Ctx, Disposer, Error};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 use yoagent::AgentTool;
@@ -80,7 +81,7 @@ use crate::handler::{Handler, HandlerImpl, Hooks};
 /// **Unique names.** A handler whose name a live handler holds, or one
 /// offering a static tool ([`Handler::with_tool`]) whose name another live
 /// handler's static tool holds, is refused with
-/// [`CordisError::ServiceExists`] (the error rutis uses for a doubly-provided
+/// [`ErrorKind::ServiceExists`] (the error rutis uses for a doubly-provided
 /// service) and logged with `warn!` naming the holder: rutis keeps a failed
 /// `apply`'s error on the fiber, not in its error sink, so the log is where a
 /// host notices it. There is **no automatic retry**: when the holder later
@@ -93,6 +94,8 @@ pub struct Registry {
     offers: Mutex<HashMap<String, Arc<HashMap<String, ToolOwner>>>>,
     /// Extensions whose late tools are in use: told of restricted handlers.
     late: Mutex<Vec<std::sync::Weak<crate::late::Late>>>,
+    /// Rust plugins' observers of every run's events (`on_agent_event`).
+    pub(crate) observers: crate::events::Observers,
     /// The runtimes whose handlers are restricted (tools only).
     restricted_runtimes: Mutex<Vec<rutis_bridge_handle::RuntimeHandle>>,
     /// Every session a restricted runtime has run as, seen so far: a call
@@ -519,14 +522,10 @@ impl Registry {
     ///
     /// The handler is removed when that plugin unloads; the returned
     /// [`Disposer`] removes it earlier (dropping it does nothing). Refused
-    /// with [`CordisError::ServiceExists`] on a name clash (see the type
+    /// with [`ErrorKind::ServiceExists`] on a name clash (see the type
     /// docs), and with rutis's own error when the plugin is no longer loading
     /// or active — in both cases nothing stays registered.
-    pub fn register(
-        self: &Arc<Self>,
-        ctx: &Ctx,
-        handler: Handler,
-    ) -> Result<Disposer, CordisError> {
+    pub fn register(self: &Arc<Self>, ctx: &Ctx, handler: Handler) -> Result<Disposer, Error> {
         let name = handler.name().to_string();
         let owner = plugin_name(ctx);
         let (seq, _gate) = self.insert(
@@ -537,17 +536,38 @@ impl Registry {
             false,
         )?;
         let registry = Arc::downgrade(self);
-        let registered = ctx.effect_named(format!("yoagent handler: {name}"), move || {
-            Effect::Disposer(Box::new(move || {
-                if let Some(registry) = registry.upgrade() {
-                    registry.remove(seq);
-                }
-                Ok(())
-            }))
+        let registered = ctx.effect(move || async move {
+            if let Some(registry) = registry.upgrade() {
+                registry.remove(seq);
+            }
+            Ok(())
         });
         if registered.is_err() {
             // The fiber is no longer loading/active: nothing owns the entry.
             self.remove(seq);
+        }
+        registered
+    }
+
+    /// Add an observer of every run's events, owned by the plugin whose
+    /// context `ctx` is: removed when that plugin unloads, or by the
+    /// returned [`Disposer`]; refused with rutis's own error when the plugin
+    /// is no longer loading or active.
+    pub(crate) fn observe(
+        self: &Arc<Self>,
+        ctx: &Ctx,
+        observer: Arc<dyn Fn(&crate::AgentEventEmitted) + Send + Sync>,
+    ) -> Result<Disposer, Error> {
+        let id = self.observers.add(observer, ctx.cancellation_token());
+        let registry = Arc::downgrade(self);
+        let registered = ctx.effect(move || async move {
+            if let Some(registry) = registry.upgrade() {
+                registry.observers.remove(id);
+            }
+            Ok(())
+        });
+        if registered.is_err() {
+            self.observers.remove(id);
         }
         registered
     }
@@ -560,7 +580,7 @@ impl Registry {
         handler: Arc<dyn HandlerImpl>,
         generation: CancellationToken,
         restricted: bool,
-    ) -> Result<(u64, Gate), CordisError> {
+    ) -> Result<(u64, Gate), Error> {
         let tool_names: Vec<String> = handler
             .static_tools()
             .iter()
@@ -577,9 +597,9 @@ impl Registry {
         for tool in &tool_names {
             if tool_names.iter().filter(|t| *t == tool).count() > 1 {
                 tracing::warn!(tool = %tool, refused = %owner, "two static tools of one handler with the same name; registration refused");
-                return Err(CordisError::ServiceExists(format!(
+                return Err(rutis::Error::from(ErrorKind::ServiceExists(format!(
                     "yoagent tool `{tool}` (already provided by plugin `{owner}`)"
-                )));
+                ))));
             }
             if restricted {
                 continue;
@@ -596,10 +616,10 @@ impl Registry {
                     "plugin tool name already taken; registration refused \
                      (the refused plugin is not retried when the holder unloads)"
                 );
-                return Err(CordisError::ServiceExists(format!(
+                return Err(rutis::Error::from(ErrorKind::ServiceExists(format!(
                     "yoagent tool `{tool}` (already provided by plugin `{}`)",
                     holder.owner
-                )));
+                ))));
             }
         }
         if let Some(existing) = inner.entries.iter().find(|e| e.name == name) {
@@ -613,10 +633,10 @@ impl Registry {
                     "plugin handler name already taken; registration refused \
                      (the refused plugin is not retried when the holder unloads)"
                 );
-                return Err(CordisError::ServiceExists(format!(
+                return Err(rutis::Error::from(ErrorKind::ServiceExists(format!(
                     "yoagent handler `{name}` (already registered by plugin `{}`)",
                     existing.owner
-                )));
+                ))));
             }
         }
         for seq in evict {
@@ -731,9 +751,15 @@ impl Registry {
             .push(runtime);
     }
 
-    /// Whether the session `tag` is the running process of a restricted
-    /// runtime. A plugin's code runs only once its runtime is ready, so a
-    /// call from it finds its runtime ready, with this session's tag.
+    /// Whether the session `tag` is (or was) the process of a restricted
+    /// runtime. Fails closed in the window rutis-host leaves: a runtime's
+    /// session mounts and provides its process at `session_key(<runtime>)`
+    /// — which is how rutis-loader finds the process its rows load through,
+    /// so its plugins run from then on — *before* the runtime's handle
+    /// reads `Ready`. So besides a `Ready` handle's process, the process
+    /// the runtime's session provides (looked up from `ctx`) counts too,
+    /// whatever the handle reads. A trusted runtime's session is never
+    /// under a restricted runtime's name.
     #[cfg(any(
         feature = "node",
         feature = "python",
@@ -741,7 +767,7 @@ impl Registry {
         feature = "go",
         feature = "websocket"
     ))]
-    pub(crate) fn is_restricted_session(&self, tag: &str) -> bool {
+    pub(crate) fn is_restricted_session(&self, ctx: &Ctx, tag: &str) -> bool {
         use rutis_bridge::runtime::RuntimeState;
         let runtimes = self
             .restricted_runtimes
@@ -751,22 +777,31 @@ impl Registry {
             .restricted_sessions
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let mut settling = false;
+        let mut unresolved = false;
         for runtime in runtimes.iter() {
-            match runtime.state() {
-                RuntimeState::Ready(process) => {
+            let state = runtime.state();
+            if let RuntimeState::Ready(process) = &state {
+                sessions.insert(process.connection().tag().to_string());
+            }
+            match ctx
+                .get_at(&rutis_bridge::session_key(runtime.name()))
+                .and_then(|session| session.process())
+            {
+                Some(process) => {
                     sessions.insert(process.connection().tag().to_string());
                 }
-                RuntimeState::Starting => settling = true,
-                _ => {}
+                None => unresolved |= matches!(state, RuntimeState::Starting),
             }
         }
         let restricted = sessions.contains(tag);
-        if !restricted && settling {
+        if !restricted && unresolved {
+            // Its session is not mounted yet: none of its plugins can be
+            // running (its rows load through that session), so the caller
+            // is not one of them.
             tracing::debug!(
                 session = %tag,
-                "a handler registered while a restricted runtime is starting, from a session not known \
-                 to be restricted: registered unrestricted"
+                "a handler registered while a restricted runtime is starting (no session yet), \
+                 from a session not known to be restricted: registered unrestricted"
             );
         }
         restricted

@@ -16,12 +16,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use rutis::host::CtxHost;
 use rutis::Ctx;
-use rutis_bridge::runtime::LocalRuntime;
-use rutis_loader::{
-    Chain, Layer, LoaderOptions, LoaderPlugin, Patch, RuntimeResolver, RuntimeRowsPlugin,
-    ServiceCatalog,
-};
+use rutis_bridge::{LocalId, PeerId};
+use rutis_host::connect::SpawnPlugin;
+use rutis_host::languages;
+use rutis_loader::runtime::SessionResolver;
+use rutis_loader::{Chain, Layer, LoaderOptions, LoaderPlugin, Patch, ServiceCatalog};
 use serde_json::json;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -92,14 +93,24 @@ async fn main() -> Result<(), BoxError> {
     }
 
     let root = Ctx::root()?;
+    // The id the host greets its runtime with.
+    root.provide(LocalId(PeerId::new("main")?))?;
     let bridge = RutisBridge::install(&root)?;
 
     // One Node runtime, its package.json the dsh directory's; `yoagent`
     // shared by name so the adapter row can inject it.
     let mut catalog = ServiceCatalog::new();
     catalog.register_shared("yoagent");
-    let node = LocalRuntime::node(&runtime, dsh_dir().join("package.json"));
-    let rows = Arc::new(RuntimeResolver::node(node.handle()).with_catalog(&catalog));
+    // rutis-host's `SpawnPlugin` starts the runtime; its rows (files and
+    // npm names) resolve on it.
+    let node = SpawnPlugin::new(
+        "node",
+        languages::node::launcher(&runtime),
+        dsh_dir().join("package.json"),
+    );
+    let started = node.handle();
+    let rows = Arc::new(SessionResolver::npm(&catalog, "node"));
+    rows.runtime(node.handle());
     root.plugin(node);
     let loader_plugin = LoaderPlugin::new(
         Chain::new().with_shared(rows.clone()),
@@ -109,8 +120,13 @@ async fn main() -> Result<(), BoxError> {
         },
     );
     let loader = loader_plugin.handle();
+    rows.attach(&loader);
     root.plugin(loader_plugin).await?;
-    root.plugin(RuntimeRowsPlugin::new(rows));
+    rows.follow_row("node");
+    // `reconcile` does not wait for a runtime still starting.
+    if started.ready().await.is_none() {
+        return Err(format!("the Node runtime did not start: {:?}", started.state()).into());
+    }
 
     // dsh's own packages, unchanged, then the adapter.
     let patches: Vec<Patch> = serde_json::from_value(json!([{ "insert": [
@@ -125,7 +141,7 @@ async fn main() -> Result<(), BoxError> {
         { "id": "adapter", "name": dsh_dir().join("dsh-tools-adapter.ts") },
     ] }]))?;
     let layers = vec![Layer::new("app", patches)];
-    let report = loader.reconcile(layers.clone(), None).await?;
+    let report = loader.reconcile(layers, None).await?;
     if !report.failures.is_empty() {
         return Err(format!("rows failed to load: {report:?}").into());
     }
@@ -133,8 +149,6 @@ async fn main() -> Result<(), BoxError> {
     // runs, or name what it lacks.
     yoagent_rutis::rows::wait_running(
         &loader,
-        &root,
-        &layers,
         &["web", "system-prompt", "tools", "free-search", "adapter"],
         Duration::from_secs(60),
     )

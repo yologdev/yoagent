@@ -13,8 +13,7 @@
 //!   adapter, in a Node runtime whose `package.json` is the base folder's.
 //!   Reports what the rows add to the base — tools and prompt guidance — and
 //!   which of the services the rows' plugins inject exist (a plugin missing
-//!   one never starts, though its row reads as started to the probe's host,
-//!   which shares only registered names, as rutis did before 0.12).
+//!   one never starts: its row reads as `waiting`, at once).
 //!
 //! **The adapters, installed.** Both take `plugins`: a folder laid out like
 //! [`adapters`](crate::adapters)' `root` (the pi and DSH adapters beside
@@ -31,6 +30,10 @@
 //! sets each of `yoagent::provider::api_key_variables()` to the empty
 //! string, as it does for the runtimes it starts itself.
 //!
+//! **What rutis reports** about the probe's rows (a row that failed, a
+//! long wait) goes to `tracing` at warn, target `yoagent_rutis::rutis`,
+//! instead of rutis's default of this process's stderr.
+//!
 //! **One at a time.** Probes in one process run one after another (a second
 //! waits): [`Logs`] is one buffer for the process, and each report carries
 //! the lines of its own load. Loading a package runs its code, as its own
@@ -41,12 +44,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rutis::{Ctx, FiberState};
-use rutis_bridge::runtime::{Launcher, LocalRuntime};
-use rutis_loader::{
-    Chain, EntryStatus, Layer, Loader, LoaderOptions, LoaderPlugin, Patch, RuntimeResolver,
-    RuntimeRowsPlugin, ServiceCatalog,
-};
+use rutis::host::{CtxHost, FiberState};
+use rutis::Ctx;
+use rutis_bridge::{LocalId, PeerId};
+use rutis_host::connect::SpawnPlugin;
+use rutis_host::languages;
+use rutis_loader::report::EntryStatus;
+use rutis_loader::runtime::SessionResolver;
+use rutis_loader::{Chain, Layer, Loader, LoaderOptions, LoaderPlugin, Patch, ServiceCatalog};
 use serde::Serialize;
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
@@ -60,12 +65,25 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 /// How long rows may take to start, and the adapter to register.
 const SETTLE: Duration = Duration::from_secs(60);
 
+/// How long rows must have read settled before a load is taken as done: a
+/// service a row's `apply` just provided may reach the loader a moment
+/// later, and a row waiting for it would then start.
+const HOPELESS_GRACE: Duration = Duration::from_millis(500);
+
 /// Probes in this process, one at a time (their logs share [`Logs`]).
 static ONE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// The `tracing` targets [`Logs`] collects: what plugins log, and the
 /// bridge's own reports of a hook that failed.
 const LOG_TARGETS: [&str; 2] = ["yoagent_rutis::plugin", "yoagent_rutis::extension"];
+
+/// The `tracing` target (at `warn`) of what rutis reports while probing —
+/// its error sink: a listener or cleanup that failed, a row's load error, a
+/// long wait. Not collected in [`Logs`] (the report's verdicts do not read
+/// it; each row's state and error are in the report already), and no longer
+/// printed to stderr by rutis: a host that wants to see it adds a layer for
+/// this target, as `examples/ecosystem_probe.rs` does.
+pub const RUTIS_TARGET: &str = "yoagent_rutis::rutis";
 
 /// One line a plugin (or the bridge, about one) logged.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -78,9 +96,9 @@ pub struct LogLine {
 
 /// Collects what plugins log (target `yoagent_rutis::plugin`) and the
 /// bridge's reports of their failed hooks (`yoagent_rutis::extension`), as
-/// a `tracing` layer. Install it globally (the runtime logs from its own
-/// threads) and pass it to [`pi`] or [`dsh`]: each report then carries the
-/// lines of its own load.
+/// a `tracing` layer — not rutis's own reports ([`RUTIS_TARGET`]). Install
+/// it globally (the runtime logs from its own threads) and pass it to [`pi`]
+/// or [`dsh`]: each report then carries the lines of its own load.
 #[derive(Debug, Clone, Default)]
 pub struct Logs(Arc<Mutex<Vec<LogLine>>>);
 
@@ -274,33 +292,42 @@ async fn host(
     package_json: &Path,
     env: &[(OsString, OsString)],
 ) -> Result<Host, BoxError> {
-    let root = Ctx::root()?;
+    // What rutis reports (a row that failed, a long wait) goes to `tracing`,
+    // not this process's stderr, where a host vetting a plugin may show
+    // nothing.
+    let sink: rutis::host::ErrorSink = Arc::new(|error| {
+        tracing::warn!(target: RUTIS_TARGET, "{}", rutis_bridge::report::report(&error));
+    });
+    let root = Ctx::root_with_sink(tokio::runtime::Handle::current(), sink);
+    // The id the host greets its runtime with (rutis-host's default).
+    root.provide(LocalId(PeerId::new("main")?))?;
     let bridge = RutisBridge::install(&root)?;
     let mut catalog = ServiceCatalog::new();
-    // As before rutis 0.12: only the registered names gate a row in rutis,
-    // so a Cordis row injecting a service nobody provides reads as started
-    // at once instead of waiting out `SETTLE`; `probe-services` reports what
-    // is missing either way.
-    catalog.share_registered_only();
     catalog.register_shared("yoagent");
-    let launcher = env
-        .iter()
-        .fold(Launcher::node(runtime), |launcher, (name, value)| {
-            launcher.env(name.clone(), value.clone())
-        });
-    let node = LocalRuntime::launcher("node", launcher, package_json);
-    let resolver = Arc::new(RuntimeResolver::node(node.handle()).with_catalog(&catalog));
+    let node = env.iter().fold(
+        SpawnPlugin::new("node", languages::node::launcher(runtime), package_json),
+        |node, (name, value)| node.env(name.clone(), value.clone()),
+    );
+    let runtime = node.handle();
+    let sessions = Arc::new(SessionResolver::npm(&catalog, "node"));
+    sessions.runtime(node.handle());
     root.plugin(node);
     let plugin = LoaderPlugin::new(
-        Chain::new().with_shared(resolver.clone()),
+        Chain::new().with_shared(sessions.clone()),
         LoaderOptions {
             catalog,
             ..LoaderOptions::default()
         },
     );
     let loader = plugin.handle();
+    sessions.attach(&loader);
     root.plugin(plugin).await?;
-    root.plugin(RuntimeRowsPlugin::new(resolver));
+    sessions.follow_row("node");
+    // `reconcile` does not wait for a runtime still starting (rutis 0.18).
+    if runtime.ready().await.is_none() {
+        let _ = tokio::time::timeout(Duration::from_secs(10), root.shutdown()).await;
+        return Err(format!("the Node runtime did not start: {:?}", runtime.state()).into());
+    }
     Ok(Host {
         root,
         bridge,
@@ -352,15 +379,40 @@ async fn load(host: &Host, layers: Vec<(&str, Value)>) -> Result<Vec<Row>, BoxEr
         built.push(Layer::new(name, patches));
     }
     host.loader.reconcile(built, None).await?;
-    // Rows still pending when the wait ends are reported as `waiting`.
-    let settled = |id: &String| {
-        matches!(
-            row(&host.loader, id).state.as_str(),
-            "active" | "failed" | "unresolved"
-        )
+    // Rows still pending when the wait ends are reported as `waiting`. A row
+    // waiting for something that will never come — a service no row
+    // provides while no row is loading or may still load (one may provide a
+    // service it does not declare), a provider that failed or is disabled,
+    // a cycle — will not start: it is settled as `waiting` once that has
+    // held for a moment (a service just provided may reach the loader late).
+    // `Some(any waiting)` once every row is settled.
+    let settled_now = |ids: &[String]| {
+        let mut waiting = Vec::new();
+        for id in ids {
+            match row(&host.loader, id).state.as_str() {
+                "active" | "failed" | "unresolved" => {}
+                "waiting" => waiting.push(id.as_str()),
+                _ => return None,
+            }
+        }
+        let hopeless = waiting
+            .iter()
+            .all(|id| crate::rows::any_hopeless(&host.loader, &[id]));
+        hopeless.then_some(!waiting.is_empty())
     };
     let _ = tokio::time::timeout(SETTLE, async {
-        while !ids.iter().all(settled) {
+        let mut since: Option<tokio::time::Instant> = None;
+        loop {
+            match settled_now(&ids) {
+                Some(false) => break,
+                Some(true) => {
+                    let at = *since.get_or_insert_with(tokio::time::Instant::now);
+                    if at.elapsed() >= HOPELESS_GRACE {
+                        break;
+                    }
+                }
+                None => since = None,
+            }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })

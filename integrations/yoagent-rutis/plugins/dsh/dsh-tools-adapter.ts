@@ -73,8 +73,8 @@ type DshBlock = {
 /** Largest image sent as an image: under Anthropic's 5 MB once base64-encoded. */
 const MAX_IMAGE_BYTES = 3_750_000
 /**
- * Most base64 one result may carry in images: rutis (0.9) closes the channel
- * on a message over 16 MiB, which would end this runtime and every plugin in it.
+ * Most base64 one result may carry in images: rutis refuses a message over
+ * 16 MiB (the call fails), so the images past it are named in text instead.
  */
 const MAX_RESULT_IMAGE_CHARS = 12 * 1024 * 1024
 
@@ -203,7 +203,8 @@ export default definePlugin<Config>({
     }
     const maxNote = config?.maxNoteChars ?? 2000
     const say = (level: 'warn' | 'debug', message: string) => {
-      // On a host without `log`, rutis's stand-in throws: fall back either way.
+      // `log` never rejects; a call refused all the same (its session
+      // closing) falls back, rather than fail this row unhandled.
       try {
         yoagent.log?.(level, message)?.catch(() => console.warn(message))
       } catch {

@@ -46,7 +46,12 @@
 // `dsh-host.json`) is opened once per generation; from then on the backend
 // writes every session event itself, and each turn's end is a durability
 // checkpoint (`sessions.flush`). The transcript stays empty: no yoagent
-// conversation is mirrored into it.
+// conversation is mirrored into it. On unload this row may no longer emit
+// (rutis withdraws a row from the bus before its cleanups run), so the
+// closing `turn/end` never reaches the backend through DSH's `session/event`
+// and `sessions.flush` is refused: once the generation's own handle has
+// drained, the event is written through a handle of its own, unless it is
+// in the log already.
 //
 // The tools adapter finds this through the `yoagent-dsh-host` service it
 // provides (looked up per call, not injected), and `host-dialogs.ts` answers
@@ -95,9 +100,14 @@ interface DshSessions {
 interface DshAgents {
   register(agent: unknown): unknown
 }
-type DshLog = { append(events: unknown[]): Promise<void>; [Symbol.asyncDispose]?(): Promise<void> }
+type DshLog = {
+  append(events: unknown[]): Promise<void>
+  read(offset?: number, length?: number): Promise<{ events: readonly unknown[] }>
+  [Symbol.asyncDispose]?(): Promise<void>
+}
 interface DshPersistence {
   create(header: unknown): Promise<DshLog>
+  open(id: string, access: 'write'): Promise<DshLog>
 }
 
 /** How a yoagent run ended (the bridge's `Outcome.end`). */
@@ -137,6 +147,12 @@ interface Generation {
   log?: DshLog
   /** Torn down: a flush queued before is skipped. */
   ended?: boolean
+  /**
+   * The seq of the latest `turn/end` the session took. Unload checks the log has it: a turn
+   * closed just before (a run's `finish`) may have emitted its end too late to reach the backend.
+   * A `turn/end` the session refused is not recorded: it is in no session, so in no log.
+   */
+  lastEnd?: number
   end: () => Promise<void>
 }
 
@@ -250,15 +266,55 @@ export function apply(ctx: any) {
     }
   }
 
-  const closeTurn = async (g: Generation, reason: TurnEnd, flush = true) => {
+  /** Close the open turn, if any. */
+  const closeTurn = async (g: Generation, reason: TurnEnd, flush = true, quiet = false) => {
     if (g.owner === undefined) return
+    // The seq the event takes, if the session takes it.
+    const seq = Number(g.session.seq)
+    let accepted = true
     try {
       g.session.append('turn/end', { turn: g.turn, reason })
     } catch (error) {
-      say('warn', `[dsh-host] closing DSH turn ${g.turn} failed: ${message(error)}`)
+      // DSH's own validation refused it (an invalid or re-entrant append): nothing was added, and
+      // nothing is written past the session either — the log holds only what the session holds.
+      accepted = false
+      say(quiet ? 'debug' : 'warn', `[dsh-host] closing DSH turn ${g.turn} failed: ${message(error)}`)
     }
     g.owner = undefined
-    if (flush) await writeLog(g)
+    if (accepted) g.lastEnd = seq
+    if (flush && accepted) await writeLog(g)
+  }
+
+  /**
+   * Write the session's `turn/end` at `seq` through a handle of its own, unless the log has it
+   * already. Only an event the session holds is written, and only if it is that `turn/end`.
+   */
+  const writeTurnEnd = async (g: Generation, seq: number) => {
+    if (seq >= Number(g.session.seq)) {
+      say('debug', `[dsh-host] the DSH session holds no event ${seq}; no turn end to write`)
+      return
+    }
+    const event = g.session.eventAt(seq) as { type?: unknown } | undefined
+    if (event?.type !== 'turn/end') {
+      say(
+        'warn',
+        `[dsh-host] DSH session event ${seq} is ${JSON.stringify(event?.type ?? null)}, not the turn's end; not written`,
+      )
+      return
+    }
+    try {
+      const handle = await bounded('reopening the DSH session log', persistence.open(g.session.id, 'write'), HOST_CALL_MS)
+      try {
+        const { events } = await bounded('reading the DSH session log', handle.read(seq, 1), HOST_CALL_MS)
+        if (events.length === 0) {
+          await bounded('writing the DSH session log', handle.append([event]), HOST_CALL_MS)
+        }
+      } finally {
+        await bounded('closing the DSH session log', Promise.resolve(handle[Symbol.asyncDispose]?.()), HOST_CALL_MS)
+      }
+    } catch (error) {
+      once(`log-direct-${g.key}`, 'warn', `[dsh-host] the DSH session log is missing the turn's end: ${detail(error)}`)
+    }
   }
 
   /** The top-level run a run belongs to. */
@@ -375,9 +431,13 @@ export function apply(ctx: any) {
         turn: 0,
         log,
         end: async () => {
-          await closeTurn(g, { kind: 'aborted', reason: { kind: 'disposed' } })
+          await closeTurn(g, { kind: 'aborted', reason: { kind: 'disposed' } }, !closed, closed)
           g.ended = true
           await unwind()
+          // On unload the latest turn's end may have reached no backend — this one's, or one a run's
+          // `finish` closed just before (this row may not emit then): written now that the
+          // generation's handle has drained what it had, unless the log has it.
+          if (closed && g.log && g.lastEnd !== undefined) await writeTurnEnd(g, g.lastEnd)
         },
       }
       say('debug', `[dsh-host] stand-in agent ${session.id} for host session ${key} in ${cwd}`)

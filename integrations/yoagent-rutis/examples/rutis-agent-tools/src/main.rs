@@ -1,7 +1,7 @@
 //! rutis-agent's tools as yoagent tools.
 //!
-//! [rutis-agent](https://github.com/arcships/rutis/tree/v0.12.0/crates/rutis-agent)
-//! keeps its tools in a `ToolRegistry` service (`tools_key()`): `ToolDef`s
+//! [rutis-agent](https://github.com/arcships/rutis/tree/v0.19.3/crates/rutis-agent)
+//! keeps its tools in a `ToolRegistry` service: `ToolDef`s
 //! (an aimux `FunctionTool` schema plus an async runner), listed by
 //! `schemas()` and run by `execute(call, cancel)`. This example's adapter is
 //! a rutis plugin that injects that registry and the bridge's `Registry` and
@@ -41,7 +41,7 @@
 //! checks its outcome and exits non-zero if something is off.
 //!
 //! **Pinning caveat**: see `Cargo.toml`. rutis-agent comes from git (the
-//! rutis repository at tag v0.12.0), with a `[patch.crates-io]` for `rutis`, so
+//! rutis repository at tag v0.19.3), with a `[patch.crates-io]` for `rutis`, so
 //! that the graph holds one `rutis` crate — rutis matches services by Rust
 //! type.
 //!
@@ -52,8 +52,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use aimux_core::options::Tool;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, Plugin, TypeKey};
-use rutis_agent::{replace_text_tool, tool_call, tools_key, ToolDef, ToolRegistry, ToolsPlugin};
+use rutis::host::CtxHost;
+use rutis::{Ctx, Plugin};
+use rutis_agent::{replace_text_tool, tool_call, ToolDef, ToolRegistry, ToolsPlugin};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -74,39 +75,22 @@ type BoxError = Box<dyn std::error::Error>;
 /// A rutis plugin offering every tool of rutis-agent's `ToolRegistry` to
 /// yoagent agents. It waits for (and reloads with) the registry and the
 /// bridge.
-struct RutisAgentTools {
-    injects: Vec<TypeKey>,
-}
-
-impl RutisAgentTools {
-    fn new() -> Self {
-        Self {
-            injects: vec![tools_key(), TypeKey::of::<Registry>()],
-        }
-    }
-}
+struct RutisAgentTools;
 
 impl Plugin for RutisAgentTools {
+    type Deps = (Arc<ToolRegistry>, Arc<Registry>);
+
     fn name(&self) -> &str {
         "rutis-agent-tools"
     }
 
-    fn injects(&self) -> &[TypeKey] {
-        &self.injects
-    }
-
-    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
-        Box::pin(async move {
-            let registry = ctx
-                .get::<ToolRegistry>()
-                .ok_or_else(|| CordisError::ServiceNotFound("rutis_agent::ToolRegistry".into()))?;
-            // Per run: a tool registered into rutis-agent's registry later is
-            // offered from the next run on.
-            ctx.register_handler(
-                Handler::new("rutis-agent-tools").with_tools(move |_run| tools_of(&registry)),
-            )?;
-            Ok(Effect::Done)
-        })
+    async fn apply(&self, ctx: &Ctx, (registry, _): Self::Deps) -> rutis::Result<()> {
+        // Per run: a tool registered into rutis-agent's registry later is
+        // offered from the next run on.
+        ctx.register_handler(
+            Handler::new("rutis-agent-tools").with_tools(move |_run| tools_of(&registry)),
+        )?;
+        Ok(())
     }
 }
 
@@ -363,7 +347,7 @@ async fn main() -> Result<(), BoxError> {
     let root = Ctx::root()?;
     let bridge = RutisBridge::install(&root)?;
     (&root.plugin(ToolsPlugin::new(vec![replace_text_tool()]))).await?;
-    (&root.plugin(RutisAgentTools::new())).await?;
+    (&root.plugin(RutisAgentTools)).await?;
     let registry = root
         .get::<ToolRegistry>()
         .ok_or("rutis-agent's ToolRegistry is not provided")?;

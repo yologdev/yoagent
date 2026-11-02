@@ -21,15 +21,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::*;
+use rutis::host::CtxHost;
 use rutis::Ctx;
-use rutis_bridge::runtime::{Launcher, LocalRuntime};
 use rutis_bridge::session::{
     host_key, Error as BridgeError, HostDispatch, Reply, Value as BridgeValue,
 };
-use rutis_loader::{
-    Chain, Layer, Loader, LoaderOptions, LoaderPlugin, Patch, RuntimeResolver, RuntimeRowsPlugin,
-    ServiceCatalog,
-};
+use rutis_loader::{Layer, Loader, Patch, ServiceCatalog};
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, Notify};
 use yoagent::extension::{ClonedHooks, RunHooks, StopContext, StopDecision};
@@ -91,9 +88,9 @@ fn node_runtime() -> Option<PathBuf> {
         .ok()
         .and_then(|m| m["version"].as_str().map(str::to_owned))
         .unwrap_or_default();
-    if !version.starts_with("0.12.") {
+    if !on_runtime_train(&version) {
         return skip(format!(
-            "@arcships/rutis-runtime is {version:?}, 0.12 needed: run `npm ci` in plugins/dsh/"
+            "@arcships/rutis-runtime is {version:?}, {RUNTIME_TRAIN} needed: run `npm ci` in plugins/dsh/"
         ));
     }
     Some(runtime)
@@ -181,32 +178,19 @@ async fn host_in(
     catalog.register_shared("yoagent");
     for (name, service) in services {
         catalog.register_shared(name);
-        root.provide_as::<dyn HostDispatch>(host_key(name), service)
+        root.provide_at::<dyn HostDispatch>(host_key(name), service)
             .unwrap();
     }
     if let Some(ui) = ui {
         catalog.register_shared("ui");
-        root.provide_as::<dyn HostDispatch>(host_key("ui"), ui)
+        root.provide_at::<dyn HostDispatch>(host_key("ui"), ui)
             .unwrap();
     }
-    let launcher = env
-        .iter()
-        .fold(Launcher::node(runtime), |launcher, (name, value)| {
-            launcher.env(*name, *value)
-        });
-    let node = LocalRuntime::launcher("node", launcher, dir.join("package.json"));
-    let resolver = Arc::new(RuntimeResolver::node(node.handle()).with_catalog(&catalog));
-    root.plugin(node);
-    let plugin = LoaderPlugin::new(
-        Chain::new().with_shared(resolver.clone()),
-        LoaderOptions {
-            catalog,
-            ..LoaderOptions::default()
-        },
+    let node = env.iter().fold(
+        runtimes::node(runtime, &dir.join("package.json")),
+        |node, (name, value)| node.env(*name, *value),
     );
-    let loader = plugin.handle();
-    root.plugin(plugin).await.unwrap();
-    root.plugin(RuntimeRowsPlugin::new(resolver));
+    let loader = runtimes::start(&root, catalog, vec![node]).await.loader;
     Host {
         root,
         bridge,

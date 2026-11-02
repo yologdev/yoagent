@@ -254,7 +254,8 @@ jobs:
 
   # The rutis bridge is its own crate (its own Cargo.toml, not a workspace
   # member, not in the published yoagent package). It depends on yoagent by
-  # path, so it is built against this checkout; `rutis` is pinned exactly.
+  # path, so it is built against this checkout; the rutis crates are a 0.19
+  # caret from 0.19.3.
   rutis-bridge:
     name: yoagent-rutis bridge
     needs: changes
@@ -284,12 +285,12 @@ jobs:
       - name: Example
         run: cargo run --manifest-path "$MANIFEST" --example policy_plugin
       # rutis-agent's tools through the bridge (its own workspace; rutis-agent
-      # from git at rutis v0.12.0): one of the ecosystems the extensions guide
+      # from git at rutis v0.19.3): one of the ecosystems the extensions guide
       # names, kept working here. Scripted, no network beyond the git fetch.
       - name: rutis-agent example
         run: cargo run --manifest-path integrations/yoagent-rutis/examples/rutis-agent-tools/Cargo.toml
 
-  # The bridge declares rust-version 1.88, the rutis 0.12 release train's MSRV
+  # The bridge declares rust-version 1.88, the rutis 0.19 release train's MSRV
   # (yoagent's own is 1.86). Mirrors the `msrv` job above; the language
   # features build there too.
   rutis-bridge-msrv:
@@ -308,13 +309,13 @@ jobs:
           workspaces: integrations/yoagent-rutis
       - name: Check
         run: cargo check --manifest-path "$MANIFEST" --all-targets
-      - name: Check with the language features (rutis-bridge 0.12)
+      - name: Check with the language features
         run: cargo check --manifest-path "$MANIFEST" --all-targets --features node,python,bun,go,websocket,loader,probe,embedded-adapters
 
-  # TypeScript (Node and Bun 1.4), Python and Go (1.24) plugins through rutis-bridge 0.12, end to end: real
-  # Node 22 (the floor: pi needs 22.19, rutis 22)
-  # and Python 3.12 runtimes load the example plugins and fixtures as
-  # rutis-loader rows. The npm and PyPI packages are pinned to the 0.12.0
+  # TypeScript (Node and Bun 1.4), Python and Go (1.24) plugins on rutis 0.19.3, end to end: real
+  # Node 22 (the floor: pi needs 22.19, rutis 22) and Python 3.12 (rutis
+  # 0.19's floor) runtimes, started by rutis-host's SpawnPlugin, load the
+  # example plugins and fixtures as rutis-loader rows. The npm and PyPI packages are pinned to the 0.19.3
   # train (plugins/package-lock.json, plugins/requirements.txt). A missing
   # runtime fails the job instead of skipping (YOAGENT_RUTIS_REQUIRE_RUNTIMES).
   rutis-bridge-languages:

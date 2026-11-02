@@ -13,6 +13,10 @@
 //! Nothing is called: tools are listed, not run, and the model is never
 //! asked. Loading a package runs its code, as its own host would.
 //!
+//! What rutis reports while probing (target [`probe::RUTIS_TARGET`]: a
+//! listener that failed, a row's load error) goes to stderr, as
+//! `rutis: <report>` lines; stdout carries only the JSON line.
+//!
 //! Run: `cargo run --manifest-path integrations/yoagent-rutis/Cargo.toml --features probe --example ecosystem_probe -- pi --cwd /tmp/x ext.ts`
 
 use std::path::PathBuf;
@@ -23,6 +27,28 @@ use yoagent_rutis::adapters::adapters;
 use yoagent_rutis::probe::{self, Logs};
 
 type BoxError = Box<dyn std::error::Error>;
+
+/// Prints rutis's reports ([`probe::RUTIS_TARGET`]) to stderr.
+struct RutisToStderr;
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RutisToStderr {
+    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
+        if event.metadata().target() != probe::RUTIS_TARGET {
+            return;
+        }
+        struct Message(String);
+        impl tracing::field::Visit for Message {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.0 = format!("{value:?}");
+                }
+            }
+        }
+        let mut message = Message(String::new());
+        event.record(&mut message);
+        eprintln!("rutis: {}", message.0);
+    }
+}
 
 fn usage() -> BoxError {
     "usage: ecosystem_probe pi [--plugins DIR] --cwd DIR [--skill PATH]... EXTENSION... | dsh [--plugins DIR] --base DIR --rows JSON [--inject SERVICE]..."
@@ -57,7 +83,11 @@ async fn main() -> Result<(), BoxError> {
     }
     // Global: the bridge logs from the runtime's worker threads.
     let logs = Logs::default();
-    tracing::subscriber::set_global_default(tracing_subscriber::registry().with(logs.clone()))?;
+    tracing::subscriber::set_global_default(
+        tracing_subscriber::registry()
+            .with(logs.clone())
+            .with(RutisToStderr),
+    )?;
     let mut result = match mode.as_str() {
         "pi" => {
             let cwd = cwd.ok_or_else(usage)?;

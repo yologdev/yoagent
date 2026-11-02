@@ -3,11 +3,11 @@
 //! `plugins/python/yoagent_example.py`.
 //!
 //! The bridge never loads plugins; the host does, here with rutis-loader
-//! rows, one local runtime per language. The `yoagent` service must be
+//! rows, one local runtime per language (started with rutis-host). The `yoagent` service must be
 //! shared in the loader's catalog so the rows can inject it.
 //!
-//! Setup (once): `npm ci` in `plugins/`, and a Python 3.10+ with rutis 0.12:
-//! `uv venv plugins/.venv --python 3.12 && uv pip install --python plugins/.venv/bin/python rutis==0.12.0`.
+//! Setup (once): `npm ci` in `plugins/`, and a Python 3.12+ with rutis 0.19:
+//! `uv venv plugins/.venv --python 3.12 && uv pip install --python plugins/.venv/bin/python rutis==0.19.3`.
 //!
 //! Run: `cargo run --manifest-path integrations/yoagent-rutis/Cargo.toml --features node,python --example language_plugins`
 
@@ -15,12 +15,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use rutis::host::CtxHost;
 use rutis::Ctx;
-use rutis_bridge::runtime::LocalRuntime;
-use rutis_loader::{
-    Chain, Layer, LoaderOptions, LoaderPlugin, Patch, RuntimeResolver, RuntimeRowsPlugin,
-    ServiceCatalog,
-};
+use rutis_bridge::{LocalId, PeerId};
+use rutis_host::connect::SpawnPlugin;
+use rutis_host::languages;
+use rutis_loader::runtime::SessionResolver;
+use rutis_loader::{Chain, Layer, LoaderOptions, LoaderPlugin, Patch, ServiceCatalog};
 use serde_json::json;
 use yoagent::provider::mock::{MockResponse, MockToolCall};
 use yoagent::provider::{MockProvider, ModelConfig};
@@ -86,36 +87,58 @@ async fn main() -> Result<(), BoxError> {
     }
 
     let root = Ctx::root()?;
+    // The id the host greets its runtimes with.
+    root.provide(LocalId(PeerId::new("main")?))?;
     // With the `node` / `python` features, installing also provides the
     // `yoagent` host service to language plugins.
     let bridge = RutisBridge::install(&root)?;
 
-    // The host's part: runtimes, a loader, and `yoagent` shared by name.
+    // The host's part: one runtime per language (rutis-host's `SpawnPlugin`),
+    // a loader whose rows run on them, and `yoagent` shared by name.
     let mut catalog = ServiceCatalog::new();
     catalog.register_shared("yoagent");
-    let node = LocalRuntime::node(&node_runtime, plugins().join("package.json"));
-    let node_rows = Arc::new(RuntimeResolver::node(node.handle()).with_catalog(&catalog));
-    let py = LocalRuntime::python(plugins().join("python")).interpreter(&python);
-    let py_rows = Arc::new(RuntimeResolver::modules(py.handle()).with_catalog(&catalog));
+    let node = SpawnPlugin::new(
+        "node",
+        languages::node::launcher(&node_runtime),
+        plugins().join("package.json"),
+    );
+    let modules = plugins().join("python");
+    let py = SpawnPlugin::new("py", languages::python::launcher(&modules), &modules)
+        .interpreter(&python);
+    // Files and npm names run on `node`; `py:<module>` on `py`.
+    let sessions = Arc::new(SessionResolver::npm(&catalog, "node"));
+    let runtimes = [node.handle(), py.handle()];
+    sessions.runtime(node.handle());
+    sessions.runtime(py.handle());
     root.plugin(node);
     root.plugin(py);
     let loader_plugin = LoaderPlugin::new(
-        Chain::new()
-            .with_shared(py_rows.clone())
-            .with_shared(node_rows.clone()),
+        Chain::new().with_shared(sessions.clone()),
         LoaderOptions {
             catalog,
             ..LoaderOptions::default()
         },
     );
     let loader = loader_plugin.handle();
+    sessions.attach(&loader);
     root.plugin(loader_plugin).await?;
-    root.plugin(RuntimeRowsPlugin::new(node_rows));
-    root.plugin(RuntimeRowsPlugin::new(py_rows));
+    sessions.follow_row("node");
+    sessions.follow_row("py");
+    // `reconcile` does not wait for a runtime still starting.
+    for runtime in &runtimes {
+        if runtime.ready().await.is_none() {
+            return Err(format!(
+                "the {} runtime did not start: {:?}",
+                runtime.name(),
+                runtime.state()
+            )
+            .into());
+        }
+    }
 
     let rows: Vec<Patch> = serde_json::from_value(json!([{ "insert": [
         { "id": "ts", "name": plugins().join("ts/example.ts"), "config": { "denied": ["bash"] } },
-        { "id": "py", "name": "py:yoagent_example", "config": { "denied": ["rm"] } },
+        { "id": "python", "name": "py:yoagent_example", "config": { "denied": ["rm"] } },
     ] }]))?;
     let report = loader
         .reconcile(vec![Layer::new("app", rows)], None)

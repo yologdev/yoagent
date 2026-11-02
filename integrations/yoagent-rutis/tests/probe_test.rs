@@ -132,9 +132,8 @@ async fn a_dsh_plugin_missing_a_service_it_injects_is_not_clean() {
     if !installed(&dsh) {
         return;
     }
-    // Its module injects a service no host provides: it never starts, though
-    // its row reads as started (the probe's catalog shares registered names
-    // only). `inject` is empty: the probe reads what the
+    // Its module injects a service no host provides: it never starts, and
+    // its row reads as waiting. `inject` is empty: the probe reads what the
     // module injects itself.
     let rows = json!([{ "id": "needs", "name": dsh.join("fixture-missing-service.ts") }]);
     let report = probe::dsh(&adapters().root, &dsh, &rows, &[], None).await;
@@ -143,9 +142,10 @@ async fn a_dsh_plugin_missing_a_service_it_injects_is_not_clean() {
         json!(["yoagentNoSuchService"]),
         "{report:?}"
     );
-    // At once: under rutis 0.12's default catalog the row would wait out the
-    // probe's settle time and read `waiting`.
-    assert_eq!(report.rows[0].state, "active", "{report:?}");
+    // Since rutis 0.19 every injected name gates a row in rutis: it waits,
+    // and the probe settles it at once (no row declares the service) rather
+    // than waiting out its settle time.
+    assert_eq!(report.rows[0].state, "waiting", "{report:?}");
     assert!(report.problem().is_some(), "{report:?}");
 }
 

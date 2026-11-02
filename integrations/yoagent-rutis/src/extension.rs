@@ -21,7 +21,7 @@
 //! | `before_tool` | A `Deny` wins; a `Modify` feeds the next handler | Denies the call |
 //! | `after_tool` | Each sees the previous handler's edit | Withholds the result (a required extension fails the run) |
 //! | `on_stop` | Every `Continue` message is sent, joined | Skipped (a required extension fails the run) |
-//! | `on_event` | All, in order, synchronously | That handler is switched off for the run; the others and bus publishing go on (a required extension fails the run, see below) |
+//! | `on_event` | All, in order, synchronously | That handler is switched off for the run; the others and the event observers go on (a required extension fails the run, see below) |
 //! | `finish` | All, concurrently | Logged |
 //!
 //! A handler whose plugin unloaded is not a failure: it is skipped where the
@@ -879,7 +879,7 @@ impl RunHooks for RunState {
     }
 
     /// Never unwinds: yoagent would switch the whole extension's `on_event`
-    /// off for the run, silencing bus publishing and every other handler. A
+    /// off for the run, silencing the event observers and every other handler. A
     /// failing handler is switched off alone and its failure recorded.
     /// Hand a recorded `tools` / `on_event` failure to yoagent, which asks
     /// at every boundary, the run's end included.
@@ -893,7 +893,7 @@ impl RunHooks for RunState {
 
     fn on_event(&self, event: &AgentEvent) {
         if !self.closed {
-            crate::events::publish(&self.host, &self.run, event);
+            crate::events::publish(&self.host, &self.registry.observers, &self.run, event);
         }
         // `AgentEnd` comes after `finish`: a handler the run's end reached
         // gets it even if its plugin has begun unloading since, so the run's

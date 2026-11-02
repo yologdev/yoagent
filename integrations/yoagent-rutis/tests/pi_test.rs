@@ -17,15 +17,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::*;
-use rutis::{Ctx, FiberState};
-use rutis_bridge::runtime::LocalRuntime;
+use rutis::host::{CtxHost, FiberState};
+use rutis::Ctx;
 use rutis_bridge::session::{
     host_key, Error as BridgeError, HostDispatch, Reply, Value as BridgeValue,
 };
-use rutis_loader::{
-    Chain, EntryStatus, Layer, Loader, LoaderOptions, LoaderPlugin, Patch, RuntimeResolver,
-    RuntimeRowsPlugin, ServiceCatalog,
-};
+use rutis_loader::report::EntryStatus;
+use rutis_loader::{Layer, Loader, Patch, ServiceCatalog};
 use serde_json::{json, Value};
 use yoagent::provider::mock::{MockResponse, MockToolCall};
 use yoagent::tools::{
@@ -85,9 +83,9 @@ fn node_runtime() -> Option<PathBuf> {
         .ok()
         .and_then(|m| m["version"].as_str().map(str::to_owned))
         .unwrap_or_default();
-    if !version.starts_with("0.12.") {
+    if !on_runtime_train(&version) {
         return skip(format!(
-            "@arcships/rutis-runtime is {version:?}, 0.12 needed: run `npm ci` in plugins/pi/"
+            "@arcships/rutis-runtime is {version:?}, {RUNTIME_TRAIN} needed: run `npm ci` in plugins/pi/"
         ));
     }
     Some(runtime)
@@ -126,25 +124,14 @@ async fn host_full(
     catalog.register_shared("yoagent");
     for (name, service) in services {
         catalog.register_shared(name);
-        root.provide_as::<dyn HostDispatch>(host_key(name), service)
+        root.provide_at::<dyn HostDispatch>(host_key(name), service)
             .unwrap();
     }
-    let node = LocalRuntime::node(runtime, pi_dir().join("package.json"));
+    let node = runtimes::node(runtime, &pi_dir().join("package.json"));
     if restricted {
         bridge.restrict_runtime(node.handle());
     }
-    let resolver = Arc::new(RuntimeResolver::node(node.handle()).with_catalog(&catalog));
-    root.plugin(node);
-    let plugin = LoaderPlugin::new(
-        Chain::new().with_shared(resolver.clone()),
-        LoaderOptions {
-            catalog,
-            ..LoaderOptions::default()
-        },
-    );
-    let loader = plugin.handle();
-    root.plugin(plugin).await.unwrap();
-    root.plugin(RuntimeRowsPlugin::new(resolver));
+    let loader = runtimes::start(&root, catalog, vec![node]).await.loader;
     Host {
         root,
         bridge,
@@ -2828,14 +2815,15 @@ async fn exec_gate_asks_the_host() {
         host.root.shutdown().await.unwrap();
     }
 
-    // A bad grant refuses the load.
+    // A bad grant refuses the load: the adapter's Schema, checked by rutis
+    // before `apply` since 0.18 (`bad-config`, `config: <path> …`).
     let host = host(&runtime).await;
     let failures = host
         .try_load(adapter_row(
             json!({ "extensions": [&gated], "exec": "ask" }),
         ))
         .await;
-    assert!(failures.contains("exec must be true, false"), "{failures}");
+    assert!(failures.contains("config: exec should be"), "{failures}");
     host.root.shutdown().await.unwrap();
 }
 
@@ -2973,7 +2961,8 @@ async fn trust_and_wake_per_extension() {
         ),
         (
             json!({ "projectTrustedFor": { woken.to_str().unwrap(): "yes" } }),
-            "must be true or false",
+            // The Schema's check (rutis 0.18+), before the adapter's own.
+            "should be a boolean",
         ),
         // One file under two spellings.
         (

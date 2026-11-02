@@ -1,5 +1,5 @@
 //! Plugins in other languages — TypeScript / JavaScript on Node or Bun,
-//! Python and Go — through [rutis-bridge](https://docs.rs/rutis-bridge) 0.12
+//! Python and Go — through [rutis-bridge](https://docs.rs/rutis-bridge) 0.19
 //! (the `node`, `bun`, `python`, `go` and `websocket` features).
 //!
 //! With one of those features, [`RutisBridge::install`](crate::RutisBridge::install)
@@ -27,7 +27,7 @@
 //! `register(name, handler, options?)` returns a function that unregisters
 //! the handler: pass it to `ctx.effect`, so the handler goes when the plugin
 //! unloads. A plugin loaded as a row (with `yoagent` in its `inject`) is tied
-//! to that row by the host as well (rutis 0.12's caller row): its handlers go
+//! to that row by the host as well (rutis's caller row): its handlers go
 //! when the row unloads or restarts, and their owner is the row's loader id.
 //! When the plugin's runtime process exits or crashes, its session closes
 //! and every handler it registered is removed too. A handler whose
@@ -55,9 +55,9 @@
 //! opt-in the same way (`options.messages: true`): `messages` on the
 //! arguments of `before_model`, `before_tool` and `on_stop`.
 //!
-//! The loader's catalog must share the name so language rows can inject it:
-//! rutis 0.12's `ServiceCatalog::new()` shares every name by name; one set
-//! to `share_registered_only()` needs `register_shared("yoagent")`.
+//! Language rows inject it by name: a loader's `ServiceCatalog` shares every
+//! name it has no other key for (`register_shared("yoagent")` says so
+//! explicitly).
 
 use std::collections::BTreeMap;
 use std::panic::AssertUnwindSafe;
@@ -66,7 +66,8 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 use futures::FutureExt;
 
-use rutis::{Ctx, Effect};
+use rutis::host::CtxHost;
+use rutis::Ctx;
 use rutis_bridge::session::{self, host_key, Error, HostDispatch, Reference, Reply, Value};
 use serde_json::{json, Value as Json};
 use tokio_util::sync::CancellationToken;
@@ -120,27 +121,39 @@ const HOOKS: [&str; 9] = [
 ];
 
 /// Provide the `yoagent` host service on `ctx` (once).
-pub(crate) fn provide(ctx: &Ctx, registry: &Arc<Registry>) -> Result<(), rutis::CordisError> {
+pub(crate) fn provide(ctx: &Ctx, registry: &Arc<Registry>) -> Result<(), rutis::Error> {
     let key = host_key(SERVICE);
-    if ctx.get_as::<dyn HostDispatch>(key.clone()).is_some() {
+    if ctx.get_at::<dyn HostDispatch>(&key.clone()).is_some() {
         return Ok(());
     }
     let service = Service {
         registry: registry.clone(),
+        ctx: ctx.clone(),
         runtime: ctx.handle().clone(),
     };
-    ctx.provide_as::<dyn HostDispatch>(key, Arc::new(service))?;
+    ctx.provide_at::<dyn HostDispatch>(key, Arc::new(service))?;
     Ok(())
 }
 
 /// The `yoagent` host service.
 struct Service {
     registry: Arc<Registry>,
+    /// The context the bridge was installed on: where a restricted
+    /// runtime's session is looked up.
+    ctx: Ctx,
     runtime: tokio::runtime::Handle,
 }
 
-fn invalid(message: impl Into<String>) -> Error {
-    Error::Value(message.into())
+/// A call to the service with the wrong arguments: rutis's `bad-argument`
+/// code (rutis 0.18), the plugin's error carrying it as `code`. Not
+/// `bad-value`, which says a value could not cross.
+fn bad_argument(message: impl Into<String>) -> Error {
+    Error::binding(session::code::BAD_ARGUMENT, message.into(), None)
+}
+
+/// A method that is not there: rutis's `no-method` code.
+fn no_method(message: impl Into<String>) -> Error {
+    Error::binding(session::code::NO_METHOD, message.into(), None)
 }
 
 impl HostDispatch for Service {
@@ -148,7 +161,7 @@ impl HostDispatch for Service {
         match method {
             "register" => self.register(args),
             "log" => log(args),
-            other => Err(invalid(format!(
+            other => Err(no_method(format!(
                 "the yoagent service has no method `{other}`"
             ))),
         }
@@ -173,7 +186,8 @@ const MAX_LOG_CHARS: usize = 8 * 1024;
 /// a log viewer — can attribute the line to its run.
 ///
 /// **Never fails.** A plugin calls it fire-and-forget, and a rejected call
-/// it does not catch would end its runtime process. So any value is taken:
+/// it does not catch fails its row (rutis 0.18: an unhandled rejection
+/// fails the row it came from). So any value is taken:
 /// a non-string message is written as JSON, other context fields (a whole
 /// hook argument, say) are ignored, a missing argument is empty, and one with
 /// no JSON form (a `Date`, a `Map`) is empty too, keeping the others in place.
@@ -228,16 +242,15 @@ impl Service {
         let mut args = args.list()?.into_iter();
         let name: String = session::decode(
             args.next()
-                .ok_or_else(|| invalid("register(name, handler, options?): missing the name"))?
+                .ok_or_else(|| bad_argument("register(name, handler, options?): missing the name"))?
                 .json()?,
         )?;
         if name.trim().is_empty() {
-            return Err(invalid("register: the handler name is empty"));
+            return Err(bad_argument("register: the handler name is empty"));
         }
-        let target =
-            Target::from_value(args.next().ok_or_else(|| {
-                invalid("register(name, handler, options?): missing the handler")
-            })?)?;
+        let target = Target::from_value(args.next().ok_or_else(|| {
+            bad_argument("register(name, handler, options?): missing the handler")
+        })?)?;
         let options: Options = match args.next() {
             None | Some(Value::Undefined) => Options::default(),
             Some(value) => match value.json()? {
@@ -247,23 +260,23 @@ impl Service {
         };
         let mut hooks = target.hooks()?;
         if options.messages && !(hooks.before_model || hooks.before_tool || hooks.on_stop) {
-            return Err(invalid(format!(
+            return Err(bad_argument(format!(
                 "register `{name}`: `options.messages` needs `before_model`, `before_tool` or `on_stop`"
             )));
         }
         hooks.messages = options.messages;
         if hooks.tools && !target.has("call_tool")? {
-            return Err(invalid(format!(
+            return Err(bad_argument(format!(
                 "register `{name}`: a handler with `tools` must implement `call_tool`"
             )));
         }
         if !hooks.on_event && !options.events.is_empty() {
-            return Err(invalid(format!(
+            return Err(bad_argument(format!(
                 "register `{name}`: `options.events` needs an `on_event` method"
             )));
         }
         if hooks.on_event && options.events.is_empty() {
-            return Err(invalid(format!(
+            return Err(bad_argument(format!(
                 "register `{name}`: `on_event` needs `options.events`, the event types to send"
             )));
         }
@@ -297,9 +310,10 @@ impl Service {
         }
         // Marked by the runtime it comes from, whatever row (or none) it
         // registers from: decided here, once, for the handler's life.
-        let restricted = caller
-            .as_ref()
-            .is_some_and(|connection| self.registry.is_restricted_session(connection.tag()));
+        let restricted = caller.as_ref().is_some_and(|connection| {
+            self.registry
+                .is_restricted_session(&self.ctx, connection.tag())
+        });
         if restricted {
             tracing::info!(handler = %name, owner = %owner, "registered from a restricted runtime: tools only");
         }
@@ -322,24 +336,20 @@ impl Service {
         // Removed when the row unloads or restarts, while its runtime runs
         // on, whether or not the plugin hands the disposer to `ctx.effect`:
         // the session watch below removes it as the row's token is cancelled
-        // (a spawned task), and this effect removes it synchronously in the
+        // (a spawned task), and this effect removes it in the
         // row's cleanup, so it is gone before a restarted row registers the
         // name again.
         let mut row_effect = None;
         if let Some(row) = &row {
             let registry = Arc::downgrade(&self.registry);
             let ended = lifetime.clone();
-            let tied = row
-                .ctx()
-                .effect_named(format!("yoagent handler: {name}"), move || {
-                    Effect::Disposer(Box::new(move || {
-                        ended.cancel();
-                        if let Some(registry) = registry.upgrade() {
-                            registry.remove(seq);
-                        }
-                        Ok(())
-                    }))
-                });
+            let tied = row.ctx().effect(move || async move {
+                ended.cancel();
+                if let Some(registry) = registry.upgrade() {
+                    registry.remove(seq);
+                }
+                Ok(())
+            });
             match tied {
                 Ok(disposer) => row_effect = Some(disposer),
                 Err(error) => {
@@ -429,14 +439,16 @@ impl Target {
                         // Absent, as on a live object (`None` in Python).
                         Value::Undefined | Value::Data(Json::Null) => {}
                         _ if HOOKS.contains(&key.as_str()) => {
-                            return Err(invalid(format!("register: `{key}` is not a function")))
+                            return Err(bad_argument(format!(
+                                "register: `{key}` is not a function"
+                            )))
                         }
                         _ => {}
                     }
                 }
                 Ok(Self::Record(functions))
             }
-            _ => Err(invalid(
+            _ => Err(bad_argument(
                 "register: the handler must be an object (or dict) of async functions",
             )),
         }
@@ -445,19 +457,32 @@ impl Target {
     /// Whether the handler implements `hook`. For a live object this reads
     /// the member back (a synchronous call on the plugin's call chain). A
     /// member that is there but not a function, or that cannot be read, is
-    /// an error: a policy must never go missing silently.
+    /// an error: a policy must never go missing silently — `bad-argument`
+    /// when the plugin's side refused the read, the session's own error
+    /// (its code kept) when the session failed under it.
     fn has(&self, hook: &str) -> Result<bool, Error> {
         match self {
             Self::Record(functions) => Ok(functions.contains_key(hook)),
             Self::Object(object) => match object.get(hook) {
                 Ok(Value::Undefined) | Ok(Value::Data(Json::Null)) => Ok(false),
                 Ok(Value::Reference(member)) if member.is_function() => Ok(true),
-                Ok(_) => Err(invalid(format!("register: `{hook}` is not a function"))),
-                // Python's getattr on a missing attribute.
+                Ok(_) => Err(bad_argument(format!(
+                    "register: `{hook}` is not a function"
+                ))),
+                // Python's getattr on a missing attribute. rutis 0.19 reads a
+                // property with a plain `getattr`: no `no-method` code to go by.
                 Err(Error::Remote { name, .. }) if name == "AttributeError" => Ok(false),
-                Err(error) => Err(invalid(format!(
+                // The plugin's own getter threw: its handler is at fault.
+                Err(error @ Error::Remote { .. }) => Err(bad_argument(format!(
                     "register: cannot read the handler's `{hook}`: {error}"
                 ))),
+                // The session failed under the call (closed, a transport
+                // error, a value that could not cross): not the plugin's
+                // argument; passed on with its own code.
+                Err(error) => {
+                    tracing::debug!(hook, %error, "register: reading the handler's member failed");
+                    Err(error)
+                }
             },
         }
     }
@@ -475,7 +500,7 @@ impl Target {
             messages: false,
         };
         if hooks == Hooks::default() && !self.has("call_tool")? {
-            return Err(invalid(format!(
+            return Err(bad_argument(format!(
                 "register: the handler implements none of {}",
                 HOOKS.join(", ")
             )));
@@ -536,7 +561,7 @@ impl Target {
             Self::Object(object) => object.call_method_async(hook, args).await,
             Self::Record(functions) => match functions.get(hook) {
                 Some(function) => function.call_async(args).await,
-                None => Err(invalid(format!("no `{hook}` function"))),
+                None => Err(no_method(format!("no `{hook}` function"))),
             },
         };
         let settled = match reply {
@@ -549,10 +574,12 @@ impl Target {
     }
 }
 
-/// The most a call's arguments may take, serialized. rutis (0.9) closes a
-/// local channel on a message over 16 MiB (`MAX_MESSAGE`; websockets have the
-/// same default), which ends the runtime's session and every plugin in it;
-/// 1 MiB is left for the call's envelope.
+/// The most a call's arguments may take, serialized. rutis refuses a message
+/// over 16 MiB (`MAX_MESSAGE`; websockets have the same default): since
+/// 0.17.2 only that call fails (`bad-value`), the runtime lives on. Under
+/// this limit — 1 MiB is left for the call's envelope — a conversation or an
+/// event still reaches the plugin, its images as text, instead of the hook
+/// failing.
 const MAX_SEND: usize = 15 * 1024 * 1024;
 
 /// What [`fit`] does with arguments over [`MAX_SEND`].
@@ -570,9 +597,10 @@ enum Oversize {
     Refuse,
 }
 
-/// `args` within [`MAX_SEND`], or an error naming the hook. The error fails
-/// the hook as any plugin failure does: a policy denies, a redaction
-/// withholds, a tool call fails.
+/// `args` within [`MAX_SEND`], or an error naming the hook and the size
+/// (what rutis would refuse anyway, said before the message is built). The
+/// error fails the hook as any plugin failure does: a policy denies, a
+/// redaction withholds, a tool call fails.
 fn fit(hook: &str, mut args: Vec<Json>, oversize: Oversize) -> Result<Vec<Json>, ExtensionError> {
     let size = |args: &[Json]| serde_json::to_vec(args).map_or(usize::MAX, |bytes| bytes.len());
     let before = size(&args);
@@ -1258,8 +1286,8 @@ const IMAGE_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/gif", "image/w
 
 /// Largest image a plugin may hand over, decoded. Keeps one image under
 /// rutis's 16 MiB message limit once base64-encoded — the whole answer must
-/// stay under it too, or the channel closes; providers may take less
-/// (Anthropic: 5 MB) — plugins should stay under theirs.
+/// stay under it too, or rutis fails the call (`bad-value`); providers may
+/// take less (Anthropic: 5 MB) — plugins should stay under theirs.
 const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 
 /// A handler's content blocks — `{"type": "text", "text"}` and

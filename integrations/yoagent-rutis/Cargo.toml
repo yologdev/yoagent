@@ -21,21 +21,25 @@ exclude = [
     "plugins/pi/node_modules",
     "examples/rutis-agent-tools",
 ]
-# The rutis 0.12 release train declares 1.88 (yoagent's own MSRV is 1.86).
+# The rutis 0.19 release train declares 1.88 (yoagent's own MSRV is 1.86).
 rust-version = "1.88"
 
 [dependencies]
 # The path's version (0.25 is the first release with `Extension`). yoagent
 # types are in this crate's API: a yoagent minor bump is a minor bump here.
 yoagent = { path = "../..", version = "0.26.0" }
-# 0.x caret: 0.12.x only (0.13 would be breaking). Any rutis minor bump is a
-# yoagent-rutis minor bump — its types are part of this crate's API. Since
-# 0.8 the packages in rutis's release train share one version.
-rutis = "0.12"
-# TypeScript / Python plugins and remote nodes (the `node`, `python` and
-# `websocket` features). Same train version as rutis; any rutis-bridge
-# minor bump is a yoagent-rutis minor bump too.
-rutis-bridge = { version = "0.12", optional = true, default-features = false }
+# 0.x caret from 0.19.3: 0.19.x only (0.20 would be breaking), and not
+# 0.19.0–0.19.2, whose own services `loader` / `sessions` took the names the
+# DSH adapter injects. Any rutis minor bump is a yoagent-rutis minor bump —
+# its types are part of this crate's API. Since 0.8 the packages in rutis's
+# release train share one version.
+rutis = "0.19.3"
+# The `yoagent` host service for plugins in other languages (the `node`,
+# `python`, `bun`, `go` and `websocket` features). Since 0.19 the bridge
+# carries no language: how a runtime starts is rutis-host's (below). Same
+# train version as rutis; any rutis-bridge minor bump is a yoagent-rutis
+# minor bump too.
+rutis-bridge = { version = "0.19.3", optional = true, default-features = false }
 async-trait = "0.1"
 # Decodes plugin images to check them (yoagent itself uses 0.22).
 base64 = "0.22"
@@ -49,7 +53,11 @@ tracing = "0.1"
 # The `loader` and `probe` features: loading plugin rows (the bridge itself
 # never loads plugins); `probe` adds a DSH home per probe and collecting what
 # plugins log.
-rutis-loader = { version = "0.12", optional = true, features = ["node"] }
+rutis-loader = { version = "0.19.3", optional = true, features = ["node"] }
+# The `probe` feature: starts a Node runtime (`rutis_host::connect::SpawnPlugin`
+# and the language launchers live there since rutis 0.19). Always brings
+# rutis-bridge's WebSocket transport (rustls), so only `probe` pulls it in.
+rutis-host = { version = "0.19.3", optional = true }
 tempfile = { version = "3", optional = true }
 tracing-subscriber = { version = "0.3", optional = true, default-features = false, features = ["registry"] }
 
@@ -59,19 +67,22 @@ rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 # Rust plugins only. Each language feature provides the `yoagent` host
-# service to plugins in other languages, through rutis-bridge.
+# service to plugins in other languages, through rutis-bridge. Since rutis
+# 0.19 the bridge carries no language, so `node`, `go`, `python` and `bun`
+# each enable the same thing (the service, `restrict_runtime`); the host
+# starts the runtimes itself, with rutis-host's `SpawnPlugin` and launchers.
 default = []
 # TypeScript / JavaScript plugins in local Node runtimes (Unix).
-node = ["rutis-bridge/node"]
-# Go plugins (Go 1.24+, the rutis Go SDK): one binary per runtime, started
-# when a row needs it (Unix).
-go = ["rutis-bridge/go"]
-# Python plugins in local Python runtimes (Unix).
-python = ["rutis-bridge/python"]
+node = ["dep:rutis-bridge"]
+# Go plugins (Go 1.24+, the rutis Go SDK): one binary per runtime (Unix).
+go = ["dep:rutis-bridge"]
+# Python plugins (Python 3.12+) in local Python runtimes (Unix).
+python = ["dep:rutis-bridge"]
 # TypeScript / JavaScript plugins in local Bun runtimes (Bun 1.4+, Unix).
-bun = ["rutis-bridge/bun"]
-# Remote nodes and runtimes over WebSocket (rustls).
-websocket = ["rutis-bridge/websocket"]
+bun = ["dep:rutis-bridge"]
+# Remote runtimes and nodes over WebSocket (rustls): rutis-bridge's
+# `websocket::dial` / `listen` for the host's own connection rows.
+websocket = ["dep:rutis-bridge", "rutis-bridge/websocket"]
 # `yoagent_rutis::rows`: wait for plugin rows a host loaded with
 # rutis-loader to run, naming the services a waiting row lacks.
 loader = ["dep:rutis-loader", "dep:rutis-bridge"]
@@ -82,13 +93,17 @@ loader = ["dep:rutis-loader", "dep:rutis-bridge"]
 embedded-adapters = []
 # `yoagent_rutis::probe`: load a pi or DSH package through its adapter and
 # report what an agent gets, without calling a tool or a model (Unix).
-probe = ["node", "loader", "dep:tempfile", "dep:tracing-subscriber"]
+probe = ["node", "loader", "dep:rutis-host", "dep:tempfile", "dep:tracing-subscriber"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "test-util"] }
 # Loads language plugins as rows in the end-to-end tests. The bridge never
-# loads plugins itself: that is the host's job.
-rutis-loader = { version = "0.12", features = ["node", "python", "bun", "go"] }
+# loads plugins itself: that is the host's job. Since rutis 0.19 Python and
+# Bun rows take `runtimes` (which `node` enables).
+rutis-loader = { version = "0.19.3", features = ["node", "go"] }
+# Starts the language runtimes in the end-to-end tests and examples
+# (`SpawnPlugin`, `languages::*::launcher`).
+rutis-host = "0.19.3"
 tempfile = "3"
 # Captures the bridge's `log` output in its own test binary (tests/plugin_log_test.rs).
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry"] }

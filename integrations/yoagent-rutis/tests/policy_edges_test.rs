@@ -8,7 +8,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::*;
-use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberState, Plugin, PluginFactory, TypeKey};
+use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, FiberState, PluginFactory, TypeKey};
+use rutis::{Ctx, Error};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use yoagent::extension::{InputContext, InputDecision, RunContext, TurnDecision};
@@ -80,14 +81,14 @@ struct GatedPolicy {
     injects: Vec<TypeKey>,
 }
 
-impl Plugin for GatedPolicy {
+impl DynPlugin for GatedPolicy {
     fn name(&self) -> &str {
         "gated-policy"
     }
-    fn injects(&self) -> &[TypeKey] {
-        &self.injects
+    fn injects(&self) -> Vec<TypeKey> {
+        self.injects.to_vec()
     }
-    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, Error>> {
         Box::pin(async move {
             if !self.first {
                 self.gate.notified().await;
@@ -102,7 +103,7 @@ impl PluginFactory<u32> for GatedPolicyFactory {
     fn name(&self) -> &str {
         "gated-policy"
     }
-    fn build(&self, version: &u32) -> Result<Box<dyn Plugin>, CordisError> {
+    fn build(&self, version: &u32) -> Result<Box<dyn DynPlugin>, Error> {
         Ok(Box::new(GatedPolicy {
             gate: self.gate.clone(),
             first: *version == 1,
@@ -563,7 +564,7 @@ fn event_kind(e: &AgentEvent) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_required_on_event_failure_keeps_the_bus_and_other_observers_going() {
+async fn a_required_on_event_failure_keeps_the_other_observers_going() {
     let (root, bridge) = setup();
     let fragile = root.plugin(plugin(panics_on_tool_use("fragile-observer")));
     wait_active(&fragile).await;
@@ -574,7 +575,7 @@ async fn a_required_on_event_failure_keeps_the_bus_and_other_observers_going() {
     })));
     wait_active(&steady).await;
     let bus = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-    let listener = root.plugin(Setup::new("bus-listener", {
+    let listener = root.plugin(Setup::new("event-observer", {
         let bus = bus.clone();
         move |ctx| {
             let bus = bus.clone();
@@ -613,15 +614,19 @@ async fn a_required_on_event_failure_keeps_the_bus_and_other_observers_going() {
         handled.iter().any(|k| k == "toolExecutionEnd"),
         "{handled:?}"
     );
-    // ...and so did the bus (delivered asynchronously).
+    // ...and so did the on_agent_event observer (delivered asynchronously).
     tokio::time::timeout(Duration::from_secs(5), async {
         while !bus.lock().unwrap().iter().any(|k| k == "agentEnd") {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
     .await
-    .unwrap_or_else(|_| panic!("the bus never saw agentEnd: {:?}", bus.lock().unwrap()));
-    assert_eq!(*bus.lock().unwrap(), handled, "the bus saw every event too");
+    .unwrap_or_else(|_| panic!("the observer never saw agentEnd: {:?}", bus.lock().unwrap()));
+    assert_eq!(
+        *bus.lock().unwrap(),
+        handled,
+        "the observer saw every event too"
+    );
     root.shutdown().await.unwrap();
 }
 
@@ -697,7 +702,7 @@ async fn an_unavailable_handler_rejects_input_and_withholds_output() {
 }
 
 /// Unloads a plugin while it runs, then returns a secret.
-struct UnloadsThenReplies(std::sync::Mutex<Option<rutis::FiberView>>);
+struct UnloadsThenReplies(std::sync::Mutex<Option<rutis::host::FiberView>>);
 
 #[async_trait::async_trait]
 impl yoagent::AgentTool for UnloadsThenReplies {
@@ -885,7 +890,7 @@ async fn a_plugin_unloaded_mid_run_is_not_sent_the_runs_end() {
 
 /// Unloads a plugin from inside the run's `finish` — after the bridge's.
 #[derive(Clone)]
-struct UnloadInFinish(Arc<std::sync::Mutex<Option<rutis::FiberView>>>);
+struct UnloadInFinish(Arc<std::sync::Mutex<Option<rutis::host::FiberView>>>);
 
 #[async_trait::async_trait]
 impl RunHooks for UnloadInFinish {

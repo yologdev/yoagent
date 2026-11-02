@@ -6,11 +6,12 @@
 
 use std::sync::Arc;
 
-use rutis::{BoxFuture, CordisError, Ctx, Disposer, Effect, EventKey, Plugin, TypeKey};
+use rutis::host::{BoxFuture, DynPlugin, Effect, ErrorKind, TypeKey};
+use rutis::{Ctx, Disposer, Error};
 use yoagent::AgentTool;
 
 use crate::bridge::sealed::Sealed;
-use crate::events::{AgentEventEmitted, ObserverListener};
+use crate::events::AgentEventEmitted;
 use crate::handler::Handler;
 use crate::registry::Registry;
 
@@ -26,40 +27,51 @@ pub trait PluginCtxExt: Sealed {
     /// Needs the bridge installed ([`RutisBridge::install`](crate::RutisBridge::install)):
     /// declare `TypeKey::of::<Registry>()` in the plugin's `injects` so it
     /// waits for it ([`AgentPlugin`] does). Refused with
-    /// `CordisError::ServiceExists` on a name clash (see [`Registry`]).
-    fn register_handler(&self, handler: Handler) -> Result<Disposer, CordisError>;
+    /// `ErrorKind::ServiceExists` on a name clash (see [`Registry`]).
+    fn register_handler(&self, handler: Handler) -> Result<Disposer, Error>;
 
     /// Offer one tool: a handler named `tool:<name>` with only this tool.
-    fn provide_tool(&self, tool: impl AgentTool + 'static) -> Result<Disposer, CordisError>;
+    fn provide_tool(&self, tool: impl AgentTool + 'static) -> Result<Disposer, Error>;
 
     /// [`provide_tool`](Self::provide_tool) for a shared tool.
-    fn provide_tool_arc(&self, tool: Arc<dyn AgentTool>) -> Result<Disposer, CordisError>;
+    fn provide_tool_arc(&self, tool: Arc<dyn AgentTool>) -> Result<Disposer, Error>;
 
-    /// Observe every agent event published on the bus (see
-    /// [`events`](crate::events)): `e.event()` is the event, `e.run_id()` /
-    /// `e.label()` tell runs apart. Runs on rutis's dispatch task, never on
-    /// the agent's — but a slow observer delays every later event on the bus.
+    /// Observe every event of every run that uses the bridge's extension
+    /// (see [`events`](crate::events)): `e.event()` is the event,
+    /// `e.run_id()` / `e.label()` tell runs apart. Called on a task of its
+    /// own, one event at a time, in the order they were produced — never on
+    /// the agent's task. Keep it quick: its queue holds the events it has
+    /// not taken yet. Removed when the plugin unloads.
+    ///
+    /// In-process: the events never go on the rutis bus, so no plugin in
+    /// another process or language can listen to them or fake them.
+    /// Needs the bridge installed, like
+    /// [`register_handler`](Self::register_handler).
     fn on_agent_event(
         &self,
         observer: impl Fn(&AgentEventEmitted) + Send + Sync + 'static,
-    ) -> Result<Disposer, CordisError>;
+    ) -> Result<Disposer, Error>;
+}
+
+/// The bridge's registry, as `ctx` sees it.
+fn registry_of(ctx: &Ctx) -> Result<Arc<Registry>, Error> {
+    ctx.get::<Registry>().ok_or_else(|| {
+        rutis::Error::from(ErrorKind::ServiceNotFound(
+            "yoagent_rutis::Registry (install the bridge with RutisBridge::install)".into(),
+        ))
+    })
 }
 
 impl PluginCtxExt for Ctx {
-    fn register_handler(&self, handler: Handler) -> Result<Disposer, CordisError> {
-        let registry = self.get::<Registry>().ok_or_else(|| {
-            CordisError::ServiceNotFound(
-                "yoagent_rutis::Registry (install the bridge with RutisBridge::install)".into(),
-            )
-        })?;
-        registry.register(self, handler)
+    fn register_handler(&self, handler: Handler) -> Result<Disposer, Error> {
+        registry_of(self)?.register(self, handler)
     }
 
-    fn provide_tool(&self, tool: impl AgentTool + 'static) -> Result<Disposer, CordisError> {
+    fn provide_tool(&self, tool: impl AgentTool + 'static) -> Result<Disposer, Error> {
         self.provide_tool_arc(Arc::new(tool))
     }
 
-    fn provide_tool_arc(&self, tool: Arc<dyn AgentTool>) -> Result<Disposer, CordisError> {
+    fn provide_tool_arc(&self, tool: Arc<dyn AgentTool>) -> Result<Disposer, Error> {
         let name = format!("tool:{}", tool.name());
         self.register_handler(Handler::new(name).with_tool_arc(tool))
     }
@@ -67,16 +79,12 @@ impl PluginCtxExt for Ctx {
     fn on_agent_event(
         &self,
         observer: impl Fn(&AgentEventEmitted) + Send + Sync + 'static,
-    ) -> Result<Disposer, CordisError> {
-        self.events().on(
-            self,
-            &EventKey::<AgentEventEmitted>::of(),
-            ObserverListener(observer),
-        )
+    ) -> Result<Disposer, Error> {
+        registry_of(self)?.observe(self, Arc::new(observer))
     }
 }
 
-/// A ready-made rutis [`Plugin`] that registers one [`Handler`] — for the
+/// A ready-made rutis [`DynPlugin`] that registers one [`Handler`] — for the
 /// common case where a plugin is "these tools plus this policy":
 ///
 /// ```
@@ -120,16 +128,16 @@ impl AgentPlugin {
     }
 }
 
-impl Plugin for AgentPlugin {
+impl DynPlugin for AgentPlugin {
     fn name(&self) -> &str {
         self.handler.name()
     }
 
-    fn injects(&self) -> &[TypeKey] {
-        &self.injects
+    fn injects(&self) -> Vec<TypeKey> {
+        self.injects.to_vec()
     }
 
-    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, Error>> {
         Box::pin(async move {
             ctx.register_handler(self.handler.clone())?;
             Ok(Effect::Done)

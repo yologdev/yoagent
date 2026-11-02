@@ -1,17 +1,39 @@
 //! Shared test doubles: a recording provider, simple tools, fiber waits.
 #![allow(dead_code)]
 
+#[cfg(feature = "node")]
+pub mod runtimes;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rutis::{FiberState, FiberView};
+use rutis::host::{CtxHost, FiberState, FiberView};
 use tokio::sync::mpsc;
 use yoagent::provider::mock::*;
 use yoagent::provider::{
     MockProvider, ModelConfig, ProviderError, StreamConfig, StreamEvent, StreamProvider,
 };
 use yoagent::*;
+
+/// The rutis release train the npm and PyPI runtimes are pinned to
+/// (`plugins/package-lock.json`, `plugins/requirements.txt`), as the
+/// handshake requires: one version on both sides.
+pub const RUNTIME_TRAIN: &str = "0.19.3";
+
+/// `version` (an installed runtime package's) is on [`RUNTIME_TRAIN`]'s
+/// minor at or after its patch: 0.19.0–0.19.2 named rutis's own services
+/// `loader`/`sessions`, which DSH's `sessions` clashes with.
+pub fn on_runtime_train(version: &str) -> bool {
+    let parse = |v: &str| -> Option<(u32, u32, u32)> {
+        let mut parts = v.split(['.', '-', '+']).map(|n| n.parse::<u32>().ok());
+        Some((parts.next()??, parts.next()??, parts.next()??))
+    };
+    match (parse(version), parse(RUNTIME_TRAIN)) {
+        (Some((a, b, c)), Some((x, y, z))) => (a, b) == (x, y) && c >= z,
+        _ => false,
+    }
+}
 
 /// One request as the provider received it.
 #[derive(Debug, Clone)]
@@ -248,30 +270,30 @@ pub fn setup() -> (rutis::Ctx, yoagent_rutis::RutisBridge) {
     (root, bridge)
 }
 
-type SetupFn = dyn Fn(&rutis::Ctx) -> Result<(), rutis::CordisError> + Send + Sync;
+type SetupFn = dyn Fn(&rutis::Ctx) -> Result<(), rutis::Error> + Send + Sync;
 
 /// A plugin whose `apply` runs a closure — registering listeners, tools,
 /// services — and returns no cleanup of its own. It waits for the bridge
 /// (and any [`with_inject`](Setup::with_inject) keys).
 pub struct Setup {
     name: String,
-    injects: Vec<rutis::TypeKey>,
+    injects: Vec<rutis::host::TypeKey>,
     apply: Arc<SetupFn>,
 }
 
 impl Setup {
     pub fn new(
         name: &str,
-        apply: impl Fn(&rutis::Ctx) -> Result<(), rutis::CordisError> + Send + Sync + 'static,
+        apply: impl Fn(&rutis::Ctx) -> Result<(), rutis::Error> + Send + Sync + 'static,
     ) -> Self {
         Self {
             name: name.into(),
-            injects: vec![rutis::TypeKey::of::<yoagent_rutis::Registry>()],
+            injects: vec![rutis::host::TypeKey::of::<yoagent_rutis::Registry>()],
             apply: Arc::new(apply),
         }
     }
 
-    pub fn with_inject(mut self, key: rutis::TypeKey) -> Self {
+    pub fn with_inject(mut self, key: rutis::host::TypeKey) -> Self {
         self.injects.push(key);
         self
     }
@@ -283,34 +305,35 @@ impl Setup {
     }
 }
 
-impl rutis::Plugin for Setup {
+impl rutis::host::DynPlugin for Setup {
     fn name(&self) -> &str {
         &self.name
     }
-    fn injects(&self) -> &[rutis::TypeKey] {
-        &self.injects
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        self.injects.to_vec()
     }
     fn apply<'a>(
         &'a self,
         ctx: &'a rutis::Ctx,
-    ) -> rutis::BoxFuture<'a, Result<rutis::Effect, rutis::CordisError>> {
+    ) -> rutis::host::BoxFuture<'a, Result<rutis::host::Effect, rutis::Error>> {
         let result = (self.apply)(ctx);
-        Box::pin(async move { result.map(|()| rutis::Effect::Done) })
+        Box::pin(async move { result.map(|()| rutis::host::Effect::Done) })
     }
 }
 
 /// Builds a plugin whose `greet` tool replies with the current config.
 pub struct GreeterFactory;
 
-impl rutis::PluginFactory<String> for GreeterFactory {
+impl rutis::host::PluginFactory<String> for GreeterFactory {
     fn name(&self) -> &str {
         "configurable-greeter"
     }
-    fn injects(&self) -> &[rutis::TypeKey] {
-        static KEYS: std::sync::OnceLock<Vec<rutis::TypeKey>> = std::sync::OnceLock::new();
-        KEYS.get_or_init(|| vec![rutis::TypeKey::of::<yoagent_rutis::Registry>()])
+    fn injects(&self) -> Vec<rutis::host::TypeKey> {
+        static KEYS: std::sync::OnceLock<Vec<rutis::host::TypeKey>> = std::sync::OnceLock::new();
+        KEYS.get_or_init(|| vec![rutis::host::TypeKey::of::<yoagent_rutis::Registry>()])
+            .to_vec()
     }
-    fn build(&self, greeting: &String) -> Result<Box<dyn rutis::Plugin>, rutis::CordisError> {
+    fn build(&self, greeting: &String) -> Result<Box<dyn rutis::host::DynPlugin>, rutis::Error> {
         Ok(Box::new(yoagent_rutis::AgentPlugin::new(
             yoagent_rutis::Handler::new("configurable-greeter")
                 .with_tool(Reply::new("greet", greeting)),

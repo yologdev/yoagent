@@ -30,12 +30,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use rutis::host::CtxHost;
 use rutis::Ctx;
-use rutis_bridge::runtime::LocalRuntime;
-use rutis_loader::{
-    Chain, Layer, LoaderOptions, LoaderPlugin, Patch, RuntimeResolver, RuntimeRowsPlugin,
-    ServiceCatalog,
-};
+use rutis_bridge::{LocalId, PeerId};
+use rutis_host::connect::SpawnPlugin;
+use rutis_host::languages;
+use rutis_loader::runtime::SessionResolver;
+use rutis_loader::{Chain, Layer, LoaderOptions, LoaderPlugin, Patch, ServiceCatalog};
 use serde_json::json;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -135,11 +136,21 @@ async fn main() -> Result<(), BoxError> {
     std::fs::write(project.path().join("README.md"), "# demo project\n")?;
 
     let root = Ctx::root()?;
+    // The id the host greets its runtime with.
+    root.provide(LocalId(PeerId::new("main")?))?;
     let bridge = RutisBridge::install(&root)?;
     let mut catalog = ServiceCatalog::new();
     catalog.register_shared("yoagent");
-    let node = LocalRuntime::node(&runtime, pi_dir().join("package.json"));
-    let rows = Arc::new(RuntimeResolver::node(node.handle()).with_catalog(&catalog));
+    // rutis-host's `SpawnPlugin` starts the runtime; its rows (files and
+    // npm names) resolve on it.
+    let node = SpawnPlugin::new(
+        "node",
+        languages::node::launcher(&runtime),
+        pi_dir().join("package.json"),
+    );
+    let started = node.handle();
+    let rows = Arc::new(SessionResolver::npm(&catalog, "node"));
+    rows.runtime(node.handle());
     root.plugin(node);
     let loader_plugin = LoaderPlugin::new(
         Chain::new().with_shared(rows.clone()),
@@ -149,8 +160,13 @@ async fn main() -> Result<(), BoxError> {
         },
     );
     let loader = loader_plugin.handle();
+    rows.attach(&loader);
     root.plugin(loader_plugin).await?;
-    root.plugin(RuntimeRowsPlugin::new(rows));
+    rows.follow_row("node");
+    // `reconcile` does not wait for a runtime still starting.
+    if started.ready().await.is_none() {
+        return Err(format!("the Node runtime did not start: {:?}", started.state()).into());
+    }
 
     let patches: Vec<Patch> = serde_json::from_value(json!([{ "insert": [{
         "id": "pi",
@@ -163,14 +179,13 @@ async fn main() -> Result<(), BoxError> {
         },
     }] }]))?;
     let layers = vec![Layer::new("app", patches)];
-    let report = loader.reconcile(layers.clone(), None).await?;
+    let report = loader.reconcile(layers, None).await?;
     if !report.failures.is_empty() {
         return Err(format!("the adapter failed to load: {report:?}").into());
     }
     // `reconcile` counts a row still waiting as settled: wait until each
     // runs, or name what it lacks.
-    yoagent_rutis::rows::wait_running(&loader, &root, &layers, &["pi"], Duration::from_secs(60))
-        .await?;
+    yoagent_rutis::rows::wait_running(&loader, &["pi"], Duration::from_secs(60)).await?;
     tokio::time::timeout(Duration::from_secs(60), async {
         while bridge.registry().handlers().is_empty() {
             tokio::time::sleep(Duration::from_millis(50)).await;

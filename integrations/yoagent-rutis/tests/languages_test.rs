@@ -1,15 +1,15 @@
 //! TypeScript and Python plugins, end to end: real Node, Bun and Python
-//! runtimes (rutis-bridge 0.12), loaded as rows by rutis-loader, registering
+//! runtimes (rutis 0.19.3), loaded as rows by rutis-loader, registering
 //! handlers through the `yoagent` host service. The TypeScript fixtures run
 //! on Node and, for the hooks, fail-closed policies and cancel handles, on
 //! Bun too.
 //!
 //! Needs Node 22.19+ with `npm ci` run in `plugins/` (for `@arcships/rutis` and
-//! `@arcships/rutis-runtime` 0.12.0), and Python 3.10+ with `rutis` 0.12 —
+//! `@arcships/rutis-runtime` 0.19.3), and Python 3.12+ with `rutis` 0.19.3 —
 //! `plugins/.venv/bin/python` (`uv venv plugins/.venv --python 3.12 && uv pip
-//! install --python plugins/.venv/bin/python rutis==0.12.0`), or the
+//! install --python plugins/.venv/bin/python -r plugins/requirements.txt`), or the
 //! interpreter in `YOAGENT_RUTIS_PYTHON`; Bun 1.4+ (`YOAGENT_RUTIS_BUN`, else
-//! `bun` on `PATH`) with `@arcships/rutis-bun` 0.12 from that `npm ci`. A test
+//! `bun` on `PATH`) with `@arcships/rutis-bun` 0.19.3 from that `npm ci`. A test
 //! whose runtime is missing
 //! prints why and passes; set `YOAGENT_RUTIS_REQUIRE_RUNTIMES=1` (CI does) to
 //! make a missing runtime fail instead.
@@ -24,13 +24,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::*;
-use rutis::{Ctx, FiberState};
-use rutis_bridge::runtime::LocalRuntime;
+use rutis::host::{CtxHost, FiberState};
+use rutis::Ctx;
 use rutis_bridge::session::{host_key, HostDispatch, Reply as RpcReply, Value as RpcValue};
-use rutis_loader::{
-    Chain, EntryStatus, Layer, Loader, LoaderOptions, LoaderPlugin, Patch, RuntimeResolver,
-    RuntimeRowsPlugin, ServiceCatalog,
-};
+use rutis_loader::report::EntryStatus;
+use rutis_loader::{Layer, Loader, Patch, ServiceCatalog};
 use serde_json::{json, Value};
 use yoagent::extension::RunContext;
 use yoagent::provider::mock::{MockResponse, MockToolCall};
@@ -86,11 +84,11 @@ fn node_runtime() -> Option<PathBuf> {
         .and_then(|text| serde_json::from_str::<Value>(&text).ok())
         .and_then(|manifest| manifest["version"].as_str().map(str::to_owned));
     match installed {
-        Some(version) if version.starts_with("0.12.") => Some(runtime),
+        Some(version) if on_runtime_train(&version) => Some(runtime),
         Some(version) => skip(
             "Node",
             format!(
-                "{} is {version}, 0.12 needed: run `npm ci` in plugins/",
+                "{} is {version}, {RUNTIME_TRAIN} needed: run `npm ci` in plugins/",
                 runtime.display()
             ),
         ),
@@ -113,12 +111,12 @@ fn bun_runtime() -> Option<(PathBuf, PathBuf)> {
         .and_then(|text| serde_json::from_str::<Value>(&text).ok())
         .and_then(|manifest| manifest["version"].as_str().map(str::to_owned));
     match installed {
-        Some(version) if version.starts_with("0.12.") => {}
+        Some(version) if on_runtime_train(&version) => {}
         Some(version) => {
             return skip(
                 "Bun",
                 format!(
-                    "{} is {version}, 0.12 needed: run `npm ci` in plugins/",
+                    "{} is {version}, {RUNTIME_TRAIN} needed: run `npm ci` in plugins/",
                     package.display()
                 ),
             )
@@ -160,7 +158,7 @@ fn bun_runtime() -> Option<(PathBuf, PathBuf)> {
     }
 }
 
-/// A Python 3.10+ interpreter with rutis 0.12.
+/// A Python 3.12+ interpreter (rutis 0.19's floor) with rutis on the train.
 fn python() -> Option<PathBuf> {
     let python = std::env::var_os("YOAGENT_RUTIS_PYTHON")
         .map(PathBuf::from)
@@ -169,18 +167,18 @@ fn python() -> Option<PathBuf> {
         .args([
             "-c",
             "import sys, importlib.metadata as m; \
-             print(sys.version_info >= (3, 10), m.version('rutis'))",
+             print(sys.version_info >= (3, 12), m.version('rutis'))",
         ])
         .output();
     match probe {
         Ok(out) if out.status.success() => {
             let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
             match text.split_once(' ') {
-                Some(("True", version)) if version.starts_with("0.12.") => Some(python),
+                Some(("True", version)) if on_runtime_train(version) => Some(python),
                 _ => skip(
                     "Python",
                     format!(
-                        "{} reports `{text}`: Python 3.10+ and rutis 0.12 needed",
+                        "{} reports `{text}`: Python 3.12+ and rutis {RUNTIME_TRAIN} needed",
                         python.display()
                     ),
                 ),
@@ -265,46 +263,25 @@ async fn host_with(
     let root = Ctx::root().unwrap();
     let bridge = RutisBridge::install(&root).unwrap();
     let probe = Probe::default();
-    root.provide_as::<dyn HostDispatch>(host_key("probe"), Arc::new(probe.clone()))
+    root.provide_at::<dyn HostDispatch>(host_key("probe"), Arc::new(probe.clone()))
         .unwrap();
     let mut catalog = ServiceCatalog::new();
     catalog.register_shared("yoagent");
     catalog.register_shared("probe");
-    let mut chain = Chain::new();
-    let mut rows = Vec::new();
+    let mut spawn = Vec::new();
     if let Some((modules, interpreter)) = python {
-        let runtime = LocalRuntime::python(modules).interpreter(interpreter);
-        let resolver = Arc::new(RuntimeResolver::modules(runtime.handle()).with_catalog(&catalog));
-        root.plugin(runtime);
-        chain = chain.with_shared(resolver.clone());
-        rows.push(resolver);
+        spawn.push(runtimes::python(modules, interpreter));
     }
     if let Some((package, executable)) = bun {
-        let runtime = LocalRuntime::bun(package, plugins_dir()).interpreter(executable);
-        let resolver = Arc::new(RuntimeResolver::modules(runtime.handle()).with_catalog(&catalog));
-        root.plugin(runtime);
-        chain = chain.with_shared(resolver.clone());
-        rows.push(resolver);
+        spawn.push(runtimes::bun(package, executable, &plugins_dir()));
     }
     if let Some(runtime_dir) = node {
-        let runtime = LocalRuntime::node(runtime_dir, plugins_dir().join("package.json"));
-        let resolver = Arc::new(RuntimeResolver::node(runtime.handle()).with_catalog(&catalog));
-        root.plugin(runtime);
-        chain = chain.with_shared(resolver.clone());
-        rows.push(resolver);
+        spawn.push(runtimes::node(
+            runtime_dir,
+            &plugins_dir().join("package.json"),
+        ));
     }
-    let plugin = LoaderPlugin::new(
-        chain,
-        LoaderOptions {
-            catalog,
-            ..LoaderOptions::default()
-        },
-    );
-    let loader = plugin.handle();
-    root.plugin(plugin).await.unwrap();
-    for resolver in rows {
-        root.plugin(RuntimeRowsPlugin::new(resolver));
-    }
+    let loader = runtimes::start(&root, catalog, spawn).await.loader;
     Host {
         root,
         bridge,
@@ -401,7 +378,7 @@ async fn the_typescript_and_python_examples_offer_tools_deny_and_redact() {
     let host = host(Some(&node), Some((&plugins_dir().join("python"), &python))).await;
     host.load(vec![
         ts_row("ts", &plugins_dir().join("ts/example.ts"), json!({})),
-        py_row("py", "yoagent_example", json!({})),
+        py_row("python", "yoagent_example", json!({})),
     ])
     .await;
     host.until_handlers(&["ts-example", "py-example"]).await;
@@ -637,7 +614,7 @@ export default definePlugin({
         yoagent.register('bad', ...args)
         probe.record(`accepted: ${what}`)
       } catch (error) {
-        probe.record(`refused: ${what}: ${error.message}`)
+        probe.record(`refused: ${what}: ${error.code}: ${error.message}`)
       }
     }
     ctx.effect(yoagent.register('strict', {
@@ -1020,7 +997,8 @@ async fn a_python_dict_of_functions_is_a_handler() {
     };
     let fx = fixtures();
     let host = host(None, Some((&fx.py, &python))).await;
-    host.load(vec![py_row("py", "py_hooks", json!({}))]).await;
+    host.load(vec![py_row("python", "py_hooks", json!({}))])
+        .await;
     host.until_handlers(&["py-hooks"]).await;
 
     let (agent, seen) = agent(vec![
@@ -1218,8 +1196,9 @@ async fn a_restarted_row_registers_its_handler_again() {
 }
 
 /// `rows::wait_running`: a row that runs passes; one injecting a service
-/// nobody provides still waits when the wait ends, and is reported with the
-/// service it lacks.
+/// nobody provides, with no row loading, ends the wait well before its
+/// timeout, reported with the service it lacks and rutis-loader's word on
+/// why.
 #[cfg(feature = "loader")]
 #[tokio::test(flavor = "multi_thread")]
 async fn wait_running_names_the_services_a_waiting_row_lacks() {
@@ -1238,31 +1217,39 @@ async fn wait_running_names_the_services_a_waiting_row_lacks() {
     ];
     let patches: Vec<Patch> = serde_json::from_value(json!([{ "insert": rows }])).unwrap();
     let layers = vec![Layer::new("rows", patches)];
-    let report = host.loader.reconcile(layers.clone(), None).await.unwrap();
+    let report = host.loader.reconcile(layers, None).await.unwrap();
     assert!(
         report.failures.is_empty(),
         "reconcile sees no failure: {report:?}"
     );
 
-    yoagent_rutis::rows::wait_running(
-        &host.loader,
-        &host.root,
-        &layers,
-        &["runs"],
-        Duration::from_secs(30),
-    )
-    .await
-    .expect("the row that runs");
+    yoagent_rutis::rows::wait_running(&host.loader, &["runs"], Duration::from_secs(30))
+        .await
+        .expect("the row that runs");
+    let started = std::time::Instant::now();
     let error = yoagent_rutis::rows::wait_running(
         &host.loader,
-        &host.root,
-        &layers,
         &["runs", "needs"],
-        Duration::from_secs(2),
+        Duration::from_secs(60),
     )
     .await
     .expect_err("the row that waits");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "a wait that cannot end ends early: {:?}",
+        started.elapsed()
+    );
     assert_eq!(error.rows.len(), 1, "{error}");
+    assert_eq!(error.rows[0].waits.len(), 1, "{:?}", error.rows[0].waits);
+    assert_eq!(error.rows[0].waits[0].service, "yoagentNoSuchService");
+    assert!(
+        matches!(
+            error.rows[0].waits[0].reason,
+            rutis_loader::report::WaitReason::NoProvider { .. }
+        ),
+        "{:?}",
+        error.rows[0].waits
+    );
     assert_eq!(error.rows[0].id, "needs");
     assert_eq!(error.rows[0].state, yoagent_rutis::rows::RowState::Waiting);
     assert_eq!(
@@ -1270,11 +1257,15 @@ async fn wait_running_names_the_services_a_waiting_row_lacks() {
         Some(vec!["yoagentNoSuchService".to_string()]),
         "{error}"
     );
-    assert_eq!(error.rows[0].note, None, "{error}");
+    assert_eq!(
+        error.rows[0].note.as_deref(),
+        Some("waiting for yoagentNoSuchService (no row provides it)"),
+        "{error}"
+    );
     assert!(
         error
             .to_string()
-            .contains("nothing provides yoagentNoSuchService"),
+            .contains("needs (waiting): waiting for yoagentNoSuchService"),
         "{error}"
     );
     host.root.shutdown().await.unwrap();
@@ -1301,31 +1292,19 @@ async fn wait_running_ends_at_once_or_waits_by_state() {
     ];
     let patches: Vec<Patch> = serde_json::from_value(json!([{ "insert": rows }])).unwrap();
     let layers = vec![Layer::new("rows", patches)];
-    let _ = host.loader.reconcile(layers.clone(), None).await.unwrap();
+    let _ = host.loader.reconcile(layers, None).await.unwrap();
 
     // Still loading: waited for, not a failure.
-    wait_running(
-        &host.loader,
-        &host.root,
-        &layers,
-        &["slow"],
-        Duration::from_secs(30),
-    )
-    .await
-    .expect("the slow row runs once its apply ends");
+    wait_running(&host.loader, &["slow"], Duration::from_secs(30))
+        .await
+        .expect("the slow row runs once its apply ends");
 
     // Never runs: the wait ends at once, every row not running listed.
     let started = std::time::Instant::now();
     let ids = vec!["broken".to_string(), "no-such-row".to_string()];
-    let error = wait_running(
-        &host.loader,
-        &host.root,
-        &layers,
-        &ids,
-        Duration::from_secs(30),
-    )
-    .await
-    .expect_err("rows that never run");
+    let error = wait_running(&host.loader, &ids, Duration::from_secs(30))
+        .await
+        .expect_err("rows that never run");
     assert!(started.elapsed() < Duration::from_secs(10), "{error}");
     let state = |id: &str| {
         error
@@ -1353,7 +1332,8 @@ async fn a_crashed_runtime_withdraws_its_handlers() {
     };
     let fx = fixtures();
     let host = host(None, Some((&fx.py, &python))).await;
-    host.load(vec![py_row("py", "py_hooks", json!({}))]).await;
+    host.load(vec![py_row("python", "py_hooks", json!({}))])
+        .await;
     host.until_handlers(&["py-hooks"]).await;
     // A Python row's handler belongs to its row too (rutis 0.12's caller row).
     let owner = host
@@ -1363,7 +1343,7 @@ async fn a_crashed_runtime_withdraws_its_handlers() {
         .into_iter()
         .find(|h| h.name() == "py-hooks")
         .map(|h| h.owner().to_string());
-    assert_eq!(owner.as_deref(), Some("py"));
+    assert_eq!(owner.as_deref(), Some("python"));
 
     let denied = Reply::new("py_denied", "ran");
     let denied_runs = denied.runs();
@@ -1411,7 +1391,7 @@ async fn handler_names_are_unique_across_languages() {
     wait_active(&rust).await;
     let rows = vec![
         ts_row("js", &fx.js, json!({"name": "taken"})),
-        py_row("py", "py_hooks", json!({"name": "taken"})),
+        py_row("python", "py_hooks", json!({"name": "taken"})),
     ];
     let patches: Vec<Patch> = serde_json::from_value(json!([{ "insert": rows }])).unwrap();
     host.loader
@@ -1424,7 +1404,7 @@ async fn handler_names_are_unique_across_languages() {
     // (seen on CI: the report held only Python's failure).
     let failed = tokio::time::timeout(Duration::from_secs(60), async {
         loop {
-            let failed: Vec<(&str, String)> = ["js", "py"]
+            let failed: Vec<(&str, String)> = ["js", "python"]
                 .into_iter()
                 .filter_map(|id| match host.loader.get(id)?.status {
                     EntryStatus::Running(s) if s.state == FiberState::Failed => {
@@ -1446,7 +1426,7 @@ async fn handler_names_are_unique_across_languages() {
         panic!(
             "both rows fail to load; js: {:?}, py: {:?}",
             status("js"),
-            status("py")
+            status("python")
         )
     });
     for (id, error) in failed {
@@ -1545,7 +1525,11 @@ async fn register_and_results_are_strict() {
             .into_iter()
             .find(|l| l.contains(what))
             .unwrap_or_else(|| panic!("{what}: {:?}", host.probe.lines()));
-        assert!(line.starts_with("refused") && line.contains(why), "{line}");
+        // An argument check, by its code (rutis 0.18): not `bad-value`.
+        assert!(
+            line.starts_with(&format!("refused: {what}: bad-argument: ")) && line.contains(why),
+            "{line}"
+        );
     }
 
     let echo = Reply::new("bad_args", "ran");
@@ -1726,7 +1710,8 @@ async fn a_python_hook_sees_its_signal_set_when_the_run_is_cancelled() {
     };
     let fx = fixtures();
     let host = host(None, Some((&fx.py, &python))).await;
-    host.load(vec![py_row("py", "py_cancel", json!({}))]).await;
+    host.load(vec![py_row("python", "py_cancel", json!({}))])
+        .await;
     host.until_handlers(&["py-cancel"]).await;
 
     let (agent, _) = agent(vec![
@@ -1832,9 +1817,10 @@ export default definePlugin({
 })
 "#;
 
-/// rutis (since 0.9) closes a local channel on a message over 16 MiB, ending the
-/// runtime. A conversation holding more than that in images still reaches a
-/// handler that reads it — the images as text — and the runtime lives on.
+/// rutis refuses a message over 16 MiB (since 0.17.2 it fails only that
+/// call). A conversation holding more than that in images still reaches a
+/// handler that reads it — the images as text, not a failed hook — and the
+/// runtime lives on.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_conversation_over_the_message_limit_reaches_a_plugin_without_its_images() {
     let Some(node) = node_runtime() else {

@@ -8,9 +8,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::*;
-use rutis::{
-    BoxFuture, CordisError, Ctx, Effect, FiberState, FiberView, Plugin, PluginFactory, TypeKey,
+use rutis::host::{
+    BoxFuture, CtxHost, DynPlugin, Effect, FiberState, FiberView, PluginFactory, TypeKey,
 };
+use rutis::{Ctx, Error};
 use tokio::sync::Notify;
 use yoagent::{AgentTool, ToolContext, ToolDecision, ToolError, ToolResult};
 use yoagent_rutis::{PluginCtxExt, Registry};
@@ -90,14 +91,14 @@ struct Keeper {
     injects: Vec<TypeKey>,
 }
 
-impl Plugin for Keeper {
+impl DynPlugin for Keeper {
     fn name(&self) -> &str {
         "keeper"
     }
-    fn injects(&self) -> &[TypeKey] {
-        &self.injects
+    fn injects(&self) -> Vec<TypeKey> {
+        self.injects.to_vec()
     }
-    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, Error>> {
         Box::pin(async move {
             *self.kept.lock().unwrap() = Some(ctx.clone());
             Ok(Effect::Done)
@@ -227,13 +228,9 @@ async fn a_run_starting_while_a_plugin_unloads_does_not_get_its_handler() {
                     .with_tool(Reply::new("greet", "hi")),
             )?;
             let gate = gate.clone();
-            ctx.effect(move || {
-                Effect::AsyncDisposer(Box::new(move || {
-                    Box::pin(async move {
-                        gate.notified().await;
-                        Ok(())
-                    })
-                }))
+            ctx.effect(move || async move {
+                gate.notified().await;
+                Ok(())
             })
             .map(drop)
         }
@@ -274,11 +271,12 @@ impl PluginFactory<bool> for SwitchFactory {
     fn name(&self) -> &str {
         "switch"
     }
-    fn injects(&self) -> &[TypeKey] {
+    fn injects(&self) -> Vec<TypeKey> {
         static KEYS: std::sync::OnceLock<Vec<TypeKey>> = std::sync::OnceLock::new();
         KEYS.get_or_init(|| vec![TypeKey::of::<Registry>()])
+            .to_vec()
     }
-    fn build(&self, allow: &bool) -> Result<Box<dyn Plugin>, CordisError> {
+    fn build(&self, allow: &bool) -> Result<Box<dyn DynPlugin>, Error> {
         let allow = *allow;
         Ok(Box::new(plugin(handler("switch").with_before_tool(
             move |_| {

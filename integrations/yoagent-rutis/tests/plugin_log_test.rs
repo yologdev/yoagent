@@ -9,16 +9,16 @@
 //! with `YOAGENT_RUTIS_REQUIRE_RUNTIMES=1`.
 #![cfg(unix)]
 
+#[path = "common/runtimes.rs"]
+mod runtimes;
+
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use rutis::host::CtxHost;
 use rutis::Ctx;
-use rutis_bridge::runtime::LocalRuntime;
-use rutis_loader::{
-    Chain, Layer, LoaderOptions, LoaderPlugin, Patch, RuntimeResolver, RuntimeRowsPlugin,
-    ServiceCatalog,
-};
+use rutis_loader::{Layer, Patch, ServiceCatalog};
 use serde_json::json;
 use tracing_subscriber::layer::SubscriberExt;
 use yoagent_rutis::RutisBridge;
@@ -109,19 +109,8 @@ async fn a_plugin_log_reaches_the_hosts_tracing_with_its_run() {
     let _bridge = RutisBridge::install(&root).unwrap();
     let mut catalog = ServiceCatalog::new();
     catalog.register_shared("yoagent");
-    let node = LocalRuntime::node(&runtime, plugins_dir().join("package.json"));
-    let resolver = Arc::new(RuntimeResolver::node(node.handle()).with_catalog(&catalog));
-    root.plugin(node);
-    let plugin = LoaderPlugin::new(
-        Chain::new().with_shared(resolver.clone()),
-        LoaderOptions {
-            catalog,
-            ..LoaderOptions::default()
-        },
-    );
-    let loader = plugin.handle();
-    root.plugin(plugin).await.unwrap();
-    root.plugin(RuntimeRowsPlugin::new(resolver));
+    let node = runtimes::node(&runtime, &plugins_dir().join("package.json"));
+    let loader = runtimes::start(&root, catalog, vec![node]).await.loader;
     let patches: Vec<Patch> = serde_json::from_value(json!([{ "insert": [{
         "id": "logger",
         "name": logger.to_string_lossy(),
