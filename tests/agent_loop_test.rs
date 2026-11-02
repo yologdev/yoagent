@@ -981,6 +981,145 @@ async fn test_execution_limit_counts_cached_tokens() {
     }));
 }
 
+/// The same 101-token prompt every turn: under `TokenAccounting::Growth`
+/// the conversation does not grow, so only `max_turns` stops the run, while
+/// the default counts each resent prompt and stops it at the token cap.
+async fn turns_until_stopped(accounting: TokenAccounting) -> (usize, String) {
+    let provider = std::sync::Arc::new(UsageProvider {
+        usage: Usage {
+            input: 1,
+            output: 1,
+            cache_read: 99,
+            cache_write: 0,
+            total_tokens: 101,
+        },
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let stop = run_until_stopped(provider.clone(), accounting, 5, 250).await;
+    (
+        provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+        stop,
+    )
+}
+
+/// Runs on follow-ups until a limit stops the run; returns the stop marker.
+async fn run_until_stopped(
+    provider_for_config: std::sync::Arc<dyn StreamProvider>,
+    accounting: TokenAccounting,
+    max_turns: usize,
+    max_total_tokens: usize,
+) -> String {
+    let mut config = AgentLoopConfig::new(provider_for_config, "usage-test");
+    config.api_key = "test".into();
+    config.get_follow_up_messages = Some(Box::new(|| {
+        vec![AgentMessage::Llm(Message::user("follow up"))]
+    }));
+    config.execution_limits = Some(
+        ExecutionLimits::default()
+            .with_max_turns(max_turns)
+            .with_max_total_tokens(max_total_tokens)
+            .with_token_accounting(accounting),
+    );
+
+    let mut context = AgentContext {
+        system_prompt: "test".into(),
+        messages: Vec::new(),
+        tools: Vec::new(),
+    };
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let new_messages = agent_loop(
+        vec![AgentMessage::Llm(Message::user("start"))],
+        &mut context,
+        &config,
+        tx,
+        CancellationToken::new(),
+    )
+    .await;
+
+    let stop = new_messages
+        .iter()
+        .find_map(|msg| match msg {
+            AgentMessage::Llm(Message::User { content, .. }) => {
+                content.iter().find_map(|c| match c {
+                    Content::Text { text } if text.starts_with("[Agent stopped:") => {
+                        Some(text.clone())
+                    }
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .expect("the run is stopped by a limit");
+    stop
+}
+
+/// A conversation that grows 500 tokens a turn (cached history), with a
+/// 100-token answer each turn.
+struct GrowingUsageProvider {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl StreamProvider for GrowingUsageProvider {
+    async fn stream(
+        &self,
+        _config: StreamConfig,
+        tx: tokio::sync::mpsc::UnboundedSender<StreamEvent>,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<yoagent::Message, ProviderError> {
+        let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) as u64;
+        let usage = Usage {
+            input: 1,
+            output: 100,
+            cache_read: 1_000 + 500 * n,
+            cache_write: 0,
+            total_tokens: 1_101 + 500 * n,
+        };
+        let message = Message::assistant(
+            vec![Content::Text {
+                text: "growing".into(),
+            }],
+            StopReason::Stop,
+            "usage-test",
+            "usage-test",
+            usage,
+        );
+        let _ = tx.send(StreamEvent::Start);
+        let _ = tx.send(StreamEvent::Done {
+            message: message.clone(),
+        });
+        Ok(message)
+    }
+}
+
+#[tokio::test]
+async fn growth_accounting_stops_a_growing_conversation_at_the_cap() {
+    let provider = std::sync::Arc::new(GrowingUsageProvider {
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let stop = run_until_stopped(provider.clone(), TokenAccounting::Growth, 10, 1_600).await;
+    // The first turn adds its 100-token answer (the 1,001-token prompt is the
+    // baseline), each later one its 500 tokens of growth: 100, 600, 1,100,
+    // 1,600. Counting every prompt would stop after two turns.
+    assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+    assert!(stop.contains("Max tokens reached (1600/1600)"), "{stop}");
+}
+
+#[tokio::test]
+async fn processed_accounting_stops_at_the_token_cap() {
+    let (calls, stop) = turns_until_stopped(TokenAccounting::Processed).await;
+    // 101 + 101 + 101 >= 250 after the third turn.
+    assert_eq!(calls, 3);
+    assert!(stop.contains("Max tokens reached (303/250)"), "{stop}");
+}
+
+#[tokio::test]
+async fn growth_accounting_lets_a_conversation_that_does_not_grow_run_on() {
+    let (calls, stop) = turns_until_stopped(TokenAccounting::Growth).await;
+    assert_eq!(calls, 5);
+    assert!(stop.contains("Max turns reached (5/5)"), "{stop}");
+}
+
 #[async_trait::async_trait]
 impl StreamProvider for FailThenSucceedProvider {
     async fn stream(

@@ -438,9 +438,10 @@ impl SubAgentTool {
 
     /// The limits each delegation runs under: turns, tokens, wall-clock time
     /// and loop detection, all per delegation. The default is 10 turns, 1M
-    /// tokens and 5 minutes. The token count includes every turn's whole
-    /// prompt, so a delegation working over a large context reaches 1M in a
-    /// few turns (see
+    /// tokens and 5 minutes. By default the token count includes every turn's
+    /// whole prompt, so a delegation working over a large context reaches 1M
+    /// in a few turns (count its growth instead with
+    /// [`TokenAccounting::Growth`](crate::context::TokenAccounting::Growth); see
     /// [`ExecutionLimits::max_total_tokens`](crate::context::ExecutionLimits::max_total_tokens));
     /// raise it here for long-running sub-agents. Replaces every limit,
     /// including one set with [`with_max_turns`](Self::with_max_turns)

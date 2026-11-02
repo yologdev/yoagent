@@ -257,6 +257,7 @@ Prevents runaway agents:
 pub struct ExecutionLimits {
     pub max_turns: usize,              // Default: 50
     pub max_total_tokens: usize,       // Default: 1,000,000
+    pub token_accounting: TokenAccounting,  // Default: Processed (every prompt)
     pub max_duration: Duration,        // Default: 600s (10 min)
     pub max_consecutive_identical_tool_calls: Option<usize>,  // Default: Some(3)
 }
@@ -270,7 +271,7 @@ prompts is never cut off by them; a single prompt that keeps working is.
 
 ### What `max_total_tokens` counts
 
-Every turn adds its **whole prompt** — cached tokens included
+By default (`TokenAccounting::Processed`), every turn adds its **whole prompt** — cached tokens included
 (`input + cache_read + cache_write`) — plus its output. The prompt resends the
 conversation each turn, so a run's total is about *turns × context size*
 (quadratic in turns while the conversation is still growing), far more than
@@ -301,6 +302,30 @@ let agent = agent.with_execution_limits(
         .with_max_duration(Duration::from_secs(4 * 3600)),
 );
 ```
+
+Or count how much the conversation **grows** during the run instead
+(`TokenAccounting::Growth`, opt-in): the conversation the run starts with —
+history, system prompt, tool definitions, the new prompt — is the baseline and
+is not counted; then each turn adds its output on the first turn, and its
+growth over the turn before after that. The total grows with the conversation,
+not with turns × context, cached or not, and a run late in a long conversation
+has the same allowance as the first. A compaction's shrink counts as zero (the
+total never goes down), and what the conversation grows by after it counts
+again; a turn that reports no usage adds nothing. A 1M cap then means "stop
+once this run has added about 1M tokens to the conversation":
+
+```rust
+use yoagent::context::{ExecutionLimits, TokenAccounting};
+
+let agent = agent.with_execution_limits(
+    ExecutionLimits::default().with_token_accounting(TokenAccounting::Growth),
+);
+```
+
+It is a cap on the conversation, not on spend — a run whose conversation stays
+the same size is never stopped by it, however many turns it takes (`max_turns`
+and `max_duration` still apply). For a spending limit use
+[`extension::Budget`](extensions.md), which counts dollars.
 
 A `SubAgentTool` delegation has its own limits, counted the same way: by
 default 10 turns, 1M tokens and 5 minutes per delegation, set with

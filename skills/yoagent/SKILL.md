@@ -185,8 +185,10 @@ and its examples.
 - **Retries emit `AgentEvent::ProviderRetry`.** A streamed attempt that
   failed was already shown; look at the next event before treating an error
   `MessageEnd` as final, or use `retry_safe_events`.
-- **Limits are per run** and `max_total_tokens` counts the whole prompt
-  every turn, so it fills faster than the visible conversation.
+- **Limits are per run** and `max_total_tokens` by default counts the whole
+  prompt every turn, so it fills faster than the visible conversation —
+  `with_token_accounting(TokenAccounting::Growth)` counts the conversation's
+  growth instead (a cap on the conversation, not on spend: use `Budget`).
 - **Spend is bucketed**: the agent's own, `sub_agents`, `decision`,
   `compaction`, `extensions` (calls an extension records through
   `RunContext::spend_handle`); `total_cost_usd()` adds them. Unknown cost

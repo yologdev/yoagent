@@ -98,6 +98,7 @@ Prevents runaway agents:
 pub struct ExecutionLimits {
     pub max_turns: usize,              // Default: 50
     pub max_total_tokens: usize,       // Default: 1,000,000
+    pub token_accounting: TokenAccounting,  // Default: Processed; Growth = conversation growth
     pub max_duration: Duration,        // Default: 600s
     pub max_consecutive_identical_tool_calls: Option<usize>,  // Default: Some(3)
 }

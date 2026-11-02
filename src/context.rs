@@ -1161,17 +1161,23 @@ fn keep_protected(
 pub struct ExecutionLimits {
     /// Maximum number of turns (LLM calls)
     pub max_turns: usize,
-    /// Maximum tokens the model processes in one run (each `prompt` /
-    /// `continue_loop` starts again at 0): every turn adds its whole prompt
-    /// (`input + cache_read + cache_write`) plus its output.
+    /// Maximum tokens in one run (each `prompt` / `continue_loop` starts
+    /// again at 0), counted as [`token_accounting`](Self::token_accounting)
+    /// says. By default ([`TokenAccounting::Processed`]) every turn adds its
+    /// whole prompt (`input + cache_read + cache_write`) plus its output.
     ///
-    /// The prompt resends the conversation each turn, so the total is about
+    /// The prompt resends the conversation each turn, so that total is about
     /// turns × context size — quadratic in turns while the conversation is
     /// still growing. At a 60K-token context the 1M default is reached around
     /// turn 16, cached or not. It is checked before each turn, so the last
     /// turn can go over by one turn's tokens. For long agentic runs raise it
-    /// (or set `usize::MAX` and rely on `max_turns`).
+    /// (or set `usize::MAX` and rely on `max_turns`), or count the
+    /// conversation's growth instead ([`TokenAccounting::Growth`]).
     pub max_total_tokens: usize,
+    /// What [`max_total_tokens`](Self::max_total_tokens) counts. Default
+    /// [`TokenAccounting::Processed`].
+    #[serde(default)]
+    pub token_accounting: TokenAccounting,
     /// Maximum wall-clock time of one run (default 10 minutes); checked
     /// between turns. A single long agentic run reaches it; raise it for
     /// those.
@@ -1203,6 +1209,7 @@ impl Default for ExecutionLimits {
         Self {
             max_turns: 50,
             max_total_tokens: 1_000_000,
+            token_accounting: TokenAccounting::Processed,
             max_duration: std::time::Duration::from_secs(600),
             max_consecutive_identical_tool_calls: Some(3),
         }
@@ -1224,6 +1231,14 @@ impl ExecutionLimits {
         self
     }
 
+    /// What [`max_total_tokens`](Self::max_total_tokens) counts: every
+    /// prompt the model processes (the default) or how much the
+    /// conversation grows. See [`TokenAccounting`].
+    pub fn with_token_accounting(mut self, accounting: TokenAccounting) -> Self {
+        self.token_accounting = accounting;
+        self
+    }
+
     /// Wall-clock cap on the run.
     pub fn with_max_duration(mut self, duration: std::time::Duration) -> Self {
         self.max_duration = duration;
@@ -1236,6 +1251,32 @@ impl ExecutionLimits {
         self.max_consecutive_identical_tool_calls = calls;
         self
     }
+}
+
+/// What [`ExecutionLimits::max_total_tokens`] counts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TokenAccounting {
+    /// Every token the model processes: each turn adds its whole prompt
+    /// (`input + cache_read + cache_write`) plus its output. The prompt
+    /// resends the conversation, so the total is about turns × context size —
+    /// a ceiling on the work a run does. The default.
+    #[default]
+    Processed,
+    /// How much the conversation grows during the run: the first turn's
+    /// output, then each turn's growth over the turn before (its prompt plus
+    /// output, less the previous turn's). The conversation the run starts
+    /// with — history, system prompt, tool definitions, the new prompt — is
+    /// the baseline and is not counted, so a run late in a long conversation
+    /// has the same allowance as the first. Without compaction the total is
+    /// about what the run added to the conversation; it grows with the
+    /// conversation, not with turns × context, and cached and uncached runs
+    /// count the same. A compaction's shrink counts as zero, so the total
+    /// never goes down; what the conversation grows by after it counts again.
+    /// A turn that reports no usage (zero prompt and output) adds nothing and
+    /// leaves the baseline where it was.
+    Growth,
 }
 
 /// How many steered signatures to remember before dropping the oldest.
@@ -1290,6 +1331,11 @@ pub struct ExecutionTracker {
     pub turns: usize,
     pub tokens_used: usize,
     pub started_at: web_time::Instant,
+    /// Prompt plus output of the latest turn recorded with
+    /// [`record_turn_usage`](Self::record_turn_usage) that reported usage,
+    /// for [`TokenAccounting::Growth`]. Kept in both modes, so switching
+    /// `limits.token_accounting` mid-run counts from the next turn.
+    last_turn_size: Option<usize>,
     /// The tool signature seen most recently, and how many times in a row.
     ///
     /// A signature is `(name, arguments)` compared as `serde_json::Value`, not
@@ -1323,6 +1369,7 @@ impl ExecutionTracker {
             turns: 0,
             tokens_used: 0,
             started_at: web_time::Instant::now(),
+            last_turn_size: None,
             last_signature: None,
             consecutive: 0,
             steered: Vec::new(),
@@ -1394,9 +1441,38 @@ impl ExecutionTracker {
         verdict
     }
 
+    /// Count one turn that used `tokens`, added as is whatever the
+    /// [`TokenAccounting`] (under [`TokenAccounting::Growth`] the caller
+    /// supplies the growth). The loop records a model turn with
+    /// [`record_turn_usage`](Self::record_turn_usage).
     pub fn record_turn(&mut self, tokens: usize) {
         self.turns += 1;
-        self.tokens_used += tokens;
+        self.tokens_used = self.tokens_used.saturating_add(tokens);
+    }
+
+    /// Count one model turn from its usage: `prompt` is the whole prompt
+    /// (`input + cache_read + cache_write`), `output` what the model
+    /// generated. What it adds to [`tokens_used`](Self::tokens_used) depends
+    /// on [`ExecutionLimits::token_accounting`].
+    pub fn record_turn_usage(&mut self, prompt: usize, output: usize) {
+        self.turns += 1;
+        let size = prompt.saturating_add(output);
+        if size == 0 {
+            // No usage reported (a gateway that omits it, a stream cut before
+            // its usage): nothing to add, and a zero baseline would make
+            // Growth count the whole conversation again on the next turn.
+            return;
+        }
+        let added = match self.limits.token_accounting {
+            TokenAccounting::Processed => size,
+            TokenAccounting::Growth => match self.last_turn_size {
+                Some(last) => size.saturating_sub(last),
+                // The conversation the run starts with is the baseline.
+                None => output,
+            },
+        };
+        self.last_turn_size = Some(size);
+        self.tokens_used = self.tokens_used.saturating_add(added);
     }
 
     /// Check if any limit has been exceeded. Returns the reason if so.
@@ -2503,6 +2579,111 @@ mod tests {
 
         tracker.record_turn(100);
         assert!(tracker.check_limits().is_some());
+    }
+
+    /// Five turns of a conversation that grows by 10K tokens a turn (tool
+    /// results in, a 1K answer out), from a 10K prompt.
+    fn five_growing_turns(tracker: &mut ExecutionTracker) {
+        for turn in 0..5 {
+            tracker.record_turn_usage(10_000 + turn * 10_000, 1_000);
+        }
+    }
+
+    #[test]
+    fn processed_accounting_counts_every_prompt() {
+        let mut tracker = ExecutionTracker::new(ExecutionLimits::default());
+        five_growing_turns(&mut tracker);
+        // 10K + 20K + … + 50K of prompts, plus 5 × 1K of output.
+        assert_eq!(tracker.tokens_used, 155_000);
+        assert_eq!(tracker.turns, 5);
+    }
+
+    #[test]
+    fn growth_accounting_counts_the_conversation_once() {
+        let limits = ExecutionLimits::default().with_token_accounting(TokenAccounting::Growth);
+        let mut tracker = ExecutionTracker::new(limits);
+        five_growing_turns(&mut tracker);
+        // What the run added: from the first 10K prompt to the last 50K
+        // prompt plus its 1K answer. Each answer is in the next prompt, so it
+        // is not counted twice.
+        assert_eq!(tracker.tokens_used, 41_000);
+        assert_eq!(tracker.turns, 5);
+    }
+
+    #[test]
+    fn growth_accounting_does_not_count_the_history_a_run_starts_with() {
+        let limits = ExecutionLimits::default().with_token_accounting(TokenAccounting::Growth);
+        let mut tracker = ExecutionTracker::new(limits);
+        // A run late in a 900K conversation: only its own growth counts.
+        tracker.record_turn_usage(900_000, 2_000);
+        assert_eq!(tracker.tokens_used, 2_000);
+        tracker.record_turn_usage(910_000, 2_000);
+        assert_eq!(tracker.tokens_used, 12_000);
+    }
+
+    #[test]
+    fn a_turn_without_usage_adds_nothing_and_keeps_the_baseline() {
+        for (accounting, expected) in [
+            (TokenAccounting::Processed, 81_000 + 83_000),
+            (TokenAccounting::Growth, 1_000 + 2_000),
+        ] {
+            let limits = ExecutionLimits::default().with_token_accounting(accounting);
+            let mut tracker = ExecutionTracker::new(limits);
+            tracker.record_turn_usage(80_000, 1_000);
+            tracker.record_turn_usage(0, 0);
+            tracker.record_turn_usage(82_000, 1_000);
+            assert_eq!(tracker.tokens_used, expected, "{accounting:?}");
+            assert_eq!(tracker.turns, 3);
+        }
+    }
+
+    #[test]
+    fn growth_accounting_never_goes_down_and_counts_regrowth() {
+        let limits = ExecutionLimits::default().with_token_accounting(TokenAccounting::Growth);
+        let mut tracker = ExecutionTracker::new(limits);
+        tracker.record_turn_usage(10_000, 1_000);
+        tracker.record_turn_usage(80_000, 1_000);
+        assert_eq!(tracker.tokens_used, 71_000);
+        // Compacted: the next prompt is smaller. Nothing is added, nothing
+        // taken back.
+        tracker.record_turn_usage(20_000, 1_000);
+        assert_eq!(tracker.tokens_used, 71_000);
+        // Growth after the compaction counts again.
+        tracker.record_turn_usage(30_000, 1_000);
+        assert_eq!(tracker.tokens_used, 81_000);
+    }
+
+    #[test]
+    fn growth_accounting_stops_a_run_at_the_cap() {
+        let limits = ExecutionLimits::default()
+            .with_max_total_tokens(40_000)
+            .with_token_accounting(TokenAccounting::Growth);
+        let mut tracker = ExecutionTracker::new(limits);
+        tracker.record_turn_usage(10_000, 1_000);
+        tracker.record_turn_usage(30_000, 1_000);
+        assert!(tracker.check_limits().is_none());
+        tracker.record_turn_usage(50_000, 1_000);
+        assert_eq!(
+            tracker.check_limits().as_deref(),
+            Some("Max tokens reached (41000/40000)")
+        );
+    }
+
+    #[test]
+    fn limits_without_token_accounting_deserialize_to_processed() {
+        let limits: ExecutionLimits = serde_json::from_value(serde_json::json!({
+            "max_turns": 5,
+            "max_total_tokens": 100,
+            "max_duration": {"secs": 1, "nanos": 0},
+            "max_consecutive_identical_tool_calls": 3
+        }))
+        .unwrap();
+        assert_eq!(limits.token_accounting, TokenAccounting::Processed);
+        let growth = ExecutionLimits::default().with_token_accounting(TokenAccounting::Growth);
+        let stored = serde_json::to_value(&growth).unwrap();
+        assert_eq!(stored["token_accounting"], "growth");
+        let back: ExecutionLimits = serde_json::from_value(stored).unwrap();
+        assert_eq!(back.token_accounting, TokenAccounting::Growth);
     }
 }
 
