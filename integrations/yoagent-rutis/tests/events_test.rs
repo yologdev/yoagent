@@ -1,4 +1,4 @@
-//! Agent events published on the rutis bus by the extension.
+//! Agent events handed by the extension to Rust `on_agent_event` observers.
 
 mod common;
 
@@ -7,7 +7,6 @@ use std::time::{Duration, Instant};
 
 use common::*;
 use rutis::host::CtxHost;
-use tokio::sync::Semaphore;
 use yoagent::{AgentEvent, SubAgentTool};
 use yoagent_rutis::{AgentEventEmitted, PluginCtxExt, RutisBridge};
 
@@ -56,7 +55,7 @@ fn record(log: &Log, e: &AgentEventEmitted) {
     ))
 }
 
-/// A plugin recording every event it observes on the bus.
+/// A plugin recording every event it observes.
 fn observer_plugin(log: Log) -> Setup {
     Setup::new("observer", move |ctx| {
         let log = log.clone();
@@ -95,7 +94,7 @@ fn attached(bridge: &RutisBridge, label: Option<&str>) -> yoagent::Agent {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_bus_listener_sees_exactly_the_runs_events_in_order() {
+async fn an_observer_sees_exactly_the_runs_events_in_order() {
     let (root, bridge) = setup();
     let log = Log::default();
     let observer = root.plugin(observer_plugin(log.clone()));
@@ -119,26 +118,28 @@ async fn a_bus_listener_sees_exactly_the_runs_events_in_order() {
     root.shutdown().await.unwrap();
 }
 
-/// An observer that waits on a gate before recording each event.
-fn gated_observer(gate: Arc<Semaphore>, log: Log) -> Setup {
+/// An observer that blocks on a gate before recording each event: one
+/// permit per event.
+fn gated_observer(gate: Arc<(Mutex<usize>, std::sync::Condvar)>, log: Log) -> Setup {
     Setup::new("gated-observer", move |ctx| {
         let (gate, log) = (gate.clone(), log.clone());
-        ctx.on::<AgentEventEmitted>(move |event, _call| {
-            let (gate, log) = (gate.clone(), log.clone());
-            async move {
-                gate.acquire().await.unwrap().forget();
-                record(&log, &event);
-                Ok(None)
-            }
+        ctx.on_agent_event(move |event| {
+            let (permits, opened) = &*gate;
+            let mut permits = opened
+                .wait_while(permits.lock().unwrap(), |n| *n == 0)
+                .unwrap();
+            *permits -= 1;
+            drop(permits);
+            record(&log, event);
         })
         .map(drop)
     })
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_blocked_listener_does_not_hold_the_agent_back() {
+async fn a_blocked_observer_does_not_hold_the_agent_back() {
     let (root, bridge) = setup();
-    let gate = Arc::new(Semaphore::new(0));
+    let gate = Arc::new((Mutex::new(0usize), std::sync::Condvar::new()));
     let log = Log::default();
     let slow = root.plugin(gated_observer(gate.clone(), log.clone()));
     wait_active(&slow).await;
@@ -146,21 +147,20 @@ async fn a_blocked_listener_does_not_hold_the_agent_back() {
 
     tokio::time::timeout(Duration::from_secs(5), run(&mut agent, "go"))
         .await
-        .expect("the run completes while the listener is blocked");
+        .expect("the run completes while the observer is blocked");
     assert!(
         log.lock().unwrap().is_empty(),
-        "the listener has not handled a single event, yet the run is done"
+        "the observer has not handled a single event, yet the run is done"
     );
 
-    gate.add_permits(EXPECTED.len());
+    *gate.0.lock().unwrap() += EXPECTED.len();
+    gate.1.notify_all();
     until_count(&log, EXPECTED.len()).await;
-    // Every event, then; since rutis 0.13 the calls only start in order (a
-    // listener that awaits first may finish them in another).
-    let mut got = kinds(&log, None);
-    got.sort();
-    let mut expected: Vec<String> = EXPECTED.iter().map(|k| k.to_string()).collect();
-    expected.sort();
-    assert_eq!(got, expected, "then it gets every event");
+    assert_eq!(
+        kinds(&log, None),
+        EXPECTED,
+        "then it gets every event, in order"
+    );
     root.shutdown().await.unwrap();
 }
 
@@ -212,7 +212,7 @@ async fn a_sub_agents_events_carry_its_depth_with_a_tree_extension() {
         }
     })
     .await
-    .expect("the parent's run ends on the bus");
+    .expect("the parent's run ends at the observer");
     let log = log.lock().unwrap().clone();
     let child: Vec<_> = log.iter().filter(|(_, _, depth, _)| *depth == 1).collect();
     assert!(
@@ -238,13 +238,13 @@ async fn a_sub_agents_events_carry_its_depth_with_a_tree_extension() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn nothing_is_published_after_the_host_stops() {
+async fn nothing_is_delivered_after_the_host_stops() {
     let (root, bridge) = setup();
     let log = Log::default();
     let observer = root.plugin(observer_plugin(log.clone()));
     wait_active(&observer).await;
     // Positive control: while the host runs, a run's events reach the
-    // listener within the window the negative check waits below, so an
+    // observer within the window the negative check waits below, so an
     // empty log after the shutdown is not just slow delivery.
     const WINDOW: Duration = Duration::from_millis(500);
     let mut agent = attached(&bridge, None);
@@ -253,7 +253,7 @@ async fn nothing_is_published_after_the_host_stops() {
     assert_eq!(
         kinds(&log, None),
         EXPECTED,
-        "while running, the whole run is published within the window"
+        "while running, the whole run is delivered within the window"
     );
     log.lock().unwrap().clear();
 
@@ -262,4 +262,23 @@ async fn nothing_is_published_after_the_host_stops() {
     run(&mut agent, "go").await;
     tokio::time::sleep(WINDOW).await;
     assert!(log.lock().unwrap().is_empty(), "{:?}", log.lock().unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_observer_goes_with_its_plugin() {
+    let (root, bridge) = setup();
+    let log = Log::default();
+    let observer = root.plugin(observer_plugin(log.clone()));
+    wait_active(&observer).await;
+    let mut agent = attached(&bridge, None);
+    run(&mut agent, "go").await;
+    until_count(&log, EXPECTED.len()).await;
+    log.lock().unwrap().clear();
+
+    observer.dispose().await.unwrap();
+    let mut agent = attached(&bridge, None);
+    run(&mut agent, "go").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(log.lock().unwrap().is_empty(), "{:?}", log.lock().unwrap());
+    root.shutdown().await.unwrap();
 }

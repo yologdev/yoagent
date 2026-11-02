@@ -1,54 +1,60 @@
-//! Agent events on the rutis bus: [`AgentEventEmitted`].
+//! Agent events for Rust observers: [`AgentEventEmitted`].
 //!
-//! Every event of a run that uses the bridge's extension is published with
-//! rutis `emit` as an [`AgentEventEmitted`], from the extension's `on_event`
-//! — no event sender to wire. `emit` starts the listeners' calls and
-//! returns without waiting for them, so a slow or failing listener never
-//! slows the agent; listener errors and panics go to the rutis `ErrorSink`.
+//! Every event of a run that uses the bridge's extension is handed, as an
+//! [`AgentEventEmitted`], to every observer a Rust plugin registered with
+//! [`on_agent_event`](crate::PluginCtxExt::on_agent_event) — no event sender
+//! to wire. Each observer has its own queue and task: the agent only queues
+//! the event and goes on, so a slow observer never slows it; a panicking
+//! observer is logged (`error!`) and called again for the next event.
 //!
-//! **Ordering.** rutis starts the calls of one event name's emits in emit
-//! order at every listener (rutis 0.13+), but runs them concurrently: a
-//! listener that does its work as its call starts — an
-//! [`on_agent_event`](crate::PluginCtxExt::on_agent_event) observer — sees
-//! each run's events in the order the run produced them; one that awaits
-//! before acting may finish them in another order. Runs on one bridge
-//! interleave; tell them apart by [`AgentEventEmitted::run_id`] (unique) or
-//! [`AgentEventEmitted::label`] (the host's `Agent::with_run_label`). A
-//! listener may see an event before or after the run's own consumer does.
+//! **In-process only.** The stream never goes on the rutis bus: rutis lets
+//! any runtime session listen to any bus event name but `internal/…`
+//! (`global`, past every emitter's filter) and emit any but `internal/…`
+//! and `rutis/…` (rutis-bridge's `events/hub.rs`), so a bus event would
+//! hand every run's prompts, answers and tool calls to every plugin — a
+//! restricted runtime's included — and let any of them fake events to the
+//! observers. The bridge keeps the observers itself, in its
+//! [`Registry`](crate::Registry); they are removed when their plugin
+//! unloads. Language plugins get events only through their handler's
+//! opt-in (`options.events`, and `options.messages` for the conversation),
+//! and a restricted one never does.
 //!
-//! **Cost.** Each event is cloned once to publish it (whether or not a
-//! listener is registered: rutis does not say), and streaming produces one
-//! `MessageUpdate` event per text delta. A slow listener never slows the
-//! runs; a listener in another process costs one cross-process call per
-//! event.
+//! **Ordering.** An observer is called with one event at a time, in the
+//! order they were produced: each run's events in its order. Runs on one
+//! bridge interleave; tell them apart by [`AgentEventEmitted::run_id`]
+//! (unique) or [`AgentEventEmitted::label`] (the host's
+//! `Agent::with_run_label`). An observer may see an event before or after
+//! the run's own consumer does.
 //!
-//! **While the host is not running** nothing is published.
+//! **Cost.** With an observer registered, each event is cloned once and
+//! shared by all of them; streaming produces one `MessageUpdate` event per
+//! text delta. Nothing is cloned while no observer is registered. A stuck
+//! observer's queue grows with every event until its plugin unloads.
+//!
+//! **While the host is not running** nothing is delivered.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use rutis::Event;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use yoagent::AgentEvent;
 
 use crate::handler::RunInfo;
 use crate::host::Host;
 
-/// One [`AgentEvent`], as published on the rutis bus.
+/// One [`AgentEvent`] of a run, as [`on_agent_event`](crate::PluginCtxExt::on_agent_event)
+/// observers get it.
 ///
-/// Serde (every rutis event is, since 0.13): it reaches listeners in other
-/// processes and languages too, as `{run_id, label, depth, event}` with the
-/// event in yoagent's JSON shape.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Serializes as `{run_id, label, depth, event}`, the event in yoagent's
+/// JSON shape (to log it); it is not a rutis bus event (see the
+/// [module docs](self)).
+#[derive(Debug, Clone, Serialize)]
 pub struct AgentEventEmitted {
     run_id: Arc<str>,
     label: Option<Arc<str>>,
     depth: usize,
     event: AgentEvent,
-}
-
-impl Event for AgentEventEmitted {
-    const NAME: &'static str = "yoagent/agent_event";
-    type Value = ();
 }
 
 impl AgentEventEmitted {
@@ -91,19 +97,81 @@ impl AgentEventEmitted {
     }
 }
 
-/// Publish one event of `run` on `ctx`'s bus (fire-and-forget; never blocks).
-pub(crate) fn publish(host: &Host, run: &RunInfo, event: &AgentEvent) {
+type Observer = Arc<dyn Fn(&AgentEventEmitted) + Send + Sync>;
+
+/// The Rust observers of every run's events, kept by the [`Registry`](crate::Registry).
+#[derive(Default)]
+pub(crate) struct Observers {
+    inner: Mutex<ObserversInner>,
+}
+
+#[derive(Default)]
+struct ObserversInner {
+    next: u64,
+    /// In registration order: each observer's queue.
+    queues: Vec<(u64, mpsc::UnboundedSender<Arc<AgentEventEmitted>>)>,
+}
+
+impl Observers {
+    /// Add `observer`, called on a task of its own (spawned on the current
+    /// Tokio runtime) until [`remove`](Self::remove) or `generation` is
+    /// cancelled. Returns its id.
+    pub(crate) fn add(&self, observer: Observer, generation: CancellationToken) -> u64 {
+        let (tx, mut rx) = mpsc::unbounded_channel::<Arc<AgentEventEmitted>>();
+        tokio::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                if generation.is_cancelled() {
+                    break;
+                }
+                let called =
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| observer(&event)));
+                if let Err(panic) = called {
+                    let payload = panic
+                        .downcast_ref::<&str>()
+                        .map(|s| s.to_string())
+                        .or_else(|| panic.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "a non-string panic".into());
+                    tracing::error!(panic = %payload, "an agent event observer panicked");
+                }
+            }
+        });
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let id = inner.next;
+        inner.next += 1;
+        inner.queues.push((id, tx));
+        id
+    }
+
+    /// Remove the observer `id` (its task ends once its queue drains).
+    pub(crate) fn remove(&self, id: u64) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.queues.retain(|(at, _)| *at != id);
+    }
+
+    /// Queue `event` of `run` for every observer (never blocks).
+    fn deliver(&self, run: &RunInfo, event: &AgentEvent) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if inner.queues.is_empty() {
+            return;
+        }
+        let wrapped = Arc::new(AgentEventEmitted {
+            run_id: run.run_id.as_str().into(),
+            label: run.label.as_deref().map(Into::into),
+            depth: run.depth,
+            event: event.clone(),
+        });
+        // A closed queue: its task ended (its plugin's generation was
+        // cancelled, or the runtime is gone): drop it.
+        inner
+            .queues
+            .retain(|(_, tx)| tx.send(wrapped.clone()).is_ok());
+    }
+}
+
+/// Hand one event of `run` to the Rust observers (never blocks).
+pub(crate) fn publish(host: &Host, observers: &Observers, run: &RunInfo, event: &AgentEvent) {
     if host.is_closed() {
         return;
     }
-    let ctx = host.ctx();
-    let wrapped = AgentEventEmitted {
-        run_id: run.run_id.as_str().into(),
-        label: run.label.as_deref().map(Into::into),
-        depth: run.depth,
-        event: event.clone(),
-    };
-    if let Err(error) = ctx.emit(wrapped) {
-        tracing::debug!(%error, "agent event not published on the rutis bus");
-    }
+    observers.deliver(run, event);
 }

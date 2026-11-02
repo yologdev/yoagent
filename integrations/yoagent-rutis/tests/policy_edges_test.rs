@@ -564,7 +564,7 @@ fn event_kind(e: &AgentEvent) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_required_on_event_failure_keeps_the_bus_and_other_observers_going() {
+async fn a_required_on_event_failure_keeps_the_other_observers_going() {
     let (root, bridge) = setup();
     let fragile = root.plugin(plugin(panics_on_tool_use("fragile-observer")));
     wait_active(&fragile).await;
@@ -575,7 +575,7 @@ async fn a_required_on_event_failure_keeps_the_bus_and_other_observers_going() {
     })));
     wait_active(&steady).await;
     let bus = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-    let listener = root.plugin(Setup::new("bus-listener", {
+    let listener = root.plugin(Setup::new("event-observer", {
         let bus = bus.clone();
         move |ctx| {
             let bus = bus.clone();
@@ -614,15 +614,19 @@ async fn a_required_on_event_failure_keeps_the_bus_and_other_observers_going() {
         handled.iter().any(|k| k == "toolExecutionEnd"),
         "{handled:?}"
     );
-    // ...and so did the bus (delivered asynchronously).
+    // ...and so did the on_agent_event observer (delivered asynchronously).
     tokio::time::timeout(Duration::from_secs(5), async {
         while !bus.lock().unwrap().iter().any(|k| k == "agentEnd") {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
     .await
-    .unwrap_or_else(|_| panic!("the bus never saw agentEnd: {:?}", bus.lock().unwrap()));
-    assert_eq!(*bus.lock().unwrap(), handled, "the bus saw every event too");
+    .unwrap_or_else(|_| panic!("the observer never saw agentEnd: {:?}", bus.lock().unwrap()));
+    assert_eq!(
+        *bus.lock().unwrap(),
+        handled,
+        "the observer saw every event too"
+    );
     root.shutdown().await.unwrap();
 }
 

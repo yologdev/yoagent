@@ -94,6 +94,8 @@ pub struct Registry {
     offers: Mutex<HashMap<String, Arc<HashMap<String, ToolOwner>>>>,
     /// Extensions whose late tools are in use: told of restricted handlers.
     late: Mutex<Vec<std::sync::Weak<crate::late::Late>>>,
+    /// Rust plugins' observers of every run's events (`on_agent_event`).
+    pub(crate) observers: crate::events::Observers,
     /// The runtimes whose handlers are restricted (tools only).
     restricted_runtimes: Mutex<Vec<rutis_bridge_handle::RuntimeHandle>>,
     /// Every session a restricted runtime has run as, seen so far: a call
@@ -543,6 +545,29 @@ impl Registry {
         if registered.is_err() {
             // The fiber is no longer loading/active: nothing owns the entry.
             self.remove(seq);
+        }
+        registered
+    }
+
+    /// Add an observer of every run's events, owned by the plugin whose
+    /// context `ctx` is: removed when that plugin unloads, or by the
+    /// returned [`Disposer`]; refused with rutis's own error when the plugin
+    /// is no longer loading or active.
+    pub(crate) fn observe(
+        self: &Arc<Self>,
+        ctx: &Ctx,
+        observer: Arc<dyn Fn(&crate::AgentEventEmitted) + Send + Sync>,
+    ) -> Result<Disposer, Error> {
+        let id = self.observers.add(observer, ctx.cancellation_token());
+        let registry = Arc::downgrade(self);
+        let registered = ctx.effect(move || async move {
+            if let Some(registry) = registry.upgrade() {
+                registry.observers.remove(id);
+            }
+            Ok(())
+        });
+        if registered.is_err() {
+            self.observers.remove(id);
         }
         registered
     }

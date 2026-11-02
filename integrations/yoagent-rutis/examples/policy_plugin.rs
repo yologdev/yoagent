@@ -4,8 +4,8 @@
 //! - `policy` denies tools by name and caps how often each tool may run.
 //! - `redactor` masks API keys in every tool result (`after_tool`).
 //!
-//! The host installs the bridge's one extension; an observer on the rutis
-//! bus prints each tool result as the model saw it.
+//! The host installs the bridge's one extension; an `on_agent_event`
+//! observer prints each tool result as the model saw it.
 //!
 //! Run: `cargo run --manifest-path integrations/yoagent-rutis/Cargo.toml --example policy_plugin`
 
@@ -222,7 +222,7 @@ async fn main() -> Result<(), BoxError> {
     wait_active(&policy).await?;
     wait_active(&redactor).await?;
 
-    // Observe the agent's events on the bus. (A plugin would do the same
+    // Observe the agent's events. (A plugin would do the same
     // from its `apply`; registered on the root, it lives as long as the root.)
     let log = Arc::new(Mutex::new(Vec::<String>::new()));
     {

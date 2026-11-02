@@ -28,7 +28,9 @@ contribute to live agents:
 | `finish` | see how the run ended |
 | `on_event` | observe the run's events (opt-in and filtered by type for TypeScript / Python) |
 
-Every event is also published on the rutis bus as `AgentEventEmitted`.
+Every event also goes, as `AgentEventEmitted`, to Rust plugins' `on_agent_event`
+observers — in-process, never on the rutis bus, so no language plugin hears it
+there.
 
 yoagent does not depend on rutis; this crate uses only yoagent's public API.
 It depends on `rutis = "0.19.3"` (0.x caret: any 0.19.x from 0.19.3, never
@@ -383,7 +385,8 @@ a restart — then gets only:
 - `finish`.
 
 Never `after_tool`, `before_model`, `on_input`, `on_stop` or `on_event`, and
-never the conversation. `HandlerInfo::restricted()` says which handlers are;
+never the conversation — nor a run's events by another way: the agent's
+events never go on the rutis bus (see [Events](#events)). `HandlerInfo::restricted()` says which handlers are;
 their `hooks()` are the ones they get. A failing `tools` offers nothing and
 never fails the run, even a `required()` one.
 
@@ -877,7 +880,7 @@ the others).
 | `before_tool` | a `Deny` wins (later handlers never see the call); a `Modify` feeds the next handler | denies the call |
 | `after_tool` | each sees the previous edit | withholds the result (`required()`: the run fails too) |
 | `on_stop` | every `Continue` message is sent, joined | skipped (`required()`: the run fails) |
-| `on_event` | all, in order, synchronously | that handler is switched off for the run; the others and bus publishing go on (`required()`: the run fails at its next decision point) |
+| `on_event` | all, in order, synchronously | that handler is switched off for the run; the others and the `on_agent_event` observers go on (`required()`: the run fails at its next decision point) |
 | `finish` | all, concurrently | logged |
 
 - **No policy means allow.** A run that starts with no `before_tool` handler
@@ -900,21 +903,26 @@ the others).
 
 ### Events
 
-- **Every event of a run is published on the bus** as `AgentEventEmitted`
-  (`event()`, `run_id()`, `label()` — the host's `Agent::with_run_label` —
-  and `depth()`), from the extension's `on_event`, with rutis's `emit`.
-  Publishing never blocks the agent: `emit` starts the listeners' calls and
-  returns. A listener may see an event before or after the run's own
-  consumer does.
-- **Started in order, run concurrently** (rutis 0.13+): each listener's calls
-  start in emit order, so one that acts as its call starts (an
-  `on_agent_event` observer) sees a run's events in order; one that awaits
-  before acting may finish them in another order. A slow listener slows
-  neither the runs nor the other listeners.
-- **Cost**: each event is cloned once to publish it, and streaming yields
-  one `MessageUpdate` per text delta; a listener in another process costs
-  one cross-process call per event. A handler's `with_on_event` runs
-  synchronously inside the run instead: keep it cheap.
+- **Every event of a run goes to each `on_agent_event` observer** as
+  `AgentEventEmitted` (`event()`, `run_id()`, `label()` — the host's
+  `Agent::with_run_label` — and `depth()`), from the extension's `on_event`.
+  Each observer has its own queue and task and gets one event at a time, in
+  the order produced; the agent only queues, so a slow observer slows
+  neither the runs nor the other observers. An observer may see an event
+  before or after the run's own consumer does; it is removed when its
+  plugin unloads.
+- **In-process, never on the rutis bus.** rutis lets any runtime session
+  listen to any bus name (but `internal/…`, past every filter with
+  `global`) and emit on it, so a bus event would hand every run's prompts,
+  answers and tool calls to every language plugin, a restricted one
+  included, and let any of them fake events. TypeScript, Python and Go
+  handlers get events only through their own `options.events` (and the
+  conversation only with `options.messages`); a restricted handler never
+  does. `AgentEventEmitted` is not a `rutis::Event`.
+- **Cost**: with an observer registered, each event is cloned once for all
+  of them, and streaming yields one `MessageUpdate` per text delta; a
+  stuck observer's queue grows until its plugin unloads. A handler's
+  `with_on_event` runs synchronously inside the run instead: keep it cheap.
 
 ### Host
 

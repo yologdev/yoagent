@@ -36,25 +36,35 @@ pub trait PluginCtxExt: Sealed {
     /// [`provide_tool`](Self::provide_tool) for a shared tool.
     fn provide_tool_arc(&self, tool: Arc<dyn AgentTool>) -> Result<Disposer, Error>;
 
-    /// Observe every agent event published on the bus (see
-    /// [`events`](crate::events)): `e.event()` is the event, `e.run_id()` /
-    /// `e.label()` tell runs apart. Called as each event's listener call
-    /// starts, so it sees a run's events in order; never on the agent's
-    /// task. Keep it quick: hand slow work to a task of your own.
+    /// Observe every event of every run that uses the bridge's extension
+    /// (see [`events`](crate::events)): `e.event()` is the event,
+    /// `e.run_id()` / `e.label()` tell runs apart. Called on a task of its
+    /// own, one event at a time, in the order they were produced — never on
+    /// the agent's task. Keep it quick: its queue holds the events it has
+    /// not taken yet. Removed when the plugin unloads.
+    ///
+    /// In-process: the events never go on the rutis bus, so no plugin in
+    /// another process or language can listen to them or fake them.
+    /// Needs the bridge installed, like
+    /// [`register_handler`](Self::register_handler).
     fn on_agent_event(
         &self,
         observer: impl Fn(&AgentEventEmitted) + Send + Sync + 'static,
     ) -> Result<Disposer, Error>;
 }
 
+/// The bridge's registry, as `ctx` sees it.
+fn registry_of(ctx: &Ctx) -> Result<Arc<Registry>, Error> {
+    ctx.get::<Registry>().ok_or_else(|| {
+        rutis::Error::from(ErrorKind::ServiceNotFound(
+            "yoagent_rutis::Registry (install the bridge with RutisBridge::install)".into(),
+        ))
+    })
+}
+
 impl PluginCtxExt for Ctx {
     fn register_handler(&self, handler: Handler) -> Result<Disposer, Error> {
-        let registry = self.get::<Registry>().ok_or_else(|| {
-            rutis::Error::from(ErrorKind::ServiceNotFound(
-                "yoagent_rutis::Registry (install the bridge with RutisBridge::install)".into(),
-            ))
-        })?;
-        registry.register(self, handler)
+        registry_of(self)?.register(self, handler)
     }
 
     fn provide_tool(&self, tool: impl AgentTool + 'static) -> Result<Disposer, Error> {
@@ -70,14 +80,7 @@ impl PluginCtxExt for Ctx {
         &self,
         observer: impl Fn(&AgentEventEmitted) + Send + Sync + 'static,
     ) -> Result<Disposer, Error> {
-        let observer = Arc::new(observer);
-        self.on::<AgentEventEmitted>(move |event, _call| {
-            let observer = observer.clone();
-            async move {
-                observer(&event);
-                Ok(None)
-            }
-        })
+        registry_of(self)?.observe(self, Arc::new(observer))
     }
 }
 

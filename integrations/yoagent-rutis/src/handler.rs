@@ -551,9 +551,8 @@ impl Handler {
     }
 
     /// Observe every event of the run, in order, synchronously from the
-    /// run's event observer: it must not block. For an observer decoupled
-    /// from the run, listen on the bus instead
-    /// ([`PluginCtxExt::on_agent_event`](crate::PluginCtxExt::on_agent_event)).
+    /// run's event observer: it must not block. For one decoupled from the
+    /// run, see [`PluginCtxExt::on_agent_event`](crate::PluginCtxExt::on_agent_event).
     pub fn with_on_event<F>(mut self, observe: F) -> Self
     where
         F: Fn(&RunInfo, &AgentEvent) + Send + Sync + 'static,

@@ -20,8 +20,9 @@
 //!    plugin policy also covers sub-agents). Each run snapshots the
 //!    registered handlers at its start.
 //!
-//! Every agent event is also published on the rutis bus as an
-//! [`AgentEventEmitted`] for decoupled observers.
+//! Every agent event also goes, as an [`AgentEventEmitted`], to decoupled
+//! Rust observers ([`PluginCtxExt::on_agent_event`]) — in-process, never on
+//! the rutis bus.
 //!
 //! yoagent itself knows nothing about rutis; the bridge uses only yoagent's
 //! public API.
