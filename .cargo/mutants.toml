@@ -104,14 +104,14 @@ exclude_re = [
     'src/context.rs:\d+:\d+: replace \^= with (\|=|&=) in signature_hash$',
     # Compat presets: deleting a field, or the whole body, that is set to its
     # `Default` value changes nothing. (They become real if a default moves.)
-    'src/provider/model.rs:\d+:\d+: delete field supports_usage_in_streaming from struct Self expression in OpenAiCompat::',
+    'src/provider/model.rs:\d+:\d+: delete field supports_usage_in_streaming from struct Self expression in OpenAiCompat::(openai|meta|xai|groq|openrouter|mistral|deepseek|zai|minimax|qwen)$',
     'src/provider/model.rs:\d+:\d+: delete field max_tokens_field from struct Self expression in OpenAiCompat::(mistral|deepseek|qwen)$',
     'src/provider/model.rs:\d+:\d+: replace OpenAiCompat::(cerebras|mistral|zai|groq) -> Self with Default::default\(\)',
     # Preset fields equal to what the base constructor infers: `anthropic`
     # (`AnthropicCompat::for_claude_id(id)`), Haiku 4.5's 200K window (the
     # `anthropic()` default) and `gpt_6`'s `reasoning` (`openai_id_is_reasoning`
     # is true for every `gpt-6*` id).
-    'src/provider/model.rs:\d+:\d+: delete field anthropic from struct Self expression in ModelConfig::claude_',
+    'src/provider/model.rs:\d+:\d+: delete field anthropic from struct Self expression in ModelConfig::claude_(fable_5_1|opus_5_5|opus_5|opus_4_8|sonnet_5|haiku_4_5|sonnet_5_5|haiku_5_5)$',
     'src/provider/model.rs:\d+:\d+: delete field context_window from struct Self expression in ModelConfig::claude_haiku_4_5$',
     'src/provider/model.rs:\d+:\d+: delete field reasoning from struct Self expression in ModelConfig::gpt_6$',
     # `with_loop_scope`'s `prompts` field: both callers pass `Vec::new()`,

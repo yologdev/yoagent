@@ -397,13 +397,13 @@ Run [40295659605](https://github.com/yologdev/yoagent/actions/runs/40295659605)
 
 | module | missed | real gap, now tested | caught since (#393) | gone | equivalent |
 |---|---:|---:|---:|---:|---:|
-| `context.rs` | 53 | 31 | 6 | 3 | 13 |
-| `llm_compaction.rs` | 37 | 30 | 0 | 0 | 7 |
+| `context.rs` | 53 | 36 | 5 | 3 | 9 |
+| `llm_compaction.rs` | 37 | 28 | 0 | 0 | 9 |
 | `provider/model.rs` | 31 | 5 | 0 | 0 | 26 |
 | `agent_loop.rs` | 23 | 18 | 0 | 0 | 5 |
 | `provider/prices.rs` | 6 | 4 | 0 | 0 | 2 |
 | `provider/sigv4.rs` | 1 | 1 | 0 | 0 | 0 |
-| **total** | **151** | **89** | **6** | **3** | **53** |
+| **total** | **151** | **92** | **5** | **3** | **51** |
 
 Each real gap has a test that fails with the mutant applied by hand and
 passes without it. The ones worth knowing about:
@@ -429,7 +429,9 @@ passes without it. The ones worth knowing about:
   skip only the calls after the steer.
 - **`provider/model.rs`**: `ContextTier::is_configured` with one rate set;
   a suffixed Claude major followed by a digit token; OpenRouter's
-  `max_completion_tokens`; the effort-clamp warning, once per model.
+  `max_completion_tokens`; the effort-clamp warning, once per model (in its
+  own binary, `tests/effort_clamp_log_test.rs`: a log assertion next to other
+  tests hitting the same `warn!` callsite was flaky).
 - **`prices.rs` / `sigv4.rs`**: `is_iso_date` lengths; the `Display` of added
   and removed price changes; a repeated SigV4 header name.
 
