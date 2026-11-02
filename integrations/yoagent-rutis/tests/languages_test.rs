@@ -1197,7 +1197,7 @@ async fn a_restarted_row_registers_its_handler_again() {
 
 /// `rows::wait_running`: a row that runs passes; one injecting a service
 /// nobody provides still waits when the wait ends, and is reported with the
-/// service it lacks.
+/// service it lacks and rutis-loader's word on why.
 #[cfg(feature = "loader")]
 #[tokio::test(flavor = "multi_thread")]
 async fn wait_running_names_the_services_a_waiting_row_lacks() {
@@ -1216,30 +1216,19 @@ async fn wait_running_names_the_services_a_waiting_row_lacks() {
     ];
     let patches: Vec<Patch> = serde_json::from_value(json!([{ "insert": rows }])).unwrap();
     let layers = vec![Layer::new("rows", patches)];
-    let report = host.loader.reconcile(layers.clone(), None).await.unwrap();
+    let report = host.loader.reconcile(layers, None).await.unwrap();
     assert!(
         report.failures.is_empty(),
         "reconcile sees no failure: {report:?}"
     );
 
-    yoagent_rutis::rows::wait_running(
-        &host.loader,
-        &host.root,
-        &layers,
-        &["runs"],
-        Duration::from_secs(30),
-    )
-    .await
-    .expect("the row that runs");
-    let error = yoagent_rutis::rows::wait_running(
-        &host.loader,
-        &host.root,
-        &layers,
-        &["runs", "needs"],
-        Duration::from_secs(2),
-    )
-    .await
-    .expect_err("the row that waits");
+    yoagent_rutis::rows::wait_running(&host.loader, &["runs"], Duration::from_secs(30))
+        .await
+        .expect("the row that runs");
+    let error =
+        yoagent_rutis::rows::wait_running(&host.loader, &["runs", "needs"], Duration::from_secs(2))
+            .await
+            .expect_err("the row that waits");
     assert_eq!(error.rows.len(), 1, "{error}");
     assert_eq!(error.rows[0].id, "needs");
     assert_eq!(error.rows[0].state, yoagent_rutis::rows::RowState::Waiting);
@@ -1248,11 +1237,15 @@ async fn wait_running_names_the_services_a_waiting_row_lacks() {
         Some(vec!["yoagentNoSuchService".to_string()]),
         "{error}"
     );
-    assert_eq!(error.rows[0].note, None, "{error}");
+    assert_eq!(
+        error.rows[0].note.as_deref(),
+        Some("waiting for yoagentNoSuchService (no row provides it)"),
+        "{error}"
+    );
     assert!(
         error
             .to_string()
-            .contains("nothing provides yoagentNoSuchService"),
+            .contains("needs (waiting): waiting for yoagentNoSuchService"),
         "{error}"
     );
     host.root.shutdown().await.unwrap();
@@ -1279,31 +1272,19 @@ async fn wait_running_ends_at_once_or_waits_by_state() {
     ];
     let patches: Vec<Patch> = serde_json::from_value(json!([{ "insert": rows }])).unwrap();
     let layers = vec![Layer::new("rows", patches)];
-    let _ = host.loader.reconcile(layers.clone(), None).await.unwrap();
+    let _ = host.loader.reconcile(layers, None).await.unwrap();
 
     // Still loading: waited for, not a failure.
-    wait_running(
-        &host.loader,
-        &host.root,
-        &layers,
-        &["slow"],
-        Duration::from_secs(30),
-    )
-    .await
-    .expect("the slow row runs once its apply ends");
+    wait_running(&host.loader, &["slow"], Duration::from_secs(30))
+        .await
+        .expect("the slow row runs once its apply ends");
 
     // Never runs: the wait ends at once, every row not running listed.
     let started = std::time::Instant::now();
     let ids = vec!["broken".to_string(), "no-such-row".to_string()];
-    let error = wait_running(
-        &host.loader,
-        &host.root,
-        &layers,
-        &ids,
-        Duration::from_secs(30),
-    )
-    .await
-    .expect_err("rows that never run");
+    let error = wait_running(&host.loader, &ids, Duration::from_secs(30))
+        .await
+        .expect_err("rows that never run");
     assert!(started.elapsed() < Duration::from_secs(10), "{error}");
     let state = |id: &str| {
         error

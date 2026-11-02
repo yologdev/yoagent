@@ -141,7 +141,7 @@ async fn main() -> Result<(), BoxError> {
         { "id": "adapter", "name": dsh_dir().join("dsh-tools-adapter.ts") },
     ] }]))?;
     let layers = vec![Layer::new("app", patches)];
-    let report = loader.reconcile(layers.clone(), None).await?;
+    let report = loader.reconcile(layers, None).await?;
     if !report.failures.is_empty() {
         return Err(format!("rows failed to load: {report:?}").into());
     }
@@ -149,8 +149,6 @@ async fn main() -> Result<(), BoxError> {
     // runs, or name what it lacks.
     yoagent_rutis::rows::wait_running(
         &loader,
-        &root,
-        &layers,
         &["web", "system-prompt", "tools", "free-search", "adapter"],
         Duration::from_secs(60),
     )

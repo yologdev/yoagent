@@ -2,26 +2,19 @@
 //!
 //! The bridge never loads plugins; a host does, with
 //! [rutis-loader](https://docs.rs/rutis-loader). Its `reconcile` counts a row
-//! still waiting for a service as settled, and since rutis 0.12
-//! (`ServiceCatalog::new()` shares every name) a row injecting a service
+//! still waiting for a service as settled, and a row injecting a service
 //! nobody provides waits for good — reading only `reconcile`'s failures, a
 //! plugin that never starts looks like a success. [`wait_running`] waits
 //! until each row runs, fails at once on a row that never will, and when the
-//! wait ends names, per row still waiting, the services it injects that do
-//! not exist: [`Loader::check`] asks the runtimes what each plugin injects,
-//! and each name is looked up in rutis as a shared service. (`check` alone
-//! cannot say: since rutis 0.12 a JavaScript row may provide services it
-//! never declares, so with another JavaScript row loaded an unprovided name
-//! reads as one that row might announce; a name another row only declares
-//! reads as provided; and a host service shared by name reads as missing.)
+//! wait ends names, per row still waiting, the services it waits for and why
+//! each is not there, as rutis-loader says it ([`Loader::waits`],
+//! [`Loader::status`]: what `rutis-host status` prints).
 
 use std::time::Duration;
 
-use rutis::host::{CtxHost, FiberState};
-use rutis::Ctx;
-use rutis_bridge::session::{host_key, HostDispatch};
-use rutis_loader::report::{CheckReport, EntryStatus, Provider, RowStatus, Supply};
-use rutis_loader::{Layer, Loader};
+use rutis::host::FiberState;
+use rutis_loader::report::{EntryStatus, WaitReason};
+use rutis_loader::Loader;
 
 /// Where a row that is not running stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,14 +91,14 @@ pub struct NotRunning {
     /// cannot resolve, or a failed cleanup.
     pub error: Option<String>,
     /// For a [`RowState::Waiting`] row when the wait ended: the services it
-    /// injects that do not exist in rutis — `Some` and empty when all of
-    /// them exist. It omits names the host registered in the catalog under
-    /// its own keys (not looked up here). `None` when not checked: another
-    /// state, or the check could not tell (see `note`).
+    /// waits for, by name, as rutis-loader reports them ([`Loader::waits`]);
+    /// empty when it waits for its own runtime alone, or rutis cannot say
+    /// which. `None` for another state.
     pub missing: Option<Vec<String>>,
-    /// Why `missing` is `None`, or may be incomplete, for a waiting row: the
-    /// check timed out, refused the row, did not know what its plugin
-    /// injects, or did not cover the row.
+    /// For a [`RowState::Waiting`] row when the wait ended: rutis-loader's
+    /// line on what it waits for and why each is not there
+    /// (`waiting for db (no row provides it)`, `waiting for runtime node
+    /// (starting)`), as `rutis-host status` prints it.
     pub note: Option<String>,
 }
 
@@ -123,14 +116,13 @@ impl std::fmt::Display for RowsNotRunning {
             .iter()
             .map(|row| {
                 let mut text = format!("{} ({})", row.id, row.state);
-                if let Some(missing) = row.missing.as_ref().filter(|m| !m.is_empty()) {
-                    text.push_str(&format!(": nothing provides {}", missing.join(", ")));
+                if let Some(note) = &row.note {
+                    text.push_str(&format!(": {note}"));
+                } else if let Some(missing) = row.missing.as_ref().filter(|m| !m.is_empty()) {
+                    text.push_str(&format!(": waiting for {}", missing.join(", ")));
                 }
                 if let Some(error) = &row.error {
                     text.push_str(&format!(": {error}"));
-                }
-                if let Some(note) = &row.note {
-                    text.push_str(&format!(" ({note})"));
                 }
                 text
             })
@@ -141,28 +133,20 @@ impl std::fmt::Display for RowsNotRunning {
 
 impl std::error::Error for RowsNotRunning {}
 
-/// How long the final [`Loader::check`] may take: it asks runtimes to
-/// describe their plugins, and a hung runtime must not hold the wait.
-const CHECK_LIMIT: Duration = Duration::from_secs(10);
-
 /// Wait until every row in `ids` runs (its fiber is active), at most
-/// `timeout`, plus up to 10 s for the final check.
+/// `timeout`.
 ///
 /// A row that never will — failed, disposed, unresolved, disabled, stopped,
 /// no such row, or a state this crate does not know — ends the wait at once;
 /// the error then lists every row not running, those that may still run
 /// included ([`RowState::may_run`]). Rows waiting, loading, unloading or
 /// inactive are waited for. At the end of the wait, each row still waiting
-/// is reported with the services it injects (by `layers`, the layers just
-/// reconciled) that do not exist, looked up from `ctx` (the context the
-/// loader runs under, usually the root) as shared services. Rows in an
-/// instanced group (and the group's own row) always read inactive here —
-/// their copies run per instance — so they cannot be waited for with this
-/// function.
+/// is reported with the services it waits for and why each is not there
+/// ([`NotRunning::missing`], [`NotRunning::note`]). Rows in an instanced
+/// group (and the group's own row) always read inactive here — their copies
+/// run per instance — so they cannot be waited for with this function.
 pub async fn wait_running<S: AsRef<str>>(
     loader: &Loader,
-    ctx: &Ctx,
-    layers: &[Layer],
     ids: &[S],
     timeout: Duration,
 ) -> Result<(), RowsNotRunning> {
@@ -179,66 +163,44 @@ pub async fn wait_running<S: AsRef<str>>(
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
-            if rows.iter().any(|row| row.state == RowState::Waiting) {
-                let report = tokio::time::timeout(CHECK_LIMIT, loader.check(layers)).await;
-                for row in rows.iter_mut().filter(|r| r.state == RowState::Waiting) {
-                    match &report {
-                        Ok(report) => missing_for(row, report, ctx),
-                        Err(_) => {
-                            row.note = Some(format!(
-                                "the check did not answer within {} s: missing services unknown",
-                                CHECK_LIMIT.as_secs()
-                            ))
-                        }
-                    }
-                }
-            }
+            waits_for(loader, &mut rows);
             return Err(RowsNotRunning { rows });
         }
+        // Polled: a row comes to run through its own fiber, a provider's,
+        // a runtime or a group around it, and no one event says them all.
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
-/// Fill a waiting row's `missing` (or `note`) from the check.
-fn missing_for(row: &mut NotRunning, report: &CheckReport, ctx: &Ctx) {
-    let Some(check) = report.rows.iter().find(|c| c.id == row.id) else {
-        row.note = Some("not in the layers checked".into());
+/// Fill each waiting row's `missing` and `note` from rutis-loader.
+fn waits_for(loader: &Loader, rows: &mut [NotRunning]) {
+    let waiting: Vec<_> = rows
+        .iter()
+        .filter(|row| row.state == RowState::Waiting)
+        .filter_map(|row| loader.get(&row.id))
+        .collect();
+    if waiting.is_empty() {
         return;
-    };
-    match &check.status {
-        RowStatus::Checked {
-            requires, declared, ..
-        } => {
-            row.missing = Some(
-                requires
-                    .iter()
-                    .filter(|r| !from_host(&r.supply))
-                    .filter(|r| {
-                        ctx.get_at::<dyn HostDispatch>(&host_key(&r.service))
-                            .is_none()
-                    })
-                    .map(|r| r.service.clone())
-                    .collect(),
-            );
-            if let Err(why) = declared {
-                row.note = Some(format!(
-                    "what its plugin injects is unknown, only the row's own inject was checked: {why}"
-                ));
-            }
-        }
-        RowStatus::Failed(error) => {
-            row.note = Some(format!("the check refused the row: {error}"));
-        }
-        RowStatus::Disabled => row.note = Some("disabled in the layers checked".into()),
-        _ => row.note = Some("the check could not tell".into()),
     }
-}
-
-/// Whether the host registered the service in the catalog (`register*`,
-/// `readable*`, `export`): under its own key, which a lookup by name may not
-/// find.
-fn from_host(supply: &Supply) -> bool {
-    matches!(supply, Supply::Provided(providers) if providers.contains(&Provider::Host))
+    let waits = loader.waits_of(&waiting.iter().collect::<Vec<_>>());
+    let status = loader.status();
+    for (entry, waits) in waiting.iter().zip(waits) {
+        let Some(row) = rows.iter_mut().find(|row| row.id == entry.id) else {
+            continue;
+        };
+        row.missing = Some(
+            waits
+                .into_iter()
+                .filter(|wait| !matches!(wait.reason, WaitReason::OwnRuntime))
+                .map(|wait| wait.service)
+                .collect(),
+        );
+        row.note = status
+            .rows
+            .iter()
+            .find(|line| line.id == row.id && line.instance.is_none())
+            .and_then(|line| line.reason.clone());
+    }
 }
 
 /// The row `id`, unless it runs.
