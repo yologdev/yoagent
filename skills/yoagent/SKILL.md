@@ -5,7 +5,7 @@ description: Use when building, extending or upgrading an agent on the yoagent R
 
 # yoagent: which feature for which job
 
-Written for **yoagent 0.26.4** (and yoagent-rutis 0.11.0); the recipes
+Written for **yoagent 0.26.5** (and yoagent-rutis 0.12.0); the recipes
 below are compiled by `tests/skill_test.rs`, line for line. Check what you
 build against: `cargo tree -p yoagent` or `Cargo.lock`. If you are on an
 older version, read [What changed](#what-changed) first.
@@ -208,6 +208,10 @@ and its examples.
 
 Newest first; the full list is `CHANGELOG.md`.
 
+- **0.26.5** — `max_total_tokens` can count what a run adds to the
+  conversation instead of every resent prompt:
+  `ExecutionLimits::with_token_accounting(TokenAccounting::Growth)` (the
+  run's starting conversation is the baseline; opt-in, default unchanged).
 - **0.26.4** — presets `gpt_6_1_terra()`, `glm_5_3_flashx()`,
   `qwen_3_8_omni_flash()`; `ModelConfig::meta` prices `muse-spark-1.3` and
   `muse-wonder-1.0` (after `prices::enable_bundled()`). No API change.
@@ -329,6 +333,12 @@ Newest first; the full list is `CHANGELOG.md`.
 - **0.24.2** — built-in tool sandbox fixes (path escapes, `search` flag
   injection, Gemini key out of the URL, tool panics contained).
 - **0.24.1** — `retry_safe_events`.
+- **yoagent-rutis 0.12.0** (breaking) — rutis 0.20.0: move the npm /
+  PyPI / Go runtimes to 0.20.0 with it (protocol is still 4, so a 0.19
+  runtime connects but runs plugins on 0.19 rules). A plugin's `use` /
+  `get` now read only what it or its row declares: declare services you
+  can run without in `optional` and read them with `ctx.get` (the pi and
+  DSH adapters now do). Cleanups run one at a time in reverse.
 - **yoagent-rutis 0.11.0** (breaking) — rutis 0.19.3: move the npm /
   PyPI (Python 3.12+) / Go runtimes to 0.19.3 with it; 0.12 runtimes are
   refused at the handshake. The `node` / `python` / `bun` / `go` features
