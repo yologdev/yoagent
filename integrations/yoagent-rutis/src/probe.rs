@@ -30,6 +30,10 @@
 //! sets each of `yoagent::provider::api_key_variables()` to the empty
 //! string, as it does for the runtimes it starts itself.
 //!
+//! **What rutis reports** about the probe's rows (a row that failed, a
+//! long wait) goes to `tracing` at warn, target `yoagent_rutis::rutis`,
+//! instead of rutis's default of this process's stderr.
+//!
 //! **One at a time.** Probes in one process run one after another (a second
 //! waits): [`Logs`] is one buffer for the process, and each report carries
 //! the lines of its own load. Loading a package runs its code, as its own
@@ -67,6 +71,11 @@ static ONE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(())
 /// The `tracing` targets [`Logs`] collects: what plugins log, and the
 /// bridge's own reports of a hook that failed.
 const LOG_TARGETS: [&str; 2] = ["yoagent_rutis::plugin", "yoagent_rutis::extension"];
+
+/// The `tracing` target of what rutis reports about the probe's rows (its
+/// error sink): not collected in [`Logs`] — each row's state and error are
+/// in the report already.
+const RUTIS_TARGET: &str = "yoagent_rutis::rutis";
 
 /// One line a plugin (or the bridge, about one) logged.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -275,7 +284,13 @@ async fn host(
     package_json: &Path,
     env: &[(OsString, OsString)],
 ) -> Result<Host, BoxError> {
-    let root = Ctx::root()?;
+    // What rutis reports (a row that failed, a long wait) goes to `tracing`,
+    // not this process's stderr, where a host vetting a plugin may show
+    // nothing.
+    let sink: rutis::host::ErrorSink = Arc::new(|error| {
+        tracing::warn!(target: RUTIS_TARGET, "{}", rutis_bridge::report::report(&error));
+    });
+    let root = Ctx::root_with_sink(tokio::runtime::Handle::current(), sink);
     // The id the host greets its runtime with (rutis-host's default).
     root.provide(LocalId(PeerId::new("main")?))?;
     let bridge = RutisBridge::install(&root)?;
