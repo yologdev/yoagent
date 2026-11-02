@@ -1,5 +1,5 @@
 //! Plugins in other languages — TypeScript / JavaScript on Node or Bun,
-//! Python and Go — through [rutis-bridge](https://docs.rs/rutis-bridge) 0.19
+//! Python and Go — through [rutis-bridge](https://docs.rs/rutis-bridge) 0.20
 //! (the `node`, `bun`, `python`, `go` and `websocket` features).
 //!
 //! With one of those features, [`RutisBridge::install`](crate::RutisBridge::install)
@@ -298,13 +298,15 @@ impl Service {
             (None, None) => "language plugin".to_string(),
         };
         if row.is_none() && caller.is_some() {
-            // A plugin that found `yoagent` without declaring it in `inject`,
-            // or a runtime without per-row scopes: a policy keyed on row ids
-            // does not see this handler as any row's.
+            // A runtime without per-row scopes, or one older than rutis 0.20
+            // (protocol 4 still greets a 0.19 runtime) whose plugin found
+            // `yoagent` without declaring it: since 0.20 a runtime's `use`
+            // refuses a name neither the plugin nor its row declares. A
+            // policy keyed on row ids does not see this handler as any row's.
             tracing::info!(
                 handler = %name,
                 owner = %owner,
-                "registered by no row (`yoagent` not in its `inject`, or a runtime without row scopes): \
+                "registered by no row (a runtime without row scopes, or `yoagent` undeclared on a runtime before rutis 0.20): \
                  owned by its session, removed when the session closes or by its disposer"
             );
         }
@@ -469,7 +471,7 @@ impl Target {
                 Ok(_) => Err(bad_argument(format!(
                     "register: `{hook}` is not a function"
                 ))),
-                // Python's getattr on a missing attribute. rutis 0.19 reads a
+                // Python's getattr on a missing attribute. rutis (0.19, 0.20) reads a
                 // property with a plain `getattr`: no `no-method` code to go by.
                 Err(Error::Remote { name, .. }) if name == "AttributeError" => Ok(false),
                 // The plugin's own getter threw: its handler is at fault.

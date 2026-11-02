@@ -1,15 +1,15 @@
 //! TypeScript and Python plugins, end to end: real Node, Bun and Python
-//! runtimes (rutis 0.19.3), loaded as rows by rutis-loader, registering
+//! runtimes (rutis 0.20.0), loaded as rows by rutis-loader, registering
 //! handlers through the `yoagent` host service. The TypeScript fixtures run
 //! on Node and, for the hooks, fail-closed policies and cancel handles, on
 //! Bun too.
 //!
 //! Needs Node 22.19+ with `npm ci` run in `plugins/` (for `@arcships/rutis` and
-//! `@arcships/rutis-runtime` 0.19.3), and Python 3.12+ with `rutis` 0.19.3 —
+//! `@arcships/rutis-runtime` 0.20.0), and Python 3.12+ with `rutis` 0.20.0 —
 //! `plugins/.venv/bin/python` (`uv venv plugins/.venv --python 3.12 && uv pip
 //! install --python plugins/.venv/bin/python -r plugins/requirements.txt`), or the
 //! interpreter in `YOAGENT_RUTIS_PYTHON`; Bun 1.4+ (`YOAGENT_RUTIS_BUN`, else
-//! `bun` on `PATH`) with `@arcships/rutis-bun` 0.19.3 from that `npm ci`. A test
+//! `bun` on `PATH`) with `@arcships/rutis-bun` 0.20.0 from that `npm ci`. A test
 //! whose runtime is missing
 //! prints why and passes; set `YOAGENT_RUTIS_REQUIRE_RUNTIMES=1` (CI does) to
 //! make a missing runtime fail instead.
@@ -158,7 +158,7 @@ fn bun_runtime() -> Option<(PathBuf, PathBuf)> {
     }
 }
 
-/// A Python 3.12+ interpreter (rutis 0.19's floor) with rutis on the train.
+/// A Python 3.12+ interpreter (rutis 0.20's floor) with rutis on the train.
 fn python() -> Option<PathBuf> {
     let python = std::env::var_os("YOAGENT_RUTIS_PYTHON")
         .map(PathBuf::from)

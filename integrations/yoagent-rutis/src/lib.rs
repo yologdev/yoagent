@@ -88,7 +88,7 @@
 //!
 //! # Plugins in other languages
 //!
-//! With the `node`, `bun`, `python`, `go` or `websocket` feature (rutis-bridge 0.19),
+//! With the `node`, `bun`, `python`, `go` or `websocket` feature (rutis-bridge 0.20),
 //! [`RutisBridge::install`] also provides the registry to plugins in other
 //! languages, as the host service `yoagent`. Such a plugin registers an
 //! object (a Python dict, a Go map of functions) of async functions, with the same hooks and the
@@ -189,8 +189,8 @@ pub use late::LateTools;
 pub use plugin::{AgentPlugin, PluginCtxExt};
 pub use registry::{HandlerInfo, HookTiming, Registry, ToolOwner};
 
-/// The rutis this bridge is built against (`0.19`, the release train shared
+/// The rutis this bridge is built against (`0.20`, the release train shared
 /// with `rutis-bridge`, `rutis-loader` and `rutis-host`). Its types are part
-/// of this crate's API, so any rutis minor bump (0.19 → 0.20) is a
+/// of this crate's API, so any rutis minor bump (0.20 → 0.21) is a
 /// yoagent-rutis minor bump.
 pub use rutis;
