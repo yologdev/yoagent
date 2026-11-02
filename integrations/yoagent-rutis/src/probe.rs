@@ -72,10 +72,13 @@ static ONE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(())
 /// bridge's own reports of a hook that failed.
 const LOG_TARGETS: [&str; 2] = ["yoagent_rutis::plugin", "yoagent_rutis::extension"];
 
-/// The `tracing` target of what rutis reports about the probe's rows (its
-/// error sink): not collected in [`Logs`] — each row's state and error are
-/// in the report already.
-const RUTIS_TARGET: &str = "yoagent_rutis::rutis";
+/// The `tracing` target (at `warn`) of what rutis reports while probing —
+/// its error sink: a listener or cleanup that failed, a row's load error, a
+/// long wait. Not collected in [`Logs`] (the report's verdicts do not read
+/// it; each row's state and error are in the report already), and no longer
+/// printed to stderr by rutis: a host that wants to see it adds a layer for
+/// this target, as `examples/ecosystem_probe.rs` does.
+pub const RUTIS_TARGET: &str = "yoagent_rutis::rutis";
 
 /// One line a plugin (or the bridge, about one) logged.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -88,9 +91,9 @@ pub struct LogLine {
 
 /// Collects what plugins log (target `yoagent_rutis::plugin`) and the
 /// bridge's reports of their failed hooks (`yoagent_rutis::extension`), as
-/// a `tracing` layer. Install it globally (the runtime logs from its own
-/// threads) and pass it to [`pi`] or [`dsh`]: each report then carries the
-/// lines of its own load.
+/// a `tracing` layer — not rutis's own reports ([`RUTIS_TARGET`]). Install
+/// it globally (the runtime logs from its own threads) and pass it to [`pi`]
+/// or [`dsh`]: each report then carries the lines of its own load.
 #[derive(Debug, Clone, Default)]
 pub struct Logs(Arc<Mutex<Vec<LogLine>>>);
 
