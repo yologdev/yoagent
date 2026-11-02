@@ -3,7 +3,8 @@
 
 use std::sync::Arc;
 
-use rutis::{CordisError, Ctx};
+use rutis::host::ErrorKind;
+use rutis::{Ctx, Error};
 
 use crate::extension::RutisExtension;
 use crate::host::Host;
@@ -35,13 +36,14 @@ impl RutisBridge {
     /// registry went with that generation, and an empty registry must not
     /// read as "no policy objected". Fails only when rutis refuses the
     /// registration (e.g. the root was shut down).
-    pub fn install(ctx: &Ctx) -> Result<Self, CordisError> {
+    pub fn install(ctx: &Ctx) -> Result<Self, Error> {
         let registry = match ctx.get::<Registry>() {
             Some(existing) => existing,
             None => {
                 ctx.provide(Registry::default())?;
-                ctx.get::<Registry>()
-                    .ok_or_else(|| CordisError::ServiceNotFound("Registry".into()))?
+                ctx.get::<Registry>().ok_or_else(|| {
+                    rutis::Error::from(ErrorKind::ServiceNotFound("Registry".into()))
+                })?
             }
         };
         #[cfg(any(

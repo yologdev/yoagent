@@ -2,39 +2,43 @@
 //!
 //! Every event of a run that uses the bridge's extension is published with
 //! rutis `emit` as an [`AgentEventEmitted`], from the extension's `on_event`
-//! — no event sender to wire. `emit` only queues a dispatch and returns (and
-//! does nothing when no listener is registered), so a slow or failing
-//! listener never slows the agent; listener errors and panics go to the
-//! rutis `ErrorSink`.
+//! — no event sender to wire. `emit` starts the listeners' calls and
+//! returns without waiting for them, so a slow or failing listener never
+//! slows the agent; listener errors and panics go to the rutis `ErrorSink`.
 //!
-//! **Ordering.** rutis dispatches emits of one event key in emit order, one
-//! listener after another in registration order, so every listener sees each
-//! run's events in the order the run produced them. Runs on one bridge
+//! **Ordering.** rutis starts the calls of one event name's emits in emit
+//! order at every listener (rutis 0.13+), but runs them concurrently: a
+//! listener that does its work as its call starts — an
+//! [`on_agent_event`](crate::PluginCtxExt::on_agent_event) observer — sees
+//! each run's events in the order the run produced them; one that awaits
+//! before acting may finish them in another order. Runs on one bridge
 //! interleave; tell them apart by [`AgentEventEmitted::run_id`] (unique) or
 //! [`AgentEventEmitted::label`] (the host's `Agent::with_run_label`). A
 //! listener may see an event before or after the run's own consumer does.
 //!
 //! **Cost.** Each event is cloned once to publish it (whether or not a
-//! listener is registered: rutis does not say), every event published while
-//! a listener is registered spawns one tokio task, and streaming produces
-//! one `MessageUpdate` event per text delta. Dispatches of the event
-//! key form **one queue shared by every run on the bus**: a slow listener
-//! delays delivery of *all* runs' later events (never the runs themselves),
-//! and a listener permanently slower than the agents builds an unbounded
-//! backlog.
+//! listener is registered: rutis does not say), and streaming produces one
+//! `MessageUpdate` event per text delta. A slow listener never slows the
+//! runs; a listener in another process costs one cross-process call per
+//! event.
 //!
 //! **While the host is not running** nothing is published.
 
 use std::sync::Arc;
 
-use rutis::{BoxFuture, CordisError, Ctx, Event, EventKey, Listener};
+use rutis::Event;
+use serde::{Deserialize, Serialize};
 use yoagent::AgentEvent;
 
 use crate::handler::RunInfo;
 use crate::host::Host;
 
 /// One [`AgentEvent`], as published on the rutis bus.
-#[derive(Debug, Clone)]
+///
+/// Serde (every rutis event is, since 0.13): it reaches listeners in other
+/// processes and languages too, as `{run_id, label, depth, event}` with the
+/// event in yoagent's JSON shape.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentEventEmitted {
     run_id: Arc<str>,
     label: Option<Arc<str>>,
@@ -99,28 +103,7 @@ pub(crate) fn publish(host: &Host, run: &RunInfo, event: &AgentEvent) {
         depth: run.depth,
         event: event.clone(),
     };
-    let key = EventKey::<AgentEventEmitted>::of();
-    if let Err(error) = ctx.events().emit(ctx, &key, Arc::new(wrapped)) {
+    if let Err(error) = ctx.emit(wrapped) {
         tracing::debug!(%error, "agent event not published on the rutis bus");
-    }
-}
-
-/// Bus listener around an observer closure
-/// ([`PluginCtxExt::on_agent_event`](crate::PluginCtxExt::on_agent_event)).
-pub(crate) struct ObserverListener<F>(pub(crate) F);
-
-impl<F> Listener<AgentEventEmitted> for ObserverListener<F>
-where
-    F: Fn(&AgentEventEmitted) + Send + Sync + 'static,
-{
-    fn call<'a>(
-        &'a self,
-        _ctx: &'a Ctx,
-        e: &'a AgentEventEmitted,
-    ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
-        Box::pin(async move {
-            (self.0)(e);
-            Ok(None)
-        })
     }
 }

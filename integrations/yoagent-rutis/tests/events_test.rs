@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::*;
-use rutis::{BoxFuture, CordisError, Ctx, EventKey, Listener};
+use rutis::host::CtxHost;
 use tokio::sync::Semaphore;
 use yoagent::{AgentEvent, SubAgentTool};
 use yoagent_rutis::{AgentEventEmitted, PluginCtxExt, RutisBridge};
@@ -119,38 +119,19 @@ async fn a_bus_listener_sees_exactly_the_runs_events_in_order() {
     root.shutdown().await.unwrap();
 }
 
-/// Waits on a gate before recording each event.
-struct Gated {
-    gate: Arc<Semaphore>,
-    log: Log,
-}
-
-impl Listener<AgentEventEmitted> for Gated {
-    fn call<'a>(
-        &'a self,
-        _ctx: &'a Ctx,
-        e: &'a AgentEventEmitted,
-    ) -> BoxFuture<'a, Result<Option<()>, CordisError>> {
-        Box::pin(async move {
-            self.gate.acquire().await.unwrap().forget();
-            record(&self.log, e);
-            Ok(None)
-        })
-    }
-}
-
+/// An observer that waits on a gate before recording each event.
 fn gated_observer(gate: Arc<Semaphore>, log: Log) -> Setup {
     Setup::new("gated-observer", move |ctx| {
-        ctx.events()
-            .on(
-                ctx,
-                &EventKey::<AgentEventEmitted>::of(),
-                Gated {
-                    gate: gate.clone(),
-                    log: log.clone(),
-                },
-            )
-            .map(drop)
+        let (gate, log) = (gate.clone(), log.clone());
+        ctx.on::<AgentEventEmitted>(move |event, _call| {
+            let (gate, log) = (gate.clone(), log.clone());
+            async move {
+                gate.acquire().await.unwrap().forget();
+                record(&log, &event);
+                Ok(None)
+            }
+        })
+        .map(drop)
     })
 }
 
@@ -173,11 +154,13 @@ async fn a_blocked_listener_does_not_hold_the_agent_back() {
 
     gate.add_permits(EXPECTED.len());
     until_count(&log, EXPECTED.len()).await;
-    assert_eq!(
-        kinds(&log, None),
-        EXPECTED,
-        "then it gets everything, in order"
-    );
+    // Every event, then; since rutis 0.13 the calls only start in order (a
+    // listener that awaits first may finish them in another).
+    let mut got = kinds(&log, None);
+    got.sort();
+    let mut expected: Vec<String> = EXPECTED.iter().map(|k| k.to_string()).collect();
+    expected.sort();
+    assert_eq!(got, expected, "then it gets every event");
     root.shutdown().await.unwrap();
 }
 

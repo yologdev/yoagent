@@ -13,8 +13,7 @@
 //!   adapter, in a Node runtime whose `package.json` is the base folder's.
 //!   Reports what the rows add to the base — tools and prompt guidance — and
 //!   which of the services the rows' plugins inject exist (a plugin missing
-//!   one never starts, though its row reads as started to the probe's host,
-//!   which shares only registered names, as rutis did before 0.12).
+//!   one never starts: its row reads as `waiting`, at once).
 //!
 //! **The adapters, installed.** Both take `plugins`: a folder laid out like
 //! [`adapters`](crate::adapters)' `root` (the pi and DSH adapters beside
@@ -41,12 +40,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rutis::{Ctx, FiberState};
-use rutis_bridge::runtime::{Launcher, LocalRuntime};
-use rutis_loader::{
-    Chain, EntryStatus, Layer, Loader, LoaderOptions, LoaderPlugin, Patch, RuntimeResolver,
-    RuntimeRowsPlugin, ServiceCatalog,
-};
+use rutis::host::{CtxHost, FiberState};
+use rutis::Ctx;
+use rutis_bridge::{LocalId, PeerId};
+use rutis_host::connect::SpawnPlugin;
+use rutis_host::languages;
+use rutis_loader::report::{EntryStatus, WaitReason};
+use rutis_loader::runtime::SessionResolver;
+use rutis_loader::{Chain, Layer, Loader, LoaderOptions, LoaderPlugin, Patch, ServiceCatalog};
 use serde::Serialize;
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
@@ -275,32 +276,35 @@ async fn host(
     env: &[(OsString, OsString)],
 ) -> Result<Host, BoxError> {
     let root = Ctx::root()?;
+    // The id the host greets its runtime with (rutis-host's default).
+    root.provide(LocalId(PeerId::new("main")?))?;
     let bridge = RutisBridge::install(&root)?;
     let mut catalog = ServiceCatalog::new();
-    // As before rutis 0.12: only the registered names gate a row in rutis,
-    // so a Cordis row injecting a service nobody provides reads as started
-    // at once instead of waiting out `SETTLE`; `probe-services` reports what
-    // is missing either way.
-    catalog.share_registered_only();
     catalog.register_shared("yoagent");
-    let launcher = env
-        .iter()
-        .fold(Launcher::node(runtime), |launcher, (name, value)| {
-            launcher.env(name.clone(), value.clone())
-        });
-    let node = LocalRuntime::launcher("node", launcher, package_json);
-    let resolver = Arc::new(RuntimeResolver::node(node.handle()).with_catalog(&catalog));
+    let node = env.iter().fold(
+        SpawnPlugin::new("node", languages::node::launcher(runtime), package_json),
+        |node, (name, value)| node.env(name.clone(), value.clone()),
+    );
+    let runtime = node.handle();
+    let sessions = Arc::new(SessionResolver::npm(&catalog, "node"));
+    sessions.runtime(node.handle());
     root.plugin(node);
     let plugin = LoaderPlugin::new(
-        Chain::new().with_shared(resolver.clone()),
+        Chain::new().with_shared(sessions.clone()),
         LoaderOptions {
             catalog,
             ..LoaderOptions::default()
         },
     );
     let loader = plugin.handle();
+    sessions.attach(&loader);
     root.plugin(plugin).await?;
-    root.plugin(RuntimeRowsPlugin::new(resolver));
+    sessions.follow_row("node");
+    // `reconcile` does not wait for a runtime still starting (rutis 0.18).
+    if runtime.ready().await.is_none() {
+        let _ = tokio::time::timeout(Duration::from_secs(10), root.shutdown()).await;
+        return Err(format!("the Node runtime did not start: {:?}", runtime.state()).into());
+    }
     Ok(Host {
         root,
         bridge,
@@ -352,12 +356,20 @@ async fn load(host: &Host, layers: Vec<(&str, Value)>) -> Result<Vec<Row>, BoxEr
         built.push(Layer::new(name, patches));
     }
     host.loader.reconcile(built, None).await?;
-    // Rows still pending when the wait ends are reported as `waiting`.
-    let settled = |id: &String| {
-        matches!(
-            row(&host.loader, id).state.as_str(),
-            "active" | "failed" | "unresolved"
-        )
+    // Rows still pending when the wait ends are reported as `waiting`. A row
+    // waiting for a service no row declares (a DSH plugin injecting one no
+    // host provides) will not start: it is settled at once, as `waiting`.
+    let settled = |id: &String| match row(&host.loader, id).state.as_str() {
+        "active" | "failed" | "unresolved" => true,
+        "waiting" => host.loader.get(id).is_some_and(|entry| {
+            host.loader.waits(&entry).iter().any(|wait| {
+                matches!(
+                    wait.reason,
+                    WaitReason::NoProvider { .. } | WaitReason::NoEnabledProvider { .. }
+                )
+            })
+        }),
+        _ => false,
     };
     let _ = tokio::time::timeout(SETTLE, async {
         while !ids.iter().all(settled) {

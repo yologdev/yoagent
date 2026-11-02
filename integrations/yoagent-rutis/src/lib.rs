@@ -38,6 +38,7 @@
 //! # Host
 //!
 //! ```no_run
+//! use rutis::host::CtxHost; // `Ctx::root`, `shutdown` and the other host methods
 //! use rutis::Ctx;
 //! use yoagent::{provider::{MockProvider, ModelConfig}, Agent};
 //! use yoagent_rutis::RutisBridge;
@@ -58,37 +59,35 @@
 //! # Plugin
 //!
 //! ```
-//! use rutis::{BoxFuture, CordisError, Ctx, Effect, Plugin, TypeKey};
+//! use std::sync::Arc;
+//!
+//! use rutis::{Ctx, Plugin};
 //! use yoagent::ToolDecision;
 //! use yoagent_rutis::{Handler, PluginCtxExt, Registry};
 //!
-//! struct NoShell {
-//!     injects: Vec<TypeKey>,
-//! }
+//! struct NoShell;
 //!
 //! impl Plugin for NoShell {
-//!     fn name(&self) -> &str { "no-shell" }
-//!     fn injects(&self) -> &[TypeKey] { &self.injects } // wait for the bridge
-//!     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
-//!         Box::pin(async move {
-//!             ctx.register_handler(Handler::new("no-shell").with_before_tool(|call| {
-//!                 match call.tool.as_str() {
-//!                     "bash" => ToolDecision::Deny("shell access is disabled".into()),
-//!                     _ => ToolDecision::Allow,
-//!                 }
-//!             }))?;
-//!             Ok(Effect::Done)
-//!         })
+//!     type Deps = Arc<Registry>; // wait for the bridge
+//!
+//!     async fn apply(&self, ctx: &Ctx, _registry: Arc<Registry>) -> rutis::Result<()> {
+//!         ctx.register_handler(Handler::new("no-shell").with_before_tool(|call| {
+//!             match call.tool.as_str() {
+//!                 "bash" => ToolDecision::Deny("shell access is disabled".into()),
+//!                 _ => ToolDecision::Allow,
+//!             }
+//!         }))?;
+//!         Ok(())
 //!     }
 //! }
-//! let _plugin = NoShell { injects: vec![TypeKey::of::<Registry>()] };
+//! let _plugin = NoShell;
 //! ```
 //!
 //! [`AgentPlugin`] wraps a handler as a plugin in one expression.
 //!
 //! # Plugins in other languages
 //!
-//! With the `node`, `bun`, `python`, `go` or `websocket` feature (rutis-bridge 0.12),
+//! With the `node`, `bun`, `python`, `go` or `websocket` feature (rutis-bridge 0.19),
 //! [`RutisBridge::install`] also provides the registry to plugins in other
 //! languages, as the host service `yoagent`. Such a plugin registers an
 //! object (a Python dict, a Go map of functions) of async functions, with the same hooks and the
@@ -117,7 +116,7 @@
 //!   failing a required run), its other hooks are skipped. Never rebound to the new generation. See
 //!   [`registry`].
 //! - **Names are unique across plugins**: handler names, and the names of
-//!   static tools. A clash is refused (`CordisError::ServiceExists`, logged;
+//!   static tools. A clash is refused (`ErrorKind::ServiceExists`, logged;
 //!   no retry when the holder unloads). The agent's own tools win over plugin
 //!   tools.
 //! - **Policies gate every tool call** — the agent's own tools too, not only
@@ -187,7 +186,8 @@ pub use late::LateTools;
 pub use plugin::{AgentPlugin, PluginCtxExt};
 pub use registry::{HandlerInfo, HookTiming, Registry, ToolOwner};
 
-/// The rutis this bridge is built against (`0.8`, the release train shared
-/// with `rutis-bridge` and `rutis-loader`). Its types are part of this crate's
-/// API, so any rutis minor bump (0.8 → 0.9) is a yoagent-rutis minor bump.
+/// The rutis this bridge is built against (`0.19`, the release train shared
+/// with `rutis-bridge`, `rutis-loader` and `rutis-host`). Its types are part
+/// of this crate's API, so any rutis minor bump (0.19 → 0.20) is a
+/// yoagent-rutis minor bump.
 pub use rutis;

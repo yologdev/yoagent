@@ -1,5 +1,5 @@
 //! Plugins in other languages — TypeScript / JavaScript on Node or Bun,
-//! Python and Go — through [rutis-bridge](https://docs.rs/rutis-bridge) 0.12
+//! Python and Go — through [rutis-bridge](https://docs.rs/rutis-bridge) 0.19
 //! (the `node`, `bun`, `python`, `go` and `websocket` features).
 //!
 //! With one of those features, [`RutisBridge::install`](crate::RutisBridge::install)
@@ -55,9 +55,9 @@
 //! opt-in the same way (`options.messages: true`): `messages` on the
 //! arguments of `before_model`, `before_tool` and `on_stop`.
 //!
-//! The loader's catalog must share the name so language rows can inject it:
-//! rutis 0.12's `ServiceCatalog::new()` shares every name by name; one set
-//! to `share_registered_only()` needs `register_shared("yoagent")`.
+//! Language rows inject it by name: a loader's `ServiceCatalog` shares every
+//! name it has no other key for (`register_shared("yoagent")` says so
+//! explicitly).
 
 use std::collections::BTreeMap;
 use std::panic::AssertUnwindSafe;
@@ -66,7 +66,8 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 use futures::FutureExt;
 
-use rutis::{Ctx, Effect};
+use rutis::host::CtxHost;
+use rutis::Ctx;
 use rutis_bridge::session::{self, host_key, Error, HostDispatch, Reference, Reply, Value};
 use serde_json::{json, Value as Json};
 use tokio_util::sync::CancellationToken;
@@ -120,16 +121,16 @@ const HOOKS: [&str; 9] = [
 ];
 
 /// Provide the `yoagent` host service on `ctx` (once).
-pub(crate) fn provide(ctx: &Ctx, registry: &Arc<Registry>) -> Result<(), rutis::CordisError> {
+pub(crate) fn provide(ctx: &Ctx, registry: &Arc<Registry>) -> Result<(), rutis::Error> {
     let key = host_key(SERVICE);
-    if ctx.get_as::<dyn HostDispatch>(key.clone()).is_some() {
+    if ctx.get_at::<dyn HostDispatch>(&key.clone()).is_some() {
         return Ok(());
     }
     let service = Service {
         registry: registry.clone(),
         runtime: ctx.handle().clone(),
     };
-    ctx.provide_as::<dyn HostDispatch>(key, Arc::new(service))?;
+    ctx.provide_at::<dyn HostDispatch>(key, Arc::new(service))?;
     Ok(())
 }
 
@@ -322,24 +323,20 @@ impl Service {
         // Removed when the row unloads or restarts, while its runtime runs
         // on, whether or not the plugin hands the disposer to `ctx.effect`:
         // the session watch below removes it as the row's token is cancelled
-        // (a spawned task), and this effect removes it synchronously in the
+        // (a spawned task), and this effect removes it in the
         // row's cleanup, so it is gone before a restarted row registers the
         // name again.
         let mut row_effect = None;
         if let Some(row) = &row {
             let registry = Arc::downgrade(&self.registry);
             let ended = lifetime.clone();
-            let tied = row
-                .ctx()
-                .effect_named(format!("yoagent handler: {name}"), move || {
-                    Effect::Disposer(Box::new(move || {
-                        ended.cancel();
-                        if let Some(registry) = registry.upgrade() {
-                            registry.remove(seq);
-                        }
-                        Ok(())
-                    }))
-                });
+            let tied = row.ctx().effect(move || async move {
+                ended.cancel();
+                if let Some(registry) = registry.upgrade() {
+                    registry.remove(seq);
+                }
+                Ok(())
+            });
             match tied {
                 Ok(disposer) => row_effect = Some(disposer),
                 Err(error) => {

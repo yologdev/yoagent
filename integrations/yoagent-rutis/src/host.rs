@@ -1,6 +1,7 @@
 //! Is the rutis host the bridge was installed on still running.
 
-use rutis::{Ctx, FiberState};
+use rutis::host::{CtxHost, FiberState};
+use rutis::Ctx;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) const NOT_RUNNING: &str =

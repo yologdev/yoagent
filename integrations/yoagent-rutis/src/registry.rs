@@ -4,7 +4,7 @@
 //! rutis holds one service per type key, so plugins cannot each `provide`
 //! their own. The bridge provides one [`Registry`] service, and plugins
 //! **add handlers to it**. Every handler a Rust plugin registers is tied to a
-//! cleanup on that plugin's fiber (`Ctx::effect_named`), so rutis removes it
+//! cleanup on that plugin's fiber (`Ctx::effect`), so rutis removes it
 //! exactly when the plugin unloads — on `dispose`, on a restart, on a config
 //! update, and on a dependency-driven eviction.
 //!
@@ -62,7 +62,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use rutis::{CordisError, Ctx, Disposer, Effect};
+use rutis::host::{CtxHost, ErrorKind};
+use rutis::{Ctx, Disposer, Error};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 use yoagent::AgentTool;
@@ -80,7 +81,7 @@ use crate::handler::{Handler, HandlerImpl, Hooks};
 /// **Unique names.** A handler whose name a live handler holds, or one
 /// offering a static tool ([`Handler::with_tool`]) whose name another live
 /// handler's static tool holds, is refused with
-/// [`CordisError::ServiceExists`] (the error rutis uses for a doubly-provided
+/// [`ErrorKind::ServiceExists`](rutis::host::ErrorKind::ServiceExists) (the error rutis uses for a doubly-provided
 /// service) and logged with `warn!` naming the holder: rutis keeps a failed
 /// `apply`'s error on the fiber, not in its error sink, so the log is where a
 /// host notices it. There is **no automatic retry**: when the holder later
@@ -519,14 +520,10 @@ impl Registry {
     ///
     /// The handler is removed when that plugin unloads; the returned
     /// [`Disposer`] removes it earlier (dropping it does nothing). Refused
-    /// with [`CordisError::ServiceExists`] on a name clash (see the type
+    /// with [`ErrorKind::ServiceExists`](rutis::host::ErrorKind::ServiceExists) on a name clash (see the type
     /// docs), and with rutis's own error when the plugin is no longer loading
     /// or active — in both cases nothing stays registered.
-    pub fn register(
-        self: &Arc<Self>,
-        ctx: &Ctx,
-        handler: Handler,
-    ) -> Result<Disposer, CordisError> {
+    pub fn register(self: &Arc<Self>, ctx: &Ctx, handler: Handler) -> Result<Disposer, Error> {
         let name = handler.name().to_string();
         let owner = plugin_name(ctx);
         let (seq, _gate) = self.insert(
@@ -537,13 +534,11 @@ impl Registry {
             false,
         )?;
         let registry = Arc::downgrade(self);
-        let registered = ctx.effect_named(format!("yoagent handler: {name}"), move || {
-            Effect::Disposer(Box::new(move || {
-                if let Some(registry) = registry.upgrade() {
-                    registry.remove(seq);
-                }
-                Ok(())
-            }))
+        let registered = ctx.effect(move || async move {
+            if let Some(registry) = registry.upgrade() {
+                registry.remove(seq);
+            }
+            Ok(())
         });
         if registered.is_err() {
             // The fiber is no longer loading/active: nothing owns the entry.
@@ -560,7 +555,7 @@ impl Registry {
         handler: Arc<dyn HandlerImpl>,
         generation: CancellationToken,
         restricted: bool,
-    ) -> Result<(u64, Gate), CordisError> {
+    ) -> Result<(u64, Gate), Error> {
         let tool_names: Vec<String> = handler
             .static_tools()
             .iter()
@@ -577,9 +572,9 @@ impl Registry {
         for tool in &tool_names {
             if tool_names.iter().filter(|t| *t == tool).count() > 1 {
                 tracing::warn!(tool = %tool, refused = %owner, "two static tools of one handler with the same name; registration refused");
-                return Err(CordisError::ServiceExists(format!(
+                return Err(rutis::Error::from(ErrorKind::ServiceExists(format!(
                     "yoagent tool `{tool}` (already provided by plugin `{owner}`)"
-                )));
+                ))));
             }
             if restricted {
                 continue;
@@ -596,10 +591,10 @@ impl Registry {
                     "plugin tool name already taken; registration refused \
                      (the refused plugin is not retried when the holder unloads)"
                 );
-                return Err(CordisError::ServiceExists(format!(
+                return Err(rutis::Error::from(ErrorKind::ServiceExists(format!(
                     "yoagent tool `{tool}` (already provided by plugin `{}`)",
                     holder.owner
-                )));
+                ))));
             }
         }
         if let Some(existing) = inner.entries.iter().find(|e| e.name == name) {
@@ -613,10 +608,10 @@ impl Registry {
                     "plugin handler name already taken; registration refused \
                      (the refused plugin is not retried when the holder unloads)"
                 );
-                return Err(CordisError::ServiceExists(format!(
+                return Err(rutis::Error::from(ErrorKind::ServiceExists(format!(
                     "yoagent handler `{name}` (already registered by plugin `{}`)",
                     existing.owner
-                )));
+                ))));
             }
         }
         for seq in evict {

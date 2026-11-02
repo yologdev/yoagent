@@ -13,7 +13,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rutis::{BoxFuture, CordisError, Ctx, Effect, FiberState, FiberView, Plugin, TypeKey};
+use rutis::host::{CtxHost, FiberState, FiberView};
+use rutis::{Ctx, Plugin};
 use yoagent::extension::ToolOutput;
 use yoagent::provider::mock::{MockResponse, MockToolCall};
 use yoagent::provider::{MockProvider, ModelConfig};
@@ -63,39 +64,37 @@ impl AgentTool for WordCount {
 struct Policy {
     denied: Vec<&'static str>,
     max_calls_per_tool: usize,
-    injects: Vec<TypeKey>,
 }
 
 impl Plugin for Policy {
+    /// Wait for the bridge (and reload with it).
+    type Deps = Arc<Registry>;
+
     fn name(&self) -> &str {
         "policy"
     }
-    fn injects(&self) -> &[TypeKey] {
-        &self.injects
-    }
-    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, Result<Effect, CordisError>> {
+
+    async fn apply(&self, ctx: &Ctx, _registry: Arc<Registry>) -> rutis::Result<()> {
         let denied = self.denied.clone();
         let cap = self.max_calls_per_tool;
         // Fresh for each generation: built in `apply`.
         let counts: Mutex<HashMap<String, usize>> = Mutex::default();
-        Box::pin(async move {
-            ctx.register_handler(Handler::new("policy").with_before_tool(move |call| {
-                if denied.contains(&call.tool.as_str()) {
-                    return ToolDecision::Deny(format!("`{}` is disabled", call.tool));
-                }
-                let mut counts = counts.lock().unwrap();
-                let n = counts.entry(call.tool.clone()).or_default();
-                if *n >= cap {
-                    return ToolDecision::Deny(format!(
-                        "rate cap: `{}` may run at most {cap} times",
-                        call.tool
-                    ));
-                }
-                *n += 1;
-                ToolDecision::Allow
-            }))?;
-            Ok(Effect::Done)
-        })
+        ctx.register_handler(Handler::new("policy").with_before_tool(move |call| {
+            if denied.contains(&call.tool.as_str()) {
+                return ToolDecision::Deny(format!("`{}` is disabled", call.tool));
+            }
+            let mut counts = counts.lock().unwrap();
+            let n = counts.entry(call.tool.clone()).or_default();
+            if *n >= cap {
+                return ToolDecision::Deny(format!(
+                    "rate cap: `{}` may run at most {cap} times",
+                    call.tool
+                ));
+            }
+            *n += 1;
+            ToolDecision::Allow
+        }))?;
+        Ok(())
     }
 }
 
@@ -212,7 +211,6 @@ async fn main() -> Result<(), BoxError> {
     let policy = root.plugin(Policy {
         denied: vec!["bash"],
         max_calls_per_tool: 2,
-        injects: vec![TypeKey::of::<Registry>()],
     });
     let redactor = root.plugin(AgentPlugin::new(Handler::new("redactor").with_after_tool(
         |_call, output| {

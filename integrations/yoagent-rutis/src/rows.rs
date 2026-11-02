@@ -17,9 +17,11 @@
 
 use std::time::Duration;
 
-use rutis::{Ctx, FiberState};
+use rutis::host::{CtxHost, FiberState};
+use rutis::Ctx;
 use rutis_bridge::session::{host_key, HostDispatch};
-use rutis_loader::{CheckReport, EntryStatus, Layer, Loader, Provider, RowStatus, Supply};
+use rutis_loader::report::{CheckReport, EntryStatus, Provider, RowStatus, Supply};
+use rutis_loader::{Layer, Loader};
 
 /// Where a row that is not running stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -212,7 +214,7 @@ fn missing_for(row: &mut NotRunning, report: &CheckReport, ctx: &Ctx) {
                     .iter()
                     .filter(|r| !from_host(&r.supply))
                     .filter(|r| {
-                        ctx.get_as::<dyn HostDispatch>(host_key(&r.service))
+                        ctx.get_at::<dyn HostDispatch>(&host_key(&r.service))
                             .is_none()
                     })
                     .map(|r| r.service.clone())

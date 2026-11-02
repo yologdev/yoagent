@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::*;
+use rutis::host::CtxHost;
 use yoagent::extension::{
     ExtensionError, InputDecision, RunEnd, StopDecision, ToolOutput, TurnDecision,
 };
