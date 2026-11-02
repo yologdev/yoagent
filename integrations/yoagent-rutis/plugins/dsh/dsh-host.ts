@@ -148,11 +148,11 @@ interface Generation {
   /** Torn down: a flush queued before is skipped. */
   ended?: boolean
   /**
-   * The latest `turn/end`: its seq, and the event itself when the session refused it. Unload
-   * checks the log has it: a turn closed just before (a run's `finish`) may have emitted its end
-   * too late to reach the backend.
+   * The seq of the latest `turn/end` the session took. Unload checks the log has it: a turn
+   * closed just before (a run's `finish`) may have emitted its end too late to reach the backend.
+   * A `turn/end` the session refused is not recorded: it is in no session, so in no log.
    */
-  lastEnd?: { seq: number; refused?: Record<string, unknown> }
+  lastEnd?: number
   end: () => Promise<void>
 }
 
@@ -266,36 +266,48 @@ export function apply(ctx: any) {
     }
   }
 
-  /** Close the open turn, if any; the `turn/end` event when the session refused it, else undefined. */
+  /** Close the open turn, if any. */
   const closeTurn = async (g: Generation, reason: TurnEnd, flush = true, quiet = false) => {
-    if (g.owner === undefined) return undefined
-    const data = { turn: g.turn, reason }
-    // The event's seq, should it have to be written without the session: a refused append adds nothing.
+    if (g.owner === undefined) return
+    // The seq the event takes, if the session takes it.
     const seq = Number(g.session.seq)
-    let refused: Record<string, unknown> | undefined
+    let accepted = true
     try {
-      g.session.append('turn/end', data)
+      g.session.append('turn/end', { turn: g.turn, reason })
     } catch (error) {
-      refused = { type: 'turn/end', seq, time: Date.now(), data }
-      if (!quiet) say('warn', `[dsh-host] closing DSH turn ${g.turn} failed: ${message(error)}`)
+      // DSH's own validation refused it (an invalid or re-entrant append): nothing was added, and
+      // nothing is written past the session either — the log holds only what the session holds.
+      accepted = false
+      say(quiet ? 'debug' : 'warn', `[dsh-host] closing DSH turn ${g.turn} failed: ${message(error)}`)
     }
     g.owner = undefined
-    g.lastEnd = { seq, refused }
-    if (flush && !refused) await writeLog(g)
-    return refused
+    if (accepted) g.lastEnd = seq
+    if (flush && accepted) await writeLog(g)
   }
 
   /**
-   * Write the closing `turn/end` at `seq` (`refused`, when the session refused it, else the
-   * session's own) through a handle of its own, unless the log has it already.
+   * Write the session's `turn/end` at `seq` through a handle of its own, unless the log has it
+   * already. Only an event the session holds is written, and only if it is that `turn/end`.
    */
-  const writeTurnEnd = async (g: Generation, seq: number, refused?: unknown) => {
+  const writeTurnEnd = async (g: Generation, seq: number) => {
+    if (seq >= Number(g.session.seq)) {
+      say('debug', `[dsh-host] the DSH session holds no event ${seq}; no turn end to write`)
+      return
+    }
+    const event = g.session.eventAt(seq) as { type?: unknown } | undefined
+    if (event?.type !== 'turn/end') {
+      say(
+        'warn',
+        `[dsh-host] DSH session event ${seq} is ${JSON.stringify(event?.type ?? null)}, not the turn's end; not written`,
+      )
+      return
+    }
     try {
       const handle = await bounded('reopening the DSH session log', persistence.open(g.session.id, 'write'), HOST_CALL_MS)
       try {
         const { events } = await bounded('reading the DSH session log', handle.read(seq, 1), HOST_CALL_MS)
         if (events.length === 0) {
-          await bounded('writing the DSH session log', handle.append([refused ?? g.session.eventAt(seq)]), HOST_CALL_MS)
+          await bounded('writing the DSH session log', handle.append([event]), HOST_CALL_MS)
         }
       } finally {
         await bounded('closing the DSH session log', Promise.resolve(handle[Symbol.asyncDispose]?.()), HOST_CALL_MS)
@@ -425,7 +437,7 @@ export function apply(ctx: any) {
           // On unload the latest turn's end may have reached no backend — this one's, or one a run's
           // `finish` closed just before (this row may not emit then): written now that the
           // generation's handle has drained what it had, unless the log has it.
-          if (closed && g.log && g.lastEnd) await writeTurnEnd(g, g.lastEnd.seq, g.lastEnd.refused)
+          if (closed && g.log && g.lastEnd !== undefined) await writeTurnEnd(g, g.lastEnd)
         },
       }
       say('debug', `[dsh-host] stand-in agent ${session.id} for host session ${key} in ${cwd}`)
