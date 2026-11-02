@@ -1,6 +1,6 @@
 //! Is the rutis host the bridge was installed on still running.
 
-use rutis::host::{CtxHost, FiberState};
+use rutis::host::CtxHost;
 use rutis::Ctx;
 use tokio_util::sync::CancellationToken;
 
@@ -33,8 +33,8 @@ impl Host {
 
     /// Whether the host can no longer serve plugins: the generation the
     /// bridge was installed in has ended (its fiber started unloading, the
-    /// root shut down, was disposed or restarted), or the root fiber is
-    /// unloading or disposed.
+    /// root was disposed or restarted — rutis cancels a generation's token
+    /// before it unloads), or the root has begun its final shutdown.
     ///
     /// Every plugin unloads with the host, so its registry is then empty —
     /// which must not read as "no policy objected". A bridge installed on a
@@ -42,14 +42,8 @@ impl Host {
     /// plugin unloads or reloads, it reads as stopped for good — install on
     /// the root.
     pub(crate) fn is_closed(&self) -> bool {
-        let root_stopped = self.ctx.root_view().is_none_or(|root| {
-            matches!(
-                root.state().state,
-                FiberState::Unloading | FiberState::Disposed
-            )
-        });
         self.generation.is_cancelled()
             || self.ctx.cancellation_token().is_cancelled()
-            || root_stopped
+            || self.ctx.is_shutting_down()
     }
 }
