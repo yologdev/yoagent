@@ -119,6 +119,8 @@ struct Host {
     loader: Loader,
     probe: Probe,
     runtime: rutis::host::FiberView,
+    /// The `Starting` handle of [`Mark::StartingForGood`], kept so.
+    _starting: Option<rutis_bridge::runtime::RuntimeStates>,
     _dir: tempfile::TempDir,
     file: PathBuf,
 }
@@ -130,6 +132,11 @@ enum Mark {
     None,
     /// Restricted, before it starts.
     Restricted,
+    /// A handle named like the runtime marked restricted that stays
+    /// `Starting` for good: what the bridge sees in the window between the
+    /// runtime's session mounting (its rows load, its plugins run) and its
+    /// handle reading `Ready`.
+    StartingForGood,
 }
 
 /// A Node runtime the bridge marks restricted before it starts.
@@ -156,9 +163,17 @@ async fn host_with(node: &Path, mark: Mark, js: &str) -> Host {
     catalog.register_shared("yoagent");
     catalog.register_shared("probe");
     let runtime = runtimes::node(node, &plugins_dir().join("package.json"));
+    let mut starting = None;
     match mark {
         Mark::None => {}
         Mark::Restricted => bridge.restrict_runtime(runtime.handle()),
+        Mark::StartingForGood => {
+            let states =
+                rutis_bridge::runtime::RuntimeStates::new(runtime.handle().name(), plugins_dir());
+            states.starting();
+            bridge.restrict_runtime(states.handle());
+            starting = Some(states);
+        }
     }
     let started = runtimes::start(&root, catalog, vec![runtime]).await;
     let loader = started.loader;
@@ -169,6 +184,7 @@ async fn host_with(node: &Path, mark: Mark, js: &str) -> Host {
         loader,
         probe,
         runtime,
+        _starting: starting,
         _dir: dir,
         file,
     }
@@ -369,6 +385,25 @@ async fn a_restarted_restricted_runtime_stays_restricted() {
     })
     .await
     .expect("the row registers again after the restart");
+    host.root.shutdown().await.unwrap();
+}
+
+/// A restricted runtime whose handle still reads `Starting` while its rows
+/// already run (rutis-host mounts the session, whose rows load, before it
+/// marks the handle ready): a handler registered then is restricted, found
+/// by the session the runtime's row provides, not left unrestricted.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_handler_registered_while_its_restricted_runtime_reads_starting_is_restricted() {
+    let Some(node) = node_runtime() else {
+        return;
+    };
+    let host = host_with(&node, Mark::StartingForGood, JS_ALL).await;
+    host.load("early", false).await;
+    host.until_handlers(&["early"]).await;
+    let info = host.bridge.registry().handlers();
+    let early = info.iter().find(|h| h.name() == "early").unwrap();
+    assert!(early.restricted(), "{:?}", early.hooks());
+    assert_eq!(early.hooks(), ["tools", "before_tool", "finish"]);
     host.root.shutdown().await.unwrap();
 }
 

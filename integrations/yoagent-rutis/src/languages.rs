@@ -128,6 +128,7 @@ pub(crate) fn provide(ctx: &Ctx, registry: &Arc<Registry>) -> Result<(), rutis::
     }
     let service = Service {
         registry: registry.clone(),
+        ctx: ctx.clone(),
         runtime: ctx.handle().clone(),
     };
     ctx.provide_at::<dyn HostDispatch>(key, Arc::new(service))?;
@@ -137,6 +138,9 @@ pub(crate) fn provide(ctx: &Ctx, registry: &Arc<Registry>) -> Result<(), rutis::
 /// The `yoagent` host service.
 struct Service {
     registry: Arc<Registry>,
+    /// The context the bridge was installed on: where a restricted
+    /// runtime's session is looked up.
+    ctx: Ctx,
     runtime: tokio::runtime::Handle,
 }
 
@@ -306,9 +310,10 @@ impl Service {
         }
         // Marked by the runtime it comes from, whatever row (or none) it
         // registers from: decided here, once, for the handler's life.
-        let restricted = caller
-            .as_ref()
-            .is_some_and(|connection| self.registry.is_restricted_session(connection.tag()));
+        let restricted = caller.as_ref().is_some_and(|connection| {
+            self.registry
+                .is_restricted_session(&self.ctx, connection.tag())
+        });
         if restricted {
             tracing::info!(handler = %name, owner = %owner, "registered from a restricted runtime: tools only");
         }

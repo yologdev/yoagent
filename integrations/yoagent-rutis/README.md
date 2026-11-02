@@ -386,7 +386,9 @@ a restart — then gets only:
 
 Never `after_tool`, `before_model`, `on_input`, `on_stop` or `on_event`, and
 never the conversation — nor a run's events by another way: the agent's
-events never go on the rutis bus (see [Events](#events)). `HandlerInfo::restricted()` says which handlers are;
+events never go on the rutis bus (see [Events](#events)). A handler is judged
+restricted from its runtime's first plugin call, before the runtime's handle
+reads ready. `HandlerInfo::restricted()` says which handlers are;
 their `hooks()` are the ones they get. A failing `tools` offers nothing and
 never fails the run, even a `required()` one.
 

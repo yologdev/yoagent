@@ -751,9 +751,15 @@ impl Registry {
             .push(runtime);
     }
 
-    /// Whether the session `tag` is the running process of a restricted
-    /// runtime. A plugin's code runs only once its runtime is ready, so a
-    /// call from it finds its runtime ready, with this session's tag.
+    /// Whether the session `tag` is (or was) the process of a restricted
+    /// runtime. Fails closed in the window rutis-host leaves: a runtime's
+    /// session mounts and provides its process at `session_key(<runtime>)`
+    /// — which is how rutis-loader finds the process its rows load through,
+    /// so its plugins run from then on — *before* the runtime's handle
+    /// reads `Ready`. So besides a `Ready` handle's process, the process
+    /// the runtime's session provides (looked up from `ctx`) counts too,
+    /// whatever the handle reads. A trusted runtime's session is never
+    /// under a restricted runtime's name.
     #[cfg(any(
         feature = "node",
         feature = "python",
@@ -761,7 +767,7 @@ impl Registry {
         feature = "go",
         feature = "websocket"
     ))]
-    pub(crate) fn is_restricted_session(&self, tag: &str) -> bool {
+    pub(crate) fn is_restricted_session(&self, ctx: &Ctx, tag: &str) -> bool {
         use rutis_bridge::runtime::RuntimeState;
         let runtimes = self
             .restricted_runtimes
@@ -771,22 +777,31 @@ impl Registry {
             .restricted_sessions
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let mut settling = false;
+        let mut unresolved = false;
         for runtime in runtimes.iter() {
-            match runtime.state() {
-                RuntimeState::Ready(process) => {
+            let state = runtime.state();
+            if let RuntimeState::Ready(process) = &state {
+                sessions.insert(process.connection().tag().to_string());
+            }
+            match ctx
+                .get_at(&rutis_bridge::session_key(runtime.name()))
+                .and_then(|session| session.process())
+            {
+                Some(process) => {
                     sessions.insert(process.connection().tag().to_string());
                 }
-                RuntimeState::Starting => settling = true,
-                _ => {}
+                None => unresolved |= matches!(state, RuntimeState::Starting),
             }
         }
         let restricted = sessions.contains(tag);
-        if !restricted && settling {
+        if !restricted && unresolved {
+            // Its session is not mounted yet: none of its plugins can be
+            // running (its rows load through that session), so the caller
+            // is not one of them.
             tracing::debug!(
                 session = %tag,
-                "a handler registered while a restricted runtime is starting, from a session not known \
-                 to be restricted: registered unrestricted"
+                "a handler registered while a restricted runtime is starting (no session yet), \
+                 from a session not known to be restricted: registered unrestricted"
             );
         }
         restricted
