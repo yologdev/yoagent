@@ -2856,6 +2856,62 @@ mod tests {
     }
 
     #[test]
+    fn effort_clamp_logs_one_warning_naming_the_model() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        /// Collects the `model` field of every `WARN` event on this thread.
+        #[derive(Clone, Default)]
+        struct Warns(Arc<Mutex<Vec<String>>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Warns {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                struct Model(String);
+                impl tracing::field::Visit for Model {
+                    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                        if field.name() == "model" {
+                            self.0 = value.to_string();
+                        }
+                    }
+                    fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {
+                    }
+                }
+                if *event.metadata().level() == tracing::Level::WARN {
+                    let mut model = Model(String::new());
+                    event.record(&mut model);
+                    self.0.lock().unwrap().push(model.0);
+                }
+            }
+        }
+
+        // Unique id: the warned-once set is process-global.
+        let model = "clamp-log-test-model";
+        let compat = OpenAiCompat::openai(); // ceiling `High`
+        let warns = Warns::default();
+        {
+            let _log = tracing::subscriber::set_default(
+                tracing_subscriber::registry().with(warns.clone()),
+            );
+            for _ in 0..3 {
+                assert_eq!(
+                    compat.openai_reasoning_effort(model, ThinkingLevel::XHigh),
+                    Some("high")
+                );
+            }
+            // Not a clamp: no warning.
+            compat.openai_reasoning_effort(model, ThinkingLevel::High);
+        }
+        assert_eq!(
+            *warns.0.lock().unwrap(),
+            [model],
+            "a clamp warns once, naming the model"
+        );
+    }
+
+    #[test]
     fn test_cost_usd() {
         let cost = CostConfig {
             input_per_million: 3.0,
@@ -3270,6 +3326,9 @@ mod tests {
             // A suffix on the major ends the version: no minor follows.
             ("claude-sonnet-4@20250514", false, false),
             ("claude-opus-5[1m]", true, true),
+            // ... so a digit token after it is not read as the minor: 4.0
+            // (legacy, tool-forced), not 4.5.
+            ("claude-sonnet-4[1m]-5", false, false),
             // Controls: an 8-digit date is still never a minor version.
             ("claude-opus-4@20250514", false, false),
             ("claude-sonnet-4-20250514-v1:0", false, false),
@@ -3337,6 +3396,14 @@ mod tests {
         let groq = OpenAiCompat::groq();
         assert!(groq.supports_usage_in_streaming);
         assert!(!groq.supports_store);
+
+        // OpenRouter takes `max_completion_tokens`, unlike the default.
+        let openrouter = OpenAiCompat::openrouter();
+        assert_eq!(
+            openrouter.max_tokens_field,
+            MaxTokensField::MaxCompletionTokens
+        );
+        assert!(openrouter.supports_usage_in_streaming);
 
         let deepseek = OpenAiCompat::deepseek();
         assert_eq!(deepseek.max_tokens_field, MaxTokensField::MaxTokens);

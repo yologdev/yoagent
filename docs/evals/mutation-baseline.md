@@ -389,6 +389,78 @@ src/provider/prices.rs:781:5: replace is_false -> bool with false
 
 </details>
 
+## Triage of the 2026-10-26 run (#198)
+
+Run [40295659605](https://github.com/yologdev/yoagent/actions/runs/40295659605)
+(commit `a03fc35`) missed 151 mutants. All 151 are triaged here, against
+`main` after #393 and #402.
+
+| module | missed | real gap, now tested | caught since (#393) | gone | equivalent |
+|---|---:|---:|---:|---:|---:|
+| `context.rs` | 53 | 31 | 6 | 3 | 13 |
+| `llm_compaction.rs` | 37 | 30 | 0 | 0 | 7 |
+| `provider/model.rs` | 31 | 5 | 0 | 0 | 26 |
+| `agent_loop.rs` | 23 | 18 | 0 | 0 | 5 |
+| `provider/prices.rs` | 6 | 4 | 0 | 0 | 2 |
+| `provider/sigv4.rs` | 1 | 1 | 0 | 0 | 0 |
+| **total** | **151** | **89** | **6** | **3** | **53** |
+
+Each real gap has a test that fails with the mutant applied by hand and
+passes without it. The ones worth knowing about:
+
+- **`context.rs`**: token estimates for every content kind; the context
+  tracker (cached prompt tokens, a response without usage, an index past the
+  history after compaction — which panicked); the headroom floor with no
+  growth estimate; `message_text` and FNV-1a (stash keys must not move between
+  releases); level 2's summaries and `keep_recent: 0` (which indexed past the
+  end); orphan results at index 0 (a `usize` underflow); the level-3 marker's
+  timestamp. Two existing tests had assertions that could not fail
+  (`test_context_tracker_reset`, the 5-line block minimum).
+- **`llm_compaction.rs`**: the splice event's span and request cost; every
+  budget boundary (at exactly the budget, `compact` `>` → `>=` reported a kept
+  briefing as a fallback); `choose_cut` with `keep_first` 0/3/4; the transcript
+  of every block kind; the one-shot request; retry and timeout backoff (paused
+  clock); cancel on drop. The two #198 boundary cases are covered.
+- **`agent_loop.rs`**: the turn delay never ran before turn 1 (the paused clock
+  hid it); the headroom growth average over several turns; the calibration
+  anchor; all four usage fields in the token limit; `after_turn` gets the
+  turn's usage; run endings without a final answer; `on_stop` not asked about
+  a cut-off answer; tool-call deltas forwarded; batched and sequential steering
+  skip only the calls after the steer.
+- **`provider/model.rs`**: `ContextTier::is_configured` with one rate set;
+  a suffixed Claude major followed by a digit token; OpenRouter's
+  `max_completion_tokens`; the effort-clamp warning, once per model.
+- **`prices.rs` / `sigv4.rs`**: `is_iso_date` lengths; the `Display` of added
+  and removed price changes; a repeated SigV4 header name.
+
+Equivalent survivors that match a whole function or a unique name are in
+`exclude_re` in `.cargo/mutants.toml`, with the reason beside each. These
+cannot be excluded without a line number (the same mutation elsewhere in the
+function is a real gap, now tested), so they are recorded here instead. Lines
+are at `a03fc35`:
+
+- `context.rs:856:25` `<` → `>` in `level2_summarize_old_turns`: the inner
+  skip loop never runs, and the outer loop's orphan-result arm drops the same
+  results.
+- `context.rs:1010:30` `>` → `>=` in `level3_drop_middle`: at exactly the
+  target, `keep_protected` rebuilds the same output.
+- `context.rs:1286:30` `>` → `>=` in `ExecutionTracker::record_tool_calls`:
+  the verdict is only replaced by an equal value.
+- `llm_compaction.rs:819:16` `>` → `>=` in `choose_cut`: a zero-length span is
+  still below `MIN_SUMMARIZED_SPAN`.
+- `llm_compaction.rs:1280:46` `>` → `>=` in `compact`: at exactly the budget
+  the safety net hands back a tail that already fits.
+- `llm_compaction.rs:1245` wasm32 `spawn_on` → `()`: compiled out natively,
+  never called on wasm32.
+- `agent_loop.rs:1178:28` `>` → `>=` in `run_loop`: at turn 0 a tool source is
+  re-asked only if its generation moved while answering; no cached prefix yet.
+- `agent_loop.rs:1211:57` `>` → `>=` in `run_loop`: 0/0 is NaN, which
+  `effective_target_ratio` treats as no estimate.
+- `agent_loop.rs:1733:44` delete `!` in `run_loop`: decides only whether a
+  rollback warning prints.
+- `agent_loop.rs:2406` `<` → `<=` in `execute_tool_calls`: the slice is empty
+  at equality.
+
 ## Reading a scheduled run
 
 The workflow summary lists every missed mutant. For each one:

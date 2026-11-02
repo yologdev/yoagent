@@ -776,6 +776,7 @@ async fn turn_delay_is_skipped_first_then_applied_between_turns() {
         }
     }));
 
+    let started = tokio::time::Instant::now();
     let task = tokio::spawn(async move {
         let mut context = AgentContext {
             system_prompt: "test".into(),
@@ -797,6 +798,14 @@ async fn turn_delay_is_skipped_first_then_applied_between_turns() {
         .recv()
         .await
         .expect("the first turn starts immediately");
+    // The paused clock auto-advances while every task is idle, so a delay
+    // before the first turn would still let the call arrive: what shows it is
+    // the clock having moved.
+    assert_eq!(
+        started.elapsed(),
+        std::time::Duration::ZERO,
+        "the first turn must not wait for the delay"
+    );
     // Let the completed first turn reach the inter-turn sleep before moving
     // the paused clock. Otherwise the test could advance before the sleep is
     // registered and accidentally test task scheduling instead of the delay.
@@ -5072,4 +5081,393 @@ async fn cancelling_during_the_backoff_aborts_the_turn_without_retrying() {
     });
     assert_eq!(last, Some(StopReason::Aborted));
     assert!(errors.lock().unwrap().is_empty(), "{:?}", errors.lock());
+}
+
+// ---------------------------------------------------------------------------
+// Mutation-testing gaps (#198): token limit sum, after_turn usage, tracker
+// anchor, growth average, steering skips, tool-call deltas.
+// ---------------------------------------------------------------------------
+
+/// The token limit counts every usage field once: input + output +
+/// cache_read + cache_write (100 a turn here), so a 150-token limit allows a
+/// second request and stops before a third.
+#[tokio::test]
+async fn execution_limit_sums_all_four_usage_fields() {
+    let provider = std::sync::Arc::new(UsageProvider {
+        usage: Usage {
+            input: 10,
+            output: 20,
+            cache_read: 30,
+            cache_write: 40,
+            total_tokens: 100,
+        },
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let provider_for_config: std::sync::Arc<dyn StreamProvider> = provider.clone();
+    let mut config = AgentLoopConfig::new(provider_for_config, "usage-test");
+    config.api_key = "test".into();
+    config.get_follow_up_messages = Some(Box::new(|| {
+        vec![AgentMessage::Llm(Message::user("follow up"))]
+    }));
+    config.execution_limits = Some(
+        ExecutionLimits::default()
+            .with_max_turns(20)
+            .with_max_total_tokens(150)
+            .with_max_duration(std::time::Duration::from_secs(60)),
+    );
+    let mut context = AgentContext {
+        system_prompt: "test".into(),
+        messages: Vec::new(),
+        tools: Vec::new(),
+    };
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent_loop(
+        vec![AgentMessage::Llm(Message::user("start"))],
+        &mut context,
+        &config,
+        tx,
+        CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(
+        provider.calls.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "100 tokens a turn: under 150 after one, over it after two"
+    );
+}
+
+/// `after_turn` gets the turn's own usage, not a default.
+#[tokio::test]
+async fn after_turn_receives_the_turns_usage() {
+    let usage = Usage {
+        input: 7,
+        output: 3,
+        ..Default::default()
+    };
+    let provider = MockProvider::new(vec![MockResponse::TextWithUsage(
+        "done".into(),
+        usage.clone(),
+    )]);
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Usage>::new()));
+    let sink = seen.clone();
+    let mut config = make_config(provider);
+    config.after_turn = Some(std::sync::Arc::new(move |_msgs, usage| {
+        sink.lock().unwrap().push(usage.clone());
+    }));
+    let mut context = AgentContext {
+        system_prompt: "test".into(),
+        messages: Vec::new(),
+        tools: Vec::new(),
+    };
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent_loop(
+        vec![AgentMessage::Llm(Message::user("go"))],
+        &mut context,
+        &config,
+        tx,
+        CancellationToken::new(),
+    )
+    .await;
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!((seen[0].input, seen[0].output), (7, 3));
+}
+
+/// Records the whole config and history each compact call receives; never
+/// modifies messages.
+struct FullRecordingCompaction {
+    calls: std::sync::Mutex<Vec<(yoagent::context::ContextConfig, Vec<AgentMessage>)>>,
+}
+
+impl yoagent::CompactionStrategy for FullRecordingCompaction {
+    fn compact(
+        &self,
+        messages: Vec<AgentMessage>,
+        config: &yoagent::context::ContextConfig,
+    ) -> Vec<AgentMessage> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push((config.clone(), messages.clone()));
+        messages
+    }
+}
+
+/// Three turns, each adding a ~1000-token follow-up, against 5010 tokens of
+/// real usage per response.
+async fn run_growth_loop(
+    headroom_turns: Option<usize>,
+) -> Vec<(yoagent::context::ContextConfig, Vec<AgentMessage>)> {
+    let provider = std::sync::Arc::new(UsageProvider {
+        usage: Usage {
+            input: 5000,
+            output: 10,
+            cache_read: 0,
+            cache_write: 0,
+            total_tokens: 5010,
+        },
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+    let strategy = std::sync::Arc::new(FullRecordingCompaction {
+        calls: std::sync::Mutex::new(Vec::new()),
+    });
+    let mut config = AgentLoopConfig::new(provider, "usage-test");
+    config.api_key = "test".into();
+    config.get_follow_up_messages = Some(Box::new(|| {
+        vec![AgentMessage::Llm(Message::user("x".repeat(4000)))]
+    }));
+    config.context_config = Some(yoagent::context::ContextConfig {
+        max_context_tokens: 40_000,
+        system_prompt_tokens: 0,
+        keep_recent: 1,
+        keep_first: 1,
+        compact_target_ratio: 0.95,
+        compact_headroom_turns: headroom_turns,
+        ..Default::default()
+    });
+    config.compaction_strategy = Some(strategy.clone());
+    config.execution_limits = Some(
+        ExecutionLimits::default()
+            .with_max_turns(3)
+            .with_max_total_tokens(1_000_000)
+            .with_max_duration(std::time::Duration::from_secs(60)),
+    );
+    config.retry_config = yoagent::RetryConfig::none();
+    let mut context = AgentContext {
+        system_prompt: "test".into(),
+        messages: Vec::new(),
+        tools: Vec::new(),
+    };
+    let (tx, _rx) = mpsc::unbounded_channel();
+    agent_loop(
+        vec![AgentMessage::Llm(Message::user("start"))],
+        &mut context,
+        &config,
+        tx,
+        CancellationToken::new(),
+    )
+    .await;
+    let calls = strategy.calls.lock().unwrap().clone();
+    calls
+}
+
+/// Real usage is anchored on the assistant message that reported it: the
+/// follow-up appended after it is estimated on top, so the measured overhead
+/// is usage minus the messages up to and including that response.
+#[tokio::test]
+async fn calibration_anchors_usage_on_the_reporting_message() {
+    let calls = run_growth_loop(None).await;
+    assert!(calls.len() >= 2, "{} compaction calls", calls.len());
+    let (config, messages) = &calls[1];
+    // [start, response, follow-up]: the response carried 5010 tokens of usage.
+    assert_eq!(messages.len(), 3);
+    let anchored = yoagent::context::total_tokens(&messages[..2]);
+    assert!(
+        yoagent::context::message_tokens(&messages[2]) > 500,
+        "the follow-up must weigh enough to tell the anchors apart"
+    );
+    assert_eq!(config.max_context_tokens, 40_000 - (5010 - anchored));
+}
+
+/// The headroom policy reads the AVERAGE growth per turn: by the third turn
+/// two samples were taken, and the ratio is derived from their mean.
+#[tokio::test]
+async fn headroom_ratio_uses_the_average_growth_per_turn() {
+    let calls = run_growth_loop(Some(2)).await;
+    assert_eq!(calls.len(), 3, "one compaction call per turn");
+    let tokens: Vec<usize> = calls
+        .iter()
+        .map(|(_, m)| yoagent::context::total_tokens(m))
+        .collect();
+    let average = (tokens[2] - tokens[0]) as f64 / 2.0;
+    let (config, _) = &calls[2];
+    let expected = yoagent::context::ContextConfig {
+        compact_target_ratio: 0.95,
+        ..config.clone()
+    }
+    .effective_target_ratio(average);
+    assert!(
+        expected < 0.95 && expected > 0.5,
+        "the derived ratio must not be clamped: {expected}"
+    );
+    assert_eq!(config.compact_target_ratio, expected, "tokens {tokens:?}");
+}
+
+/// A tool that counts its executions, for steering on what has run.
+struct RunCounter(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+#[async_trait::async_trait]
+impl AgentTool for RunCounter {
+    fn name(&self) -> &str {
+        "counting_tool"
+    }
+    fn label(&self) -> &str {
+        "Counting"
+    }
+    fn description(&self) -> &str {
+        "Counts its runs"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({})
+    }
+    async fn execute(
+        &self,
+        _params: serde_json::Value,
+        _ctx: ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(ToolResult {
+            content: vec![Content::Text { text: "ran".into() }],
+            details: serde_json::Value::Null,
+        })
+    }
+}
+
+/// Runs `calls` calls of `counting_tool` under `strategy`, steering once as
+/// soon as `steer_after` of them have run. Returns (executed, result ids).
+async fn steer_mid_calls(
+    strategy: ToolExecutionStrategy,
+    calls: usize,
+    steer_after: usize,
+) -> (usize, Vec<String>) {
+    let provider = MockProvider::new(vec![
+        MockResponse::ToolCalls(
+            (0..calls)
+                .map(|_| MockToolCall {
+                    provider_metadata: None,
+                    name: "counting_tool".into(),
+                    arguments: serde_json::json!({}),
+                })
+                .collect(),
+        ),
+        MockResponse::Text("done".into()),
+    ]);
+    let ran = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut config = make_config(provider);
+    config.tool_execution = strategy;
+    let seen = ran.clone();
+    let steered = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    config.get_steering_messages = Some(Box::new(move || {
+        if seen.load(std::sync::atomic::Ordering::SeqCst) >= steer_after
+            && !steered.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            vec![AgentMessage::Llm(Message::user("steer"))]
+        } else {
+            Vec::new()
+        }
+    }));
+    let mut context = AgentContext {
+        system_prompt: "test".into(),
+        messages: Vec::new(),
+        tools: vec![Box::new(RunCounter(ran.clone()))],
+    };
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let new_messages = agent_loop(
+        vec![AgentMessage::Llm(Message::user("start"))],
+        &mut context,
+        &config,
+        tx,
+        CancellationToken::new(),
+    )
+    .await;
+    let ids = new_messages
+        .iter()
+        .filter_map(|m| match m {
+            AgentMessage::Llm(Message::ToolResult { tool_call_id, .. }) => {
+                Some(tool_call_id.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    (ran.load(std::sync::atomic::Ordering::SeqCst), ids)
+}
+
+fn assert_one_result_per_call(ids: &[String], calls: usize) {
+    let mut unique = ids.to_vec();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(ids.len(), calls, "one result per call: {ids:?}");
+    assert_eq!(unique.len(), calls, "{ids:?}");
+}
+
+/// A steer after the first batch of two skips only the two calls that did
+/// not run: the skip starts at (batch + 1) × size.
+#[tokio::test]
+async fn batched_steer_skips_only_the_unstarted_batches() {
+    let (ran, ids) = steer_mid_calls(ToolExecutionStrategy::Batched { size: 2 }, 4, 2).await;
+    assert_eq!(ran, 2, "the second batch must not run");
+    assert_one_result_per_call(&ids, 4);
+}
+
+/// A steer after the first sequential call skips the calls after it, not the
+/// one that ran.
+#[tokio::test]
+async fn sequential_steer_skips_only_the_calls_after_it() {
+    let (ran, ids) = steer_mid_calls(ToolExecutionStrategy::Sequential, 3, 1).await;
+    assert_eq!(ran, 1, "the calls after the steer must not run");
+    assert_one_result_per_call(&ids, 3);
+}
+
+/// Streams a tool call's arguments as deltas.
+struct ToolCallDeltaProvider;
+
+#[async_trait::async_trait]
+impl StreamProvider for ToolCallDeltaProvider {
+    async fn stream(
+        &self,
+        _config: StreamConfig,
+        tx: tokio::sync::mpsc::UnboundedSender<StreamEvent>,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<Message, ProviderError> {
+        let message = Message::assistant(
+            vec![Content::Text { text: "ok".into() }],
+            StopReason::Stop,
+            "mock",
+            "mock",
+            Usage::default(),
+        );
+        let _ = tx.send(StreamEvent::Start);
+        for delta in ["{\"pa", "th\": 1}"] {
+            let _ = tx.send(StreamEvent::ToolCallDelta {
+                content_index: 0,
+                delta: delta.into(),
+            });
+        }
+        let _ = tx.send(StreamEvent::Done {
+            message: message.clone(),
+        });
+        Ok(message)
+    }
+}
+
+/// Tool-call argument deltas reach the consumer as `MessageUpdate`s, in order.
+#[tokio::test]
+async fn tool_call_deltas_are_forwarded_as_message_updates() {
+    let mut config = make_config(MockProvider::text("unused"));
+    config.provider = std::sync::Arc::new(ToolCallDeltaProvider);
+    let mut context = AgentContext {
+        system_prompt: "test".into(),
+        messages: Vec::new(),
+        tools: Vec::new(),
+    };
+    let (tx, rx) = mpsc::unbounded_channel();
+    agent_loop(
+        vec![AgentMessage::Llm(Message::user("go"))],
+        &mut context,
+        &config,
+        tx,
+        CancellationToken::new(),
+    )
+    .await;
+    let deltas: Vec<String> = collect_events(rx)
+        .into_iter()
+        .filter_map(|e| match e {
+            AgentEvent::MessageUpdate {
+                delta: StreamDelta::ToolCallDelta { delta },
+                ..
+            } => Some(delta),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(deltas, ["{\"pa", "th\": 1}"]);
 }

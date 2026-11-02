@@ -416,6 +416,30 @@ mod tests {
         });
     }
 
+    /// `get-header-key-duplicate`: a name given more than once is signed once,
+    /// its values joined with commas in the order given. (The vector's
+    /// `X-Amz-Date` request header is the one `sign` adds. The hash and the
+    /// signature were recomputed with `shasum`/`openssl`, not copied.)
+    #[test]
+    fn get_header_key_duplicate() {
+        check(&Vector {
+            method: "GET",
+            path: "/",
+            headers: &[
+                ("Host", "example.amazonaws.com"),
+                ("My-Header1", "value2"),
+                ("My-Header1", "value2"),
+                ("My-Header1", "value1"),
+            ],
+            body: b"",
+            token: None,
+            sign_body: false,
+            canonical_request: "GET\n/\n\nhost:example.amazonaws.com\nmy-header1:value2,value2,value1\nx-amz-date:20150830T123600Z\n\nhost;my-header1;x-amz-date\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            string_to_sign: "AWS4-HMAC-SHA256\n20150830T123600Z\n20150830/us-east-1/service/aws4_request\ndc7f04a3abfde8d472b0ab1a418b741b7c67174dad1551b4117b15527fbe966c",
+            authorization: "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/service/aws4_request, SignedHeaders=host;my-header1;x-amz-date, Signature=c9d5ea9f3f72853aea855b47ea873832890dbdd183b4468f858259531a5138ea",
+        });
+    }
+
     /// `get-utf8`: the request line carries the raw UTF-8 path `/ሴ`, encoded
     /// once in the canonical URI.
     #[test]

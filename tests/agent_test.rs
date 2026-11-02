@@ -1193,6 +1193,13 @@ async fn test_prompt_structured_unwraps_forced_tool_call() {
     );
     // The unwrap happened in the loop: history ends with a plain assistant
     // message (Stop), no tool-result turn for the synthetic tool.
+    assert!(matches!(
+        agent.messages().last(),
+        Some(AgentMessage::Llm(Message::Assistant {
+            stop_reason: StopReason::Stop,
+            ..
+        }))
+    ));
     assert!(!agent
         .messages()
         .iter()
