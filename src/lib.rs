@@ -123,7 +123,7 @@ pub mod decision;
 
 pub use agent::{Agent, AgentBuildError, StructuredPromptError};
 pub use agent_loop::{agent_loop, agent_loop_continue};
-pub use context::{CompactionStrategy, DefaultCompaction};
+pub use context::{CompactionStrategy, DefaultCompaction, TokenAccounting};
 pub use extension::{Extension, ExtensionMode, RunHooks};
 pub use llm_compaction::LlmCompaction;
 pub use retry::RetryConfig;

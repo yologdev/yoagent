@@ -4,6 +4,10 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+- **`max_total_tokens` can count the conversation's growth instead of every prompt** (#236, opt-in): `ExecutionLimits::with_token_accounting(TokenAccounting::Growth)` counts what the run adds to the conversation — the first turn's output, then each turn's growth over the turn before; the conversation the run starts with (history, system prompt, tools) is the baseline, so a run late in a long conversation gets the same allowance as the first. It grows with the conversation, not with turns × context, cached or not; a compaction's shrink, and a turn that reports no usage, count as zero. The default, `TokenAccounting::Processed`, is unchanged (every turn's whole prompt plus output), so no limit trips at a different point unless you opt in. Also `ExecutionTracker::record_turn_usage(prompt, output)`, which the loop now calls; `record_turn(tokens)` still adds its tokens as is. `ExecutionLimits` stored without the new field deserializes to `Processed`.
+
 ## 0.26.4 (2026-11-02)
 
 Patch release: new model presets and prices, no API change. Released with **yoagent-rutis 0.11.0** (rutis 0.19.3, below); yoagent-workers (0.3.0) is unchanged.

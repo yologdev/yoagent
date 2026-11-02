@@ -280,6 +280,7 @@ async fn the_verifier_recipe_sends_the_agent_back_until_tests_ran() {
 #[allow(dead_code, clippy::let_underscore_future)]
 fn prose_names() {
     let _ = Agent::from_config;
+    let _ = ExecutionLimits::default().with_token_accounting(yoagent::TokenAccounting::Growth);
     let _ = |a: Agent, b: Budget| a.with_extension(b);
     let _ = Agent::with_tools;
     let _ = |a: Agent, b: Budget| a.with_tree_extension(b);

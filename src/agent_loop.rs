@@ -1761,13 +1761,13 @@ async fn run_loop(
 
             // Track turn for execution limits
             if let Some(ref mut tracker) = tracker {
-                let turn_tokens = match &message {
-                    Message::Assistant { usage, .. } => {
-                        (usage.input + usage.output + usage.cache_read + usage.cache_write) as usize
-                    }
-                    _ => context::message_tokens(&agent_msg),
-                };
-                tracker.record_turn(turn_tokens);
+                match &message {
+                    Message::Assistant { usage, .. } => tracker.record_turn_usage(
+                        (usage.input + usage.cache_read + usage.cache_write) as usize,
+                        usage.output as usize,
+                    ),
+                    _ => tracker.record_turn(context::message_tokens(&agent_msg)),
+                }
             }
 
             // after_turn callback
