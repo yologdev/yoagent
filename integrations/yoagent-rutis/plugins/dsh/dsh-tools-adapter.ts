@@ -164,6 +164,10 @@ const EMPTY_SCHEMA = { type: 'object', properties: {} }
 
 export default definePlugin<Config>({
   inject: ['tools', 'systemPrompt', 'yoagent'],
+  // Read with `ctx.get` when they are used: the adapter runs without them
+  // (since rutis 0.20 `use` and `get` read only what a plugin or its row
+  // declares, whatever else the runtime has).
+  optional: ['attachments', 'yoagent-dsh-host'],
   config: {
     type: 'object',
     properties: {
@@ -180,7 +184,7 @@ export default definePlugin<Config>({
     /** dsh's attachment store, when one is loaded: optional, so looked up per use rather than injected. */
     const attachments = (): DshAttachments | undefined => {
       try {
-        return ctx.use<DshAttachments>('attachments')
+        return ctx.get<DshAttachments>('attachments')
       } catch {
         return undefined
       }
@@ -188,7 +192,7 @@ export default definePlugin<Config>({
     /** The DSH host (`dsh-host.ts`), when the host loaded it: looked up per call, like `attachments`. */
     const dshHost = (): DshHost | undefined => {
       try {
-        return ctx.use<DshHost>('yoagent-dsh-host')
+        return ctx.get<DshHost>('yoagent-dsh-host')
       } catch {
         return undefined
       }
