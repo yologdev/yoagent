@@ -147,6 +147,12 @@ interface Generation {
   log?: DshLog
   /** Torn down: a flush queued before is skipped. */
   ended?: boolean
+  /**
+   * The latest `turn/end`: its seq, and the event itself when the session refused it. Unload
+   * checks the log has it: a turn closed just before (a run's `finish`) may have emitted its end
+   * too late to reach the backend.
+   */
+  lastEnd?: { seq: number; refused?: Record<string, unknown> }
   end: () => Promise<void>
 }
 
@@ -274,6 +280,7 @@ export function apply(ctx: any) {
       if (!quiet) say('warn', `[dsh-host] closing DSH turn ${g.turn} failed: ${message(error)}`)
     }
     g.owner = undefined
+    g.lastEnd = { seq, refused }
     if (flush && !refused) await writeLog(g)
     return refused
   }
@@ -412,14 +419,13 @@ export function apply(ctx: any) {
         turn: 0,
         log,
         end: async () => {
-          const open = g.owner !== undefined
-          const seq = Number(g.session.seq)
-          const refused = await closeTurn(g, { kind: 'aborted', reason: { kind: 'disposed' } }, !closed, closed)
+          await closeTurn(g, { kind: 'aborted', reason: { kind: 'disposed' } }, !closed, closed)
           g.ended = true
           await unwind()
-          // On unload the event reached no backend (this row may not emit then): written now that the
-          // generation's handle has drained what it had.
-          if (closed && open && g.log) await writeTurnEnd(g, seq, refused)
+          // On unload the latest turn's end may have reached no backend — this one's, or one a run's
+          // `finish` closed just before (this row may not emit then): written now that the
+          // generation's handle has drained what it had, unless the log has it.
+          if (closed && g.log && g.lastEnd) await writeTurnEnd(g, g.lastEnd.seq, g.lastEnd.refused)
         },
       }
       say('debug', `[dsh-host] stand-in agent ${session.id} for host session ${key} in ${cwd}`)
