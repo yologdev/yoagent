@@ -2815,14 +2815,15 @@ async fn exec_gate_asks_the_host() {
         host.root.shutdown().await.unwrap();
     }
 
-    // A bad grant refuses the load.
+    // A bad grant refuses the load: the adapter's Schema, checked by rutis
+    // before `apply` since 0.18 (`bad-config`, `config: <path> …`).
     let host = host(&runtime).await;
     let failures = host
         .try_load(adapter_row(
             json!({ "extensions": [&gated], "exec": "ask" }),
         ))
         .await;
-    assert!(failures.contains("exec must be true, false"), "{failures}");
+    assert!(failures.contains("config: exec should be"), "{failures}");
     host.root.shutdown().await.unwrap();
 }
 
@@ -2960,7 +2961,8 @@ async fn trust_and_wake_per_extension() {
         ),
         (
             json!({ "projectTrustedFor": { woken.to_str().unwrap(): "yes" } }),
-            "must be true or false",
+            // The Schema's check (rutis 0.18+), before the adapter's own.
+            "should be a boolean",
         ),
         // One file under two spellings.
         (
