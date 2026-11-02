@@ -54,7 +54,7 @@
 // in the log already.
 //
 // The tools adapter finds this through the `yoagent-dsh-host` service it
-// provides (looked up per call, not injected), and `host-dialogs.ts` answers
+// provides (declared `optional` there and read per call with `ctx.get`), and `host-dialogs.ts` answers
 // DSH's `approval/request` and the stand-in's questions through the host's
 // `ui`.
 

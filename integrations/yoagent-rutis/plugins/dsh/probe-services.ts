@@ -58,16 +58,19 @@ export function apply(ctx: any, config: Config) {
     await read
     const present: string[] = []
     const missing: string[] = []
+    // Why a name could not be read at all (missing either way), so a broken
+    // service is not reported as merely absent.
+    const lookupErrors: Record<string, string> = {}
     for (const entry of names) {
       let found = false
       try {
         found = ctx.get(entry) !== undefined
-      } catch {
-        found = false
+      } catch (error: any) {
+        lookupErrors[entry] = String(error?.message ?? error).slice(0, 300)
       }
       ;(found ? present : missing).push(entry)
     }
-    writeFileSync(config.out, JSON.stringify({ present, missing, importErrors }))
+    writeFileSync(config.out, JSON.stringify({ present, missing, importErrors, lookupErrors }))
   }, config.waitMs ?? 3000)
   ctx.effect(() => () => clearTimeout(timer))
 }

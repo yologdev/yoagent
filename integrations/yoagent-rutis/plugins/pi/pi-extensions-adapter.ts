@@ -1082,6 +1082,10 @@ const message = (error: unknown) => {
 
 export default definePlugin<Config>({
   inject: ['yoagent'],
+  // The host services the shims re-provide, read with `ctx.get` when a call
+  // or a context is made: optional, so the adapter starts without them (since
+  // rutis 0.20 `use` and `get` read only what a plugin or its row declares).
+  optional: ['pi-host-ui', 'pi-host-approval', 'pi-host-session'],
   config: {
     type: 'object',
     required: ['extensions'],
@@ -1179,12 +1183,12 @@ export default definePlugin<Config>({
     const runModels = new Map<string, string>()
     /** The latest request's model of any run: for contexts outside a run (`session_start`, ...). */
     let latestModel: string | undefined
-    // Host services for the grants: looked up when a call is made, never injected (as `ui`).
+    // Host services for the grants: looked up when a call is made, optional (as `ui`).
     /** A re-provided host service; why not, when it cannot be had (the error's own text). */
     const lookup = <T>(hostName: string, plugin: string): Lookup<T> => {
       const missing = `the host provides no ${hostName} service (load ${plugin})`
       try {
-        const service = ctx.use<T>(`pi-${hostName.replace('_', '-')}`)
+        const service = ctx.get<T>(`pi-${hostName.replace('_', '-')}`)
         return service ? { service } : { missing }
       } catch (error) {
         return { missing: `${missing}: ${message(error)}` }
@@ -1225,18 +1229,28 @@ export default definePlugin<Config>({
 
     const sessionManager = SessionManager.inMemory(cwd)
     // A host `ui` service, re-provided in this runtime as `pi-host-ui` by
-    // `host-ui.ts`, makes this pi's RPC mode. It is looked up when a context
-    // is made, never injected: rutis starts a plugin only once every injected
-    // service exists, and hosts without one keep print mode.
+    // `host-ui.ts`, makes this pi's RPC mode. It is declared `optional` and
+    // read when a context is made, not injected: rutis starts a plugin only
+    // once every injected service exists, and hosts without one keep print
+    // mode.
     let uiMissingReported = false
+    let uiFailureReported = false
     const lookupUi = () => {
       try {
-        return ctx.use<HostUi>('pi-host-ui')
-      } catch (error) {
+        const ui = ctx.get<HostUi>('pi-host-ui')
         // The usual case without a frontend: print mode. Said once, at debug.
-        if (!uiMissingReported) {
+        if (ui === undefined && !uiMissingReported) {
           uiMissingReported = true
-          report('debug', `[pi] no host ui (print mode): ${message(error)}`)
+          report('debug', '[pi] no host ui (print mode)')
+        }
+        return ui
+      } catch (error) {
+        // `pi-host-ui` is declared `optional`, so `get` throws only when that
+        // declaration is wrong: every dialog would fall back to print mode
+        // unnoticed. Said once, at warn.
+        if (!uiFailureReported) {
+          uiFailureReported = true
+          report('warn', `[pi] reading pi-host-ui failed, so print mode (is it in \`optional\`?): ${message(error)}`)
         }
         return undefined
       }
@@ -1978,7 +1992,9 @@ export default definePlugin<Config>({
             | undefined
           if (result === 'late') {
             // Left running; the queue moves on so one stuck handler cannot stall every observer.
-            call.catch(() => {})
+            call.catch((error) =>
+              report('debug', `[pi] ${short(ext.path)}: a late ${pi.type} handler failed: ${message(error)}`),
+            )
             once(
               `${runId}\0${ext.path}\0${pi.type}\0late`,
               'warn',

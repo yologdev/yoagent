@@ -1,4 +1,4 @@
-//! Local language runtimes as a rutis 0.19 host starts them: each one a
+//! Local language runtimes as a rutis 0.20 host starts them: each one a
 //! `rutis_host::connect::SpawnPlugin` (its process the far end of a
 //! session), every row resolved by one `SessionResolver` — npm names and
 //! files on the `node` runtime, `<runtime>:<plugin>` on the others

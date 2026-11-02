@@ -164,6 +164,10 @@ const EMPTY_SCHEMA = { type: 'object', properties: {} }
 
 export default definePlugin<Config>({
   inject: ['tools', 'systemPrompt', 'yoagent'],
+  // Read with `ctx.get` when they are used: the adapter runs without them
+  // (since rutis 0.20 `use` and `get` read only what a plugin or its row
+  // declares, whatever else the runtime has).
+  optional: ['attachments', 'yoagent-dsh-host'],
   config: {
     type: 'object',
     properties: {
@@ -177,22 +181,34 @@ export default definePlugin<Config>({
     const prompt = ctx.use<DshSystemPrompt>('systemPrompt')
     const yoagent = ctx.use<Yoagent>('yoagent')
     const only = config?.tools ? new Set(config.tools) : undefined
-    /** dsh's attachment store, when one is loaded: optional, so looked up per use rather than injected. */
-    const attachments = (): DshAttachments | undefined => {
+    /** What was already said about each optional service: once per name and kind. */
+    const said = new Set<string>()
+    /**
+     * An `optional` service, read per use. Its absence is ordinary (said once,
+     * at debug); a `get` that throws means the `optional` declaration above is
+     * wrong — the features would vanish silently — so that is said at warn.
+     */
+    const optionalService = <T>(name: string, without: string): T | undefined => {
+      let service: T | undefined
       try {
-        return ctx.use<DshAttachments>('attachments')
-      } catch {
+        service = ctx.get<T>(name)
+      } catch (error) {
+        if (!said.has(`${name}\0threw`)) {
+          said.add(`${name}\0threw`)
+          say('warn', `[dsh] reading ${name} failed (is it in \`optional\`?), so ${without}: ${error}`)
+        }
         return undefined
       }
-    }
-    /** The DSH host (`dsh-host.ts`), when the host loaded it: looked up per call, like `attachments`. */
-    const dshHost = (): DshHost | undefined => {
-      try {
-        return ctx.use<DshHost>('yoagent-dsh-host')
-      } catch {
-        return undefined
+      if (service === undefined && !said.has(`${name}\0absent`)) {
+        said.add(`${name}\0absent`)
+        say('debug', `[dsh] no ${name} service, so ${without}`)
       }
+      return service
     }
+    /** dsh's attachment store, when one is loaded. */
+    const attachments = () => optionalService<DshAttachments>('attachments', 'images become placeholders')
+    /** The DSH host (`dsh-host.ts`), when the host loaded it. */
+    const dshHost = () => optionalService<DshHost>('yoagent-dsh-host', 'calls run without a DSH agent')
     /** Tell the DSH host who delegated this run, so its DSH turn is its top-level run's. */
     const noteRun = (run: RunInfo) => {
       try {
@@ -377,7 +393,11 @@ export default definePlugin<Config>({
               // set here (the dsh loop supplies `model`, `cwd`) is skipped,
               // not the whole note.
               text = renderPrompt({ ...assembly, sections: [section], contexts: [], tools: [] })
-            } catch {
+            } catch (error) {
+              if (!said.has(`section\0${section.name}`)) {
+                said.add(`section\0${section.name}`)
+                say('debug', `[dsh] prompt section ${section.name} left out: ${error}`)
+              }
               continue
             }
             if (text.trim()) parts.push(text.trim())

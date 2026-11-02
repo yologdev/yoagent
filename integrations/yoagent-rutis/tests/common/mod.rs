@@ -17,13 +17,14 @@ use yoagent::provider::{
 use yoagent::*;
 
 /// The rutis release train the npm and PyPI runtimes are pinned to
-/// (`plugins/package-lock.json`, `plugins/requirements.txt`), as the
-/// handshake requires: one version on both sides.
-pub const RUNTIME_TRAIN: &str = "0.19.3";
+/// (`plugins/package-lock.json`, `plugins/requirements.txt`): one version
+/// on both sides, the host's crates and the runtimes.
+pub const RUNTIME_TRAIN: &str = "0.20.0";
 
 /// `version` (an installed runtime package's) is on [`RUNTIME_TRAIN`]'s
-/// minor at or after its patch: 0.19.0–0.19.2 named rutis's own services
-/// `loader`/`sessions`, which DSH's `sessions` clashes with.
+/// minor at or after its patch. rutis 0.20 kept protocol 4, so a 0.19
+/// runtime still greets a 0.20 host; it would run on 0.19's rules (no
+/// `optional`, its own unload order), which the tests do not expect.
 pub fn on_runtime_train(version: &str) -> bool {
     let parse = |v: &str| -> Option<(u32, u32, u32)> {
         let mut parts = v.split(['.', '-', '+']).map(|n| n.parse::<u32>().ok());

@@ -193,9 +193,9 @@ and its examples.
   `compaction`, `extensions` (calls an extension records through
   `RunContext::spend_handle`); `total_cost_usd()` adds them. Unknown cost
   is `None`, never zero.
-- **Plugin messages are capped at 16 MiB**: on rutis 0.19 (yoagent-rutis
-  0.11) a larger one fails that call; on rutis 0.12 (yoagent-rutis 0.10 and
-  earlier) it ends the runtime and its plugins. Large images in a
+- **Plugin messages are capped at 16 MiB**: on rutis 0.19 and later
+  (yoagent-rutis 0.11 and later) a larger one fails that call; on rutis
+  0.12 (yoagent-rutis 0.10 and earlier) it ends the runtime and its plugins. Large images in a
   conversation reach plugins as text.
 - **Tests**: script whole multi-turn tool conversations with `MockProvider`
   (`Agent::from_provider(MockProvider::new(…), ModelConfig::mock())`); it

@@ -6,8 +6,8 @@
 //! rows, one local runtime per language (started with rutis-host). The `yoagent` service must be
 //! shared in the loader's catalog so the rows can inject it.
 //!
-//! Setup (once): `npm ci` in `plugins/`, and a Python 3.12+ with rutis 0.19:
-//! `uv venv plugins/.venv --python 3.12 && uv pip install --python plugins/.venv/bin/python rutis==0.19.3`.
+//! Setup (once): `npm ci` in `plugins/`, and a Python 3.12+ with rutis 0.20:
+//! `uv venv plugins/.venv --python 3.12 && uv pip install --python plugins/.venv/bin/python rutis==0.20.0`.
 //!
 //! Run: `cargo run --manifest-path integrations/yoagent-rutis/Cargo.toml --features node,python --example language_plugins`
 
