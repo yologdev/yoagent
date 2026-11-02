@@ -266,12 +266,21 @@ pub enum McpError {
     /// as a `Transport` error read before — the server's body (first 200
     /// chars) included when there was one.
     ///
+    /// `www_authenticate` is the response's `WWW-Authenticate` header on a
+    /// 401 or 403 (the challenge naming how to sign in, or the scope a 403
+    /// `insufficient_scope` wants), when it sent one; read it with
+    /// [`McpError::www_authenticate`].
+    ///
     /// `#[non_exhaustive]`: match with `Http { status, .. }` and build one
-    /// with [`McpError::http`], so fields can be added (a 401's
-    /// `WWW-Authenticate`, say) without a breaking change.
+    /// with [`McpError::http`], so fields can be added without a breaking
+    /// change.
     #[error("Transport error: {message}")]
     #[non_exhaustive]
-    Http { status: u16, message: String },
+    Http {
+        status: u16,
+        message: String,
+        www_authenticate: Option<String>,
+    },
     #[error("Protocol error: {0}")]
     Protocol(String),
     #[error("JSON-RPC error {code}: {message}")]
@@ -291,6 +300,30 @@ impl McpError {
         Self::Http {
             status,
             message: message.into(),
+            www_authenticate: None,
+        }
+    }
+
+    /// This error with the response's `WWW-Authenticate` header, for an
+    /// [`Http`](Self::Http) error; any other error is returned unchanged.
+    pub(crate) fn with_www_authenticate(mut self, challenge: Option<String>) -> Self {
+        if let Self::Http {
+            www_authenticate, ..
+        } = &mut self
+        {
+            *www_authenticate = challenge;
+        }
+        self
+    }
+
+    /// The `WWW-Authenticate` header of an [`Http`](Self::Http) error's
+    /// response (401 / 403), if it sent one; `None` for any other error.
+    pub fn www_authenticate(&self) -> Option<&str> {
+        match self {
+            Self::Http {
+                www_authenticate, ..
+            } => www_authenticate.as_deref(),
+            _ => None,
         }
     }
 
@@ -316,6 +349,16 @@ mod tests {
             "Transport error: HTTP 401 Unauthorized from server on 'tools/list'"
         );
         assert_eq!(McpError::Transport("x".into()).http_status(), None);
+        let challenged = McpError::http(401, "sign in")
+            .with_www_authenticate(Some("Bearer realm=\"mcp\"".into()));
+        assert_eq!(challenged.www_authenticate(), Some("Bearer realm=\"mcp\""));
+        assert_eq!(err.www_authenticate(), None);
+        assert_eq!(
+            McpError::Transport("x".into())
+                .with_www_authenticate(Some("y".into()))
+                .www_authenticate(),
+            None
+        );
     }
 
     #[test]

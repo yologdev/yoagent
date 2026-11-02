@@ -4,6 +4,12 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+- **MCP over HTTP: credentials that change during a session** (for yobuild's OAuth sign-in to remote servers). `HttpTransport::with_authorization(Arc<dyn AuthorizationSource>)`: the source is asked for the `Authorization` value before every request (each POST and the closing `DELETE`); on a 401 its `challenged(&AuthChallenge)` (status, every `WWW-Authenticate`, the request, and `refused()` — the value the server refused, for collapsing concurrent refreshes; `AuthChallenge::new` builds one for tests) may return a new value, and that request is sent once more with the same MCP session — an expiring OAuth access token no longer needs a new transport. `Ok(None)` sends no header; a source error fails the request unsent (a `Transport` error naming the request); the refused value returned again is not retried; a 403 is never retried; a refreshed value refused too fails as `Http` 401 saying so. Values are marked sensitive and redacted from what the transport quotes (server bodies, JSON-RPC error messages); an invalid value is refused unsent and unechoed; a fixed `authorization` header and a source together are an error. The closing `DELETE`'s 401 / 403 is now logged at `warn` (the session may leak).
+- **Credential headers set with `with_header` are redacted too**: the value of `authorization`, `proxy-authorization`, `cookie`, or a header whose name contains `key`, `token`, `secret`, `auth` or `session`, echoed into an error body or JSON-RPC error message, becomes `[redacted]` (like the URL's key-like parts since 0.26.1).
+- **`McpError::Http` carries the `WWW-Authenticate` challenge** of a 401 / 403 (`err.www_authenticate()`; several headers joined with `, `), with or without a source — the server's sign-in or `insufficient_scope` details. A new field on the `#[non_exhaustive]` variant: not breaking.
+
 ## 0.26.5 (2026-11-02)
 
 Additive: an opt-in way to count `max_total_tokens`; nothing changes unless you set it. Released with **yoagent-rutis 0.12.0** (rutis 0.20.0, below); yoagent-workers (0.3.0) is unchanged.
