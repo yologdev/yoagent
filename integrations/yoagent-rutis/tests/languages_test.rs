@@ -1196,8 +1196,9 @@ async fn a_restarted_row_registers_its_handler_again() {
 }
 
 /// `rows::wait_running`: a row that runs passes; one injecting a service
-/// nobody provides still waits when the wait ends, and is reported with the
-/// service it lacks and rutis-loader's word on why.
+/// nobody provides, with no row loading, ends the wait well before its
+/// timeout, reported with the service it lacks and rutis-loader's word on
+/// why.
 #[cfg(feature = "loader")]
 #[tokio::test(flavor = "multi_thread")]
 async fn wait_running_names_the_services_a_waiting_row_lacks() {
@@ -1225,11 +1226,30 @@ async fn wait_running_names_the_services_a_waiting_row_lacks() {
     yoagent_rutis::rows::wait_running(&host.loader, &["runs"], Duration::from_secs(30))
         .await
         .expect("the row that runs");
-    let error =
-        yoagent_rutis::rows::wait_running(&host.loader, &["runs", "needs"], Duration::from_secs(2))
-            .await
-            .expect_err("the row that waits");
+    let started = std::time::Instant::now();
+    let error = yoagent_rutis::rows::wait_running(
+        &host.loader,
+        &["runs", "needs"],
+        Duration::from_secs(60),
+    )
+    .await
+    .expect_err("the row that waits");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "a wait that cannot end ends early: {:?}",
+        started.elapsed()
+    );
     assert_eq!(error.rows.len(), 1, "{error}");
+    assert_eq!(error.rows[0].waits.len(), 1, "{:?}", error.rows[0].waits);
+    assert_eq!(error.rows[0].waits[0].service, "yoagentNoSuchService");
+    assert!(
+        matches!(
+            error.rows[0].waits[0].reason,
+            rutis_loader::report::WaitReason::NoProvider { .. }
+        ),
+        "{:?}",
+        error.rows[0].waits
+    );
     assert_eq!(error.rows[0].id, "needs");
     assert_eq!(error.rows[0].state, yoagent_rutis::rows::RowState::Waiting);
     assert_eq!(

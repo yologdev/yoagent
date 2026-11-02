@@ -49,7 +49,7 @@ use rutis::Ctx;
 use rutis_bridge::{LocalId, PeerId};
 use rutis_host::connect::SpawnPlugin;
 use rutis_host::languages;
-use rutis_loader::report::{EntryStatus, WaitReason};
+use rutis_loader::report::EntryStatus;
 use rutis_loader::runtime::SessionResolver;
 use rutis_loader::{Chain, Layer, Loader, LoaderOptions, LoaderPlugin, Patch, ServiceCatalog};
 use serde::Serialize;
@@ -64,6 +64,11 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 /// How long rows may take to start, and the adapter to register.
 const SETTLE: Duration = Duration::from_secs(60);
+
+/// How long rows must have read settled before a load is taken as done: a
+/// service a row's `apply` just provided may reach the loader a moment
+/// later, and a row waiting for it would then start.
+const HOPELESS_GRACE: Duration = Duration::from_millis(500);
 
 /// Probes in this process, one at a time (their logs share [`Logs`]).
 static ONE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -375,22 +380,39 @@ async fn load(host: &Host, layers: Vec<(&str, Value)>) -> Result<Vec<Row>, BoxEr
     }
     host.loader.reconcile(built, None).await?;
     // Rows still pending when the wait ends are reported as `waiting`. A row
-    // waiting for a service no row declares (a DSH plugin injecting one no
-    // host provides) will not start: it is settled at once, as `waiting`.
-    let settled = |id: &String| match row(&host.loader, id).state.as_str() {
-        "active" | "failed" | "unresolved" => true,
-        "waiting" => host.loader.get(id).is_some_and(|entry| {
-            host.loader.waits(&entry).iter().any(|wait| {
-                matches!(
-                    wait.reason,
-                    WaitReason::NoProvider { .. } | WaitReason::NoEnabledProvider { .. }
-                )
-            })
-        }),
-        _ => false,
+    // waiting for something that will never come — a service no row
+    // provides while no row is loading or may still load (one may provide a
+    // service it does not declare), a provider that failed or is disabled,
+    // a cycle — will not start: it is settled as `waiting` once that has
+    // held for a moment (a service just provided may reach the loader late).
+    // `Some(any waiting)` once every row is settled.
+    let settled_now = |ids: &[String]| {
+        let mut waiting = Vec::new();
+        for id in ids {
+            match row(&host.loader, id).state.as_str() {
+                "active" | "failed" | "unresolved" => {}
+                "waiting" => waiting.push(id.as_str()),
+                _ => return None,
+            }
+        }
+        let hopeless = waiting
+            .iter()
+            .all(|id| crate::rows::any_hopeless(&host.loader, &[id]));
+        hopeless.then_some(!waiting.is_empty())
     };
     let _ = tokio::time::timeout(SETTLE, async {
-        while !ids.iter().all(settled) {
+        let mut since: Option<tokio::time::Instant> = None;
+        loop {
+            match settled_now(&ids) {
+                Some(false) => break,
+                Some(true) => {
+                    let at = *since.get_or_insert_with(tokio::time::Instant::now);
+                    if at.elapsed() >= HOPELESS_GRACE {
+                        break;
+                    }
+                }
+                None => since = None,
+            }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
