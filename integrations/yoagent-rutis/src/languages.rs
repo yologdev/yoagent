@@ -140,8 +140,16 @@ struct Service {
     runtime: tokio::runtime::Handle,
 }
 
-fn invalid(message: impl Into<String>) -> Error {
-    Error::Value(message.into())
+/// A call to the service with the wrong arguments: rutis's `bad-argument`
+/// code (rutis 0.18), the plugin's error carrying it as `code`. Not
+/// `bad-value`, which says a value could not cross.
+fn bad_argument(message: impl Into<String>) -> Error {
+    Error::binding(session::code::BAD_ARGUMENT, message.into(), None)
+}
+
+/// A method that is not there: rutis's `no-method` code.
+fn no_method(message: impl Into<String>) -> Error {
+    Error::binding(session::code::NO_METHOD, message.into(), None)
 }
 
 impl HostDispatch for Service {
@@ -149,7 +157,7 @@ impl HostDispatch for Service {
         match method {
             "register" => self.register(args),
             "log" => log(args),
-            other => Err(invalid(format!(
+            other => Err(no_method(format!(
                 "the yoagent service has no method `{other}`"
             ))),
         }
@@ -229,16 +237,15 @@ impl Service {
         let mut args = args.list()?.into_iter();
         let name: String = session::decode(
             args.next()
-                .ok_or_else(|| invalid("register(name, handler, options?): missing the name"))?
+                .ok_or_else(|| bad_argument("register(name, handler, options?): missing the name"))?
                 .json()?,
         )?;
         if name.trim().is_empty() {
-            return Err(invalid("register: the handler name is empty"));
+            return Err(bad_argument("register: the handler name is empty"));
         }
-        let target =
-            Target::from_value(args.next().ok_or_else(|| {
-                invalid("register(name, handler, options?): missing the handler")
-            })?)?;
+        let target = Target::from_value(args.next().ok_or_else(|| {
+            bad_argument("register(name, handler, options?): missing the handler")
+        })?)?;
         let options: Options = match args.next() {
             None | Some(Value::Undefined) => Options::default(),
             Some(value) => match value.json()? {
@@ -248,23 +255,23 @@ impl Service {
         };
         let mut hooks = target.hooks()?;
         if options.messages && !(hooks.before_model || hooks.before_tool || hooks.on_stop) {
-            return Err(invalid(format!(
+            return Err(bad_argument(format!(
                 "register `{name}`: `options.messages` needs `before_model`, `before_tool` or `on_stop`"
             )));
         }
         hooks.messages = options.messages;
         if hooks.tools && !target.has("call_tool")? {
-            return Err(invalid(format!(
+            return Err(bad_argument(format!(
                 "register `{name}`: a handler with `tools` must implement `call_tool`"
             )));
         }
         if !hooks.on_event && !options.events.is_empty() {
-            return Err(invalid(format!(
+            return Err(bad_argument(format!(
                 "register `{name}`: `options.events` needs an `on_event` method"
             )));
         }
         if hooks.on_event && options.events.is_empty() {
-            return Err(invalid(format!(
+            return Err(bad_argument(format!(
                 "register `{name}`: `on_event` needs `options.events`, the event types to send"
             )));
         }
@@ -426,14 +433,16 @@ impl Target {
                         // Absent, as on a live object (`None` in Python).
                         Value::Undefined | Value::Data(Json::Null) => {}
                         _ if HOOKS.contains(&key.as_str()) => {
-                            return Err(invalid(format!("register: `{key}` is not a function")))
+                            return Err(bad_argument(format!(
+                                "register: `{key}` is not a function"
+                            )))
                         }
                         _ => {}
                     }
                 }
                 Ok(Self::Record(functions))
             }
-            _ => Err(invalid(
+            _ => Err(bad_argument(
                 "register: the handler must be an object (or dict) of async functions",
             )),
         }
@@ -449,10 +458,13 @@ impl Target {
             Self::Object(object) => match object.get(hook) {
                 Ok(Value::Undefined) | Ok(Value::Data(Json::Null)) => Ok(false),
                 Ok(Value::Reference(member)) if member.is_function() => Ok(true),
-                Ok(_) => Err(invalid(format!("register: `{hook}` is not a function"))),
-                // Python's getattr on a missing attribute.
+                Ok(_) => Err(bad_argument(format!(
+                    "register: `{hook}` is not a function"
+                ))),
+                // Python's getattr on a missing attribute. rutis 0.19 reads a
+                // property with a plain `getattr`: no `no-method` code to go by.
                 Err(Error::Remote { name, .. }) if name == "AttributeError" => Ok(false),
-                Err(error) => Err(invalid(format!(
+                Err(error) => Err(bad_argument(format!(
                     "register: cannot read the handler's `{hook}`: {error}"
                 ))),
             },
@@ -472,7 +484,7 @@ impl Target {
             messages: false,
         };
         if hooks == Hooks::default() && !self.has("call_tool")? {
-            return Err(invalid(format!(
+            return Err(bad_argument(format!(
                 "register: the handler implements none of {}",
                 HOOKS.join(", ")
             )));
@@ -533,7 +545,7 @@ impl Target {
             Self::Object(object) => object.call_method_async(hook, args).await,
             Self::Record(functions) => match functions.get(hook) {
                 Some(function) => function.call_async(args).await,
-                None => Err(invalid(format!("no `{hook}` function"))),
+                None => Err(no_method(format!("no `{hook}` function"))),
             },
         };
         let settled = match reply {

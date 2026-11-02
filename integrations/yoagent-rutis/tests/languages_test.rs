@@ -614,7 +614,7 @@ export default definePlugin({
         yoagent.register('bad', ...args)
         probe.record(`accepted: ${what}`)
       } catch (error) {
-        probe.record(`refused: ${what}: ${error.message}`)
+        probe.record(`refused: ${what}: ${error.code}: ${error.message}`)
       }
     }
     ctx.effect(yoagent.register('strict', {
@@ -1505,7 +1505,11 @@ async fn register_and_results_are_strict() {
             .into_iter()
             .find(|l| l.contains(what))
             .unwrap_or_else(|| panic!("{what}: {:?}", host.probe.lines()));
-        assert!(line.starts_with("refused") && line.contains(why), "{line}");
+        // An argument check, by its code (rutis 0.18): not `bad-value`.
+        assert!(
+            line.starts_with(&format!("refused: {what}: bad-argument: ")) && line.contains(why),
+            "{line}"
+        );
     }
 
     let echo = Reply::new("bad_args", "ran");
