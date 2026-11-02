@@ -457,7 +457,9 @@ impl Target {
     /// Whether the handler implements `hook`. For a live object this reads
     /// the member back (a synchronous call on the plugin's call chain). A
     /// member that is there but not a function, or that cannot be read, is
-    /// an error: a policy must never go missing silently.
+    /// an error: a policy must never go missing silently — `bad-argument`
+    /// when the plugin's side refused the read, the session's own error
+    /// (its code kept) when the session failed under it.
     fn has(&self, hook: &str) -> Result<bool, Error> {
         match self {
             Self::Record(functions) => Ok(functions.contains_key(hook)),
@@ -470,9 +472,17 @@ impl Target {
                 // Python's getattr on a missing attribute. rutis 0.19 reads a
                 // property with a plain `getattr`: no `no-method` code to go by.
                 Err(Error::Remote { name, .. }) if name == "AttributeError" => Ok(false),
-                Err(error) => Err(bad_argument(format!(
+                // The plugin's own getter threw: its handler is at fault.
+                Err(error @ Error::Remote { .. }) => Err(bad_argument(format!(
                     "register: cannot read the handler's `{hook}`: {error}"
                 ))),
+                // The session failed under the call (closed, a transport
+                // error, a value that could not cross): not the plugin's
+                // argument; passed on with its own code.
+                Err(error) => {
+                    tracing::debug!(hook, %error, "register: reading the handler's member failed");
+                    Err(error)
+                }
             },
         }
     }
