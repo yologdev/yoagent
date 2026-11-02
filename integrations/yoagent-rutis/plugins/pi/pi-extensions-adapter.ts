@@ -1229,10 +1229,12 @@ export default definePlugin<Config>({
 
     const sessionManager = SessionManager.inMemory(cwd)
     // A host `ui` service, re-provided in this runtime as `pi-host-ui` by
-    // `host-ui.ts`, makes this pi's RPC mode. It is looked up when a context
-    // is made, optional rather than injected: rutis starts a plugin only once
-    // every injected service exists, and hosts without one keep print mode.
+    // `host-ui.ts`, makes this pi's RPC mode. It is declared `optional` and
+    // read when a context is made, not injected: rutis starts a plugin only
+    // once every injected service exists, and hosts without one keep print
+    // mode.
     let uiMissingReported = false
+    let uiFailureReported = false
     const lookupUi = () => {
       try {
         const ui = ctx.get<HostUi>('pi-host-ui')
@@ -1243,10 +1245,12 @@ export default definePlugin<Config>({
         }
         return ui
       } catch (error) {
-        // None, or one that cannot be read: print mode. Said once, at debug.
-        if (!uiMissingReported) {
-          uiMissingReported = true
-          report('debug', `[pi] no host ui (print mode): ${message(error)}`)
+        // `pi-host-ui` is declared `optional`, so `get` throws only when that
+        // declaration is wrong: every dialog would fall back to print mode
+        // unnoticed. Said once, at warn.
+        if (!uiFailureReported) {
+          uiFailureReported = true
+          report('warn', `[pi] reading pi-host-ui failed, so print mode (is it in \`optional\`?): ${message(error)}`)
         }
         return undefined
       }
@@ -1988,7 +1992,9 @@ export default definePlugin<Config>({
             | undefined
           if (result === 'late') {
             // Left running; the queue moves on so one stuck handler cannot stall every observer.
-            call.catch(() => {})
+            call.catch((error) =>
+              report('debug', `[pi] ${short(ext.path)}: a late ${pi.type} handler failed: ${message(error)}`),
+            )
             once(
               `${runId}\0${ext.path}\0${pi.type}\0late`,
               'warn',

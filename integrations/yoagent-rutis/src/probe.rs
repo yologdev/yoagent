@@ -202,9 +202,10 @@ impl PiReport {
 #[non_exhaustive]
 pub struct DshReport {
     /// Which services the plugin's rows inject, as the runtime saw it:
-    /// `{ "present": [...], "missing": [...], "importErrors": {...} }`
-    /// (a row whose module could not be imported: what it injects is
-    /// unknown), or `{ "error": … }`; `null` when the probe did not get
+    /// `{ "present": [...], "missing": [...], "importErrors": {...},
+    /// "lookupErrors": {...} }` (`importErrors`: a row whose module could
+    /// not be imported, so what it injects is unknown; `lookupErrors`: a
+    /// missing name whose lookup failed, with why), or `{ "error": … }`; `null` when the probe did not get
     /// that far (see `error`).
     pub services: Value,
     /// The plugin's rows (not the base's).
@@ -236,7 +237,16 @@ impl DshReport {
             .cloned()
             .unwrap_or_default();
         if !missing.is_empty() {
-            return Some(format!("needs services the host lacks: {}", json!(missing)));
+            let mut problem = format!("needs services the host lacks: {}", json!(missing));
+            if let Some(errors) = self.services["lookupErrors"].as_object() {
+                if !errors.is_empty() {
+                    problem.push_str(&format!(
+                        " (lookups failed: {})",
+                        Value::Object(errors.clone())
+                    ));
+                }
+            }
+            return Some(problem);
         }
         if self.services["missing"].is_null() {
             return Some("the service check did not report".into());
@@ -956,6 +966,14 @@ mod tests {
         assert_eq!(
             missing.problem().as_deref(),
             Some("needs services the host lacks: [\"db\"]")
+        );
+        let broken = DshReport {
+            services: json!({ "missing": ["db"], "lookupErrors": { "db": "not declared" } }),
+            ..clean.clone()
+        };
+        assert_eq!(
+            broken.problem().as_deref(),
+            Some("needs services the host lacks: [\"db\"] (lookups failed: {\"db\":\"not declared\"})")
         );
         let waiting = DshReport {
             rows: vec![Row {

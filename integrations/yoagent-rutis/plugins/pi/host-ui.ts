@@ -5,10 +5,12 @@
 //
 // rutis shows a host service only to plugins that inject it, and starts a
 // plugin only once everything it injects exists. So the adapter cannot
-// declare `ui` (hosts without one would never start it): this plugin
+// inject `ui` (hosts without one would never start it): this plugin
 // injects it and re-provides it as `pi-host-ui` (since rutis 0.12 that name
 // reaches rutis too, so load this plugin in one runtime only), which the
-// adapter looks up when it makes a pi context.
+// adapter declares `optional` and reads with `ctx.get` when it makes a pi
+// context. Load it in the adapter's runtime: the adapter reads one this
+// process has whenever it starts.
 
 import { definePlugin } from '@arcships/rutis'
 

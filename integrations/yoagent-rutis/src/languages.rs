@@ -410,7 +410,9 @@ impl Service {
             let effect = row_effect.lock().unwrap_or_else(|e| e.into_inner()).take();
             if let Some(effect) = effect {
                 runtime.spawn(async move {
-                    let _ = effect.dispose().await;
+                    if let Err(error) = effect.dispose().await {
+                        tracing::warn!(%error, "yoagent-rutis: disposing a handler's row effect on unregister failed");
+                    }
                 });
             }
             Ok(Value::Undefined)
