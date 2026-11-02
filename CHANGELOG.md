@@ -4,17 +4,20 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.26.4 (2026-11-02)
+
+Patch release: new model presets and prices, no API change. Released with **yoagent-rutis 0.11.0** (rutis 0.19.3, below); yoagent-workers (0.3.0) is unchanged.
 
 - **Three new model presets and five new priced models** (after `prices::enable_bundled()`), each read from the vendor's own page on 2026-11-01:
   - `gpt_6_1_terra()` — GPT-6.1 Terra on the Responses API (tool calling requires it), 1,050,000-token context, 64K of 128K output, effort ceiling `max`; $1 / $5, cached $0.05, cache write $1.25, and above 272K prompt tokens $2 / $7.50 / $0.10 / $2.50.
   - `glm_5_3_flashx()` — GLM-5.3-FlashX, the faster GLM-5.3-Flash (thinking always on, 1M / 128K): $0.37 / $1.25, cached $0.075.
   - `qwen_3_8_omni_flash()` — Qwen3.8-Omni-Flash (an omni model; yoagent sends it text and images; 1M / 131,072; JSON Schema structured output unsupported): $0.15 / $0.47, cached $0.016, international deployment. Alibaba documents it on the workspace endpoint; that the `dashscope-intl` base URL serves it is unconfirmed — set `base_url` if it does not.
   - `ModelConfig::meta` prices `muse-spark-1.3` (Muse Spark 1.2's rates) and `muse-wonder-1.0` ($4 / $20, cached $0.20, cache writes at the input rate; in preview). The `-contributor` ids stay unpriced.
+- **Tests:** the 151 mutants that survived the 2026-10-26 mutation run are triaged — 92 caught by new tests, 5 already caught since #393, 3 gone with the code they mutated and 51 documented as equivalent (#198, #403); a flaky MCP stdio test waits for the settled exit answer (#404).
 
-## yoagent-rutis Unreleased
+## yoagent-rutis 0.11.0 (2026-11-02)
 
-yoagent-rutis only (to ship as 0.11.0); requires rutis 0.19.3 or a later 0.19, yoagent 0.26 and Rust 1.88. Breaking: rutis 0.19 (its types are in this crate's API), runtimes the host starts itself, and `rows::wait_running`'s signature.
+yoagent-rutis only; requires rutis 0.19.3 or a later 0.19, yoagent 0.26 and Rust 1.88. Breaking: rutis 0.19 (its types are in this crate's API), runtimes the host starts itself, and `rows::wait_running`'s signature.
 
 - **rutis 0.19.3** (from 0.12). `rutis`, `rutis-bridge` and `rutis-loader` 0.19.3, plus `rutis-host` 0.19.3 (for the `probe` feature); the runtimes move with them: npm `@arcships/rutis`, `@arcships/rutis-runtime`, `@arcships/rutis-bun` 0.19.3, PyPI `rutis` 0.19.3 (**Python 3.12+**, was 3.10+), Go module `github.com/arcships/rutis/go/rutis` v0.19.3 (Go 1.24+). rutis 0.13 and 0.19 changed the protocol: a 0.12 runtime and a 0.19 host refuse each other at the handshake. Not 0.19.0–0.19.2: they named rutis's own services `loader` / `sessions`, which clash with the DSH `sessions` service the DSH host injects (0.19.3 renamed them `rutis/loader` / `rutis/sessions`). Rust plugins follow rutis 0.17's API (`rutis::host::*`, `rutis::Error` / `ErrorKind`, the typed `Plugin` with `type Deps = Arc<Registry>` to wait for the bridge; `rutis-migrate` 0.18 automates most of it).
 - **The language features no longer start runtimes.** rutis-bridge 0.19 carries no language: `node`, `python`, `bun` and `go` each enable only the bridge's `yoagent` host service and `restrict_runtime` (`websocket` also rutis-bridge's WebSocket transport). A host starts each runtime itself with rutis-host's `SpawnPlugin` and resolves rows on them with rutis-loader's `SessionResolver`. Before (0.12):
