@@ -412,8 +412,14 @@ done
 /// Poll `exited` until it answers (the process is reaped asynchronously).
 async fn wait_exited(client: &McpClient) -> String {
     for _ in 0..200 {
-        if let Some(why) = client.exited() {
-            return why;
+        if client.exited().is_some() {
+            // The first answer is provisional: the exit is reported at once
+            // and gains the last of the server's stderr until the drain has
+            // read it, or 500 ms (`EXIT_TAIL_GRACE`) — then it is latched.
+            // Wait past that, so a slow runner's drain cannot race the
+            // assertion on the tail.
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            return client.exited().expect("an exit stays seen");
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
