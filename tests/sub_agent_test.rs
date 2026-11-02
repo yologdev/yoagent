@@ -242,7 +242,9 @@ async fn test_sub_agent_max_turns() {
 // Parallel sub-agent execution (via parent agent loop)
 // ---------------------------------------------------------------------------
 
-#[tokio::test]
+// Paused clock: the providers' sleeps advance virtual time, so a busy CI
+// runner cannot fail the timing below.
+#[tokio::test(start_paused = true)]
 async fn test_sub_agent_parallel() {
     // Two sub-agents that each take ~50ms, run in parallel via the parent loop.
     // The parent's mock emits both sub-agent tool calls, then a final text.
@@ -333,7 +335,7 @@ async fn test_sub_agent_parallel() {
     let (tx, rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
-    let start = std::time::Instant::now();
+    let start = tokio::time::Instant::now();
     let new_messages = agent_loop(vec![prompt], &mut context, &config, tx, cancel).await;
     let elapsed = start.elapsed();
 
@@ -346,10 +348,10 @@ async fn test_sub_agent_parallel() {
         .collect();
     assert_eq!(tool_results.len(), 2);
 
-    // Should complete in roughly 50-100ms (parallel), not 100ms+ (sequential)
+    // One 50ms wait for both (parallel), not 100ms (sequential)
     assert!(
-        elapsed.as_millis() < 130,
-        "Parallel sub-agents took {}ms, expected <130ms",
+        (50..100).contains(&elapsed.as_millis()),
+        "Parallel sub-agents took {}ms, expected 50-100ms",
         elapsed.as_millis()
     );
 }

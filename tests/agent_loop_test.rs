@@ -378,7 +378,9 @@ impl AgentTool for TimedTool {
     }
 }
 
-#[tokio::test]
+// Paused clock: the tools' sleeps advance virtual time, so the elapsed
+// times below are exact and a busy CI runner cannot fail them.
+#[tokio::test(start_paused = true)]
 async fn test_parallel_tool_execution_faster_than_sequential() {
     // 3 tools each taking 50ms. Sequential = 150ms+, Parallel = ~50ms.
     let provider = MockProvider::new(vec![
@@ -428,7 +430,7 @@ async fn test_parallel_tool_execution_faster_than_sequential() {
     let (tx, rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
-    let start = std::time::Instant::now();
+    let start = tokio::time::Instant::now();
     let new_messages = agent_loop(vec![prompt], &mut context, &config, tx, cancel).await;
     let elapsed = start.elapsed();
 
@@ -441,10 +443,10 @@ async fn test_parallel_tool_execution_faster_than_sequential() {
         .collect();
     assert_eq!(tool_results.len(), 3);
 
-    // Should complete in roughly 50-100ms, not 150ms+
+    // One 50ms wait for all three, not 150ms
     assert!(
-        elapsed.as_millis() < 130,
-        "Parallel execution took {}ms, expected <130ms",
+        (50..100).contains(&elapsed.as_millis()),
+        "Parallel execution took {}ms, expected 50-100ms",
         elapsed.as_millis()
     );
 
@@ -461,7 +463,9 @@ async fn test_parallel_tool_execution_faster_than_sequential() {
     assert_eq!(ends, 3);
 }
 
-#[tokio::test]
+// Paused clock: the tools' sleeps advance virtual time, so the elapsed
+// times below are exact and a busy CI runner cannot fail them.
+#[tokio::test(start_paused = true)]
 async fn test_sequential_tool_execution_is_slower() {
     let provider = MockProvider::new(vec![
         MockResponse::ToolCalls(vec![
@@ -501,19 +505,21 @@ async fn test_sequential_tool_execution_is_slower() {
     let (tx, _rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
-    let start = std::time::Instant::now();
+    let start = tokio::time::Instant::now();
     let _new_messages = agent_loop(vec![prompt], &mut context, &config, tx, cancel).await;
     let elapsed = start.elapsed();
 
-    // Sequential should take 100ms+ (2 × 50ms)
+    // Sequential: 2 × 50ms
     assert!(
-        elapsed.as_millis() >= 95,
-        "Sequential execution took {}ms, expected >=95ms",
+        (100..150).contains(&elapsed.as_millis()),
+        "Sequential execution took {}ms, expected 100-150ms",
         elapsed.as_millis()
     );
 }
 
-#[tokio::test]
+// Paused clock: the tools' sleeps advance virtual time, so the elapsed
+// times below are exact and a busy CI runner cannot fail them.
+#[tokio::test(start_paused = true)]
 async fn test_batched_tool_execution() {
     // 4 tools, batch size 2: two batches of 2
     let provider = MockProvider::new(vec![
@@ -572,7 +578,7 @@ async fn test_batched_tool_execution() {
     let (tx, rx) = mpsc::unbounded_channel();
     let cancel = CancellationToken::new();
 
-    let start = std::time::Instant::now();
+    let start = tokio::time::Instant::now();
     let new_messages = agent_loop(vec![prompt], &mut context, &config, tx, cancel).await;
     let elapsed = start.elapsed();
 
@@ -587,8 +593,8 @@ async fn test_batched_tool_execution() {
 
     // 2 batches × 50ms = ~100ms (not 200ms sequential, not 50ms full parallel)
     assert!(
-        elapsed.as_millis() >= 90 && elapsed.as_millis() < 160,
-        "Batched execution took {}ms, expected 90-160ms",
+        (100..150).contains(&elapsed.as_millis()),
+        "Batched execution took {}ms, expected 100-150ms",
         elapsed.as_millis()
     );
 }
