@@ -1246,6 +1246,10 @@ mod tests {
             "2026-09-32",
             "yesterday",
             "2026-09-2x",
+            // The length is checked on its own: a short value must not be
+            // indexed, a long one must not pass on its first ten bytes.
+            "2026",
+            "2026-09-251",
         ] {
             let e = PriceTable::from_json_str(&one(&format!(
                 r#"{{"input": 1, "output": 2, "verified": "{bad}"}}"#
@@ -1476,6 +1480,41 @@ mod tests {
             .iter()
             .any(|s| s.starts_with("p/gone: no longer priced")));
         assert!(shown.iter().any(|s| s.starts_with("p/new: new")));
+    }
+
+    /// A model that appears or disappears is shown with its full rates, its
+    /// context tiers included when it has any.
+    #[test]
+    fn added_and_removed_changes_show_their_rates() {
+        let change = |before: Option<CostConfig>, after: Option<CostConfig>| {
+            PriceChange {
+                provider: "p".into(),
+                model: "m".into(),
+                before,
+                after,
+                shadowed: false,
+            }
+            .to_string()
+        };
+        let plain = CostConfig::new(1.0, 2.0)
+            .with_cache_read(0.5)
+            .with_cache_write(3.0);
+        assert_eq!(
+            change(None, Some(plain.clone())),
+            "p/m: new (input 1, output 2, cache_read 0.5, cache_write 3)"
+        );
+        let tiered = plain.with_context_tier(ContextTier {
+            above_prompt_tokens: 200_000,
+            input_per_million: 2.0,
+            output_per_million: 4.0,
+            cache_read_per_million: 1.0,
+            cache_write_per_million: 6.0,
+        });
+        assert_eq!(
+            change(Some(tiered), None),
+            "p/m: no longer priced (was input 1, output 2, cache_read 0.5, \
+             cache_write 3, tiers [>200000: 2/4/1/6])"
+        );
     }
 
     #[test]

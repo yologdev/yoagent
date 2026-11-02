@@ -1113,6 +1113,14 @@ fn is_configured_means_any_rate_set() {
             .is_configured(),
         "a single configured tier rate is enough"
     );
+    assert!(
+        ContextTier::new(1, 2.0, 0.0).is_configured(),
+        "a tier with only an input rate is configured"
+    );
+    assert!(
+        ContextTier::new(1, 0.0, 3.0).is_configured(),
+        "a tier with only an output rate is configured"
+    );
 
     for p in presets() {
         assert!(

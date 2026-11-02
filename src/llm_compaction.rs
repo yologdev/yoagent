@@ -2393,6 +2393,493 @@ mod tests {
             "a failed request must leave the slot idle, not pinned in flight"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Pinned behaviour the weekly mutation run found unasserted (#198).
+    // Staged summaries and a paused clock, so none of these depend on timing.
+    // -----------------------------------------------------------------------
+
+    /// `n` user messages of ~104 estimated tokens each.
+    fn users(n: usize) -> Vec<AgentMessage> {
+        (0..n)
+            .map(|i| {
+                AgentMessage::Llm(Message::User {
+                    content: vec![Content::Text {
+                        text: format!("message {i}: {}", "x".repeat(400)),
+                    }],
+                    timestamp: i as u64,
+                })
+            })
+            .collect()
+    }
+
+    fn summary_for(messages: &[AgentMessage], head_end: usize, cut: usize, text: &str) -> Summary {
+        Summary {
+            fingerprint: fingerprint(messages, cut),
+            head_end,
+            text: text.into(),
+            usage: Usage {
+                input: 1_000,
+                output: 100,
+                ..Usage::default()
+            },
+        }
+    }
+
+    fn stage(strategy: &LlmCompaction, summary: Summary) {
+        lock(&strategy.state).phase = Phase::Ready(Box::new(summary));
+    }
+
+    fn compacted_events(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<AgentEvent>,
+    ) -> Vec<(CompactionMethod, Option<SummaryStats>)> {
+        let mut out = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let AgentEvent::ContextCompacted {
+                method, summary, ..
+            } = event
+            {
+                out.push((method, summary));
+            }
+        }
+        out
+    }
+
+    /// The splice event reports the span it replaced and the request's cost
+    /// at the summarizer's rates.
+    #[test]
+    fn splice_event_reports_the_span_and_the_request_cost() {
+        let messages = users(8);
+        let cfg = config(600);
+        let rates = crate::provider::CostConfig::new(10.0, 20.0);
+        let mut model = ModelConfig::mock();
+        model.cost = Some(rates.clone());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let strategy = LlmCompaction::from_provider(Arc::new(MockProvider::text("unused")), model)
+            .with_event_sender(tx);
+        let summary = summary_for(&messages, 1, 6, "brief");
+        let usage = summary.usage.clone();
+        stage(&strategy, summary);
+
+        let out = strategy.compact(messages, &cfg);
+        assert!(has_summary(&out), "fixture must splice");
+        let events = compacted_events(&mut rx);
+        assert_eq!(events.len(), 1);
+        let (method, stats) = &events[0];
+        assert_eq!(*method, CompactionMethod::Summarized);
+        let stats = stats.as_ref().expect("a splice reports its request");
+        assert_eq!(stats.messages_summarized, 5, "messages[1..6) were replaced");
+        assert_eq!(stats.cost_usd, Some(rates.cost_usd(&usage)));
+    }
+
+    /// At exactly the budget nothing is over it: no splice, no fallback, no
+    /// event, and the ready briefing is neither spent nor replaced by a new
+    /// request (`arm` must see the slot as busy).
+    #[tokio::test]
+    async fn exactly_at_the_budget_nothing_is_rewritten() {
+        let messages = users(8);
+        let cfg = config(total_tokens(&messages));
+        let (provider, calls) = ScriptedProvider::new("unused");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let strategy =
+            LlmCompaction::from_provider(provider, ModelConfig::mock()).with_event_sender(tx);
+        stage(&strategy, summary_for(&messages, 1, 6, "brief"));
+
+        let out = strategy.compact(messages.clone(), &cfg);
+        assert_eq!(out, messages, "a history at the budget must not change");
+        assert!(
+            compacted_events(&mut rx).is_empty(),
+            "nothing was compacted"
+        );
+        {
+            let state = lock(&strategy.state);
+            assert_eq!(state.fallbacks, 0, "not a fallback");
+            assert!(
+                matches!(state.phase, Phase::Ready(_)),
+                "the ready briefing must be kept for the next over-budget call"
+            );
+        }
+        settle().await;
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    /// A splice that lands exactly on the budget fits: it is a splice, not a
+    /// discarded briefing.
+    #[test]
+    fn a_splice_exactly_at_the_budget_is_kept() {
+        let messages = users(8);
+        let strategy = mock("unused");
+        let spliced = strategy.splice(&messages, &summary_for(&messages, 1, 6, "brief"));
+        let cfg = config(total_tokens(&spliced));
+        assert!(total_tokens(&messages) > total_tokens(&spliced));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let strategy = strategy.with_event_sender(tx);
+        stage(&strategy, summary_for(&messages, 1, 6, "brief"));
+
+        let out = strategy.compact(messages, &cfg);
+        assert_eq!(out, spliced);
+        let events = compacted_events(&mut rx);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, CompactionMethod::Summarized);
+        assert_eq!(lock(&strategy.state).fallbacks, 0);
+    }
+
+    /// The safety net compacts the tail against the room it really has.
+    /// `system_prompt_tokens` was already taken off the budget it is given,
+    /// so reserving it a second time would cut tail messages that fit. And a
+    /// shrunk splice that lands exactly on the budget fits: the briefing is
+    /// kept and reported as a splice, not discarded.
+    #[test]
+    fn the_safety_net_uses_all_the_room_the_tail_has() {
+        let mut messages = users(7);
+        messages.extend(tool_turn(99, 400));
+        let cut = 7; // the tool turn's user message
+        let spliced = mock("unused").splice(&messages, &summary_for(&messages, 1, cut, "brief"));
+        let fixed = total_tokens(&spliced[..2]); // head + briefing
+
+        // Size the budget so the tail fits once Level 1 truncates the tool
+        // output, and the reserve is larger than the slack that leaves.
+        let probe = config(1_000_000);
+        let tail_l1: Vec<AgentMessage> = spliced[2..]
+            .iter()
+            .map(|m| context::truncate_tool_output(m.clone(), &probe))
+            .collect();
+        let tail_l1_tokens = total_tokens(&tail_l1);
+        assert!(
+            tail_l1_tokens < total_tokens(&spliced[2..]),
+            "L1 must shrink the tail"
+        );
+        let mut expected = spliced[..2].to_vec();
+        expected.extend(tail_l1);
+
+        for slack in [10, 0] {
+            let budget = fixed + tail_l1_tokens + slack;
+            let reserve = tail_l1_tokens;
+            let cfg = ContextConfig {
+                max_context_tokens: budget + reserve,
+                system_prompt_tokens: reserve,
+                ..config(0)
+            };
+            assert!(total_tokens(&messages) > budget);
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let strategy = mock("unused").with_event_sender(tx);
+            stage(&strategy, summary_for(&messages, 1, cut, "brief"));
+
+            let out = strategy.compact(messages.clone(), &cfg);
+            assert_eq!(
+                out, expected,
+                "slack {slack}: only Level 1 was needed; the whole tail must survive"
+            );
+            let events = compacted_events(&mut rx);
+            assert_eq!(events.len(), 1);
+            assert_eq!(
+                events[0].0,
+                CompactionMethod::Summarized,
+                "slack {slack}: the briefing fits and was kept"
+            );
+            assert_eq!(lock(&strategy.state).fallbacks, 0);
+        }
+    }
+
+    /// `serialize_transcript` names every block kind the briefing should
+    /// know about, and labels each by role.
+    #[test]
+    fn transcript_names_every_block_kind() {
+        let messages = vec![
+            AgentMessage::Llm(Message::User {
+                content: vec![
+                    Content::Text {
+                        text: "look at this".into(),
+                    },
+                    Content::Image {
+                        data: "aGk=".into(),
+                        mime_type: "image/png".into(),
+                    },
+                ],
+                timestamp: 0,
+            }),
+            AgentMessage::Llm(Message::assistant(
+                vec![
+                    Content::thinking("private reasoning"),
+                    Content::Text {
+                        text: "I will check".into(),
+                    },
+                    Content::tool_call("c1", "bash", serde_json::json!({"command": "ls"})),
+                ],
+                StopReason::ToolUse,
+                "mock",
+                "mock",
+                Usage::default(),
+            )),
+            AgentMessage::Llm(Message::ToolResult {
+                tool_call_id: "c1".into(),
+                tool_name: "bash".into(),
+                content: vec![Content::Text { text: "src".into() }],
+                is_error: false,
+                timestamp: 0,
+            }),
+        ];
+        assert_eq!(
+            serialize_transcript(&messages),
+            "User: look at this\n\
+             [image omitted]\n\
+             [thinking omitted]\n\
+             Assistant: I will check\n\
+             [tool call] bash({\"command\":\"ls\"})\n\
+             [tool result: bash] src\n"
+        );
+    }
+
+    /// `keep_first` is the verbatim head, pulled back only when a tool call
+    /// would be split; it is not collapsed to one message.
+    #[test]
+    fn choose_cut_honours_keep_first() {
+        let strategy = mock("unused").with_retain_tail_tokens(200);
+        let messages = history(30, 400);
+        for keep_first in [0usize, 3, 4] {
+            let cfg = ContextConfig {
+                keep_first,
+                ..config(2_000)
+            };
+            let (head_end, _) = strategy
+                .choose_cut(&messages, &cfg, 2_000)
+                .expect("a split exists");
+            assert_eq!(head_end, keep_first);
+        }
+    }
+
+    /// With `keep_first: 0` and a tail that swallows the history, the walk
+    /// stops at the start instead of stepping before it.
+    #[test]
+    fn choose_cut_with_no_head_and_a_huge_tail_finds_no_split() {
+        let strategy = mock("unused").with_retain_tail_tokens(usize::MAX);
+        let cfg = ContextConfig {
+            keep_first: 0,
+            ..config(2_000)
+        };
+        assert!(strategy.choose_cut(&users(8), &cfg, 2_000).is_err());
+    }
+
+    /// A tail of exactly `retain_tail_tokens` is enough: the cut is not
+    /// moved one message earlier.
+    #[test]
+    fn a_tail_of_exactly_the_retained_size_is_enough() {
+        let messages = users(8);
+        let last = context::message_tokens(&messages[7]);
+        let strategy = mock("unused").with_retain_tail_tokens(last);
+        let cfg = ContextConfig {
+            keep_recent: 0,
+            ..config(2_000)
+        };
+        assert_eq!(strategy.choose_cut(&messages, &cfg, 2_000).unwrap(), (1, 7));
+    }
+
+    /// The summarized span must be at least `MIN_SUMMARIZED_SPAN` messages.
+    #[test]
+    fn a_span_shorter_than_the_minimum_is_not_summarized() {
+        // keep_first 1, keep_recent 2, no retained tail: cut = len - 2.
+        let strategy = mock("unused").with_retain_tail_tokens(0);
+        let cfg = config(2_000);
+        assert!(
+            strategy.choose_cut(&users(6), &cfg, 2_000).is_err(),
+            "messages[1..4) is three messages, one short of the minimum"
+        );
+        assert_eq!(strategy.choose_cut(&users(7), &cfg, 2_000).unwrap(), (1, 5));
+    }
+
+    /// Which reason `choose_cut` gives decides whether the one-shot inert
+    /// warning fires, so the threshold between them is pinned: a history is
+    /// "too short" only below `MIN_SUMMARIZED_SPAN + keep_recent` messages
+    /// after the head.
+    #[test]
+    fn no_cut_reason_switches_at_span_plus_keep_recent() {
+        let strategy = mock("unused").with_retain_tail_tokens(usize::MAX);
+        let cfg = config(2_000); // keep_first 1, keep_recent 2: threshold 6
+        let reason = |n: usize| strategy.choose_cut(&users(n), &cfg, 2_000).unwrap_err();
+        assert!(
+            matches!(reason(6), NoCut::HistoryTooShort),
+            "5 after the head"
+        );
+        assert!(matches!(reason(7), NoCut::TailTooLarge), "6 after the head");
+        assert!(matches!(reason(8), NoCut::TailTooLarge), "7 after the head");
+    }
+
+    /// The summarization request is a one-shot: prompt caching off, the
+    /// configured system prompt and output cap, the transcript and the
+    /// instruction in one user message.
+    #[tokio::test]
+    async fn the_summarization_request_is_one_shot() {
+        struct Capture(Arc<Mutex<Option<StreamConfig>>>);
+        #[async_trait::async_trait]
+        impl StreamProvider for Capture {
+            async fn stream(
+                &self,
+                config: StreamConfig,
+                _tx: tokio::sync::mpsc::UnboundedSender<crate::provider::StreamEvent>,
+                _cancel: CancellationToken,
+            ) -> Result<Message, crate::provider::ProviderError> {
+                *self.0.lock().unwrap() = Some(config);
+                Err(crate::provider::ProviderError::Api("done".into()))
+            }
+        }
+        let seen = Arc::new(Mutex::new(None));
+        let strategy =
+            LlmCompaction::from_provider(Arc::new(Capture(Arc::clone(&seen))), ModelConfig::mock())
+                .with_trigger_ratio(0.1)
+                .with_retain_tail_tokens(200)
+                .with_system_prompt("SYSTEM")
+                .with_instruction("INSTRUCTION")
+                .with_max_summary_tokens(512);
+        strategy.compact(history(30, 400), &config(2_000));
+        settle().await;
+
+        let request = seen.lock().unwrap().take().expect("a request was sent");
+        assert!(!request.cache_config.enabled, "nothing to reuse");
+        assert_eq!(request.system_prompt, "SYSTEM");
+        assert_eq!(request.max_tokens, Some(512));
+        assert_eq!(request.messages.len(), 1);
+        let Message::User { content, .. } = &request.messages[0] else {
+            panic!("the request is one user message");
+        };
+        let Content::Text { text } = &content[0] else {
+            panic!("text");
+        };
+        assert!(text.starts_with("<conversation>\n"));
+        assert!(text.ends_with("</conversation>\n\nINSTRUCTION"));
+    }
+
+    /// Answers with `failures` failures (an error, or a hang the timeout
+    /// ends) before a briefing, recording when each call arrived.
+    struct Flaky {
+        failures: usize,
+        hang: bool,
+        calls: Mutex<Vec<tokio::time::Instant>>,
+    }
+
+    #[async_trait::async_trait]
+    impl StreamProvider for Flaky {
+        async fn stream(
+            &self,
+            _config: StreamConfig,
+            _tx: tokio::sync::mpsc::UnboundedSender<crate::provider::StreamEvent>,
+            _cancel: CancellationToken,
+        ) -> Result<Message, crate::provider::ProviderError> {
+            let n = {
+                let mut calls = self.calls.lock().unwrap();
+                calls.push(tokio::time::Instant::now());
+                calls.len()
+            };
+            if n <= self.failures {
+                if self.hang {
+                    std::future::pending::<()>().await;
+                }
+                return Err(crate::provider::ProviderError::Network("down".into()));
+            }
+            Ok(Message::assistant(
+                vec![Content::Text {
+                    text: "## Goal\nRetried.".into(),
+                }],
+                StopReason::Stop,
+                "mock",
+                "mock",
+                Usage::default(),
+            ))
+        }
+    }
+
+    /// Drive one summarization through two failures on a paused clock and
+    /// return the gaps between the three calls.
+    async fn retry_gaps(hang: bool) -> (Duration, Duration) {
+        let provider = Arc::new(Flaky {
+            failures: 2,
+            hang,
+            calls: Mutex::new(Vec::new()),
+        });
+        let strategy = LlmCompaction::from_provider(
+            Arc::clone(&provider) as Arc<dyn StreamProvider>,
+            ModelConfig::mock(),
+        )
+        .with_trigger_ratio(0.1)
+        .with_retain_tail_tokens(200)
+        .with_timeout(Duration::from_millis(50))
+        .with_retry_config(RetryConfig {
+            max_retries: 2,
+            initial_delay_ms: 100,
+            backoff_multiplier: 10.0,
+            max_delay_ms: 10_000,
+        });
+        strategy.compact(history(30, 400), &config(2_000));
+        for _ in 0..100 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if matches!(lock(&strategy.state).phase, Phase::Ready(_)) {
+                break;
+            }
+        }
+        assert!(
+            matches!(lock(&strategy.state).phase, Phase::Ready(_)),
+            "the third attempt's briefing must land"
+        );
+        let calls = provider.calls.lock().unwrap();
+        assert_eq!(calls.len(), 3);
+        (calls[1] - calls[0], calls[2] - calls[1])
+    }
+
+    /// Retryable errors are retried with the documented backoff: the first
+    /// retry after `delay_for_attempt(1)` (≈100 ms), the second after
+    /// `delay_for_attempt(2)` (≈1 s), ±20% jitter.
+    #[tokio::test(start_paused = true)]
+    async fn retryable_errors_back_off_and_retry() {
+        let (first, second) = retry_gaps(false).await;
+        assert!(first >= Duration::from_millis(79) && first <= Duration::from_millis(120));
+        assert!(second >= Duration::from_millis(799) && second <= Duration::from_millis(1_200));
+    }
+
+    /// A timed-out attempt is retried after the same backoff, on top of the
+    /// timeout itself — a hung provider is not hammered.
+    #[tokio::test(start_paused = true)]
+    async fn timed_out_attempts_back_off_and_retry() {
+        let (first, second) = retry_gaps(true).await;
+        assert!(first >= Duration::from_millis(129) && first <= Duration::from_millis(170));
+        assert!(second >= Duration::from_millis(849) && second <= Duration::from_millis(1_250));
+    }
+
+    /// Dropping the strategy cancels its in-flight request.
+    #[tokio::test(start_paused = true)]
+    async fn dropping_the_strategy_cancels_the_request() {
+        struct WaitsForCancel(Arc<std::sync::atomic::AtomicBool>);
+        #[async_trait::async_trait]
+        impl StreamProvider for WaitsForCancel {
+            async fn stream(
+                &self,
+                _config: StreamConfig,
+                _tx: tokio::sync::mpsc::UnboundedSender<crate::provider::StreamEvent>,
+                cancel: CancellationToken,
+            ) -> Result<Message, crate::provider::ProviderError> {
+                cancel.cancelled().await;
+                self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+                Err(crate::provider::ProviderError::Cancelled)
+            }
+        }
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let strategy = LlmCompaction::from_provider(
+            Arc::new(WaitsForCancel(Arc::clone(&cancelled))),
+            ModelConfig::mock(),
+        )
+        .with_trigger_ratio(0.1)
+        .with_retain_tail_tokens(200)
+        .with_timeout(Duration::from_secs(3_600))
+        .with_retry_config(RetryConfig::none());
+        strategy.compact(history(30, 400), &config(2_000));
+        settle().await;
+        assert!(!cancelled.load(std::sync::atomic::Ordering::SeqCst));
+
+        drop(strategy);
+        settle().await;
+        assert!(
+            cancelled.load(std::sync::atomic::Ordering::SeqCst),
+            "an abandoned strategy must stop its request"
+        );
+    }
 }
 
 #[cfg(test)]

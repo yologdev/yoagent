@@ -1994,7 +1994,8 @@ mod tests {
                 .collect(),
         );
         let (once, marked) = truncate_tool_output_keyed(msg, &config, None);
-        assert_eq!(block_lines(&once), vec![MIN_BLOCK_LINES; 10]);
+        // One head line, the marker's three, one tail line.
+        assert_eq!(block_lines(&once), vec![5; 10]);
         assert_eq!(marked.len(), 10);
         assert_eq!(
             truncate_tool_output(once.clone(), &config),
@@ -2185,15 +2186,303 @@ mod tests {
                 output: 500,
                 ..Default::default()
             },
-            5,
+            0,
         );
         tracker.reset();
+        // Index 0 is inside this history, so only the reset makes the
+        // tracker fall back (an index past the end falls back regardless).
         let messages = vec![AgentMessage::Llm(Message::user("test"))];
         // After reset, should fall back to estimation
         assert_eq!(
             tracker.estimate_context_tokens(&messages),
             total_tokens(&messages)
         );
+    }
+
+    #[test]
+    fn tracker_counts_cached_prompt_tokens() {
+        let mut tracker = ContextTracker::new();
+        let messages = vec![
+            AgentMessage::Llm(Message::user("Hello")),
+            AgentMessage::Llm(Message::user("World")),
+        ];
+        // A cached prompt is mostly `cache_read`; every bucket is context.
+        tracker.record_usage(
+            &Usage {
+                input: 100,
+                output: 10,
+                cache_read: 1_000,
+                cache_write: 200,
+                ..Default::default()
+            },
+            1,
+        );
+        assert_eq!(tracker.estimate_context_tokens(&messages), 1_310);
+    }
+
+    #[test]
+    fn tracker_ignores_a_response_without_usage() {
+        let mut tracker = ContextTracker::new();
+        let messages = vec![
+            AgentMessage::Llm(Message::user("Hello")),
+            AgentMessage::Llm(Message::user("World")),
+        ];
+        // A provider that reports no usage must not zero the estimate.
+        tracker.record_usage(&Usage::default(), 0);
+        assert_eq!(
+            tracker.estimate_context_tokens(&messages),
+            total_tokens(&messages)
+        );
+    }
+
+    #[test]
+    fn tracker_falls_back_when_its_index_is_past_the_history() {
+        let mut tracker = ContextTracker::new();
+        tracker.record_usage(
+            &Usage {
+                input: 1_000,
+                ..Default::default()
+            },
+            3,
+        );
+        // Compaction shrank the history below the recorded index, and the
+        // caller did not reset: estimate, never slice past the end.
+        let messages = vec![
+            AgentMessage::Llm(Message::user("a")),
+            AgentMessage::Llm(Message::user("b")),
+            AgentMessage::Llm(Message::user("c")),
+        ];
+        assert_eq!(
+            tracker.estimate_context_tokens(&messages),
+            total_tokens(&messages)
+        );
+    }
+
+    #[test]
+    fn token_estimates_of_each_content_kind() {
+        let one = |content: Content| {
+            message_tokens(&AgentMessage::Llm(Message::User {
+                content: vec![content],
+                timestamp: 0,
+            }))
+        };
+        // 400,000 base64 chars = 300,000 bytes, at 750 bytes a token.
+        let image = Content::Image {
+            data: "A".repeat(400_000),
+            mime_type: "image/png".into(),
+        };
+        assert_eq!(one(image), 400 + 4);
+        // 1,600 base64 chars = 1,200 bytes, at 4 bytes a token.
+        let redacted = Content::thinking_redacted(
+            crate::provider::ApiProtocol::AnthropicMessages,
+            "A".repeat(1_600),
+        );
+        assert_eq!(one(redacted), 300 + 4);
+        // Name (1) + arguments `{}` (1) + 8 of framing.
+        let call = Content::tool_call("tc-1", "read", serde_json::json!({}));
+        assert_eq!(one(call), 10 + 4);
+        // Text (1) + tool name (1) + 8 of framing.
+        let result = AgentMessage::Llm(Message::ToolResult {
+            tool_call_id: "tc-1".into(),
+            tool_name: "bash".into(),
+            content: vec![Content::Text {
+                text: "abcd".into(),
+            }],
+            is_error: false,
+            timestamp: 0,
+        });
+        assert_eq!(message_tokens(&result), 10);
+    }
+
+    #[test]
+    fn the_headroom_floor_is_inert_without_a_growth_estimate() {
+        // Below the floor, an inert policy keeps the configured ratio rather
+        // than raising it to the floor.
+        let config = ContextConfig {
+            max_context_tokens: 100_000,
+            system_prompt_tokens: 0,
+            compact_target_ratio: 0.2,
+            compact_headroom_turns: Some(30),
+            ..Default::default()
+        };
+        assert_eq!(config.effective_target_ratio(f64::NAN), 0.2);
+        assert_eq!(
+            ContextConfig {
+                compact_headroom_turns: Some(0),
+                ..config
+            }
+            .effective_target_ratio(1000.0),
+            0.2
+        );
+    }
+
+    #[test]
+    fn message_text_joins_the_text_blocks_of_a_tool_result() {
+        let msg = result_with(vec![
+            Content::Text { text: "a".into() },
+            Content::Image {
+                data: "x".into(),
+                mime_type: "image/png".into(),
+            },
+            Content::Text { text: "b".into() },
+        ]);
+        assert_eq!(message_text(&msg), "a\nb");
+        assert_eq!(message_text(&AgentMessage::Llm(Message::user("u"))), "");
+    }
+
+    #[test]
+    fn tool_output_keys_hash_with_fnv1a() {
+        // Published FNV-1a 64 vectors: a stashed key must not move between
+        // releases, or the markers already in a history stop resolving.
+        assert_eq!(tool_output_key("tc", ""), "tool-out-tc-cbf29ce484222325");
+        assert_eq!(tool_output_key("tc", "a"), "tool-out-tc-af63dc4c8601ec8c");
+        assert_eq!(
+            tool_output_key("tc", "foobar"),
+            "tool-out-tc-85944171f73967e8"
+        );
+    }
+
+    fn assistant_with(content: Vec<Content>) -> AgentMessage {
+        AgentMessage::Llm(Message::assistant(
+            content,
+            StopReason::Stop,
+            "test",
+            "test",
+            Usage::default(),
+        ))
+    }
+
+    fn user_texts(messages: &[AgentMessage]) -> Vec<String> {
+        messages
+            .iter()
+            .map(|m| match m {
+                AgentMessage::Llm(Message::User { content, .. }) => content
+                    .iter()
+                    .filter_map(|c| match c {
+                        Content::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<String>(),
+                other => panic!("expected only user messages, got {other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn level2_summarizes_each_old_turn_by_what_it_said_or_did() {
+        let call = |id: &str| Content::tool_call(id, "bash", serde_json::json!({}));
+        let text = |n: usize| Content::Text {
+            text: "t".repeat(n),
+        };
+        let messages = vec![
+            AgentMessage::Llm(Message::user("task")),
+            assistant_with(vec![
+                Content::Text {
+                    text: "short".into(),
+                },
+                call("a"),
+            ]),
+            result_with(vec![text(1)]),
+            // 200 chars is short enough to keep.
+            assistant_with(vec![text(200)]),
+            // Longer text is dropped: what is left is the tool count...
+            assistant_with(vec![text(201), call("b"), call("c")]),
+            result_with(vec![text(1)]),
+            result_with(vec![text(1)]),
+            // ...or, with no tools either, a placeholder.
+            assistant_with(vec![text(201)]),
+            AgentMessage::Llm(Message::user("recent")),
+        ];
+        let compacted = level2_summarize_old_turns(&messages, 1);
+        assert_eq!(
+            user_texts(&compacted),
+            [
+                "task".to_string(),
+                "[Summary] short".into(),
+                format!("[Summary] {}", "t".repeat(200)),
+                "[Summary] [Assistant used 2 tool(s)]".into(),
+                "[Summary] [Assistant response]".into(),
+                "recent".into(),
+            ]
+        );
+    }
+
+    #[test]
+    fn level2_with_nothing_kept_recent_summarizes_every_turn() {
+        let messages = vec![
+            AgentMessage::Llm(Message::user("task")),
+            assistant_with(vec![Content::tool_call("a", "bash", serde_json::json!({}))]),
+            result_with(vec![Content::Text { text: "out".into() }]),
+        ];
+        // The history ends on the turn's tool result.
+        let compacted = level2_summarize_old_turns(&messages, 0);
+        assert_eq!(
+            user_texts(&compacted),
+            ["task", "[Summary] [Assistant used 1 tool(s)]"]
+        );
+    }
+
+    #[test]
+    fn a_history_opening_on_tool_results_stops_at_its_start() {
+        // Orphaned results at the front (a history loaded from elsewhere):
+        // walking back to the turn start stops at index 0.
+        let messages = vec![
+            result_with(vec![Content::Text { text: "a".into() }]),
+            result_with(vec![Content::Text { text: "b".into() }]),
+            AgentMessage::Llm(Message::user("next")),
+        ];
+        assert_eq!(safe_turn_start(&messages, 1), 0);
+    }
+
+    fn users(n: usize, tokens: usize) -> Vec<AgentMessage> {
+        (0..n)
+            .map(|i| {
+                AgentMessage::Llm(
+                    Message::user(format!("{i:02}{}", "x".repeat(tokens * 4 - 2)))
+                        .with_timestamp(100 + i as u64),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_history_inside_keep_first_and_keep_recent_still_compacts() {
+        // Six messages, fewer than `keep_first + keep_recent`, over budget.
+        let config = ContextConfig {
+            max_context_tokens: 2_000,
+            system_prompt_tokens: 0,
+            keep_first: 1,
+            keep_recent: 10,
+            compact_target_ratio: 0.5,
+            ..Default::default()
+        };
+        let messages = users(6, 500);
+        let out = compact_messages(messages.clone(), &config);
+        assert!(total_tokens(&out) <= 2_000, "{}", total_tokens(&out));
+        // The task, the marker, the latest ask.
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0], messages[0]);
+        assert_eq!(out[2], messages[5]);
+    }
+
+    #[test]
+    fn level3_with_no_head_kept_opens_on_the_marker() {
+        let config = ContextConfig {
+            max_context_tokens: 5_000,
+            system_prompt_tokens: 0,
+            keep_first: 0,
+            keep_recent: 2,
+            compact_target_ratio: 0.5,
+            ..Default::default()
+        };
+        let messages = users(20, 500);
+        let out = compact_messages(messages.clone(), &config);
+        assert!(total_tokens(&out) <= 2_500, "{}", total_tokens(&out));
+        // The marker, then the newest messages that fit the target.
+        assert_eq!(out.len(), 5);
+        assert_eq!(out[1..], messages[16..]);
+        // It takes the timestamp of the first message it replaces.
+        assert_eq!(out[0], compaction_marker(100));
     }
 
     #[test]

@@ -3199,3 +3199,106 @@ async fn a_cancelled_after_tool_says_the_run_was_cancelled() {
         "{results:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Mutation-testing gaps (#198): how `run_outcome` reads endings that are not
+// a final answer, and `on_stop` only judging a finished answer.
+// ---------------------------------------------------------------------------
+
+/// Fails every request with the provider's own `Cancelled`, without the
+/// run's token being cancelled.
+struct ProviderCancels;
+
+#[async_trait::async_trait]
+impl StreamProvider for ProviderCancels {
+    async fn stream(
+        &self,
+        _config: StreamConfig,
+        _tx: mpsc::UnboundedSender<StreamEvent>,
+        _cancel: CancellationToken,
+    ) -> Result<Message, ProviderError> {
+        Err(ProviderError::Cancelled)
+    }
+}
+
+#[tokio::test]
+async fn finish_reports_endings_without_a_final_answer() {
+    async fn finished(agent: Agent) -> Vec<String> {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut agent = agent.with_extension(Outcomes {
+            seen: seen.clone(),
+            cancel_in_before_tool: false,
+        });
+        let _ = run(&mut agent, "go").await;
+        let seen = seen.lock().unwrap().clone();
+        seen
+    }
+    // `on_before_turn` ends the run before its first request: the prompt is
+    // the last message, and nothing was cancelled.
+    let (a, requests) = scripted(vec![text("never")]);
+    let a = a.on_before_turn(|_, _| false);
+    assert_eq!(finished(a).await, vec!["Completed stop=None"]);
+    assert!(requests.lock().unwrap().is_empty());
+
+    // ... or after a tool turn: a tool result is the last message.
+    let (a, requests) = scripted(vec![
+        call("echo", serde_json::json!({"text": "x"})),
+        text("never"),
+    ]);
+    let a = a.on_before_turn(|_, turn| turn == 0);
+    assert_eq!(finished(a).await, vec!["Completed stop=Some(ToolUse)"]);
+    assert_eq!(requests.lock().unwrap().len(), 1);
+
+    // The provider reports a cancel of its own: the turn is aborted, not
+    // failed, and the run ends cancelled although its token never was.
+    let errors = Arc::new(Mutex::new(Vec::<String>::new()));
+    let sink = errors.clone();
+    let a = Agent::from_provider(ProviderCancels, ModelConfig::mock())
+        .on_error(move |e| sink.lock().unwrap().push(e.to_string()));
+    assert_eq!(finished(a).await, vec!["Cancelled stop=Some(Aborted)"]);
+    assert!(errors.lock().unwrap().is_empty(), "{:?}", errors.lock());
+}
+
+/// A continued run cancelled before its first request has no new messages
+/// at all; it still ends cancelled.
+#[tokio::test]
+async fn a_continue_cancelled_before_its_first_request_ends_cancelled() {
+    let ends = Arc::new(Mutex::new(Vec::new()));
+    let (agent, requests) = scripted(vec![text("never")]);
+    let mut agent = agent
+        .with_messages(vec![AgentMessage::Llm(Message::user("go"))])
+        .with_extension(CancelBeforeInput(ends.clone()));
+    let mut rx = agent.continue_loop().await;
+    let mut events = Vec::new();
+    while let Some(e) = rx.recv().await {
+        events.push(e);
+    }
+    assert!(requests.lock().unwrap().is_empty());
+    assert!(end_messages(&events).is_empty(), "nothing new was added");
+    assert_eq!(*ends.lock().unwrap(), vec!["Cancelled"]);
+}
+
+/// `on_stop` judges only a finished answer (`Stop`): an answer cut off at
+/// the output limit is not offered to it, so it cannot continue the run.
+#[tokio::test]
+async fn on_stop_is_not_asked_about_a_cut_off_answer() {
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let hooks = Hooks {
+        continue_with: Some("keep going"),
+        log: Some(log.clone()),
+        ..Default::default()
+    };
+    let mut agent =
+        Agent::from_provider(CutOff, ModelConfig::mock()).with_extension(ext("judge", hooks));
+    let events = run(&mut agent, "go").await;
+    assert_eq!(final_assistant(&events).0, StopReason::Length);
+    let log = log.lock().unwrap().clone();
+    assert!(
+        !log.iter().any(|entry| entry.starts_with("on_stop")),
+        "{log:?}"
+    );
+    assert!(
+        log.iter().any(|entry| entry.starts_with("finish")),
+        "{log:?}"
+    );
+}

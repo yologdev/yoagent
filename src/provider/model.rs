@@ -2856,6 +2856,27 @@ mod tests {
     }
 
     #[test]
+    fn an_effort_clamp_is_reported_once_per_model_and_kind() {
+        // The warning itself is asserted in tests/effort_clamp_log_test.rs
+        // (its own binary: a log assertion needs the process's subscriber).
+        let slot = effort_clamp_slot(ThinkingLevel::XHigh, "high").expect("a clamp");
+        assert!(first_effort_clamp("clamp-once-model-a", slot));
+        assert!(
+            !first_effort_clamp("clamp-once-model-a", slot),
+            "once per model"
+        );
+        assert!(first_effort_clamp("clamp-once-model-b", slot), "per model");
+        let other = effort_clamp_slot(ThinkingLevel::Max, "high").expect("a clamp");
+        assert_ne!(slot, other);
+        assert!(first_effort_clamp("clamp-once-model-a", other), "per kind");
+        assert_eq!(
+            effort_clamp_slot(ThinkingLevel::High, "high"),
+            None,
+            "no clamp"
+        );
+    }
+
+    #[test]
     fn test_cost_usd() {
         let cost = CostConfig {
             input_per_million: 3.0,
@@ -3270,6 +3291,9 @@ mod tests {
             // A suffix on the major ends the version: no minor follows.
             ("claude-sonnet-4@20250514", false, false),
             ("claude-opus-5[1m]", true, true),
+            // ... so a digit token after it is not read as the minor: 4.0
+            // (legacy, tool-forced), not 4.5.
+            ("claude-sonnet-4[1m]-5", false, false),
             // Controls: an 8-digit date is still never a minor version.
             ("claude-opus-4@20250514", false, false),
             ("claude-sonnet-4-20250514-v1:0", false, false),
@@ -3337,6 +3361,14 @@ mod tests {
         let groq = OpenAiCompat::groq();
         assert!(groq.supports_usage_in_streaming);
         assert!(!groq.supports_store);
+
+        // OpenRouter takes `max_completion_tokens`, unlike the default.
+        let openrouter = OpenAiCompat::openrouter();
+        assert_eq!(
+            openrouter.max_tokens_field,
+            MaxTokensField::MaxCompletionTokens
+        );
+        assert!(openrouter.supports_usage_in_streaming);
 
         let deepseek = OpenAiCompat::deepseek();
         assert_eq!(deepseek.max_tokens_field, MaxTokensField::MaxTokens);
