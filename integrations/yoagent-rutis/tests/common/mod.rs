@@ -1,6 +1,9 @@
 //! Shared test doubles: a recording provider, simple tools, fiber waits.
 #![allow(dead_code)]
 
+#[cfg(feature = "node")]
+pub mod runtimes;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

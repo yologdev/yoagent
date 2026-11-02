@@ -24,13 +24,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::*;
-use rutis::{Ctx, FiberState};
-use rutis_bridge::runtime::LocalRuntime;
+use rutis::host::{CtxHost, FiberState};
+use rutis::Ctx;
 use rutis_bridge::session::{host_key, HostDispatch, Reply as RpcReply, Value as RpcValue};
-use rutis_loader::{
-    Chain, EntryStatus, Layer, Loader, LoaderOptions, LoaderPlugin, Patch, RuntimeResolver,
-    RuntimeRowsPlugin, ServiceCatalog,
-};
+use rutis_loader::report::EntryStatus;
+use rutis_loader::{Layer, Loader, Patch, ServiceCatalog};
 use serde_json::{json, Value};
 use yoagent::extension::RunContext;
 use yoagent::provider::mock::{MockResponse, MockToolCall};
@@ -265,46 +263,25 @@ async fn host_with(
     let root = Ctx::root().unwrap();
     let bridge = RutisBridge::install(&root).unwrap();
     let probe = Probe::default();
-    root.provide_as::<dyn HostDispatch>(host_key("probe"), Arc::new(probe.clone()))
+    root.provide_at::<dyn HostDispatch>(host_key("probe"), Arc::new(probe.clone()))
         .unwrap();
     let mut catalog = ServiceCatalog::new();
     catalog.register_shared("yoagent");
     catalog.register_shared("probe");
-    let mut chain = Chain::new();
-    let mut rows = Vec::new();
+    let mut spawn = Vec::new();
     if let Some((modules, interpreter)) = python {
-        let runtime = LocalRuntime::python(modules).interpreter(interpreter);
-        let resolver = Arc::new(RuntimeResolver::modules(runtime.handle()).with_catalog(&catalog));
-        root.plugin(runtime);
-        chain = chain.with_shared(resolver.clone());
-        rows.push(resolver);
+        spawn.push(runtimes::python(modules, interpreter));
     }
     if let Some((package, executable)) = bun {
-        let runtime = LocalRuntime::bun(package, plugins_dir()).interpreter(executable);
-        let resolver = Arc::new(RuntimeResolver::modules(runtime.handle()).with_catalog(&catalog));
-        root.plugin(runtime);
-        chain = chain.with_shared(resolver.clone());
-        rows.push(resolver);
+        spawn.push(runtimes::bun(package, executable, &plugins_dir()));
     }
     if let Some(runtime_dir) = node {
-        let runtime = LocalRuntime::node(runtime_dir, plugins_dir().join("package.json"));
-        let resolver = Arc::new(RuntimeResolver::node(runtime.handle()).with_catalog(&catalog));
-        root.plugin(runtime);
-        chain = chain.with_shared(resolver.clone());
-        rows.push(resolver);
+        spawn.push(runtimes::node(
+            runtime_dir,
+            &plugins_dir().join("package.json"),
+        ));
     }
-    let plugin = LoaderPlugin::new(
-        chain,
-        LoaderOptions {
-            catalog,
-            ..LoaderOptions::default()
-        },
-    );
-    let loader = plugin.handle();
-    root.plugin(plugin).await.unwrap();
-    for resolver in rows {
-        root.plugin(RuntimeRowsPlugin::new(resolver));
-    }
+    let loader = runtimes::start(&root, catalog, spawn).await.loader;
     Host {
         root,
         bridge,
@@ -401,7 +378,7 @@ async fn the_typescript_and_python_examples_offer_tools_deny_and_redact() {
     let host = host(Some(&node), Some((&plugins_dir().join("python"), &python))).await;
     host.load(vec![
         ts_row("ts", &plugins_dir().join("ts/example.ts"), json!({})),
-        py_row("py", "yoagent_example", json!({})),
+        py_row("python", "yoagent_example", json!({})),
     ])
     .await;
     host.until_handlers(&["ts-example", "py-example"]).await;
@@ -1020,7 +997,8 @@ async fn a_python_dict_of_functions_is_a_handler() {
     };
     let fx = fixtures();
     let host = host(None, Some((&fx.py, &python))).await;
-    host.load(vec![py_row("py", "py_hooks", json!({}))]).await;
+    host.load(vec![py_row("python", "py_hooks", json!({}))])
+        .await;
     host.until_handlers(&["py-hooks"]).await;
 
     let (agent, seen) = agent(vec![
@@ -1353,7 +1331,8 @@ async fn a_crashed_runtime_withdraws_its_handlers() {
     };
     let fx = fixtures();
     let host = host(None, Some((&fx.py, &python))).await;
-    host.load(vec![py_row("py", "py_hooks", json!({}))]).await;
+    host.load(vec![py_row("python", "py_hooks", json!({}))])
+        .await;
     host.until_handlers(&["py-hooks"]).await;
     // A Python row's handler belongs to its row too (rutis 0.12's caller row).
     let owner = host
@@ -1363,7 +1342,7 @@ async fn a_crashed_runtime_withdraws_its_handlers() {
         .into_iter()
         .find(|h| h.name() == "py-hooks")
         .map(|h| h.owner().to_string());
-    assert_eq!(owner.as_deref(), Some("py"));
+    assert_eq!(owner.as_deref(), Some("python"));
 
     let denied = Reply::new("py_denied", "ran");
     let denied_runs = denied.runs();
@@ -1411,7 +1390,7 @@ async fn handler_names_are_unique_across_languages() {
     wait_active(&rust).await;
     let rows = vec![
         ts_row("js", &fx.js, json!({"name": "taken"})),
-        py_row("py", "py_hooks", json!({"name": "taken"})),
+        py_row("python", "py_hooks", json!({"name": "taken"})),
     ];
     let patches: Vec<Patch> = serde_json::from_value(json!([{ "insert": rows }])).unwrap();
     host.loader
@@ -1424,7 +1403,7 @@ async fn handler_names_are_unique_across_languages() {
     // (seen on CI: the report held only Python's failure).
     let failed = tokio::time::timeout(Duration::from_secs(60), async {
         loop {
-            let failed: Vec<(&str, String)> = ["js", "py"]
+            let failed: Vec<(&str, String)> = ["js", "python"]
                 .into_iter()
                 .filter_map(|id| match host.loader.get(id)?.status {
                     EntryStatus::Running(s) if s.state == FiberState::Failed => {
@@ -1446,7 +1425,7 @@ async fn handler_names_are_unique_across_languages() {
         panic!(
             "both rows fail to load; js: {:?}, py: {:?}",
             status("js"),
-            status("py")
+            status("python")
         )
     });
     for (id, error) in failed {
@@ -1726,7 +1705,8 @@ async fn a_python_hook_sees_its_signal_set_when_the_run_is_cancelled() {
     };
     let fx = fixtures();
     let host = host(None, Some((&fx.py, &python))).await;
-    host.load(vec![py_row("py", "py_cancel", json!({}))]).await;
+    host.load(vec![py_row("python", "py_cancel", json!({}))])
+        .await;
     host.until_handlers(&["py-cancel"]).await;
 
     let (agent, _) = agent(vec![

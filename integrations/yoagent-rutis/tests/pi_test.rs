@@ -17,15 +17,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::*;
-use rutis::{Ctx, FiberState};
-use rutis_bridge::runtime::LocalRuntime;
+use rutis::host::{CtxHost, FiberState};
+use rutis::Ctx;
 use rutis_bridge::session::{
     host_key, Error as BridgeError, HostDispatch, Reply, Value as BridgeValue,
 };
-use rutis_loader::{
-    Chain, EntryStatus, Layer, Loader, LoaderOptions, LoaderPlugin, Patch, RuntimeResolver,
-    RuntimeRowsPlugin, ServiceCatalog,
-};
+use rutis_loader::report::EntryStatus;
+use rutis_loader::{Layer, Loader, Patch, ServiceCatalog};
 use serde_json::{json, Value};
 use yoagent::provider::mock::{MockResponse, MockToolCall};
 use yoagent::tools::{
@@ -126,25 +124,14 @@ async fn host_full(
     catalog.register_shared("yoagent");
     for (name, service) in services {
         catalog.register_shared(name);
-        root.provide_as::<dyn HostDispatch>(host_key(name), service)
+        root.provide_at::<dyn HostDispatch>(host_key(name), service)
             .unwrap();
     }
-    let node = LocalRuntime::node(runtime, pi_dir().join("package.json"));
+    let node = runtimes::node(runtime, &pi_dir().join("package.json"));
     if restricted {
         bridge.restrict_runtime(node.handle());
     }
-    let resolver = Arc::new(RuntimeResolver::node(node.handle()).with_catalog(&catalog));
-    root.plugin(node);
-    let plugin = LoaderPlugin::new(
-        Chain::new().with_shared(resolver.clone()),
-        LoaderOptions {
-            catalog,
-            ..LoaderOptions::default()
-        },
-    );
-    let loader = plugin.handle();
-    root.plugin(plugin).await.unwrap();
-    root.plugin(RuntimeRowsPlugin::new(resolver));
+    let loader = runtimes::start(&root, catalog, vec![node]).await.loader;
     Host {
         root,
         bridge,

@@ -81,7 +81,7 @@ impl PluginCtxExt for Ctx {
     }
 }
 
-/// A ready-made rutis [`Plugin`] that registers one [`Handler`] — for the
+/// A ready-made rutis [`DynPlugin`] that registers one [`Handler`] — for the
 /// common case where a plugin is "these tools plus this policy":
 ///
 /// ```

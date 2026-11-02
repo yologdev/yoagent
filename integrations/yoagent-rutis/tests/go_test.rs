@@ -16,11 +16,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::*;
+use rutis::host::CtxHost;
 use rutis::Ctx;
-use rutis_loader::{
-    Chain, GoBinaries, GoResolver, GoRuntimes, Layer, LoaderOptions, LoaderPlugin, Patch,
-    ServiceCatalog,
-};
+use rutis_bridge::{LocalId, PeerId};
+use rutis_host::connect::SpawnPlugin;
+use rutis_loader::runtime::binary::{Binaries, BinaryResolver, BinaryRuntimes, Spawn, Spawned};
+use rutis_loader::runtime::go::Go;
+use rutis_loader::{Chain, Layer, LoaderOptions, LoaderPlugin, Patch, ServiceCatalog};
 use serde_json::json;
 use yoagent_rutis::RutisBridge;
 
@@ -68,6 +70,19 @@ fn build(dir: &Path) -> Option<PathBuf> {
     Some(binary)
 }
 
+/// What starts a Go binary's runtime: a `SpawnPlugin`, as rutis-host's
+/// `rutis-host/spawn` row.
+fn spawn() -> Spawn {
+    Arc::new(|name: &str, launcher, anchor: &Path| {
+        let plugin = SpawnPlugin::new(name, launcher, anchor);
+        Spawned {
+            handle: plugin.handle(),
+            processes: plugin.processes(),
+            plugin: Box::new(plugin),
+        }
+    })
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_go_plugin_offers_tools_redacts_fails_closed_and_unloads() {
     let dir = tempfile::tempdir().unwrap();
@@ -77,10 +92,13 @@ async fn a_go_plugin_offers_tools_redacts_fails_closed_and_unloads() {
     let out = dir.path().join("go.log");
 
     let root = Ctx::root().unwrap();
+    // The id the host greets its runtimes with (rutis-host's default).
+    root.provide(LocalId(PeerId::new("main").unwrap())).unwrap();
     let bridge = RutisBridge::install(&root).unwrap();
     let mut catalog = ServiceCatalog::new();
     catalog.register_shared("yoagent");
-    let go = Arc::new(GoResolver::new(GoBinaries::new().file(&binary)).with_catalog(&catalog));
+    let go =
+        Arc::new(BinaryResolver::<Go>::new(Binaries::new().file(&binary)).with_catalog(&catalog));
     let plugin = LoaderPlugin::new(
         Chain::new().with_shared(go.clone()),
         LoaderOptions {
@@ -90,7 +108,7 @@ async fn a_go_plugin_offers_tools_redacts_fails_closed_and_unloads() {
     );
     let loader = plugin.handle();
     root.plugin(plugin).await.unwrap();
-    root.plugin(GoRuntimes::new(go, dir.path()).idle(None))
+    root.plugin(BinaryRuntimes::<Go>::new(go, dir.path(), spawn()).idle(None))
         .await
         .unwrap();
     let rows = json!([{ "id": "go", "name": "go:go-policy", "config": { "out": out } }]);

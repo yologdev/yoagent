@@ -81,7 +81,7 @@ use crate::handler::{Handler, HandlerImpl, Hooks};
 /// **Unique names.** A handler whose name a live handler holds, or one
 /// offering a static tool ([`Handler::with_tool`]) whose name another live
 /// handler's static tool holds, is refused with
-/// [`ErrorKind::ServiceExists`](rutis::host::ErrorKind::ServiceExists) (the error rutis uses for a doubly-provided
+/// [`ErrorKind::ServiceExists`] (the error rutis uses for a doubly-provided
 /// service) and logged with `warn!` naming the holder: rutis keeps a failed
 /// `apply`'s error on the fiber, not in its error sink, so the log is where a
 /// host notices it. There is **no automatic retry**: when the holder later
@@ -520,7 +520,7 @@ impl Registry {
     ///
     /// The handler is removed when that plugin unloads; the returned
     /// [`Disposer`] removes it earlier (dropping it does nothing). Refused
-    /// with [`ErrorKind::ServiceExists`](rutis::host::ErrorKind::ServiceExists) on a name clash (see the type
+    /// with [`ErrorKind::ServiceExists`] on a name clash (see the type
     /// docs), and with rutis's own error when the plugin is no longer loading
     /// or active — in both cases nothing stays registered.
     pub fn register(self: &Arc<Self>, ctx: &Ctx, handler: Handler) -> Result<Disposer, Error> {

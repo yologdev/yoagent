@@ -14,13 +14,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use common::*;
+use rutis::host::CtxHost;
 use rutis::Ctx;
-use rutis_bridge::runtime::LocalRuntime;
 use rutis_bridge::session::{host_key, HostDispatch, Reply as RpcReply, Value as RpcValue};
-use rutis_loader::{
-    Chain, Layer, Loader, LoaderOptions, LoaderPlugin, Patch, RuntimeResolver, RuntimeRowsPlugin,
-    ServiceCatalog,
-};
+use rutis_loader::{Layer, Loader, Patch, ServiceCatalog};
 use serde_json::{json, Value};
 use yoagent::ToolDecision;
 use yoagent_rutis::RutisBridge;
@@ -121,7 +118,7 @@ struct Host {
     bridge: RutisBridge,
     loader: Loader,
     probe: Probe,
-    runtime: rutis::FiberView,
+    runtime: rutis::host::FiberView,
     _dir: tempfile::TempDir,
     file: PathBuf,
 }
@@ -139,25 +136,16 @@ async fn host(node: &Path) -> Host {
     let root = Ctx::root().unwrap();
     let bridge = RutisBridge::install(&root).unwrap();
     let probe = Probe::default();
-    root.provide_as::<dyn HostDispatch>(host_key("probe"), Arc::new(probe.clone()))
+    root.provide_at::<dyn HostDispatch>(host_key("probe"), Arc::new(probe.clone()))
         .unwrap();
     let mut catalog = ServiceCatalog::new();
     catalog.register_shared("yoagent");
     catalog.register_shared("probe");
-    let runtime = LocalRuntime::node(node, plugins_dir().join("package.json"));
+    let runtime = runtimes::node(node, &plugins_dir().join("package.json"));
     bridge.restrict_runtime(runtime.handle());
-    let resolver = Arc::new(RuntimeResolver::node(runtime.handle()).with_catalog(&catalog));
-    let runtime = root.plugin(runtime);
-    let plugin = LoaderPlugin::new(
-        Chain::new().with_shared(resolver.clone()),
-        LoaderOptions {
-            catalog,
-            ..LoaderOptions::default()
-        },
-    );
-    let loader = plugin.handle();
-    root.plugin(plugin).await.unwrap();
-    root.plugin(RuntimeRowsPlugin::new(resolver));
+    let started = runtimes::start(&root, catalog, vec![runtime]).await;
+    let loader = started.loader;
+    let runtime = started.runtimes.into_iter().next().unwrap();
     Host {
         root,
         bridge,
