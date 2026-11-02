@@ -83,7 +83,7 @@ All return `Self` for chaining (unless noted as `Result`).
 | `with_skills(skills: SkillSet) -> Self` | Load skills and append their index to the system prompt |
 | `async with_mcp_server_stdio(command, args, env) -> Result<Self, McpError>` | Connect to MCP server via stdio and add its tools *(feature `native`)* |
 | `async with_mcp_server_http(url) -> Result<Self, McpError>` | Connect to MCP server via HTTP and add its tools |
-| `async with_mcp_server_http_transport(transport: HttpTransport) -> Result<Self, McpError>` | The same over a configured transport (auth headers via `HttpTransport::with_header`, redirect policy) |
+| `async with_mcp_server_http_transport(transport: HttpTransport) -> Result<Self, McpError>` | The same over a configured transport (auth headers via `HttpTransport::with_header`, or a refreshable token via `HttpTransport::with_authorization`; redirect policy) |
 | `async with_openapi_file(path, config, filter) -> Result<Self, OpenApiError>` | Load tools from an OpenAPI spec file *(requires `openapi` feature)* |
 | `async with_openapi_url(url, config, filter) -> Result<Self, OpenApiError>` | Fetch spec from URL and add tools *(requires `openapi` feature)* |
 | `with_openapi_spec(spec_str, config, filter) -> Result<Self, OpenApiError>` | Parse spec string and add tools *(requires `openapi` feature)* |

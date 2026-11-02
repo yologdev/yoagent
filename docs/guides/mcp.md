@@ -121,15 +121,85 @@ let agent = agent.with_mcp_server_http_transport(transport).await?;
   `Content-Length`, `Transfer-Encoding`, `Connection`, `Host`.
 - On wasm32 the headers ride on the host's `fetch`. Cloudflare Workers send
   them; a browser may drop some, such as `User-Agent`.
-- The headers are fixed for the transport's lifetime. A token that expires
-  during a session (OAuth refresh) needs a new transport and client.
-- Redirects are followed within the URL's own origin only (scheme, host and
-  port; up to 10; use 307/308 — a 301/302/303 turns the POST into a GET), so the headers never follow a server pointing at another
-  host, or from `https` to `http`: such a redirect is an error naming both
-  ends by origin only (scheme, host and port; since 0.26.1). `with_redirects(Redirects::None)` refuses every redirect;
-  `Redirects::Any` follows them anywhere — then a custom header goes along (the
-  HTTP client drops only `Authorization` and `Cookie` on a hop to another
-  host). Native targets; on wasm32 the host's `fetch` follows redirects.
+- The headers are fixed for the transport's lifetime. For a token that expires
+  during a session (OAuth), use an authorization source (below).
+- A credential header's value — `authorization`, `proxy-authorization`,
+  `cookie`, or a name containing `key`, `token`, `secret`, `auth` or `session`
+  — echoed by the server into an error body or a JSON-RPC error message is
+  replaced with `[redacted]` (the whole value and the credential after its
+  scheme, pieces of 8+ characters). Other headers, such as `User-Agent`, stay
+  readable.
+
+#### Credentials that change: an authorization source
+
+An OAuth access token expires (often within the hour). Rather than a fixed
+header, give the transport an `AuthorizationSource`: it is asked for the
+`Authorization` value before every request (each POST and the closing
+`DELETE`), and told when the server answers 401, once per request. A new value
+sends that request once more, with the same MCP session.
+
+```rust
+use std::sync::Arc;
+use yoagent::mcp::{AuthChallenge, AuthorizationSource, HttpTransport, McpError};
+
+struct Tokens; // your OAuth client: holds the access and refresh tokens
+
+#[async_trait::async_trait]
+impl AuthorizationSource for Tokens {
+    async fn authorization(&self) -> Result<Option<String>, McpError> {
+        Ok(Some(format!("Bearer {}", "current-access-token")))
+    }
+    async fn challenged(&self, challenge: &AuthChallenge) -> Result<Option<String>, McpError> {
+        // `challenge.www_authenticate`: the server's `WWW-Authenticate`;
+        // `challenge.refused()`: the value it refused. Refresh and return
+        // the new value, or `Ok(None)` to give up.
+        Ok(Some(format!("Bearer {}", "refreshed-access-token")))
+    }
+}
+
+let transport = HttpTransport::new("https://mcp.example.com/mcp")?
+    .with_authorization(Arc::new(Tokens))?;
+let agent = agent.with_mcp_server_http_transport(transport).await?;
+```
+
+- `Ok(None)` from `authorization` sends the request without the header; an
+  error fails the request before it is sent. Errors from either method come
+  back as `McpError::Transport`, naming the request.
+- A request is retried at most once, and only on a 401 answered with a new
+  value (returning the value just refused is not retried, and logged).
+  Giving up (`Ok(None)`, the default) fails it as `McpError::Http` 401 with
+  the challenge in `err.www_authenticate()` — the place to start a sign-in; a
+  new value the server refuses too fails the same way, its message saying so.
+  A 403 (`insufficient_scope`) is never retried: it needs a new consent, and
+  carries its challenge the same way. The closing `DELETE` is best-effort: its
+  failure is only logged (a 401 / 403 at `warn`, as the session may leak).
+- `challenge.status` is 401 today; a later release may also pass a 403 for
+  step-up, so check it. Several `WWW-Authenticate` headers (one per scheme)
+  are joined with `, `.
+- Requests can run concurrently, so several may report the same expiry:
+  collapse them into one refresh in the source — `challenge.refused()` is the
+  value each refused request carried, so one that carried an old value can be
+  answered with the current one. `AuthChallenge::new(status, method)` builds
+  one to test a source.
+- Values are the whole header value (`Bearer <token>`), visible ASCII; they
+  are marked sensitive, and a value (or the credential after its scheme) the
+  server echoes into an error is replaced with `[redacted]`. An invalid value
+  fails the request unsent, without echoing it.
+- One source of credentials per transport: an `authorization` header set with
+  `with_header` and a source together are an error, in either order.
+- Since 0.26.6.
+
+#### Redirects
+
+Redirects are followed within the URL's own origin only (scheme, host and
+port; up to 10; use 307/308 — a 301/302/303 turns the POST into a GET), so the caller's headers (and a source's `Authorization`) never follow a server pointing at another
+host, or from `https` to `http`: such a redirect is an error naming both
+ends by origin only (scheme, host and port; since 0.26.1). `with_redirects(Redirects::None)` refuses every redirect;
+`Redirects::Any` follows them anywhere — then a custom header goes along (the
+HTTP client drops only `Authorization` and `Cookie` on a hop to another
+host). Native targets; on wasm32 the host's `fetch` follows redirects.
+
+#### Streamable HTTP responses
 
 `HttpTransport` handles both the plain JSON-RPC-over-POST shape and the
 **request/response subset of Streamable HTTP** — servers that answer a POST with
@@ -360,7 +430,8 @@ MCP operations return `McpError` (`#[non_exhaustive]`: a `match` needs a `_` arm
 - `McpError::Transport` — connection or I/O failure
 - `McpError::Http { status, .. }` — the server answered with a
   non-success HTTP status (HTTP transport): match on `status` (or
-  `err.http_status()`) — 401/403, it wants a credential or a sign-in; 404, the
+  `err.http_status()`) — 401/403, it wants a credential or a sign-in (its
+  `WWW-Authenticate` challenge in `err.www_authenticate()`, since 0.26.6); 404, the
   session expired when one was held (the message says so; else most likely a wrong URL). `message`
   reads as the `Transport` text did. A custom transport builds one with
   `McpError::http(status, message)`. Typed on `McpClient` and connect calls; a

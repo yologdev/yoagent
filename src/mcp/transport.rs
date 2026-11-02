@@ -7,7 +7,6 @@ use futures::StreamExt;
 use std::collections::BTreeMap;
 #[cfg(feature = "native")]
 use std::collections::HashMap;
-#[cfg(feature = "native")]
 use std::sync::Arc;
 #[cfg(feature = "native")]
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -1002,7 +1001,7 @@ fn named_origin(url: &str) -> String {
 /// `message` (not its `data`) have them replaced first. Built from the URL as
 /// sent (trailing `/` trimmed). Longest first, so a whole part is replaced
 /// before its pieces.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct UrlSecrets(Vec<String>);
 
 impl UrlSecrets {
@@ -1050,6 +1049,25 @@ impl UrlSecrets {
         Self(all)
     }
 
+    /// These secrets plus `values` (credentials the caller set or an
+    /// [`AuthorizationSource`] handed out): each whole value and, after an
+    /// auth scheme (`Bearer xyz`), its credential — pieces of 8 or more
+    /// characters, longest first.
+    fn with_values<'a>(&self, values: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut all = self.0.clone();
+        for value in values {
+            let credential = value.split_once(' ').map(|(_, c)| c.trim());
+            for piece in [Some(value.trim()), credential].into_iter().flatten() {
+                if piece.chars().count() >= Self::MIN_PIECE {
+                    all.push(piece.to_owned());
+                }
+            }
+        }
+        all.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+        all.dedup();
+        Self(all)
+    }
+
     /// `text` with every secret replaced.
     fn scrub(&self, text: &str) -> String {
         let mut text = text.to_owned();
@@ -1091,6 +1109,149 @@ fn percent_decoded(raw: &str) -> String {
         }
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// What a server said when it refused a request's credentials: handed to
+/// [`AuthorizationSource::challenged`]. `#[non_exhaustive]`; fields may be
+/// added (a parsed `resource_metadata`, say). Build one with
+/// [`new`](Self::new) to test a source.
+#[derive(Clone)]
+#[non_exhaustive]
+pub struct AuthChallenge {
+    /// The response's status: 401 today. A later release may also pass a
+    /// 403 `insufficient_scope` (step-up), so check it.
+    pub status: u16,
+    /// The response's `WWW-Authenticate` headers, if it sent any (several
+    /// joined with `, `): how to sign in (`Bearer resource_metadata="…"`,
+    /// an `error="invalid_token"`). Not redacted: a source needs the URLs in
+    /// it.
+    pub www_authenticate: Option<String>,
+    /// Which request was refused, for logs and messages — not for matching:
+    /// its JSON-RPC method (`initialize`, `tools/call`, …), or `DELETE` for
+    /// the request that closes the session.
+    pub method: String,
+    /// The `Authorization` value the server refused (`None` if the request
+    /// went without one). Private, and `[redacted]` in `Debug`.
+    refused: Option<String>,
+}
+
+impl AuthChallenge {
+    /// A challenge with no `WWW-Authenticate` and no refused value.
+    pub fn new(status: u16, method: impl Into<String>) -> Self {
+        Self {
+            status,
+            www_authenticate: None,
+            method: method.into(),
+            refused: None,
+        }
+    }
+
+    /// With the response's `WWW-Authenticate` value.
+    pub fn with_www_authenticate(mut self, challenge: impl Into<String>) -> Self {
+        self.www_authenticate = Some(challenge.into());
+        self
+    }
+
+    /// With the `Authorization` value the server refused.
+    pub fn with_refused(mut self, value: impl Into<String>) -> Self {
+        self.refused = Some(value.into());
+        self
+    }
+
+    /// The `Authorization` value the server refused, `None` if the request
+    /// carried none. Compare it with your current value: when several
+    /// requests are refused at once, only the first needs a refresh — the
+    /// others carry a value you already replaced, and can be answered with
+    /// the current one.
+    pub fn refused(&self) -> Option<&str> {
+        self.refused.as_deref()
+    }
+}
+
+impl std::fmt::Debug for AuthChallenge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthChallenge")
+            .field("status", &self.status)
+            .field("www_authenticate", &self.www_authenticate)
+            .field("method", &self.method)
+            .field("refused", &self.refused.as_ref().map(|_| "[redacted]"))
+            .finish()
+    }
+}
+
+/// Where an [`HttpTransport`] gets its `Authorization` header, request by
+/// request: for credentials that change during a session — an OAuth access
+/// token that expires and is refreshed — without a new transport (and so a
+/// new MCP session). Installed with
+/// [`HttpTransport::with_authorization`].
+///
+/// The transport asks [`authorization`](Self::authorization) before every
+/// request (each POST, and the closing `DELETE`). When the server answers
+/// 401 it calls [`challenged`](Self::challenged) once for that request; a
+/// new value sends the request once more, the MCP session kept (the value
+/// it refused again is not resent). Requests can run concurrently, so
+/// several may report the same 401: collapsing those into one refresh is
+/// the source's job ([`AuthChallenge::refused`] says which value each
+/// carried).
+///
+/// Values are the whole header value (`Bearer <token>`), visible ASCII; the
+/// transport marks them sensitive and replaces them (and the credential
+/// after the scheme) with `[redacted]` in everything it quotes from the
+/// server.
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+pub trait AuthorizationSource: crate::rt::MaybeSend + crate::rt::MaybeSync {
+    /// The `Authorization` value for the next request; `Ok(None)` sends it
+    /// without one. An error fails the request before it is sent (as a
+    /// `Transport` error naming the request and quoting it).
+    async fn authorization(&self) -> Result<Option<String>, McpError>;
+
+    /// The server refused a request with `challenge` (a 401 today; check
+    /// [`status`](AuthChallenge::status)). A new value sends that request
+    /// once more with it; `Ok(None)` (the default) gives up and the request
+    /// fails with [`McpError::Http`], the challenge in its
+    /// [`www_authenticate`](McpError::www_authenticate). An error fails the
+    /// request (a `Transport` error naming the request and quoting it).
+    async fn challenged(&self, challenge: &AuthChallenge) -> Result<Option<String>, McpError> {
+        let _ = challenge;
+        Ok(None)
+    }
+}
+
+/// Whether a caller's header `name` carries a credential, so its value is
+/// redacted: `authorization`, `proxy-authorization`, `cookie`, and any name
+/// with `key`, `token`, `secret`, `auth` or `session` in it. A `User-Agent`
+/// stays readable.
+fn is_credential_header(name: &reqwest::header::HeaderName) -> bool {
+    let name = name.as_str();
+    matches!(name, "authorization" | "proxy-authorization" | "cookie")
+        || ["key", "token", "secret", "auth", "session"]
+            .iter()
+            .any(|part| name.contains(part))
+}
+
+/// The response's `WWW-Authenticate` headers on a 401 or 403: every one (a
+/// server may send one per scheme, `Basic` before `Bearer`), joined with
+/// `, `, bytes outside visible ASCII decoded lossily rather than dropped.
+fn challenge_of(resp: &reqwest::Response) -> Option<String> {
+    let status = resp.status().as_u16();
+    if status != 401 && status != 403 {
+        return None;
+    }
+    let all: Vec<String> = resp
+        .headers()
+        .get_all(reqwest::header::WWW_AUTHENTICATE)
+        .iter()
+        .map(|v| String::from_utf8_lossy(v.as_bytes()).into_owned())
+        .collect();
+    (!all.is_empty()).then(|| all.join(", "))
+}
+
+/// How a request went through [`HttpTransport::send_authorized`].
+struct Sent {
+    resp: reqwest::Response,
+    /// Sent a second time with a new value from the source.
+    retried: bool,
 }
 
 /// A failed request as an error: `context`, then the HTTP client's error —
@@ -1141,16 +1302,27 @@ fn http_error(context: &str, e: reqwest::Error) -> McpError {
 ///
 /// Extra request headers — an auth token, a `User-Agent` — are set with
 /// [`with_header`](Self::with_header) and go on every request of the session.
+/// A credential that changes during the session (an OAuth access token) comes
+/// from an [`AuthorizationSource`] instead
+/// ([`with_authorization`](Self::with_authorization)).
 pub struct HttpTransport {
     client: reqwest::Client,
     base_url: String,
     /// The server as errors name it: scheme, host and port ([`url_origin`]).
     origin: String,
-    /// What to scrub from a server's body, or a JSON-RPC error's message,
-    /// before handing it on.
+    /// The URL's secrets; [`redactor`](Self::redactor) adds the credential
+    /// values, for scrubbing a server's body or a JSON-RPC error's message.
     secrets: UrlSecrets,
     /// The caller's headers, on every request. Values are marked sensitive.
     headers: reqwest::header::HeaderMap,
+    /// Where the `Authorization` header comes from, request by request.
+    authorization: Option<Arc<dyn AuthorizationSource>>,
+    /// The caller's credential header values ([`is_credential_header`]),
+    /// redacted for the transport's life.
+    fixed_secrets: Vec<String>,
+    /// Values the source has handed out, redacted (the latest
+    /// [`Self::MAX_ISSUED`]).
+    issued: std::sync::Mutex<Vec<String>>,
     /// Session assigned by the server on `initialize`, replayed on subsequent
     /// requests. `Mutex` because [`McpTransport::send`] takes `&self`.
     session_id: Mutex<Option<String>>,
@@ -1182,6 +1354,9 @@ impl HttpTransport {
             origin: named_origin(url),
             secrets: UrlSecrets::of(url.trim_end_matches('/')),
             headers: reqwest::header::HeaderMap::new(),
+            authorization: None,
+            fixed_secrets: Vec::new(),
+            issued: std::sync::Mutex::new(Vec::new()),
             session_id: Mutex::new(None),
             notifications: None,
         })
@@ -1252,7 +1427,13 @@ impl HttpTransport {
     /// itself (`Accept`, `Content-Type`, `Mcp-Session-Id`, `Content-Length`,
     /// `Transfer-Encoding`, `Connection`, `Host`) is an error here, before
     /// anything is sent. The headers are fixed for the transport's lifetime;
-    /// a token that changes during a session needs a new transport.
+    /// for a token that changes during a session, use
+    /// [`with_authorization`](Self::with_authorization). The value of a
+    /// credential header — `authorization`, `proxy-authorization`, `cookie`,
+    /// or a name containing `key`, `token`, `secret`, `auth` or `session` —
+    /// is also replaced with `[redacted]` (whole, and the credential after an
+    /// auth scheme; pieces of 8+ characters) in what the transport quotes
+    /// from the server.
     ///
     /// ```no_run
     /// # async fn run(token: &str) -> Result<(), yoagent::mcp::McpError> {
@@ -1270,6 +1451,9 @@ impl HttpTransport {
                 "header {name:?} is set by the MCP transport or HTTP client and cannot be overridden"
             )));
         }
+        if header == reqwest::header::AUTHORIZATION && self.authorization.is_some() {
+            return Err(Self::two_authorizations());
+        }
         // The value may be a secret: name the header, never echo the value.
         // Visible ASCII only: `HeaderValue` also takes bytes 0x80-0xFF, which
         // many servers reject and wasm32's fetch-based client refuses on every
@@ -1281,8 +1465,224 @@ impl HttpTransport {
             return Err(invalid());
         }
         value.set_sensitive(true);
+        if is_credential_header(&header) {
+            if let Ok(text) = value.to_str() {
+                self.fixed_secrets.push(text.to_owned());
+            }
+        }
         self.headers.insert(header, value);
         Ok(self)
+    }
+
+    /// How many values from an [`AuthorizationSource`] are remembered for
+    /// redaction: a token refreshed hourly for days stays well inside it.
+    /// The caller's own header values are kept apart and never dropped.
+    const MAX_ISSUED: usize = 256;
+
+    fn two_authorizations() -> McpError {
+        McpError::Transport(
+            "an Authorization header and an authorization source cannot both be set: \
+             the source supplies the header"
+                .into(),
+        )
+    }
+
+    /// Take the `Authorization` header from `source`, request by request:
+    /// for a credential that changes during a session (an OAuth access token
+    /// refreshed when it expires) without a new transport. See
+    /// [`AuthorizationSource`]. An `authorization` header already set with
+    /// [`with_header`](Self::with_header) is an error (and the other way
+    /// round), so one transport has one source of credentials.
+    ///
+    /// ```no_run
+    /// # use std::sync::Arc;
+    /// # use yoagent::mcp::{AuthChallenge, AuthorizationSource, HttpTransport, McpClient, McpError};
+    /// struct Tokens; // your OAuth client
+    /// #[async_trait::async_trait]
+    /// impl AuthorizationSource for Tokens {
+    ///     async fn authorization(&self) -> Result<Option<String>, McpError> {
+    ///         Ok(Some(format!("Bearer {}", "current-access-token")))
+    ///     }
+    ///     async fn challenged(&self, _: &AuthChallenge) -> Result<Option<String>, McpError> {
+    ///         // Refresh, then retry the request once with the new token.
+    ///         Ok(Some(format!("Bearer {}", "refreshed-access-token")))
+    ///     }
+    /// }
+    /// # async fn run() -> Result<(), McpError> {
+    /// let transport = HttpTransport::new("https://mcp.example.com/mcp")?
+    ///     .with_authorization(Arc::new(Tokens))?;
+    /// let client = McpClient::connect_http_with(transport).await?;
+    /// # Ok(()) }
+    /// ```
+    pub fn with_authorization(
+        mut self,
+        source: Arc<dyn AuthorizationSource>,
+    ) -> Result<Self, McpError> {
+        if self.headers.contains_key(reqwest::header::AUTHORIZATION) {
+            return Err(Self::two_authorizations());
+        }
+        self.authorization = Some(source);
+        Ok(self)
+    }
+
+    /// Note a value the source handed out, for redaction.
+    fn remember(&self, value: String) {
+        let mut issued = self.issued.lock().unwrap_or_else(|e| e.into_inner());
+        if issued.contains(&value) {
+            return;
+        }
+        if issued.len() >= Self::MAX_ISSUED {
+            issued.remove(0);
+        }
+        issued.push(value);
+    }
+
+    /// What to redact now: the URL's secrets and every credential value.
+    fn redactor(&self) -> UrlSecrets {
+        let issued = self.issued.lock().unwrap_or_else(|e| e.into_inner());
+        self.secrets.with_values(
+            self.fixed_secrets
+                .iter()
+                .chain(issued.iter())
+                .map(String::as_str),
+        )
+    }
+
+    /// A value from the source's `call` (`authorization()` /
+    /// `challenged()`) as a header: visible ASCII, marked sensitive,
+    /// remembered for redaction. Never echoes it in an error.
+    fn authorization_value(
+        &self,
+        value: &str,
+        call: &str,
+        method: &str,
+    ) -> Result<reqwest::header::HeaderValue, McpError> {
+        let invalid = || {
+            McpError::Transport(format!(
+                "the authorization source's {call} returned a value for '{method}' that is not \
+                 a valid header value (visible ASCII); not sent"
+            ))
+        };
+        let mut header = reqwest::header::HeaderValue::from_str(value).map_err(|_| invalid())?;
+        if header.to_str().is_err() {
+            return Err(invalid());
+        }
+        header.set_sensitive(true);
+        self.remember(value.to_owned());
+        Ok(header)
+    }
+
+    /// Send the request `build` makes, with the source's `Authorization`
+    /// when there is one; on a 401, ask the source once and, given a new
+    /// value, send it once more. `build` is called again for the retry, so
+    /// the request (session id included) is the same.
+    async fn send_authorized(
+        &self,
+        method: &str,
+        build: impl Fn() -> reqwest::RequestBuilder,
+        context: impl Fn() -> String,
+    ) -> Result<Sent, McpError> {
+        let context = &context;
+        let send = |builder: reqwest::RequestBuilder| async move {
+            builder.send().await.map_err(|e| http_error(&context(), e))
+        };
+        let Some(source) = &self.authorization else {
+            let resp = send(build()).await?;
+            return Ok(Sent {
+                resp,
+                retried: false,
+            });
+        };
+        let with = |value: Option<reqwest::header::HeaderValue>| match value {
+            Some(value) => build().header(reqwest::header::AUTHORIZATION, value),
+            None => build(),
+        };
+        let source_failed = |when: &str, e: McpError| {
+            McpError::Transport(format!(
+                "the authorization source failed {when} '{method}': {e}"
+            ))
+        };
+        let first = source
+            .authorization()
+            .await
+            .map_err(|e| source_failed("before", e))?;
+        let header = match &first {
+            Some(value) => Some(self.authorization_value(value, "authorization()", method)?),
+            None => None,
+        };
+        let resp = send(with(header)).await?;
+        if resp.status() != reqwest::StatusCode::UNAUTHORIZED {
+            return Ok(Sent {
+                resp,
+                retried: false,
+            });
+        }
+        let mut challenge = AuthChallenge::new(401, method);
+        challenge.www_authenticate = challenge_of(&resp);
+        challenge.refused = first.clone();
+        let Some(retry) = source
+            .challenged(&challenge)
+            .await
+            .map_err(|e| source_failed("after HTTP 401 on", e))?
+        else {
+            return Ok(Sent {
+                resp,
+                retried: false,
+            });
+        };
+        if Some(&retry) == first.as_ref() {
+            warn!(
+                "the authorization source returned the value the server just refused on \
+                 '{method}' (HTTP 401); not retrying"
+            );
+            return Ok(Sent {
+                resp,
+                retried: false,
+            });
+        }
+        let header = self.authorization_value(&retry, "challenged()", method)?;
+        debug!("MCP server refused the credentials on '{method}' (HTTP 401); retrying once with the source's new value");
+        let resp = send(with(Some(header))).await?;
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            warn!(
+                "MCP server refused the authorization source's new value too on '{method}' \
+                 (HTTP 401)"
+            );
+        }
+        Ok(Sent {
+            resp,
+            retried: true,
+        })
+    }
+
+    /// A non-success response as an [`McpError::Http`]: its status, the
+    /// server's body (redacted, cut), and on a 401 / 403 its
+    /// `WWW-Authenticate`.
+    async fn status_error(&self, sent: Sent, what: &str) -> McpError {
+        let Sent { resp, retried } = sent;
+        let status = resp.status();
+        let challenge = challenge_of(&resp);
+        let again = if retried && status == reqwest::StatusCode::UNAUTHORIZED {
+            " (refused again after the authorization source supplied a new value)"
+        } else {
+            ""
+        };
+        // Carry the body: servers explain themselves in it, and dropping it
+        // leaves the caller with a bare status to guess from.
+        let message = match resp.text().await {
+            Ok(body) if body.trim().is_empty() => {
+                format!("HTTP {status} from server on {what}{again}")
+            }
+            Ok(body) => format!(
+                "HTTP {status} from server on {what}{again}: {}",
+                self.redactor().excerpt(body.trim())
+            ),
+            Err(e) => format!(
+                "HTTP {status} from server on {what}{again} (body unreadable: {})",
+                e.without_url()
+            ),
+        };
+        McpError::http(status.as_u16(), message).with_www_authenticate(challenge)
     }
 
     /// A request to the server with the caller's headers; every request path
@@ -1612,43 +2012,33 @@ impl McpTransport for HttpTransport {
         let request_id = request.id;
         let method = request.method.clone();
 
-        let mut builder = self
-            .request(reqwest::Method::POST)
-            // Streamable HTTP servers pick their framing from this; JSON-only
-            // servers still match `application/json`.
-            .header("Accept", "application/json, text/event-stream")
-            .json(&request);
+        let session = self.session_id.lock().await.clone();
+        let build = || {
+            let builder = self
+                .request(reqwest::Method::POST)
+                // Streamable HTTP servers pick their framing from this; JSON-only
+                // servers still match `application/json`.
+                .header("Accept", "application/json, text/event-stream")
+                .json(&request);
+            match &session {
+                Some(session) => builder.header("Mcp-Session-Id", session),
+                None => builder,
+            }
+        };
+        let sent = self
+            .send_authorized(&method, build, || {
+                format!("HTTP error reaching {}", self.origin)
+            })
+            .await?;
 
-        if let Some(session) = self.session_id.lock().await.as_ref() {
-            builder = builder.header("Mcp-Session-Id", session);
-        }
-
-        let resp = builder
-            .send()
-            .await
-            .map_err(|e| http_error(&format!("HTTP error reaching {}", self.origin), e))?;
-
-        let status = resp.status();
+        let status = sent.resp.status();
         if !status.is_success() {
             if let Some(expired) = self.expired_session(status, &method).await {
                 return Err(expired);
             }
-            // Carry the body: servers explain themselves in it, and dropping it
-            // leaves the caller with a bare status to guess from.
-            let body = resp.text().await.unwrap_or_default();
-            let detail = body.trim();
-            return Err(McpError::http(
-                status.as_u16(),
-                if detail.is_empty() {
-                    format!("HTTP {status} from server on '{method}'")
-                } else {
-                    format!(
-                        "HTTP {status} from server on '{method}': {}",
-                        self.secrets.excerpt(detail)
-                    )
-                },
-            ));
+            return Err(self.status_error(sent, &format!("'{method}'")).await);
         }
+        let resp = sent.resp;
 
         // Servers assign the session on `initialize`; any response carrying one
         // updates it.
@@ -1662,19 +2052,21 @@ impl McpTransport for HttpTransport {
             None => {}
         }
 
+        let redactor = self.redactor();
         Self::read_response(
             resp,
             request_id,
             &method,
             status,
             self.notifications.as_ref(),
-            &self.secrets,
+            &redactor,
         )
         .await
         .map(|mut response| {
-            // A server's JSON-RPC error may echo its request target too.
+            // A server's JSON-RPC error may echo its request target, or the
+            // credential it was sent, too.
             if let Some(error) = response.error.as_mut() {
-                error.message = self.secrets.scrub(&error.message);
+                error.message = redactor.scrub(&error.message);
             }
             response
         })
@@ -1682,40 +2074,33 @@ impl McpTransport for HttpTransport {
 
     async fn notify(&self, notification: JsonRpcNotification) -> Result<(), McpError> {
         let method = notification.method.clone();
-        let mut builder = self
-            .request(reqwest::Method::POST)
-            .header("Accept", "application/json, text/event-stream")
-            .json(&notification);
-        if let Some(session) = self.session_id.lock().await.as_ref() {
-            builder = builder.header("Mcp-Session-Id", session);
-        }
+        let session = self.session_id.lock().await.clone();
+        let build = || {
+            let builder = self
+                .request(reqwest::Method::POST)
+                .header("Accept", "application/json, text/event-stream")
+                .json(&notification);
+            match &session {
+                Some(session) => builder.header("Mcp-Session-Id", session),
+                None => builder,
+            }
+        };
         // A notification is acknowledged with 202 and no body; nothing waits
         // for anything after the status.
-        let resp = builder.send().await.map_err(|e| {
-            http_error(
-                &format!("HTTP error on '{method}' reaching {}", self.origin),
-                e,
-            )
-        })?;
-        let status = resp.status();
+        let sent = self
+            .send_authorized(&method, build, || {
+                format!("HTTP error on '{method}' reaching {}", self.origin)
+            })
+            .await?;
+        let status = sent.resp.status();
         if status.is_success() {
             Ok(())
         } else if let Some(expired) = self.expired_session(status, &method).await {
             Err(expired)
         } else {
-            let body = resp.text().await.unwrap_or_default();
-            let detail = body.trim();
-            Err(McpError::http(
-                status.as_u16(),
-                if detail.is_empty() {
-                    format!("HTTP {status} from server on notification '{method}'")
-                } else {
-                    format!(
-                        "HTTP {status} from server on notification '{method}': {}",
-                        self.secrets.excerpt(detail)
-                    )
-                },
-            ))
+            Err(self
+                .status_error(sent, &format!("notification '{method}'"))
+                .await)
         }
     }
 
@@ -1733,22 +2118,28 @@ impl McpTransport for HttpTransport {
             // unobservable, though — a rejection is fine, but a DELETE that
             // never reached the server leaks the session there, and that only
             // surfaces later as an unrelated connect failure.
+            let build = || {
+                self.request(reqwest::Method::DELETE)
+                    .header("Mcp-Session-Id", &session)
+            };
             match self
-                .request(reqwest::Method::DELETE)
-                .header("Mcp-Session-Id", &session)
-                .send()
+                .send_authorized("DELETE", build, || "DELETE".into())
                 .await
             {
-                Ok(resp) if resp.status().is_success() => {}
-                Ok(resp) => debug!(
+                Ok(sent) if sent.resp.status().is_success() => {}
+                // Refused credentials leave the session open on the server.
+                Ok(sent) if matches!(sent.resp.status().as_u16(), 401 | 403) => warn!(
+                    "MCP session teardown refused with HTTP {} (credentials); \
+                     the session may leak server-side",
+                    sent.resp.status()
+                ),
+                Ok(sent) => debug!(
                     "MCP session teardown rejected with HTTP {}; it is optional, continuing",
-                    resp.status()
+                    sent.resp.status()
                 ),
                 Err(e) => warn!(
-                    "MCP session teardown did not reach {}: {}; \
-                     the session may leak server-side",
+                    "MCP session teardown with {} failed: {e}; the session may leak server-side",
                     named_origin(&self.base_url),
-                    http_error("DELETE", e)
                 ),
             }
         }
@@ -1759,6 +2150,52 @@ impl McpTransport for HttpTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credential_values_are_listed_whole_and_after_their_scheme() {
+        let secrets = UrlSecrets::default().with_values([
+            "Bearer abcdefgh123",
+            "abcdefgh456",
+            "Bearer short",
+            "Basic dXNlcjpwYXNz",
+        ]);
+        assert_eq!(
+            secrets.0,
+            [
+                "Basic dXNlcjpwYXNz",
+                "Bearer abcdefgh123",
+                "Bearer short",
+                "dXNlcjpwYXNz",
+                "abcdefgh123",
+                "abcdefgh456",
+            ]
+        );
+        assert_eq!(
+            secrets.scrub("got abcdefgh123 and Bearer short"),
+            "got [redacted] and [redacted]"
+        );
+    }
+
+    #[test]
+    fn credential_headers_are_told_from_others() {
+        let is = |name: &str| {
+            is_credential_header(&reqwest::header::HeaderName::from_bytes(name.as_bytes()).unwrap())
+        };
+        for name in [
+            "Authorization",
+            "proxy-authorization",
+            "Cookie",
+            "X-Api-Key",
+            "x-auth-token",
+            "client-secret",
+            "x-session",
+        ] {
+            assert!(is(name), "{name}");
+        }
+        for name in ["user-agent", "accept-language", "x-request-id"] {
+            assert!(!is(name), "{name}");
+        }
+    }
 
     #[test]
     fn url_secrets_hide_keys_and_leave_a_plain_path_readable() {
