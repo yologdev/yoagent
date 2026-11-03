@@ -5,7 +5,7 @@ description: Use when building, extending or upgrading an agent on the yoagent R
 
 # yoagent: which feature for which job
 
-Written for **yoagent 0.26.7** (and yoagent-rutis 0.12.0); the recipes
+Written for **yoagent 0.26.8** (and yoagent-rutis 0.12.0); the recipes
 below are compiled by `tests/skill_test.rs`, line for line. Check what you
 build against: `cargo tree -p yoagent` or `Cargo.lock`. If you are on an
 older version, read [What changed](#what-changed) first.
@@ -281,6 +281,12 @@ UI, model layer, agents) rather than add agent tools.
 
 Newest first; the full list is `CHANGELOG.md`.
 
+- **0.26.8** — MCP stdio: `StdioOptions::env_remove` / `env_remove_all`
+  start a server with the host's variables unset (not `""`), and
+  `env_clear_except(names)` with only an allow-list;
+  `.env_remove_all(provider::api_key_variables())` keeps your provider
+  keys out. `Agent::with_mcp_server_stdio_with(.., options)` takes them on
+  the `Agent` path.
 - **0.26.7** — presets `claude_sonnet_4_6()`, `gemini_3_6_flash()`,
   `gemini_3_1_pro_preview()`; `ModelConfig::preset("bedrock", id)` takes
   Bedrock / cross-Region profile ids (`us.anthropic.claude-sonnet-4-6`) and

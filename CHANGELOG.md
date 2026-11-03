@@ -4,7 +4,9 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.26.8 (2026-11-03)
+
+Additive: MCP stdio servers can be started without the host's variables. yoagent-rutis (0.12.0) and yoagent-workers (0.3.0) are unchanged.
 
 - **MCP stdio: keep the host's variables from a server** (asked for by yoyo-evolve, its #1125). `StdioOptions::env_remove(name)` / `env_remove_all(names)` start the server with those variables **unset** — not set to `""`, which is still a value and breaks some servers — and `env_clear_except(names)` passes only an allow-list. Applied as clear (keeping the allow-list's variables that are set) → remove → the caller's `env` map (a value set there wins). Names are `OsString`. `StdioOptions::new().env_remove_all(provider::api_key_variables())` keeps every provider key yoagent knows out of a server. `Agent::with_mcp_server_stdio_with(command, args, env, options)` takes the options on the `Agent` path too (`with_mcp_server_stdio` keeps the defaults).
 
