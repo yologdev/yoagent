@@ -1068,3 +1068,186 @@ exec 1>&-; while [ ! -e {go} ]; do sleep 0.05; done; exit 0"#,
     );
     assert!(until_gone(&child).await, "the later call took its group");
 }
+
+/// Reports what it inherited in its server name: whether `HOME` is set,
+/// and `YOAGENT_ENV_TEST_ADDED`'s value.
+const ENV_SERVER: &str = r#"
+read -r line; id=$(id_of "$line")
+name="home=${HOME+set};added=${YOAGENT_ENV_TEST_ADDED-unset}"
+echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"serverInfo\":{\"name\":\"$name\",\"version\":\"1\"}}}"
+read -r note
+while read -r line; do :; done
+"#;
+
+async fn env_seen(
+    env: Option<std::collections::HashMap<String, String>>,
+    options: yoagent::mcp::StdioOptions,
+) -> String {
+    let script = format!("{ID_OF}\n{ENV_SERVER}");
+    let client = McpClient::connect_stdio_with("bash", &["-c", &script], env, options)
+        .await
+        .unwrap();
+    client.server_info().unwrap().name.clone()
+}
+
+/// #1125 (yoyo-evolve): a host can keep its variables — provider keys — out
+/// of a server it starts. Removed means unset, not empty; the caller's own
+/// `env` map still applies; `env_clear` is an allow-list.
+#[tokio::test]
+async fn stdio_options_remove_or_clear_the_inherited_environment() {
+    use yoagent::mcp::StdioOptions;
+    assert!(
+        std::env::var_os("HOME").is_some(),
+        "the test reads HOME, which every CI runner sets"
+    );
+    // Control: inherited by default.
+    assert_eq!(
+        env_seen(None, StdioOptions::new()).await,
+        "home=set;added=unset"
+    );
+    // Removed: unset (`${HOME+set}` is empty), not set to "".
+    assert_eq!(
+        env_seen(None, StdioOptions::new().env_remove("HOME")).await,
+        "home=;added=unset"
+    );
+    assert_eq!(
+        env_seen(
+            None,
+            StdioOptions::new().env_remove_all(["HOME", "NOT_SET_ANYWAY"])
+        )
+        .await,
+        "home=;added=unset"
+    );
+    // The caller's own env map is still applied, after the removal.
+    let mut env = std::collections::HashMap::new();
+    env.insert("YOAGENT_ENV_TEST_ADDED".to_string(), "yes".to_string());
+    env.insert("HOME".to_string(), "/tmp".to_string());
+    assert_eq!(
+        env_seen(Some(env.clone()), StdioOptions::new().env_remove("HOME")).await,
+        "home=set;added=yes"
+    );
+    // Cleared: only the kept variables (PATH, so `bash` and `sed` are found).
+    assert_eq!(
+        env_seen(None, StdioOptions::new().env_clear_except(["PATH"])).await,
+        "home=;added=unset"
+    );
+    assert_eq!(
+        env_seen(None, StdioOptions::new().env_clear_except(["PATH", "HOME"])).await,
+        "home=set;added=unset"
+    );
+    // Called again, the lists add up.
+    assert_eq!(
+        env_seen(
+            None,
+            StdioOptions::new()
+                .env_clear_except(["PATH"])
+                .env_clear_except(["HOME"])
+        )
+        .await,
+        "home=set;added=unset"
+    );
+    // A kept variable the host does not have stays unset, never empty
+    // (`${…-unset}` prints `unset` only for an unset one).
+    assert_eq!(
+        env_seen(
+            None,
+            StdioOptions::new().env_clear_except(["PATH", "YOAGENT_ENV_TEST_ADDED"])
+        )
+        .await,
+        "home=;added=unset"
+    );
+    // env_remove wins over the allow-list; the env map still wins over both.
+    assert_eq!(
+        env_seen(
+            None,
+            StdioOptions::new()
+                .env_clear_except(["PATH", "HOME"])
+                .env_remove("HOME")
+        )
+        .await,
+        "home=;added=unset"
+    );
+    env.remove("HOME");
+    assert_eq!(
+        env_seen(Some(env), StdioOptions::new().env_clear_except(["PATH"])).await,
+        "home=;added=yes"
+    );
+    // With a process group of its own too (the std command is converted
+    // to tokio's before the environment is applied).
+    assert_eq!(
+        env_seen(
+            None,
+            StdioOptions::new()
+                .own_process_group(true)
+                .env_remove("HOME")
+        )
+        .await,
+        "home=;added=unset"
+    );
+}
+
+/// The `Agent` path takes the options too: a server started with
+/// `with_mcp_server_stdio_with` does not inherit what they remove.
+#[tokio::test]
+async fn an_agent_starts_a_stdio_server_with_its_options() {
+    use yoagent::mcp::StdioOptions;
+    use yoagent::provider::mock::{MockResponse, MockToolCall};
+    use yoagent::provider::{MockProvider, ModelConfig};
+    // One tool, `env`, whose result says whether HOME was inherited.
+    let script = format!(
+        r#"{ID_OF}
+read -r line; id=$(id_of "$line")
+echo "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{{\"tools\":{{}}}},\"serverInfo\":{{\"name\":\"env\",\"version\":\"1\"}}}}}}"
+read -r note
+read -r line; id=$(id_of "$line")
+echo "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{{\"tools\":[{{\"name\":\"env\",\"inputSchema\":{{\"type\":\"object\"}}}}]}}}}"
+read -r line; id=$(id_of "$line")
+echo "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{{\"content\":[{{\"type\":\"text\",\"text\":\"home=${{HOME+set}}\"}}]}}}}"
+while read -r line; do :; done
+"#
+    );
+    async fn seen(agent: yoagent::Agent) -> String {
+        let mut agent = agent;
+        let mut rx = agent.prompt("go").await;
+        while rx.recv().await.is_some() {}
+        agent.finish().await;
+        agent
+            .messages()
+            .iter()
+            .find_map(|m| match m {
+                AgentMessage::Llm(Message::ToolResult { content, .. }) => {
+                    content.iter().find_map(|c| match c {
+                        Content::Text { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                }
+                _ => None,
+            })
+            .expect("the tool ran")
+    }
+    let provider = || {
+        MockProvider::new(vec![
+            MockResponse::ToolCalls(vec![MockToolCall {
+                provider_metadata: None,
+                name: "env".into(),
+                arguments: serde_json::json!({}),
+            }]),
+            MockResponse::Text("done".into()),
+        ])
+    };
+    let agent = yoagent::Agent::from_provider(provider(), ModelConfig::mock())
+        .with_mcp_server_stdio("bash", &["-c", &script], None)
+        .await
+        .unwrap();
+    assert_eq!(seen(agent).await, "home=set");
+    let agent = yoagent::Agent::from_provider(provider(), ModelConfig::mock())
+        .with_mcp_server_stdio_with(
+            "bash",
+            &["-c", &script],
+            None,
+            StdioOptions::new().env_remove("HOME"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(seen(agent).await, "home=");
+}

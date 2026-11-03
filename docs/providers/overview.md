@@ -129,7 +129,10 @@ resolves the key from the environment variable named for `ModelConfig.provider`
 
 `provider::api_key_variables()` lists every one of these (and the decision
 presets' keys) once: a host that keeps credentials from processes it starts —
-plugin runtimes, MCP servers — can blank each of them there.
+plugin runtimes, MCP servers — can unset (or, where a launcher can only add
+variables, blank) each of them there. For an MCP stdio server,
+`StdioOptions::new().env_remove_all(provider::api_key_variables())` starts it
+with them unset.
 
 **wasm32 (Cloudflare Workers):** there are no environment variables, so none of
 the above is found. Pass every key with `with_api_key` (see

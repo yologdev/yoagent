@@ -849,16 +849,35 @@ impl Agent {
     // -- MCP integration --
 
     /// Connect to an MCP server via stdio and add its tools to the agent.
-    /// Native hosts only.
+    /// Native hosts only. To start it in its own process group, or keep the
+    /// host's variables (provider keys) from it, use
+    /// [`with_mcp_server_stdio_with`](Self::with_mcp_server_stdio_with).
     #[cfg(feature = "native")]
     #[cfg_attr(docsrs, doc(cfg(feature = "native")))]
     pub async fn with_mcp_server_stdio(
-        mut self,
+        self,
         command: &str,
         args: &[&str],
         env: Option<HashMap<String, String>>,
     ) -> Result<Self, McpError> {
-        let client = McpClient::connect_stdio(command, args, env).await?;
+        self.with_mcp_server_stdio_with(command, args, env, crate::mcp::StdioOptions::default())
+            .await
+    }
+
+    /// [`with_mcp_server_stdio`](Self::with_mcp_server_stdio), started as
+    /// `options` says: a process group of its own, the host's provider keys
+    /// unset (`StdioOptions::new().env_remove_all(provider::api_key_variables())`),
+    /// an allow-list of variables. Native hosts only.
+    #[cfg(feature = "native")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "native")))]
+    pub async fn with_mcp_server_stdio_with(
+        mut self,
+        command: &str,
+        args: &[&str],
+        env: Option<HashMap<String, String>>,
+        options: crate::mcp::StdioOptions,
+    ) -> Result<Self, McpError> {
+        let client = McpClient::connect_stdio_with(command, args, env, options).await?;
         let client = Arc::new(tokio::sync::Mutex::new(client));
         let adapters = McpToolAdapter::from_client(client).await?;
         for adapter in adapters {
