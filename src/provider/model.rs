@@ -1488,6 +1488,29 @@ impl ModelConfig {
         }
     }
 
+    /// Claude Sonnet 4.6 (a legacy model: Anthropic recommends Sonnet 5.5).
+    /// 1M context; defaults to 64K of the model's 128K max output.
+    ///
+    /// Adaptive thinking ([`AnthropicCompat::default`]; Anthropic lists
+    /// budget-based extended thinking as deprecated on it), default effort
+    /// `high`. It uses the tokenizer of Sonnet 4.6 and earlier, not the newer
+    /// one of Claude 4.7+.
+    ///
+    /// Rates verified against the raw markup of
+    /// <https://platform.claude.com/docs/en/about-claude/pricing> on
+    /// 2026-11-03: $3 / $15, cached $0.30, 5-minute cache write $3.75 (the
+    /// 1-hour write, $6, is not modelled); no long-context tier, the full 1M
+    /// bills at these rates. Carried in `prices.json`; see [`CostConfig`] — a
+    /// snapshot, not an authority.
+    pub fn claude_sonnet_4_6() -> Self {
+        Self {
+            context_window: 1_000_000,
+            max_tokens: 64_000,
+            anthropic: Some(AnthropicCompat::default().with_native_structured_output(true)),
+            ..Self::anthropic("claude-sonnet-4-6", "Claude Sonnet 4.6")
+        }
+    }
+
     /// Claude Haiku 4.5. 200K context; defaults to 32K of the model's 64K max output.
     ///
     /// Uses budget-based extended thinking ([`AnthropicCompat::legacy`]):
@@ -1787,6 +1810,49 @@ impl ModelConfig {
         }
     }
 
+    /// Gemini 3.6 Flash, Google's previous-generation Flash model (stable).
+    /// 1,048,576-token context, 65,536 max output.
+    ///
+    /// `thinkingLevel` `minimal`/`low`/`medium` (default)/`high`;
+    /// `ThinkingLevel::Off` sends no `thinkingConfig`, so the model runs at
+    /// `medium` — use `ThinkingLevel::Minimal` for the least thinking.
+    ///
+    /// Priced at the **regular** rate, $1.50 / $7.50, cached $0.15 per
+    /// Google's pricing page (read 2026-11-03) — Google bills $0.75 / $3.75 /
+    /// $0.075 through 2026-12-31, so until then costs read twice the bill (an
+    /// upper bound), as for [`gemini_3_8_flash`](Self::gemini_3_8_flash).
+    /// Context-cache storage is not modelled. See [`CostConfig`].
+    pub fn gemini_3_6_flash() -> Self {
+        Self {
+            reasoning: true,
+            context_window: 1_048_576,
+            max_tokens: 65_536,
+            ..Self::google("gemini-3.6-flash", "Gemini 3.6 Flash")
+        }
+    }
+
+    /// Gemini 3.1 Pro (preview, `gemini-3.1-pro-preview`). 1,048,576-token
+    /// context, 65,536 max output. A preview model: Google may change or
+    /// retire it at short notice.
+    ///
+    /// `thinkingLevel` `low`/`medium`/`high` (default); `minimal` is not
+    /// supported (this crate sends `low` for `ThinkingLevel::Minimal`).
+    /// `ThinkingLevel::Off` sends no `thinkingConfig`, so the model thinks at
+    /// `high`.
+    ///
+    /// Priced per Google's pricing page (read 2026-11-03): $2 / $12, cached
+    /// $0.20 for prompts up to 200,000 tokens; a longer prompt bills at $4 /
+    /// $18 / $0.40 (a [`ContextTier`] at 200,000). Context-cache storage is
+    /// not modelled. See [`CostConfig`].
+    pub fn gemini_3_1_pro_preview() -> Self {
+        Self {
+            reasoning: true,
+            context_window: 1_048_576,
+            max_tokens: 65_536,
+            ..Self::google("gemini-3.1-pro-preview", "Gemini 3.1 Pro Preview")
+        }
+    }
+
     /// Grok 4.7. 500,000-token context; xAI states no output limit beyond
     /// the context, so this defaults to 64K.
     ///
@@ -1964,6 +2030,7 @@ impl ModelConfig {
         ("anthropic", "claude-opus-5", Self::claude_opus_5),
         ("anthropic", "claude-opus-4-8", Self::claude_opus_4_8),
         ("anthropic", "claude-sonnet-5", Self::claude_sonnet_5),
+        ("anthropic", "claude-sonnet-4-6", Self::claude_sonnet_4_6),
         ("anthropic", "claude-haiku-4-5", Self::claude_haiku_4_5),
         ("anthropic", "claude-sonnet-5-5", Self::claude_sonnet_5_5),
         ("anthropic", "claude-haiku-5-5", Self::claude_haiku_5_5),
@@ -1975,6 +2042,12 @@ impl ModelConfig {
         ("openai", "gpt-6.1-terra", Self::gpt_6_1_terra),
         ("google", "gemini-4-argon", Self::gemini_4_argon),
         ("google", "gemini-3.8-flash", Self::gemini_3_8_flash),
+        ("google", "gemini-3.6-flash", Self::gemini_3_6_flash),
+        (
+            "google",
+            "gemini-3.1-pro-preview",
+            Self::gemini_3_1_pro_preview,
+        ),
         ("xai", "grok-4.7", Self::grok_4_7),
         ("mistral", "mistral-large-4", Self::mistral_large_4),
         ("zai", "glm-5.3", Self::glm_5_3),
@@ -2672,7 +2745,7 @@ mod tests {
                 config.id
             );
         }
-        assert_eq!(keys.len(), 25);
+        assert_eq!(keys.len(), 28);
     }
 
     #[test]
@@ -3436,6 +3509,7 @@ mod tests {
             ModelConfig::claude_opus_4_8(),
             ModelConfig::claude_sonnet_5(),
             ModelConfig::claude_sonnet_5_5(),
+            ModelConfig::claude_sonnet_4_6(),
             ModelConfig::claude_haiku_5_5(),
             ModelConfig::claude_haiku_4_5(),
         ] {

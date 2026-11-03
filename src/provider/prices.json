@@ -63,6 +63,15 @@
         "source": "https://platform.claude.com/docs/en/about-claude/pricing",
         "verified": "2026-08-19"
       },
+      "claude-sonnet-4-6": {
+        "input": 3.0,
+        "output": 15.0,
+        "cache_read": 0.3,
+        "cache_write": 3.75,
+        "note": "5-minute cache write; the 1-hour write is $6. No long-context tier: Claude 4.6 and later (except Haiku 5.5) bill the full 1M window at these rates. Verified against the raw page markup.",
+        "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+        "verified": "2026-11-03"
+      },
       "claude-sonnet-5-5": {
         "input": 2.0,
         "output": 10.0,
@@ -290,6 +299,30 @@
         "note": "Regular price. Google bills an introductory $0.75 / $3.75 / $0.075 through 2026-12-31: until then costs read twice the bill (an upper bound, so a Budget stops early, never late). Context-cache storage ($1.00 per 1M tokens per hour) is not modelled.",
         "source": "https://ai.google.dev/gemini-api/docs/pricing",
         "verified": "2026-10-18"
+      },
+      "gemini-3.6-flash": {
+        "input": 1.5,
+        "output": 7.5,
+        "cache_read": 0.15,
+        "note": "Regular price, from 2027-01-01. Google bills $0.75 / $3.75 / $0.075 through 2026-12-31: until then costs read twice the bill (an upper bound, so a Budget stops early, never late). Context-cache storage ($1.00 per 1M tokens per hour) is not modelled.",
+        "source": "https://ai.google.dev/gemini-api/docs/pricing",
+        "verified": "2026-11-03"
+      },
+      "gemini-3.1-pro-preview": {
+        "input": 2.0,
+        "output": 12.0,
+        "cache_read": 0.2,
+        "tiers": [
+          {
+            "above_prompt_tokens": 200000,
+            "input": 4.0,
+            "output": 18.0,
+            "cache_read": 0.4
+          }
+        ],
+        "note": "Prompts over 200,000 tokens bill at the second rates (Google: '<= 200k tokens' / '> 200k tokens'). Context-cache storage ($4.50 per 1M tokens per hour) is not modelled.",
+        "source": "https://ai.google.dev/gemini-api/docs/pricing",
+        "verified": "2026-11-03"
       },
       "gemini-4-argon": {
         "input": 4.0,

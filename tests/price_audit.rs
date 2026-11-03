@@ -188,6 +188,15 @@ const FLAT_RATE_GAPS: &[(&str, &str, FlatRateGap)] = &[
         },
     ),
     (
+        "google",
+        "gemini-3.6-flash",
+        FlatRateGap {
+            keys: &["input_audio"],
+            rates: &[("/input_audio", 0.75), ("/input", 0.75)],
+            why: GEMINI_AUDIO,
+        },
+    ),
+    (
         "deepseek",
         "deepseek-flash",
         FlatRateGap {
@@ -241,6 +250,7 @@ const PEAK_IS_TWICE_UPSTREAM: &[&str] = &["deepseek"];
 const PROMO_IS_HALF_REGULAR: &[(&str, &str)] = &[
     ("google", "gemini-4-argon"),
     ("google", "gemini-3.8-flash"),
+    ("google", "gemini-3.6-flash"),
     // Mistral Large 4 left on 2026-10-23: its launch sale ended, and
     // models.dev lists the regular rate the crate carries.
 ];
@@ -330,6 +340,9 @@ fn every_priced_preset_is_an_audited_entry() {
         ModelConfig::gpt_6_1_terra(),
         ModelConfig::glm_5_3_flashx(),
         ModelConfig::qwen_3_8_omni_flash(),
+        ModelConfig::claude_sonnet_4_6(),
+        ModelConfig::gemini_3_6_flash(),
+        ModelConfig::gemini_3_1_pro_preview(),
     ] {
         let entry = table
             .entry(&config.provider, &config.id)
