@@ -189,6 +189,12 @@ pub struct StdioTransport {
 #[non_exhaustive]
 pub struct StdioOptions {
     own_process_group: bool,
+    /// Inherited variables the server does not get.
+    env_remove: Vec<std::ffi::OsString>,
+    /// Inherit nothing but `env_keep`.
+    env_clear: bool,
+    /// With `env_clear`: inherited variables it keeps.
+    env_keep: Vec<std::ffi::OsString>,
 }
 
 #[cfg(feature = "native")]
@@ -225,6 +231,85 @@ impl StdioOptions {
     pub fn own_process_group(mut self, yes: bool) -> Self {
         self.own_process_group = yes;
         self
+    }
+
+    /// Do not pass the host's variable `name` to the server: it starts
+    /// with `name` **unset**, not empty (an empty value is still a value —
+    /// a credential set to `""` can break a server that would run fine
+    /// without one). Repeatable. Applies to what the server inherits; a
+    /// variable given in the `env` map of
+    /// [`with_options`](StdioTransport::with_options) is still set.
+    ///
+    /// To keep the host's provider keys out of every server it starts:
+    ///
+    /// ```no_run
+    /// # async fn run() -> Result<(), yoagent::mcp::McpError> {
+    /// use yoagent::mcp::{McpClient, StdioOptions};
+    /// let options = StdioOptions::new().env_remove_all(yoagent::provider::api_key_variables());
+    /// let client = McpClient::connect_stdio_with("npx", &["-y", "some-mcp-server"], None, options).await?;
+    /// # Ok(()) }
+    /// ```
+    pub fn env_remove(mut self, name: impl Into<std::ffi::OsString>) -> Self {
+        self.env_remove.push(name.into());
+        self
+    }
+
+    /// [`env_remove`](Self::env_remove) for each of `names`.
+    pub fn env_remove_all<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<std::ffi::OsString>,
+    {
+        self.env_remove.extend(names.into_iter().map(Into::into));
+        self
+    }
+
+    /// Pass the server **only** the host's variables named in `keep` (those
+    /// that are set; one that is not stays unset), plus, as always, the `env`
+    /// map — an allow-list, the opposite default to
+    /// [`env_remove`](Self::env_remove) (which still wins over it). Called
+    /// again, the lists add up.
+    ///
+    /// Most servers need at least `PATH`: to find the command when it is
+    /// not in `/bin` or `/usr/bin`, and for scripts such as `npx`
+    /// (`#!/usr/bin/env node`) to find their interpreter. Often `HOME` too;
+    /// on Windows also `SystemRoot` (Winsock and Node need it).
+    ///
+    /// ```no_run
+    /// # async fn run() -> Result<(), yoagent::mcp::McpError> {
+    /// use yoagent::mcp::{McpClient, StdioOptions};
+    /// let options = StdioOptions::new().env_clear_except(["PATH", "HOME"]);
+    /// let client = McpClient::connect_stdio_with("npx", &["-y", "some-mcp-server"], None, options).await?;
+    /// # Ok(()) }
+    /// ```
+    pub fn env_clear_except<I, S>(mut self, keep: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<std::ffi::OsString>,
+    {
+        self.env_clear = true;
+        self.env_keep.extend(keep.into_iter().map(Into::into));
+        self
+    }
+
+    /// The server's environment changes, in order: clear (keeping the
+    /// allow-list's variables that are set), remove, then the caller's
+    /// `env` map.
+    fn apply_env(&self, cmd: &mut Command, env: Option<HashMap<String, String>>) {
+        if self.env_clear {
+            cmd.env_clear();
+            for name in &self.env_keep {
+                if let Some(value) = std::env::var_os(name) {
+                    cmd.env(name, value);
+                }
+            }
+        }
+        for name in &self.env_remove {
+            cmd.env_remove(name);
+        }
+        for (k, v) in env.into_iter().flatten() {
+            cmd.env(k, v);
+        }
     }
 }
 
@@ -318,11 +403,7 @@ impl StdioTransport {
             // Dropping the transport (or the client) ends the server.
             .kill_on_drop(true);
 
-        if let Some(env_vars) = env {
-            for (k, v) in env_vars {
-                cmd.env(k, v);
-            }
-        }
+        options.apply_env(&mut cmd, env);
 
         let mut child = cmd
             .spawn()

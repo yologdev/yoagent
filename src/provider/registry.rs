@@ -222,9 +222,10 @@ const DECISION_KEY_VARIABLES: &[&str] = &[
 /// decision-model presets' keys — each once, in that order.
 ///
 /// For hosts that keep credentials away from code they run (plugins, MCP
-/// servers): set each of these to the empty string in the child's
-/// environment when the launcher can only add variables. A key a host
-/// passes under another name (a manifest's own variable) is not in it.
+/// servers): unset each of these in the child's environment — for yoagent's
+/// MCP stdio servers, `StdioOptions::env_remove_all` (native) — or set it
+/// to the empty string when the launcher can only add variables. A key a
+/// host passes under another name (a manifest's own variable) is not in it.
 pub fn api_key_variables() -> Vec<&'static str> {
     let mut names: Vec<&'static str> = Vec::new();
     let all = PROVIDER_KEY_VARIABLES

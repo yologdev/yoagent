@@ -57,7 +57,7 @@ Before writing loop code of your own, find the hook below.
 | branch / restore history | `session::Session` (a tree, JSONL) | `docs/concepts/session-trees.md` |
 | know what it cost | `agent.total_cost_usd()`, `SessionStats` buckets | `docs/concepts/pricing.md` |
 | use current prices, not the bundled snapshot | `prices::enable_live_cached(&source, path, CacheOptions)` (native), then `agent.reprice()` for configs built before | `docs/concepts/pricing.md#live-sources` |
-| keep API keys from processes it starts | set each of `provider::api_key_variables()` to `""` in their environment | `docs/providers/overview.md` |
+| keep API keys from processes it starts | MCP stdio: `StdioOptions::new().env_remove_all(provider::api_key_variables())` (unset, not `""`); elsewhere unset or blank each of `provider::api_key_variables()` | `docs/providers/overview.md` |
 | record runs to a git repo (GASP) | `gasp::GaspRecorder` + `recording_sender` (feature `gasp`, native) | `docs/concepts/gasp.md` |
 | test without a network | `MockProvider` + `Agent::from_provider` | `docs/guides/testing.md` |
 | run on Cloudflare Workers | `default-features = false` (wasm32); the AI binding: [yoagent-workers](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-workers) | `docs/guides/wasm-workers.md` |
@@ -264,8 +264,9 @@ UI, model layer, agents) rather than add agent tools.
 - **MCP servers you start**: `McpClient::connect_stdio_with(cmd, args, env,
   StdioOptions::new().own_process_group(true))` (Unix) keeps the
   terminal's Ctrl+C from the server and kills what it started on close or
-  drop. The server inherits your environment: an `env` setting each of
-  `provider::api_key_variables()` to `""` keeps your keys from it. Over
+  drop. The server inherits your environment:
+  `.env_remove_all(provider::api_key_variables())` on the same options
+  keeps your keys from it (unset, not `""`). Over
   HTTP, redirects stay within the server's origin unless
   `HttpTransport::with_redirects(Redirects::Any)`; a custom `McpTransport`
   reports tool-list changes through `report_notifications`.

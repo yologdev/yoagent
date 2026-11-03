@@ -445,6 +445,11 @@ fn prose_names() {
             McpClient::connect_stdio_with("srv", &[], Some(Default::default()), o)
         };
         let _ = StdioOptions::new().own_process_group(true);
+        let _ = StdioOptions::new()
+            .env_remove_all(yoagent::provider::api_key_variables())
+            .env_remove("KEY")
+            .env_clear_except(["PATH"]);
+        let _ = Agent::with_mcp_server_stdio_with;
         let _ = |s: &yoagent::provider::PriceSource, o: yoagent::provider::CacheOptions| {
             let _ = yoagent::provider::prices::enable_live_cached(s, "prices.json", o);
         };

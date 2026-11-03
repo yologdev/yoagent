@@ -83,6 +83,24 @@ How the stdio transport behaves:
   wrapper) has its group killed as soon as its exit is seen (`exited()`, a tool
   source's turn, a call finding its output closed): the server is gone, and so
   is what it left behind — including a real server a launcher backgrounded.
+- The server inherits the host's environment, provider keys included. Keep
+  variables from it with `StdioOptions`: `env_remove(name)` /
+  `env_remove_all(names)` start it with them **unset** (not `""` — an empty
+  credential is still a value, and some servers fail on one), and
+  `env_clear_except(names)` passes only an allow-list (keep at least `PATH`;
+  on Windows also `SystemRoot`). The `env` map is applied after both, so a
+  value you set wins. On the `Agent`, use
+  `with_mcp_server_stdio_with(command, args, env, options)`:
+
+  ```rust
+  use yoagent::mcp::{McpClient, StdioOptions};
+  let options = StdioOptions::new()
+      .own_process_group(true)
+      .env_remove_all(yoagent::provider::api_key_variables());
+  let client = McpClient::connect_stdio_with("npx", &["-y", "some-mcp-server"], None, options).await?;
+  ```
+
+  Since 0.26.8; before it, the only option was setting each key to `""`.
 
 ### HTTP Transport
 
