@@ -917,6 +917,63 @@ fn claude_version(id: &str) -> Option<(u32, u32)> {
     Some((major, minor))
 }
 
+/// Geography prefixes of Bedrock's cross-Region inference profiles, before
+/// `anthropic.`: `global` and the geographies AWS documents (`us`, `eu`,
+/// `apac`, `in` in its geographic cross-Region inference guide; `us-gov`,
+/// `jp`, `au`, `ca` in the Claude model cards' profile ids).
+const BEDROCK_PROFILE_PREFIXES: &[&str] = &[
+    "global", "us", "us-gov", "eu", "apac", "jp", "au", "ca", "in",
+];
+
+/// Bedrock model ids (after `anthropic.`) of the Claude models with a preset,
+/// with the preset's Anthropic id, per AWS's model cards
+/// (`docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-*`).
+/// Only Haiku 4.5 carries a date and version; the rest are the Anthropic id.
+const BEDROCK_CLAUDE_IDS: &[(&str, &str)] = &[
+    ("claude-fable-5-1", "claude-fable-5-1"),
+    ("claude-fable-5", "claude-fable-5"),
+    ("claude-opus-5-5", "claude-opus-5-5"),
+    ("claude-opus-5", "claude-opus-5"),
+    ("claude-opus-4-8", "claude-opus-4-8"),
+    ("claude-sonnet-5-5", "claude-sonnet-5-5"),
+    ("claude-sonnet-5", "claude-sonnet-5"),
+    ("claude-sonnet-4-6", "claude-sonnet-4-6"),
+    ("claude-haiku-5-5", "claude-haiku-5-5"),
+    ("claude-haiku-4-5-20251001-v1:0", "claude-haiku-4-5"),
+];
+
+/// The endpoint a Bedrock preset starts with; callers set their own Region.
+const BEDROCK_PRESET_BASE_URL: &str = "https://bedrock-runtime.us-east-1.amazonaws.com";
+
+/// OpenRouter's Chat Completions base URL.
+const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
+
+/// OpenRouter vendor prefixes (as its `/api/v1/models` listing spells them)
+/// of the providers with presets whose ids OpenRouter serves.
+const OPENROUTER_VENDORS: &[(&str, &str)] = &[
+    ("anthropic", "anthropic"),
+    ("openai", "openai"),
+    ("google", "google"),
+    ("x-ai", "xai"),
+    ("z-ai", "zai"),
+    ("qwen", "qwen"),
+];
+
+/// OpenRouter's spelling of an Anthropic model id: a trailing
+/// `-{major}-{minor}` is written `-{major}.{minor}` (`claude-sonnet-4-6` →
+/// `claude-sonnet-4.6`); an id without a minor version is unchanged.
+fn openrouter_claude_id(anthropic_id: &str) -> String {
+    let is_number = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    match anthropic_id.rsplit_once('-') {
+        Some((head, minor))
+            if is_number(minor) && head.rsplit_once('-').is_some_and(|(_, m)| is_number(m)) =>
+        {
+            format!("{head}.{minor}")
+        }
+        _ => anthropic_id.to_owned(),
+    }
+}
+
 /// Quirk flags for the Gemini protocols (`GoogleGenerativeAi` and
 /// `GoogleVertex`).
 ///
@@ -2067,8 +2124,38 @@ impl ModelConfig {
     /// `("openai_responses", "gpt-6-sol")` and `("openai", "GPT-6-Sol")` find
     /// nothing. Only the match is built.
     ///
-    /// From `provider/id` text, split at the first `/` (Groq's ids contain
-    /// one), and fall back to [`generic`](Self::generic):
+    /// Two hosts of those models are resolved too, each to a config for that
+    /// host carrying the vendor preset's context window, output limit and
+    /// `reasoning` flag — and **no price** (`cost: None`; what they bill is
+    /// not the vendor's list price):
+    ///
+    /// - `"bedrock"`: a Claude model on Amazon Bedrock by its Bedrock model id
+    ///   (`anthropic.claude-sonnet-4-6`) or a cross-Region inference profile
+    ///   id (`us.anthropic.claude-sonnet-4-6`, `global.…`; the geography
+    ///   prefixes `us`, `us-gov`, `eu`, `apac`, `jp`, `au`, `ca`, `in`). The
+    ///   id is kept as given; the config uses
+    ///   [`ApiProtocol::BedrockConverseStream`] and the `us-east-1` endpoint,
+    ///   so set [`base_url`](Self::base_url) to a Region the profile serves
+    ///   (an `eu.` profile is called from an EU Region). Bedrock spells
+    ///   Haiku 4.5 `anthropic.claude-haiku-4-5-20251001-v1:0`; the others are
+    ///   the Anthropic id behind `anthropic.`. ARNs, other vendors' models
+    ///   and unknown prefixes find nothing. Bedrock's ConverseStream sends
+    ///   budget-based thinking for any `ThinkingLevel` but `Off` (see
+    ///   [`BedrockProvider`](crate::provider::BedrockProvider)), which the
+    ///   adaptive-only Claude models (Sonnet 5.5, Opus 5.5, Haiku 5.5,
+    ///   Fable 5.1) reject.
+    /// - `"openrouter"`: an OpenRouter model id, `<vendor>/<model>`, for the
+    ///   vendors `anthropic`, `openai`, `google`, `x-ai` (xAI), `z-ai` (Z.ai)
+    ///   and `qwen` — OpenRouter's Chat Completions endpoint
+    ///   (`https://openrouter.ai/api/v1`, [`OpenAiCompat::openrouter`]). The
+    ///   model is the vendor's id, except that OpenRouter writes a Claude
+    ///   version with a dot (`anthropic/claude-sonnet-4.6` for
+    ///   `claude-sonnet-4-6`); the dashed spelling, variants such as
+    ///   `:batch`, and vendors without presets find nothing.
+    ///
+    /// From `provider/id` text, split at the first `/` (Groq's and
+    /// OpenRouter's ids contain one), and fall back to
+    /// [`generic`](Self::generic):
     ///
     /// ```
     /// # use yoagent::provider::{ApiProtocol, ModelConfig};
@@ -2083,12 +2170,82 @@ impl ModelConfig {
     ///     ModelConfig::generic(provider, id)
     /// });
     /// assert_eq!(config.unwrap().id, "openai/gpt-oss-120b");
+    ///
+    /// let bedrock = ModelConfig::preset("bedrock", "us.anthropic.claude-sonnet-4-6").unwrap();
+    /// assert_eq!(bedrock.api, ApiProtocol::BedrockConverseStream);
+    /// assert_eq!(bedrock.context_window, 1_000_000);
+    /// assert!(bedrock.cost.is_none());
+    ///
+    /// let routed = ModelConfig::preset("openrouter", "anthropic/claude-sonnet-4.6").unwrap();
+    /// assert_eq!(routed.id, "anthropic/claude-sonnet-4.6");
+    /// assert!(ModelConfig::preset("openrouter", "anthropic/claude-sonnet-4-6").is_none());
     /// ```
     pub fn preset(provider: &str, id: &str) -> Option<ModelConfig> {
+        match provider {
+            "bedrock" => Self::bedrock_preset(id),
+            "openrouter" => Self::openrouter_preset(id),
+            _ => Self::named_preset(provider, id),
+        }
+    }
+
+    /// The row of [`PRESETS`](Self::PRESETS) for exactly `provider` and `id`,
+    /// built.
+    fn named_preset(provider: &str, id: &str) -> Option<ModelConfig> {
         Self::PRESETS
             .iter()
             .find(|(p, i, _)| *p == provider && *i == id)
             .map(|(_, _, preset)| preset())
+    }
+
+    /// A Claude preset on Amazon Bedrock (see [`preset`](Self::preset)).
+    fn bedrock_preset(id: &str) -> Option<ModelConfig> {
+        let model = match id.split_once('.') {
+            Some((prefix, rest)) if BEDROCK_PROFILE_PREFIXES.contains(&prefix) => rest,
+            _ => id,
+        };
+        let model = model.strip_prefix("anthropic.")?;
+        let (_, anthropic_id) = BEDROCK_CLAUDE_IDS.iter().find(|(b, _)| *b == model)?;
+        let vendor = Self::named_preset("anthropic", anthropic_id)?;
+        Some(Self {
+            id: id.to_owned(),
+            api: ApiProtocol::BedrockConverseStream,
+            provider: "bedrock".into(),
+            base_url: BEDROCK_PRESET_BASE_URL.into(),
+            cost: None,
+            list_priced: false,
+            headers: HashMap::new(),
+            google: None,
+            anthropic: None,
+            compat: None,
+            ..vendor
+        })
+    }
+
+    /// A vendor preset behind OpenRouter (see [`preset`](Self::preset)).
+    fn openrouter_preset(id: &str) -> Option<ModelConfig> {
+        let (vendor, model) = id.split_once('/')?;
+        let (_, provider) = OPENROUTER_VENDORS.iter().find(|(v, _)| *v == vendor)?;
+        let preset = if *provider == "anthropic" {
+            Self::PRESETS
+                .iter()
+                .find(|(p, i, _)| *p == "anthropic" && openrouter_claude_id(i) == model)
+                .map(|(_, _, preset)| preset())
+        } else {
+            Self::named_preset(provider, model)
+        }?;
+        Some(Self {
+            id: id.to_owned(),
+            api: ApiProtocol::OpenAiCompletions,
+            provider: "openrouter".into(),
+            base_url: OPENROUTER_BASE_URL.into(),
+            cost: None,
+            list_priced: false,
+            headers: HashMap::new(),
+            google: None,
+            anthropic: None,
+            compat: Some(OpenAiCompat::openrouter()),
+            ..preset
+        })
     }
 
     /// A config for `id` at a first-party `provider` from that provider's
@@ -2777,6 +2934,203 @@ mod tests {
         assert!(ModelConfig::preset("opencode-zen", "gpt-6-sol").is_none());
         assert!(ModelConfig::preset("xai", "grok-4.6").is_none());
         assert!(ModelConfig::preset("anthropic", "").is_none());
+        // Host spellings stay with their host: no prefix or dot is read at
+        // the vendor.
+        assert!(ModelConfig::preset("anthropic", "claude-sonnet-4.6").is_none());
+        assert!(ModelConfig::preset("anthropic", "anthropic.claude-sonnet-4-6").is_none());
+        assert!(ModelConfig::preset("anthropic", "us.anthropic.claude-sonnet-4-6").is_none());
+        assert!(ModelConfig::preset("anthropic", "anthropic/claude-sonnet-4.6").is_none());
+    }
+
+    #[test]
+    fn bedrock_preset_reads_inference_profile_ids() {
+        crate::provider::prices::enable_bundled();
+        let vendor = ModelConfig::claude_sonnet_4_6();
+        for prefix in [
+            "", "global.", "us.", "us-gov.", "eu.", "apac.", "jp.", "au.", "ca.", "in.",
+        ] {
+            let id = format!("{prefix}anthropic.claude-sonnet-4-6");
+            let config = ModelConfig::preset("bedrock", &id).unwrap_or_else(|| panic!("{id}"));
+            assert_eq!(config.id, id);
+            assert_eq!(config.name, vendor.name);
+            assert_eq!(config.api, ApiProtocol::BedrockConverseStream);
+            assert_eq!(config.provider, "bedrock");
+            assert_eq!(config.base_url, BEDROCK_PRESET_BASE_URL);
+            assert_eq!(
+                (config.context_window, config.max_tokens, config.reasoning),
+                (vendor.context_window, vendor.max_tokens, vendor.reasoning)
+            );
+            // Bedrock bills its own rates (and more on regional profiles):
+            // never Anthropic's, even with the snapshot on.
+            assert!(vendor.cost.is_some());
+            assert!(config.cost.is_none(), "{id}");
+            assert!(!config.list_priced);
+            assert!(config.reprice().cost.is_none(), "{id}");
+            let config = ModelConfig::preset("bedrock", &id).unwrap();
+            assert!(config.anthropic.is_none() && config.compat.is_none());
+        }
+        // Haiku 4.5 is the one id with a date and version on Bedrock.
+        let haiku =
+            ModelConfig::preset("bedrock", "global.anthropic.claude-haiku-4-5-20251001-v1:0")
+                .unwrap();
+        assert_eq!((haiku.context_window, haiku.max_tokens), (200_000, 32_000));
+        assert_eq!(haiku.id, "global.anthropic.claude-haiku-4-5-20251001-v1:0");
+        // Every row names a real preset.
+        for (bedrock, anthropic) in BEDROCK_CLAUDE_IDS {
+            let preset = ModelConfig::preset("anthropic", anthropic).unwrap();
+            let on_bedrock =
+                ModelConfig::preset("bedrock", &format!("us.anthropic.{bedrock}")).unwrap();
+            assert_eq!(
+                on_bedrock.context_window, preset.context_window,
+                "{bedrock}"
+            );
+            assert_eq!(on_bedrock.max_tokens, preset.max_tokens, "{bedrock}");
+        }
+    }
+
+    #[test]
+    fn bedrock_preset_refuses_near_misses() {
+        for id in [
+            "",
+            "us.",
+            "anthropic.",
+            "claude-sonnet-4-6",
+            "anthropic.claude-sonnet-4.6",
+            "anthropic.claude-sonnet-4-6-v1:0",
+            "anthropic.claude-sonnet-4-6 ",
+            "US.anthropic.claude-sonnet-4-6",
+            "xx.anthropic.claude-sonnet-4-6",
+            "us.us.anthropic.claude-sonnet-4-6",
+            "us.global.anthropic.claude-sonnet-4-6",
+            "anthropic.us.claude-sonnet-4-6",
+            "Anthropic.claude-sonnet-4-6",
+            "arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.claude-sonnet-4-6",
+            "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-4-6",
+            // Mantle's spelling of Haiku 4.5, not the bedrock-runtime one.
+            "anthropic.claude-haiku-4-5",
+            "us.anthropic.claude-haiku-4-5-20251001-v2:0",
+            "us.anthropic.claude-opus-4-6-v1",
+            "us.amazon.nova-pro-v1:0",
+            "us.meta.llama4-maverick-17b-instruct-v1:0",
+            "openai.gpt-oss-120b-1:0",
+        ] {
+            assert!(ModelConfig::preset("bedrock", id).is_none(), "{id:?}");
+        }
+        // Only the provider name `bedrock` reads Bedrock ids.
+        assert!(ModelConfig::preset("aws-bedrock", "us.anthropic.claude-sonnet-4-6").is_none());
+        assert!(ModelConfig::preset("Bedrock", "us.anthropic.claude-sonnet-4-6").is_none());
+        assert!(ModelConfig::generic("bedrock", "us.anthropic.claude-sonnet-4-6").is_none());
+    }
+
+    #[test]
+    fn openrouter_preset_reads_vendor_slash_id() {
+        crate::provider::prices::enable_bundled();
+        for (id, vendor) in [
+            (
+                "anthropic/claude-sonnet-4.6",
+                ModelConfig::claude_sonnet_4_6(),
+            ),
+            ("anthropic/claude-sonnet-5", ModelConfig::claude_sonnet_5()),
+            (
+                "anthropic/claude-haiku-4.5",
+                ModelConfig::claude_haiku_4_5(),
+            ),
+            (
+                "anthropic/claude-fable-5.1",
+                ModelConfig::claude_fable_5_1(),
+            ),
+            ("openai/gpt-6-sol", ModelConfig::gpt_6_sol()),
+            ("openai/gpt-5.5", ModelConfig::gpt_5_5()),
+            ("google/gemini-3.6-flash", ModelConfig::gemini_3_6_flash()),
+            ("x-ai/grok-4.7", ModelConfig::grok_4_7()),
+            ("z-ai/glm-5.3-flashx", ModelConfig::glm_5_3_flashx()),
+            (
+                "qwen/qwen3.8-omni-flash",
+                ModelConfig::qwen_3_8_omni_flash(),
+            ),
+        ] {
+            let config = ModelConfig::preset("openrouter", id).unwrap_or_else(|| panic!("{id}"));
+            assert_eq!(config.id, id);
+            assert_eq!(config.name, vendor.name);
+            assert_eq!(config.provider, "openrouter");
+            assert_eq!(config.api, ApiProtocol::OpenAiCompletions);
+            assert_eq!(config.base_url, OPENROUTER_BASE_URL);
+            assert_eq!(
+                config.compat.as_ref().map(|c| c.max_tokens_field),
+                Some(OpenAiCompat::openrouter().max_tokens_field)
+            );
+            assert_eq!(
+                (config.context_window, config.max_tokens, config.reasoning),
+                (vendor.context_window, vendor.max_tokens, vendor.reasoning),
+                "{id}"
+            );
+            // A gateway: never the vendor's list price.
+            assert!(vendor.cost.is_some(), "{id}");
+            assert!(config.cost.is_none(), "{id}");
+            assert!(!config.list_priced);
+            assert!(config.anthropic.is_none() && config.google.is_none());
+        }
+        // Every Claude preset is reachable by its OpenRouter spelling.
+        for (provider, id, _) in ModelConfig::PRESETS {
+            if *provider == "anthropic" {
+                let routed = format!("anthropic/{}", openrouter_claude_id(id));
+                assert!(
+                    ModelConfig::preset("openrouter", &routed).is_some(),
+                    "{routed}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn openrouter_preset_refuses_near_misses() {
+        for id in [
+            "",
+            "anthropic/",
+            "/claude-sonnet-4.6",
+            "claude-sonnet-4.6",
+            // Anthropic's own spelling is not OpenRouter's.
+            "anthropic/claude-sonnet-4-6",
+            "anthropic/claude-haiku-4-5",
+            "anthropic/claude-sonnet-4.6:batch",
+            "anthropic/claude-sonnet-4.6 ",
+            "anthropic/claude-4.6-sonnet-20260217",
+            "anthropic/claude-sonnet-4..6",
+            "anthropic/claude-sonnet.4.6",
+            "anthropic/claude-opus-4.6",
+            "Anthropic/claude-sonnet-4.6",
+            "openai/GPT-6-Sol",
+            "openai/gpt-6-sol:batch",
+            "openai/gpt-6-sol-pro",
+            // Vendor names as yoagent spells them, not OpenRouter.
+            "xai/grok-4.7",
+            "zai/glm-5.3",
+            "x-ai/grok-4.6",
+            "google/gemini-3.8-flash/extra",
+            "mistralai/mistral-large-4-0",
+            "mistral/mistral-large-4",
+            "meta/muse-spark-1.3",
+            "qwen/qwen3.8-max-0902",
+            "openrouter/auto",
+        ] {
+            assert!(ModelConfig::preset("openrouter", id).is_none(), "{id:?}");
+        }
+        assert!(ModelConfig::generic("openrouter", "x-ai/grok-4.7").is_none());
+    }
+
+    #[test]
+    fn openrouter_claude_spelling() {
+        for (anthropic, openrouter) in [
+            ("claude-sonnet-4-6", "claude-sonnet-4.6"),
+            ("claude-haiku-4-5", "claude-haiku-4.5"),
+            ("claude-fable-5-1", "claude-fable-5.1"),
+            ("claude-opus-5", "claude-opus-5"),
+            ("claude-sonnet-5", "claude-sonnet-5"),
+            ("claude-x", "claude-x"),
+            ("claude-3-5-sonnet", "claude-3-5-sonnet"),
+        ] {
+            assert_eq!(openrouter_claude_id(anthropic), openrouter, "{anthropic}");
+        }
     }
 
     #[test]

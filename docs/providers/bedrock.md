@@ -7,7 +7,8 @@
 ```rust
 use yoagent::provider::{ApiProtocol, ModelConfig};
 
-// Bedrock has no dedicated ModelConfig preset — build one with `custom`.
+// Any Bedrock model: build the config with `custom`. (A Claude model with a
+// preset can also be looked up by its Bedrock id; see below.)
 // Credentials come from the environment (see Authentication below).
 let agent = Agent::from_config(ModelConfig::custom(
     ApiProtocol::BedrockConverseStream,
@@ -22,6 +23,37 @@ let agent = Agent::from_config(ModelConfig::custom(
 //   .with_api_key("ACCESS_KEY_ID:SECRET_ACCESS_KEY")      // IAM, SigV4-signed
 //   .with_api_key("ACCESS_KEY_ID:SECRET_ACCESS_KEY:SESSION_TOKEN")
 ```
+
+### Claude by Bedrock id
+
+For a Claude model with a yoagent preset, `ModelConfig::preset("bedrock", id)`
+takes the Bedrock model id or a cross-Region inference profile id and builds
+the config with that model's context window and output limit (the generic
+`custom` constructor above assumes 128K / 16K):
+
+```rust
+let mut config = ModelConfig::preset("bedrock", "eu.anthropic.claude-sonnet-4-6").unwrap();
+// The preset starts on us-east-1; call an `eu.` profile from an EU Region.
+config.base_url = "https://bedrock-runtime.eu-central-1.amazonaws.com".into();
+let agent = Agent::from_config(config);
+```
+
+- Accepted: `anthropic.<id>` with an optional `global.`, `us.`, `us-gov.`,
+  `eu.`, `apac.`, `jp.`, `au.`, `ca.` or `in.` profile prefix, for the Claude
+  presets as AWS's model cards spell them (Haiku 4.5 is
+  `anthropic.claude-haiku-4-5-20251001-v1:0`; the others are the Anthropic id,
+  for example `anthropic.claude-opus-5-5`). Which profiles exist differs per
+  model and Region — check the model's card in AWS's "models at a glance".
+- Not accepted (`None`): ARNs, other vendors' models (`amazon.`, `meta.`, …),
+  Claude models without a preset, and any other spelling.
+- **Unpriced** (`cost: None`). Bedrock bills its own rates, and regional and
+  geographic profiles (`us.`, `eu.`, …) and in-Region calls carry a 10% premium
+  over `global.` ones; set `config.cost` yourself if you want cost reporting.
+- **Thinking.** This provider sends budget-based thinking
+  (`additionalModelRequestFields.thinking`) for every `ThinkingLevel` but
+  `Off` (the default). Claude Sonnet 5.5, Opus 5.5, Haiku 5.5 and Fable 5.1
+  accept only adaptive thinking on the Claude API; leave the level at `Off`
+  for them on Bedrock.
 
 ## Authentication
 
