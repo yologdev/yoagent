@@ -335,4 +335,88 @@ fn prose_names() {
     let _ = |p: std::sync::Arc<dyn yoagent::provider::StreamProvider>| {
         yoagent::agent_loop::AgentLoopConfig::new(p, "model")
     };
+    let _ = ModelConfig::presets;
+    let _ = Agent::set_model;
+    let _ = |a: Agent| a.with_thinking(yoagent::ThinkingLevel::Off);
+    let _ = |a: Agent| a.with_tool_execution(yoagent::ToolExecutionStrategy::Sequential);
+    let _ = yoagent::ToolExecutionStrategy::Batched { size: 2 };
+    let _ = || SkillSet::load(&[root()]);
+    let _ = || SkillSet::load_resilient(&[root()]);
+    let _ = Agent::with_skills;
+    async fn extension_points(
+        e: &dyn yoagent::Extension,
+        h: &mut dyn RunHooks,
+        r: &yoagent::extension::RunContext<'_>,
+    ) {
+        let _ = e.start_run(r).await;
+        let _ = h.tools(r).await;
+    }
+    let _ = extension_points;
+    let _ = Agent::with_context_config;
+    let _ = |a: Agent| {
+        a.with_compaction_strategy(yoagent::LlmCompaction::from_config(ModelConfig::mock()))
+    };
+    let _ = Agent::without_context_management;
+    let _ = yoagent::SharedState::new;
+    let _ = SubAgentTool::with_shared_state;
+    let _ = Agent::with_shared_state;
+    let _ = Agent::delegated_from;
+    let _ = yoagent::ToolContext::report_delegated_run;
+    async fn streaming(a: &mut Agent, tx: tokio::sync::mpsc::UnboundedSender<yoagent::AgentEvent>) {
+        a.prompt_with_sender("x", tx).await;
+        a.finish().await;
+        let _ = a.prompt("x").await;
+    }
+    let _ = streaming;
+    let _ = Agent::save_messages;
+    let _ = Agent::restore_messages;
+    let _ = Agent::reprice;
+    let _ = yoagent::provider::api_key_variables;
+    {
+        use yoagent::mcp::{
+            AuthChallenge, AuthorizationSource, HttpTransport, McpError, Redirects,
+        };
+        let _ = HttpTransport::with_authorization;
+        let _ = |s: &dyn AuthorizationSource, c: &AuthChallenge| {
+            let _ = s.challenged(c);
+        };
+        let _ = McpError::http_status;
+        let _ = McpError::www_authenticate;
+        let _ = |t: HttpTransport| t.with_redirects(Redirects::Any);
+        let _ = |t: &mut dyn yoagent::mcp::McpTransport, n: yoagent::mcp::ServerNotifications| {
+            t.report_notifications(n)
+        };
+    }
+    #[cfg(feature = "native")]
+    {
+        use yoagent::mcp::{McpClient, StdioOptions};
+        let _ = McpClient::connect_stdio_with;
+        let _ = StdioOptions::new().own_process_group(true);
+        let _ = |s: &yoagent::provider::PriceSource, o: yoagent::provider::CacheOptions| {
+            let _ = yoagent::provider::prices::enable_live_cached(s, "prices.json", o);
+        };
+    }
+    #[cfg(feature = "openapi")]
+    {
+        let _ = |a: Agent,
+                 c: yoagent::openapi::OpenApiConfig,
+                 f: &yoagent::openapi::OperationFilter| {
+            let _ = a.with_openapi_file("spec.yaml", c, f);
+        };
+        let _ = Agent::with_openapi_url;
+        let _ = Agent::with_openapi_spec;
+    }
+    #[cfg(feature = "decision")]
+    {
+        use yoagent::decision::DecisionModel;
+        let _ = DecisionModel::jev;
+        let _ = || DecisionModel::clef("account");
+        let _ = || DecisionModel::local("http://localhost:8080");
+        let _ = || DecisionModel::logprobs("http://localhost:8080", "model");
+        let _ = |a: DecisionModel, b: DecisionModel| a.or(b);
+        let _ = Agent::with_decision_model;
+        let _ = |m: &DecisionModel| {
+            let _ = yoagent::decision::calibrate(m, Vec::new());
+        };
+    }
 }
