@@ -21,9 +21,9 @@ Before writing loop code of your own, find the hook below.
 | You want to… | Use | Read |
 |---|---|---|
 | build an agent | `Agent::from_config(ModelConfig::…)` (provider and API key follow the config) | `docs/getting-started/quick-start.md` |
-| pick a model from `provider/id` text | `ModelConfig::preset(p, id)`, else `ModelConfig::generic(p, id)` (provider-default limits: tell the user); every preset: `ModelConfig::presets()` | `docs/providers/model-presets.md#looking-up-a-preset-by-name` |
+| pick a model from `provider/id` text | `ModelConfig::preset(p, id)`, else `ModelConfig::generic(p, id)` (provider-default limits: tell the user); `preset` also reads `("bedrock", "us.anthropic.claude-sonnet-4-6")` and `("openrouter", "anthropic/claude-sonnet-4.6")` — unpriced; every preset: `ModelConfig::presets()` | `docs/providers/model-presets.md#looking-up-a-preset-by-name` |
 | switch model or thinking mid-session | `agent.set_model(config)` (an explicit key or provider is kept); `agent = agent.with_thinking(ThinkingLevel::…)` between runs | `docs/providers/overview.md` |
-| run on Bedrock or Azure OpenAI | `ModelConfig::custom(ApiProtocol::…)` (Bedrock: SigV4 or API key, `base_url` required) | `docs/providers/bedrock.md`, `docs/providers/azure-openai.md` |
+| run on Bedrock or Azure OpenAI | `ModelConfig::custom(ApiProtocol::…)` (Bedrock: SigV4 or API key, `base_url` required; a Claude preset by Bedrock id via `preset("bedrock", id)`, starts on `us-east-1`) | `docs/providers/bedrock.md`, `docs/providers/azure-openai.md` |
 | give it tools | `impl AgentTool`; `.with_tools(…)` (built-ins: `tools::default_tools()`) | `docs/concepts/tools.md` |
 | run tool calls one at a time or in batches | `.with_tool_execution(ToolExecutionStrategy::Sequential)` / `Batched { size }` (default `Parallel`) | `docs/concepts/tools.md#execution-strategies` |
 | turn an OpenAPI spec into tools | `.with_openapi_file(…)` / `_url(…)` / `_spec(…)` (feature `openapi`) | `docs/guides/openapi.md` |

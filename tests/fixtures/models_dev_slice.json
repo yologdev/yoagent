@@ -55,6 +55,22 @@
      "cache_read": 0.1,
      "cache_write": 1.25
     }
+   },
+   "claude-sonnet-4-6": {
+    "id": "claude-sonnet-4-6",
+    "name": "Claude Sonnet 4.6",
+    "reasoning": true,
+    "tool_call": true,
+    "limit": {
+     "context": 1000000,
+     "output": 128000
+    },
+    "cost": {
+     "input": 3,
+     "output": 15,
+     "cache_read": 0.3,
+     "cache_write": 3.75
+    }
    }
   }
  },
@@ -383,6 +399,53 @@
       "input": 2.5,
       "output": 15,
       "cache_read": 0.25
+     }
+    }
+   },
+   "gemini-3.6-flash": {
+    "id": "gemini-3.6-flash",
+    "name": "Gemini 3.6 Flash",
+    "reasoning": true,
+    "tool_call": true,
+    "limit": {
+     "context": 1048576,
+     "output": 65536
+    },
+    "cost": {
+     "input": 0.75,
+     "output": 3.75,
+     "cache_read": 0.075,
+     "input_audio": 0.75
+    }
+   },
+   "gemini-3.1-pro-preview": {
+    "id": "gemini-3.1-pro-preview",
+    "name": "Gemini 3.1 Pro Preview",
+    "reasoning": true,
+    "tool_call": true,
+    "limit": {
+     "context": 1048576,
+     "output": 65536
+    },
+    "cost": {
+     "input": 2,
+     "output": 12,
+     "cache_read": 0.2,
+     "tiers": [
+      {
+       "input": 4,
+       "output": 18,
+       "cache_read": 0.4,
+       "tier": {
+        "type": "context",
+        "size": 200000
+       }
+      }
+     ],
+     "context_over_200k": {
+      "input": 4,
+      "output": 18,
+      "cache_read": 0.4
      }
     }
    }

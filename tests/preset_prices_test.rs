@@ -157,6 +157,22 @@ fn pinned() -> Vec<(&'static str, ModelConfig, CostConfig)> {
             read_only(0.15, 0.47, 0.016),
         ),
         (
+            "claude_sonnet_4_6",
+            ModelConfig::claude_sonnet_4_6(),
+            flat(3.0, 15.0, 0.3, 3.75),
+        ),
+        (
+            "gemini_3_6_flash",
+            ModelConfig::gemini_3_6_flash(),
+            read_only(1.5, 7.5, 0.15),
+        ),
+        (
+            "gemini_3_1_pro_preview",
+            ModelConfig::gemini_3_1_pro_preview(),
+            read_only(2.0, 12.0, 0.2)
+                .with_context_tier(ContextTier::new(200_000, 4.0, 18.0).with_cache_read(0.4)),
+        ),
+        (
             "meta(muse-spark-1.3)",
             ModelConfig::meta("muse-spark-1.3", "Muse Spark 1.3"),
             flat(1.25, 4.25, 0.15, 1.25),
@@ -193,10 +209,11 @@ fn expected_max_tokens(name: &str) -> u32 {
         | "meta(muse-spark-1.2)"
         | "meta(muse-spark-1.3)"
         | "meta(muse-wonder-1.0)" => 131_072,
-        "claude_sonnet_5_5" | "claude_haiku_5_5" | "gpt_6_1_sol" | "gpt_6_1_terra" | "grok_4_7" => {
-            64_000
+        "claude_sonnet_5_5" | "claude_sonnet_4_6" | "claude_haiku_5_5" | "gpt_6_1_sol"
+        | "gpt_6_1_terra" | "grok_4_7" => 64_000,
+        "gemini_4_argon" | "gemini_3_8_flash" | "gemini_3_6_flash" | "gemini_3_1_pro_preview" => {
+            65_536
         }
-        "gemini_4_argon" | "gemini_3_8_flash" => 65_536,
         "mistral_large_4" => 32_768,
         "glm_5_3" | "glm_5_3_flash" | "glm_5_3_flashx" => 128_000,
         "qwen_3_8_max" | "qwen_3_8_flash" | "qwen_3_8_omni_flash" => 131_072,
@@ -213,6 +230,8 @@ fn expected_context_window(name: &str) -> u32 {
         "gpt_6_astra" | "gpt_6_sol" | "gpt_6_1_sol" | "gpt_6_1_terra" | "gpt_6_luna" => 1_050_000,
         "gemini_4_argon"
         | "gemini_3_8_flash"
+        | "gemini_3_6_flash"
+        | "gemini_3_1_pro_preview"
         | "meta(muse-spark-1.1)"
         | "meta(muse-spark-1.2)"
         | "meta(muse-spark-1.3)"
@@ -225,6 +244,7 @@ fn expected_context_window(name: &str) -> u32 {
         | "claude_opus_4_8"
         | "claude_sonnet_5"
         | "claude_sonnet_5_5"
+        | "claude_sonnet_4_6"
         | "claude_haiku_5_5"
         | "mistral_large_4"
         | "glm_5_3"
@@ -255,6 +275,8 @@ fn always_thinking_presets_are_marked_reasoning() {
     for config in [
         ModelConfig::gemini_4_argon(),
         ModelConfig::gemini_3_8_flash(),
+        ModelConfig::gemini_3_6_flash(),
+        ModelConfig::gemini_3_1_pro_preview(),
         ModelConfig::grok_4_7(),
         ModelConfig::glm_5_3(),
         ModelConfig::glm_5_3_flash(),

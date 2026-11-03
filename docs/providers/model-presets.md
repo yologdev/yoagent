@@ -16,6 +16,7 @@ Use a preset when the provider is listed here. Use a custom `ModelConfig` when y
 | `ModelConfig::claude_opus_4_8()` | Anthropic | `AnthropicMessages` | `https://api.anthropic.com/v1` | 1M | 64,000 |
 | `ModelConfig::claude_sonnet_5()` | Anthropic | `AnthropicMessages` | `https://api.anthropic.com/v1` | 1M | 64,000 |
 | `ModelConfig::claude_sonnet_5_5()` | Anthropic | `AnthropicMessages` | `https://api.anthropic.com/v1` | 1M | 64,000 |
+| `ModelConfig::claude_sonnet_4_6()` | Anthropic | `AnthropicMessages` | `https://api.anthropic.com/v1` | 1M | 64,000 |
 | `ModelConfig::claude_haiku_5_5()` | Anthropic | `AnthropicMessages` | `https://api.anthropic.com/v1` | 1M | 64,000 |
 | `ModelConfig::claude_haiku_4_5()` | Anthropic | `AnthropicMessages` | `https://api.anthropic.com/v1` | 200K | 32,000 |
 | `ModelConfig::openai(id, name)` | OpenAI | `OpenAiCompletions` | `https://api.openai.com/v1` | 128K | 4,096 |
@@ -31,6 +32,8 @@ Use a preset when the provider is listed here. Use a custom `ModelConfig` when y
 | `ModelConfig::google(id, name)` | Google Gemini | `GoogleGenerativeAi` | `https://generativelanguage.googleapis.com` | 1M | 8,192 |
 | `ModelConfig::gemini_4_argon()` | Google Gemini | `GoogleGenerativeAi` | `https://generativelanguage.googleapis.com` | 1,048,576 | 65,536 |
 | `ModelConfig::gemini_3_8_flash()` | Google Gemini | `GoogleGenerativeAi` | `https://generativelanguage.googleapis.com` | 1,048,576 | 65,536 |
+| `ModelConfig::gemini_3_6_flash()` | Google Gemini | `GoogleGenerativeAi` | `https://generativelanguage.googleapis.com` | 1,048,576 | 65,536 |
+| `ModelConfig::gemini_3_1_pro_preview()` | Google Gemini | `GoogleGenerativeAi` | `https://generativelanguage.googleapis.com` | 1,048,576 | 65,536 |
 | `ModelConfig::xai(id, name)` | xAI | `OpenAiCompletions` | `https://api.x.ai/v1` | 131,072 | 4,096 |
 | `ModelConfig::grok_4_7()` | xAI | `OpenAiCompletions` | `https://api.x.ai/v1` | 500,000 | 64,000 |
 | `ModelConfig::groq(id, name)` | Groq | `OpenAiCompletions` | `https://api.groq.com/openai/v1` | 128K | 4,096 |
@@ -50,7 +53,7 @@ Use a preset when the provider is listed here. Use a custom `ModelConfig` when y
 
 The generic constructors (`google(id, name)`, `xai`, `mistral`, …) assume conservative limits; for a model with a named preset, use the preset — it carries the model's real context window and output limit (a generic `ModelConfig::xai("grok-4.7", ..)` compacts at 131K and stops replies at 4,096 tokens). The constructors do not validate model IDs. They send the `id` you pass through to the provider, which lets you use newly released model IDs before yoagent updates its examples.
 
-**Nothing is priced until the process opts in** — `prices::enable_bundled()` (the bundled data file `src/provider/prices.json`, offline) or `prices::enable_live(..)` (native) — see [Model Pricing](../concepts/pricing.md#enabling-pricing). After that, prices are looked up by `(provider, id)` when the config is built. The named presets (`claude_fable_5`, `claude_fable_5_1`, `claude_opus_5_5`, `claude_opus_5`, `claude_opus_4_8`, `claude_sonnet_5`, `claude_sonnet_5_5`, `claude_haiku_5_5`, `claude_haiku_4_5`, `gpt_5_5`, `gpt_6_astra`, `gpt_6_sol`, `gpt_6_1_sol`, `gpt_6_1_terra`, `gpt_6_luna`, `gemini_4_argon`, `gemini_3_8_flash`, `grok_4_7`, `mistral_large_4`, `glm_5_3`, `glm_5_3_flash`, `glm_5_3_flashx`, `qwen_3_8_max`, `qwen_3_8_flash`, `qwen_3_8_omni_flash`) are all in the snapshot (`cost: Some(CostConfig)`). The OpenAI ones carry a context tier: above 272K prompt tokens the whole request bills at the long-context rates (`gpt_5_5`'s long-band cached-input rate is unverified; see its `note` in the data file); so do `claude_haiku_5_5` (above 100K) and `grok_4_7` (above 200K; xAI bills a prompt of exactly 200,000 tokens at the higher rate, see its `note`). `gemini_4_argon` and `gemini_3_8_flash` carry the **regular** rate while Google runs a promotion (Gemini 4 Argon through 2026-11-30, 3.8 Flash through 2026-12-31): until then their costs read up to twice the bill, an upper bound, as with DeepSeek's peak rate. The generic first-party constructors (`anthropic`, `openai`, `openai_responses`, `google`, `xai`, `groq`, `deepseek`, `mistral`, `zai`, `minimax`, `qwen`, `meta`) are priced when the file lists the id — `ModelConfig::anthropic("claude-sonnet-5", ..)` gets `claude_sonnet_5()`'s rates, `meta` prices `muse-spark-1.1`/`-1.2`/`-1.3` and `muse-wonder-1.0`, `deepseek` prices `deepseek-flash`/`deepseek-v4-pro` and the legacy `deepseek-v4-flash`/`deepseek-v4-flash-vision-exp` at the peak rate (see [DeepSeek Models](#deepseek-models)) — and carry `cost: None` otherwise. Gateways and custom endpoints (`custom`, `openai_compat`, `local`, `ollama`, `opencode_zen`, `opencode_go`) are always `cost: None`, since what they bill is not the vendor's list price. `None` means pricing **unknown**, not free; set `config.cost = Some(CostConfig::new(input, output))` yourself if you want cost reporting. The OpenCode presets select the API protocol from the model id — see [OpenCode Zen & Go](opencode.md).
+**Nothing is priced until the process opts in** — `prices::enable_bundled()` (the bundled data file `src/provider/prices.json`, offline) or `prices::enable_live(..)` (native) — see [Model Pricing](../concepts/pricing.md#enabling-pricing). After that, prices are looked up by `(provider, id)` when the config is built. The named presets (`claude_fable_5`, `claude_fable_5_1`, `claude_opus_5_5`, `claude_opus_5`, `claude_opus_4_8`, `claude_sonnet_5`, `claude_sonnet_5_5`, `claude_sonnet_4_6`, `claude_haiku_5_5`, `claude_haiku_4_5`, `gpt_5_5`, `gpt_6_astra`, `gpt_6_sol`, `gpt_6_1_sol`, `gpt_6_1_terra`, `gpt_6_luna`, `gemini_4_argon`, `gemini_3_8_flash`, `gemini_3_6_flash`, `gemini_3_1_pro_preview`, `grok_4_7`, `mistral_large_4`, `glm_5_3`, `glm_5_3_flash`, `glm_5_3_flashx`, `qwen_3_8_max`, `qwen_3_8_flash`, `qwen_3_8_omni_flash`) are all in the snapshot (`cost: Some(CostConfig)`). The OpenAI ones carry a context tier: above 272K prompt tokens the whole request bills at the long-context rates (`gpt_5_5`'s long-band cached-input rate is unverified; see its `note` in the data file); so do `claude_haiku_5_5` (above 100K), `gemini_3_1_pro_preview` (above 200K) and `grok_4_7` (above 200K; xAI bills a prompt of exactly 200,000 tokens at the higher rate, see its `note`). `gemini_4_argon`, `gemini_3_8_flash` and `gemini_3_6_flash` carry the **regular** rate while Google runs a promotion (Gemini 4 Argon through 2026-11-30, 3.8 and 3.6 Flash through 2026-12-31): until then their costs read up to twice the bill, an upper bound, as with DeepSeek's peak rate. The generic first-party constructors (`anthropic`, `openai`, `openai_responses`, `google`, `xai`, `groq`, `deepseek`, `mistral`, `zai`, `minimax`, `qwen`, `meta`) are priced when the file lists the id — `ModelConfig::anthropic("claude-sonnet-5", ..)` gets `claude_sonnet_5()`'s rates, `meta` prices `muse-spark-1.1`/`-1.2`/`-1.3` and `muse-wonder-1.0`, `deepseek` prices `deepseek-flash`/`deepseek-v4-pro` and the legacy `deepseek-v4-flash`/`deepseek-v4-flash-vision-exp` at the peak rate (see [DeepSeek Models](#deepseek-models)) — and carry `cost: None` otherwise. Gateways and custom endpoints (`custom`, `openai_compat`, `local`, `ollama`, `opencode_zen`, `opencode_go`) are always `cost: None`, since what they bill is not the vendor's list price. `None` means pricing **unknown**, not free; set `config.cost = Some(CostConfig::new(input, output))` yourself if you want cost reporting. The OpenCode presets select the API protocol from the model id — see [OpenCode Zen & Go](opencode.md).
 
 The `claude_*` presets also set `AnthropicCompat::native_structured_output`, so `Agent::prompt_structured` uses the API's native JSON outputs instead of a forced tool call. `claude_fable_5_1` and `claude_opus_5_5` depend on it, because both models reject forced `tool_choice`. `ModelConfig::anthropic(id, name)` infers it (and the thinking mode) from a Claude id, and leaves it off for any other id. See [Structured Outputs](../concepts/structured-outputs.md).
 
@@ -65,6 +68,28 @@ flag):
   `None`. Case-sensitive, no aliases: `("openai", "gpt-6-sol")` finds
   `gpt_6_sol()`; `("openai_responses", "gpt-6-sol")` and `("opencode-zen",
   "gpt-6-sol")` find nothing.
+- `ModelConfig::preset("bedrock", id)` — a Claude preset on Amazon Bedrock,
+  by Bedrock model id (`anthropic.claude-sonnet-4-6`) or cross-Region
+  inference profile id (`us.anthropic.claude-sonnet-4-6`, `global.…`, and the
+  `us-gov`, `eu`, `apac`, `jp`, `au`, `ca`, `in` geographies). The config is
+  `BedrockConverseStream` on `https://bedrock-runtime.us-east-1.amazonaws.com`
+  — set `base_url` to a Region the profile serves — with the Anthropic
+  preset's limits and `cost: None`: Bedrock bills its own rates (regional
+  and geographic profiles 10% above global ones, per AWS), which yoagent does
+  not carry. Bedrock spells Haiku 4.5
+  `anthropic.claude-haiku-4-5-20251001-v1:0`; the other Claude presets are
+  the Anthropic id after `anthropic.`. ARNs, unknown prefixes and other
+  vendors' models find nothing. See [Amazon Bedrock](bedrock.md) for
+  thinking on Bedrock.
+- `ModelConfig::preset("openrouter", "vendor/model")` — a vendor preset
+  behind OpenRouter (`https://openrouter.ai/api/v1`, Chat Completions,
+  `OpenAiCompat::openrouter()`, key from `OPENROUTER_API_KEY`), for the
+  vendors `anthropic`, `openai`, `google`, `x-ai`, `z-ai` and `qwen`, with
+  the vendor preset's limits and `cost: None` (a gateway). The model is the
+  vendor's id as OpenRouter lists it, which for Claude writes the version
+  with a dot: `anthropic/claude-sonnet-4.6`, `anthropic/claude-opus-5`,
+  `openai/gpt-6-sol`, `x-ai/grok-4.7`. The dashed Anthropic spelling and
+  variants such as `:batch` find nothing.
 - `ModelConfig::generic(provider, id)` — the provider's generic constructor
   (`anthropic`, `openai`, `google`, `xai`, `groq`, `deepseek`, `mistral`,
   `zai`, `minimax`, `qwen`, `meta`), **never a preset**: the context window
@@ -74,7 +99,7 @@ flag):
   provider (gateways and local servers need a base URL).
 
 ```rust
-// Split at the first `/` (Groq's ids contain one).
+// Split at the first `/` (Groq's and OpenRouter's ids contain one).
 let (provider, id) = "groq/openai/gpt-oss-120b".split_once('/').unwrap();
 let config = ModelConfig::preset(provider, id).or_else(|| {
     // No preset: the limits are guesses. Say so to the user.
@@ -214,4 +239,4 @@ let non_thinking = Agent::from_config(ModelConfig::deepseek("deepseek-flash", "D
 
 ## Compat Flags Without Constructors
 
-`OpenAiCompat` also has quirk presets such as `OpenAiCompat::cerebras()` and `OpenAiCompat::openrouter()`. Those are compatibility profiles, not full `ModelConfig` constructors. To use them, call `ModelConfig::openai_compat(...)` with the provider name, base URL, and `compat` value you need. The API key is resolved from the provider string, so pass `"cerebras"` / `"openrouter"` as `provider` to pick up `CEREBRAS_API_KEY` / `OPENROUTER_API_KEY`; any other name falls back to `YOAGENT_API_KEY` / `API_KEY` (see [API keys](overview.md#api-keys)).
+`OpenAiCompat` also has quirk presets such as `OpenAiCompat::cerebras()` and `OpenAiCompat::openrouter()`. Those are compatibility profiles, not full `ModelConfig` constructors (for an OpenRouter model with a vendor preset, `ModelConfig::preset("openrouter", "vendor/model")` builds the whole config; see [Looking Up a Preset by Name](#looking-up-a-preset-by-name)). To use them, call `ModelConfig::openai_compat(...)` with the provider name, base URL, and `compat` value you need. The API key is resolved from the provider string, so pass `"cerebras"` / `"openrouter"` as `provider` to pick up `CEREBRAS_API_KEY` / `OPENROUTER_API_KEY`; any other name falls back to `YOAGENT_API_KEY` / `API_KEY` (see [API keys](overview.md#api-keys)).

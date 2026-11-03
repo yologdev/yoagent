@@ -188,6 +188,15 @@ const FLAT_RATE_GAPS: &[(&str, &str, FlatRateGap)] = &[
         },
     ),
     (
+        "google",
+        "gemini-3.6-flash",
+        FlatRateGap {
+            keys: &["input_audio"],
+            rates: &[("/input_audio", 0.75), ("/input", 0.75)],
+            why: GEMINI_AUDIO,
+        },
+    ),
+    (
         "deepseek",
         "deepseek-flash",
         FlatRateGap {
@@ -241,6 +250,7 @@ const PEAK_IS_TWICE_UPSTREAM: &[&str] = &["deepseek"];
 const PROMO_IS_HALF_REGULAR: &[(&str, &str)] = &[
     ("google", "gemini-4-argon"),
     ("google", "gemini-3.8-flash"),
+    ("google", "gemini-3.6-flash"),
     // Mistral Large 4 left on 2026-10-23: its launch sale ended, and
     // models.dev lists the regular rate the crate carries.
 ];
@@ -330,6 +340,9 @@ fn every_priced_preset_is_an_audited_entry() {
         ModelConfig::gpt_6_1_terra(),
         ModelConfig::glm_5_3_flashx(),
         ModelConfig::qwen_3_8_omni_flash(),
+        ModelConfig::claude_sonnet_4_6(),
+        ModelConfig::gemini_3_6_flash(),
+        ModelConfig::gemini_3_1_pro_preview(),
     ] {
         let entry = table
             .entry(&config.provider, &config.id)
@@ -896,6 +909,9 @@ fn the_audit_logic_runs_offline_against_the_fixture() {
         "deepseek-flash",
         "deepseek-v4-pro",
         "mistral-large-4",
+        "claude-sonnet-4-6",
+        "gemini-3.6-flash",
+        "gemini-3.1-pro-preview",
     ] {
         assert!(
             names.contains(&covered),
@@ -918,9 +934,9 @@ fn the_audit_logic_runs_offline_against_the_fixture() {
     );
     // Unlisted cache_write accepted by the allowance: gpt-5.5 base and tier,
     // Muse Spark 1.2 and 1.3, Muse Wonder 1.0, and the three DeepSeek
-    // entries; and Mistral Large 4's and Qwen3.8-Omni-Flash's, unset on both
-    // sides.
-    assert_eq!(o.absent, 10);
+    // entries; and Mistral Large 4's, Qwen3.8-Omni-Flash's, Gemini 3.6 Flash's
+    // and Gemini 3.1 Pro's (base and tier), unset on both sides.
+    assert_eq!(o.absent, 13);
     // Mistral Large 4's launch sale is over: compared at models.dev's own
     // rate, with no promotion note.
     assert!(
@@ -993,6 +1009,50 @@ fn the_audit_logic_runs_offline_against_the_fixture() {
         }
     });
     assert_eq!(reasoning.len(), 1, "{reasoning:?}");
+    // Gemini 3.6 Flash carries the regular rate during Google's half-price
+    // promotion: an entry at the promotional rate models.dev lists is drift.
+    let at_promo = drift_after(&|p| {
+        if p.model == "gemini-3.6-flash" {
+            p.cost.input_per_million = 0.75;
+        }
+    });
+    assert_eq!(at_promo.len(), 1, "{at_promo:?}");
+    assert!(
+        at_promo[0].contains("input is 0.75 in the crate, 0.75 in models.dev")
+            && at_promo[0].contains("twice models.dev's off-peak or promotional rate"),
+        "{at_promo:?}"
+    );
+    // And when the promotion ends and models.dev lists the regular rate, the
+    // doubled comparison and the recorded `input_audio` gap both say so.
+    let mut ended = db.clone();
+    for key in ["input", "input_audio"] {
+        ended["google"]["models"]["gemini-3.6-flash"]["cost"][key] = serde_json::json!(1.5);
+    }
+    let promo_over = audit(&ended, &fixture_presets(&ended)).drift;
+    assert_eq!(promo_over.len(), 3, "{promo_over:?}");
+    assert!(
+        promo_over
+            .iter()
+            .any(|d| d.contains("input is 1.5 in the crate, 1.5 in models.dev")),
+        "{promo_over:?}"
+    );
+    // Gemini 3.1 Pro's >200k tier: the tier field and its context_over_200k
+    // mirror both disagree.
+    let pro_tier = drift_after(&|p| {
+        if p.model == "gemini-3.1-pro-preview" {
+            p.cost.context_tiers[0].cache_read_per_million = 0.5;
+        }
+    });
+    assert_eq!(pro_tier.len(), 2, "{pro_tier:?}");
+    assert!(
+        pro_tier
+            .iter()
+            .any(|d| d.contains("tier0.cache_read is 0.5 in the crate, 0.4 in models.dev"))
+            && pro_tier
+                .iter()
+                .any(|d| d.contains("context_over_200k.cache_read is 0.4")),
+        "{pro_tier:?}"
+    );
 }
 
 /// An entry models.dev lacks is drift unless it records `absent_upstream` —

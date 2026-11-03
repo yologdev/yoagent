@@ -749,3 +749,129 @@ async fn signature_expired_suggests_checking_the_clock() {
     .unwrap_err();
     assert!(format!("{err}").contains("check the system clock"), "{err}");
 }
+
+// ---------------------------------------------------------------------------
+// End to end from a preset
+// ---------------------------------------------------------------------------
+
+/// Bitwise CRC-32 (IEEE), as in `tests/bedrock_stream_test.rs`, which holds
+/// the full frame encoder; this file needs only a text response.
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc = !0u32;
+    for &byte in data {
+        crc ^= byte as u32;
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+        }
+    }
+    !crc
+}
+
+/// One ConverseStream event frame (string headers; the payload is the event
+/// structure itself).
+fn event_frame(event_type: &str, payload: serde_json::Value) -> Vec<u8> {
+    let mut h = Vec::new();
+    for (name, value) in [
+        (":event-type", event_type),
+        (":content-type", "application/json"),
+        (":message-type", "event"),
+    ] {
+        h.push(name.len() as u8);
+        h.extend_from_slice(name.as_bytes());
+        h.push(7);
+        h.extend_from_slice(&(value.len() as u16).to_be_bytes());
+        h.extend_from_slice(value.as_bytes());
+    }
+    let payload = payload.to_string();
+    let total = (16 + h.len() + payload.len()) as u32;
+    let mut out = Vec::new();
+    out.extend_from_slice(&total.to_be_bytes());
+    out.extend_from_slice(&(h.len() as u32).to_be_bytes());
+    let c = crc32(&out);
+    out.extend_from_slice(&c.to_be_bytes());
+    out.extend_from_slice(&h);
+    out.extend_from_slice(payload.as_bytes());
+    let c = crc32(&out);
+    out.extend_from_slice(&c.to_be_bytes());
+    out
+}
+
+/// A complete plain-text ConverseStream response.
+fn converse_text_response(text: &str) -> Vec<u8> {
+    use serde_json::json;
+    [
+        event_frame("messageStart", json!({"role": "assistant"})),
+        event_frame(
+            "contentBlockDelta",
+            json!({"contentBlockIndex": 0, "delta": {"text": text}}),
+        ),
+        event_frame("contentBlockStop", json!({"contentBlockIndex": 0})),
+        event_frame("messageStop", json!({"stopReason": "end_turn"})),
+        event_frame(
+            "metadata",
+            json!({"usage": {"inputTokens": 3, "outputTokens": 2, "totalTokens": 5}}),
+        ),
+    ]
+    .concat()
+}
+
+/// A Bedrock preset, as a user builds it: `ModelConfig::preset` +
+/// `Agent::from_config`, IAM credentials from the environment. The
+/// version-suffixed id goes on the wire with `:` encoded once, the request is
+/// SigV4-signed over what was sent, and the streamed answer lands in history.
+#[tokio::test]
+async fn bedrock_preset_signs_end_to_end() {
+    const ID: &str = "us.anthropic.claude-haiku-4-5-20251001-v1:0";
+    const WIRE_PATH: &str = "/model/us.anthropic.claude-haiku-4-5-20251001-v1%3A0/converse-stream";
+    let _guard = ENV_LOCK.lock().await;
+    clear_env();
+    std::env::set_var("AWS_ACCESS_KEY_ID", ACCESS);
+    std::env::set_var("AWS_SECRET_ACCESS_KEY", SECRET);
+    // The preset's own host names us-east-1; a local mock does not, so the
+    // region comes from the environment.
+    std::env::set_var("AWS_REGION", "us-east-1");
+
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(WIRE_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            converse_text_response("hello from haiku"),
+            "application/vnd.amazon.eventstream",
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut config = ModelConfig::preset("bedrock", ID).unwrap();
+    assert_eq!(config.api, ApiProtocol::BedrockConverseStream);
+    assert_eq!(config.id, ID);
+    config.base_url = server.uri();
+    let agent = run_agent(config).await;
+
+    let req = only_request(&server).await;
+    assert_eq!(req.url.path(), WIRE_PATH);
+    let auth = verify_sigv4(&req, SECRET);
+    assert_eq!(auth.access, ACCESS);
+    assert_eq!(auth.region, "us-east-1");
+    assert_eq!(auth.service, "bedrock");
+    assert!(header(&req, "x-amz-security-token").is_none());
+    assert_never_sent(&req, SECRET);
+    server.verify().await;
+
+    match agent.messages().last() {
+        Some(AgentMessage::Llm(Message::Assistant {
+            content,
+            stop_reason,
+            ..
+        })) => {
+            assert_eq!(*stop_reason, StopReason::Stop);
+            assert!(
+                matches!(content.as_slice(), [Content::Text { text }] if text == "hello from haiku"),
+                "{content:?}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    clear_env();
+}
