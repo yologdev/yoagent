@@ -21,32 +21,46 @@ Before writing loop code of your own, find the hook below.
 | You want to… | Use | Read |
 |---|---|---|
 | build an agent | `Agent::from_config(ModelConfig::…)` (provider and API key follow the config) | `docs/getting-started/quick-start.md` |
-| pick a model from `provider/id` text | `ModelConfig::preset(p, id)`, else `ModelConfig::generic(p, id)` (provider-default limits: tell the user) | `docs/providers/model-presets.md#looking-up-a-preset-by-name` |
+| pick a model from `provider/id` text | `ModelConfig::preset(p, id)`, else `ModelConfig::generic(p, id)` (provider-default limits: tell the user); every preset: `ModelConfig::presets()` | `docs/providers/model-presets.md#looking-up-a-preset-by-name` |
+| switch model or thinking mid-session | `agent.set_model(config)` (an explicit key or provider is kept); `agent = agent.with_thinking(ThinkingLevel::…)` between runs | `docs/providers/overview.md` |
 | run on Bedrock or Azure OpenAI | `ModelConfig::custom(ApiProtocol::…)` (Bedrock: SigV4 or API key, `base_url` required) | `docs/providers/bedrock.md`, `docs/providers/azure-openai.md` |
 | give it tools | `impl AgentTool`; `.with_tools(…)` (built-ins: `tools::default_tools()`) | `docs/concepts/tools.md` |
+| run tool calls one at a time or in batches | `.with_tool_execution(ToolExecutionStrategy::Sequential)` / `Batched { size }` (default `Parallel`) | `docs/concepts/tools.md#execution-strategies` |
+| turn an OpenAPI spec into tools | `.with_openapi_file(…)` / `_url(…)` / `_spec(…)` (feature `openapi`) | `docs/guides/openapi.md` |
+| give it skills (`<name>/SKILL.md` folders) | `SkillSet::load(&dirs)` (or `load_resilient`: skips bad ones, returns their errors) + `.with_skills(set)` | `docs/concepts/skills.md` |
 | allow / rewrite / deny tool calls | `RunHooks::before_tool` in an `Extension` | `docs/concepts/extensions.md` |
 | redact or edit a tool's output | `RunHooks::after_tool` (+ `.filters_tool_output()`) | same |
 | refuse an input before the run | `RunHooks::on_input` | same |
-| gate tool calls / screen input with a small decision model | `.with_tool_gate(ToolGate)`, `.with_input_guard(InputGuard)` (feature `decision`; both fail closed) | `docs/concepts/decision-models.md#blocking-with_tool_gate` |
 | add a note to every model request | `RunHooks::before_model` → `TurnDecision::Note` | same |
 | check the final answer, send the agent back | `RunHooks::on_stop` → `StopDecision::Continue(why)` | same |
 | count, log or record what happened | `RunHooks::on_event` (sync, cheap), `finish` | same |
+| write an extension with per-run state or run-scoped tools | `impl Extension` (`start_run(&RunContext)` returns that run's `RunHooks`; `RunHooks::tools` offers tools for the run), or `ClonedHooks` | `docs/concepts/extensions.md#runs-and-state` |
+| gate tool calls / screen input with a small decision model | `.with_tool_gate(ToolGate)`, `.with_input_guard(InputGuard)` (feature `decision`; both fail closed) | `docs/concepts/decision-models.md#blocking-with_tool_gate` |
+| ask a small model typed questions, or let it advise | `DecisionModel` (`jev()`, `clef(…)`, `local(url)`, `logprobs(url, model)`; `.or(fallback)`), `.with_decision_model(m)` (notes only, never blocks); pick thresholds with `decision::calibrate` (feature `decision`) | `docs/concepts/decision-models.md` |
 | cap spend in dollars | `extension::Budget` | `docs/concepts/extensions.md#budget` |
 | charge an extension's own model calls | `RunContext::spend_handle()` → `SpendHandle::add(&usage, &model)` | `docs/concepts/extensions.md#spend-an-extension-makes` |
 | cap turns / tokens / time | `ExecutionLimits` | `docs/concepts/context-management.md` |
+| tune or replace compaction | `.with_context_config(ContextConfig { … })`, `.with_compaction_strategy(LlmCompaction::from_config(…))` (a model writes the summary), `.without_context_management()` (also removes `ExecutionLimits`) | `docs/concepts/context-management.md` |
 | delegate to a child agent | `SubAgentTool` (own model, tools, limits) | `docs/concepts/sub-agents.md` |
+| share large artifacts with sub-agents by key | `SharedState` + `SubAgentTool::with_shared_state` (and `Agent::with_shared_state`, which also stashes cut tool output) | `docs/concepts/sub-agents.md#shared-state` |
+| delegate from a tool you write | `Agent::from_config(..).delegated_from(&ctx)` (the tree extensions follow) + `ctx.report_delegated_run(stats)` (its spend) | `docs/concepts/extensions.md#sub-agents` |
 | apply one policy to every sub-agent | `.with_tree_extension(…)` | `docs/concepts/extensions.md` |
 | offer tools that change between runs — or mid-run | `ToolSource` (consulted at each run start; again mid-run when `generation()` moves); an MCP server whose tools change: `mcp::McpToolSource` (withdraws a stdio server that exits; `McpClient::exited()` says why) | `docs/concepts/tools.md` |
-| load plugins at runtime (Rust, TS on Node/Bun, Python, Go), or pi / DeepSeek Harness plugins unchanged | the **yoagent-rutis** crate (`RutisBridge`, one `Extension`) | [yoagent-rutis README](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis) |
+| reuse pi extensions or DeepSeek Harness plugins unchanged, or load plugins at runtime (Rust, TS on Node/Bun, Python, Go) | the **yoagent-rutis** crate (`RutisBridge`, one `Extension`): [how to start](#plugins-from-other-ecosystems-yoagent-rutis) | [yoagent-rutis README](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis) |
 | use MCP servers | `.with_mcp_server_stdio(…)` / `_http(…)` / `_http_transport(…)` | `docs/guides/mcp.md` |
+| reach an MCP server behind OAuth or an expiring token | `HttpTransport::with_authorization(Arc<dyn AuthorizationSource>)` (refresh in `challenged`); a refusal is `McpError::Http` (`http_status()`, `www_authenticate()`) | `docs/guides/mcp.md#credentials-that-change-an-authorization-source` |
 | get typed JSON back | `agent.prompt_structured::<T>(text, schema)` | `docs/concepts/structured-outputs.md` |
+| stream events to a UI as they happen | `agent.prompt_with_sender(text, tx)` (returns when the run ends; dropping its future cancels the run — then `agent.finish().await`), or `agent.prompt(text)` → receiver (drain it, then `finish()`) | `docs/concepts/messages-events.md#agentevent` |
 | steer a running agent | `agent.steer(msg)` (between tool batches), `follow_up(msg)` | `docs/concepts/agent-loop.md` |
 | show streamed text without retry duplicates | `retry::retry_safe_events(rx)` | `docs/concepts/retry.md` |
+| save and restore a conversation | `agent.save_messages()` / `restore_messages(&json)` | `docs/concepts/persistence.md` |
 | branch / restore history | `session::Session` (a tree, JSONL) | `docs/concepts/session-trees.md` |
 | know what it cost | `agent.total_cost_usd()`, `SessionStats` buckets | `docs/concepts/pricing.md` |
+| use current prices, not the bundled snapshot | `prices::enable_live_cached(&source, path, CacheOptions)` (native), then `agent.reprice()` for configs built before | `docs/concepts/pricing.md#live-sources` |
+| keep API keys from processes it starts | set each of `provider::api_key_variables()` to `""` in their environment | `docs/providers/overview.md` |
 | record runs to a git repo (GASP) | `gasp::GaspRecorder` + `recording_sender` (feature `gasp`, native) | `docs/concepts/gasp.md` |
 | test without a network | `MockProvider` + `Agent::from_provider` | `docs/guides/testing.md` |
-| run on Cloudflare Workers | `default-features = false` (wasm32) | `docs/guides/wasm-workers.md` |
+| run on Cloudflare Workers | `default-features = false` (wasm32); the AI binding: [yoagent-workers](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-workers) | `docs/guides/wasm-workers.md` |
 
 ## Recipes
 
@@ -127,7 +141,8 @@ if let Some(budget) = Budget::for_model(2.00, &config) { // None when unpriced
 
 It is checked before every model call: once the spend has reached the
 limit, the run stops there (one call may cross it). It counts sub-agents,
-decision models and compaction too.
+decision models and compaction too, and what extensions record through
+`RunContext::spend_handle` (a plugin's host service, say).
 
 ### A sub-agent with its own limits, under the parent's policy
 
@@ -144,14 +159,63 @@ let agent = agent
 
 ### Plugins from other ecosystems (yoagent-rutis)
 
-Plugins register a handler with the bridge; the bridge is one `Extension`.
-pi extensions and DeepSeek Harness (DSH) plugins load unchanged through
-adapters, as far as yoagent can honour them; what it cannot (UI, commands)
-is ignored, and what would decide things yoagent cannot enforce is
-**refused**. Measured (2026-10-16): of the 20 most-downloaded packages, pi 12 and
-DSH 3 are usable (`docs/evals/plugin-compatibility.md`). Start from the
-[yoagent-rutis README](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis)
-and its examples.
+Before writing a tool or policy, check npm: pi extensions (keyword
+`pi-package`) and DeepSeek Harness plugins (`dsh-plugin`) number 10k+
+packages, and the separate **yoagent-rutis** crate loads them unchanged.
+What follows is a map; every name is in its
+[README](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis).
+
+- **Host** ([README: Host](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis#host)):
+  `RutisBridge::install(&root)` once on the rutis root, then
+  `agent.with_extension(bridge.extension())` — add `.require_policy()` so a
+  run that starts before a policy plugin registered denies tool calls, or
+  install it with `with_tree_extension` to cover sub-agents. Plugins
+  register handlers: Rust (`AgentPlugin`, `Handler`), TypeScript (Node or
+  Bun), Python and Go through the `node` / `bun` / `python` / `go`
+  features.
+- **Runtimes** (yoagent-rutis 0.11+): the host starts each one itself with
+  rutis-host's `SpawnPlugin` and resolves plugin rows with rutis-loader's
+  `SessionResolver` (yoagent-rutis's `language_plugins` example is a whole host). A plugin
+  declares `yoagent` in its `inject`; services it can run without go in
+  `optional`, read with `ctx.get` (rutis 0.20). Pin the npm / PyPI / Go
+  runtimes to the host's rutis version
+  ([README: Versions](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis#versions)).
+- **pi extensions** ([README](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis#pi-extensions-tools-and-tool-policies)):
+  mapped are tools, `tool_call` / `tool_result` policies, `input`,
+  `before_agent_start` additions (as notes) and the observer events; not
+  mapped are commands, UI and session history. `pi.exec` is closed by
+  default: grant it with `exec` / `execFor`, or `"gate"` to ask the host
+  (load `plugins/pi/host-approval.ts`); `projectTrusted` defaults to false.
+- **DSH plugins** ([README](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis#dsh-deepseek-harness-tool-plugins)):
+  tools and system-prompt sections. Many wait for DSH's own host services:
+  load the rows of `plugins/dsh/host-services.json` before them — or,
+  when they need a DSH agent for the call, the rows
+  `adapters::dsh_host_rows(..)` returns **instead** (`host-services.json`
+  plus a stand-in agent; loading both keeps the first row of an id). Give the runtime its own `DSH_HOME`, or the plugins see the
+  user's DSH keys and skills.
+- **Vet a package first** (feature `probe`): `probe::pi` / `probe::dsh`
+  load it through its adapter without calling a tool or a model;
+  `report.problem()` is `None` when it is usable. Blank provider keys for
+  the probe with `ProbeOptions::default().env(name, "")` (`pi_with` /
+  `dsh_with`), one per `provider::api_key_variables()`.
+- **Untrusted packages** ([README](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis#restricted-runtimes-tools-only)):
+  `bridge.restrict_runtime(handle)` before the runtime starts makes its
+  plugins tools only, offered as `<handler>__<tool>`;
+  `bridge.extension().late_tools()` (a `ToolSource`: install it with
+  `with_tool_source`) offers one loaded mid-run from the next turn. Known gap: a restricted runtime
+  can still publish services host-wide
+  ([arcships/rutis#1040](https://github.com/arcships/rutis/issues/1040)).
+- **Examples**: `pi_extensions`, `dsh_tools`, `ecosystem_probe`,
+  `language_plugins`, `policy_plugin` in its
+  [examples](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis/examples).
+
+What yoagent cannot honour (UI, commands) is ignored, and what would decide
+things yoagent cannot enforce is **refused**. Measured 2026-10-16 on
+yoagent-rutis 0.4 / rutis 0.9, not re-measured since: of the 20
+most-downloaded packages, pi 12 and DSH 3 are usable
+(`docs/evals/plugin-compatibility.md`). The 3 usable DSH ones need
+DSH's host services (above); 12 of its top 20 extend DSH's own app (web
+UI, model layer, agents) rather than add agent tools.
 
 ## Tips and pitfalls
 
@@ -195,8 +259,16 @@ and its examples.
   is `None`, never zero.
 - **Plugin messages are capped at 16 MiB**: on rutis 0.19 and later
   (yoagent-rutis 0.11 and later) a larger one fails that call; on rutis
-  0.12 (yoagent-rutis 0.10 and earlier) it ends the runtime and its plugins. Large images in a
-  conversation reach plugins as text.
+  0.9–0.12 (yoagent-rutis 0.3–0.10) it ends the runtime and its plugins.
+  Large images in a conversation reach plugins as text.
+- **MCP servers you start**: `McpClient::connect_stdio_with(cmd, args, env,
+  StdioOptions::new().own_process_group(true))` (Unix) keeps the
+  terminal's Ctrl+C from the server and kills what it started on close or
+  drop. The server inherits your environment: an `env` setting each of
+  `provider::api_key_variables()` to `""` keeps your keys from it. Over
+  HTTP, redirects stay within the server's origin unless
+  `HttpTransport::with_redirects(Redirects::Any)`; a custom `McpTransport`
+  reports tool-list changes through `report_notifications`.
 - **Tests**: script whole multi-turn tool conversations with `MockProvider`
   (`Agent::from_provider(MockProvider::new(…), ModelConfig::mock())`); it
   honours cancellation, so abort and steering paths are testable.
@@ -415,8 +487,22 @@ Newest first; the full list is `CHANGELOG.md`.
   crate ships: copy `root`, `npm ci` the copy) and the `probe` feature: vet
   a pi extension or DSH plugin without running it as an agent; each
   report's `problem()` is the verdict.
+- **yoagent-rutis 0.3.1** — DSH's own host services for DSH plugins:
+  `plugins/dsh/host-services.json` lists DSH's headless packages for
+  files, attachments, credentials, storage, session persistence and skills
+  (load them before the plugins that wait for them). They read `DSH_HOME`
+  / `DSH_AGENTS_HOME` (else `~/.dsh`, `~/.agents`): give the runtime homes
+  of its own. No Rust API change.
 - **yoagent-rutis 0.3.0** — rutis 0.9 (Rust 1.88); Bun and Go plugins;
   the 16 MiB guard.
+- **yoagent-rutis 0.2.0** — rutis 0.8 (move the npm / PyPI packages to
+  0.8.0 with it, and depend on `rutis = "0.8"`). A DSH tool policy's `ask`,
+  and DSH's `ask_user_question` tool, reach the user on hosts with a `ui` service
+  (`plugins/dsh/host-dialogs.ts`); DSH tool cards as `details.view`; pi
+  dialogs reach a frontend through `plugins/pi/host-ui.ts`.
+
+Older releases (0.24.0 added Clef decision models and the yoagent-workers
+crate) are in `CHANGELOG.md`.
 
 ## More
 
