@@ -4,14 +4,15 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.26.7 (2026-11-03)
 
-Additive: three presets, and `ModelConfig::preset` reads Bedrock and OpenRouter ids.
+Additive: three presets, `ModelConfig::preset` reads Bedrock and OpenRouter ids, and the agent skill is refreshed. yoagent-rutis (0.12.0) and yoagent-workers (0.3.0) are unchanged.
 
 - **`ModelConfig::claude_sonnet_4_6()`** (`claude-sonnet-4-6`, a legacy model Anthropic still serves): 1M context, 64K of its 128K max output by default, adaptive thinking, native structured outputs. Priced (after `prices::enable_bundled()`) at $3 / $15, cached $0.30, 5-minute cache write $3.75, no long-context tier — Anthropic's pricing page, 2026-11-03.
 - **Gemini 3.6 Flash and 3.1 Pro Preview**: `ModelConfig::gemini_3_6_flash()` (`gemini-3.6-flash`, stable) and `ModelConfig::gemini_3_1_pro_preview()` (`gemini-3.1-pro-preview`), both 1,048,576 context / 65,536 output. 3.6 Flash is priced at the regular $1.50 / $7.50, cached $0.15 (Google bills half through 2026-12-31, so costs read up to twice the bill until then, as for 3.8 Flash); 3.1 Pro at $2 / $12, cached $0.20, and $4 / $18 / $0.40 for prompts over 200,000 tokens. `gemini-3.5-flash` and `gemini-3.7-flash` are deprecated by Google (their requests are routed to 3.6 and 3.8 Flash) and get no preset.
 - **`ModelConfig::preset("bedrock", id)`**: a Claude preset on Amazon Bedrock by Bedrock model id or cross-Region inference profile id (`anthropic.claude-sonnet-4-6`, `us.anthropic.claude-sonnet-4-6`, `global.…`; prefixes `us`, `us-gov`, `eu`, `apac`, `jp`, `au`, `ca`, `in`; Haiku 4.5 as `anthropic.claude-haiku-4-5-20251001-v1:0`). The config is `BedrockConverseStream` on the `us-east-1` endpoint (set `base_url` for another Region) with the Anthropic preset's limits and **no price**: Bedrock bills its own rates, 10% higher on regional and geographic profiles. ARNs, other vendors and any other spelling find nothing.
 - **`ModelConfig::preset("openrouter", "vendor/model")`**: a vendor preset behind OpenRouter (`https://openrouter.ai/api/v1`, `OpenAiCompat::openrouter()`) for `anthropic`, `openai`, `google`, `x-ai`, `z-ai` and `qwen`, with the preset's limits and no price (a gateway). Model ids as OpenRouter lists them: Claude versions take a dot (`anthropic/claude-sonnet-4.6`); the dashed spelling and `:batch` variants find nothing.
+- **The `yoagent` skill** (`skills/yoagent/SKILL.md`, shipped in the crate): 14 more rows in its feature map (streaming, skills, compaction, persistence, shared state, custom extensions and delegation, decision models, MCP auth, live prices, OpenAPI, Workers, …), a how-to for running pi extensions and DSH plugins through yoagent-rutis, the missing yoagent-rutis 0.3.1 / 0.2.0 history, and accuracy fixes (#415). `tests/skill_test.rs` now also checks every repository URL and anchor the skill cites.
 
 ## 0.26.6 (2026-11-02)
 
