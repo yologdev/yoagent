@@ -5,7 +5,7 @@ description: Use when building, extending or upgrading an agent on the yoagent R
 
 # yoagent: which feature for which job
 
-Written for **yoagent 0.26.6** (and yoagent-rutis 0.12.0); the recipes
+Written for **yoagent 0.26.7** (and yoagent-rutis 0.12.0); the recipes
 below are compiled by `tests/skill_test.rs`, line for line. Check what you
 build against: `cargo tree -p yoagent` or `Cargo.lock`. If you are on an
 older version, read [What changed](#what-changed) first.
@@ -280,6 +280,12 @@ UI, model layer, agents) rather than add agent tools.
 
 Newest first; the full list is `CHANGELOG.md`.
 
+- **0.26.7** — presets `claude_sonnet_4_6()`, `gemini_3_6_flash()`,
+  `gemini_3_1_pro_preview()`; `ModelConfig::preset("bedrock", id)` takes
+  Bedrock / cross-Region profile ids (`us.anthropic.claude-sonnet-4-6`) and
+  `preset("openrouter", "anthropic/claude-sonnet-4.6")` OpenRouter ids —
+  limits only, unpriced. This skill gained most of its feature map and the
+  pi / DSH how-to.
 - **0.26.6** — MCP over HTTP: `HttpTransport::with_authorization(Arc<dyn
   AuthorizationSource>)` asks for the `Authorization` value per request and,
   on a 401, lets the source refresh it (`challenged`) — the request is sent
