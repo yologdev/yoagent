@@ -133,6 +133,55 @@ fn every_path_and_anchor_the_skill_and_llms_txt_cite_exists_in_the_crate() {
     }
 }
 
+/// This repository's files the skill links as GitHub URLs (the
+/// `integrations/` crates are not in the published crate, so they are cited
+/// that way): each path must exist here, and each `#anchor` must be a heading
+/// of the file — a directory's `README.md`.
+#[test]
+fn every_repository_url_the_skill_cites_exists() {
+    const PREFIXES: [&str; 2] = [
+        "https://github.com/yologdev/yoagent/tree/main/",
+        "https://github.com/yologdev/yoagent/blob/main/",
+    ];
+    let mut checked = 0;
+    for file in FILES {
+        let text = read(file);
+        for prefix in PREFIXES {
+            for rest in text.split(prefix).skip(1) {
+                let url = rest
+                    .split(|c: char| c == ')' || c == '>' || c == '`' || c.is_whitespace())
+                    .next()
+                    .unwrap_or("");
+                let (path, anchor) = match url.split_once('#') {
+                    Some((path, anchor)) => (path, Some(anchor)),
+                    None => (url, None),
+                };
+                let path = path.trim_end_matches('/');
+                let local = root().join(path);
+                assert!(local.exists(), "{file} links {prefix}{url}: no {path} here");
+                if let Some(anchor) = anchor {
+                    let doc = if local.is_dir() {
+                        local.join("README.md")
+                    } else {
+                        local
+                    };
+                    let markdown = std::fs::read_to_string(&doc).unwrap();
+                    assert!(
+                        has_heading(&markdown, anchor),
+                        "{file} links {prefix}{url}: no heading #{anchor} in {}",
+                        doc.display()
+                    );
+                }
+                checked += 1;
+            }
+        }
+    }
+    assert!(
+        checked >= 5,
+        "expected the skill's repository links, found {checked}"
+    );
+}
+
 /// The skill's recipe lines, without `use` lines, comments, blank lines
 /// and lone braces: what must also be compiled below.
 fn recipe_lines(skill: &str) -> Vec<String> {
@@ -340,6 +389,7 @@ fn prose_names() {
     let _ = |a: Agent| a.with_thinking(yoagent::ThinkingLevel::Off);
     let _ = |a: Agent| a.with_tool_execution(yoagent::ToolExecutionStrategy::Sequential);
     let _ = yoagent::ToolExecutionStrategy::Batched { size: 2 };
+    let _ = yoagent::ToolExecutionStrategy::Parallel;
     let _ = || SkillSet::load(&[root()]);
     let _ = || SkillSet::load_resilient(&[root()]);
     let _ = Agent::with_skills;
@@ -352,7 +402,7 @@ fn prose_names() {
         let _ = h.tools(r).await;
     }
     let _ = extension_points;
-    let _ = Agent::with_context_config;
+    let _ = |a: Agent| a.with_context_config(yoagent::context::ContextConfig::default());
     let _ = |a: Agent| {
         a.with_compaction_strategy(yoagent::LlmCompaction::from_config(ModelConfig::mock()))
     };
@@ -382,6 +432,7 @@ fn prose_names() {
         };
         let _ = McpError::http_status;
         let _ = McpError::www_authenticate;
+        let _ = |e: McpError| matches!(e, McpError::Http { .. });
         let _ = |t: HttpTransport| t.with_redirects(Redirects::Any);
         let _ = |t: &mut dyn yoagent::mcp::McpTransport, n: yoagent::mcp::ServerNotifications| {
             t.report_notifications(n)
@@ -390,7 +441,9 @@ fn prose_names() {
     #[cfg(feature = "native")]
     {
         use yoagent::mcp::{McpClient, StdioOptions};
-        let _ = McpClient::connect_stdio_with;
+        let _ = |o: StdioOptions| {
+            McpClient::connect_stdio_with("srv", &[], Some(Default::default()), o)
+        };
         let _ = StdioOptions::new().own_process_group(true);
         let _ = |s: &yoagent::provider::PriceSource, o: yoagent::provider::CacheOptions| {
             let _ = yoagent::provider::prices::enable_live_cached(s, "prices.json", o);

@@ -22,7 +22,7 @@ Before writing loop code of your own, find the hook below.
 |---|---|---|
 | build an agent | `Agent::from_config(ModelConfig::…)` (provider and API key follow the config) | `docs/getting-started/quick-start.md` |
 | pick a model from `provider/id` text | `ModelConfig::preset(p, id)`, else `ModelConfig::generic(p, id)` (provider-default limits: tell the user); every preset: `ModelConfig::presets()` | `docs/providers/model-presets.md#looking-up-a-preset-by-name` |
-| switch model or thinking mid-session | `agent.set_model(config)` (an explicit key or provider is kept); `.with_thinking(ThinkingLevel::…)` | `docs/providers/overview.md` |
+| switch model or thinking mid-session | `agent.set_model(config)` (an explicit key or provider is kept); `agent = agent.with_thinking(ThinkingLevel::…)` between runs | `docs/providers/overview.md` |
 | run on Bedrock or Azure OpenAI | `ModelConfig::custom(ApiProtocol::…)` (Bedrock: SigV4 or API key, `base_url` required) | `docs/providers/bedrock.md`, `docs/providers/azure-openai.md` |
 | give it tools | `impl AgentTool`; `.with_tools(…)` (built-ins: `tools::default_tools()`) | `docs/concepts/tools.md` |
 | run tool calls one at a time or in batches | `.with_tool_execution(ToolExecutionStrategy::Sequential)` / `Batched { size }` (default `Parallel`) | `docs/concepts/tools.md#execution-strategies` |
@@ -40,17 +40,17 @@ Before writing loop code of your own, find the hook below.
 | cap spend in dollars | `extension::Budget` | `docs/concepts/extensions.md#budget` |
 | charge an extension's own model calls | `RunContext::spend_handle()` → `SpendHandle::add(&usage, &model)` | `docs/concepts/extensions.md#spend-an-extension-makes` |
 | cap turns / tokens / time | `ExecutionLimits` | `docs/concepts/context-management.md` |
-| tune or replace compaction | `.with_context_config(ContextConfig { … })`, `.with_compaction_strategy(LlmCompaction::from_config(…))` (a model writes the summary), `.without_context_management()` | `docs/concepts/context-management.md` |
+| tune or replace compaction | `.with_context_config(ContextConfig { … })`, `.with_compaction_strategy(LlmCompaction::from_config(…))` (a model writes the summary), `.without_context_management()` (also removes `ExecutionLimits`) | `docs/concepts/context-management.md` |
 | delegate to a child agent | `SubAgentTool` (own model, tools, limits) | `docs/concepts/sub-agents.md` |
 | share large artifacts with sub-agents by key | `SharedState` + `SubAgentTool::with_shared_state` (and `Agent::with_shared_state`, which also stashes cut tool output) | `docs/concepts/sub-agents.md#shared-state` |
-| delegate from a tool you write | `Agent::delegated_from(&ctx)` (the tree extensions follow) + `ctx.report_delegated_run(stats)` (its spend) | `docs/concepts/extensions.md#sub-agents` |
+| delegate from a tool you write | `Agent::from_config(..).delegated_from(&ctx)` (the tree extensions follow) + `ctx.report_delegated_run(stats)` (its spend) | `docs/concepts/extensions.md#sub-agents` |
 | apply one policy to every sub-agent | `.with_tree_extension(…)` | `docs/concepts/extensions.md` |
 | offer tools that change between runs — or mid-run | `ToolSource` (consulted at each run start; again mid-run when `generation()` moves); an MCP server whose tools change: `mcp::McpToolSource` (withdraws a stdio server that exits; `McpClient::exited()` says why) | `docs/concepts/tools.md` |
 | reuse pi extensions or DeepSeek Harness plugins unchanged, or load plugins at runtime (Rust, TS on Node/Bun, Python, Go) | the **yoagent-rutis** crate (`RutisBridge`, one `Extension`): [how to start](#plugins-from-other-ecosystems-yoagent-rutis) | [yoagent-rutis README](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis) |
 | use MCP servers | `.with_mcp_server_stdio(…)` / `_http(…)` / `_http_transport(…)` | `docs/guides/mcp.md` |
 | reach an MCP server behind OAuth or an expiring token | `HttpTransport::with_authorization(Arc<dyn AuthorizationSource>)` (refresh in `challenged`); a refusal is `McpError::Http` (`http_status()`, `www_authenticate()`) | `docs/guides/mcp.md#credentials-that-change-an-authorization-source` |
 | get typed JSON back | `agent.prompt_structured::<T>(text, schema)` | `docs/concepts/structured-outputs.md` |
-| stream events to a UI as they happen | `agent.prompt_with_sender(text, tx)` (dropping its future cancels the run; call `agent.finish().await` after), or `agent.prompt(text)` → receiver | `docs/concepts/messages-events.md#agentevent` |
+| stream events to a UI as they happen | `agent.prompt_with_sender(text, tx)` (returns when the run ends; dropping its future cancels the run — then `agent.finish().await`), or `agent.prompt(text)` → receiver (drain it, then `finish()`) | `docs/concepts/messages-events.md#agentevent` |
 | steer a running agent | `agent.steer(msg)` (between tool batches), `follow_up(msg)` | `docs/concepts/agent-loop.md` |
 | show streamed text without retry duplicates | `retry::retry_safe_events(rx)` | `docs/concepts/retry.md` |
 | save and restore a conversation | `agent.save_messages()` / `restore_messages(&json)` | `docs/concepts/persistence.md` |
@@ -175,7 +175,7 @@ What follows is a map; every name is in its
   features.
 - **Runtimes** (yoagent-rutis 0.11+): the host starts each one itself with
   rutis-host's `SpawnPlugin` and resolves plugin rows with rutis-loader's
-  `SessionResolver` (its `language_plugins` example is a whole host). A plugin
+  `SessionResolver` (yoagent-rutis's `language_plugins` example is a whole host). A plugin
   declares `yoagent` in its `inject`; services it can run without go in
   `optional`, read with `ctx.get` (rutis 0.20). Pin the npm / PyPI / Go
   runtimes to the host's rutis version
@@ -188,9 +188,10 @@ What follows is a map; every name is in its
   (load `plugins/pi/host-approval.ts`); `projectTrusted` defaults to false.
 - **DSH plugins** ([README](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis#dsh-deepseek-harness-tool-plugins)):
   tools and system-prompt sections. Many wait for DSH's own host services:
-  load the rows of `plugins/dsh/host-services.json` before them, and
-  `adapters::dsh_host_rows` when they need a DSH agent for the call (a
-  stand-in). Give the runtime its own `DSH_HOME`, or the plugins see the
+  load the rows of `plugins/dsh/host-services.json` before them — or,
+  when they need a DSH agent for the call, the rows
+  `adapters::dsh_host_rows(..)` returns **instead** (`host-services.json`
+  plus a stand-in agent; loading both keeps the first row of an id). Give the runtime its own `DSH_HOME`, or the plugins see the
   user's DSH keys and skills.
 - **Vet a package first** (feature `probe`): `probe::pi` / `probe::dsh`
   load it through its adapter without calling a tool or a model;
@@ -199,8 +200,9 @@ What follows is a map; every name is in its
   `dsh_with`), one per `provider::api_key_variables()`.
 - **Untrusted packages** ([README](https://github.com/yologdev/yoagent/tree/main/integrations/yoagent-rutis#restricted-runtimes-tools-only)):
   `bridge.restrict_runtime(handle)` before the runtime starts makes its
-  plugins tools only, offered as `<handler>__<tool>`; `late_tools()` offers
-  one loaded mid-run from the next turn. Known gap: a restricted runtime
+  plugins tools only, offered as `<handler>__<tool>`;
+  `bridge.extension().late_tools()` (a `ToolSource`: install it with
+  `with_tool_source`) offers one loaded mid-run from the next turn. Known gap: a restricted runtime
   can still publish services host-wide
   ([arcships/rutis#1040](https://github.com/arcships/rutis/issues/1040)).
 - **Examples**: `pi_extensions`, `dsh_tools`, `ecosystem_probe`,
@@ -211,8 +213,8 @@ What yoagent cannot honour (UI, commands) is ignored, and what would decide
 things yoagent cannot enforce is **refused**. Measured 2026-10-16 on
 yoagent-rutis 0.4 / rutis 0.9, not re-measured since: of the 20
 most-downloaded packages, pi 12 and DSH 3 are usable
-(`docs/evals/plugin-compatibility.md`). DSH plugins mostly need DSH's
-host services (above), and most of its top 20 extend DSH's own app (web
+(`docs/evals/plugin-compatibility.md`). The 3 usable DSH ones need
+DSH's host services (above); 12 of its top 20 extend DSH's own app (web
 UI, model layer, agents) rather than add agent tools.
 
 ## Tips and pitfalls
@@ -494,8 +496,8 @@ Newest first; the full list is `CHANGELOG.md`.
 - **yoagent-rutis 0.3.0** — rutis 0.9 (Rust 1.88); Bun and Go plugins;
   the 16 MiB guard.
 - **yoagent-rutis 0.2.0** — rutis 0.8 (move the npm / PyPI packages to
-  0.8.0 with it, and depend on `rutis = "0.8"`). DSH tool policies' `ask`
-  and `ask_user_question` reach the user on hosts with a `ui` service
+  0.8.0 with it, and depend on `rutis = "0.8"`). A DSH tool policy's `ask`,
+  and DSH's `ask_user_question` tool, reach the user on hosts with a `ui` service
   (`plugins/dsh/host-dialogs.ts`); DSH tool cards as `details.view`; pi
   dialogs reach a frontend through `plugins/pi/host-ui.ts`.
 
