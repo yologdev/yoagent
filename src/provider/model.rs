@@ -959,6 +959,12 @@ const OPENROUTER_VENDORS: &[(&str, &str)] = &[
     ("qwen", "qwen"),
 ];
 
+/// `vendor/id`s whose preset OpenRouter does not serve under that id (its
+/// `/api/v1/models` listing, checked 2026-11-03): OpenRouter lists Qwen3.8
+/// Max only as dated snapshots (`qwen/qwen3.8-max-0902`, `-20260902`) and
+/// `-prime`, so the bare id would build a config for a model it rejects.
+const OPENROUTER_UNLISTED: &[&str] = &["qwen/qwen3.8-max"];
+
 /// OpenRouter's spelling of an Anthropic model id: a trailing
 /// `-{major}-{minor}` is written `-{major}.{minor}` (`claude-sonnet-4-6` →
 /// `claude-sonnet-4.6`); an id without a minor version is unchanged.
@@ -2223,6 +2229,9 @@ impl ModelConfig {
 
     /// A vendor preset behind OpenRouter (see [`preset`](Self::preset)).
     fn openrouter_preset(id: &str) -> Option<ModelConfig> {
+        if OPENROUTER_UNLISTED.contains(&id) {
+            return None;
+        }
         let (vendor, model) = id.split_once('/')?;
         let (_, provider) = OPENROUTER_VENDORS.iter().find(|(v, _)| *v == vendor)?;
         let preset = if *provider == "anthropic" {
@@ -2965,9 +2974,13 @@ mod tests {
             assert!(vendor.cost.is_some());
             assert!(config.cost.is_none(), "{id}");
             assert!(!config.list_priced);
-            assert!(config.reprice().cost.is_none(), "{id}");
-            let config = ModelConfig::preset("bedrock", &id).unwrap();
+            assert!(config.clone().reprice().cost.is_none(), "{id}");
+            // `with_prices` applies to gateways; the bundled table has no
+            // `bedrock` keys, so it must not borrow Anthropic's entry.
+            let builtin = crate::provider::PriceTable::builtin();
+            assert!(config.clone().with_prices(&builtin).cost.is_none(), "{id}");
             assert!(config.anthropic.is_none() && config.compat.is_none());
+            assert!(config.google.is_none());
         }
         // Haiku 4.5 is the one id with a date and version on Bedrock.
         let haiku =
@@ -3010,6 +3023,11 @@ mod tests {
             "anthropic.claude-haiku-4-5",
             "us.anthropic.claude-haiku-4-5-20251001-v2:0",
             "us.anthropic.claude-opus-4-6-v1",
+            // Haiku 4.5's Bedrock id, almost.
+            "global.anthropic.claude-haiku-4-5-20251001",
+            "us.anthropic.claude-haiku-4-5-20251001-v1",
+            "us.anthropic.claude-haiku-4-5-20251002-v1:0",
+            "us.claude-sonnet-4-6",
             "us.amazon.nova-pro-v1:0",
             "us.meta.llama4-maverick-17b-instruct-v1:0",
             "openai.gpt-oss-120b-1:0",
@@ -3069,13 +3087,21 @@ mod tests {
             assert!(config.cost.is_none(), "{id}");
             assert!(!config.list_priced);
             assert!(config.anthropic.is_none() && config.google.is_none());
+            assert!(config.clone().reprice().cost.is_none(), "{id}");
+            let builtin = crate::provider::PriceTable::builtin();
+            assert!(config.with_prices(&builtin).cost.is_none(), "{id}");
         }
         // Every Claude preset is reachable by its OpenRouter spelling.
         for (provider, id, _) in ModelConfig::PRESETS {
             if *provider == "anthropic" {
                 let routed = format!("anthropic/{}", openrouter_claude_id(id));
-                assert!(
-                    ModelConfig::preset("openrouter", &routed).is_some(),
+                let config = ModelConfig::preset("openrouter", &routed)
+                    .unwrap_or_else(|| panic!("{routed}"));
+                // The row it resolves to is this preset, not another whose
+                // spelling collapses to the same OpenRouter id.
+                assert_eq!(
+                    config.name,
+                    ModelConfig::preset("anthropic", id).unwrap().name,
                     "{routed}"
                 );
             }
@@ -3111,6 +3137,8 @@ mod tests {
             "mistral/mistral-large-4",
             "meta/muse-spark-1.3",
             "qwen/qwen3.8-max-0902",
+            // A preset OpenRouter lists only as dated snapshots.
+            "qwen/qwen3.8-max",
             "openrouter/auto",
         ] {
             assert!(ModelConfig::preset("openrouter", id).is_none(), "{id:?}");
