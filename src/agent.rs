@@ -1376,9 +1376,9 @@ impl Agent {
     /// in an error or a cancel, a run killed while its tools ran, a session
     /// saved mid-turn) is continued from those calls answered with an error
     /// result: "not run", or "no result was recorded … check before calling
-    /// it again". They are not run again. Every run, prompted or continued,
-    /// answers such calls first, since every provider refuses a request with
-    /// one.
+    /// it again". They are not run again. Every run that sends a request,
+    /// prompted or continued, answers such calls first, since every provider
+    /// refuses a request with one.
     ///
     /// Call [`finish()`](Self::finish) after draining events to restore state.
     ///

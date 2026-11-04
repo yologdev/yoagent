@@ -1171,7 +1171,8 @@ pub struct ModelConfig {
     #[serde(skip)]
     list_priced: bool,
     /// The model takes image input (default `true`). Off, every image in the
-    /// request is sent as a short text note instead: a text-only model
+    /// agent loop's requests is sent as a short text note instead (a
+    /// provider's `stream` called directly is unaffected): a text-only model
     /// refuses a request carrying one, and the image stays in the history,
     /// so every later request would fail too. The history keeps the image.
     #[serde(default = "image_input_default")]

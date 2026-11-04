@@ -529,106 +529,149 @@ pub(crate) const UNANSWERED_CALL_RESULT: &str = "No result was recorded for this
      that made it ended before it returned. It may have run in part, in full or not at all; \
      check the current state before calling it again.";
 
-/// The result a tool call gets when its response ended in an error or was
-/// cancelled: the loop runs no tool of such a response.
+/// The result a tool call gets when its response ended in an error, a
+/// refusal or a cancel: the loop runs no tool of such a response.
 pub(crate) const NOT_RUN_CALL_RESULT: &str = "Not run: the response that made this call \
-     ended in an error or was cancelled before any of its tools ran.";
+     ended in an error, a refusal or a cancel, so none of its tools ran.";
 
-/// Answer every tool call in `messages` that has no result, right after its
-/// results so far: every provider refuses a request with an unanswered call,
-/// so continuing or prompting such a history would fail, and every request
-/// after it too. The calls are not run again. A call whose response ended in
-/// an error or a cancel never ran ([`NOT_RUN_CALL_RESULT`]); any other may
-/// have ([`UNANSWERED_CALL_RESULT`]). A call with a result anywhere in the
-/// history is left alone (a hand-built history may place it late).
+/// The open tool calls of one assistant message.
+struct OpenCalls {
+    /// Id and tool name of each call with no result yet.
+    calls: Vec<(String, String)>,
+    /// Whether its response ran its tools: not one that ended in an error,
+    /// a refusal or a cancel.
+    ran: bool,
+}
+
+impl OpenCalls {
+    fn none() -> Self {
+        Self {
+            calls: Vec::new(),
+            ran: true,
+        }
+    }
+
+    /// The error results answering these calls, logged.
+    fn answer(self, at: usize) -> impl Iterator<Item = AgentMessage> {
+        let (text, outcome) = if self.ran {
+            (UNANSWERED_CALL_RESULT, "unknown outcome")
+        } else {
+            (NOT_RUN_CALL_RESULT, "not run")
+        };
+        self.calls.into_iter().map(move |(id, name)| {
+            tracing::warn!(
+                tool = name.as_str(),
+                tool_call_id = id.as_str(),
+                at,
+                "tool call with no result in the history: answered as {outcome}"
+            );
+            Message::ToolResult {
+                tool_call_id: id,
+                tool_name: name,
+                content: vec![Content::Text { text: text.into() }],
+                is_error: true,
+                timestamp: now_ms(),
+            }
+            .into()
+        })
+    }
+}
+
+/// Whether a result for `id` comes in `rest` before another call with that
+/// id (a hand-built history may answer a call after a later message; Gemini
+/// reuses ids such as `google-fc-0` turn after turn).
+fn answered_later(rest: &[AgentMessage], id: &str) -> bool {
+    for message in rest {
+        match message {
+            AgentMessage::Llm(Message::ToolResult { tool_call_id, .. }) if tool_call_id == id => {
+                return true
+            }
+            AgentMessage::Llm(Message::Assistant { content, .. })
+                if content
+                    .iter()
+                    .any(|c| matches!(c, Content::ToolCall { id: call, .. } if call == id)) =>
+            {
+                return false
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Answer every tool call in `messages` that has no result, after its turn's
+/// results (and any custom messages after them): every provider refuses a
+/// request with an unanswered call, so continuing or prompting such a
+/// history would fail, and every request after it too. The calls are not
+/// run again. A call whose response ended in an error, a refusal or a cancel
+/// never ran
+/// ([`NOT_RUN_CALL_RESULT`]); any other may have ([`UNANSWERED_CALL_RESULT`]).
+/// A result answers the nearest call before it with its id.
 ///
 /// Returns the results added at the end of the history, which the run
-/// reports as new messages; ones added earlier only repair it (logged, not
-/// reported: a transcript kept from events lacks them).
+/// reports as new messages. Ones added earlier only repair it (logged, not
+/// reported: a transcript kept from events lacks them). Histories saved by
+/// yoagent before 0.27 can have those: prompting again after a response that
+/// failed with tool calls left them unanswered.
 fn close_unanswered_calls(messages: &mut Vec<AgentMessage>) -> Vec<AgentMessage> {
-    use std::collections::HashSet;
-    let answered: HashSet<String> = messages
-        .iter()
-        .filter_map(|m| match m {
-            AgentMessage::Llm(Message::ToolResult { tool_call_id, .. }) => {
-                Some(tool_call_id.clone())
-            }
-            _ => None,
-        })
-        .collect();
-    // Open calls of the latest assistant message: id, name, and whether its
-    // response ran its tools.
-    let mut pending: Vec<(String, String)> = Vec::new();
-    let mut ran = true;
-    let results = |pending: &mut Vec<(String, String)>, ran: bool, at: usize| {
-        pending
-            .drain(..)
-            .map(|(id, name)| {
-                tracing::warn!(
-                    tool = name.as_str(),
-                    tool_call_id = id.as_str(),
-                    at,
-                    "tool call with no result in the history: answered as {}",
-                    if ran { "unknown outcome" } else { "not run" }
-                );
-                Message::ToolResult {
-                    tool_call_id: id,
-                    tool_name: name,
-                    content: vec![Content::Text {
-                        text: if ran {
-                            UNANSWERED_CALL_RESULT
-                        } else {
-                            NOT_RUN_CALL_RESULT
-                        }
-                        .into(),
-                    }],
-                    is_error: true,
-                    timestamp: now_ms(),
+    // Where results go: before message `at` (or at the end), for `calls`.
+    let mut inserts: Vec<(usize, OpenCalls)> = Vec::new();
+    let mut open = OpenCalls::none();
+    for (i, message) in messages.iter().enumerate() {
+        let AgentMessage::Llm(message) = message else {
+            continue;
+        };
+        match message {
+            Message::ToolResult { tool_call_id, .. } => {
+                if let Some(at) = open.calls.iter().position(|(id, _)| id == tool_call_id) {
+                    open.calls.remove(at);
                 }
-                .into()
-            })
-            .collect::<Vec<AgentMessage>>()
-    };
-    let mut i = 0;
-    while i < messages.len() {
-        match &messages[i] {
-            AgentMessage::Llm(Message::ToolResult { tool_call_id, .. }) => {
-                pending.retain(|(id, _)| id != tool_call_id);
             }
-            AgentMessage::Llm(m @ (Message::User { .. } | Message::Assistant { .. })) => {
-                let (calls, next_ran) = match m {
-                    Message::Assistant {
-                        content,
-                        stop_reason,
-                        ..
-                    } => (
-                        content
+            Message::User { .. } | Message::Assistant { .. } => {
+                let rest = &messages[i..];
+                open.calls.retain(|(id, _)| !answered_later(rest, id));
+                let closed = std::mem::replace(&mut open, OpenCalls::none());
+                if !closed.calls.is_empty() {
+                    inserts.push((i, closed));
+                }
+                if let Message::Assistant {
+                    content,
+                    stop_reason,
+                    ..
+                } = message
+                {
+                    open = OpenCalls {
+                        calls: content
                             .iter()
                             .filter_map(|c| match c {
-                                Content::ToolCall { id, name, .. } if !answered.contains(id) => {
+                                Content::ToolCall { id, name, .. } => {
                                     Some((id.clone(), name.clone()))
                                 }
                                 _ => None,
                             })
                             .collect(),
-                        !matches!(stop_reason, StopReason::Error | StopReason::Aborted),
-                    ),
-                    _ => (Vec::new(), true),
-                };
-                if !pending.is_empty() {
-                    let added = results(&mut pending, ran, i);
-                    let n = added.len();
-                    messages.splice(i..i, added);
-                    i += n;
+                        ran: !matches!(
+                            stop_reason,
+                            StopReason::Error | StopReason::Aborted | StopReason::Refusal
+                        ),
+                    };
                 }
-                pending = calls;
-                ran = next_ran;
             }
-            AgentMessage::Custom(_) => {}
         }
-        i += 1;
     }
-    let added = results(&mut pending, ran, messages.len());
+    if inserts.is_empty() && open.calls.is_empty() {
+        return Vec::new();
+    }
+    let old = std::mem::take(messages);
+    let mut inserts = inserts.into_iter().peekable();
+    for (i, message) in old.into_iter().enumerate() {
+        while let Some((_, closed)) = inserts.next_if(|(at, _)| *at == i) {
+            let at = messages.len();
+            messages.extend(closed.answer(at));
+        }
+        messages.push(message);
+    }
+    let added: Vec<AgentMessage> = open.answer(messages.len()).collect();
     messages.extend(added.iter().cloned());
     added
 }
@@ -1108,10 +1151,11 @@ async fn apply_input_filters(
 
 /// Continue an agent loop from existing context (for retries).
 ///
-/// Tool calls with no result in the context are answered first (an error
-/// result saying none was recorded; the calls are not run again), so a
-/// history saved mid-turn can be continued. The context must not end with a
-/// finished assistant answer.
+/// Tool calls with no result in the context are answered first, with an
+/// error result ("not run", or "no result was recorded"; the calls are not
+/// run again), so a history left mid-turn can be continued. Panics if the
+/// context then ends with an assistant message (one with no tool calls left
+/// open, errored or not): there is nothing to continue from.
 pub async fn agent_loop_continue(
     context: &mut AgentContext,
     config: &AgentLoopConfig,

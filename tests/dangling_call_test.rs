@@ -418,3 +418,137 @@ async fn a_call_answered_later_is_not_answered_again() {
         .count();
     assert_eq!(c1, 1, "{:#?}", run.history);
 }
+
+fn ended(stop: StopReason, ids: &[&str]) -> AgentMessage {
+    AgentMessage::Llm(Message::assistant(
+        ids.iter()
+            .map(|id| Content::tool_call(*id, "write_file", serde_json::json!({"path": "r.md"})))
+            .collect(),
+        stop,
+        "mock",
+        "mock",
+        Usage::default(),
+    ))
+}
+
+fn texts_for<'a>(run: &'a Run, id: &str) -> Vec<&'a str> {
+    run.history
+        .iter()
+        .filter_map(result_text)
+        .filter(|(call, ..)| *call == id)
+        .map(|(_, text, _)| text)
+        .collect()
+}
+
+/// A cancelled response, or a refused one, ran none of its calls either.
+#[tokio::test]
+async fn calls_of_a_cancelled_or_refused_response_are_answered_not_run() {
+    for stop in [StopReason::Aborted, StopReason::Refusal] {
+        let run = run(
+            vec![user("write"), ended(stop.clone(), &["c1"])],
+            Some("again"),
+        )
+        .await;
+        assert!(violation(&run.requests[0]).is_none());
+        let texts = texts_for(&run, "c1");
+        assert_eq!(texts.len(), 1, "{stop:?}: {texts:?}");
+        assert!(texts[0].starts_with("Not run"), "{stop:?}: {}", texts[0]);
+    }
+}
+
+/// Each response's calls get the text for how that response ended.
+#[tokio::test]
+async fn each_turn_is_answered_by_how_its_response_ended() {
+    let run = run(
+        vec![
+            user("write"),
+            ended(StopReason::Error, &["c1"]),
+            user("retry"),
+            calls(&["c2"]),
+        ],
+        Some("well?"),
+    )
+    .await;
+    assert!(violation(&run.requests[0]).is_none());
+    assert!(texts_for(&run, "c1")[0].starts_with("Not run"));
+    assert!(texts_for(&run, "c2")[0].starts_with("No result was recorded"));
+    assert!(result_text(&run.history[2]).is_some(), "{:#?}", run.history);
+}
+
+/// `continue_loop` after a failed response with calls.
+#[tokio::test]
+async fn continuing_after_a_failed_response_answers_its_calls_not_run() {
+    let run = run(vec![user("write"), ended(StopReason::Error, &["c1"])], None).await;
+    assert!(violation(&run.requests[0]).is_none());
+    assert!(texts_for(&run, "c1")[0].starts_with("Not run"));
+    assert_eq!(run.tool_runs, 0);
+}
+
+/// Gemini makes call ids up from their position (`google-fc-0`), so one id
+/// recurs turn after turn: an earlier turn's result answers only its own
+/// call, in either order.
+#[tokio::test]
+async fn a_reused_call_id_is_answered_per_turn() {
+    // Answered first, left open later.
+    let run1 = run(
+        vec![
+            user("one"),
+            calls(&["google-fc-0"]),
+            answered("google-fc-0"),
+            said("done"),
+            user("two"),
+            ended(StopReason::Aborted, &["google-fc-0"]),
+        ],
+        None,
+    )
+    .await;
+    assert!(
+        violation(&run1.requests[0]).is_none(),
+        "{:#?}",
+        run1.requests[0]
+    );
+    assert_eq!(texts_for(&run1, "google-fc-0").len(), 2);
+    // Left open first, answered later.
+    let run2 = run(
+        vec![
+            user("one"),
+            calls(&["google-fc-0"]),
+            user("two"),
+            calls(&["google-fc-0"]),
+            answered("google-fc-0"),
+            said("done"),
+        ],
+        Some("three"),
+    )
+    .await;
+    assert!(
+        violation(&run2.requests[0]).is_none(),
+        "{:#?}",
+        run2.requests[0]
+    );
+    assert!(
+        result_text(&run2.history[2]).is_some(),
+        "{:#?}",
+        run2.history
+    );
+}
+
+/// On the continue path the results come right after `TurnStart`, before
+/// the answer.
+#[tokio::test]
+async fn closed_calls_are_reported_first_when_continuing() {
+    let run = run(vec![user("write"), calls(&["c1"])], None).await;
+    let order: Vec<&str> = run
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TurnStart => Some("turn"),
+            AgentEvent::MessageEnd { message } => Some(match message {
+                AgentMessage::Llm(Message::ToolResult { .. }) => "result",
+                _ => "other",
+            }),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(order[..3], ["turn", "result", "other"], "{order:?}");
+}

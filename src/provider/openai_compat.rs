@@ -323,7 +323,7 @@ fn build_request_body(
 
     // Images from tool results, sent in a user message after the tool
     // messages: a `tool` message may carry only text (OpenAI answers 400,
-    // others drop the image without a word).
+    // DeepSeek drops the image silently).
     let mut tool_images: Vec<serde_json::Value> = Vec::new();
 
     for msg in &config.messages {
@@ -395,10 +395,7 @@ fn build_request_body(
                 let images: Vec<serde_json::Value> = content
                     .iter()
                     .filter_map(|c| match c {
-                        Content::Image { data, mime_type } => Some(serde_json::json!({
-                            "type": "image_url",
-                            "image_url": {"url": format!("data:{};base64,{}", mime_type, data)},
-                        })),
+                        Content::Image { data, mime_type } => Some(image_part(data, mime_type)),
                         _ => None,
                     })
                     .collect();
@@ -555,6 +552,14 @@ fn deepseek_reasoning_effort(level: ThinkingLevel) -> &'static str {
     }
 }
 
+/// An image as a Chat Completions content part.
+fn image_part(data: &str, mime_type: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "image_url",
+        "image_url": {"url": format!("data:{mime_type};base64,{data}")},
+    })
+}
+
 /// What a tool message with images says in their place.
 fn tool_images_note(images: usize) -> &'static str {
     if images == 1 {
@@ -613,10 +618,7 @@ fn content_to_openai(content: &[Content]) -> serde_json::Value {
         .filter(|c| !matches!(c, Content::Text { text } if text.is_empty()))
         .filter_map(|c| match c {
             Content::Text { text } => Some(serde_json::json!({"type": "text", "text": text})),
-            Content::Image { data, mime_type } => Some(serde_json::json!({
-                "type": "image_url",
-                "image_url": {"url": format!("data:{};base64,{}", mime_type, data)},
-            })),
+            Content::Image { data, mime_type } => Some(image_part(data, mime_type)),
             _ => None,
         })
         .collect();
@@ -1010,6 +1012,7 @@ mod tests {
                             text: "a chart".into(),
                         },
                         image("CCCC"),
+                        image("DDDD"),
                     ],
                 ),
                 assistant("red and blue"),
@@ -1029,9 +1032,12 @@ mod tests {
             ]
         );
         let m = body["messages"].as_array().unwrap();
-        assert_eq!(m[3]["content"], tool_images_note(1));
+        assert_eq!(m[3]["content"], "[Its image is in the next user message.]");
         assert_eq!(m[4]["content"], "no image");
-        assert_eq!(m[5]["content"], format!("a chart\n{}", tool_images_note(1)));
+        assert_eq!(
+            m[5]["content"],
+            "a chart\n[Its images are in the next user message.]"
+        );
         // Each tool's images under its name and call id.
         let parts: Vec<String> = m[6]["content"]
             .as_array()
@@ -1048,7 +1054,8 @@ mod tests {
                 "From read_file (a):",
                 "data:image/png;base64,AAAA",
                 "From read_file (c):",
-                "data:image/png;base64,CCCC"
+                "data:image/png;base64,CCCC",
+                "data:image/png;base64,DDDD"
             ]
         );
     }
