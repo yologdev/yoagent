@@ -4,7 +4,7 @@ Extend [yoagent](https://crates.io/crates/yoagent) agents at runtime with
 [rutis](https://crates.io/crates/rutis) plugins — in Rust, TypeScript (on
 Node or Bun), Python or Go — through one yoagent `Extension`.
 
-**Status:** on [crates.io](https://crates.io/crates/yoagent-rutis); needs yoagent's `Extension`: yoagent 0.26 (yoagent-rutis 0.10 and later), and rutis 0.20.0 or a later 0.20. The DSH and pi adapters below cover tools, tool policies, input checks, prompt additions and images; commands, dialogs and UI belong to the app and are not mapped.
+**Status:** on [crates.io](https://crates.io/crates/yoagent-rutis); needs yoagent's `Extension`: yoagent 0.27 (yoagent-rutis 0.13; 0.10–0.12 take yoagent 0.26), and rutis 0.20.0 or a later 0.20. The DSH and pi adapters below cover tools, tool policies, input checks, prompt additions and images; commands, dialogs and UI belong to the app and are not mapped.
 
 rutis (a Rust port of the [Cordis](https://github.com/shigma/cordis) plugin
 kernel) loads, unloads, reloads and hot-updates plugins, and tears down
@@ -1007,7 +1007,10 @@ rutis 0.20.0 or a later 0.20, yoagent 0.26 and Rust 1.88, with the runtimes
 at 0.20.0 too (rutis 0.20 kept protocol 4, so a 0.19 runtime still greets a
 0.20 host, but runs its plugins on 0.19's rules — no `optional`, the old
 unload order — which the pi and DSH adapters are not built for: they read
-their optional services with `ctx.get`). rutis's release
+their optional services with `ctx.get`); 0.13 requires yoagent 0.27
+(rutis 0.20, Rust 1.88): `on_stop` also sees an answer cut off at the
+output limit, and its `Stop` carries `stop_reason` (`"stop"` / `"length"`).
+rutis's release
 train (`rutis`, `rutis-bridge`, `rutis-loader`, `rutis-host`, the npm, PyPI
 and Go runtimes) shares one version: move the host and the language runtimes
 together.
@@ -1017,8 +1020,8 @@ as `yoagent-rutis`: a crates.io `yoagent` next to a git `yoagent-rutis` is two
 `yoagent` crates whose types do not match.
 
 ```toml
-yoagent = "0.26"
-yoagent-rutis = "0.12"
+yoagent = "0.27"
+yoagent-rutis = "0.13"
 ```
 
 ## License

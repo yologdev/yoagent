@@ -3,8 +3,8 @@
 Run [yoagent](https://crates.io/crates/yoagent) on Cloudflare Workers through
 the Worker's own bindings.
 
-yoagent-workers 0.3 requires yoagent 0.26 (a requirement bump, no code
-change). 0.2 requires yoagent 0.25 (it reads
+yoagent-workers 0.4 requires yoagent 0.27, and 0.3 requires yoagent 0.26
+(requirement bumps, no code change). 0.2 requires yoagent 0.25 (it reads
 `prices::global::pricing_enabled`; pricing is opt-in from yoagent 0.25 — call
 `yoagent::provider::prices::enable_bundled()` to price Clef).
 yoagent-workers 0.1 works with yoagent 0.24.
@@ -32,8 +32,8 @@ binding = "AI"
 ```toml
 # Cargo.toml
 [dependencies]
-yoagent = { version = "0.26", default-features = false, features = ["decision"] }
-yoagent-workers = "0.3"
+yoagent = { version = "0.27", default-features = false, features = ["decision"] }
+yoagent-workers = "0.4"
 ```
 
 Take both from the same source: crates.io for both as above, or git for both.
