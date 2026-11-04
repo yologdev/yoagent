@@ -5687,6 +5687,9 @@ async fn a_requested_wait_over_max_retry_after_fails_the_turn_at_once() {
         "{error}"
     );
     assert!(error.contains("Rate limited"), "{error}");
+    assert!(error.contains("max_retry_after"), "{error}");
+    // The wait is said once, not again as "retry after 3600000ms".
+    assert!(!error.contains("3600000"), "{error}");
 }
 
 /// A wait within the maximum, a rate limit naming no wait, and no maximum
@@ -5694,7 +5697,13 @@ async fn a_requested_wait_over_max_retry_after_fails_the_turn_at_once() {
 #[tokio::test]
 async fn waits_within_max_retry_after_are_retried() {
     let minute = Some(std::time::Duration::from_secs(60));
-    for (retry_after_ms, max) in [(Some(10), minute), (None, minute), (Some(3_600_000), None)] {
+    for (retry_after_ms, max) in [
+        (Some(10), minute),
+        // The boundary: a wait equal to the maximum is retried.
+        (Some(60_000), minute),
+        (None, minute),
+        (Some(3_600_000), None),
+    ] {
         let (messages, _, calls) = rate_limited_once(retry_after_ms, max).await;
         assert_eq!(calls, 2, "{retry_after_ms:?} under {max:?}");
         let Some(AgentMessage::Llm(Message::Assistant { stop_reason, .. })) = messages.last()
@@ -5703,4 +5712,88 @@ async fn waits_within_max_retry_after_are_retried() {
         };
         assert_eq!(*stop_reason, StopReason::Stop, "{retry_after_ms:?}");
     }
+}
+
+/// Fails with each scripted error in turn, then answers.
+struct ErrorsThenText {
+    errors: std::sync::Mutex<std::collections::VecDeque<ProviderError>>,
+    calls: std::sync::atomic::AtomicUsize,
+    inner: MockProvider,
+}
+
+#[async_trait::async_trait]
+impl StreamProvider for ErrorsThenText {
+    async fn stream(
+        &self,
+        config: StreamConfig,
+        tx: tokio::sync::mpsc::UnboundedSender<StreamEvent>,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<yoagent::Message, ProviderError> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let next = self.errors.lock().unwrap().pop_front();
+        match next {
+            Some(error) => Err(error),
+            None => self.inner.stream(config, tx, cancel).await,
+        }
+    }
+}
+
+/// A retry, then a wait over the maximum: the second error ends the turn
+/// after exactly one retry.
+#[tokio::test]
+async fn max_retry_after_applies_after_an_earlier_retry() {
+    let provider = std::sync::Arc::new(ErrorsThenText {
+        errors: std::sync::Mutex::new(
+            [
+                ProviderError::Network("connection reset".into()),
+                ProviderError::RateLimited {
+                    retry_after_ms: Some(3_600_000),
+                },
+            ]
+            .into(),
+        ),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+        inner: MockProvider::text("never reached"),
+    });
+    let mut config = AgentLoopConfig::new(provider.clone(), "mock");
+    config.api_key = "test".into();
+    config.retry_config = yoagent::RetryConfig {
+        max_retries: 3,
+        initial_delay_ms: 1,
+        backoff_multiplier: 1.0,
+        max_delay_ms: 5,
+    };
+    config.max_retry_after = Some(std::time::Duration::from_secs(60));
+    let mut context = AgentContext {
+        system_prompt: "test".into(),
+        messages: Vec::new(),
+        tools: Vec::new(),
+    };
+    let (tx, rx) = mpsc::unbounded_channel();
+    let messages = agent_loop(
+        vec![AgentMessage::Llm(Message::user("hi"))],
+        &mut context,
+        &config,
+        tx,
+        CancellationToken::new(),
+    )
+    .await;
+    let events = collect_events(rx);
+    assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    let retries = events
+        .iter()
+        .filter(|e| matches!(e, AgentEvent::ProviderRetry { .. }))
+        .count();
+    assert_eq!(retries, 1);
+    let Some(AgentMessage::Llm(Message::Assistant {
+        stop_reason,
+        error_message,
+        ..
+    })) = messages.last()
+    else {
+        panic!("expected an assistant message");
+    };
+    assert_eq!(*stop_reason, StopReason::Error);
+    let error = error_message.as_deref().unwrap();
+    assert!(error.contains("asked to wait 3600.0s"), "{error}");
 }

@@ -543,9 +543,10 @@ impl Agent {
     /// The longest server-requested wait (a rate limit's `Retry-After`)
     /// this agent's runs retry after: a retryable error asking for longer
     /// ends the turn at once as an `Error` naming the wait, instead of
-    /// waiting it clamped to `retry_config.max_delay_ms` and retrying
-    /// (likely into the same limit). Errors that name no wait are retried as
-    /// usual. Off by default (clamp and retry). See
+    /// retrying (likely into the same limit); a wait equal to it is retried.
+    /// It only decides whether to give up at once: every wait still made is
+    /// capped at `retry_config.max_delay_ms` (30 s by default). Errors that
+    /// name no wait are retried as usual. Off by default. See
     /// [`AgentLoopConfig::max_retry_after`](crate::agent_loop::AgentLoopConfig::max_retry_after).
     pub fn with_max_retry_after(mut self, max: std::time::Duration) -> Self {
         self.max_retry_after = Some(max);

@@ -117,10 +117,12 @@ let agent = Agent::from_config(config)
 ```
 
 A retryable error whose requested wait exceeds it ends the turn at once as `StopReason::Error`,
-with an error message naming the wait ("the server asked to wait 3600.0s, longer than the 60.0s
-allowed (max_retry_after); not retried"); no `ProviderRetry` is emitted. Errors that name no wait
-are retried as usual. Off by default. Also `SubAgentTool::with_max_retry_after` and the
-`AgentLoopConfig::max_retry_after` field.
+with an error message naming the wait ("Rate limited: the server asked to wait 3600.0s, longer
+than the 60.0s allowed by max_retry_after; not retried") and a `warn!` saying why; no
+`ProviderRetry` is emitted for it. A wait equal to the maximum is retried, and so are errors that
+name no wait. The setting only decides whether to give up at once: every wait the loop does make
+is still capped at `max_delay_ms` (30 s by default). Off by default. Also
+`SubAgentTool::with_max_retry_after` and the `AgentLoopConfig::max_retry_after` field.
 
 ## Observability
 

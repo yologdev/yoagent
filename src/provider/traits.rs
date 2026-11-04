@@ -303,7 +303,7 @@ impl ProviderError {
         if matches!(status, 429 | 503 | 529) {
             // `RateLimited` has no message: keep the server's explanation
             // ("Overloaded", "model is loading") in the log.
-            tracing::warn!(status, body = %truncate_body(message), "provider rate-limited or overloaded; will retry");
+            tracing::warn!(status, body = %truncate_body(message), "provider rate-limited or overloaded");
             Self::RateLimited { retry_after_ms }
         } else if is_context_overflow(status, message) {
             Self::ContextOverflow {
@@ -398,7 +398,7 @@ pub(crate) fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<
 /// receive `"error"` events in the SSE stream.
 pub fn classify_sse_error_event(message: &str) -> ProviderError {
     if is_rate_limit_payload(message) {
-        tracing::warn!(payload = %truncate_body(message), "in-stream rate limit or overload; will retry");
+        tracing::warn!(payload = %truncate_body(message), "in-stream rate limit or overload");
         ProviderError::RateLimited {
             retry_after_ms: None,
         }

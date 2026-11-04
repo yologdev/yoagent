@@ -2163,3 +2163,49 @@ async fn a_max_depth_of_zero_refuses_every_call() {
         .unwrap_err();
     assert!(err.to_string().contains("at depth 1"), "{err}");
 }
+
+/// Rate limited every time, asking for an hour's wait; counts the requests.
+struct AskedToWaitAnHour(Arc<std::sync::atomic::AtomicUsize>);
+
+#[async_trait::async_trait]
+impl yoagent::provider::StreamProvider for AskedToWaitAnHour {
+    async fn stream(
+        &self,
+        _config: yoagent::provider::StreamConfig,
+        _tx: mpsc::UnboundedSender<yoagent::provider::StreamEvent>,
+        _cancel: CancellationToken,
+    ) -> Result<Message, yoagent::provider::ProviderError> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(yoagent::provider::ProviderError::RateLimited {
+            retry_after_ms: Some(3_600_000),
+        })
+    }
+}
+
+/// `SubAgentTool::with_max_retry_after` reaches the child's loop.
+#[tokio::test]
+async fn sub_agent_max_retry_after_fails_a_long_wait_without_retrying() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let tool = SubAgentTool::from_provider(
+        "waiter",
+        Arc::new(AskedToWaitAnHour(calls.clone())),
+        ModelConfig::mock(),
+    )
+    .with_retry_config(yoagent::RetryConfig {
+        max_retries: 3,
+        initial_delay_ms: 1,
+        backoff_multiplier: 1.0,
+        max_delay_ms: 1,
+    })
+    .with_max_retry_after(std::time::Duration::from_secs(60));
+    let err = tool
+        .execute(
+            serde_json::json!({"task": "x"}),
+            ToolContext::new("tc", "waiter"),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(err.contains("max_retry_after"), "{err}");
+}

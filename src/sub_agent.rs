@@ -410,8 +410,9 @@ impl SubAgentTool {
 
     /// The longest server-requested wait (a rate limit's `Retry-After`) the
     /// sub-agent's runs retry after; a longer one ends the turn at once as
-    /// an error naming the wait. Off by default (the wait is clamped to
-    /// `max_delay_ms` and retried). Mirrors
+    /// an error naming the wait. It only decides whether to give up at once:
+    /// every wait still made is capped at `max_delay_ms` (30 s by default).
+    /// Off by default. Mirrors
     /// [`Agent::with_max_retry_after`](crate::Agent::with_max_retry_after).
     pub fn with_max_retry_after(mut self, max: std::time::Duration) -> Self {
         self.max_retry_after = Some(max);
