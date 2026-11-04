@@ -56,6 +56,11 @@ pub struct BashTool {
     pub env_allowlist: Option<Vec<String>>,
     /// Optional callback for confirming dangerous commands
     pub confirm_fn: Option<ConfirmFn>,
+    /// Keep ANSI escape sequences (colours, cursor movement, terminal
+    /// titles, hyperlinks) in the output. Off by default: they are stripped
+    /// before the output reaches the model, which sees them only as noise.
+    /// See [`with_raw_output`](Self::with_raw_output).
+    pub raw_output: bool,
 }
 
 impl Default for BashTool {
@@ -73,6 +78,7 @@ impl Default for BashTool {
             ],
             confirm_fn: None,
             env_allowlist: None,
+            raw_output: false,
         }
     }
 }
@@ -106,6 +112,17 @@ impl BashTool {
 
     pub fn with_confirm(mut self, f: impl Fn(&str) -> bool + Send + Sync + 'static) -> Self {
         self.confirm_fn = Some(Box::new(f));
+        self
+    }
+
+    /// `true` keeps ANSI escape sequences in the output exactly as the
+    /// command printed them. By default they are stripped: CSI sequences
+    /// (colours, cursor movement), OSC strings (terminal titles,
+    /// hyperlinks — the link text stays), the other string sequences (DCS,
+    /// SOS, PM, APC) and two-character escapes. Carriage returns, tabs and
+    /// backspaces are text and are always kept.
+    pub fn with_raw_output(mut self, raw: bool) -> Self {
+        self.raw_output = raw;
         self
     }
 }
@@ -208,6 +225,7 @@ impl AgentTool for BashTool {
 
         let timeout = self.timeout;
         let max_bytes = self.max_output_bytes;
+        let strip = !self.raw_output;
 
         if cancel.is_cancelled() {
             return Err(ToolError::Cancelled);
@@ -269,7 +287,7 @@ impl AgentTool for BashTool {
                 return Err(ToolError::Failed(format!(
                     "Command timed out after {}s. Output so far:\n{}",
                     timeout.as_secs(),
-                    render_output(&out, &err)
+                    render_output(&out, &err, strip)
                 )));
             }
             (Some(Some(drained)), _) => drained,
@@ -300,7 +318,12 @@ impl AgentTool for BashTool {
             return Err(ToolError::Cancelled);
         }
         let exit_code = status.code().unwrap_or(-1);
-        let mut output = format!("Exit code: {}\n{}", exit_code, render_output(&out, &err));
+        let signal = exit_signal(&status);
+        let header = match signal {
+            Some(sig) => format!("Killed by signal {}", describe_signal(sig)),
+            None => format!("Exit code: {exit_code}"),
+        };
+        let mut output = format!("{header}\n{}", render_output(&out, &err, strip));
         if !drained {
             output.push_str(
                 "\n\nNOTE: a background process still holds the command's output and was \
@@ -311,13 +334,70 @@ impl AgentTool for BashTool {
         // Return output even on failure — LLMs need error output to self-correct
         Ok(ToolResult {
             content: vec![Content::Text { text: output }],
+            // `exit_code` is -1 when there is no exit status (the command was
+            // killed by a signal); `signal` then names it, and is null
+            // otherwise (always null off Unix).
             details: serde_json::json!({
                 "exit_code": exit_code,
+                "signal": signal,
                 "success": exit_code == 0,
                 "output_still_open": !drained,
             }),
         })
     }
+}
+
+/// The signal that terminated the command, if one did (Unix only).
+fn exit_signal(status: &std::process::ExitStatus) -> Option<i32> {
+    #[cfg(unix)]
+    {
+        std::os::unix::process::ExitStatusExt::signal(status)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = status;
+        None
+    }
+}
+
+/// `9 (SIGKILL)`, or just the number for a signal without a name here.
+fn describe_signal(sig: i32) -> String {
+    match signal_name(sig) {
+        Some(name) => format!("{sig} ({name})"),
+        None => sig.to_string(),
+    }
+}
+
+/// The name of a common signal. Numbers differ between platforms (SIGBUS is
+/// 7 on Linux and 10 on macOS), so they come from `libc`, never literals.
+#[cfg(unix)]
+fn signal_name(sig: i32) -> Option<&'static str> {
+    const NAMES: &[(libc::c_int, &str)] = &[
+        (libc::SIGHUP, "SIGHUP"),
+        (libc::SIGINT, "SIGINT"),
+        (libc::SIGQUIT, "SIGQUIT"),
+        (libc::SIGILL, "SIGILL"),
+        (libc::SIGTRAP, "SIGTRAP"),
+        (libc::SIGABRT, "SIGABRT"),
+        (libc::SIGBUS, "SIGBUS"),
+        (libc::SIGFPE, "SIGFPE"),
+        (libc::SIGKILL, "SIGKILL"),
+        (libc::SIGUSR1, "SIGUSR1"),
+        (libc::SIGSEGV, "SIGSEGV"),
+        (libc::SIGUSR2, "SIGUSR2"),
+        (libc::SIGPIPE, "SIGPIPE"),
+        (libc::SIGALRM, "SIGALRM"),
+        (libc::SIGTERM, "SIGTERM"),
+        (libc::SIGXCPU, "SIGXCPU"),
+        (libc::SIGXFSZ, "SIGXFSZ"),
+        (libc::SIGSYS, "SIGSYS"),
+    ];
+    NAMES.iter().find(|(n, _)| *n == sig).map(|(_, name)| *name)
+}
+
+#[cfg(not(unix))]
+fn signal_name(_: i32) -> Option<&'static str> {
+    None
 }
 
 /// Kills the command's process group when dropped — on a timeout, a cancel,
@@ -394,9 +474,17 @@ impl Capture {
 
     /// The text, with a note when bytes were discarded or reading failed.
     /// Bytes are cut before decoding, so a multi-byte character split by the
-    /// cap becomes U+FFFD, never a panic.
-    fn text(&self) -> String {
-        let mut s = String::from_utf8_lossy(&self.bytes).into_owned();
+    /// cap becomes U+FFFD, never a panic. With `strip`, ANSI escapes are
+    /// removed after decoding (they are ASCII, so the lossy decode never
+    /// alters one) and before the notes are added; a sequence the cap cut
+    /// short is dropped like a whole one.
+    fn text(&self, strip: bool) -> String {
+        let decoded = String::from_utf8_lossy(&self.bytes);
+        let mut s = if strip {
+            strip_ansi(&decoded)
+        } else {
+            decoded.into_owned()
+        };
         if self.cut {
             s.push_str("\n... (output truncated)");
         }
@@ -412,10 +500,141 @@ impl Capture {
 }
 
 /// Stdout alone, or both streams labelled.
-fn render_output(out: &Capture, err: &Capture) -> String {
+fn render_output(out: &Capture, err: &Capture, strip: bool) -> String {
     if err.is_empty() {
-        out.text()
+        out.text(strip)
     } else {
-        format!("STDOUT:\n{}\nSTDERR:\n{}", out.text(), err.text())
+        format!("STDOUT:\n{}\nSTDERR:\n{}", out.text(strip), err.text(strip))
+    }
+}
+
+const ESC: char = '\u{1b}';
+/// The 8-bit CSI, as a decoded character (UTF-8 `C2 9B`).
+const C1_CSI: char = '\u{9b}';
+const BEL: char = '\u{7}';
+
+/// `text` without ANSI escape sequences (ECMA-48):
+///
+/// - CSI: `ESC [` (or the 8-bit U+009B), parameter bytes `0x30–0x3F`,
+///   intermediate bytes `0x20–0x2F`, a final byte `0x40–0x7E`. A sequence
+///   broken by any other character ends there: what was read of it is
+///   dropped, the character is kept.
+/// - String sequences: `ESC ]` (OSC), `ESC P` (DCS), `ESC X` (SOS),
+///   `ESC ^` (PM), `ESC _` (APC), up to BEL or `ESC \` (ST). One with no
+///   terminator loses only its two-character introducer, so a stray
+///   `ESC ]` can never hide the rest of the output.
+/// - `ESC` + intermediates `0x20–0x2F` + a final `0x30–0x7E` (charset
+///   selection such as `ESC ( B`), and `ESC` + any other character in
+///   `0x30–0x7E` (`ESC 7`, `ESC M`, …).
+/// - A lone `ESC` (the last character, or one before any other character,
+///   which is kept).
+///
+/// Everything else, other control characters included, is kept.
+fn strip_ansi(text: &str) -> String {
+    if !text.contains([ESC, C1_CSI]) {
+        return text.to_owned();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == C1_CSI {
+            skip_csi(&mut chars);
+            continue;
+        }
+        if c != ESC {
+            out.push(c);
+            continue;
+        }
+        match chars.peek().copied() {
+            Some('[') => {
+                chars.next();
+                skip_csi(&mut chars);
+            }
+            Some(']' | 'P' | 'X' | '^' | '_') => {
+                chars.next();
+                // Look for the terminator on a copy: without one, only the
+                // introducer goes.
+                let mut ahead = chars.clone();
+                while let Some(d) = ahead.next() {
+                    if d == BEL || (d == ESC && ahead.next_if_eq(&'\\').is_some()) {
+                        chars = ahead;
+                        break;
+                    }
+                }
+            }
+            Some(' '..='/') => {
+                while chars.next_if(|d| (' '..='/').contains(d)).is_some() {}
+                chars.next_if(|d| ('0'..='~').contains(d));
+            }
+            Some('0'..='~') => {
+                chars.next();
+            }
+            // A lone ESC: dropped, the next character kept.
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Skip a CSI sequence's parameters, intermediates and final byte, after
+/// its introducer.
+fn skip_csi(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+    while chars.next_if(|d| ('0'..='?').contains(d)).is_some() {}
+    while chars.next_if(|d| (' '..='/').contains(d)).is_some() {}
+    chars.next_if(|d| ('@'..='~').contains(d));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_ansi;
+
+    #[test]
+    fn strips_sgr_colours_and_cursor_movement() {
+        assert_eq!(strip_ansi("\x1b[1;31merror\x1b[0m: bad"), "error: bad");
+        assert_eq!(strip_ansi("a\x1b[2Kb\x1b[10;20Hc\x1b[?25ld"), "abcd");
+        assert_eq!(strip_ansi("\u{9b}31mred"), "red");
+    }
+
+    #[test]
+    fn strips_osc_titles_and_keeps_hyperlink_text() {
+        assert_eq!(strip_ansi("\x1b]0;title\x07after"), "after");
+        assert_eq!(
+            strip_ansi("\x1b]8;;https://x.test\x1b\\link\x1b]8;;\x1b\\ done"),
+            "link done"
+        );
+        assert_eq!(strip_ansi("\x1bPq#0\x1b\\x"), "x");
+    }
+
+    #[test]
+    fn strips_two_character_and_charset_escapes() {
+        assert_eq!(strip_ansi("a\x1b7b\x1b8c\x1bMd"), "abcd");
+        assert_eq!(strip_ansi("\x1b(Bplain\x1b)0"), "plain");
+    }
+
+    #[test]
+    fn keeps_text_and_other_control_characters() {
+        let plain = "line\r\n\ttab\x08 日本語 [31m";
+        assert_eq!(strip_ansi(plain), plain);
+    }
+
+    #[test]
+    fn an_unterminated_string_sequence_loses_only_its_introducer() {
+        assert_eq!(
+            strip_ansi("\x1b]0;never closed\nmore"),
+            "0;never closed\nmore"
+        );
+    }
+
+    #[test]
+    fn a_sequence_cut_short_at_the_end_is_dropped() {
+        assert_eq!(strip_ansi("ok\x1b[1;3"), "ok");
+        assert_eq!(strip_ansi("ok\x1b["), "ok");
+        assert_eq!(strip_ansi("ok\x1b"), "ok");
+    }
+
+    #[test]
+    fn a_broken_csi_keeps_the_character_that_broke_it() {
+        assert_eq!(strip_ansi("\x1b[31\n日"), "\n日");
+        assert_eq!(strip_ansi("\x1b\u{e9}x"), "\u{e9}x");
     }
 }

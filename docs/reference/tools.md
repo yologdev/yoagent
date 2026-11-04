@@ -24,6 +24,7 @@ pub struct BashTool {
     pub deny_patterns: Vec<String>,    // Blocked commands
     pub env_allowlist: Option<Vec<String>>, // Default: None (inherit the whole environment)
     pub confirm_fn: Option<ConfirmFn>, // Confirmation callback
+    pub raw_output: bool,              // Default: false (ANSI escapes stripped)
 }
 ```
 
@@ -45,6 +46,17 @@ it prints from then on is read and discarded in the background (so a closed pipe
 it; a job that prints without pause keeps that reading busy), and the result says so with a
 `NOTE:` line and `details.output_still_open: true`. Redirect a job's output (`cmd >log 2>&1 &`)
 to keep it. Before 0.25.8 such a job held the call until the timeout, which then killed it.
+
+The result starts with `Exit code: N`, or, for a command killed by a signal (Unix), with
+`Killed by signal 9 (SIGKILL)`. `details.exit_code` is the exit status, `-1` when there is none
+(a signal); `details.signal` is the signal number, `null` otherwise (always `null` off Unix).
+Up to 0.26.8 a killed command reported only `Exit code: -1`.
+
+ANSI escape sequences (colours, cursor movement, terminal titles, hyperlinks, whose text stays)
+are stripped from both streams before the output reaches the model; `with_raw_output(true)` (or
+`raw_output: true`) keeps them. Carriage returns, tabs and backspaces are kept either way. The
+cap counts the bytes as printed, escapes included, and a sequence the cap cuts in half is dropped
+too.
 
 ### Example
 

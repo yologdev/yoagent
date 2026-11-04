@@ -4,6 +4,11 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+- **`bash` names the signal that killed a command.** A command killed by a signal (Unix) used to report `Exit code: -1`; it now reads `Killed by signal 9 (SIGKILL)`, and `details.signal` carries the number (`null` for an ordinary exit, and always off Unix). `details.exit_code` keeps its meaning: the exit status, `-1` when there is none.
+- **`bash` strips ANSI escape sequences** from stdout and stderr before they reach the model: CSI (colours, cursor movement), OSC (terminal titles; a hyperlink keeps its text), DCS/SOS/PM/APC and two-character escapes. Carriage returns, tabs and backspaces are kept; a string sequence with no terminator loses only its introducer, so nothing printed after it disappears; a sequence the output cap cuts in half is dropped. `BashTool::with_raw_output(true)` (new `raw_output` field, default `false`) keeps the output as printed.
+
 ## 0.26.8 (2026-11-03)
 
 Additive: MCP stdio servers can be started without the host's variables. yoagent-rutis (0.12.0) and yoagent-workers (0.3.0) are unchanged.
