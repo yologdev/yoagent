@@ -6,6 +6,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **yoagent** is a Rust library (crate) for building AI coding agents. It provides a core agent loop, multi-provider LLM streaming, built-in tools, MCP integration, and context management. Published to crates.io as `yoagent`.
 
+## Library Principles
+
+yoagent's motto is **keep it simple but effective**: a powerful, flexible, reusable base for others to build agents on. Check every change against these four lines before adding it:
+
+1. **The loop stays as it is.** New behaviour goes into tools, providers, extensions or opt-in settings, not new concepts in the agent loop.
+2. **Built-in tools must be correct and safe.** People use them as defaults without reading them, so a tool that silently loses data or misreports a result is a bug, not a missing feature.
+3. **Small, generic knobs that any agent needs.** Add a setting only when every kind of agent could want it, keep it opt-in or defaulting to today's behaviour, and keep the public API small.
+4. **Opinions and heuristics belong above the library.** Prompt tricks, auto-fixes, house policies and product behaviour go in extensions, in yobuild, or in the app — never baked into yoagent's defaults.
+
+The longer reasoning is in `docs/design-philosophy.md`.
+
 ## Build & Development Commands
 
 ```bash
