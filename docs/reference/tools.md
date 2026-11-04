@@ -91,6 +91,7 @@ pub struct ReadFileTool {
     pub max_bytes: usize,              // Default: 1MB
     pub allowed_paths: Vec<String>,    // Path restrictions (empty = no restriction)
     pub max_lines: usize,              // Default: 500 when the call gives no limit (usize::MAX = unbounded)
+    pub read_log: Option<ReadLog>,     // Default: None; shared with WriteFileTool (see below)
 }
 ```
 
@@ -111,7 +112,16 @@ Write content to a file. Creates parent directories automatically.
 
 - **Name**: `write_file`
 - **Parameters**: `path` (required), `content` (required)
-- **Configuration**: `allowed_paths: Vec<String>`
+- **Configuration**: `allowed_paths: Vec<String>`, `read_log: Option<ReadLog>`
+
+With a `ReadLog` shared with `read_file` (`with_read_log(log)` on both; `default_tools()` does
+this), `write_file` refuses to overwrite an existing file that this agent has read only in part,
+naming the lines it read and the file's length, so the model reads the rest or uses `edit_file`.
+A full read of the current version (in one call or in pages; later pages of that version keep
+it), the agent's own successful write, or never having read the file lets the write through; a
+file changed on disk since the partial read stays refused until read again, and a read showing
+no lines records nothing. Without a log (the field's default) it overwrites as before. See
+[Tools: `write_file` after a partial read](../concepts/tools.md#write_file-after-a-partial-read).
 
 ## EditFileTool
 
