@@ -7,33 +7,117 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-/// 20 MB limit for image files
-const MAX_IMAGE_SIZE_BYTES: u64 = 20 * 1024 * 1024;
+/// The largest image `read_file` sends by default: 3.75 MB, which base64
+/// makes 5 MB. Anthropic refuses an image over 5 MB encoded, Bedrock one
+/// over 3.75 MB; see [`ReadFileTool::max_image_bytes`].
+pub const DEFAULT_MAX_IMAGE_BYTES: u64 = 3_932_160;
 
-fn is_image_file(path: &Path) -> bool {
-    matches!(
-        path.extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.to_lowercase())
-            .as_deref(),
-        Some("jpg" | "jpeg" | "png" | "webp" | "gif" | "bmp")
-    )
+/// The longest side `read_file` sends: Anthropic and Bedrock refuse an image
+/// wider or taller than 8000 px.
+const MAX_IMAGE_SIDE: u32 = 8000;
+
+/// What `read_file` treats as an image: the formats every provider with image
+/// input takes, then ones none of them does (refused with a hint, rather than
+/// read as text that is not UTF-8).
+const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp", "gif"];
+const REFUSED_IMAGE_EXTENSIONS: &[&str] =
+    &["bmp", "tif", "tiff", "heic", "heif", "avif", "ico", "jxl"];
+
+fn image_extension(path: &Path) -> Option<String> {
+    let ext = path.extension()?.to_str()?.to_lowercase();
+    (IMAGE_EXTENSIONS.contains(&ext.as_str()) || REFUSED_IMAGE_EXTENSIONS.contains(&ext.as_str()))
+        .then_some(ext)
 }
 
-fn get_image_mime_type(path: &Path) -> Option<&'static str> {
-    match path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_lowercase())
-        .as_deref()
-    {
-        Some("jpg" | "jpeg") => Some("image/jpeg"),
-        Some("png") => Some("image/png"),
-        Some("webp") => Some("image/webp"),
-        Some("gif") => Some("image/gif"),
-        Some("bmp") => Some("image/bmp"),
+/// The image's type, from its first bytes: a file named `.png` may hold a
+/// JPEG, and a provider refuses a block whose stated type is not its own.
+fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
+/// Width and height from the image's header, or `None` when it is cut off
+/// before them.
+fn image_size(bytes: &[u8], mime: &str) -> Option<(u32, u32)> {
+    let be16 = |at: usize| Some(u16::from_be_bytes(bytes.get(at..at + 2)?.try_into().ok()?) as u32);
+    let le16 = |at: usize| Some(u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?) as u32);
+    let le24 = |at: usize| {
+        let b = bytes.get(at..at + 3)?;
+        Some(b[0] as u32 | (b[1] as u32) << 8 | (b[2] as u32) << 16)
+    };
+    let be32 = |at: usize| Some(u32::from_be_bytes(bytes.get(at..at + 4)?.try_into().ok()?));
+    match mime {
+        // IHDR comes first.
+        "image/png" => Some((be32(16)?, be32(20)?)),
+        "image/gif" => Some((le16(6)?, le16(8)?)),
+        "image/webp" => match bytes.get(12..16)? {
+            b"VP8 " => Some((le16(26)? & 0x3FFF, le16(28)? & 0x3FFF)),
+            b"VP8L" => {
+                let bits = u32::from_le_bytes(bytes.get(21..25)?.try_into().ok()?);
+                Some(((bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1))
+            }
+            b"VP8X" => Some((le24(24)? + 1, le24(27)? + 1)),
+            _ => None,
+        },
+        "image/jpeg" => {
+            // Walk the segments to the first start-of-frame.
+            let mut at = 2;
+            loop {
+                if *bytes.get(at)? != 0xFF {
+                    return None;
+                }
+                let marker = *bytes.get(at + 1)?;
+                match marker {
+                    // Fill byte, or a marker with no length.
+                    0xFF => at += 1,
+                    0x01 | 0xD0..=0xD7 => at += 2,
+                    0xC0..=0xCF if !matches!(marker, 0xC4 | 0xC8 | 0xCC) => {
+                        return Some((be16(at + 7)?, be16(at + 5)?));
+                    }
+                    _ => at += 2 + be16(at + 2)? as usize,
+                }
+            }
+        }
         _ => None,
     }
+}
+
+/// Why `bytes` (from `path`) must not be sent as an image, or its type.
+fn check_image(path: &str, ext: &str, bytes: &[u8]) -> Result<&'static str, ToolError> {
+    const TAKEN: &str = "model APIs take PNG, JPEG, GIF or WebP";
+    let Some(mime) = sniff_image(bytes) else {
+        return Err(ToolError::Failed(if IMAGE_EXTENSIONS.contains(&ext) {
+            format!("{path} is not a PNG, JPEG, GIF or WebP image, whatever its name says")
+        } else {
+            format!(
+                "{path}: {} images are not sent ({TAKEN}). Convert it first, e.g. \
+                 `magick {path} out.png` or, on macOS, `sips -s format png {path} --out out.png`.",
+                ext.to_uppercase()
+            )
+        }));
+    };
+    let Some((w, h)) = image_size(bytes, mime) else {
+        return Err(ToolError::Failed(format!(
+            "{path}: cannot read the image's size from its header (cut off or damaged?)"
+        )));
+    };
+    if w == 0 || h == 0 || w > MAX_IMAGE_SIDE || h > MAX_IMAGE_SIDE {
+        return Err(ToolError::Failed(format!(
+            "{path} is {w}×{h} px; images are sent at most {MAX_IMAGE_SIDE} px a side. \
+             Scale it down first, e.g. `magick {path} -resize 2000x2000 smaller.png` \
+             or `sips -Z 2000 {path} --out smaller.png`."
+        )));
+    }
+    Ok(mime)
 }
 
 /// Default number of lines returned when the caller gives no explicit `limit`.
@@ -98,6 +182,40 @@ pub(crate) fn require_regular_file(
     Err(ToolError::Failed(format!(
         "{path} is {kind}: only regular files can be read or written"
     )))
+}
+
+/// Hold the file at `key` (a resolved path, [`PathSandbox::check`]'s) for
+/// one tool call: `read_file`, `write_file` and `edit_file` take turns on a
+/// file, process-wide, so calls the loop runs at once (one response's tool
+/// calls, sub-agents) cannot interleave. Two `edit_file`s of one file each
+/// read it and write it back; interleaved, the last write wins and the other
+/// edit is lost while both report success. A read during a write could see
+/// the file half written.
+///
+/// Other processes are not held off; this is not a file lock.
+///
+/// [`PathSandbox::check`]: crate::tools::PathSandbox::check
+pub(crate) async fn hold_file(key: &Path) -> tokio::sync::OwnedMutexGuard<()> {
+    use std::sync::{OnceLock, Weak};
+    type Locks = HashMap<PathBuf, Weak<tokio::sync::Mutex<()>>>;
+    static LOCKS: OnceLock<Mutex<Locks>> = OnceLock::new();
+    let lock = {
+        let mut locks = LOCKS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // Entries go when the last call holding or waiting for one ends.
+        locks.retain(|_, held| held.strong_count() > 0);
+        match locks.get(key).and_then(Weak::upgrade) {
+            Some(lock) => lock,
+            None => {
+                let lock = Arc::new(tokio::sync::Mutex::new(()));
+                locks.insert(key.to_path_buf(), Arc::downgrade(&lock));
+                lock
+            }
+        }
+    };
+    lock.lock_owned().await
 }
 
 /// What one agent has read, shared by its [`ReadFileTool`] and
@@ -309,6 +427,11 @@ pub struct ReadFileTool {
     /// Where reads are recorded for a [`WriteFileTool`] sharing the same
     /// [`ReadLog`] (`None`, the default, records nothing).
     pub read_log: Option<ReadLog>,
+    /// The largest image file sent, in bytes (default
+    /// [`DEFAULT_MAX_IMAGE_BYTES`], what every provider takes). Raise it only
+    /// for a provider known to take more: one it refuses fails every later
+    /// request of the conversation.
+    pub max_image_bytes: u64,
 }
 
 impl Default for ReadFileTool {
@@ -318,6 +441,7 @@ impl Default for ReadFileTool {
             allowed_paths: Vec::new(),
             max_lines: DEFAULT_READ_MAX_LINES,
             read_log: None,
+            max_image_bytes: DEFAULT_MAX_IMAGE_BYTES,
         }
     }
 }
@@ -330,6 +454,12 @@ impl ReadFileTool {
     /// Restrict reads to these directory roots.
     pub fn with_allowed_paths(mut self, paths: Vec<String>) -> Self {
         self.allowed_paths = paths;
+        self
+    }
+
+    /// Send images up to `bytes` (see [`max_image_bytes`](Self::max_image_bytes)).
+    pub fn with_max_image_bytes(mut self, bytes: u64) -> Self {
+        self.max_image_bytes = bytes;
         self
     }
 
@@ -352,7 +482,7 @@ impl AgentTool for ReadFileTool {
     }
 
     fn description(&self) -> &str {
-        "Read a file's contents. Supports text files with optional offset/limit, and image files (jpg, png, webp, gif, bmp) which are returned as base64-encoded images. Long files are returned one page at a time — the header states the total line count, so pass offset/limit to read further."
+        "Read a file's contents. Supports text files with optional offset/limit, and images (PNG, JPEG, GIF, WebP; up to 8000 px a side), which are returned as images. Long files are returned one page at a time — the header states the total line count, so pass offset/limit to read further."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -391,33 +521,34 @@ impl AgentTool for ReadFileTool {
 
         let sandbox = crate::tools::PathSandbox::new(self.allowed_paths.clone());
         let io_path = sandbox.io_path(path)?;
+        // The resolved path the lock and the log know this file by (`io_path`
+        // keeps the caller's spelling when unrestricted).
+        let key = sandbox.check(path)?;
+        let _held = hold_file(&key).await;
 
         // Check file exists and size
         let metadata = tokio::fs::metadata(&io_path)
             .await
             .map_err(|e| ToolError::Failed(format!("Cannot access {}: {}", path, e)))?;
         require_regular_file(&metadata, path)?;
-        // The resolved path the log knows this file by (`io_path` keeps the
-        // caller's spelling when unrestricted).
-        let logged = match &self.read_log {
-            Some(log) => Some((log, sandbox.check(path)?)),
-            None => None,
-        };
+        let logged = self.read_log.as_ref().map(|log| (log, key));
 
-        // Handle image files: read as binary, return base64-encoded Content::Image
-        let file_path = Path::new(path);
-        if is_image_file(file_path) {
-            if metadata.len() > MAX_IMAGE_SIZE_BYTES {
+        // Images: sent only in a form every provider takes. A block one
+        // refuses stays in the history, and every later request fails too.
+        if let Some(ext) = image_extension(Path::new(path)) {
+            if metadata.len() > self.max_image_bytes {
                 return Err(ToolError::Failed(format!(
-                    "Image too large ({}MB, max 20MB)",
-                    metadata.len() / (1024 * 1024)
+                    "{path}: image too large ({:.1} MB; images are sent up to {:.2} MB). \
+                     Scale it down first, e.g. `magick {path} -resize 2000x2000 -quality 85 \
+                     smaller.jpg` or `sips -Z 2000 {path} --out smaller.jpg`.",
+                    metadata.len() as f64 / 1_048_576.0,
+                    self.max_image_bytes as f64 / 1_048_576.0,
                 )));
             }
-            let mime_type = get_image_mime_type(file_path)
-                .ok_or_else(|| ToolError::Failed("Unknown image format".into()))?;
             let bytes = tokio::fs::read(&io_path)
                 .await
                 .map_err(|e| ToolError::Failed(format!("Cannot read {}: {}", path, e)))?;
+            let mime_type = check_image(path, &ext, &bytes)?;
             let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
             if let Some((log, key)) = &logged {
                 log.record_full(key, Some(FileStamp::of(&metadata)));
@@ -590,10 +721,9 @@ impl AgentTool for WriteFileTool {
 
         let sandbox = crate::tools::PathSandbox::new(self.allowed_paths.clone());
         let io_path = sandbox.io_path(path)?;
-        let logged = match &self.read_log {
-            Some(log) => Some((log, sandbox.check(path)?)),
-            None => None,
-        };
+        let key = sandbox.check(path)?;
+        let _held = hold_file(&key).await;
+        let logged = self.read_log.as_ref().map(|log| (log, key));
 
         // An existing path must be a regular file: writing to a FIFO blocks
         // until something reads it, and a device is not a file to overwrite.

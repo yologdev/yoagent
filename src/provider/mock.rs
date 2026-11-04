@@ -24,6 +24,8 @@ pub enum MockResponse {
     /// `error_message` and the usage spent before the failure, the way an
     /// SSE-embedded error arrives. Not retried by the loop.
     ErrorWithUsage(String, Usage),
+    /// Text cut off at the output limit (`StopReason::Length`).
+    TextCutOff(String),
 }
 
 #[derive(Debug, Clone)]
@@ -183,6 +185,10 @@ impl StreamProvider for MockProvider {
 
         let _ = tx.send(StreamEvent::Start);
 
+        let stop_reason = match response {
+            MockResponse::TextCutOff(_) => StopReason::Length,
+            _ => StopReason::Stop,
+        };
         let message = match response {
             MockResponse::TextWithUsage(text, usage) => {
                 let _ = tx.send(StreamEvent::TextDelta {
@@ -199,14 +205,14 @@ impl StreamProvider for MockProvider {
                     error_message: None,
                 }
             }
-            MockResponse::Text(text) => {
+            MockResponse::Text(text) | MockResponse::TextCutOff(text) => {
                 let _ = tx.send(StreamEvent::TextDelta {
                     content_index: 0,
                     delta: text.clone(),
                 });
                 Message::Assistant {
                     content: vec![Content::Text { text }],
-                    stop_reason: StopReason::Stop,
+                    stop_reason,
                     model: "mock".into(),
                     provider: "mock".into(),
                     usage: Usage::default(),

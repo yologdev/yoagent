@@ -274,7 +274,8 @@ pub enum TurnDecision {
     Fail(String),
 }
 
-/// The model's final answer, as [`RunHooks::on_stop`] sees it.
+/// The model's final answer, as [`RunHooks::on_stop`] sees it: finished
+/// (`StopReason::Stop`) or cut off at the output limit (`StopReason::Length`).
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct StopContext<'a> {
@@ -466,8 +467,9 @@ pub trait RunHooks: MaybeSend + MaybeSync {
         Ok(())
     }
 
-    /// When the model ends its answer. Not called for an answer cut off at
-    /// the output limit (`StopReason::Length`).
+    /// When the model ends its answer, including one cut off at the output
+    /// limit: `stop.answer`'s `stop_reason` is then `StopReason::Length`, and
+    /// a `Continue` lets the model finish it.
     async fn on_stop(&mut self, _stop: &StopContext<'_>) -> StopDecision {
         StopDecision::Accept
     }

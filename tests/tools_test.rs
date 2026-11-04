@@ -726,7 +726,7 @@ async fn test_read_image_file() {
 #[tokio::test]
 async fn test_read_jpeg_file() {
     let tmp = std::env::temp_dir().join("yoagent-test-image.jpg");
-    std::fs::write(&tmp, b"fake-jpeg-data").unwrap();
+    std::fs::write(&tmp, jpeg(4, 3)).unwrap();
 
     let tool = ReadFileTool::new();
     let result = tool
@@ -2118,7 +2118,7 @@ async fn a_sandboxed_reader_and_an_unrestricted_writer_share_a_log() {
 async fn an_image_read_then_written_is_allowed() {
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path().join("x.png");
-    std::fs::write(&path, [0x89, b'P', b'N', b'G', 0, 1, 2, 3]).unwrap();
+    std::fs::write(&path, png(1, 1)).unwrap();
     let path = path.to_str().unwrap();
     let (r, w) = guarded_pair();
     let result = r
@@ -2160,4 +2160,203 @@ async fn a_custom_max_lines_sets_the_page_the_guard_sees() {
     let w = WriteFileTool::new().with_read_log(log);
     read(&r, serde_json::json!({"path": path})).await;
     write(&w, path, "x").await.unwrap();
+}
+
+// --- One file, several calls at once ---
+
+/// The loop runs a response's tool calls concurrently. Two edits of one file
+/// both read it, then both write it: without a lock per file the last write
+/// wins and the other edit is lost — while both calls report success.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn parallel_edits_of_one_file_all_land() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("many.txt");
+    let lines: String = (0..32).map(|i| format!("<{i}>\n")).collect();
+    std::fs::write(&path, &lines).unwrap();
+    let path = path.to_str().unwrap().to_owned();
+    // The same file spelled another way is the same file.
+    std::fs::create_dir(dir.path().join("sub")).unwrap();
+    let other = dir.path().join("sub/../many.txt");
+    let other = other.to_str().unwrap().to_owned();
+    let tool = EditFileTool::new();
+    let calls = (0..32).map(|i| {
+        tool.execute(
+            serde_json::json!({
+                "path": if i % 2 == 0 { &path } else { &other },
+                "old_text": format!("<{i}>\n"),
+                "new_text": format!("<edited {i}>\n"),
+            }),
+            ctx("edit_file"),
+        )
+    });
+    for result in futures::future::join_all(calls).await {
+        result.unwrap();
+    }
+    let after = std::fs::read_to_string(&path).unwrap();
+    let lost: Vec<usize> = (0..32)
+        .filter(|i| !after.contains(&format!("<edited {i}>\n")))
+        .collect();
+    assert!(lost.is_empty(), "edits lost: {lost:?}\n{after}");
+}
+
+/// A write and an edit of one file at once: the edit applies to the file the
+/// write produced, or the write replaces the edited file — never an edit of
+/// the old content written over the new.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_write_and_an_edit_of_one_file_do_not_interleave() {
+    for _ in 0..20 {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("f.txt");
+        std::fs::write(&path, "keep <a>\n").unwrap();
+        let path = path.to_str().unwrap().to_owned();
+        let write = WriteFileTool::new();
+        let edit = EditFileTool::new();
+        let (w, e) = tokio::join!(
+            write.execute(
+                serde_json::json!({"path": path, "content": "new <a>\n"}),
+                ctx("write_file"),
+            ),
+            edit.execute(
+                serde_json::json!({"path": path, "old_text": "<a>", "new_text": "<b>"}),
+                ctx("edit_file"),
+            ),
+        );
+        w.unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+        match e {
+            // The edit ran second, on the written file; or first, and the
+            // write replaced it.
+            Ok(_) => assert!(after == "new <b>\n" || after == "new <a>\n", "{after:?}"),
+            Err(e) => panic!("{e}"),
+        }
+        assert_ne!(
+            after, "keep <b>\n",
+            "an edit of the old file overwrote the write"
+        );
+    }
+}
+
+// --- Images a provider will take ---
+//
+// An image block a provider rejects stays in the history and fails every
+// later request too, so `read_file` sends only what all of them accept.
+
+/// A PNG of `w`×`h` (the header is all a reader of its size looks at).
+fn png(w: u32, h: u32) -> Vec<u8> {
+    let mut b = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    b.extend([0, 0, 0, 13]);
+    b.extend(b"IHDR");
+    b.extend(w.to_be_bytes());
+    b.extend(h.to_be_bytes());
+    b.extend([8, 2, 0, 0, 0, 0, 0, 0, 0]);
+    b.extend([0, 0, 0, 0]);
+    b.extend(b"IEND");
+    b.extend([0xAE, 0x42, 0x60, 0x82]);
+    b
+}
+
+/// A baseline JPEG of `w`×`h`: SOI, a JFIF segment, SOF0, EOI.
+fn jpeg(w: u16, h: u16) -> Vec<u8> {
+    let mut b = vec![0xFF, 0xD8];
+    b.extend([0xFF, 0xE0, 0x00, 0x10]);
+    b.extend(b"JFIF\0");
+    b.extend([1, 1, 0, 0, 1, 0, 1, 0, 0]);
+    b.extend([0xFF, 0xC0, 0x00, 0x11, 0x08]);
+    b.extend(h.to_be_bytes());
+    b.extend(w.to_be_bytes());
+    b.extend([3, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1]);
+    b.extend([0xFF, 0xD9]);
+    b
+}
+
+async fn read_image(name: &str, bytes: &[u8]) -> Result<ToolResult, ToolError> {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join(name);
+    std::fs::write(&path, bytes).unwrap();
+    ReadFileTool::new()
+        .execute(
+            serde_json::json!({"path": path.to_str().unwrap()}),
+            ctx("read_file"),
+        )
+        .await
+}
+
+fn image_type(result: &ToolResult) -> &str {
+    match &result.content[0] {
+        Content::Image { mime_type, .. } => mime_type,
+        other => panic!("expected an image, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn an_image_is_typed_by_its_content_not_its_name() {
+    // A JPEG saved as .png: sent as image/png, a provider refuses it.
+    let result = read_image("photo.png", &jpeg(10, 10)).await.unwrap();
+    assert_eq!(image_type(&result), "image/jpeg");
+    let result = read_image("shot.jpg", &png(10, 10)).await.unwrap();
+    assert_eq!(image_type(&result), "image/png");
+}
+
+#[tokio::test]
+async fn gif_and_webp_are_recognised() {
+    let mut gif = b"GIF89a".to_vec();
+    gif.extend(20u16.to_le_bytes());
+    gif.extend(10u16.to_le_bytes());
+    gif.extend([0; 8]);
+    let result = read_image("a.gif", &gif).await.unwrap();
+    assert_eq!(image_type(&result), "image/gif");
+
+    // Lossless WebP: a 14-bit width - 1 and height - 1 after the signature.
+    let mut webp = b"RIFF\0\0\0\0WEBPVP8L\0\0\0\0\x2f".to_vec();
+    let bits: u32 = (20 - 1) | ((10 - 1) << 14);
+    webp.extend(bits.to_le_bytes());
+    let result = read_image("a.webp", &webp).await.unwrap();
+    assert_eq!(image_type(&result), "image/webp");
+}
+
+#[tokio::test]
+async fn formats_providers_refuse_are_not_sent() {
+    for name in ["a.bmp", "a.tiff", "a.heic", "a.avif"] {
+        let err = read_image(name, b"BM....").await.unwrap_err().to_string();
+        assert!(err.contains("PNG, JPEG, GIF or WebP"), "{name}: {err}");
+    }
+}
+
+#[tokio::test]
+async fn a_file_named_as_an_image_that_is_not_one_is_refused() {
+    let err = read_image("notes.png", b"just some text\n")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("not a PNG, JPEG, GIF or WebP image"), "{err}");
+}
+
+#[tokio::test]
+async fn an_image_larger_than_providers_take_is_refused() {
+    let mut big = png(100, 100);
+    big.resize(4 * 1024 * 1024, 0);
+    let err = read_image("big.png", &big).await.unwrap_err().to_string();
+    assert!(err.contains("too large"), "{err}");
+
+    let wide = png(9000, 100);
+    let err = read_image("wide.png", &wide).await.unwrap_err().to_string();
+    assert!(err.contains("9000×100"), "{err}");
+}
+
+#[tokio::test]
+async fn the_image_size_limit_is_a_knob() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("big.png");
+    let mut big = png(100, 100);
+    big.resize(4 * 1024 * 1024, 0);
+    std::fs::write(&path, &big).unwrap();
+    let tool = ReadFileTool::new().with_max_image_bytes(8 * 1024 * 1024);
+    let result = tool
+        .execute(
+            serde_json::json!({"path": path.to_str().unwrap()}),
+            ctx("read_file"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(image_type(&result), "image/png");
 }
