@@ -347,7 +347,10 @@ impl AgentTool for BashTool {
     }
 }
 
-/// The signal that terminated the command, if one did (Unix only).
+/// The signal that terminated the `bash` process, if one did (Unix only).
+/// That is the shell itself, or the command bash ran in its place (the last
+/// simple command, or an `exec`ed one); a command killed earlier in a
+/// compound script makes bash exit with `128 + n`, an ordinary exit code.
 fn exit_signal(status: &std::process::ExitStatus) -> Option<i32> {
     #[cfg(unix)]
     {
@@ -511,7 +514,16 @@ fn render_output(out: &Capture, err: &Capture, strip: bool) -> String {
 const ESC: char = '\u{1b}';
 /// The 8-bit CSI, as a decoded character (UTF-8 `C2 9B`).
 const C1_CSI: char = '\u{9b}';
+#[cfg(test)]
 const BEL: char = '\u{7}';
+
+/// The most bytes between an OSC, SOS, PM or APC introducer and its
+/// terminator: a title or hyperlink is short, and a stray introducer must
+/// not swallow the output after it up to some later BEL.
+const STRING_MAX_BYTES: usize = 4 * 1024;
+
+/// The same bound for DCS, which carries graphics (sixel) and so runs long.
+const DCS_MAX_BYTES: usize = 64 * 1024;
 
 /// `text` without ANSI escape sequences (ECMA-48):
 ///
@@ -520,9 +532,12 @@ const BEL: char = '\u{7}';
 ///   broken by any other character ends there: what was read of it is
 ///   dropped, the character is kept.
 /// - String sequences: `ESC ]` (OSC), `ESC P` (DCS), `ESC X` (SOS),
-///   `ESC ^` (PM), `ESC _` (APC), up to BEL or `ESC \` (ST). One with no
-///   terminator loses only its two-character introducer, so a stray
-///   `ESC ]` can never hide the rest of the output.
+///   `ESC ^` (PM), `ESC _` (APC), up to and including the first BEL, ST
+///   (`ESC \` or the 8-bit U+009C), or CAN / SUB (`0x18` / `0x1A`, which
+///   abort a sequence), when that comes within [`STRING_MAX_BYTES`] bytes
+///   ([`DCS_MAX_BYTES`] for DCS). An unterminated sequence — none within
+///   the bound — loses only its two-character introducer, so a stray
+///   `ESC ]` cannot hide the output after it.
 /// - `ESC` + intermediates `0x20–0x2F` + a final `0x30–0x7E` (charset
 ///   selection such as `ESC ( B`), and `ESC` + any other character in
 ///   `0x30–0x7E` (`ESC 7`, `ESC M`, …).
@@ -530,21 +545,22 @@ const BEL: char = '\u{7}';
 ///   which is kept).
 ///
 /// Everything else, other control characters included, is kept.
-///
-/// Linear in the length of `text`: a string sequence is scanned for its
-/// terminator only when one exists further on (the last terminator's
-/// position is found once, up front), and a scan that runs consumes what it
-/// scanned. Rescanning from every unterminated introducer was quadratic: a
-/// 256 KB run of `ESC ]` took seconds.
 fn strip_ansi(text: &str) -> String {
+    strip_ansi_bounded(text, STRING_MAX_BYTES, DCS_MAX_BYTES)
+}
+
+/// [`strip_ansi`] with its bounds as parameters (tests use small ones).
+///
+/// Linear in the length of `text`: the end of the next string sequence is
+/// looked for from where it is needed and remembered, and a later
+/// introducer before that end reuses it, so no byte is searched twice.
+/// Rescanning from every unterminated introducer was quadratic: a 256 KB
+/// run of `ESC ]` took seconds.
+fn strip_ansi_bounded(text: &str, string_max: usize, dcs_max: usize) -> String {
     if !text.contains([ESC, C1_CSI]) {
         return text.to_owned();
     }
-    // Where the last terminator starts: an introducer after it has none.
-    let last_terminator = match (text.rfind(BEL), text.rfind("\u{1b}\\")) {
-        (Some(a), Some(b)) => Some(a.max(b)),
-        (a, b) => a.or(b),
-    };
+    let mut ends = SequenceEnds::new(text);
     let mut out = String::with_capacity(text.len());
     let mut chars = text.char_indices().peekable();
     while let Some((_, c)) = chars.next() {
@@ -561,18 +577,15 @@ fn strip_ansi(text: &str) -> String {
                 chars.next();
                 skip_csi(&mut chars);
             }
-            Some(']' | 'P' | 'X' | '^' | '_') => {
+            Some(kind @ (']' | 'P' | 'X' | '^' | '_')) => {
                 chars.next();
                 let at = chars.peek().map_or(text.len(), |&(i, _)| i);
-                // Without a terminator ahead, only the introducer goes.
-                // With one, the scan reaches it (a BEL, or an `ESC \`: an
-                // ESC not followed by `\` is skipped over, never consumed
-                // with the character after it) and drops what it read.
-                if last_terminator.is_some_and(|t| t >= at) {
-                    while let Some((_, d)) = chars.next() {
-                        if d == BEL || (d == ESC && chars.next_if(|&(_, e)| e == '\\').is_some()) {
-                            break;
-                        }
+                let max = if kind == 'P' { dcs_max } else { string_max };
+                // Within the bound, the sequence goes up to and including
+                // its end; past it (or with none), only the introducer.
+                if let Some((start, after)) = ends.next_from(at) {
+                    if start - at <= max {
+                        while chars.next_if(|&(i, _)| i < after).is_some() {}
                     }
                 }
             }
@@ -590,6 +603,55 @@ fn strip_ansi(text: &str) -> String {
     out
 }
 
+/// Finds where string sequences end: the next BEL, `ESC \`, U+009C, CAN or
+/// SUB at or after a position. Positions asked for only grow, so the last
+/// answer is kept and reused while it still lies ahead.
+struct SequenceEnds<'a> {
+    bytes: &'a [u8],
+    /// The last search: from where, and the end it found (start of the
+    /// terminator, byte after it), `None` when there was none.
+    last: Option<(usize, Option<(usize, usize)>)>,
+}
+
+impl<'a> SequenceEnds<'a> {
+    fn new(text: &'a str) -> Self {
+        Self {
+            bytes: text.as_bytes(),
+            last: None,
+        }
+    }
+
+    fn next_from(&mut self, at: usize) -> Option<(usize, usize)> {
+        if let Some((from, found)) = self.last {
+            // Still valid: nothing between `from` and the found end (or the
+            // end of the text) is a terminator.
+            if from <= at && found.is_none_or(|(start, _)| start >= at) {
+                return found;
+            }
+        }
+        let found = self.search(at);
+        self.last = Some((at, found));
+        found
+    }
+
+    /// The first terminator at or after `at`. The bytes looked for are
+    /// ASCII or (U+009C) the lead byte `C2`, which never occur inside
+    /// another character's UTF-8, so a byte search is exact.
+    fn search(&self, at: usize) -> Option<(usize, usize)> {
+        let b = self.bytes;
+        let mut i = at;
+        while i < b.len() {
+            match b[i] {
+                0x07 | 0x18 | 0x1a => return Some((i, i + 1)),
+                0x1b if b.get(i + 1) == Some(&b'\\') => return Some((i, i + 2)),
+                0xc2 if b.get(i + 1) == Some(&0x9c) => return Some((i, i + 2)),
+                _ => i += 1,
+            }
+        }
+        None
+    }
+}
+
 /// Skip a CSI sequence's parameters, intermediates and final byte, after
 /// its introducer.
 fn skip_csi(chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>) {
@@ -600,7 +662,7 @@ fn skip_csi(chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>) {
 
 #[cfg(test)]
 mod tests {
-    use super::strip_ansi;
+    use super::{strip_ansi, strip_ansi_bounded};
 
     #[test]
     fn strips_sgr_colours_and_cursor_movement() {
@@ -617,6 +679,32 @@ mod tests {
             "link done"
         );
         assert_eq!(strip_ansi("\x1bPq#0\x1b\\x"), "x");
+    }
+
+    #[test]
+    fn the_8_bit_st_terminates_and_can_or_sub_abort() {
+        assert_eq!(strip_ansi("\x1b]0;title\u{9c}after"), "after");
+        assert_eq!(strip_ansi("\x1b]0;tit\x18after"), "after");
+        assert_eq!(strip_ansi("\x1bPq#0\x1aafter"), "after");
+        // Outside a sequence they are text.
+        assert_eq!(strip_ansi("a\u{9c}\x18\x1ab"), "a\u{9c}\x18\x1ab");
+    }
+
+    /// A stray introducer, 10 KB of output, then a BEL: the output stays.
+    #[test]
+    fn a_terminator_past_the_bound_does_not_swallow_the_output() {
+        let text = "real output line\n".repeat(600);
+        let input = format!("\x1b]{text}\x07end");
+        assert_eq!(strip_ansi(&input), format!("{text}\x07end"));
+        // A DCS has a larger bound: 10 KB of sixel data is removed.
+        let sixel = "#0;2;0;0;0~~@@vv@@~~$".repeat(500);
+        assert_eq!(strip_ansi(&format!("\x1bPq{sixel}\x1b\\end")), "end");
+        // Past its own bound, a DCS also loses only its introducer.
+        let long = "x".repeat(super::DCS_MAX_BYTES + 1);
+        assert_eq!(
+            strip_ansi(&format!("\x1bP{long}\x07")),
+            format!("{long}\x07")
+        );
     }
 
     #[test]
@@ -671,7 +759,8 @@ mod tests {
                 format!("a\x07{}", "\x1b_x".repeat(n / 2)),
                 "a\x07".to_owned() + &"x".repeat(n / 2),
             ),
-            // One at the very end swallows everything after the first.
+            // One at the very end: the introducers before it lose
+            // themselves, the last few (within the bound) reach it.
             (format!("{}\x07b", "\x1b]".repeat(n)), "b".to_owned()),
         ] {
             let started = std::time::Instant::now();
@@ -682,12 +771,13 @@ mod tests {
         }
     }
 
-    /// The quadratic original, kept as the reference for what the output
-    /// must be.
-    fn reference(text: &str) -> String {
+    /// The definition, written the obvious (quadratic) way: from each string
+    /// introducer, look ahead char by char for the first BEL, `ESC \`,
+    /// U+009C, CAN or SUB within the bound.
+    fn reference(text: &str, string_max: usize, dcs_max: usize) -> String {
         let mut out = String::new();
-        let mut chars = text.chars().peekable();
-        while let Some(c) = chars.next() {
+        let mut chars = text.char_indices().peekable();
+        while let Some((_, c)) = chars.next() {
             if c == super::C1_CSI {
                 skip(&mut chars);
                 continue;
@@ -696,25 +786,31 @@ mod tests {
                 out.push(c);
                 continue;
             }
-            match chars.peek().copied() {
+            match chars.peek().map(|&(_, d)| d) {
                 Some('[') => {
                     chars.next();
                     skip(&mut chars);
                 }
-                Some(']' | 'P' | 'X' | '^' | '_') => {
+                Some(kind @ (']' | 'P' | 'X' | '^' | '_')) => {
                     chars.next();
+                    let at = chars.peek().map_or(text.len(), |&(i, _)| i);
+                    let max = if kind == 'P' { dcs_max } else { string_max };
                     let mut ahead = chars.clone();
-                    while let Some(d) = ahead.next() {
-                        if d == super::BEL || (d == super::ESC && ahead.next_if_eq(&'\\').is_some())
-                        {
+                    while let Some((i, d)) = ahead.next() {
+                        if i - at > max {
+                            break;
+                        }
+                        let ends = matches!(d, super::BEL | '\u{9c}' | '\x18' | '\x1a')
+                            || (d == super::ESC && ahead.next_if(|&(_, e)| e == '\\').is_some());
+                        if ends {
                             chars = ahead;
                             break;
                         }
                     }
                 }
                 Some(' '..='/') => {
-                    while chars.next_if(|d| (' '..='/').contains(d)).is_some() {}
-                    chars.next_if(|d| ('0'..='~').contains(d));
+                    while chars.next_if(|&(_, d)| (' '..='/').contains(&d)).is_some() {}
+                    chars.next_if(|&(_, d)| ('0'..='~').contains(&d));
                 }
                 Some('0'..='~') => {
                     chars.next();
@@ -725,18 +821,19 @@ mod tests {
         out
     }
 
-    fn skip(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
-        while chars.next_if(|d| ('0'..='?').contains(d)).is_some() {}
-        while chars.next_if(|d| (' '..='/').contains(d)).is_some() {}
-        chars.next_if(|d| ('@'..='~').contains(d));
+    fn skip(chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>) {
+        while chars.next_if(|&(_, d)| ('0'..='?').contains(&d)).is_some() {}
+        while chars.next_if(|&(_, d)| (' '..='/').contains(&d)).is_some() {}
+        chars.next_if(|&(_, d)| ('@'..='~').contains(&d));
     }
 
-    /// Same output as the reference on 20,000 pseudo-random strings over the
-    /// characters that matter.
+    /// Same output as the reference on 40,000 pseudo-random strings over the
+    /// characters that matter, with small bounds so they are reached.
     #[test]
     fn linear_strip_matches_the_reference() {
-        const ALPHABET: [char; 14] = [
-            '\x1b', '\x1b', ']', 'P', '_', '\\', '\x07', '[', '1', ';', 'm', '(', 'a', 'é',
+        const ALPHABET: [char; 21] = [
+            '\x1b', '\x1b', ']', 'P', '_', 'X', '\\', '\x07', '[', '1', ';', 'm', '(', ' ', '?',
+            'a', 'é', '\u{9b}', '\u{9c}', '\x18', '\x1a',
         ];
         let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
         let mut next = move || {
@@ -745,12 +842,21 @@ mod tests {
                 .wrapping_add(1_442_695_040_888_963_407);
             (state >> 33) as usize
         };
-        for _ in 0..20_000 {
-            let len = next() % 24;
+        for round in 0..40_000 {
+            let len = next() % 32;
             let text: String = (0..len)
                 .map(|_| ALPHABET[next() % ALPHABET.len()])
                 .collect();
-            assert_eq!(strip_ansi(&text), reference(&text), "{text:?}");
+            let (string_max, dcs_max) = if round % 2 == 0 {
+                (4, 9)
+            } else {
+                (4096, 65536)
+            };
+            assert_eq!(
+                strip_ansi_bounded(&text, string_max, dcs_max),
+                reference(&text, string_max, dcs_max),
+                "{text:?} with bounds {string_max}/{dcs_max}"
+            );
         }
     }
 }

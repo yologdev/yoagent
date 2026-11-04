@@ -1696,3 +1696,22 @@ async fn test_edit_file_crlf_spelling_matching_twice_is_refused() {
     assert!(err.contains("matches 2 locations"), "{err}");
     assert_eq!(std::fs::read(&file).unwrap(), before);
 }
+
+/// A timeout's "output so far" is stripped too, and a command the tool
+/// killed is a timeout, not a signal death.
+#[tokio::test]
+async fn test_bash_timeout_output_is_stripped() {
+    let err = BashTool::new()
+        .with_timeout(std::time::Duration::from_millis(500))
+        .execute(
+            serde_json::json!({"command": r"printf '\033[31mred\033[0m\n'; sleep 10"}),
+            ctx("bash"),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("timed out"), "{err}");
+    assert!(err.contains("red"), "{err}");
+    assert!(!err.contains('\u{1b}'), "{err:?}");
+    assert!(!err.contains("Killed by signal"), "{err}");
+}
