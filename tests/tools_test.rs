@@ -1573,3 +1573,75 @@ async fn test_bash_strips_an_escape_cut_by_the_cap() {
     };
     assert_eq!(text, "Exit code: 0\nok\n... (output truncated)", "{text:?}");
 }
+
+/// A model writes `\n`; in a CRLF file the edit still applies, and every
+/// line it writes ends `\r\n`.
+#[tokio::test]
+async fn test_edit_file_crlf_file_with_lf_old_text_keeps_crlf() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let file = dir.path().join("crlf.txt");
+    std::fs::write(&file, b"alpha\r\nbeta\r\ngamma\r\n").unwrap();
+    let result = EditFileTool::new()
+        .execute(
+            serde_json::json!({
+                "path": file.to_str().unwrap(),
+                "old_text": "alpha\nbeta",
+                "new_text": "one\ntwo\nthree",
+            }),
+            ctx("edit_file"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read(&file).unwrap(),
+        b"one\r\ntwo\r\nthree\r\ngamma\r\n"
+    );
+    assert_eq!(result.details["crlf"], true);
+    assert_eq!(result.details["old_lines"], 2);
+    assert_eq!(result.details["new_lines"], 3);
+}
+
+/// An exact match wins, and an LF file is never rewritten with CRLF.
+#[tokio::test]
+async fn test_edit_file_exact_match_is_not_adapted() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let file = dir.path().join("lf.txt");
+    std::fs::write(&file, b"alpha\nbeta\ngamma\n").unwrap();
+    let result = EditFileTool::new()
+        .execute(
+            serde_json::json!({
+                "path": file.to_str().unwrap(),
+                "old_text": "alpha\nbeta",
+                "new_text": "A\nB",
+            }),
+            ctx("edit_file"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(&file).unwrap(), b"A\nB\ngamma\n");
+    assert_eq!(result.details["crlf"], false);
+}
+
+/// A minified file's line cannot blow up the "did you mean" error.
+#[tokio::test]
+async fn test_edit_file_not_found_snippet_is_numbered_and_capped() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let file = dir.path().join("min.js");
+    let minified = format!("var a=1;{}\n", "x+=1;".repeat(100_000));
+    std::fs::write(&file, format!("// header\n{minified}")).unwrap();
+    let err = EditFileTool::new()
+        .execute(
+            serde_json::json!({
+                "path": file.to_str().unwrap(),
+                "old_text": "var a=1;\nnot there",
+                "new_text": "",
+            }),
+            ctx("edit_file"),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("   2 | var a=1;x+=1;"), "{err}");
+    assert!(err.contains("… (line truncated)"), "{err}");
+    assert!(err.len() < 2_000, "error is {} bytes", err.len());
+}

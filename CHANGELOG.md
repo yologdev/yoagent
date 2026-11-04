@@ -8,6 +8,8 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 - **`bash` names the signal that killed a command.** A command killed by a signal (Unix) used to report `Exit code: -1`; it now reads `Killed by signal 9 (SIGKILL)`, and `details.signal` carries the number (`null` for an ordinary exit, and always off Unix). `details.exit_code` keeps its meaning: the exit status, `-1` when there is none.
 - **`bash` strips ANSI escape sequences** from stdout and stderr before they reach the model: CSI (colours, cursor movement), OSC (terminal titles; a hyperlink keeps its text), DCS/SOS/PM/APC and two-character escapes. Carriage returns, tabs and backspaces are kept; a string sequence with no terminator loses only its introducer, so nothing printed after it disappears; a sequence the output cap cuts in half is dropped. `BashTool::with_raw_output(true)` (new `raw_output` field, default `false`) keeps the output as printed.
+- **`edit_file` keeps a CRLF file's line endings.** Models write line breaks as `\n` and cannot see a file's `\r`, so a multi-line edit to a CRLF file failed with "old_text not found". An `old_text` not found as given is now looked up with each bare `\n` spelled `\r\n`, and `new_text` is written the same way; `details.crlf` says when that happened. An exact match always wins, and an LF file is never touched.
+- **`edit_file`'s "did you mean" snippet is numbered and bounded**: lines carry `read_file`-style numbers (`  12 | …`), each cut to 400 characters (`… (line truncated)`), at most 20 lines. One line of a minified file used to put the whole line into the error.
 
 ## 0.26.8 (2026-11-03)
 

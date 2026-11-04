@@ -114,7 +114,16 @@ Surgical search/replace edits. The most important tool for coding agents — ins
 - **Parameters**: `path` (required), `old_text` (required), `new_text` (required)
 - **Configuration**: `allowed_paths: Vec<String>`
 
-The `old_text` must match exactly, including whitespace and indentation.
+The `old_text` must match exactly, including whitespace and indentation. One exception: in a
+file with CRLF line endings, an `old_text` written with `\n` line breaks (models cannot see the
+`\r`) that is not found as given is looked up with each bare `\n` spelled `\r\n`, and the
+`new_text` is written the same way, so the file keeps its line endings (`details.crlf: true`).
+An exact match always wins, and an LF file is never rewritten with CRLF.
+
+When `old_text` is not found, the error shows where its first line occurs ("Did you mean"),
+numbered like `read_file`'s output: at most 20 lines, each cut to 400 characters with
+`… (line truncated)`, so a minified file cannot blow up the error. Whitespace is never fixed up
+for the model.
 
 ## ListFilesTool
 
