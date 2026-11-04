@@ -571,7 +571,8 @@ impl AgentTool for SubAgentTool {
         if let Some(max) = self.max_depth.filter(|max| depth > *max) {
             return Err(ToolError::Failed(format!(
                 "Delegation refused: '{}' would start a run at depth {depth}, past its \
-                 maximum depth of {max} (SubAgentTool::with_max_depth).",
+                 maximum depth of {max} (SubAgentTool::with_max_depth). Do this task \
+                 yourself instead of delegating it.",
                 self.tool_name
             )));
         }

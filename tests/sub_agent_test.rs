@@ -2132,6 +2132,10 @@ async fn a_delegation_past_the_max_depth_is_refused() {
         err.contains("'worker' would start a run at depth 2, past its maximum depth of 1"),
         "{err}"
     );
+    assert!(
+        err.ends_with("Do this task yourself instead of delegating it."),
+        "{err}"
+    );
     // No run started: only the planner's.
     assert_eq!(stats.sub_agents.runs, 1);
     assert_eq!(stats.sub_agents.usage, Usage::default());

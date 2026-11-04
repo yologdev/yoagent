@@ -82,7 +82,7 @@ When the parent LLM calls multiple sub-agents in a single response, they run con
 | `with_max_tokens()` / `with_temperature()` | Override sampling settings (the model comes from `from_config` / `from_provider`) |
 | `with_max_turns(N)` | Turn limit (default: 10). Primary guard against runaway execution. |
 | `with_execution_limits(ExecutionLimits)` | All per-delegation limits: turns, tokens, duration, loop detection (default: 10 / 1M / 300 s / on). |
-| `with_max_depth(N)` | Refuse a call that would start a run deeper than `N` (1 = a run delegated by a top-level run): the call fails at once with a tool error and no run starts. Default: no cap. |
+| `with_max_depth(N)` | Refuse a call that would start a run deeper than `N` (1 = a run delegated by a top-level run): the call fails at once with a tool error (naming both depths, and ending "Do this task yourself instead of delegating it.") and no run starts. Default: no cap. |
 | `with_thinking()` | Enable extended thinking for the sub-agent |
 | `with_cache_config()` | Prompt caching settings |
 | `with_turn_delay()` | Inter-turn delay to throttle API calls (useful for rate-limit-sensitive providers) |
