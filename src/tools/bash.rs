@@ -530,13 +530,24 @@ const BEL: char = '\u{7}';
 ///   which is kept).
 ///
 /// Everything else, other control characters included, is kept.
+///
+/// Linear in the length of `text`: a string sequence is scanned for its
+/// terminator only when one exists further on (the last terminator's
+/// position is found once, up front), and a scan that runs consumes what it
+/// scanned. Rescanning from every unterminated introducer was quadratic: a
+/// 256 KB run of `ESC ]` took seconds.
 fn strip_ansi(text: &str) -> String {
     if !text.contains([ESC, C1_CSI]) {
         return text.to_owned();
     }
+    // Where the last terminator starts: an introducer after it has none.
+    let last_terminator = match (text.rfind(BEL), text.rfind("\u{1b}\\")) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (a, b) => a.or(b),
+    };
     let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
+    let mut chars = text.char_indices().peekable();
+    while let Some((_, c)) = chars.next() {
         if c == C1_CSI {
             skip_csi(&mut chars);
             continue;
@@ -545,26 +556,29 @@ fn strip_ansi(text: &str) -> String {
             out.push(c);
             continue;
         }
-        match chars.peek().copied() {
+        match chars.peek().map(|&(_, d)| d) {
             Some('[') => {
                 chars.next();
                 skip_csi(&mut chars);
             }
             Some(']' | 'P' | 'X' | '^' | '_') => {
                 chars.next();
-                // Look for the terminator on a copy: without one, only the
-                // introducer goes.
-                let mut ahead = chars.clone();
-                while let Some(d) = ahead.next() {
-                    if d == BEL || (d == ESC && ahead.next_if_eq(&'\\').is_some()) {
-                        chars = ahead;
-                        break;
+                let at = chars.peek().map_or(text.len(), |&(i, _)| i);
+                // Without a terminator ahead, only the introducer goes.
+                // With one, the scan reaches it (a BEL, or an `ESC \`: an
+                // ESC not followed by `\` is skipped over, never consumed
+                // with the character after it) and drops what it read.
+                if last_terminator.is_some_and(|t| t >= at) {
+                    while let Some((_, d)) = chars.next() {
+                        if d == BEL || (d == ESC && chars.next_if(|&(_, e)| e == '\\').is_some()) {
+                            break;
+                        }
                     }
                 }
             }
             Some(' '..='/') => {
-                while chars.next_if(|d| (' '..='/').contains(d)).is_some() {}
-                chars.next_if(|d| ('0'..='~').contains(d));
+                while chars.next_if(|&(_, d)| (' '..='/').contains(&d)).is_some() {}
+                chars.next_if(|&(_, d)| ('0'..='~').contains(&d));
             }
             Some('0'..='~') => {
                 chars.next();
@@ -578,10 +592,10 @@ fn strip_ansi(text: &str) -> String {
 
 /// Skip a CSI sequence's parameters, intermediates and final byte, after
 /// its introducer.
-fn skip_csi(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
-    while chars.next_if(|d| ('0'..='?').contains(d)).is_some() {}
-    while chars.next_if(|d| (' '..='/').contains(d)).is_some() {}
-    chars.next_if(|d| ('@'..='~').contains(d));
+fn skip_csi(chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>) {
+    while chars.next_if(|&(_, d)| ('0'..='?').contains(&d)).is_some() {}
+    while chars.next_if(|&(_, d)| (' '..='/').contains(&d)).is_some() {}
+    chars.next_if(|&(_, d)| ('@'..='~').contains(&d));
 }
 
 #[cfg(test)]
@@ -636,5 +650,107 @@ mod tests {
     fn a_broken_csi_keeps_the_character_that_broke_it() {
         assert_eq!(strip_ansi("\x1b[31\n日"), "\n日");
         assert_eq!(strip_ansi("\x1b\u{e9}x"), "\u{e9}x");
+    }
+
+    /// 256 KB (the default `max_output_bytes`) of string introducers that
+    /// never close. Rescanning to the end from each one took ~15 s; linear
+    /// takes milliseconds, so the ceiling is generous and still catches it.
+    #[test]
+    fn unterminated_string_sequences_take_linear_time() {
+        let n = 256 * 1024 / 2;
+        let ceiling = if cfg!(debug_assertions) {
+            std::time::Duration::from_secs(5)
+        } else {
+            std::time::Duration::from_secs(1)
+        };
+        for (input, expected) in [
+            ("\x1b]".repeat(n), String::new()),
+            ("\x1bP".repeat(n), String::new()),
+            // A terminator before them all does not help them.
+            (
+                format!("a\x07{}", "\x1b_x".repeat(n / 2)),
+                "a\x07".to_owned() + &"x".repeat(n / 2),
+            ),
+            // One at the very end swallows everything after the first.
+            (format!("{}\x07b", "\x1b]".repeat(n)), "b".to_owned()),
+        ] {
+            let started = std::time::Instant::now();
+            let out = strip_ansi(&input);
+            let took = started.elapsed();
+            assert_eq!(out, expected);
+            assert!(took < ceiling, "{} bytes took {took:?}", input.len());
+        }
+    }
+
+    /// The quadratic original, kept as the reference for what the output
+    /// must be.
+    fn reference(text: &str) -> String {
+        let mut out = String::new();
+        let mut chars = text.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == super::C1_CSI {
+                skip(&mut chars);
+                continue;
+            }
+            if c != super::ESC {
+                out.push(c);
+                continue;
+            }
+            match chars.peek().copied() {
+                Some('[') => {
+                    chars.next();
+                    skip(&mut chars);
+                }
+                Some(']' | 'P' | 'X' | '^' | '_') => {
+                    chars.next();
+                    let mut ahead = chars.clone();
+                    while let Some(d) = ahead.next() {
+                        if d == super::BEL || (d == super::ESC && ahead.next_if_eq(&'\\').is_some())
+                        {
+                            chars = ahead;
+                            break;
+                        }
+                    }
+                }
+                Some(' '..='/') => {
+                    while chars.next_if(|d| (' '..='/').contains(d)).is_some() {}
+                    chars.next_if(|d| ('0'..='~').contains(d));
+                }
+                Some('0'..='~') => {
+                    chars.next();
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    fn skip(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+        while chars.next_if(|d| ('0'..='?').contains(d)).is_some() {}
+        while chars.next_if(|d| (' '..='/').contains(d)).is_some() {}
+        chars.next_if(|d| ('@'..='~').contains(d));
+    }
+
+    /// Same output as the reference on 20,000 pseudo-random strings over the
+    /// characters that matter.
+    #[test]
+    fn linear_strip_matches_the_reference() {
+        const ALPHABET: [char; 14] = [
+            '\x1b', '\x1b', ']', 'P', '_', '\\', '\x07', '[', '1', ';', 'm', '(', 'a', 'é',
+        ];
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as usize
+        };
+        for _ in 0..20_000 {
+            let len = next() % 24;
+            let text: String = (0..len)
+                .map(|_| ALPHABET[next() % ALPHABET.len()])
+                .collect();
+            assert_eq!(strip_ansi(&text), reference(&text), "{text:?}");
+        }
     }
 }
