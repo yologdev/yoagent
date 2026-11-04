@@ -200,6 +200,7 @@ impl SubAgentTool {
     /// Set the model id and stash the config on a freshly-constructed
     /// sub-agent (provider already wired).
     fn configured_for(mut self, config: ModelConfig) -> Self {
+        config.warn_if_default_limits();
         self.model = config.id.clone();
         self.model_config = Some(config);
         self

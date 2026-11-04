@@ -583,6 +583,19 @@ fn first_effort_clamp(model: &str, slot: usize) -> bool {
     }
 }
 
+/// Whether this is the first time `(provider, id)` is warned about by
+/// [`ModelConfig::warn_if_default_limits`] in this process.
+fn first_default_limits(provider: &str, id: &str) -> bool {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static WARNED: OnceLock<Mutex<HashSet<(String, String)>>> = OnceLock::new();
+    WARNED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert((provider.to_owned(), id.to_owned()))
+}
+
 /// Which clamp `level` → `sent` is, if it is one. Separate from the logging so
 /// the detection is testable without a process-global subscriber.
 fn effort_clamp_slot(level: ThinkingLevel, sent: &str) -> Option<usize> {
@@ -2302,6 +2315,58 @@ impl ModelConfig {
             _ => return None,
         };
         Some(generic(id.to_owned(), id.to_owned()))
+    }
+
+    /// Whether this config's context window and output limit are exactly a
+    /// first-party provider's generic defaults (what
+    /// [`generic`](Self::generic), or for `openai` either of its two
+    /// constructors, gives this id) and no [`preset`](Self::preset) for
+    /// this provider and id has those limits: nobody looked the model's
+    /// real limits up. Gateways, local servers and custom endpoints are
+    /// never judged.
+    pub(crate) fn has_default_limits(&self) -> bool {
+        let limits = (self.context_window, self.max_tokens);
+        let of = |c: &Self| (c.context_window, c.max_tokens);
+        let defaults: Vec<Self> = match self.provider.as_str() {
+            "openai" => vec![
+                Self::openai(self.id.clone(), self.id.clone()),
+                Self::openai_responses(self.id.clone(), self.id.clone()),
+            ],
+            provider => Self::generic(provider, &self.id).into_iter().collect(),
+        };
+        defaults.iter().any(|d| of(d) == limits)
+            && Self::preset(&self.provider, &self.id).is_none_or(|p| of(&p) != limits)
+    }
+
+    /// Warn, once per provider and id in this process, when
+    /// [`has_default_limits`](Self::has_default_limits): the context window
+    /// drives compaction and the output limit caps every answer, so a guess
+    /// should be visible. Called where a config becomes an agent's
+    /// ([`Agent::from_config`](crate::Agent::from_config) and the other
+    /// constructors, [`Agent::set_model`](crate::Agent::set_model),
+    /// [`SubAgentTool`](crate::SubAgentTool)'s constructors), not by the
+    /// constructors themselves: presets are built from them, and a caller
+    /// may set the limits after building.
+    pub(crate) fn warn_if_default_limits(&self) {
+        if !self.has_default_limits() || !first_default_limits(&self.provider, &self.id) {
+            return;
+        }
+        let (provider, model) = (self.provider.as_str(), self.id.as_str());
+        let hint = if Self::preset(provider, model).is_some() {
+            format!("ModelConfig::preset(\"{provider}\", \"{model}\") has the model's limits")
+        } else {
+            "set `context_window` and `max_tokens` on the ModelConfig to the model's own".into()
+        };
+        tracing::warn!(
+            provider,
+            model,
+            context_window = self.context_window,
+            max_tokens = self.max_tokens,
+            "model {provider}/{model}: the context window ({}) and output limit ({}) are \
+             {provider}'s generic defaults, not this model's; {hint}. Logged once per model.",
+            self.context_window,
+            self.max_tokens,
+        );
     }
 
     /// Create a new OpenAI model config (Chat Completions).
@@ -4095,6 +4160,30 @@ mod tests {
     /// `PRICED_PROVIDERS` is exactly the set of providers whose constructors
     /// look prices up (the override warning relies on it). `priced()` also
     /// debug-asserts membership, so a new pricing constructor cannot miss it.
+    #[test]
+    fn default_limits_are_told_from_looked_up_ones() {
+        // A first-party id with no preset, at the constructor's defaults.
+        assert!(ModelConfig::openai("my-finetune", "x").has_default_limits());
+        assert!(ModelConfig::openai_responses("o9-mini", "x").has_default_limits());
+        assert!(ModelConfig::generic("xai", "grok-unknown")
+            .unwrap()
+            .has_default_limits());
+        // A preset id built generically still has guessed limits.
+        assert!(ModelConfig::openai("gpt-5.5", "x").has_default_limits());
+        // Every preset has looked-up limits.
+        for preset in ModelConfig::presets() {
+            assert!(!preset.has_default_limits(), "{}", preset.id);
+        }
+        // Limits set by the caller are not guesses.
+        let mut set = ModelConfig::openai("my-finetune", "x");
+        set.context_window = 32_768;
+        assert!(!set.has_default_limits());
+        // Gateways, local servers and test configs are never judged.
+        assert!(!ModelConfig::local("http://localhost:1234/v1", "m").has_default_limits());
+        assert!(!ModelConfig::opencode_zen("m").has_default_limits());
+        assert!(!ModelConfig::mock().has_default_limits());
+    }
+
     #[test]
     fn priced_providers_match_the_constructors() {
         use crate::provider::PRICED_PROVIDERS;

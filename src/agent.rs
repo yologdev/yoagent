@@ -310,6 +310,7 @@ impl Agent {
                 config.api
             );
         }
+        config.warn_if_default_limits();
         self.model = config.id.clone();
         self.model_config = Some(config);
     }
@@ -318,6 +319,7 @@ impl Agent {
     /// and stash the config (provider is already wired). Key stays lazily
     /// resolved from the config's provider env var unless set explicitly.
     fn configured_for(mut self, config: ModelConfig) -> Self {
+        config.warn_if_default_limits();
         self.model = config.id.clone();
         self.model_config = Some(config);
         self
