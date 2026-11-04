@@ -321,7 +321,15 @@ fn build_request_body(
     // Without tools DeepSeek ignores it, so it is only sent when it matters.
     let replay_reasoning = compat.replays_reasoning_content && !config.tools.is_empty();
 
+    // Images from tool results, sent in a user message after the tool
+    // messages: a `tool` message may carry only text (OpenAI answers 400,
+    // others drop the image without a word).
+    let mut tool_images: Vec<serde_json::Value> = Vec::new();
+
     for msg in &config.messages {
+        if !matches!(msg, Message::ToolResult { .. }) {
+            push_tool_images(&mut messages, &mut tool_images, compat);
+        }
         if !matches!(msg, Message::ToolResult { .. } | Message::Assistant { .. }) {
             maybe_insert_assistant_after_tool_results(&mut messages, compat);
         }
@@ -381,14 +389,25 @@ fn build_request_body(
                 content,
                 ..
             } => {
-                let content_val = if content.iter().any(|c| matches!(c, Content::Image { .. })) {
-                    // Images present: use array format for multimodal tool results
-                    content_to_openai(content)
-                } else {
-                    // Text-only: every text block in one plain string, for maximum compat
-                    let text = super::tool_result_text(content);
-                    serde_json::json!(text)
-                };
+                // Every text block in one plain string; images go after the
+                // tool messages, in a user message.
+                let mut text = super::tool_result_text(content);
+                let images = content.iter().filter_map(|c| match c {
+                    Content::Image { data, mime_type } => Some(serde_json::json!({
+                        "type": "image_url",
+                        "image_url": {"url": format!("data:{};base64,{}", mime_type, data)},
+                    })),
+                    _ => None,
+                });
+                let before = tool_images.len();
+                tool_images.extend(images);
+                if tool_images.len() > before {
+                    if !text.is_empty() {
+                        text.push('\n');
+                    }
+                    text.push_str(TOOL_IMAGES_NOTE);
+                }
+                let content_val = serde_json::json!(text);
 
                 let mut msg_obj = serde_json::json!({
                     "role": "tool",
@@ -402,6 +421,7 @@ fn build_request_body(
             }
         }
     }
+    push_tool_images(&mut messages, &mut tool_images, compat);
     maybe_insert_assistant_after_tool_results(&mut messages, compat);
 
     let max_tokens_val = config.max_tokens.unwrap_or(model_config.max_tokens);
@@ -526,6 +546,28 @@ fn deepseek_reasoning_effort(level: ThinkingLevel) -> &'static str {
         ThinkingLevel::Max => "max",
         ThinkingLevel::Off => unreachable!(),
     }
+}
+
+/// What a tool message with images says in their place.
+const TOOL_IMAGES_NOTE: &str = "[The image is in the next user message.]";
+
+/// Send the tool results' images, if any, as one user message after the
+/// tool messages.
+fn push_tool_images(
+    messages: &mut Vec<serde_json::Value>,
+    images: &mut Vec<serde_json::Value>,
+    compat: &OpenAiCompat,
+) {
+    if images.is_empty() {
+        return;
+    }
+    maybe_insert_assistant_after_tool_results(messages, compat);
+    let mut content = vec![serde_json::json!({
+        "type": "text",
+        "text": "Images from the tool results above:",
+    })];
+    content.append(images);
+    messages.push(serde_json::json!({"role": "user", "content": content}));
 }
 
 fn maybe_insert_assistant_after_tool_results(
@@ -891,6 +933,135 @@ mod tests {
         config.model_config = Some(model_config.clone());
         config.cache_config = cache_config;
         build_request_body(&config, &model_config, &compat)
+    }
+
+    fn tool_call(id: &str) -> Content {
+        Content::ToolCall {
+            id: id.into(),
+            name: "read_file".into(),
+            arguments: serde_json::json!({}),
+            provider_metadata: None,
+        }
+    }
+
+    fn tool_result(id: &str, content: Vec<Content>) -> Message {
+        Message::ToolResult {
+            tool_call_id: id.into(),
+            tool_name: "read_file".into(),
+            content,
+            is_error: false,
+            timestamp: 0,
+        }
+    }
+
+    fn image(data: &str) -> Content {
+        Content::Image {
+            data: data.into(),
+            mime_type: "image/png".into(),
+        }
+    }
+
+    fn roles(body: &serde_json::Value) -> Vec<String> {
+        body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["role"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    /// Parallel calls: the tool messages stay together after their
+    /// assistant message (the API requires it), and one user message after
+    /// them carries every image, in order.
+    #[test]
+    fn images_of_several_tool_results_follow_the_tool_messages() {
+        let calls = Message::assistant(
+            vec![tool_call("a"), tool_call("b"), tool_call("c")],
+            StopReason::ToolUse,
+            "gpt-5.5",
+            "openai",
+            Usage::default(),
+        );
+        let body = openai_body(
+            CacheConfig::default(),
+            vec![
+                Message::user("look"),
+                calls,
+                tool_result("a", vec![image("AAAA")]),
+                tool_result(
+                    "b",
+                    vec![Content::Text {
+                        text: "no image".into(),
+                    }],
+                ),
+                tool_result(
+                    "c",
+                    vec![
+                        Content::Text {
+                            text: "a chart".into(),
+                        },
+                        image("CCCC"),
+                    ],
+                ),
+                assistant("red and blue"),
+            ],
+        );
+        assert_eq!(
+            roles(&body),
+            [
+                "developer",
+                "user",
+                "assistant",
+                "tool",
+                "tool",
+                "tool",
+                "user",
+                "assistant"
+            ]
+        );
+        let m = body["messages"].as_array().unwrap();
+        assert_eq!(m[3]["content"], TOOL_IMAGES_NOTE);
+        assert_eq!(m[4]["content"], "no image");
+        assert_eq!(m[5]["content"], format!("a chart\n{TOOL_IMAGES_NOTE}"));
+        let parts = m[6]["content"].as_array().unwrap();
+        let urls: Vec<_> = parts[1..]
+            .iter()
+            .map(|p| p["image_url"]["url"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            urls,
+            ["data:image/png;base64,AAAA", "data:image/png;base64,CCCC"]
+        );
+    }
+
+    /// A provider that wants an assistant message between tool results and
+    /// a user message (`requires_assistant_after_tool_result`, Ollama's
+    /// compat) gets one before the images too.
+    #[test]
+    fn tool_images_keep_the_assistant_after_tool_results_rule() {
+        let model_config = ModelConfig::openai("gpt-5.5", "GPT-5.5");
+        let compat = OpenAiCompat {
+            requires_assistant_after_tool_result: true,
+            ..OpenAiCompat::openai()
+        };
+        let mut config = StreamConfig::new("gpt-5.5", "test");
+        config.messages = vec![
+            Message::user("look"),
+            Message::assistant(
+                vec![tool_call("a")],
+                StopReason::ToolUse,
+                "m",
+                "mistral",
+                Usage::default(),
+            ),
+            tool_result("a", vec![image("AAAA")]),
+        ];
+        config.model_config = Some(model_config.clone());
+        let body = build_request_body(&config, &model_config, &compat);
+        assert_eq!(
+            roles(&body),
+            ["user", "assistant", "tool", "assistant", "user"]
+        );
     }
 
     #[test]
@@ -1606,13 +1777,18 @@ mod tests {
 
         let body = build_request_body(&config, &model_config, &compat);
         let msgs = body["messages"].as_array().unwrap();
-        // tool result is the last message (after system + assistant)
-        let tool_msg = msgs.last().unwrap();
+        // A `tool` message may carry only text (OpenAI: "Image URLs are only
+        // allowed for messages with role 'user'"): it says where the image
+        // went, and a user message after it carries the image.
+        let tool_msg = &msgs[msgs.len() - 2];
         assert_eq!(tool_msg["role"], "tool");
-        // content should be an array with image_url
-        let content = tool_msg["content"].as_array().unwrap();
-        assert_eq!(content[0]["type"], "image_url");
-        assert!(content[0]["image_url"]["url"]
+        assert_eq!(tool_msg["content"], TOOL_IMAGES_NOTE);
+        let user = msgs.last().unwrap();
+        assert_eq!(user["role"], "user");
+        let content = user["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[1]["type"], "image_url");
+        assert!(content[1]["image_url"]["url"]
             .as_str()
             .unwrap()
             .starts_with("data:image/png;base64,"));

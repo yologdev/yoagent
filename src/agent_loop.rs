@@ -527,6 +527,72 @@ pub async fn agent_loop(
 /// `AgentEnd` — for callers inside the crate that must not depend on someone
 /// draining the event channel (`Agent`'s sub-agent bucket, `SubAgentTool`'s
 /// spend report).
+/// The result a tool call gets when the run that made it ended before it
+/// returned (killed while its tools ran, or saved mid-turn), found when the
+/// next run starts.
+pub(crate) const UNANSWERED_CALL_RESULT: &str = "No result was recorded for this call: the run \
+     that made it ended before it returned. It may have run in part, in full or not at all; \
+     check the current state before calling it again.";
+
+/// Answer every tool call in `messages` that has no result, right after its
+/// results so far: every provider refuses a request with an unanswered call,
+/// so continuing or prompting such a history would fail, and every request
+/// after it too. The calls are not run again (they may have run already).
+/// Returns the results added at the end of the history, which the run
+/// reports as new messages; ones added earlier only repair it.
+fn close_unanswered_calls(messages: &mut Vec<AgentMessage>) -> Vec<AgentMessage> {
+    let results = |pending: &mut Vec<(String, String)>| -> Vec<AgentMessage> {
+        pending
+            .drain(..)
+            .map(|(id, name)| {
+                Message::ToolResult {
+                    tool_call_id: id,
+                    tool_name: name,
+                    content: vec![Content::Text {
+                        text: UNANSWERED_CALL_RESULT.into(),
+                    }],
+                    is_error: true,
+                    timestamp: now_ms(),
+                }
+                .into()
+            })
+            .collect()
+    };
+    let mut pending: Vec<(String, String)> = Vec::new();
+    let mut i = 0;
+    while i < messages.len() {
+        match &messages[i] {
+            AgentMessage::Llm(Message::ToolResult { tool_call_id, .. }) => {
+                pending.retain(|(id, _)| id != tool_call_id);
+            }
+            AgentMessage::Llm(m @ (Message::User { .. } | Message::Assistant { .. })) => {
+                let calls: Vec<(String, String)> = match m {
+                    Message::Assistant { content, .. } => content
+                        .iter()
+                        .filter_map(|c| match c {
+                            Content::ToolCall { id, name, .. } => Some((id.clone(), name.clone())),
+                            _ => None,
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                if !pending.is_empty() {
+                    let added = results(&mut pending);
+                    let n = added.len();
+                    messages.splice(i..i, added);
+                    i += n;
+                }
+                pending = calls;
+            }
+            AgentMessage::Custom(_) => {}
+        }
+        i += 1;
+    }
+    let added = results(&mut pending);
+    messages.extend(added.iter().cloned());
+    added
+}
+
 pub(crate) async fn agent_loop_with_stats(
     prompts: Vec<AgentMessage>,
     context: &mut AgentContext,
@@ -557,7 +623,11 @@ pub(crate) async fn agent_loop_with_stats(
         }
         note_run_prompts(&prompts);
 
-        let mut new_messages: Vec<AgentMessage> = prompts.clone();
+        // A call the last run left unanswered gets its result before the
+        // prompt, or the request is one every provider refuses.
+        let closed = close_unanswered_calls(&mut context.messages);
+        let mut new_messages: Vec<AgentMessage> = closed.clone();
+        new_messages.extend(prompts.iter().cloned());
 
         // Add prompts to context
         for prompt in &prompts {
@@ -566,8 +636,8 @@ pub(crate) async fn agent_loop_with_stats(
 
         tx.send(AgentEvent::TurnStart).ok();
 
-        // Emit events for each prompt message
-        for prompt in &prompts {
+        // Emit events for each closed call and prompt message
+        for prompt in closed.iter().chain(&prompts) {
             tx.send(AgentEvent::MessageStart {
                 message: prompt.clone(),
             })
@@ -993,6 +1063,11 @@ async fn apply_input_filters(
 }
 
 /// Continue an agent loop from existing context (for retries).
+///
+/// Tool calls with no result in the context are answered first (an error
+/// result saying none was recorded; the calls are not run again), so a
+/// history saved mid-turn can be continued. The context must not end with a
+/// finished assistant answer.
 pub async fn agent_loop_continue(
     context: &mut AgentContext,
     config: &AgentLoopConfig,
@@ -1016,6 +1091,10 @@ pub(crate) async fn agent_loop_continue_with_stats(
         "Cannot continue: no messages in context"
     );
 
+    // Calls the last run left unanswered get their results, and the run
+    // continues from those (the model sees the calls did not return).
+    let closed = close_unanswered_calls(&mut context.messages);
+
     if let Some(last) = context.messages.last() {
         assert!(
             last.role() != "assistant",
@@ -1027,10 +1106,20 @@ pub(crate) async fn agent_loop_continue_with_stats(
     let observer = EventObserver::new(&exts, tx);
     let tx = observer.sender();
 
-    let mut new_messages: Vec<AgentMessage> = Vec::new();
+    let mut new_messages: Vec<AgentMessage> = closed.clone();
 
     tx.send(AgentEvent::AgentStart).ok();
     tx.send(AgentEvent::TurnStart).ok();
+    for message in &closed {
+        tx.send(AgentEvent::MessageStart {
+            message: message.clone(),
+        })
+        .ok();
+        tx.send(AgentEvent::MessageEnd {
+            message: message.clone(),
+        })
+        .ok();
+    }
 
     let mut stats = {
         let (mut stats, recorded) = with_loop_scope(
@@ -1949,10 +2038,19 @@ async fn stream_assistant_response(
 
     // Convert to LLM messages
     let convert = config.convert_to_llm.as_ref();
-    let llm_messages = match convert {
+    let mut llm_messages = match convert {
         Some(f) => f(&messages),
         None => default_convert_to_llm(&messages),
     };
+    // A text-only model gets a note in place of each image (the history
+    // keeps the image, for a model that takes one).
+    if config
+        .model_config
+        .as_ref()
+        .is_some_and(|mc| !mc.image_input)
+    {
+        crate::provider::images_as_text(&mut llm_messages);
+    }
 
     // Build tool definitions
     let tool_defs: Vec<ToolDefinition> = crate::extension::tool_definitions(&context.tools);
@@ -1960,7 +2058,6 @@ async fn stream_assistant_response(
     // Extensions judge the request once per turn (a retried attempt is not
     // judged again). Their notes go on the latest user turn, before any turn
     // hook's (those run inside the provider wrapper, per attempt).
-    let mut llm_messages = llm_messages;
     if !exts.is_empty() {
         let prompts = run_prompts();
         let turn = TurnContext::new(

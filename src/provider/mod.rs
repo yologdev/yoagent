@@ -225,6 +225,32 @@ mod merge_same_role_tests {
     }
 }
 
+/// What a model without image input is sent in place of an image.
+pub(crate) const IMAGE_NOT_SENT: &str =
+    "[An image was here; this model takes no image input, so it was not sent.]";
+
+/// Replace every image in `messages` with [`IMAGE_NOT_SENT`], for a model
+/// without image input ([`ModelConfig::image_input`] off): it would refuse
+/// the request, and every later one too, since the image stays in the
+/// history.
+pub(crate) fn images_as_text(messages: &mut [crate::types::Message]) {
+    use crate::types::{Content, Message};
+    for message in messages {
+        let content = match message {
+            Message::User { content, .. }
+            | Message::Assistant { content, .. }
+            | Message::ToolResult { content, .. } => content,
+        };
+        for block in content.iter_mut() {
+            if matches!(block, Content::Image { .. }) {
+                *block = Content::Text {
+                    text: IMAGE_NOT_SENT.into(),
+                };
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tool_result_text_tests {
     use super::tool_result_text;
