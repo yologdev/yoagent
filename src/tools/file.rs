@@ -145,6 +145,12 @@ pub(crate) fn require_regular_file(
 ///
 /// Give each agent its own log: a sub-agent sharing its parent's would count
 /// the parent's reads as its own.
+///
+/// The log lives as long as the tools, not the conversation:
+/// `Agent::reset()`, compaction and a new `SubAgentTool` delegation do not
+/// clear it (the tool `Arc`s are reused), and a read whose output is
+/// truncated afterwards still counts as read. A fresh `default_tools()` (or
+/// a fresh `ReadLog`) starts over.
 #[derive(Debug, Clone, Default)]
 pub struct ReadLog {
     known: Arc<Mutex<HashMap<PathBuf, Known>>>,

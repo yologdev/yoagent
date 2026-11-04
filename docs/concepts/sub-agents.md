@@ -43,8 +43,29 @@ let researcher = SubAgentTool::from_config(
     .with_max_turns(10);
 ```
 
-(`ReadFileTool` and `SearchTool` are among the filesystem tools behind the
-default `native` feature.)
+A sub-agent that writes files should share a `ReadLog` between its
+`read_file` and `write_file`, so it cannot overwrite a file it has read only in
+part (see [Tools: `write_file` after a partial read](tools.md#write_file-after-a-partial-read)):
+
+```rust
+let log = tools::ReadLog::new();
+let coder = SubAgentTool::from_config(
+    "coder",
+    ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"),
+)
+    .with_description("Writes and edits code files.")
+    .with_tools(vec![
+        Arc::new(tools::ReadFileTool::new().with_read_log(log.clone())),
+        Arc::new(tools::WriteFileTool::new().with_read_log(log)),
+        Arc::new(tools::EditFileTool::new()),
+    ]);
+```
+
+The log belongs to the tools, so it carries over from one delegation to the
+next.
+
+(`ReadFileTool`, `WriteFileTool`, `EditFileTool` and `SearchTool` are among the
+filesystem tools behind the default `native` feature.)
 
 ## Registering on a Parent Agent
 

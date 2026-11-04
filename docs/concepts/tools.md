@@ -176,7 +176,7 @@ the whole file would delete lines you have not seen. Read the rest with read_fil
 
 - Refused: a `write_file` to an **existing** file whose latest read by this agent covered only part of it. Pages add up: reading 1–500 and then 501–2,140 counts as the whole file.
 - Allowed: a file read in full and unchanged since (in one read or in pages of the same version), even after it reads a page of that same version again; a file this agent last wrote itself; a file it never read (this guard is only about partial reads); a path that does not exist.
-- Versions are told apart by length and modification time. A file that changed on disk after the partial read stays refused, and the message says it changed; pages of the old version do not count towards the new one, so the model reads it again. A file read in full that changed since and is then read in part is refused the same way. A change after a full read with no read since is not re-checked.
+- Versions are told apart by length and modification time, so a same-length rewrite within the filesystem's timestamp resolution is not seen. A file that changed on disk after the partial read stays refused, and the message says it changed; pages of the old version do not count towards the new one, so the model reads it again. A file read in full that changed since and is then read in part is refused the same way. A change after a full read with no read since is not re-checked.
 - A read that shows no lines (an `offset` past the end, `limit: 0`) records nothing: what was known before stays.
 - `edit_file` is not affected: it replaces text the model gave exactly.
 - Paths are compared after the sandbox's resolution, so `./src/a.rs`, `src/a.rs` and `src/../src/a.rs` are one file. Sandboxed or not makes no difference.
@@ -194,6 +194,8 @@ let tools: Vec<Box<dyn AgentTool>> = vec![
 ```
 
 Give a sub-agent its own log: a shared one would count the parent's reads as the child's.
+
+The log lives as long as the tools, not the conversation: `Agent::reset()`, compaction and a new `SubAgentTool` delegation do not clear it (the tool `Arc`s are reused), and a read whose output is truncated or compacted afterwards still counts as read. Build a fresh `default_tools()` (or a fresh `ReadLog`) to start over.
 
 ## `BashTool` is not a sandbox
 

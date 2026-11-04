@@ -1580,7 +1580,7 @@ async fn write_to_a_file_never_read_is_allowed() {
 }
 
 #[tokio::test]
-async fn write_then_write_is_allowed() {
+async fn a_deleted_file_is_written_and_then_known() {
     let (_dir, path) = lines_file(900);
     let (r, w) = guarded_pair();
     read(&r, serde_json::json!({"path": path})).await;
@@ -1764,4 +1764,179 @@ async fn an_empty_page_keeps_the_partial_read() {
         err.contains("only lines 1-500 of its 900 lines, and it has changed on disk since"),
         "{err}"
     );
+}
+
+fn numbered(n: usize) -> String {
+    let text: Vec<String> = (1..=n).map(|i| format!("line {i}")).collect();
+    text.join("\n")
+}
+
+#[tokio::test]
+async fn a_same_length_rewrite_with_a_new_mtime_is_a_new_version() {
+    let (_dir, path) = lines_file(900);
+    let (r, w) = guarded_pair();
+    read(&r, serde_json::json!({"path": path})).await;
+    // Same bytes count: only the modification time tells the versions apart.
+    let upper = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("line", "LINE");
+    std::fs::write(&path, upper).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(10))
+        .unwrap();
+
+    let err = write(&w, &path, "x").await.unwrap_err().to_string();
+    assert!(err.contains("changed on disk since"), "{err}");
+    // A page of the new version starts over rather than adding to 1-500.
+    read(&r, serde_json::json!({"path": path, "offset": 501})).await;
+    let err = write(&w, &path, "x").await.unwrap_err().to_string();
+    assert!(err.contains("only lines 501-900 of its 900 lines"), "{err}");
+}
+
+#[tokio::test]
+async fn pages_read_out_of_order_add_up() {
+    let (_dir, path) = lines_file(900);
+    let (r, w) = guarded_pair();
+    read(&r, serde_json::json!({"path": path, "offset": 501})).await;
+    read(&r, serde_json::json!({"path": path})).await;
+    write(&w, &path, "x").await.unwrap();
+}
+
+#[tokio::test]
+async fn overlapping_pages_merge_and_gaps_are_named() {
+    let (_dir, path) = lines_file(900);
+    let (r, w) = guarded_pair();
+    read(&r, serde_json::json!({"path": path})).await;
+    read(
+        &r,
+        serde_json::json!({"path": path, "offset": 400, "limit": 200}),
+    )
+    .await;
+    let err = write(&w, &path, "x").await.unwrap_err().to_string();
+    assert!(err.contains("only lines 1-599 of its 900 lines"), "{err}");
+
+    let (_dir, path) = lines_file(900);
+    let (r, w) = guarded_pair();
+    read(&r, serde_json::json!({"path": path, "limit": 10})).await;
+    read(
+        &r,
+        serde_json::json!({"path": path, "offset": 50, "limit": 11}),
+    )
+    .await;
+    let err = write(&w, &path, "x").await.unwrap_err().to_string();
+    assert!(
+        err.contains("only lines 1-10, 50-60 of its 900 lines"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn the_agents_own_write_makes_the_file_known() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("new.txt");
+    let path = path.to_str().unwrap();
+    let (r, w) = guarded_pair();
+    write(&w, path, &numbered(900)).await.unwrap();
+    read(&r, serde_json::json!({"path": path})).await;
+    write(&w, path, "x").await.unwrap();
+}
+
+#[tokio::test]
+async fn a_page_of_a_file_changed_after_the_agents_own_write_is_refused() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("new.txt");
+    let path = path.to_str().unwrap();
+    let (r, w) = guarded_pair();
+    write(&w, path, &numbered(900)).await.unwrap();
+    rewrite_lines(path, 950);
+    read(&r, serde_json::json!({"path": path})).await;
+    let err = write(&w, path, "x").await.unwrap_err().to_string();
+    assert!(err.contains("only lines 1-500 of its 950 lines"), "{err}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_partial_read_through_a_symlink_guards_its_target() {
+    let (dir, path) = lines_file(900);
+    let link = dir.path().join("link.txt");
+    std::os::unix::fs::symlink(&path, &link).unwrap();
+    let (r, w) = guarded_pair();
+    read(&r, serde_json::json!({"path": link.to_str().unwrap()})).await;
+    let err = write(&w, &path, "x").await.unwrap_err().to_string();
+    assert!(err.contains("only lines 1-500"), "{err}");
+}
+
+#[tokio::test]
+async fn a_sandboxed_reader_and_an_unrestricted_writer_share_a_log() {
+    let (dir, path) = lines_file(900);
+    let log = ReadLog::new();
+    let r = ReadFileTool::new()
+        .with_allowed_paths(vec![dir.path().to_str().unwrap().to_string()])
+        .with_read_log(log.clone());
+    let w = WriteFileTool::new().with_read_log(log);
+    // The same file, relative to the working directory.
+    let ups = std::env::current_dir().unwrap().components().count() - 1;
+    let relative = format!("{}{}", "../".repeat(ups), path.trim_start_matches('/'));
+    read(&r, serde_json::json!({"path": relative})).await;
+
+    let err = write(&w, &path, "x").await.unwrap_err().to_string();
+    assert_eq!(
+        err,
+        format!(
+            "Refusing to overwrite {path}: you have read only lines 1-500 of its 900 lines, \
+             so writing the whole file would delete lines you have not seen. Read the rest \
+             with read_file (offset/limit), or change it in place with edit_file."
+        )
+    );
+}
+
+#[tokio::test]
+async fn an_image_read_then_written_is_allowed() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("x.png");
+    std::fs::write(&path, [0x89, b'P', b'N', b'G', 0, 1, 2, 3]).unwrap();
+    let path = path.to_str().unwrap();
+    let (r, w) = guarded_pair();
+    let result = r
+        .execute(serde_json::json!({"path": path}), ctx("read_file"))
+        .await
+        .unwrap();
+    assert!(matches!(result.content[0], Content::Image { .. }));
+    write(&w, path, "x").await.unwrap();
+}
+
+#[tokio::test]
+async fn a_custom_max_lines_sets_the_page_the_guard_sees() {
+    // Ends with a newline: still 900 lines.
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("big.txt");
+    std::fs::write(&path, numbered(900) + "\n").unwrap();
+    let path = path.to_str().unwrap();
+
+    let log = ReadLog::new();
+    let r = ReadFileTool {
+        max_lines: 100,
+        ..Default::default()
+    }
+    .with_read_log(log.clone());
+    let w = WriteFileTool::new().with_read_log(log);
+    read(&r, serde_json::json!({"path": path})).await;
+    let err = write(&w, path, &(numbered(900) + "\n"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("only lines 1-100 of its 900 lines"), "{err}");
+
+    let log = ReadLog::new();
+    let r = ReadFileTool {
+        max_lines: usize::MAX,
+        ..Default::default()
+    }
+    .with_read_log(log.clone());
+    let w = WriteFileTool::new().with_read_log(log);
+    read(&r, serde_json::json!({"path": path})).await;
+    write(&w, path, "x").await.unwrap();
 }

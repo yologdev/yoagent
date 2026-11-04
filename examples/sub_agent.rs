@@ -38,13 +38,16 @@ async fn main() {
         ])
         .with_max_turns(10);
 
-    // Sub-agent 2: a coder with file editing tools
+    // Sub-agent 2: a coder with file editing tools. Its read_file and
+    // write_file share a ReadLog, so it cannot overwrite a file it has read
+    // only in part (docs/concepts/tools.md, "write_file after a partial read").
+    let log = tools::ReadLog::new();
     let coder = SubAgentTool::from_config("coder", sonnet())
         .with_description("Writes and edits code files. Delegate coding tasks here.")
         .with_system_prompt("You are a coding assistant. Write clean, correct code. Be concise.")
         .with_tools(vec![
-            Arc::new(tools::ReadFileTool::new()),
-            Arc::new(tools::WriteFileTool::new()),
+            Arc::new(tools::ReadFileTool::new().with_read_log(log.clone())),
+            Arc::new(tools::WriteFileTool::new().with_read_log(log)),
             Arc::new(tools::EditFileTool::new()),
         ])
         .with_max_turns(15);
