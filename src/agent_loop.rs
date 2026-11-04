@@ -112,6 +112,17 @@ pub struct AgentLoopConfig {
     /// Retry configuration for transient provider errors.
     pub retry_config: crate::retry::RetryConfig,
 
+    /// The longest server-requested wait (a rate limit's `Retry-After`)
+    /// the loop retries after. When a retryable error asks for longer, the
+    /// turn ends at once as an `Error` naming the wait, instead of retrying
+    /// (likely into the same limit). A wait equal to it is retried. This
+    /// only decides whether to give up at once: every wait the loop does
+    /// make is still capped at
+    /// [`RetryConfig::max_delay_ms`](crate::retry::RetryConfig::max_delay_ms)
+    /// (30 s by default). Errors that name no wait are retried as usual.
+    /// `None` (the default) never gives up early.
+    pub max_retry_after: Option<std::time::Duration>,
+
     /// Called before each LLM turn. Return `false` to abort the loop.
     pub before_turn: Option<BeforeTurnFn>,
     /// Called after each LLM turn with the current messages and the turn's usage.
@@ -191,6 +202,7 @@ impl AgentLoopConfig {
             tool_middleware: Vec::new(),
             output_schema: None,
             retry_config: crate::retry::RetryConfig::default(),
+            max_retry_after: None,
             before_turn: None,
             after_turn: None,
             on_error: None,
@@ -2118,8 +2130,19 @@ async fn stream_assistant_response(
             }
         };
 
+        // A server-requested wait longer than the caller accepts ends the
+        // turn now, rather than clamping it and retrying into the same limit.
+        let too_long = match (&result, config.max_retry_after) {
+            (Err(e), Some(max)) if e.is_retryable() => e.retry_after().filter(|wait| *wait > max),
+            _ => None,
+        };
         match &result {
-            Err(e) if e.is_retryable() && attempt < retry.max_retries && !cancel.is_cancelled() => {
+            Err(e)
+                if too_long.is_none()
+                    && e.is_retryable()
+                    && attempt < retry.max_retries
+                    && !cancel.is_cancelled() =>
+            {
                 // Close the failed attempt's message so consumers can discard
                 // whatever partial content it streamed before the retry. The
                 // `ProviderRetry` that follows marks it as retried, not final.
@@ -2162,6 +2185,30 @@ async fn stream_assistant_response(
                     break (Err(ProviderError::Cancelled), AttemptEvents::default());
                 }
                 continue;
+            }
+            Err(e) if too_long.is_some() && !cancel.is_cancelled() => {
+                let wait = too_long.unwrap_or_default();
+                let max = config.max_retry_after.unwrap_or_default();
+                // `RateLimited` carries no body: the provider's reason was
+                // logged when the response was classified, just before this.
+                warn!(
+                    error = %e,
+                    wait_secs = wait.as_secs_f64(),
+                    max_retry_after_secs = max.as_secs_f64(),
+                    "not retrying: the provider asked to wait longer than max_retry_after \
+                     (its reason, if it gave one, is in the rate-limit warning before this)"
+                );
+                // Text only from here on (the turn's error message), so the
+                // variant does not matter; the wait is said once.
+                break (
+                    Err(ProviderError::Other(format!(
+                        "Rate limited: the server asked to wait {:.1}s, longer than the \
+                         {:.1}s allowed by max_retry_after; not retried",
+                        wait.as_secs_f64(),
+                        max.as_secs_f64()
+                    ))),
+                    attempt_events,
+                );
             }
             _ => break (result, attempt_events),
         }

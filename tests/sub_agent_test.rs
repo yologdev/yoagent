@@ -2045,3 +2045,171 @@ async fn with_max_turns_keeps_the_other_limits() {
         .unwrap();
     assert_eq!(text_of(&result), "final answer");
 }
+
+// ---------------------------------------------------------------------------
+// Depth cap (with_max_depth)
+// ---------------------------------------------------------------------------
+
+/// Passes calls through to a sub-agent and keeps what it returned.
+struct Recording {
+    inner: SubAgentTool,
+    outcome: Arc<std::sync::Mutex<Option<Result<String, String>>>>,
+}
+
+#[async_trait::async_trait]
+impl AgentTool for Recording {
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+    fn label(&self) -> &str {
+        self.inner.label()
+    }
+    fn description(&self) -> &str {
+        self.inner.description()
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        self.inner.parameters_schema()
+    }
+    async fn execute(
+        &self,
+        params: serde_json::Value,
+        ctx: ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        let result = self.inner.execute(params, ctx).await;
+        *self.outcome.lock().unwrap() = Some(match &result {
+            Ok(r) => Ok(match &r.content[0] {
+                Content::Text { text } => text.clone(),
+                _ => String::new(),
+            }),
+            Err(e) => Err(e.to_string()),
+        });
+        result
+    }
+}
+
+/// parent → planner (depth 1) → worker (depth 2): what the worker's call
+/// returned, and the parent run's stats.
+async fn nested_worker_call(
+    worker_max_depth: Option<usize>,
+) -> (Result<String, String>, SessionStats) {
+    let mut worker = SubAgentTool::from_provider(
+        "worker",
+        Arc::new(MockProvider::new(vec![MockResponse::TextWithUsage(
+            "worked".into(),
+            usage(1000, 100, 0, 0),
+        )])),
+        ModelConfig::mock(),
+    );
+    if let Some(max) = worker_max_depth {
+        worker = worker.with_max_depth(max);
+    }
+    let outcome = Arc::new(std::sync::Mutex::new(None));
+    let recording = Recording {
+        inner: worker,
+        outcome: outcome.clone(),
+    };
+    let planner = SubAgentTool::from_provider(
+        "planner",
+        Arc::new(MockProvider::new(vec![
+            delegate("worker"),
+            MockResponse::Text("planned".into()),
+        ])),
+        ModelConfig::mock(),
+    )
+    .with_tools(vec![Arc::new(recording)]);
+
+    let parent = MockProvider::new(vec![delegate("planner"), MockResponse::Text("done".into())]);
+    let events = run_parent(parent, vec![Box::new(planner)]).await;
+    let worker_outcome = outcome.lock().unwrap().take().expect("worker was called");
+    (worker_outcome, end_stats(&events))
+}
+
+#[tokio::test]
+async fn a_delegation_past_the_max_depth_is_refused() {
+    let (outcome, stats) = nested_worker_call(Some(1)).await;
+    let err = outcome.expect_err("depth 2 is past a max depth of 1");
+    assert!(
+        err.contains("'worker' would start a run at depth 2, past its maximum depth of 1"),
+        "{err}"
+    );
+    assert!(
+        err.ends_with("Do this task yourself instead of delegating it."),
+        "{err}"
+    );
+    // No run started: only the planner's.
+    assert_eq!(stats.sub_agents.runs, 1);
+    assert_eq!(stats.sub_agents.usage, Usage::default());
+}
+
+#[tokio::test]
+async fn a_delegation_within_the_max_depth_runs() {
+    for max in [Some(2), None] {
+        let (outcome, stats) = nested_worker_call(max).await;
+        assert_eq!(outcome.as_deref(), Ok("worked"), "max depth {max:?}");
+        assert_eq!(stats.sub_agents.runs, 2, "max depth {max:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_max_depth_of_zero_refuses_every_call() {
+    let tool = SubAgentTool::from_provider(
+        "never",
+        Arc::new(MockProvider::text("unreachable")),
+        ModelConfig::mock(),
+    )
+    .with_max_depth(0);
+    let err = tool
+        .execute(
+            serde_json::json!({"task": "x"}),
+            ToolContext::new("tc", "never"),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("at depth 1"), "{err}");
+}
+
+/// Rate limited every time, asking for an hour's wait; counts the requests.
+struct AskedToWaitAnHour(Arc<std::sync::atomic::AtomicUsize>);
+
+#[async_trait::async_trait]
+impl yoagent::provider::StreamProvider for AskedToWaitAnHour {
+    async fn stream(
+        &self,
+        _config: yoagent::provider::StreamConfig,
+        _tx: mpsc::UnboundedSender<yoagent::provider::StreamEvent>,
+        _cancel: CancellationToken,
+    ) -> Result<Message, yoagent::provider::ProviderError> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(yoagent::provider::ProviderError::RateLimited {
+            retry_after_ms: Some(3_600_000),
+        })
+    }
+}
+
+/// `SubAgentTool::with_max_retry_after` reaches the child's loop.
+#[tokio::test]
+async fn sub_agent_max_retry_after_fails_a_long_wait_without_retrying() {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let tool = SubAgentTool::from_provider(
+        "waiter",
+        Arc::new(AskedToWaitAnHour(calls.clone())),
+        ModelConfig::mock(),
+    )
+    .with_retry_config(yoagent::RetryConfig {
+        max_retries: 3,
+        initial_delay_ms: 1,
+        backoff_multiplier: 1.0,
+        max_delay_ms: 1,
+    })
+    .with_max_retry_after(std::time::Duration::from_secs(60));
+    let err = tool
+        .execute(
+            serde_json::json!({"task": "x"}),
+            ToolContext::new("tc", "waiter"),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(err.contains("max_retry_after"), "{err}");
+}

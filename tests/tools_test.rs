@@ -1495,6 +1495,227 @@ async fn file_tools_refuse_what_is_not_a_regular_file() {
     assert_eq!(std::fs::read_to_string(&real).unwrap(), "bye\n");
 }
 
+/// A command killed by a signal names the signal: there is no exit code.
+#[cfg(unix)]
+#[tokio::test]
+async fn test_bash_names_the_signal_that_killed_the_command() {
+    let result = BashTool::new()
+        .execute(
+            serde_json::json!({"command": "echo before; kill -9 $$"}),
+            ctx("bash"),
+        )
+        .await
+        .unwrap();
+    let Content::Text { text } = &result.content[0] else {
+        panic!("expected text")
+    };
+    assert!(
+        text.starts_with("Killed by signal 9 (SIGKILL)\nbefore"),
+        "{text}"
+    );
+    assert!(!text.contains("Exit code"), "{text}");
+    assert_eq!(result.details["signal"], 9);
+    assert_eq!(result.details["exit_code"], -1);
+    assert_eq!(result.details["success"], false);
+
+    // An ordinary exit has no signal.
+    let result = BashTool::new()
+        .execute(serde_json::json!({"command": "exit 3"}), ctx("bash"))
+        .await
+        .unwrap();
+    assert!(result.details["signal"].is_null());
+    assert_eq!(result.details["exit_code"], 3);
+}
+
+/// Colour codes and terminal titles never reach the model; stderr too.
+#[tokio::test]
+async fn test_bash_strips_ansi_escapes() {
+    let command =
+        r"printf '\033]0;title\007\033[1;32mok\033[0m done\n'; printf '\033[31merr\033[0m\n' >&2";
+    let result = BashTool::new()
+        .execute(serde_json::json!({ "command": command }), ctx("bash"))
+        .await
+        .unwrap();
+    let Content::Text { text } = &result.content[0] else {
+        panic!("expected text")
+    };
+    assert_eq!(
+        text, "Exit code: 0\nSTDOUT:\nok done\n\nSTDERR:\nerr\n",
+        "{text:?}"
+    );
+
+    // Opted out: kept as printed.
+    let result = BashTool::new()
+        .with_raw_output(true)
+        .execute(serde_json::json!({ "command": command }), ctx("bash"))
+        .await
+        .unwrap();
+    let Content::Text { text } = &result.content[0] else {
+        panic!("expected text")
+    };
+    assert!(text.contains("\u{1b}[1;32mok\u{1b}[0m done"), "{text:?}");
+}
+
+/// A sequence the output cap cuts in half is dropped, not left as `[1;3`.
+#[tokio::test]
+async fn test_bash_strips_an_escape_cut_by_the_cap() {
+    let mut tool = BashTool::new();
+    tool.max_output_bytes = 6; // "ok" + ESC "[1;3" of ESC "[1;31m"
+    let result = tool
+        .execute(
+            serde_json::json!({"command": r"printf 'ok\033[1;31mred'"}),
+            ctx("bash"),
+        )
+        .await
+        .unwrap();
+    let Content::Text { text } = &result.content[0] else {
+        panic!("expected text")
+    };
+    assert_eq!(text, "Exit code: 0\nok\n... (output truncated)", "{text:?}");
+}
+
+/// A model writes `\n`; in a CRLF file the edit still applies, and every
+/// line it writes ends `\r\n`.
+#[tokio::test]
+async fn test_edit_file_crlf_file_with_lf_old_text_keeps_crlf() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let file = dir.path().join("crlf.txt");
+    std::fs::write(&file, b"alpha\r\nbeta\r\ngamma\r\n").unwrap();
+    let result = EditFileTool::new()
+        .execute(
+            serde_json::json!({
+                "path": file.to_str().unwrap(),
+                "old_text": "alpha\nbeta",
+                "new_text": "one\ntwo\nthree",
+            }),
+            ctx("edit_file"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read(&file).unwrap(),
+        b"one\r\ntwo\r\nthree\r\ngamma\r\n"
+    );
+    assert_eq!(result.details["crlf"], true);
+    assert_eq!(result.details["old_lines"], 2);
+    assert_eq!(result.details["new_lines"], 3);
+}
+
+/// An exact match wins, and an LF file is never rewritten with CRLF.
+#[tokio::test]
+async fn test_edit_file_exact_match_is_not_adapted() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let file = dir.path().join("lf.txt");
+    std::fs::write(&file, b"alpha\nbeta\ngamma\n").unwrap();
+    let result = EditFileTool::new()
+        .execute(
+            serde_json::json!({
+                "path": file.to_str().unwrap(),
+                "old_text": "alpha\nbeta",
+                "new_text": "A\nB",
+            }),
+            ctx("edit_file"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(&file).unwrap(), b"A\nB\ngamma\n");
+    assert_eq!(result.details["crlf"], false);
+}
+
+/// A minified file's line cannot blow up the "did you mean" error.
+#[tokio::test]
+async fn test_edit_file_not_found_snippet_is_numbered_and_capped() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let file = dir.path().join("min.js");
+    let minified = format!("var a=1;{}\n", "x+=1;".repeat(100_000));
+    std::fs::write(&file, format!("// header\n{minified}")).unwrap();
+    let err = EditFileTool::new()
+        .execute(
+            serde_json::json!({
+                "path": file.to_str().unwrap(),
+                "old_text": "var a=1;\nnot there",
+                "new_text": "",
+            }),
+            ctx("edit_file"),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("   2 | var a=1;x+=1;"), "{err}");
+    assert!(err.contains("… (line truncated)"), "{err}");
+    assert!(err.len() < 2_000, "error is {} bytes", err.len());
+}
+
+/// An exact one-line match in a CRLF file: the multi-line new_text is
+/// written with `\r\n` too, never bare `\n`.
+#[tokio::test]
+async fn test_edit_file_exact_match_in_a_crlf_file_writes_crlf() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let file = dir.path().join("crlf.txt");
+    for (old, new, expected) in [
+        ("alpha", "A\nB", &b"A\r\nB\r\nbeta\r\n"[..]),
+        // An old_text already spelled with `\r\n`.
+        ("alpha\r\nbeta", "A\nB\nC", &b"A\r\nB\r\nC\r\n"[..]),
+    ] {
+        std::fs::write(&file, b"alpha\r\nbeta\r\n").unwrap();
+        let result = EditFileTool::new()
+            .execute(
+                serde_json::json!({
+                    "path": file.to_str().unwrap(),
+                    "old_text": old,
+                    "new_text": new,
+                }),
+                ctx("edit_file"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), expected, "{old:?}");
+        assert_eq!(result.details["crlf"], true, "{old:?}");
+    }
+}
+
+/// The CRLF spelling of old_text is held to the same uniqueness rule.
+#[tokio::test]
+async fn test_edit_file_crlf_spelling_matching_twice_is_refused() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let file = dir.path().join("twice.txt");
+    let before = b"a\r\nb\r\na\r\nb\r\n";
+    std::fs::write(&file, before).unwrap();
+    let err = EditFileTool::new()
+        .execute(
+            serde_json::json!({
+                "path": file.to_str().unwrap(),
+                "old_text": "a\nb",
+                "new_text": "x",
+            }),
+            ctx("edit_file"),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("matches 2 locations"), "{err}");
+    assert_eq!(std::fs::read(&file).unwrap(), before);
+}
+
+/// A timeout's "output so far" is stripped too, and a command the tool
+/// killed is a timeout, not a signal death.
+#[tokio::test]
+async fn test_bash_timeout_output_is_stripped() {
+    let err = BashTool::new()
+        .with_timeout(std::time::Duration::from_millis(500))
+        .execute(
+            serde_json::json!({"command": r"printf '\033[31mred\033[0m\n'; sleep 10"}),
+            ctx("bash"),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("timed out"), "{err}");
+    assert!(err.contains("red"), "{err}");
+    assert!(!err.contains('\u{1b}'), "{err:?}");
+    assert!(!err.contains("Killed by signal"), "{err}");
+}
+
 // --- write_file after a partial read_file (ReadLog) -------------------------
 
 /// A file of `n` numbered lines in a fresh temp dir.

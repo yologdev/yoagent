@@ -7,7 +7,7 @@
 //! # Design
 //!
 //! - **Context isolation**: each invocation starts a fresh conversation
-//! - **Nesting supported**: sub-agents can contain other SubAgentTools for recursive delegation (use `with_max_turns()` to bound depth)
+//! - **Nesting supported**: sub-agents can contain other SubAgentTools for recursive delegation (`with_max_depth()` refuses delegations past a depth; `with_max_turns()` bounds each run)
 //! - **Cancellation propagation**: the parent's cancel token is forwarded
 //! - **Event forwarding**: sub-agent events stream to the parent via `on_update`
 //! - **Spend reporting**: the sub-agent's [`SessionStats`] — its own usage and,
@@ -73,6 +73,7 @@ pub struct SubAgentTool {
     cache_config: CacheConfig,
     tool_execution: ToolExecutionStrategy,
     retry_config: crate::retry::RetryConfig,
+    max_retry_after: Option<std::time::Duration>,
     execution_limits: ExecutionLimits,
     shared_state: Option<SharedState>,
     context_config: Option<crate::context::ContextConfig>,
@@ -82,6 +83,7 @@ pub struct SubAgentTool {
     extensions: Vec<Arc<dyn crate::Extension>>,
     tree_extensions: Vec<Arc<dyn crate::Extension>>,
     max_stop_continues: usize,
+    max_depth: Option<usize>,
     turn_hooks: Vec<Arc<dyn TurnHook>>,
     input_filters: Vec<Arc<dyn InputFilter>>,
     #[cfg(feature = "decision")]
@@ -125,6 +127,7 @@ impl SubAgentTool {
             cache_config: CacheConfig::default(),
             tool_execution: ToolExecutionStrategy::default(),
             retry_config: crate::retry::RetryConfig::default(),
+            max_retry_after: None,
             execution_limits: default_execution_limits(),
             shared_state: None,
             context_config: None,
@@ -134,6 +137,7 @@ impl SubAgentTool {
             extensions: Vec::new(),
             tree_extensions: Vec::new(),
             max_stop_continues: crate::extension::DEFAULT_MAX_STOP_CONTINUES,
+            max_depth: None,
             turn_hooks: Vec::new(),
             input_filters: Vec::new(),
             #[cfg(feature = "decision")]
@@ -196,6 +200,7 @@ impl SubAgentTool {
     /// Set the model id and stash the config on a freshly-constructed
     /// sub-agent (provider already wired).
     fn configured_for(mut self, config: ModelConfig) -> Self {
+        config.warn_if_default_limits();
         self.model = config.id.clone();
         self.model_config = Some(config);
         self
@@ -403,6 +408,17 @@ impl SubAgentTool {
         self
     }
 
+    /// The longest server-requested wait (a rate limit's `Retry-After`) the
+    /// sub-agent's runs retry after; a longer one ends the turn at once as
+    /// an error naming the wait. It only decides whether to give up at once:
+    /// every wait still made is capped at `max_delay_ms` (30 s by default).
+    /// Off by default. Mirrors
+    /// [`Agent::with_max_retry_after`](crate::Agent::with_max_retry_after).
+    pub fn with_max_retry_after(mut self, max: std::time::Duration) -> Self {
+        self.max_retry_after = Some(max);
+        self
+    }
+
     /// Give the sub-agent its own context management.
     ///
     /// Sub-agents ran without one, so `truncate_tool_output_on_append` never
@@ -433,6 +449,24 @@ impl SubAgentTool {
     /// the rest.
     pub fn with_max_turns(mut self, max: usize) -> Self {
         self.execution_limits = self.execution_limits.with_max_turns(max);
+        self
+    }
+
+    /// Refuse to delegate past `depth`: a call that would start a run
+    /// deeper than that fails at once with a tool error naming both depths,
+    /// and no run starts. Depth counts delegated runs: 1 is a run delegated
+    /// by a top-level run, 2 one delegated by that run, and so on
+    /// ([`ToolContext::delegation_depth`]). So `with_max_depth(1)` lets a
+    /// top-level agent use this tool but not a sub-agent it delegates to,
+    /// and `with_max_depth(0)` refuses every call. Off by default (no cap).
+    ///
+    /// The depth is what the calling run was started at: it is carried by
+    /// `SubAgentTool` and by delegation tools that call
+    /// [`AgentLoopConfig::delegated_from`] or
+    /// [`Agent::delegated_from`](crate::Agent::delegated_from); a run
+    /// started any other way counts as top-level.
+    pub fn with_max_depth(mut self, depth: usize) -> Self {
+        self.max_depth = Some(depth);
         self
     }
 
@@ -533,6 +567,15 @@ impl AgentTool for SubAgentTool {
         let cancel = ctx.cancel.clone();
         let on_update = ctx.on_update.clone();
         let on_progress = ctx.on_progress.clone();
+        let depth = ctx.delegation_depth();
+        if let Some(max) = self.max_depth.filter(|max| depth > *max) {
+            return Err(ToolError::Failed(format!(
+                "Delegation refused: '{}' would start a run at depth {depth}, past its \
+                 maximum depth of {max} (SubAgentTool::with_max_depth). Do this task \
+                 yourself instead of delegating it.",
+                self.tool_name
+            )));
+        }
         // Extract the task parameter
         let task = params
             .get("task")
@@ -616,6 +659,7 @@ impl AgentTool for SubAgentTool {
         config.tool_output_sink = self.shared_state.clone();
         config.tool_execution = self.tool_execution.clone();
         config.retry_config = self.retry_config.clone();
+        config.max_retry_after = self.max_retry_after;
         config.input_filters = self.input_filters.clone();
         config.tool_middleware = tool_middleware;
         config.turn_delay = self.turn_delay;

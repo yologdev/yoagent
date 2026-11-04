@@ -24,6 +24,7 @@ pub struct BashTool {
     pub deny_patterns: Vec<String>,    // Blocked commands
     pub env_allowlist: Option<Vec<String>>, // Default: None (inherit the whole environment)
     pub confirm_fn: Option<ConfirmFn>, // Confirmation callback
+    pub raw_output: bool,              // Default: false (ANSI escapes stripped)
 }
 ```
 
@@ -45,6 +46,24 @@ it prints from then on is read and discarded in the background (so a closed pipe
 it; a job that prints without pause keeps that reading busy), and the result says so with a
 `NOTE:` line and `details.output_still_open: true`. Redirect a job's output (`cmd >log 2>&1 &`)
 to keep it. Before 0.25.8 such a job held the call until the timeout, which then killed it.
+
+The result starts with `Exit code: N`, or, when the `bash` process itself was killed by a
+signal (Unix), with `Killed by signal 9 (SIGKILL)`. That happens when the shell is killed, or
+when the signal hits the command's last simple command (bash `exec`s it, so it *is* the shell)
+or an `exec`ed one. A command killed earlier in a compound script (`a; b`, a pipeline, a
+subshell) is reported by bash itself as `Exit code: 128+n` (137 for SIGKILL), and the library
+does not guess which. `details.exit_code` is the exit status, `-1` when there is none (a signal);
+`details.signal` is the signal number, `null` otherwise (always `null` off Unix). Up to 0.26.8 a
+killed shell reported only `Exit code: -1`.
+
+ANSI escape sequences (colours, cursor movement, terminal titles, hyperlinks, whose text stays)
+are stripped from both streams before the output reaches the model, the timeout error's output
+included; `with_raw_output(true)` (or `raw_output: true`) keeps them. Carriage returns, tabs and
+backspaces are kept either way. A string sequence (OSC, DCS, SOS, PM, APC) is removed up to its
+BEL, ST (`ESC \` or the 8-bit U+009C) or CAN/SUB (which abort it), when that comes within 4 KiB
+(64 KiB for DCS, which carries sixel graphics); an unterminated one (none within the bound)
+loses only its introducer, so a stray `ESC ]` cannot hide the output after it. The cap counts
+the bytes as printed, escapes included, and a sequence the cap cuts in half is dropped too.
 
 ### Example
 
@@ -112,7 +131,22 @@ Surgical search/replace edits. The most important tool for coding agents — ins
 - **Parameters**: `path` (required), `old_text` (required), `new_text` (required)
 - **Configuration**: `allowed_paths: Vec<String>`
 
-The `old_text` must match exactly, including whitespace and indentation.
+The `old_text` must match exactly, including whitespace and indentation. One exception: an
+`old_text` written with `\n` line breaks (models cannot see a CRLF file's `\r`) that is not
+found as given is looked up with each bare `\n` spelled `\r\n`; that spelling must match exactly
+once too. An exact match always wins.
+
+`new_text` is written with the line endings of the place it goes: where the matched text's line
+breaks are all `\r\n` (or, for a match within one line, where that line ends in `\r\n`), each
+bare `\n` of `new_text` becomes `\r\n`, so a CRLF file never gains bare `\n`. Anywhere else
+`new_text` is written as given; an LF file is never touched. `details.crlf` is `true` when either
+text was respelled.
+
+When `old_text` is not found, the error shows where its first line occurs ("Did you mean"),
+numbered like `read_file`'s output, each line cut to 400 characters with `… (line truncated)`,
+so a minified file cannot blow up the error. Past 20 lines it shows 20 around the first line that
+differs from `old_text`, and counts the lines left out above and below. Whitespace is never fixed
+up for the model.
 
 ## ListFilesTool
 

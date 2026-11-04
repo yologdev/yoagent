@@ -103,6 +103,7 @@ When the parent LLM calls multiple sub-agents in a single response, they run con
 | `with_max_tokens()` / `with_temperature()` | Override sampling settings (the model comes from `from_config` / `from_provider`) |
 | `with_max_turns(N)` | Turn limit (default: 10). Primary guard against runaway execution. |
 | `with_execution_limits(ExecutionLimits)` | All per-delegation limits: turns, tokens, duration, loop detection (default: 10 / 1M / 300 s / on). |
+| `with_max_depth(N)` | Refuse a call that would start a run deeper than `N` (1 = a run delegated by a top-level run): the call fails at once with a tool error (naming both depths, and ending "Do this task yourself instead of delegating it.") and no run starts. Default: no cap. |
 | `with_thinking()` | Enable extended thinking for the sub-agent |
 | `with_cache_config()` | Prompt caching settings |
 | `with_turn_delay()` | Inter-turn delay to throttle API calls (useful for rate-limit-sensitive providers) |
@@ -251,7 +252,7 @@ for enabling prices.
 ## Design Decisions
 
 - **Context isolation**: Each invocation starts fresh. Sub-agents don't accumulate history across calls.
-- **Nesting supported**: Sub-agents can be given other `SubAgentTool`s for recursive delegation (see [`examples/rlm.rs`](../../examples/rlm.rs)). Use `with_max_turns()` to prevent infinite chains.
+- **Nesting supported**: Sub-agents can be given other `SubAgentTool`s for recursive delegation (see [`examples/rlm.rs`](../../examples/rlm.rs)). Use `with_max_depth()` to refuse delegation past a depth, and `with_max_turns()` to bound each run.
 - **Cancellation propagation**: The parent's cancellation token is forwarded. Aborting the parent aborts all sub-agents. A delegation cancelled during one of its LLM calls fails the tool call (`Sub-agent '<name>' failed: Cancelled`); one cancelled while its tools run fails with `Sub-agent '<name>' failed: [Agent stopped: cancelled]`; one cancelled before it answered at all (its input check or its first request) fails with `ToolError::Cancelled`, not an empty success; and waiting on a tool source is abandoned with `ToolError::Cancelled`.
 - **Limits**: Each delegation runs under its own limits — by default 10 turns, 5 minutes and 1M tokens, with loop detection on. By default the token count includes every turn's whole prompt, so a delegation working over a large context reaches 1M in a few turns (or count its growth with `TokenAccounting::Growth`). Change them with `with_execution_limits(ExecutionLimits)` (all of them) or `with_max_turns` (turns only):
 

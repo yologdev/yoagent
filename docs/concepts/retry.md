@@ -107,6 +107,23 @@ When a provider returns `ProviderError::RateLimited { retry_after_ms: Some(5000)
 
 If no `retry_after_ms` is provided, the exponential backoff kicks in.
 
+A long requested wait (an exhausted quota that resets in an hour, say) is clamped to `max_delay_ms`
+and retried, which usually runs into the same limit until the retries are used up. To fail fast
+instead, set a maximum wait:
+
+```rust
+let agent = Agent::from_config(config)
+    .with_max_retry_after(Duration::from_secs(60));
+```
+
+A retryable error whose requested wait exceeds it ends the turn at once as `StopReason::Error`,
+with an error message naming the wait ("Rate limited: the server asked to wait 3600.0s, longer
+than the 60.0s allowed by max_retry_after; not retried") and a `warn!` saying why; no
+`ProviderRetry` is emitted for it. A wait equal to the maximum is retried, and so are errors that
+name no wait. The setting only decides whether to give up at once: every wait the loop does make
+is still capped at `max_delay_ms` (30 s by default). Off by default. Also
+`SubAgentTool::with_max_retry_after` and the `AgentLoopConfig::max_retry_after` field.
+
 ## Observability
 
 ### Events
