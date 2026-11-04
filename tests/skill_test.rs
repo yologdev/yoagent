@@ -362,6 +362,15 @@ fn prose_names() {
     let _ = yoagent::tools::default_tools;
     let _ = yoagent::session::Session::new;
     let _ = ModelConfig::preset;
+    let _ = |c: ModelConfig| c.with_image_input(false);
+    #[cfg(feature = "native")]
+    let _ = |t: yoagent::tools::ReadFileTool| t.with_max_image_bytes(1);
+    #[cfg(feature = "native")]
+    let _ = yoagent::tools::ReadLog::new;
+    #[cfg(feature = "native")]
+    let _ = |t: yoagent::tools::BashTool| t.with_raw_output(true);
+    let _ = |t: yoagent::sub_agent::SubAgentTool| t.with_max_depth(1);
+    let _ = |a: Agent| a.with_max_retry_after(std::time::Duration::from_secs(1));
     let _ = ModelConfig::generic;
     let _ = |r: &yoagent::extension::RunContext<'_>| r.spend_handle();
     let _ = yoagent::extension::SpendHandle::add;

@@ -5,7 +5,7 @@ description: Use when building, extending or upgrading an agent on the yoagent R
 
 # yoagent: which feature for which job
 
-Written for **yoagent 0.26.8** (and yoagent-rutis 0.12.0); the recipes
+Written for **yoagent 0.27.0** (and yoagent-rutis 0.13.0); the recipes
 below are compiled by `tests/skill_test.rs`, line for line. Check what you
 build against: `cargo tree -p yoagent` or `Cargo.lock`. If you are on an
 older version, read [What changed](#what-changed) first.
@@ -281,6 +281,23 @@ UI, model layer, agents) rather than add agent tools.
 
 Newest first; the full list is `CHANGELOG.md`.
 
+- **0.27.0** — breaking for struct literals only (new public fields on
+  `ReadFileTool`, `WriteFileTool`, `BashTool`). Built-in tools are safer:
+  `write_file` from `default_tools()` refuses to overwrite a file read only
+  in part (`tools::ReadLog`); `read_file`, `write_file` and `edit_file` take
+  turns on a file, so parallel edits no longer lose one; `read_file` sends
+  only PNG, JPEG and WebP images, typed by content, up to 8000 px and
+  3.75 MB (`ReadFileTool::with_max_image_bytes`); `bash` strips ANSI
+  sequences (`with_raw_output(true)` keeps them) and names a killing
+  signal; `edit_file` keeps CRLF. Loop: `on_stop` also judges an answer cut
+  off at the output limit (check `stop.answer`'s `stop_reason`); tool calls
+  a run left unanswered are answered when the next run starts, never re-run,
+  so `continue_loop` after a failed or killed run works. Providers: images
+  from tool results reach OpenAI-compatible models (in a user message);
+  `ModelConfig::with_image_input(false)` sends a text-only model a note
+  instead of each image; Gemini's `RECITATION` is a refusal. Opt-in knobs:
+  `SubAgentTool::with_max_depth`, `Agent::with_max_retry_after`. With
+  yoagent-rutis 0.13.0: plugins' `on_stop` gets `stop_reason`.
 - **0.26.8** — MCP stdio: `StdioOptions::env_remove` / `env_remove_all`
   start a server with the host's variables unset (not `""`), and
   `env_clear_except(names)` with only an allow-list;
