@@ -163,7 +163,7 @@ Other constructors:
 - `Agent::set_model(config)` — switch model mid-session (re-resolves the env key; re-selects the provider only when it was registry-resolved, never clobbering an explicit one; explicit keys preserved).
 - `Agent::new(provider)` + `with_model`/`with_model_config` — the original builder, deprecated since 0.10 and `#[doc(hidden)]` since 0.25 (same on `SubAgentTool`); removal promised for 1.0.
 
-`SubAgentTool` mirrors these: `from_config`, `from_config_with`, `from_provider`. Its limits are a stored `ExecutionLimits` (default 10 turns / 1M tokens / 300 s, loop detection on): `with_execution_limits` replaces them, `with_max_turns` changes only the turns.
+`SubAgentTool` mirrors these: `from_config`, `from_config_with`, `from_provider`. Its limits are a stored `ExecutionLimits` (default 10 turns / 1M tokens / 300 s, loop detection on): `with_execution_limits` replaces them, `with_max_turns` changes only the turns. `with_max_depth(n)` (opt-in, default none) refuses a call when `ToolContext::delegation_depth()` (the depth the child run would get: 1 under a top-level run) exceeds `n` — `ToolError::Failed` naming both depths, checked first in `execute`, so no run starts and nothing is reported; 0 refuses every call.
 
 **Sub-agent spend** is a separate bucket, never merged into the parent's own
 figures: `SessionStats::sub_agents` (`SubAgentSpend { usage, cost_usd, runs }`),

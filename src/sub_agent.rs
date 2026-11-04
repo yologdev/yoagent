@@ -7,7 +7,7 @@
 //! # Design
 //!
 //! - **Context isolation**: each invocation starts a fresh conversation
-//! - **Nesting supported**: sub-agents can contain other SubAgentTools for recursive delegation (use `with_max_turns()` to bound depth)
+//! - **Nesting supported**: sub-agents can contain other SubAgentTools for recursive delegation (`with_max_depth()` refuses delegations past a depth; `with_max_turns()` bounds each run)
 //! - **Cancellation propagation**: the parent's cancel token is forwarded
 //! - **Event forwarding**: sub-agent events stream to the parent via `on_update`
 //! - **Spend reporting**: the sub-agent's [`SessionStats`] — its own usage and,
@@ -82,6 +82,7 @@ pub struct SubAgentTool {
     extensions: Vec<Arc<dyn crate::Extension>>,
     tree_extensions: Vec<Arc<dyn crate::Extension>>,
     max_stop_continues: usize,
+    max_depth: Option<usize>,
     turn_hooks: Vec<Arc<dyn TurnHook>>,
     input_filters: Vec<Arc<dyn InputFilter>>,
     #[cfg(feature = "decision")]
@@ -134,6 +135,7 @@ impl SubAgentTool {
             extensions: Vec::new(),
             tree_extensions: Vec::new(),
             max_stop_continues: crate::extension::DEFAULT_MAX_STOP_CONTINUES,
+            max_depth: None,
             turn_hooks: Vec::new(),
             input_filters: Vec::new(),
             #[cfg(feature = "decision")]
@@ -436,6 +438,24 @@ impl SubAgentTool {
         self
     }
 
+    /// Refuse to delegate past `depth`: a call that would start a run
+    /// deeper than that fails at once with a tool error naming both depths,
+    /// and no run starts. Depth counts delegated runs: 1 is a run delegated
+    /// by a top-level run, 2 one delegated by that run, and so on
+    /// ([`ToolContext::delegation_depth`]). So `with_max_depth(1)` lets a
+    /// top-level agent use this tool but not a sub-agent it delegates to,
+    /// and `with_max_depth(0)` refuses every call. Off by default (no cap).
+    ///
+    /// The depth is what the calling run was started at: it is carried by
+    /// `SubAgentTool` and by delegation tools that call
+    /// [`AgentLoopConfig::delegated_from`] or
+    /// [`Agent::delegated_from`](crate::Agent::delegated_from); a run
+    /// started any other way counts as top-level.
+    pub fn with_max_depth(mut self, depth: usize) -> Self {
+        self.max_depth = Some(depth);
+        self
+    }
+
     /// The limits each delegation runs under: turns, tokens, wall-clock time
     /// and loop detection, all per delegation. The default is 10 turns, 1M
     /// tokens and 5 minutes. By default the token count includes every turn's
@@ -533,6 +553,14 @@ impl AgentTool for SubAgentTool {
         let cancel = ctx.cancel.clone();
         let on_update = ctx.on_update.clone();
         let on_progress = ctx.on_progress.clone();
+        let depth = ctx.delegation_depth();
+        if let Some(max) = self.max_depth.filter(|max| depth > *max) {
+            return Err(ToolError::Failed(format!(
+                "Delegation refused: '{}' would start a run at depth {depth}, past its \
+                 maximum depth of {max} (SubAgentTool::with_max_depth).",
+                self.tool_name
+            )));
+        }
         // Extract the task parameter
         let task = params
             .get("task")
