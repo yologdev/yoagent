@@ -2178,8 +2178,9 @@ async fn parallel_edits_of_one_file_all_land() {
     std::fs::create_dir(dir.path().join("sub")).unwrap();
     let other = dir.path().join("sub/../many.txt");
     let other = other.to_str().unwrap().to_owned();
-    let tool = EditFileTool::new();
-    let calls = (0..32).map(|i| {
+    // One tool per call, as separate agents (sub-agents) would have.
+    let tools: Vec<EditFileTool> = (0..32).map(|_| EditFileTool::new()).collect();
+    let calls = tools.iter().enumerate().map(|(i, tool)| {
         tool.execute(
             serde_json::json!({
                 "path": if i % 2 == 0 { &path } else { &other },
@@ -2297,28 +2298,149 @@ async fn an_image_is_typed_by_its_content_not_its_name() {
     assert_eq!(image_type(&result), "image/png");
 }
 
-#[tokio::test]
-async fn gif_and_webp_are_recognised() {
-    let mut gif = b"GIF89a".to_vec();
-    gif.extend(20u16.to_le_bytes());
-    gif.extend(10u16.to_le_bytes());
-    gif.extend([0; 8]);
-    let result = read_image("a.gif", &gif).await.unwrap();
-    assert_eq!(image_type(&result), "image/gif");
+/// A WebP of `w`×`h`: `kind` is `VP8 ` (lossy), `VP8L` or `VP8X`.
+fn webp(kind: &[u8; 4], w: u32, h: u32) -> Vec<u8> {
+    let mut b = b"RIFF\0\0\0\0WEBP".to_vec();
+    b.extend(kind);
+    b.extend([0; 4]);
+    match kind {
+        b"VP8 " => {
+            b.extend([0, 0, 0, 0x9D, 0x01, 0x2A]);
+            b.extend((w as u16).to_le_bytes());
+            b.extend((h as u16).to_le_bytes());
+        }
+        b"VP8L" => {
+            b.push(0x2F);
+            b.extend(((w - 1) | ((h - 1) << 14)).to_le_bytes());
+        }
+        _ => {
+            b.extend([0; 4]);
+            b.extend(&(w - 1).to_le_bytes()[..3]);
+            b.extend(&(h - 1).to_le_bytes()[..3]);
+        }
+    }
+    b
+}
 
-    // Lossless WebP: a 14-bit width - 1 and height - 1 after the signature.
-    let mut webp = b"RIFF\0\0\0\0WEBPVP8L\0\0\0\0\x2f".to_vec();
-    let bits: u32 = (20 - 1) | ((10 - 1) << 14);
-    webp.extend(bits.to_le_bytes());
-    let result = read_image("a.webp", &webp).await.unwrap();
-    assert_eq!(image_type(&result), "image/webp");
+#[tokio::test]
+async fn webp_sizes_are_read_in_all_three_forms() {
+    for kind in [b"VP8 ", b"VP8L", b"VP8X"] {
+        let ok = read_image("a.webp", &webp(kind, 20, 10)).await.unwrap();
+        assert_eq!(image_type(&ok), "image/webp");
+        let err = read_image("a.webp", &webp(kind, 9000, 10))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("9000×10"), "{kind:?}: {err}");
+    }
+    // The lossless form stores width - 1: 8001 is refused, 8000 sent.
+    assert!(read_image("a.webp", &webp(b"VP8L", 8001, 1)).await.is_err());
+    assert!(read_image("a.webp", &webp(b"VP8L", 8000, 1)).await.is_ok());
+}
+
+/// A camera JPEG: Exif (APP1), padding, a Huffman table (`FF C4`, which is
+/// not a frame) and then a progressive frame (SOF2).
+fn camera_jpeg(sof: u8, precision: u8, w: u16, h: u16) -> Vec<u8> {
+    let mut b = vec![0xFF, 0xD8];
+    b.extend([0xFF, 0xE1, 0x00, 0x0A]);
+    b.extend(b"Exif\0\0\x4D\x4D");
+    b.extend([0x00, 0x00]);
+    b.extend([0xFF, 0xC4, 0x00, 0x04, 0x00, 0x00]);
+    b.extend([0xFF, sof, 0x00, 0x11, precision]);
+    b.extend(h.to_be_bytes());
+    b.extend(w.to_be_bytes());
+    b.extend([3, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1]);
+    b.extend([0xFF, 0xD9]);
+    b
+}
+
+#[tokio::test]
+async fn a_camera_jpeg_is_measured_past_its_other_segments() {
+    let ok = read_image("p.jpg", &camera_jpeg(0xC2, 8, 4000, 3000))
+        .await
+        .unwrap();
+    assert_eq!(image_type(&ok), "image/jpeg");
+    // Width and height are not swapped.
+    let err = read_image("p.jpg", &camera_jpeg(0xC2, 8, 9000, 100))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("9000×100"), "{err}");
+}
+
+#[tokio::test]
+async fn a_jpeg_decoders_seldom_read_is_refused() {
+    // Lossless (SOF3), hierarchical (SOF5), arithmetic-coded (SOF9), and a
+    // 12-bit baseline frame.
+    for (sof, precision) in [(0xC3, 8), (0xC5, 8), (0xC9, 8), (0xC1, 12)] {
+        let err = read_image("p.jpg", &camera_jpeg(sof, precision, 10, 10))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("may not decode"),
+            "{sof:#x}/{precision}: {err}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_side_limit_is_8000_px_and_a_zero_side_is_refused() {
+    assert!(read_image("a.png", &png(8000, 8000)).await.is_ok());
+    let err = read_image("a.png", &png(8001, 1))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("8001×1"), "{err}");
+    let err = read_image("a.png", &png(0, 10))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("no width or height"), "{err}");
+}
+
+#[tokio::test]
+async fn an_image_cut_off_before_its_size_is_refused() {
+    let err = read_image("a.png", &png(10, 10)[..18])
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("cannot read the image's size"), "{err}");
+    let jpeg = camera_jpeg(0xC0, 8, 10, 10);
+    let err = read_image("a.jpg", &jpeg[..jpeg.len() - 14])
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("cannot read the image's size"), "{err}");
+}
+
+#[tokio::test]
+async fn image_extensions_are_matched_in_any_case() {
+    assert_eq!(
+        image_type(&read_image("A.PNG", &png(4, 4)).await.unwrap()),
+        "image/png"
+    );
+    let err = read_image("A.BMP", b"BM..").await.unwrap_err().to_string();
+    assert!(err.contains("BMP images are not sent"), "{err}");
+}
+
+#[tokio::test]
+async fn a_large_file_that_is_not_an_image_says_so() {
+    let mut text = b"not an image at all\n".to_vec();
+    text.resize(4 * 1024 * 1024, b'x');
+    let err = read_image("big.png", &text).await.unwrap_err().to_string();
+    assert!(err.contains("not a PNG, JPEG or WebP image"), "{err}");
 }
 
 #[tokio::test]
 async fn formats_providers_refuse_are_not_sent() {
-    for name in ["a.bmp", "a.tiff", "a.heic", "a.avif"] {
-        let err = read_image(name, b"BM....").await.unwrap_err().to_string();
-        assert!(err.contains("PNG, JPEG, GIF or WebP"), "{name}: {err}");
+    // GIF: Gemini does not list it, OpenAI takes only still ones.
+    for name in ["a.gif", "a.bmp", "a.tiff", "a.heic", "a.avif"] {
+        let err = read_image(name, b"GIF89a....")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("PNG, JPEG or WebP"), "{name}: {err}");
     }
 }
 
@@ -2328,7 +2450,7 @@ async fn a_file_named_as_an_image_that_is_not_one_is_refused() {
         .await
         .unwrap_err()
         .to_string();
-    assert!(err.contains("not a PNG, JPEG, GIF or WebP image"), "{err}");
+    assert!(err.contains("not a PNG, JPEG or WebP image"), "{err}");
 }
 
 #[tokio::test]

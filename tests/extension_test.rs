@@ -3335,3 +3335,35 @@ async fn a_required_verifier_fails_a_run_cut_off_at_the_output_limit() {
     assert_eq!(stop, StopReason::Error);
     assert!(error.unwrap().contains("verify"));
 }
+
+/// What `on_stop` was shown, answer by answer.
+#[derive(Clone, Default)]
+struct SeenStops(Arc<Mutex<Vec<StopReason>>>);
+
+#[async_trait::async_trait]
+impl RunHooks for SeenStops {
+    async fn on_stop(&mut self, stop: &StopContext<'_>) -> StopDecision {
+        let Message::Assistant { stop_reason, .. } = stop.answer else {
+            panic!("on_stop is shown an assistant message");
+        };
+        self.0.lock().unwrap().push(stop_reason.clone());
+        if *stop_reason == StopReason::Length {
+            StopDecision::Continue("finish it".into())
+        } else {
+            StopDecision::Accept
+        }
+    }
+}
+
+/// `on_stop` tells a cut-off answer from a finished one by its stop reason.
+#[tokio::test]
+async fn on_stop_sees_the_cut_off_answers_stop_reason() {
+    let seen = SeenStops::default();
+    let (agent, _) = scripted(vec![MockResponse::TextCutOff("ha".into()), text("done")]);
+    let mut agent = agent.with_extension(ClonedHooks::new("seen", seen.clone()));
+    run(&mut agent, "go").await;
+    assert_eq!(
+        *seen.0.lock().unwrap(),
+        vec![StopReason::Length, StopReason::Stop]
+    );
+}

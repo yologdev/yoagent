@@ -264,6 +264,10 @@ pub struct Stop {
     pub answer: String,
     /// How many times extensions have continued this run already.
     pub continues: usize,
+    /// The answer was cut off at the output limit (yoagent's
+    /// `StopReason::Length`), not finished: `Continue` lets the model finish
+    /// it.
+    pub cut_off: bool,
     /// The run's conversation, the answer last — only for a handler that
     /// asked ([`Handler::with_messages`], or `options.messages`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -278,6 +282,7 @@ impl Stop {
         Self {
             answer: answer.into(),
             continues,
+            cut_off: false,
             messages: None,
             run: RunInfo::default(),
         }
@@ -286,6 +291,12 @@ impl Stop {
     /// With the run's conversation.
     pub fn with_messages(mut self, messages: Vec<Message>) -> Self {
         self.messages = Some(Arc::new(messages));
+        self
+    }
+
+    /// An answer cut off at the output limit.
+    pub fn cut_off(mut self) -> Self {
+        self.cut_off = true;
         self
     }
 }

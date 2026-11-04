@@ -96,6 +96,10 @@ impl AgentTool for EditFileTool {
         // From the read to the write: another call's edit of this file in
         // between would be overwritten.
         let _held = crate::tools::file::hold_file(&sandbox.check(path)?).await;
+        // A run cancelled while this call waited for the file does not act.
+        if cancel.is_cancelled() {
+            return Err(ToolError::Cancelled);
+        }
 
         // Read existing file (a regular one: a FIFO or device would block or
         // read without end).

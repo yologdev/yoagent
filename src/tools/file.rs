@@ -13,15 +13,19 @@ use std::sync::{Arc, Mutex};
 pub const DEFAULT_MAX_IMAGE_BYTES: u64 = 3_932_160;
 
 /// The longest side `read_file` sends: Anthropic and Bedrock refuse an image
-/// wider or taller than 8000 px.
+/// wider or taller than 8000 px. (Anthropic allows only 2000 px once a
+/// request carries more than 20 images; that depends on the conversation,
+/// not the file, and is not checked.)
 const MAX_IMAGE_SIDE: u32 = 8000;
 
 /// What `read_file` treats as an image: the formats every provider with image
-/// input takes, then ones none of them does (refused with a hint, rather than
-/// read as text that is not UTF-8).
-const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp", "gif"];
-const REFUSED_IMAGE_EXTENSIONS: &[&str] =
-    &["bmp", "tif", "tiff", "heic", "heif", "avif", "ico", "jxl"];
+/// input takes (Gemini does not list GIF; OpenAI takes only still GIFs), then
+/// ones that are refused with a hint, rather than read as text that is not
+/// UTF-8.
+const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "webp"];
+const REFUSED_IMAGE_EXTENSIONS: &[&str] = &[
+    "gif", "bmp", "tif", "tiff", "heic", "heif", "avif", "ico", "jxl",
+];
 
 fn image_extension(path: &Path) -> Option<String> {
     let ext = path.extension()?.to_str()?.to_lowercase();
@@ -36,8 +40,6 @@ fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
         Some("image/png")
     } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
         Some("image/jpeg")
-    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        Some("image/gif")
     } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
         Some("image/webp")
     } else {
@@ -45,9 +47,18 @@ fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
-/// Width and height from the image's header, or `None` when it is cut off
-/// before them.
-fn image_size(bytes: &[u8], mime: &str) -> Option<(u32, u32)> {
+/// What an image's header says.
+#[derive(Debug, PartialEq)]
+enum ImageHeader {
+    /// Width and height.
+    Size(u32, u32),
+    /// A JPEG coded in a way decoders seldom read: lossless, hierarchical,
+    /// arithmetic-coded, or more than 8 bits a sample.
+    UnusualJpeg,
+}
+
+/// The image's header, or `None` when it is cut off before its size.
+fn image_header(bytes: &[u8], mime: &str) -> Option<ImageHeader> {
     let be16 = |at: usize| Some(u16::from_be_bytes(bytes.get(at..at + 2)?.try_into().ok()?) as u32);
     let le16 = |at: usize| Some(u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?) as u32);
     let le24 = |at: usize| {
@@ -55,17 +66,17 @@ fn image_size(bytes: &[u8], mime: &str) -> Option<(u32, u32)> {
         Some(b[0] as u32 | (b[1] as u32) << 8 | (b[2] as u32) << 16)
     };
     let be32 = |at: usize| Some(u32::from_be_bytes(bytes.get(at..at + 4)?.try_into().ok()?));
+    let size = |w, h| Some(ImageHeader::Size(w, h));
     match mime {
         // IHDR comes first.
-        "image/png" => Some((be32(16)?, be32(20)?)),
-        "image/gif" => Some((le16(6)?, le16(8)?)),
+        "image/png" => size(be32(16)?, be32(20)?),
         "image/webp" => match bytes.get(12..16)? {
-            b"VP8 " => Some((le16(26)? & 0x3FFF, le16(28)? & 0x3FFF)),
+            b"VP8 " => size(le16(26)? & 0x3FFF, le16(28)? & 0x3FFF),
             b"VP8L" => {
                 let bits = u32::from_le_bytes(bytes.get(21..25)?.try_into().ok()?);
-                Some(((bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1))
+                size((bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1)
             }
-            b"VP8X" => Some((le24(24)? + 1, le24(27)? + 1)),
+            b"VP8X" => size(le24(24)? + 1, le24(27)? + 1),
             _ => None,
         },
         "image/jpeg" => {
@@ -73,15 +84,22 @@ fn image_size(bytes: &[u8], mime: &str) -> Option<(u32, u32)> {
             let mut at = 2;
             loop {
                 if *bytes.get(at)? != 0xFF {
-                    return None;
+                    // Padding some writers leave between segments; decoders
+                    // skip it.
+                    at += 1;
+                    continue;
                 }
                 let marker = *bytes.get(at + 1)?;
                 match marker {
                     // Fill byte, or a marker with no length.
                     0xFF => at += 1,
-                    0x01 | 0xD0..=0xD7 => at += 2,
+                    0x00 | 0x01 | 0xD0..=0xD7 => at += 2,
+                    // Baseline, extended and progressive, 8 bits a sample.
+                    0xC0..=0xC2 if *bytes.get(at + 4)? == 8 => {
+                        return size(be16(at + 7)?, be16(at + 5)?);
+                    }
                     0xC0..=0xCF if !matches!(marker, 0xC4 | 0xC8 | 0xCC) => {
-                        return Some((be16(at + 7)?, be16(at + 5)?));
+                        return Some(ImageHeader::UnusualJpeg);
                     }
                     _ => at += 2 + be16(at + 2)? as usize,
                 }
@@ -91,34 +109,62 @@ fn image_size(bytes: &[u8], mime: &str) -> Option<(u32, u32)> {
     }
 }
 
-/// Why `bytes` (from `path`) must not be sent as an image, or its type.
+const SCALE_HINT: &str = "e.g. `magick <file> -resize 2000x2000 smaller.jpg`, \
+                          or on macOS `sips -Z 2000 <file> --out smaller.jpg`";
+
+/// Why `bytes` (from `path`, or its first bytes) must not be sent as an
+/// image, or its type.
 fn check_image(path: &str, ext: &str, bytes: &[u8]) -> Result<&'static str, ToolError> {
-    const TAKEN: &str = "model APIs take PNG, JPEG, GIF or WebP";
+    let refuse = |why: String| Err(ToolError::Failed(why));
     let Some(mime) = sniff_image(bytes) else {
-        return Err(ToolError::Failed(if IMAGE_EXTENSIONS.contains(&ext) {
-            format!("{path} is not a PNG, JPEG, GIF or WebP image, whatever its name says")
+        return refuse(if IMAGE_EXTENSIONS.contains(&ext) {
+            format!("{path} is not a PNG, JPEG or WebP image, whatever its name says")
         } else {
             format!(
-                "{path}: {} images are not sent ({TAKEN}). Convert it first, e.g. \
-                 `magick {path} out.png` or, on macOS, `sips -s format png {path} --out out.png`.",
+                "{path}: {} images are not sent (what every model API takes is PNG, JPEG or \
+                 WebP). Convert it first, e.g. `magick {path} out.png`, or on macOS \
+                 `sips -s format png {path} --out out.png`.",
                 ext.to_uppercase()
             )
-        }));
+        });
     };
-    let Some((w, h)) = image_size(bytes, mime) else {
-        return Err(ToolError::Failed(format!(
+    match image_header(bytes, mime) {
+        None => refuse(format!(
             "{path}: cannot read the image's size from its header (cut off or damaged?)"
-        )));
-    };
-    if w == 0 || h == 0 || w > MAX_IMAGE_SIDE || h > MAX_IMAGE_SIDE {
-        return Err(ToolError::Failed(format!(
-            "{path} is {w}×{h} px; images are sent at most {MAX_IMAGE_SIDE} px a side. \
-             Scale it down first, e.g. `magick {path} -resize 2000x2000 smaller.png` \
-             or `sips -Z 2000 {path} --out smaller.png`."
-        )));
+        )),
+        Some(ImageHeader::UnusualJpeg) => refuse(format!(
+            "{path} is a JPEG coded in a way model APIs may not decode (lossless, \
+             hierarchical, arithmetic-coded or over 8 bits a sample). Convert it first, \
+             e.g. `magick {path} out.png`."
+        )),
+        Some(ImageHeader::Size(w, h)) if w == 0 || h == 0 => refuse(format!(
+            "{path}: its header gives no width or height ({w}×{h}), so it is not sent. \
+             Convert it first, e.g. `magick {path} out.png`."
+        )),
+        Some(ImageHeader::Size(w, h)) if w > MAX_IMAGE_SIDE || h > MAX_IMAGE_SIDE => {
+            refuse(format!(
+                "{path} is {w}×{h} px; images are sent at most {MAX_IMAGE_SIDE} px a side. \
+                 Scale it down first, {}.",
+                SCALE_HINT.replace("<file>", path)
+            ))
+        }
+        Some(ImageHeader::Size(..)) => Ok(mime),
     }
-    Ok(mime)
 }
+
+fn image_too_large(path: &str, len: u64, max: u64) -> ToolError {
+    ToolError::Failed(format!(
+        "{path}: image too large ({:.1} MB; images are sent up to {:.2} MB). \
+         Scale it down first, {}.",
+        len as f64 / 1_048_576.0,
+        max as f64 / 1_048_576.0,
+        SCALE_HINT.replace("<file>", path)
+    ))
+}
+
+/// The first bytes of a file too large to send: enough to tell a damaged or
+/// unsupported image, which says more than "too large".
+const IMAGE_HEAD_BYTES: u64 = 64 * 1024;
 
 /// Default number of lines returned when the caller gives no explicit `limit`.
 ///
@@ -482,7 +528,7 @@ impl AgentTool for ReadFileTool {
     }
 
     fn description(&self) -> &str {
-        "Read a file's contents. Supports text files with optional offset/limit, and images (PNG, JPEG, GIF, WebP; up to 8000 px a side), which are returned as images. Long files are returned one page at a time — the header states the total line count, so pass offset/limit to read further."
+        "Read a file's contents. Supports text files with optional offset/limit, and images (PNG, JPEG, WebP; up to 8000 px a side), which are returned as images. Long files are returned one page at a time — the header states the total line count, so pass offset/limit to read further."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -525,6 +571,10 @@ impl AgentTool for ReadFileTool {
         // keeps the caller's spelling when unrestricted).
         let key = sandbox.check(path)?;
         let _held = hold_file(&key).await;
+        // A run cancelled while this call waited for the file does not act.
+        if ctx.cancel.is_cancelled() {
+            return Err(ToolError::Cancelled);
+        }
 
         // Check file exists and size
         let metadata = tokio::fs::metadata(&io_path)
@@ -536,18 +586,32 @@ impl AgentTool for ReadFileTool {
         // Images: sent only in a form every provider takes. A block one
         // refuses stays in the history, and every later request fails too.
         if let Some(ext) = image_extension(Path::new(path)) {
+            let read_error =
+                |e: std::io::Error| ToolError::Failed(format!("Cannot read {path}: {e}"));
             if metadata.len() > self.max_image_bytes {
-                return Err(ToolError::Failed(format!(
-                    "{path}: image too large ({:.1} MB; images are sent up to {:.2} MB). \
-                     Scale it down first, e.g. `magick {path} -resize 2000x2000 -quality 85 \
-                     smaller.jpg` or `sips -Z 2000 {path} --out smaller.jpg`.",
-                    metadata.len() as f64 / 1_048_576.0,
-                    self.max_image_bytes as f64 / 1_048_576.0,
-                )));
+                use tokio::io::AsyncReadExt;
+                let mut head = Vec::new();
+                tokio::fs::File::open(&io_path)
+                    .await
+                    .map_err(read_error)?
+                    .take(IMAGE_HEAD_BYTES)
+                    .read_to_end(&mut head)
+                    .await
+                    .map_err(read_error)?;
+                // Not an image, or one refused anyway: say that, not "too large".
+                check_image(path, &ext, &head)?;
+                return Err(image_too_large(path, metadata.len(), self.max_image_bytes));
             }
-            let bytes = tokio::fs::read(&io_path)
-                .await
-                .map_err(|e| ToolError::Failed(format!("Cannot read {}: {}", path, e)))?;
+            let bytes = tokio::fs::read(&io_path).await.map_err(read_error)?;
+            // Grown since `metadata` (another process: the lock holds off
+            // only this one's tools).
+            if bytes.len() as u64 > self.max_image_bytes {
+                return Err(image_too_large(
+                    path,
+                    bytes.len() as u64,
+                    self.max_image_bytes,
+                ));
+            }
             let mime_type = check_image(path, &ext, &bytes)?;
             let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
             if let Some((log, key)) = &logged {
@@ -723,6 +787,10 @@ impl AgentTool for WriteFileTool {
         let io_path = sandbox.io_path(path)?;
         let key = sandbox.check(path)?;
         let _held = hold_file(&key).await;
+        // A run cancelled while this call waited for the file does not act.
+        if ctx.cancel.is_cancelled() {
+            return Err(ToolError::Cancelled);
+        }
         let logged = self.read_log.as_ref().map(|log| (log, key));
 
         // An existing path must be a regular file: writing to a FIFO blocks

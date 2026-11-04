@@ -63,8 +63,8 @@ use yoagent::extension::{
     StopDecision, ToolOutput, TurnDecision,
 };
 use yoagent::{
-    AgentEvent, AgentTool, Content, Extension, ExtensionMode, Message, RunHooks, ToolCallRequest,
-    ToolDecision, TurnContext,
+    AgentEvent, AgentTool, Content, Extension, ExtensionMode, Message, RunHooks, StopReason,
+    ToolCallRequest, ToolDecision, TurnContext,
 };
 
 use crate::handler::{
@@ -841,6 +841,13 @@ impl RunHooks for RunState {
         let event = Stop {
             answer: answer_text(stop.answer),
             continues: stop.continues,
+            cut_off: matches!(
+                stop.answer,
+                Message::Assistant {
+                    stop_reason: StopReason::Length,
+                    ..
+                }
+            ),
             messages: wants_messages(&handlers).then(|| llm_messages(stop.messages.iter())),
             run: self.run.clone(),
         };
