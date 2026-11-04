@@ -1070,6 +1070,11 @@ impl OpenCodeGateway {
     }
 }
 
+/// `ModelConfig::image_input` when a persisted config has no such field.
+fn image_input_default() -> bool {
+    true
+}
+
 /// Full model configuration. Knows everything needed to make API calls.
 ///
 /// Marked `#[non_exhaustive]`: fields may be added in minor releases (e.g.
@@ -1165,6 +1170,13 @@ pub struct ModelConfig {
     /// not built here, so `reprice` leaves it alone.
     #[serde(skip)]
     list_priced: bool,
+    /// The model takes image input (default `true`). Off, every image in the
+    /// agent loop's requests is sent as a short text note instead (a
+    /// provider's `stream` called directly is unaffected): a text-only model
+    /// refuses a request carrying one, and the image stays in the history,
+    /// so every later request would fail too. The history keeps the image.
+    #[serde(default = "image_input_default")]
+    pub image_input: bool,
     /// Additional headers to send with requests.
     ///
     /// May carry credentials (`Authorization`, `x-api-key`). `Debug` prints
@@ -1219,6 +1231,7 @@ impl std::fmt::Debug for ModelConfig {
             .field("reasoning", &self.reasoning)
             .field("context_window", &self.context_window)
             .field("max_tokens", &self.max_tokens)
+            .field("image_input", &self.image_input)
             .field("header_names", &headers)
             .finish_non_exhaustive()
     }
@@ -1306,6 +1319,14 @@ impl ModelConfig {
         }
     }
 
+    /// Whether the model takes images (see
+    /// [`image_input`](Self::image_input)). Turn it off for a text-only
+    /// model, so images in the conversation reach it as a text note.
+    pub fn with_image_input(mut self, on: bool) -> Self {
+        self.image_input = on;
+        self
+    }
+
     /// Turn [`OpenAiCompat::encrypted_reasoning`] on or off (OpenAI
     /// Responses / Azure OpenAI): keep a reasoning model's encrypted
     /// reasoning across tool calls. Off by default, and not yet verified
@@ -1377,6 +1398,7 @@ impl ModelConfig {
             max_tokens: 16_000,
             cost: None,
             list_priced: false,
+            image_input: true,
             headers: HashMap::new(),
             google: None,
             compat: None,
@@ -1413,6 +1435,7 @@ impl ModelConfig {
             max_tokens: 16_000,
             cost: None, // set by `priced`
             list_priced: false,
+            image_input: true,
             headers: HashMap::new(),
             google: None,
             anthropic: compat,
@@ -2232,6 +2255,7 @@ impl ModelConfig {
             base_url: BEDROCK_PRESET_BASE_URL.into(),
             cost: None,
             list_priced: false,
+            image_input: true,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -2262,6 +2286,7 @@ impl ModelConfig {
             base_url: OPENROUTER_BASE_URL.into(),
             cost: None,
             list_priced: false,
+            image_input: true,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -2407,6 +2432,7 @@ impl ModelConfig {
             max_tokens: 4096,
             cost: None, // set by `priced`
             list_priced: false,
+            image_input: true,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -2468,6 +2494,7 @@ impl ModelConfig {
             max_tokens: 16_000,
             cost: None, // set by `priced`
             list_priced: false,
+            image_input: true,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -2490,6 +2517,7 @@ impl ModelConfig {
             max_tokens: 4096,
             cost: None,
             list_priced: false,
+            image_input: true,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -2608,6 +2636,7 @@ impl ModelConfig {
             max_tokens: 16_000,
             cost: None,
             list_priced: false,
+            image_input: true,
             headers: HashMap::new(),
             google: None,
             compat,
@@ -2634,6 +2663,7 @@ impl ModelConfig {
             max_tokens: 4096,
             cost: None,
             list_priced: false,
+            image_input: true,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -2657,6 +2687,7 @@ impl ModelConfig {
             max_tokens: 4096,
             cost: None,
             list_priced: false,
+            image_input: true,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -2683,6 +2714,7 @@ impl ModelConfig {
             max_tokens: 4096,
             cost: None, // set by `priced`
             list_priced: false,
+            image_input: true,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -2733,6 +2765,7 @@ impl ModelConfig {
             max_tokens: 131_072,
             cost: None, // set by `priced`
             list_priced: false,
+            image_input: true,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -2758,6 +2791,7 @@ impl ModelConfig {
             max_tokens: 4096,
             cost: None, // set by `priced`
             list_priced: false,
+            image_input: true,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -2786,6 +2820,7 @@ impl ModelConfig {
             max_tokens: 4096,
             cost: None, // set by `priced`
             list_priced: false,
+            image_input: true,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -2813,6 +2848,7 @@ impl ModelConfig {
             max_tokens: 4096,
             cost: None, // set by `priced`
             list_priced: false,
+            image_input: true,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -2838,6 +2874,7 @@ impl ModelConfig {
             max_tokens: 4096,
             cost: None, // set by `priced`
             list_priced: false,
+            image_input: true,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -2870,6 +2907,7 @@ impl ModelConfig {
             max_tokens: 384_000,
             cost: None, // set by `priced`
             list_priced: false,
+            image_input: true,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -2896,6 +2934,7 @@ impl ModelConfig {
             max_tokens: 4096,
             cost: None, // set by `priced`
             list_priced: false,
+            image_input: true,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -2922,6 +2961,7 @@ impl ModelConfig {
             max_tokens: 8192,
             cost: None, // set by `priced`
             list_priced: false,
+            image_input: true,
             headers: HashMap::new(),
             google: None,
             anthropic: None,

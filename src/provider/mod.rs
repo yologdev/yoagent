@@ -225,6 +225,90 @@ mod merge_same_role_tests {
     }
 }
 
+/// What a model without image input is sent in place of an image.
+pub(crate) const IMAGE_NOT_SENT: &str =
+    "[An image was here; this model takes no image input, so it was not sent.]";
+
+/// Replace every image in `messages` with [`IMAGE_NOT_SENT`], for a model
+/// without image input ([`ModelConfig::image_input`] off): it would refuse
+/// the request, and every later one too, since the image stays in the
+/// history.
+pub(crate) fn images_as_text(messages: &mut [crate::types::Message]) {
+    use crate::types::{Content, Message};
+    let mut replaced = 0;
+    for message in messages.iter_mut() {
+        let content = match message {
+            Message::User { content, .. }
+            | Message::Assistant { content, .. }
+            | Message::ToolResult { content, .. } => content,
+        };
+        for block in content.iter_mut() {
+            if matches!(block, Content::Image { .. }) {
+                *block = Content::Text {
+                    text: IMAGE_NOT_SENT.into(),
+                };
+                replaced += 1;
+            }
+        }
+    }
+    if replaced > 0 {
+        tracing::debug!(
+            images = replaced,
+            "images sent as a note: the model config has image_input off"
+        );
+    }
+}
+
+#[cfg(test)]
+mod images_as_text_tests {
+    use super::{images_as_text, IMAGE_NOT_SENT};
+    use crate::types::{Content, Message, StopReason, Usage};
+
+    #[test]
+    fn every_image_becomes_the_note_and_text_stays() {
+        let image = || Content::Image {
+            data: "AAAA".into(),
+            mime_type: "image/png".into(),
+        };
+        let mut messages = vec![
+            Message::User {
+                content: vec![
+                    Content::Text {
+                        text: "look".into(),
+                    },
+                    image(),
+                ],
+                timestamp: 0,
+            },
+            Message::assistant(vec![image()], StopReason::Stop, "m", "p", Usage::default()),
+            Message::ToolResult {
+                tool_call_id: "c".into(),
+                tool_name: "t".into(),
+                content: vec![image()],
+                is_error: false,
+                timestamp: 0,
+            },
+        ];
+        images_as_text(&mut messages);
+        let texts: Vec<String> = messages
+            .iter()
+            .flat_map(|m| match m {
+                Message::User { content, .. }
+                | Message::Assistant { content, .. }
+                | Message::ToolResult { content, .. } => content.iter(),
+            })
+            .map(|c| match c {
+                Content::Text { text } => text.clone(),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            ["look", IMAGE_NOT_SENT, IMAGE_NOT_SENT, IMAGE_NOT_SENT]
+        );
+    }
+}
+
 #[cfg(test)]
 mod tool_result_text_tests {
     use super::tool_result_text;

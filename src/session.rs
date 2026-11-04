@@ -142,6 +142,10 @@ impl Session {
     /// (on by default) rewriting the agent's messages mid-session — disable
     /// context management on session-tracked agents, or rebuild the branch
     /// with [`from_messages`](Self::from_messages) after a divergence.
+    /// Another: a path with a tool call left unanswered *before* its last
+    /// turn (a history saved by yoagent before 0.27, after a response that
+    /// failed with tool calls, can have one), which the next run answers in
+    /// place.
     pub fn append_new(&mut self, full_history: &[AgentMessage]) -> Result<usize, SessionError> {
         let path = self.path_messages();
         if full_history.len() < path.len() {
