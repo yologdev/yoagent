@@ -1705,3 +1705,63 @@ async fn default_tools_refuse_a_write_after_a_partial_read() {
         .await
         .unwrap();
 }
+
+/// Rewrite `path` as `n` new lines (a different length, so a new version).
+fn rewrite_lines(path: &str, n: usize) {
+    let text: Vec<String> = (1..=n).map(|i| format!("row {i}")).collect();
+    std::fs::write(path, text.join("\n")).unwrap();
+}
+
+#[tokio::test]
+async fn a_page_after_a_full_read_keeps_the_file_known() {
+    let (_dir, path) = lines_file(300);
+    let (r, w) = guarded_pair();
+    read(&r, serde_json::json!({"path": path})).await;
+    read(
+        &r,
+        serde_json::json!({"path": path, "offset": 40, "limit": 21}),
+    )
+    .await;
+    write(&w, &path, "x").await.unwrap();
+}
+
+#[tokio::test]
+async fn a_page_of_a_file_changed_after_a_full_read_is_refused() {
+    let (_dir, path) = lines_file(300);
+    let (r, w) = guarded_pair();
+    read(&r, serde_json::json!({"path": path})).await;
+    rewrite_lines(&path, 320);
+    read(
+        &r,
+        serde_json::json!({"path": path, "offset": 40, "limit": 21}),
+    )
+    .await;
+    let err = write(&w, &path, "x").await.unwrap_err().to_string();
+    assert!(err.contains("only lines 40-60 of its 320 lines"), "{err}");
+}
+
+#[tokio::test]
+async fn an_empty_page_after_a_full_read_changes_nothing() {
+    let (_dir, path) = lines_file(10);
+    let (r, w) = guarded_pair();
+    read(&r, serde_json::json!({"path": path})).await;
+    read(&r, serde_json::json!({"path": path, "offset": 50})).await;
+    read(&r, serde_json::json!({"path": path, "limit": 0})).await;
+    write(&w, &path, "x").await.unwrap();
+}
+
+#[tokio::test]
+async fn an_empty_page_keeps_the_partial_read() {
+    let (_dir, path) = lines_file(900);
+    let (r, w) = guarded_pair();
+    read(&r, serde_json::json!({"path": path})).await;
+    rewrite_lines(&path, 950);
+    // Shows no lines of the new version: what was known stays as it was.
+    read(&r, serde_json::json!({"path": path, "limit": 0})).await;
+    read(&r, serde_json::json!({"path": path, "offset": 5000})).await;
+    let err = write(&w, &path, "x").await.unwrap_err().to_string();
+    assert!(
+        err.contains("only lines 1-500 of its 900 lines, and it has changed on disk since"),
+        "{err}"
+    );
+}

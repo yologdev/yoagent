@@ -113,14 +113,19 @@ pub(crate) fn require_regular_file(
 /// The rule, for a `write_file` to a path that exists:
 /// - refused when this agent's latest knowledge of the file is a partial read
 ///   (pages that, together, do not cover every line);
-/// - allowed once it has read the whole file (in one read, or in pages of the
-///   same version of the file), or after its own successful `write_file`;
+/// - allowed for a file read in full and unchanged since (in one read, or in
+///   pages of the same version), whatever pages of that same version it reads
+///   afterwards, and after its own successful `write_file`;
 /// - allowed for a file it never read (this guard is about partial reads only).
 ///
-/// A file that changed on disk (length or modification time) after the
-/// partial read stays refused until it is read again: earlier pages of an
-/// older version do not count towards a later one. A full read is not
-/// re-checked against later changes. `edit_file` is not affected.
+/// Versions are told apart by length and modification time. A page of a
+/// version other than the one last known in full or in part starts over: a
+/// file that changed on disk after a read and is then read in part is refused
+/// until read whole again, and earlier pages of an older version do not count
+/// towards a later one. A file changed after the partial read is refused too.
+/// A change after a full read, with no read since, is not re-checked. A page
+/// with no lines (an `offset` past the end, `limit: 0`) records nothing.
+/// `edit_file` is not affected.
 ///
 /// Paths are compared after the same resolution the sandbox uses
 /// ([`PathSandbox::check`](crate::tools::PathSandbox::check)), so `./a.rs`
@@ -142,7 +147,16 @@ pub(crate) fn require_regular_file(
 /// the parent's reads as its own.
 #[derive(Debug, Clone, Default)]
 pub struct ReadLog {
-    partial: Arc<Mutex<HashMap<PathBuf, PartialRead>>>,
+    known: Arc<Mutex<HashMap<PathBuf, Known>>>,
+}
+
+/// What the agent last knew of a file.
+#[derive(Debug)]
+enum Known {
+    /// Every line of this version (read whole, or written by the agent).
+    Full(FileStamp),
+    /// Part of it.
+    Partial(PartialRead),
 }
 
 /// A file read in part: the lines seen (1-indexed, inclusive, merged) of the
@@ -190,37 +204,55 @@ impl ReadLog {
         Self::default()
     }
 
-    fn entries(&self) -> std::sync::MutexGuard<'_, HashMap<PathBuf, PartialRead>> {
-        self.partial.lock().unwrap_or_else(|e| e.into_inner())
+    fn entries(&self) -> std::sync::MutexGuard<'_, HashMap<PathBuf, Known>> {
+        self.known.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// The whole file is known (read in full, or written by this agent).
-    fn record_full(&self, key: &Path) {
-        self.entries().remove(key);
-    }
-
-    /// Lines `first..=last` (`first > last` = none) of a `total`-line file
-    /// were read.
-    fn record_page(&self, key: PathBuf, page: (usize, usize), total: usize, stamp: FileStamp) {
+    /// Every line of this version of the file is known (read in full, or
+    /// written by this agent). `None`: the version could not be read, so
+    /// nothing is remembered (a later page then starts over).
+    fn record_full(&self, key: &Path, stamp: Option<FileStamp>) {
         let mut entries = self.entries();
-        let entry = entries.entry(key.clone()).or_insert_with(|| PartialRead {
-            ranges: Vec::new(),
-            total,
-            stamp: stamp.clone(),
-        });
-        if entry.stamp != stamp || entry.total != total {
-            // Pages of another version of the file say nothing about this one.
-            *entry = PartialRead {
+        match stamp {
+            Some(stamp) => {
+                entries.insert(key.to_path_buf(), Known::Full(stamp));
+            }
+            None => {
+                entries.remove(key);
+            }
+        }
+    }
+
+    /// Lines `first..=last` of a `total`-line file were read.
+    fn record_page(&self, key: PathBuf, page: (usize, usize), total: usize, stamp: FileStamp) {
+        if page.0 > page.1 {
+            // No lines shown: nothing learned, nothing forgotten.
+            return;
+        }
+        let mut entries = self.entries();
+        let start_over = match entries.get(&key) {
+            // A page of a version already known whole adds nothing.
+            Some(Known::Full(known)) if *known == stamp => return,
+            Some(Known::Partial(read)) => read.stamp != stamp || read.total != total,
+            // Never read, or another version known whole: that says nothing
+            // about this one.
+            _ => true,
+        };
+        if start_over {
+            let read = PartialRead {
                 ranges: Vec::new(),
                 total,
-                stamp,
+                stamp: stamp.clone(),
             };
+            entries.insert(key.clone(), Known::Partial(read));
         }
-        entry.ranges.push(page);
-        entry.ranges = merged(&entry.ranges);
-        let covered = matches!(entry.ranges.first(), Some(&(1, last)) if last >= total);
-        if covered {
-            entries.remove(&key);
+        let Some(Known::Partial(read)) = entries.get_mut(&key) else {
+            return;
+        };
+        read.ranges.push(page);
+        read.ranges = merged(&read.ranges);
+        if matches!(read.ranges.first(), Some(&(1, last)) if last >= total) {
+            entries.insert(key, Known::Full(stamp));
         }
     }
 
@@ -233,17 +265,15 @@ impl ReadLog {
         current: &std::fs::Metadata,
     ) -> Option<String> {
         let entries = self.entries();
-        let read = entries.get(key)?;
-        let seen = if read.ranges.is_empty() {
-            "none".to_string()
-        } else {
-            let ranges: Vec<String> = read
-                .ranges
-                .iter()
-                .map(|(a, b)| format!("{a}-{b}"))
-                .collect();
-            format!("only lines {}", ranges.join(", "))
+        let Some(Known::Partial(read)) = entries.get(key) else {
+            return None;
         };
+        let ranges: Vec<String> = read
+            .ranges
+            .iter()
+            .map(|(a, b)| format!("{a}-{b}"))
+            .collect();
+        let seen = format!("only lines {}", ranges.join(", "));
         let changed = if read.stamp == FileStamp::of(current) {
             ""
         } else {
@@ -384,7 +414,7 @@ impl AgentTool for ReadFileTool {
                 .map_err(|e| ToolError::Failed(format!("Cannot read {}: {}", path, e)))?;
             let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
             if let Some((log, key)) = &logged {
-                log.record_full(key);
+                log.record_full(key, Some(FileStamp::of(&metadata)));
             }
             return Ok(ToolResult {
                 content: vec![Content::Image {
@@ -438,7 +468,7 @@ impl AgentTool for ReadFileTool {
             if partial {
                 log.record_page(key, (start + 1, end), total, FileStamp::of(&metadata));
             } else {
-                log.record_full(&key);
+                log.record_full(&key, Some(FileStamp::of(&metadata)));
             }
         }
 
@@ -585,7 +615,11 @@ impl AgentTool for WriteFileTool {
             .map_err(|e| ToolError::Failed(format!("Cannot write {}: {}", path, e)))?;
         // The agent wrote every line: it knows the whole file now.
         if let Some((log, key)) = &logged {
-            log.record_full(key);
+            let stamp = tokio::fs::metadata(&io_path)
+                .await
+                .ok()
+                .map(|m| FileStamp::of(&m));
+            log.record_full(key, stamp);
         }
 
         let bytes = content.len();
