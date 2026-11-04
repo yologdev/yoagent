@@ -1910,3 +1910,50 @@ async fn batched_with_size_zero_does_not_panic() {
     agent.finish().await;
     assert_eq!(tool_ends(&events), vec![(false, "ok".to_string())]);
 }
+
+/// Rate limited every time, asking for an hour's wait; counts the requests.
+struct AskedToWaitAnHour(Arc<AtomicUsize>);
+
+#[async_trait::async_trait]
+impl yoagent::provider::StreamProvider for AskedToWaitAnHour {
+    async fn stream(
+        &self,
+        _config: yoagent::provider::StreamConfig,
+        _tx: mpsc::UnboundedSender<yoagent::provider::StreamEvent>,
+        _cancel: tokio_util::sync::CancellationToken,
+    ) -> Result<Message, yoagent::provider::ProviderError> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Err(yoagent::provider::ProviderError::RateLimited {
+            retry_after_ms: Some(3_600_000),
+        })
+    }
+}
+
+/// `Agent::with_max_retry_after` reaches the loop: the hour is not waited
+/// for (even clamped) nor retried.
+#[tokio::test]
+async fn agent_max_retry_after_fails_a_long_wait_without_retrying() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut agent = Agent::from_provider(AskedToWaitAnHour(calls.clone()), ModelConfig::mock())
+        .with_retry_config(RetryConfig {
+            max_retries: 3,
+            initial_delay_ms: 1,
+            backoff_multiplier: 1.0,
+            max_delay_ms: 1,
+        })
+        .with_max_retry_after(std::time::Duration::from_secs(60));
+    let mut rx = agent.prompt("hi").await;
+    while rx.recv().await.is_some() {}
+    agent.finish().await;
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let Some(AgentMessage::Llm(Message::Assistant { error_message, .. })) = agent.messages().last()
+    else {
+        panic!("expected an assistant message");
+    };
+    assert!(
+        error_message
+            .as_deref()
+            .is_some_and(|e| e.contains("max_retry_after")),
+        "{error_message:?}"
+    );
+}

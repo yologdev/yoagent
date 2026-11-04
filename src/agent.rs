@@ -67,6 +67,7 @@ pub struct Agent {
     pub shared_state: Option<crate::shared_state::SharedState>,
     pub tool_execution: ToolExecutionStrategy,
     pub retry_config: crate::retry::RetryConfig,
+    max_retry_after: Option<std::time::Duration>,
 
     // Lifecycle callbacks
     before_turn: Option<BeforeTurnFn>,
@@ -349,6 +350,7 @@ impl Agent {
             shared_state: None,
             tool_execution: ToolExecutionStrategy::default(),
             retry_config: crate::retry::RetryConfig::default(),
+            max_retry_after: None,
             before_turn: None,
             after_turn: None,
             on_error: None,
@@ -533,6 +535,18 @@ impl Agent {
 
     pub fn with_retry_config(mut self, config: crate::retry::RetryConfig) -> Self {
         self.retry_config = config;
+        self
+    }
+
+    /// The longest server-requested wait (a rate limit's `Retry-After`)
+    /// this agent's runs retry after: a retryable error asking for longer
+    /// ends the turn at once as an `Error` naming the wait, instead of
+    /// waiting it clamped to `retry_config.max_delay_ms` and retrying
+    /// (likely into the same limit). Errors that name no wait are retried as
+    /// usual. Off by default (clamp and retry). See
+    /// [`AgentLoopConfig::max_retry_after`](crate::agent_loop::AgentLoopConfig::max_retry_after).
+    pub fn with_max_retry_after(mut self, max: std::time::Duration) -> Self {
+        self.max_retry_after = Some(max);
         self
     }
 
@@ -1631,6 +1645,7 @@ impl Agent {
         config.tool_output_sink = self.shared_state.clone();
         config.tool_execution = self.tool_execution.clone();
         config.retry_config = self.retry_config.clone();
+        config.max_retry_after = self.max_retry_after;
         config.get_follow_up_messages = Some(Box::new(move || {
             let mut queue = follow_up_queue.lock().unwrap();
             match follow_up_mode {

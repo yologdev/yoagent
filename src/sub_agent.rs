@@ -73,6 +73,7 @@ pub struct SubAgentTool {
     cache_config: CacheConfig,
     tool_execution: ToolExecutionStrategy,
     retry_config: crate::retry::RetryConfig,
+    max_retry_after: Option<std::time::Duration>,
     execution_limits: ExecutionLimits,
     shared_state: Option<SharedState>,
     context_config: Option<crate::context::ContextConfig>,
@@ -126,6 +127,7 @@ impl SubAgentTool {
             cache_config: CacheConfig::default(),
             tool_execution: ToolExecutionStrategy::default(),
             retry_config: crate::retry::RetryConfig::default(),
+            max_retry_after: None,
             execution_limits: default_execution_limits(),
             shared_state: None,
             context_config: None,
@@ -405,6 +407,16 @@ impl SubAgentTool {
         self
     }
 
+    /// The longest server-requested wait (a rate limit's `Retry-After`) the
+    /// sub-agent's runs retry after; a longer one ends the turn at once as
+    /// an error naming the wait. Off by default (the wait is clamped to
+    /// `max_delay_ms` and retried). Mirrors
+    /// [`Agent::with_max_retry_after`](crate::Agent::with_max_retry_after).
+    pub fn with_max_retry_after(mut self, max: std::time::Duration) -> Self {
+        self.max_retry_after = Some(max);
+        self
+    }
+
     /// Give the sub-agent its own context management.
     ///
     /// Sub-agents ran without one, so `truncate_tool_output_on_append` never
@@ -644,6 +656,7 @@ impl AgentTool for SubAgentTool {
         config.tool_output_sink = self.shared_state.clone();
         config.tool_execution = self.tool_execution.clone();
         config.retry_config = self.retry_config.clone();
+        config.max_retry_after = self.max_retry_after;
         config.input_filters = self.input_filters.clone();
         config.tool_middleware = tool_middleware;
         config.turn_delay = self.turn_delay;
