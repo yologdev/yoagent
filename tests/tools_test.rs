@@ -2333,19 +2333,27 @@ async fn webp_sizes_are_read_in_all_three_forms() {
             .to_string();
         assert!(err.contains("9000×10"), "{kind:?}: {err}");
     }
+    // The extended form's sizes are 24-bit.
+    let err = read_image("a.webp", &webp(b"VP8X", 70000, 10))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("70000×10"), "{err}");
     // The lossless form stores width - 1: 8001 is refused, 8000 sent.
     assert!(read_image("a.webp", &webp(b"VP8L", 8001, 1)).await.is_err());
     assert!(read_image("a.webp", &webp(b"VP8L", 8000, 1)).await.is_ok());
 }
 
 /// A camera JPEG: Exif (APP1), padding, a Huffman table (`FF C4`, which is
-/// not a frame) and then a progressive frame (SOF2).
+/// not a frame), a fill byte and a marker with no length, then the frame
+/// (`sof`: SOF2 is progressive).
 fn camera_jpeg(sof: u8, precision: u8, w: u16, h: u16) -> Vec<u8> {
     let mut b = vec![0xFF, 0xD8];
     b.extend([0xFF, 0xE1, 0x00, 0x0A]);
     b.extend(b"Exif\0\0\x4D\x4D");
     b.extend([0x00, 0x00]);
     b.extend([0xFF, 0xC4, 0x00, 0x04, 0x00, 0x00]);
+    b.extend([0xFF, 0xFF, 0x01]);
     b.extend([0xFF, sof, 0x00, 0x11, precision]);
     b.extend(h.to_be_bytes());
     b.extend(w.to_be_bytes());
@@ -2481,4 +2489,60 @@ async fn the_image_size_limit_is_a_knob() {
         .await
         .unwrap();
     assert_eq!(image_type(&result), "image/png");
+}
+
+#[tokio::test]
+async fn an_animated_webp_is_refused() {
+    let mut animated = webp(b"VP8X", 20, 10);
+    animated[20] |= 0x02;
+    let err = read_image("a.webp", &animated)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("animated WebP"), "{err}");
+}
+
+/// A large camera JPEG whose metadata runs past the bytes read of a file too
+/// large to send is "too large", not "damaged".
+#[tokio::test]
+async fn a_large_camera_jpeg_with_long_metadata_is_too_large() {
+    let mut b = vec![0xFF, 0xD8];
+    for _ in 0..2 {
+        b.extend([0xFF, 0xE1, 0xFF, 0xFF]);
+        b.extend(std::iter::repeat_n(0u8, 0xFFFF - 2));
+    }
+    b.extend(&camera_jpeg(0xC0, 8, 4000, 3000)[2..]);
+    b.resize(4_200_000, 0);
+    let err = read_image("big.jpg", &b).await.unwrap_err().to_string();
+    assert!(err.contains("image too large (4.2 MB"), "{err}");
+    assert!(err.contains("up to 3.75 MB"), "{err}");
+}
+
+#[tokio::test]
+async fn a_large_file_of_a_refused_format_says_its_format() {
+    let mut gif = b"GIF89a".to_vec();
+    gif.resize(4_200_000, 0);
+    let err = read_image("big.gif", &gif).await.unwrap_err().to_string();
+    assert!(err.contains("GIF images are not sent"), "{err}");
+}
+
+#[tokio::test]
+async fn an_image_of_exactly_the_limit_is_sent() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("x.png");
+    let mut bytes = png(10, 10);
+    bytes.resize(1000, 0);
+    std::fs::write(&path, &bytes).unwrap();
+    let read = |max| {
+        let path = path.to_str().unwrap().to_owned();
+        async move {
+            ReadFileTool::new()
+                .with_max_image_bytes(max)
+                .execute(serde_json::json!({"path": path}), ctx("read_file"))
+                .await
+        }
+    };
+    assert!(read(1000).await.is_ok());
+    let err = read(999).await.unwrap_err().to_string();
+    assert!(err.contains("too large"), "{err}");
 }

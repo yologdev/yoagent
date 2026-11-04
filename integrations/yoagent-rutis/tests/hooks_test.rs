@@ -435,7 +435,8 @@ async fn on_stop_continues_the_run_until_the_verifier_accepts() {
     root.shutdown().await.unwrap();
 }
 
-/// An answer cut off at the output limit reaches `on_stop` marked `cut_off`,
+/// An answer cut off at the output limit reaches `on_stop` with stop reason
+/// `Length`,
 /// so a verifier can send the model back to finish it.
 #[tokio::test(flavor = "multi_thread")]
 async fn on_stop_sees_an_answer_cut_off_at_the_output_limit() {
@@ -447,8 +448,8 @@ async fn on_stop_sees_an_answer_cut_off_at_the_output_limit() {
             stops
                 .lock()
                 .unwrap()
-                .push((stop.answer.clone(), stop.cut_off));
-            if stop.cut_off {
+                .push((stop.answer.clone(), stop.stop_reason.clone()));
+            if stop.stop_reason == yoagent::StopReason::Length {
                 StopDecision::Continue("finish your answer".into())
             } else {
                 StopDecision::Accept
@@ -465,8 +466,8 @@ async fn on_stop_sees_an_answer_cut_off_at_the_output_limit() {
     assert_eq!(
         stops.lock().unwrap().clone(),
         vec![
-            ("half an ans".to_string(), true),
-            ("the whole answer".to_string(), false)
+            ("half an ans".to_string(), yoagent::StopReason::Length),
+            ("the whole answer".to_string(), yoagent::StopReason::Stop)
         ]
     );
     assert_eq!(seen.lock().unwrap().len(), 2);

@@ -245,8 +245,8 @@ export interface Stop extends RunInfo {
   answer: string
   /** How many times extensions have continued this run already. */
   continues: number
-  /** The answer was cut off at the output limit, not finished: `{ continue }` lets the model finish it. */
-  cut_off: boolean
+  /** `"stop"` for a finished answer, `"length"` for one cut off at the output limit (`{ continue }` lets the model finish it). */
+  stop_reason: 'stop' | 'length'
   /** With `options.messages`: the conversation, the answer last. */
   messages?: Message[]
 }

@@ -309,6 +309,46 @@ async fn safety_finish_reason_maps_to_refusal() {
     );
 }
 
+/// RECITATION is not a cut-off: asking the model to go on returns the same
+/// block, so it is a refusal (an `on_stop` verifier does not judge it), not
+/// `Length`.
+#[tokio::test]
+async fn recitation_finish_reason_maps_to_refusal() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/v1beta/models/{}:streamGenerateContent",
+            MODEL
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            sse(&[
+                r#"{"candidates":[{"content":{"parts":[{"text":"The text"}],"role":"model"},"finishReason":"RECITATION","index":0}]}"#,
+            ]),
+            "text/event-stream",
+        ))
+        .mount(&server)
+        .await;
+
+    let message = run_stream(stream_config(&server.uri(), vec![Message::user("hi")])).await;
+
+    let Message::Assistant {
+        stop_reason,
+        error_message,
+        ..
+    } = &message
+    else {
+        panic!("expected assistant message");
+    };
+    assert_eq!(*stop_reason, StopReason::Refusal);
+    assert!(
+        error_message
+            .as_deref()
+            .unwrap_or("")
+            .contains("RECITATION"),
+        "{error_message:?}"
+    );
+}
+
 /// Gemini's promptTokenCount INCLUDES cachedContentTokenCount; the mapping
 /// must keep `input` as the uncached remainder so `input + cache_read`
 /// doesn't double-count cached tokens.

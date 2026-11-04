@@ -841,13 +841,10 @@ impl RunHooks for RunState {
         let event = Stop {
             answer: answer_text(stop.answer),
             continues: stop.continues,
-            cut_off: matches!(
-                stop.answer,
-                Message::Assistant {
-                    stop_reason: StopReason::Length,
-                    ..
-                }
-            ),
+            stop_reason: match stop.answer {
+                Message::Assistant { stop_reason, .. } => stop_reason.clone(),
+                _ => StopReason::Stop,
+            },
             messages: wants_messages(&handlers).then(|| llm_messages(stop.messages.iter())),
             run: self.run.clone(),
         };
