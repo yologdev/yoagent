@@ -523,42 +523,72 @@ pub async fn agent_loop(
         .0
 }
 
-/// [`agent_loop`], also returning the [`SessionStats`] it sent on
-/// `AgentEnd` — for callers inside the crate that must not depend on someone
-/// draining the event channel (`Agent`'s sub-agent bucket, `SubAgentTool`'s
-/// spend report).
-/// The result a tool call gets when the run that made it ended before it
-/// returned (killed while its tools ran, or saved mid-turn), found when the
-/// next run starts.
+/// The result a tool call gets when the run that made it ended while its
+/// tools ran (killed, or saved mid-turn), found when the next run starts.
 pub(crate) const UNANSWERED_CALL_RESULT: &str = "No result was recorded for this call: the run \
      that made it ended before it returned. It may have run in part, in full or not at all; \
      check the current state before calling it again.";
 
+/// The result a tool call gets when its response ended in an error or was
+/// cancelled: the loop runs no tool of such a response.
+pub(crate) const NOT_RUN_CALL_RESULT: &str = "Not run: the response that made this call \
+     ended in an error or was cancelled before any of its tools ran.";
+
 /// Answer every tool call in `messages` that has no result, right after its
 /// results so far: every provider refuses a request with an unanswered call,
 /// so continuing or prompting such a history would fail, and every request
-/// after it too. The calls are not run again (they may have run already).
+/// after it too. The calls are not run again. A call whose response ended in
+/// an error or a cancel never ran ([`NOT_RUN_CALL_RESULT`]); any other may
+/// have ([`UNANSWERED_CALL_RESULT`]). A call with a result anywhere in the
+/// history is left alone (a hand-built history may place it late).
+///
 /// Returns the results added at the end of the history, which the run
-/// reports as new messages; ones added earlier only repair it.
+/// reports as new messages; ones added earlier only repair it (logged, not
+/// reported: a transcript kept from events lacks them).
 fn close_unanswered_calls(messages: &mut Vec<AgentMessage>) -> Vec<AgentMessage> {
-    let results = |pending: &mut Vec<(String, String)>| -> Vec<AgentMessage> {
+    use std::collections::HashSet;
+    let answered: HashSet<String> = messages
+        .iter()
+        .filter_map(|m| match m {
+            AgentMessage::Llm(Message::ToolResult { tool_call_id, .. }) => {
+                Some(tool_call_id.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    // Open calls of the latest assistant message: id, name, and whether its
+    // response ran its tools.
+    let mut pending: Vec<(String, String)> = Vec::new();
+    let mut ran = true;
+    let results = |pending: &mut Vec<(String, String)>, ran: bool, at: usize| {
         pending
             .drain(..)
             .map(|(id, name)| {
+                tracing::warn!(
+                    tool = name.as_str(),
+                    tool_call_id = id.as_str(),
+                    at,
+                    "tool call with no result in the history: answered as {}",
+                    if ran { "unknown outcome" } else { "not run" }
+                );
                 Message::ToolResult {
                     tool_call_id: id,
                     tool_name: name,
                     content: vec![Content::Text {
-                        text: UNANSWERED_CALL_RESULT.into(),
+                        text: if ran {
+                            UNANSWERED_CALL_RESULT
+                        } else {
+                            NOT_RUN_CALL_RESULT
+                        }
+                        .into(),
                     }],
                     is_error: true,
                     timestamp: now_ms(),
                 }
                 .into()
             })
-            .collect()
+            .collect::<Vec<AgentMessage>>()
     };
-    let mut pending: Vec<(String, String)> = Vec::new();
     let mut i = 0;
     while i < messages.len() {
         match &messages[i] {
@@ -566,33 +596,47 @@ fn close_unanswered_calls(messages: &mut Vec<AgentMessage>) -> Vec<AgentMessage>
                 pending.retain(|(id, _)| id != tool_call_id);
             }
             AgentMessage::Llm(m @ (Message::User { .. } | Message::Assistant { .. })) => {
-                let calls: Vec<(String, String)> = match m {
-                    Message::Assistant { content, .. } => content
-                        .iter()
-                        .filter_map(|c| match c {
-                            Content::ToolCall { id, name, .. } => Some((id.clone(), name.clone())),
-                            _ => None,
-                        })
-                        .collect(),
-                    _ => Vec::new(),
+                let (calls, next_ran) = match m {
+                    Message::Assistant {
+                        content,
+                        stop_reason,
+                        ..
+                    } => (
+                        content
+                            .iter()
+                            .filter_map(|c| match c {
+                                Content::ToolCall { id, name, .. } if !answered.contains(id) => {
+                                    Some((id.clone(), name.clone()))
+                                }
+                                _ => None,
+                            })
+                            .collect(),
+                        !matches!(stop_reason, StopReason::Error | StopReason::Aborted),
+                    ),
+                    _ => (Vec::new(), true),
                 };
                 if !pending.is_empty() {
-                    let added = results(&mut pending);
+                    let added = results(&mut pending, ran, i);
                     let n = added.len();
                     messages.splice(i..i, added);
                     i += n;
                 }
                 pending = calls;
+                ran = next_ran;
             }
             AgentMessage::Custom(_) => {}
         }
         i += 1;
     }
-    let added = results(&mut pending);
+    let added = results(&mut pending, ran, messages.len());
     messages.extend(added.iter().cloned());
     added
 }
 
+/// [`agent_loop`], also returning the [`SessionStats`] it sent on
+/// `AgentEnd` — for callers inside the crate that must not depend on someone
+/// draining the event channel (`Agent`'s sub-agent bucket, `SubAgentTool`'s
+/// spend report).
 pub(crate) async fn agent_loop_with_stats(
     prompts: Vec<AgentMessage>,
     context: &mut AgentContext,

@@ -94,3 +94,79 @@ async fn a_model_with_image_input_is_sent_the_image() {
     let (sent, _) = run(ModelConfig::mock()).await;
     assert!(has_image(&sent[0]));
 }
+
+/// A config saved before the field existed takes images, as it did.
+#[test]
+fn a_persisted_config_without_the_field_takes_images() {
+    let mut value = serde_json::to_value(ModelConfig::mock()).unwrap();
+    value
+        .as_object_mut()
+        .unwrap()
+        .remove("image_input")
+        .unwrap();
+    let config: ModelConfig = serde_json::from_value(value).unwrap();
+    assert!(config.image_input);
+}
+
+/// A tool that returns an image.
+struct Screenshot;
+
+#[async_trait::async_trait]
+impl AgentTool for Screenshot {
+    fn name(&self) -> &str {
+        "screenshot"
+    }
+    fn label(&self) -> &str {
+        "Screenshot"
+    }
+    fn description(&self) -> &str {
+        "take one"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    async fn execute(&self, _: serde_json::Value, _: ToolContext) -> Result<ToolResult, ToolError> {
+        Ok(ToolResult {
+            content: vec![Content::Image {
+                data: "AAAA".into(),
+                mime_type: "image/png".into(),
+            }],
+            details: serde_json::Value::Null,
+        })
+    }
+}
+
+/// A tool's image, the usual way one reaches a text-only model, is a note
+/// too.
+#[tokio::test]
+async fn a_tool_image_reaches_a_text_only_model_as_a_note() {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let provider = Recording {
+        inner: MockProvider::new(vec![
+            yoagent::provider::mock::MockResponse::ToolCalls(vec![
+                yoagent::provider::mock::MockToolCall {
+                    name: "screenshot".into(),
+                    arguments: serde_json::json!({}),
+                    provider_metadata: None,
+                },
+            ]),
+            yoagent::provider::mock::MockResponse::Text("a login page".into()),
+        ]),
+        requests: requests.clone(),
+    };
+    let mut agent = Agent::from_provider(provider, ModelConfig::mock().with_image_input(false))
+        .with_tools(vec![Box::new(Screenshot)]);
+    let mut rx = agent.prompt("look").await;
+    while rx.recv().await.is_some() {}
+    agent.finish().await;
+    let sent = requests.lock().unwrap().clone();
+    assert_eq!(sent.len(), 2);
+    assert!(!has_image(&sent[1]));
+    let Some(Message::ToolResult { content, .. }) = sent[1].last() else {
+        panic!("{:?}", sent[1]);
+    };
+    assert!(
+        matches!(&content[0], Content::Text { text } if text.contains("takes no image input")),
+        "{content:?}"
+    );
+}

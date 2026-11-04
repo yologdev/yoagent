@@ -1372,17 +1372,21 @@ impl Agent {
     /// Continue from current context (for retries after errors). Returns a
     /// receiver immediately with the loop running concurrently.
     ///
-    /// A history ending in tool calls with no results (a run killed while
-    /// its tools ran, a session saved mid-turn) is continued from those calls
-    /// answered as "no result was recorded … check before calling it again":
-    /// they are not run again. Every run, prompted or continued, answers such
-    /// calls first, since every provider refuses a request with one.
+    /// A history ending in tool calls with no results (a response that ended
+    /// in an error or a cancel, a run killed while its tools ran, a session
+    /// saved mid-turn) is continued from those calls answered with an error
+    /// result: "not run", or "no result was recorded … check before calling
+    /// it again". They are not run again. Every run, prompted or continued,
+    /// answers such calls first, since every provider refuses a request with
+    /// one.
     ///
     /// Call [`finish()`](Self::finish) after draining events to restore state.
     ///
     /// # Panics
     ///
-    /// Panics if there are no messages to continue from.
+    /// Panics if there are no messages to continue from, or if the history
+    /// ends with an assistant answer that has no tool calls (even an errored
+    /// one): there is nothing to continue from; prompt instead.
     pub async fn continue_loop(&mut self) -> mpsc::UnboundedReceiver<AgentEvent> {
         let (tx, rx) = mpsc::unbounded_channel();
         self.start_run(RunInput::Continue, None, tx).await;

@@ -392,20 +392,27 @@ fn build_request_body(
                 // Every text block in one plain string; images go after the
                 // tool messages, in a user message.
                 let mut text = super::tool_result_text(content);
-                let images = content.iter().filter_map(|c| match c {
-                    Content::Image { data, mime_type } => Some(serde_json::json!({
-                        "type": "image_url",
-                        "image_url": {"url": format!("data:{};base64,{}", mime_type, data)},
-                    })),
-                    _ => None,
-                });
-                let before = tool_images.len();
-                tool_images.extend(images);
-                if tool_images.len() > before {
+                let images: Vec<serde_json::Value> = content
+                    .iter()
+                    .filter_map(|c| match c {
+                        Content::Image { data, mime_type } => Some(serde_json::json!({
+                            "type": "image_url",
+                            "image_url": {"url": format!("data:{};base64,{}", mime_type, data)},
+                        })),
+                        _ => None,
+                    })
+                    .collect();
+                if !images.is_empty() {
                     if !text.is_empty() {
                         text.push('\n');
                     }
-                    text.push_str(TOOL_IMAGES_NOTE);
+                    text.push_str(tool_images_note(images.len()));
+                    // Named, so the images of parallel calls can be told apart.
+                    tool_images.push(serde_json::json!({
+                        "type": "text",
+                        "text": format!("From {tool_name} ({tool_call_id}):"),
+                    }));
+                    tool_images.extend(images);
                 }
                 let content_val = serde_json::json!(text);
 
@@ -549,7 +556,13 @@ fn deepseek_reasoning_effort(level: ThinkingLevel) -> &'static str {
 }
 
 /// What a tool message with images says in their place.
-const TOOL_IMAGES_NOTE: &str = "[The image is in the next user message.]";
+fn tool_images_note(images: usize) -> &'static str {
+    if images == 1 {
+        "[Its image is in the next user message.]"
+    } else {
+        "[Its images are in the next user message.]"
+    }
+}
 
 /// Send the tool results' images, if any, as one user message after the
 /// tool messages.
@@ -562,11 +575,7 @@ fn push_tool_images(
         return;
     }
     maybe_insert_assistant_after_tool_results(messages, compat);
-    let mut content = vec![serde_json::json!({
-        "type": "text",
-        "text": "Images from the tool results above:",
-    })];
-    content.append(images);
+    let content = std::mem::take(images);
     messages.push(serde_json::json!({"role": "user", "content": content}));
 }
 
@@ -1020,18 +1029,74 @@ mod tests {
             ]
         );
         let m = body["messages"].as_array().unwrap();
-        assert_eq!(m[3]["content"], TOOL_IMAGES_NOTE);
+        assert_eq!(m[3]["content"], tool_images_note(1));
         assert_eq!(m[4]["content"], "no image");
-        assert_eq!(m[5]["content"], format!("a chart\n{TOOL_IMAGES_NOTE}"));
-        let parts = m[6]["content"].as_array().unwrap();
-        let urls: Vec<_> = parts[1..]
+        assert_eq!(m[5]["content"], format!("a chart\n{}", tool_images_note(1)));
+        // Each tool's images under its name and call id.
+        let parts: Vec<String> = m[6]["content"]
+            .as_array()
+            .unwrap()
             .iter()
-            .map(|p| p["image_url"]["url"].as_str().unwrap())
+            .map(|p| match p["type"].as_str().unwrap() {
+                "text" => p["text"].as_str().unwrap().to_owned(),
+                _ => p["image_url"]["url"].as_str().unwrap().to_owned(),
+            })
             .collect();
         assert_eq!(
-            urls,
-            ["data:image/png;base64,AAAA", "data:image/png;base64,CCCC"]
+            parts,
+            [
+                "From read_file (a):",
+                "data:image/png;base64,AAAA",
+                "From read_file (c):",
+                "data:image/png;base64,CCCC"
+            ]
         );
+    }
+
+    /// Two tool turns with images: each turn's images follow its own tool
+    /// messages; nothing is carried into the next turn.
+    #[test]
+    fn each_tool_turn_sends_its_own_images() {
+        let call = |id: &str| {
+            Message::assistant(
+                vec![tool_call(id)],
+                StopReason::ToolUse,
+                "gpt-5.5",
+                "openai",
+                Usage::default(),
+            )
+        };
+        let body = openai_body(
+            CacheConfig::default(),
+            vec![
+                Message::user("look"),
+                call("a"),
+                tool_result("a", vec![image("AAAA")]),
+                call("b"),
+                tool_result("b", vec![image("BBBB")]),
+                Message::user("and now?"),
+            ],
+        );
+        assert_eq!(
+            roles(&body),
+            [
+                "developer",
+                "user",
+                "assistant",
+                "tool",
+                "user",
+                "assistant",
+                "tool",
+                "user",
+                "user"
+            ]
+        );
+        let m = body["messages"].as_array().unwrap();
+        let url = |i: usize| m[i]["content"][1]["image_url"]["url"].clone();
+        assert_eq!(url(4), "data:image/png;base64,AAAA");
+        assert_eq!(url(7), "data:image/png;base64,BBBB");
+        assert_eq!(m[7]["content"].as_array().unwrap().len(), 2);
+        assert_eq!(m[8]["content"], "and now?");
     }
 
     /// A provider that wants an assistant message between tool results and
@@ -1782,7 +1847,7 @@ mod tests {
         // went, and a user message after it carries the image.
         let tool_msg = &msgs[msgs.len() - 2];
         assert_eq!(tool_msg["role"], "tool");
-        assert_eq!(tool_msg["content"], TOOL_IMAGES_NOTE);
+        assert_eq!(tool_msg["content"], tool_images_note(1));
         let user = msgs.last().unwrap();
         assert_eq!(user["role"], "user");
         let content = user["content"].as_array().unwrap();

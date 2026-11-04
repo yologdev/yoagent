@@ -1070,6 +1070,11 @@ impl OpenCodeGateway {
     }
 }
 
+/// `ModelConfig::image_input` when a persisted config has no such field.
+fn image_input_default() -> bool {
+    true
+}
+
 /// Full model configuration. Knows everything needed to make API calls.
 ///
 /// Marked `#[non_exhaustive]`: fields may be added in minor releases (e.g.
@@ -1080,10 +1085,6 @@ impl OpenCodeGateway {
 /// (`ModelConfig { .. }`) no longer compile; field mutation is the supported
 /// pattern. New fields must carry `#[serde(default)]` so previously
 /// persisted configs keep deserializing.
-fn image_input_default() -> bool {
-    true
-}
-
 #[derive(Clone, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ModelConfig {

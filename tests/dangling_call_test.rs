@@ -178,12 +178,14 @@ fn assert_answered_honestly(run: &Run, ids: &[&str]) {
         );
     }
     for id in ids {
-        let (_, text, is_error) = run
+        let results: Vec<_> = run
             .history
             .iter()
             .filter_map(result_text)
-            .find(|(call, ..)| call == id)
-            .unwrap_or_else(|| panic!("{id} has no result"));
+            .filter(|(call, ..)| call == id)
+            .collect();
+        assert_eq!(results.len(), 1, "{id}: {results:?}");
+        let (_, text, is_error) = results[0];
         assert!(text.contains("No result was recorded"), "{text}");
         assert!(text.contains("check the current state"), "{text}");
         assert!(is_error);
@@ -260,7 +262,11 @@ async fn an_unanswered_call_earlier_in_the_history_is_answered_in_place() {
 async fn a_complete_history_is_left_as_it_is() {
     let history = vec![user("write"), calls(&["c1"]), answered("c1"), said("done")];
     let run = run(history.clone(), Some("thanks")).await;
-    assert_eq!(run.history[..4].len(), history.len());
+    let before = |m: &AgentMessage| serde_json::to_value(m).unwrap();
+    assert_eq!(
+        run.history[..4].iter().map(before).collect::<Vec<_>>(),
+        history.iter().map(before).collect::<Vec<_>>()
+    );
     assert_eq!(
         run.history.iter().filter_map(result_text).count(),
         1,
@@ -268,4 +274,147 @@ async fn a_complete_history_is_left_as_it_is() {
         run.history
     );
     assert!(violation(&run.requests[0]).is_none());
+}
+
+/// Parallel calls, one answered, then more turns: the missing result goes
+/// after the answered one, before the next message.
+#[tokio::test]
+async fn a_partly_answered_turn_earlier_in_the_history_is_completed_in_place() {
+    let run = run(
+        vec![
+            user("start"),
+            said("ok"),
+            user("write both"),
+            calls(&["c1", "c2"]),
+            answered("c1"),
+            user("never mind"),
+            said("fine"),
+        ],
+        Some("next"),
+    )
+    .await;
+    assert_answered_honestly(&run, &["c2"]);
+    let ids: Vec<_> = run.history[4..6]
+        .iter()
+        .filter_map(result_text)
+        .map(|(id, ..)| id)
+        .collect();
+    assert_eq!(ids, ["c1", "c2"], "{:#?}", run.history);
+}
+
+/// A custom message (it never reaches the model) between a call and the
+/// end of the history does not count as the turn moving on.
+#[tokio::test]
+async fn a_custom_message_after_an_unanswered_call_is_kept_in_place() {
+    let note = AgentMessage::Custom(CustomMessage::new("note", serde_json::json!({"x": 1})));
+    let run = run(vec![user("write"), calls(&["c1"]), note], Some("next")).await;
+    assert_answered_honestly(&run, &["c1"]);
+    assert!(
+        matches!(run.history[2], AgentMessage::Custom(_)),
+        "{:#?}",
+        run.history
+    );
+    assert!(result_text(&run.history[3]).is_some(), "{:#?}", run.history);
+}
+
+/// The results come first among the run's events: after `TurnStart`,
+/// before the prompt and the answer.
+#[tokio::test]
+async fn closed_calls_are_reported_before_the_prompt() {
+    let run = run(vec![user("write"), calls(&["c1"])], Some("next")).await;
+    let order: Vec<String> = run
+        .events
+        .iter()
+        .filter_map(|e| match e {
+            AgentEvent::TurnStart => Some("turn".into()),
+            AgentEvent::MessageEnd { message } => Some(match message {
+                AgentMessage::Llm(Message::ToolResult { .. }) => "result".into(),
+                AgentMessage::Llm(Message::User { .. }) => "prompt".into(),
+                AgentMessage::Llm(Message::Assistant { .. }) => "answer".into(),
+                _ => "other".into(),
+            }),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        order[..4],
+        ["turn", "result", "prompt", "answer"],
+        "{order:?}"
+    );
+}
+
+/// The free function returns the results it added, as the run's first new
+/// messages.
+#[tokio::test]
+async fn agent_loop_continue_returns_the_closed_calls() {
+    let provider = Arc::new(MockProvider::texts(vec!["done"]));
+    let config = yoagent::agent_loop::AgentLoopConfig::new(provider, "mock");
+    let mut context = AgentContext {
+        system_prompt: String::new(),
+        messages: vec![user("write"), calls(&["c1"])],
+        tools: vec![],
+    };
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let new = yoagent::agent_loop::agent_loop_continue(
+        &mut context,
+        &config,
+        tx,
+        CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(result_text(&new[0]).map(|(id, ..)| id), Some("c1"));
+    assert!(matches!(
+        new.last(),
+        Some(AgentMessage::Llm(Message::Assistant {
+            stop_reason: StopReason::Stop,
+            ..
+        }))
+    ));
+}
+
+/// A response that ended in an error kept its calls, and the loop ran none:
+/// they are answered "not run", not "may have run".
+#[tokio::test]
+async fn calls_of_a_failed_response_are_answered_not_run() {
+    let failed = AgentMessage::Llm(Message::assistant(
+        vec![Content::tool_call(
+            "c1",
+            "write_file",
+            serde_json::json!({"path": "r.md"}),
+        )],
+        StopReason::Error,
+        "mock",
+        "mock",
+        Usage::default(),
+    ));
+    let run = run(vec![user("write"), failed], Some("try again")).await;
+    assert!(violation(&run.requests[0]).is_none());
+    let texts: Vec<_> = run
+        .history
+        .iter()
+        .filter_map(result_text)
+        .filter(|(id, ..)| *id == "c1")
+        .map(|(_, text, _)| text.to_owned())
+        .collect();
+    assert_eq!(texts.len(), 1, "{texts:?}");
+    assert!(texts[0].starts_with("Not run"), "{}", texts[0]);
+    assert_eq!(run.tool_runs, 0);
+}
+
+/// A call answered later in a hand-built history is not answered twice (two
+/// results for one call are refused too).
+#[tokio::test]
+async fn a_call_answered_later_is_not_answered_again() {
+    let run = run(
+        vec![user("write"), calls(&["c1"]), user("hm"), answered("c1")],
+        None,
+    )
+    .await;
+    let c1 = run
+        .history
+        .iter()
+        .filter_map(result_text)
+        .filter(|(id, ..)| *id == "c1")
+        .count();
+    assert_eq!(c1, 1, "{:#?}", run.history);
 }
