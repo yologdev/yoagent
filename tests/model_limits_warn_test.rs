@@ -81,6 +81,21 @@ fn default_limits_are_warned_about_once_per_model() {
     set.max_tokens = 8_192;
     let _e = agent(set);
     let _f = agent(ModelConfig::local("http://localhost:1234/v1", "llama"));
+    // Gateways and custom endpoints, even under a first-party provider name.
+    let _gw1 = agent(ModelConfig::anthropic("glm-5.3", "GLM via a gateway"));
+    let _gw2 = agent(ModelConfig::openai_compat(
+        "https://gateway.test/v1",
+        "my-finetune-2",
+        "openai",
+        yoagent::provider::OpenAiCompat::default(),
+    ));
+    let _gw3 = agent(ModelConfig::custom(
+        yoagent::provider::ApiProtocol::OpenAiCompletions,
+        "openai",
+        "https://gateway.test/v1",
+        "my-finetune-3",
+        "Custom",
+    ));
     assert_eq!(logs.take(), Vec::<String>::new());
 
     // A preset id built generically points at the preset.

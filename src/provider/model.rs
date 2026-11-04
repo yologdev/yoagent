@@ -2322,9 +2322,22 @@ impl ModelConfig {
     /// [`generic`](Self::generic), or for `openai` either of its two
     /// constructors, gives this id) and no [`preset`](Self::preset) for
     /// this provider and id has those limits: nobody looked the model's
-    /// real limits up. Gateways, local servers and custom endpoints are
-    /// never judged.
+    /// real limits up.
+    ///
+    /// Only a config a first-party generic constructor built (the private
+    /// `list_priced` marker), still at that constructor's `base_url`, is
+    /// judged: gateways, local servers and custom endpoints
+    /// ([`openai_compat`](Self::openai_compat), [`custom`](Self::custom), a
+    /// changed base URL) never are, whatever their `provider` string. Nor is
+    /// [`anthropic`](Self::anthropic) with an id not starting `claude-`,
+    /// which is that constructor's mark of a gateway model.
     pub(crate) fn has_default_limits(&self) -> bool {
+        if !self.list_priced
+            || (self.provider == "anthropic"
+                && !self.id.to_ascii_lowercase().starts_with("claude-"))
+        {
+            return false;
+        }
         let limits = (self.context_window, self.max_tokens);
         let of = |c: &Self| (c.context_window, c.max_tokens);
         let defaults: Vec<Self> = match self.provider.as_str() {
@@ -2334,7 +2347,9 @@ impl ModelConfig {
             ],
             provider => Self::generic(provider, &self.id).into_iter().collect(),
         };
-        defaults.iter().any(|d| of(d) == limits)
+        defaults
+            .iter()
+            .any(|d| of(d) == limits && d.base_url == self.base_url)
             && Self::preset(&self.provider, &self.id).is_none_or(|p| of(&p) != limits)
     }
 
@@ -4178,7 +4193,29 @@ mod tests {
         let mut set = ModelConfig::openai("my-finetune", "x");
         set.context_window = 32_768;
         assert!(!set.has_default_limits());
-        // Gateways, local servers and test configs are never judged.
+        assert!(ModelConfig::anthropic("claude-unknown", "x").has_default_limits());
+        // Gateways, local servers and test configs are never judged, even
+        // under a first-party provider string.
+        assert!(!ModelConfig::anthropic("glm-5.3", "x").has_default_limits());
+        let compat = ModelConfig::openai_compat(
+            "https://gateway.test/v1",
+            "my-finetune",
+            "openai",
+            OpenAiCompat::default(),
+        );
+        assert_eq!((compat.context_window, compat.max_tokens), (128_000, 4096));
+        assert!(!compat.has_default_limits());
+        let custom = ModelConfig::custom(
+            ApiProtocol::OpenAiCompletions,
+            "openai",
+            "https://gateway.test/v1",
+            "my-finetune",
+            "x",
+        );
+        assert!(!custom.has_default_limits());
+        let mut moved = ModelConfig::openai("my-finetune", "x");
+        moved.base_url = "https://gateway.test/v1".into();
+        assert!(!moved.has_default_limits());
         assert!(!ModelConfig::local("http://localhost:1234/v1", "m").has_default_limits());
         assert!(!ModelConfig::opencode_zen("m").has_default_limits());
         assert!(!ModelConfig::mock().has_default_limits());
