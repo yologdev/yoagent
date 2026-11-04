@@ -4,6 +4,10 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+- **`write_file` no longer overwrites a file the agent read only in part** (bug fix; prior art: yoyo-evolve's partial-read guard). `read_file` pages long files (500 lines by default) and `write_file` replaced the whole file without checking, so a model that read lines 1–500 of a 2,140-line file and wrote it back silently deleted lines 501–2,140. The tools now share a `ReadLog` (`tools::ReadLog`, a cloneable handle): `write_file` refuses an **existing** file whose latest read covered only part of it, with an error naming the lines read and the file's length and pointing to `read_file` offset/limit or `edit_file`. Pages add up (1–500 then 501–2,140 is the whole file); a full read, the agent's own successful write, a file never read and a path that does not exist are allowed; a file changed on disk (length or mtime) since the partial read stays refused until read again. Paths are compared after the sandbox's resolution (`./a.rs` = `a.rs`), sandboxed or not. `edit_file` is unchanged. **Behaviour change only for `default_tools()`**, which wires one log into its `read_file` and `write_file` (one per call — one per agent), and for tools given a log with the new `ReadFileTool::with_read_log` / `WriteFileTool::with_read_log`; tools built on their own keep today's behaviour. Both structs gain a public `read_log: Option<ReadLog>` field (default `None`): a struct literal naming every field without `..Default::default()` needs it added.
+
 ## 0.26.8 (2026-11-03)
 
 Additive: MCP stdio servers can be started without the host's variables. yoagent-rutis (0.12.0) and yoagent-workers (0.3.0) are unchanged.

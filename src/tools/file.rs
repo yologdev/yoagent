@@ -3,7 +3,9 @@
 use crate::types::*;
 use async_trait::async_trait;
 use base64::Engine;
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 /// 20 MB limit for image files
 const MAX_IMAGE_SIZE_BYTES: u64 = 20 * 1024 * 1024;
@@ -98,6 +100,164 @@ pub(crate) fn require_regular_file(
     )))
 }
 
+/// What one agent has read, shared by its [`ReadFileTool`] and
+/// [`WriteFileTool`] so that `write_file` can refuse to overwrite a file the
+/// agent has read only part of.
+///
+/// `read_file` pages (see [`DEFAULT_READ_MAX_LINES`]), and `write_file`
+/// replaces the whole file. A model that read lines 1–500 of a 2,000-line
+/// file and then writes "the file" back deletes lines 501–2,000 without ever
+/// having seen them. With a shared log, that write is refused with an error
+/// naming the lines read, and the model can read the rest or use `edit_file`.
+///
+/// The rule, for a `write_file` to a path that exists:
+/// - refused when this agent's latest knowledge of the file is a partial read
+///   (pages that, together, do not cover every line);
+/// - allowed once it has read the whole file (in one read, or in pages of the
+///   same version of the file), or after its own successful `write_file`;
+/// - allowed for a file it never read (this guard is about partial reads only).
+///
+/// A file that changed on disk (length or modification time) after the
+/// partial read stays refused until it is read again: earlier pages of an
+/// older version do not count towards a later one. A full read is not
+/// re-checked against later changes. `edit_file` is not affected.
+///
+/// Paths are compared after the same resolution the sandbox uses
+/// ([`PathSandbox::check`](crate::tools::PathSandbox::check)), so `./a.rs`
+/// and `a.rs` are one file.
+///
+/// [`default_tools`](crate::tools::default_tools) shares one log between its
+/// `read_file` and `write_file`. Tools built on their own have none and keep
+/// the unguarded behaviour; share one with `with_read_log`:
+///
+/// ```rust
+/// use yoagent::tools::{ReadFileTool, ReadLog, WriteFileTool};
+///
+/// let log = ReadLog::new();
+/// let read = ReadFileTool::new().with_read_log(log.clone());
+/// let write = WriteFileTool::new().with_read_log(log);
+/// ```
+///
+/// Give each agent its own log: a sub-agent sharing its parent's would count
+/// the parent's reads as its own.
+#[derive(Debug, Clone, Default)]
+pub struct ReadLog {
+    partial: Arc<Mutex<HashMap<PathBuf, PartialRead>>>,
+}
+
+/// A file read in part: the lines seen (1-indexed, inclusive, merged) of the
+/// version the pages came from.
+#[derive(Debug)]
+struct PartialRead {
+    ranges: Vec<(usize, usize)>,
+    total: usize,
+    stamp: FileStamp,
+}
+
+/// What identifies a version of a file on disk, as far as cheaply checkable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileStamp {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+impl FileStamp {
+    fn of(metadata: &std::fs::Metadata) -> Self {
+        Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+        }
+    }
+}
+
+/// Sort and merge line ranges, dropping empty ones.
+fn merged(ranges: &[(usize, usize)]) -> Vec<(usize, usize)> {
+    let mut sorted: Vec<(usize, usize)> = ranges.iter().copied().filter(|(a, b)| a <= b).collect();
+    sorted.sort_unstable();
+    let mut out: Vec<(usize, usize)> = Vec::new();
+    for (a, b) in sorted {
+        match out.last_mut() {
+            Some(last) if a <= last.1.saturating_add(1) => last.1 = last.1.max(b),
+            _ => out.push((a, b)),
+        }
+    }
+    out
+}
+
+impl ReadLog {
+    /// An empty log.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn entries(&self) -> std::sync::MutexGuard<'_, HashMap<PathBuf, PartialRead>> {
+        self.partial.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The whole file is known (read in full, or written by this agent).
+    fn record_full(&self, key: &Path) {
+        self.entries().remove(key);
+    }
+
+    /// Lines `first..=last` (`first > last` = none) of a `total`-line file
+    /// were read.
+    fn record_page(&self, key: PathBuf, page: (usize, usize), total: usize, stamp: FileStamp) {
+        let mut entries = self.entries();
+        let entry = entries.entry(key.clone()).or_insert_with(|| PartialRead {
+            ranges: Vec::new(),
+            total,
+            stamp: stamp.clone(),
+        });
+        if entry.stamp != stamp || entry.total != total {
+            // Pages of another version of the file say nothing about this one.
+            *entry = PartialRead {
+                ranges: Vec::new(),
+                total,
+                stamp,
+            };
+        }
+        entry.ranges.push(page);
+        entry.ranges = merged(&entry.ranges);
+        let covered = matches!(entry.ranges.first(), Some(&(1, last)) if last >= total);
+        if covered {
+            entries.remove(&key);
+        }
+    }
+
+    /// The refusal for overwriting the existing file at `key` (spelled `path`
+    /// for the model), or `None` when the write may go ahead.
+    fn overwrite_refusal(
+        &self,
+        key: &Path,
+        path: &str,
+        current: &std::fs::Metadata,
+    ) -> Option<String> {
+        let entries = self.entries();
+        let read = entries.get(key)?;
+        let seen = if read.ranges.is_empty() {
+            "none".to_string()
+        } else {
+            let ranges: Vec<String> = read
+                .ranges
+                .iter()
+                .map(|(a, b)| format!("{a}-{b}"))
+                .collect();
+            format!("only lines {}", ranges.join(", "))
+        };
+        let changed = if read.stamp == FileStamp::of(current) {
+            ""
+        } else {
+            ", and it has changed on disk since"
+        };
+        Some(format!(
+            "Refusing to overwrite {path}: you have read {seen} of its {total} lines{changed}, \
+             so writing the whole file would delete lines you have not seen. Read the rest \
+             with read_file (offset/limit), or change it in place with edit_file.",
+            total = read.total,
+        ))
+    }
+}
+
 /// Read a file's contents. Supports line range for large files.
 pub struct ReadFileTool {
     /// Max file size to read (prevents OOM)
@@ -110,6 +270,9 @@ pub struct ReadFileTool {
     /// Lines returned when the call specifies no `limit`.
     /// Set to `usize::MAX` to restore unbounded reads.
     pub max_lines: usize,
+    /// Where reads are recorded for a [`WriteFileTool`] sharing the same
+    /// [`ReadLog`] (`None`, the default, records nothing).
+    pub read_log: Option<ReadLog>,
 }
 
 impl Default for ReadFileTool {
@@ -118,6 +281,7 @@ impl Default for ReadFileTool {
             max_bytes: 1024 * 1024, // 1MB
             allowed_paths: Vec::new(),
             max_lines: DEFAULT_READ_MAX_LINES,
+            read_log: None,
         }
     }
 }
@@ -130,6 +294,13 @@ impl ReadFileTool {
     /// Restrict reads to these directory roots.
     pub fn with_allowed_paths(mut self, paths: Vec<String>) -> Self {
         self.allowed_paths = paths;
+        self
+    }
+
+    /// Record reads in `log`, so a [`WriteFileTool`] sharing it refuses to
+    /// overwrite a file read only in part. See [`ReadLog`].
+    pub fn with_read_log(mut self, log: ReadLog) -> Self {
+        self.read_log = Some(log);
         self
     }
 }
@@ -182,13 +353,20 @@ impl AgentTool for ReadFileTool {
             return Err(ToolError::Cancelled);
         }
 
-        let io_path = crate::tools::PathSandbox::new(self.allowed_paths.clone()).io_path(path)?;
+        let sandbox = crate::tools::PathSandbox::new(self.allowed_paths.clone());
+        let io_path = sandbox.io_path(path)?;
 
         // Check file exists and size
         let metadata = tokio::fs::metadata(&io_path)
             .await
             .map_err(|e| ToolError::Failed(format!("Cannot access {}: {}", path, e)))?;
         require_regular_file(&metadata, path)?;
+        // The resolved path the log knows this file by (`io_path` keeps the
+        // caller's spelling when unrestricted).
+        let logged = match &self.read_log {
+            Some(log) => Some((log, sandbox.check(path)?)),
+            None => None,
+        };
 
         // Handle image files: read as binary, return base64-encoded Content::Image
         let file_path = Path::new(path);
@@ -205,6 +383,9 @@ impl AgentTool for ReadFileTool {
                 .await
                 .map_err(|e| ToolError::Failed(format!("Cannot read {}: {}", path, e)))?;
             let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+            if let Some((log, key)) = &logged {
+                log.record_full(key);
+            }
             return Ok(ToolResult {
                 content: vec![Content::Image {
                     data,
@@ -252,7 +433,16 @@ impl AgentTool for ReadFileTool {
             .map(|(i, line)| format!("{:>4} | {}", start + i + 1, line))
             .collect();
 
-        let header = if start > 0 || end < total {
+        let partial = start > 0 || end < total;
+        if let Some((log, key)) = logged {
+            if partial {
+                log.record_page(key, (start + 1, end), total, FileStamp::of(&metadata));
+            } else {
+                log.record_full(&key);
+            }
+        }
+
+        let header = if partial {
             format!(
                 "[Lines {}-{} of {} — use offset/limit to read the rest]",
                 start + 1,
@@ -281,6 +471,10 @@ pub struct WriteFileTool {
     /// Enforced against the *resolved* path, so `..` and symlinks cannot
     /// escape. See [`PathSandbox`](crate::tools::PathSandbox).
     pub allowed_paths: Vec<String>,
+    /// The [`ReadLog`] shared with this agent's [`ReadFileTool`]: when set, an
+    /// existing file it has read only in part is not overwritten. `None` (the
+    /// default) overwrites without checking.
+    pub read_log: Option<ReadLog>,
 }
 
 impl Default for WriteFileTool {
@@ -293,12 +487,20 @@ impl WriteFileTool {
     pub fn new() -> Self {
         Self {
             allowed_paths: Vec::new(),
+            read_log: None,
         }
     }
 
     /// Restrict writes to these directory roots.
     pub fn with_allowed_paths(mut self, paths: Vec<String>) -> Self {
         self.allowed_paths = paths;
+        self
+    }
+
+    /// Refuse to overwrite an existing file that the [`ReadFileTool`] sharing
+    /// `log` has read only in part. See [`ReadLog`].
+    pub fn with_read_log(mut self, log: ReadLog) -> Self {
+        self.read_log = Some(log);
         self
     }
 }
@@ -350,12 +552,23 @@ impl AgentTool for WriteFileTool {
             return Err(ToolError::Cancelled);
         }
 
-        let io_path = crate::tools::PathSandbox::new(self.allowed_paths.clone()).io_path(path)?;
+        let sandbox = crate::tools::PathSandbox::new(self.allowed_paths.clone());
+        let io_path = sandbox.io_path(path)?;
+        let logged = match &self.read_log {
+            Some(log) => Some((log, sandbox.check(path)?)),
+            None => None,
+        };
 
         // An existing path must be a regular file: writing to a FIFO blocks
         // until something reads it, and a device is not a file to overwrite.
         if let Ok(metadata) = tokio::fs::metadata(&io_path).await {
             require_regular_file(&metadata, path)?;
+            // Overwriting a file read only in part deletes the unseen lines.
+            if let Some((log, key)) = &logged {
+                if let Some(refusal) = log.overwrite_refusal(key, path, &metadata) {
+                    return Err(ToolError::Failed(refusal));
+                }
+            }
         }
 
         // Create parent directories
@@ -370,6 +583,10 @@ impl AgentTool for WriteFileTool {
         tokio::fs::write(&io_path, content)
             .await
             .map_err(|e| ToolError::Failed(format!("Cannot write {}: {}", path, e)))?;
+        // The agent wrote every line: it knows the whole file now.
+        if let Some((log, key)) = &logged {
+            log.record_full(key);
+        }
 
         let bytes = content.len();
         Ok(ToolResult {

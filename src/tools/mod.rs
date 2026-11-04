@@ -27,7 +27,7 @@ pub use bash::BashTool;
 pub use edit::EditFileTool;
 #[cfg(feature = "native")]
 #[cfg_attr(docsrs, doc(cfg(feature = "native")))]
-pub use file::{ReadFileTool, WriteFileTool, DEFAULT_READ_MAX_LINES};
+pub use file::{ReadFileTool, ReadLog, WriteFileTool, DEFAULT_READ_MAX_LINES};
 #[cfg(feature = "native")]
 #[cfg_attr(docsrs, doc(cfg(feature = "native")))]
 pub use list::ListFilesTool;
@@ -41,13 +41,18 @@ pub use shared_state_tool::SharedStateTool;
 use crate::types::AgentTool;
 
 /// Get the standard set of coding agent tools (native hosts only).
+///
+/// `read_file` and `write_file` share a fresh [`ReadLog`], so `write_file`
+/// refuses to overwrite a file that `read_file` returned only part of. Call
+/// this once per agent: each call has its own log.
 #[cfg(feature = "native")]
 #[cfg_attr(docsrs, doc(cfg(feature = "native")))]
 pub fn default_tools() -> Vec<Box<dyn AgentTool>> {
+    let read_log = ReadLog::new();
     vec![
         Box::new(BashTool::default()),
-        Box::new(ReadFileTool::default()),
-        Box::new(WriteFileTool::new()),
+        Box::new(ReadFileTool::default().with_read_log(read_log.clone())),
+        Box::new(WriteFileTool::new().with_read_log(read_log)),
         Box::new(EditFileTool::new()),
         Box::new(ListFilesTool::default()),
         Box::new(SearchTool::default()),

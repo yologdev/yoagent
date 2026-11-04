@@ -1494,3 +1494,214 @@ async fn file_tools_refuse_what_is_not_a_regular_file() {
         .unwrap();
     assert_eq!(std::fs::read_to_string(&real).unwrap(), "bye\n");
 }
+
+// --- write_file after a partial read_file (ReadLog) -------------------------
+
+/// A file of `n` numbered lines in a fresh temp dir.
+fn lines_file(n: usize) -> (tempfile::TempDir, String) {
+    let dir = tempfile::TempDir::new().unwrap();
+    let file = dir.path().join("big.txt");
+    let text: Vec<String> = (1..=n).map(|i| format!("line {i}")).collect();
+    std::fs::write(&file, text.join("\n")).unwrap();
+    let path = file.to_str().unwrap().to_string();
+    (dir, path)
+}
+
+fn guarded_pair() -> (ReadFileTool, WriteFileTool) {
+    let log = ReadLog::new();
+    (
+        ReadFileTool::new().with_read_log(log.clone()),
+        WriteFileTool::new().with_read_log(log),
+    )
+}
+
+async fn read(tool: &ReadFileTool, args: serde_json::Value) {
+    tool.execute(args, ctx("read_file")).await.unwrap();
+}
+
+async fn write(tool: &WriteFileTool, path: &str, content: &str) -> Result<ToolResult, ToolError> {
+    tool.execute(
+        serde_json::json!({"path": path, "content": content}),
+        ctx("write_file"),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn write_after_a_partial_read_is_refused_and_names_the_lines_seen() {
+    let (_dir, path) = lines_file(2140);
+    let (r, w) = guarded_pair();
+    read(&r, serde_json::json!({"path": path})).await;
+
+    let err = write(&w, &path, "replaced").await.unwrap_err().to_string();
+    assert!(err.contains("only lines 1-500 of its 2140 lines"), "{err}");
+    assert!(err.contains(&path) && err.contains("edit_file"), "{err}");
+    // Nothing was written.
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(on_disk.lines().count(), 2140);
+}
+
+#[tokio::test]
+async fn write_after_reading_the_rest_is_allowed() {
+    let (_dir, path) = lines_file(1200);
+    let (r, w) = guarded_pair();
+    read(&r, serde_json::json!({"path": path})).await;
+    read(
+        &r,
+        serde_json::json!({"path": path, "offset": 501, "limit": 300}),
+    )
+    .await;
+    let err = write(&w, &path, "x").await.unwrap_err().to_string();
+    assert!(err.contains("only lines 1-800 of its 1200 lines"), "{err}");
+
+    // The last page completes the file.
+    read(&r, serde_json::json!({"path": path, "offset": 801})).await;
+    write(&w, &path, "x").await.unwrap();
+}
+
+#[tokio::test]
+async fn write_after_a_partial_then_a_full_read_is_allowed() {
+    let (_dir, path) = lines_file(900);
+    let (r, w) = guarded_pair();
+    read(
+        &r,
+        serde_json::json!({"path": path, "offset": 10, "limit": 5}),
+    )
+    .await;
+    read(&r, serde_json::json!({"path": path, "limit": 900})).await;
+    write(&w, &path, "x").await.unwrap();
+}
+
+#[tokio::test]
+async fn write_to_a_file_never_read_is_allowed() {
+    let (_dir, path) = lines_file(900);
+    let (_r, w) = guarded_pair();
+    write(&w, &path, "x").await.unwrap();
+}
+
+#[tokio::test]
+async fn write_then_write_is_allowed() {
+    let (_dir, path) = lines_file(900);
+    let (r, w) = guarded_pair();
+    read(&r, serde_json::json!({"path": path})).await;
+    assert!(write(&w, &path, "x").await.is_err());
+    // A file deleted since the partial read is written; that write makes the
+    // whole file known, so the next write goes ahead too.
+    std::fs::remove_file(&path).unwrap();
+    write(&w, &path, "first").await.unwrap();
+    write(&w, &path, "second").await.unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "second");
+}
+
+#[tokio::test]
+async fn tools_built_without_a_shared_log_overwrite_as_before() {
+    let (_dir, path) = lines_file(900);
+    let r = ReadFileTool::new();
+    let w = WriteFileTool::new();
+    read(&r, serde_json::json!({"path": path})).await;
+    write(&w, &path, "x").await.unwrap();
+
+    // Two separate logs are not shared either.
+    let (_dir, path) = lines_file(900);
+    let r = ReadFileTool::new().with_read_log(ReadLog::new());
+    let w = WriteFileTool::new().with_read_log(ReadLog::new());
+    read(&r, serde_json::json!({"path": path})).await;
+    write(&w, &path, "x").await.unwrap();
+}
+
+#[tokio::test]
+async fn differently_spelled_paths_are_one_file() {
+    let (dir, path) = lines_file(900);
+    std::fs::create_dir(dir.path().join("sub")).unwrap();
+    let dotted = format!("{}/./big.txt", dir.path().display());
+    let climbed = format!("{}/sub/../big.txt", dir.path().display());
+    let (r, w) = guarded_pair();
+    read(&r, serde_json::json!({"path": dotted})).await;
+    let err = write(&w, &climbed, "x").await.unwrap_err().to_string();
+    assert!(err.contains("only lines 1-500"), "{err}");
+    // A full read under a third spelling clears it.
+    read(&r, serde_json::json!({"path": path, "limit": 900})).await;
+    write(&w, &climbed, "x").await.unwrap();
+}
+
+#[tokio::test]
+async fn sandboxed_tools_are_guarded_too() {
+    let (dir, path) = lines_file(900);
+    let roots = vec![dir.path().to_str().unwrap().to_string()];
+    let log = ReadLog::new();
+    let r = ReadFileTool::new()
+        .with_allowed_paths(roots.clone())
+        .with_read_log(log.clone());
+    let w = WriteFileTool::new()
+        .with_allowed_paths(roots)
+        .with_read_log(log);
+    read(&r, serde_json::json!({"path": path})).await;
+    assert!(write(&w, &path, "x").await.is_err());
+}
+
+#[tokio::test]
+async fn a_file_changed_after_a_partial_read_is_still_refused() {
+    let (_dir, path) = lines_file(900);
+    let (r, w) = guarded_pair();
+    read(&r, serde_json::json!({"path": path})).await;
+    // Something else (a bash call) rewrites it.
+    let text: Vec<String> = (1..=950).map(|i| format!("row {i}")).collect();
+    std::fs::write(&path, text.join("\n")).unwrap();
+
+    let err = write(&w, &path, "x").await.unwrap_err().to_string();
+    assert!(err.contains("changed on disk since"), "{err}");
+
+    // Pages of the old version do not add up with pages of the new one.
+    read(&r, serde_json::json!({"path": path, "offset": 501})).await;
+    let err = write(&w, &path, "x").await.unwrap_err().to_string();
+    assert!(err.contains("only lines 501-950 of its 950 lines"), "{err}");
+    read(&r, serde_json::json!({"path": path, "limit": 500})).await;
+    write(&w, &path, "x").await.unwrap();
+}
+
+#[tokio::test]
+async fn edit_file_is_not_affected_by_a_partial_read() {
+    let (_dir, path) = lines_file(900);
+    let (r, _w) = guarded_pair();
+    read(&r, serde_json::json!({"path": path})).await;
+    EditFileTool::new()
+        .execute(
+            serde_json::json!({"path": path, "old_text": "line 700\n", "new_text": "LINE 700\n"}),
+            ctx("edit_file"),
+        )
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn default_tools_refuse_a_write_after_a_partial_read() {
+    let (_dir, path) = lines_file(2140);
+    let tools = default_tools();
+    let tool = |name: &str| tools.iter().find(|t| t.name() == name).unwrap();
+    tool("read_file")
+        .execute(serde_json::json!({"path": path}), ctx("read_file"))
+        .await
+        .unwrap();
+    let err = tool("write_file")
+        .execute(
+            serde_json::json!({"path": path, "content": "x"}),
+            ctx("write_file"),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("only lines 1-500 of its 2140 lines"), "{err}");
+
+    // Another default_tools() call (another agent) has its own log.
+    let other = default_tools();
+    other
+        .iter()
+        .find(|t| t.name() == "write_file")
+        .unwrap()
+        .execute(
+            serde_json::json!({"path": path, "content": "x"}),
+            ctx("write_file"),
+        )
+        .await
+        .unwrap();
+}
