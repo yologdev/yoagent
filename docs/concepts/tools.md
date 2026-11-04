@@ -164,6 +164,39 @@ Enforcement is against the **resolved** path, not the string, so neither `..` no
 
 With or without an allowlist, `read_file`, `write_file` and `edit_file` work on regular files only: a FIFO, a device, a socket or a directory (after following symlinks) is refused with an error naming what it is. Before 0.25.8 a FIFO or `/dev/zero` could hang the call.
 
+## `write_file` after a partial read
+
+`read_file` returns a long file one page at a time (500 lines unless the call gives a `limit`), and `write_file` replaces the whole file. A model that read lines 1–500 of a 2,140-line file and then writes the file back would delete lines 501–2,140 without having seen them. When `read_file` and `write_file` share a `ReadLog`, that write is refused:
+
+```text
+Refusing to overwrite src/big.rs: you have read only lines 1-500 of its 2140 lines, so writing
+the whole file would delete lines you have not seen. Read the rest with read_file
+(offset/limit), or change it in place with edit_file.
+```
+
+- Refused: a `write_file` to an **existing** file whose latest read by this agent covered only part of it. Pages add up: reading 1–500 and then 501–2,140 counts as the whole file.
+- Allowed: a file read in full and unchanged since (in one read or in pages of the same version), even after it reads a page of that same version again; a file this agent last wrote itself; a file it never read (this guard is only about partial reads); a path that does not exist.
+- Versions are told apart by length and modification time, so a same-length rewrite within the filesystem's timestamp resolution is not seen. A file that changed on disk after the partial read stays refused, and the message says it changed; pages of the old version do not count towards the new one, so the model reads it again. A file read in full that changed since and is then read in part is refused the same way. A change after a full read with no read since is not re-checked.
+- A read that shows no lines (an `offset` past the end, `limit: 0`) records nothing: what was known before stays.
+- `edit_file` is not affected: it replaces text the model gave exactly.
+- Paths are compared after the sandbox's resolution, so `./src/a.rs`, `src/a.rs` and `src/../src/a.rs` are one file. Sandboxed or not makes no difference.
+
+`default_tools()` shares one log between its `read_file` and `write_file`, so every agent built from it is protected (each call is its own log — one per agent). Tools built on their own record nothing and overwrite as before; share a log to protect them:
+
+```rust
+use yoagent::tools::{ReadFileTool, ReadLog, WriteFileTool};
+
+let log = ReadLog::new();
+let tools: Vec<Box<dyn AgentTool>> = vec![
+    Box::new(ReadFileTool::new().with_allowed_paths(roots.clone()).with_read_log(log.clone())),
+    Box::new(WriteFileTool::new().with_allowed_paths(roots).with_read_log(log)),
+];
+```
+
+Give a sub-agent its own log: a shared one would count the parent's reads as the child's.
+
+The log lives as long as the tools, not the conversation: `Agent::reset()`, compaction and a new `SubAgentTool` delegation do not clear it (the tool `Arc`s are reused), and a read whose output is truncated or compacted afterwards still counts as read. Build a fresh `default_tools()` (or a fresh `ReadLog`) to start over.
+
 ## `BashTool` is not a sandbox
 
 `BashTool` runs whatever the model asks through `bash -c`, with the agent process's own environment and filesystem access.
