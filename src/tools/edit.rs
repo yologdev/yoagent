@@ -105,20 +105,20 @@ impl AgentTool for EditFileTool {
             ))
         })?;
 
-        // Find the old text: as given, else (in a CRLF file) with its line
-        // breaks spelled `\r\n`, the way the model could not see them.
+        // Find the old text: as given, else with its line breaks spelled
+        // `\r\n` (a model writes `\n` and cannot see a CRLF file's `\r`).
+        let mut old_used = std::borrow::Cow::Borrowed(old_text);
         let mut match_count = content.matches(old_text).count();
-        let crlf = match match_count {
-            0 => crlf_adapted(&content, old_text, new_text),
-            _ => None,
-        };
-        let (old_text, new_text) = match &crlf {
-            Some((old, new)) => {
-                match_count = content.matches(old.as_str()).count();
-                (old.as_str(), new.as_str())
+        if match_count == 0 {
+            let old_crlf = bare_lf_to_crlf(old_text);
+            if old_crlf != old_text {
+                let crlf_count = content.matches(old_crlf.as_str()).count();
+                if crlf_count > 0 {
+                    match_count = crlf_count;
+                    old_used = old_crlf.into();
+                }
             }
-            None => (old_text, new_text),
-        };
+        }
 
         if match_count == 0 {
             // Provide helpful error with context
@@ -144,6 +144,17 @@ impl AgentTool for EditFileTool {
                 match_count, path
             )));
         }
+
+        // Write `new_text` with the line endings of the place it goes, so a
+        // CRLF file never gains bare `\n` (an LF region is left as given).
+        let at = content.find(old_used.as_ref()).unwrap_or_default();
+        let new_used = if region_uses_crlf(&content, at, old_used.len()) {
+            std::borrow::Cow::Owned(bare_lf_to_crlf(new_text))
+        } else {
+            std::borrow::Cow::Borrowed(new_text)
+        };
+        let crlf = old_used != old_text || new_used != new_text;
+        let (old_text, new_text) = (old_used.as_ref(), new_used.as_ref());
 
         // Perform the replacement
         let new_content = content.replacen(old_text, new_text, 1);
@@ -174,23 +185,28 @@ impl AgentTool for EditFileTool {
                 "path": path,
                 "old_lines": old_lines,
                 "new_lines": new_lines,
-                "crlf": crlf.is_some(),
+                "crlf": crlf,
             }),
         })
     }
 }
 
-/// The edit with every bare `\n` of `old` and `new` spelled `\r\n`, when
-/// `old` has one and `content` contains it spelled that way: a model writes
-/// line breaks as `\n` and cannot see a CRLF file's `\r`. Only tried when
-/// `old` is not found as given, so an exact match always wins and an LF
-/// file is never touched.
-fn crlf_adapted(content: &str, old: &str, new: &str) -> Option<(String, String)> {
-    let old_crlf = bare_lf_to_crlf(old);
-    if old_crlf == old || !content.contains(old_crlf.as_str()) {
-        return None;
+/// Whether the text at `content[at..at + len]` sits among CRLF line
+/// endings: when it contains line breaks, all of them are `\r\n`; when it
+/// has none, the line break that ends its line is (or, on the last line,
+/// the one before it). No line break anywhere: no.
+fn region_uses_crlf(content: &str, at: usize, len: usize) -> bool {
+    let region = &content[at..at + len];
+    let breaks = region.matches('\n').count();
+    if breaks > 0 {
+        return region.matches("\r\n").count() == breaks;
     }
-    Some((old_crlf, bare_lf_to_crlf(new)))
+    let bytes = content.as_bytes();
+    let next = content[at + len..].find('\n').map(|i| at + len + i);
+    match next.or_else(|| content[..at].rfind('\n')) {
+        Some(i) => i > 0 && bytes[i - 1] == b'\r',
+        None => false,
+    }
 }
 
 /// `s` with every bare `\n` spelled `\r\n`; an existing `\r\n` is kept.
@@ -209,8 +225,10 @@ const SNIPPET_MAX_LINES: usize = 20;
 /// Try to find similar text in the file (fuzzy match for better error
 /// messages): the lines from the first one containing `target`'s first
 /// line, as many as `target` has plus one, numbered like `read_file`'s
-/// output and capped at [`SNIPPET_MAX_LINES`] lines of
-/// [`SNIPPET_MAX_LINE_CHARS`] characters each.
+/// output, each capped at [`SNIPPET_MAX_LINE_CHARS`] characters. Longer
+/// than [`SNIPPET_MAX_LINES`] lines, it shows a window of that many around
+/// the first line that differs from `target`, with a count of the lines
+/// left out above and below.
 fn find_similar_text(content: &str, target: &str) -> Option<String> {
     let target_trimmed = target.trim();
     if target_trimmed.is_empty() {
@@ -227,26 +245,35 @@ fn find_similar_text(content: &str, target: &str) -> Option<String> {
 
     // Search for lines containing the first line (case-sensitive)
     let lines: Vec<&str> = content.lines().collect();
-    for (i, line) in lines.iter().enumerate() {
-        if line.contains(first_line_trimmed) {
-            // Return a few lines of context
-            let start = i;
-            let target_line_count = target_trimmed.lines().count();
-            let end = (i + target_line_count + 1).min(lines.len());
-            let shown = end.min(start + SNIPPET_MAX_LINES);
-            let mut snippet: Vec<String> = lines[start..shown]
-                .iter()
-                .enumerate()
-                .map(|(k, line)| format!("{:>4} | {}", start + k + 1, cap_line(line)))
-                .collect();
-            if shown < end {
-                snippet.push(format!("... ({} more lines)", end - shown));
-            }
-            return Some(snippet.join("\n"));
-        }
-    }
+    let start = lines
+        .iter()
+        .position(|line| line.contains(first_line_trimmed))?;
+    let target_lines: Vec<&str> = target_trimmed.lines().collect();
+    let end = (start + target_lines.len() + 1).min(lines.len());
+    // The first line of the file that is not the target's (the first one
+    // is only required to contain it).
+    let differs = (1..end - start)
+        .find(|&k| target_lines.get(k) != Some(&lines[start + k]))
+        .unwrap_or(0);
+    let from = (start + differs)
+        .saturating_sub(SNIPPET_MAX_LINES / 2)
+        .clamp(start, end.saturating_sub(SNIPPET_MAX_LINES).max(start));
+    let to = end.min(from + SNIPPET_MAX_LINES);
 
-    None
+    let mut snippet = Vec::new();
+    if from > start {
+        snippet.push(format!("... ({} lines above)", from - start));
+    }
+    snippet.extend(
+        lines[from..to]
+            .iter()
+            .enumerate()
+            .map(|(k, line)| format!("{:>4} | {}", from + k + 1, cap_line(line))),
+    );
+    if to < end {
+        snippet.push(format!("... ({} more lines)", end - to));
+    }
+    Some(snippet.join("\n"))
 }
 
 /// `line`, cut to [`SNIPPET_MAX_LINE_CHARS`] characters (on a character
@@ -269,15 +296,20 @@ mod tests {
     }
 
     #[test]
-    fn crlf_adaptation_needs_a_line_break_and_a_match() {
-        let file = "alpha\r\nbeta\r\ngamma\r\n";
-        assert_eq!(
-            crlf_adapted(file, "alpha\nbeta", "A\nB\nC"),
-            Some(("alpha\r\nbeta".into(), "A\r\nB\r\nC".into()))
-        );
-        assert_eq!(crlf_adapted(file, "alpha", "A"), None);
-        assert_eq!(crlf_adapted(file, "alpha\ngamma", "x"), None);
-        assert_eq!(crlf_adapted("alpha\nbeta\n", "alpha\nbeta", "x"), None);
+    fn the_region_decides_the_line_ending() {
+        let crlf = "alpha\r\nbeta\r\ngamma\r\n";
+        // Line breaks inside the region.
+        assert!(region_uses_crlf(crlf, 0, "alpha\r\nbeta".len()));
+        // None inside: the break ending its line, or (last line) before it.
+        assert!(region_uses_crlf(crlf, 0, "alpha".len()));
+        assert!(region_uses_crlf("a\r\nlast", 3, 4));
+        assert!(!region_uses_crlf("alpha\nbeta\n", 0, 5));
+        assert!(!region_uses_crlf("no breaks", 0, 2));
+        // A mixed file: the region's own style.
+        let mixed = "a\r\nb\r\nc\nd\n";
+        assert!(region_uses_crlf(mixed, 0, 1));
+        assert!(!region_uses_crlf(mixed, 7, 1));
+        assert!(!region_uses_crlf(mixed, 3, "b\r\nc\nd".len()));
     }
 
     #[test]
@@ -305,5 +337,29 @@ mod tests {
         assert_eq!(lines.len(), SNIPPET_MAX_LINES + 1, "{snippet}");
         assert_eq!(lines[0], "   1 | l1");
         assert_eq!(lines[SNIPPET_MAX_LINES], "... (41 more lines)");
+    }
+
+    /// A 40-line old_text that matches the file up to its line 30: the
+    /// window shows line 30, with what it leaves out counted on both sides.
+    #[test]
+    fn snippet_window_centres_on_the_first_difference() {
+        let content = (1..=100).map(|i| format!("l{i}\n")).collect::<String>();
+        let target = (1..=40)
+            .map(|i| {
+                if i == 30 {
+                    "changed\n".into()
+                } else {
+                    format!("l{i}\n")
+                }
+            })
+            .collect::<String>();
+        let snippet = find_similar_text(&content, &target).unwrap();
+        let lines: Vec<&str> = snippet.lines().collect();
+        assert_eq!(lines.len(), SNIPPET_MAX_LINES + 2, "{snippet}");
+        assert_eq!(lines[0], "... (19 lines above)");
+        assert_eq!(lines[1], "  20 | l20");
+        assert!(lines.contains(&"  30 | l30"), "{snippet}");
+        assert_eq!(lines[SNIPPET_MAX_LINES], "  39 | l39");
+        assert_eq!(lines[SNIPPET_MAX_LINES + 1], "... (2 more lines)");
     }
 }

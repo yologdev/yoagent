@@ -1645,3 +1645,54 @@ async fn test_edit_file_not_found_snippet_is_numbered_and_capped() {
     assert!(err.contains("… (line truncated)"), "{err}");
     assert!(err.len() < 2_000, "error is {} bytes", err.len());
 }
+
+/// An exact one-line match in a CRLF file: the multi-line new_text is
+/// written with `\r\n` too, never bare `\n`.
+#[tokio::test]
+async fn test_edit_file_exact_match_in_a_crlf_file_writes_crlf() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let file = dir.path().join("crlf.txt");
+    for (old, new, expected) in [
+        ("alpha", "A\nB", &b"A\r\nB\r\nbeta\r\n"[..]),
+        // An old_text already spelled with `\r\n`.
+        ("alpha\r\nbeta", "A\nB\nC", &b"A\r\nB\r\nC\r\n"[..]),
+    ] {
+        std::fs::write(&file, b"alpha\r\nbeta\r\n").unwrap();
+        let result = EditFileTool::new()
+            .execute(
+                serde_json::json!({
+                    "path": file.to_str().unwrap(),
+                    "old_text": old,
+                    "new_text": new,
+                }),
+                ctx("edit_file"),
+            )
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), expected, "{old:?}");
+        assert_eq!(result.details["crlf"], true, "{old:?}");
+    }
+}
+
+/// The CRLF spelling of old_text is held to the same uniqueness rule.
+#[tokio::test]
+async fn test_edit_file_crlf_spelling_matching_twice_is_refused() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let file = dir.path().join("twice.txt");
+    let before = b"a\r\nb\r\na\r\nb\r\n";
+    std::fs::write(&file, before).unwrap();
+    let err = EditFileTool::new()
+        .execute(
+            serde_json::json!({
+                "path": file.to_str().unwrap(),
+                "old_text": "a\nb",
+                "new_text": "x",
+            }),
+            ctx("edit_file"),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("matches 2 locations"), "{err}");
+    assert_eq!(std::fs::read(&file).unwrap(), before);
+}

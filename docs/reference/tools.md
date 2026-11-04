@@ -114,16 +114,22 @@ Surgical search/replace edits. The most important tool for coding agents — ins
 - **Parameters**: `path` (required), `old_text` (required), `new_text` (required)
 - **Configuration**: `allowed_paths: Vec<String>`
 
-The `old_text` must match exactly, including whitespace and indentation. One exception: in a
-file with CRLF line endings, an `old_text` written with `\n` line breaks (models cannot see the
-`\r`) that is not found as given is looked up with each bare `\n` spelled `\r\n`, and the
-`new_text` is written the same way, so the file keeps its line endings (`details.crlf: true`).
-An exact match always wins, and an LF file is never rewritten with CRLF.
+The `old_text` must match exactly, including whitespace and indentation. One exception: an
+`old_text` written with `\n` line breaks (models cannot see a CRLF file's `\r`) that is not
+found as given is looked up with each bare `\n` spelled `\r\n`; that spelling must match exactly
+once too. An exact match always wins.
+
+`new_text` is written with the line endings of the place it goes: where the matched text's line
+breaks are all `\r\n` (or, for a match within one line, where that line ends in `\r\n`), each
+bare `\n` of `new_text` becomes `\r\n`, so a CRLF file never gains bare `\n`. Anywhere else
+`new_text` is written as given; an LF file is never touched. `details.crlf` is `true` when either
+text was respelled.
 
 When `old_text` is not found, the error shows where its first line occurs ("Did you mean"),
-numbered like `read_file`'s output: at most 20 lines, each cut to 400 characters with
-`… (line truncated)`, so a minified file cannot blow up the error. Whitespace is never fixed up
-for the model.
+numbered like `read_file`'s output, each line cut to 400 characters with `… (line truncated)`,
+so a minified file cannot blow up the error. Past 20 lines it shows 20 around the first line that
+differs from `old_text`, and counts the lines left out above and below. Whitespace is never fixed
+up for the model.
 
 ## ListFilesTool
 
