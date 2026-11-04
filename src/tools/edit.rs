@@ -91,7 +91,11 @@ impl AgentTool for EditFileTool {
             return Err(ToolError::Cancelled);
         }
 
-        let io_path = crate::tools::PathSandbox::new(self.allowed_paths.clone()).io_path(path)?;
+        let sandbox = crate::tools::PathSandbox::new(self.allowed_paths.clone());
+        let io_path = sandbox.io_path(path)?;
+        // From the read to the write: another call's edit of this file in
+        // between would be overwritten.
+        let _held = crate::tools::file::hold_file(&sandbox.check(path)?, &cancel).await?;
 
         // Read existing file (a regular one: a FIFO or device would block or
         // read without end).

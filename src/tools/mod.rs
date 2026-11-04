@@ -27,7 +27,9 @@ pub use bash::BashTool;
 pub use edit::EditFileTool;
 #[cfg(feature = "native")]
 #[cfg_attr(docsrs, doc(cfg(feature = "native")))]
-pub use file::{ReadFileTool, ReadLog, WriteFileTool, DEFAULT_READ_MAX_LINES};
+pub use file::{
+    ReadFileTool, ReadLog, WriteFileTool, DEFAULT_MAX_IMAGE_BYTES, DEFAULT_READ_MAX_LINES,
+};
 #[cfg(feature = "native")]
 #[cfg_attr(docsrs, doc(cfg(feature = "native")))]
 pub use list::ListFilesTool;

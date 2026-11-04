@@ -726,7 +726,7 @@ async fn test_read_image_file() {
 #[tokio::test]
 async fn test_read_jpeg_file() {
     let tmp = std::env::temp_dir().join("yoagent-test-image.jpg");
-    std::fs::write(&tmp, b"fake-jpeg-data").unwrap();
+    std::fs::write(&tmp, jpeg(4, 3)).unwrap();
 
     let tool = ReadFileTool::new();
     let result = tool
@@ -2118,7 +2118,7 @@ async fn a_sandboxed_reader_and_an_unrestricted_writer_share_a_log() {
 async fn an_image_read_then_written_is_allowed() {
     let dir = tempfile::TempDir::new().unwrap();
     let path = dir.path().join("x.png");
-    std::fs::write(&path, [0x89, b'P', b'N', b'G', 0, 1, 2, 3]).unwrap();
+    std::fs::write(&path, png(1, 1)).unwrap();
     let path = path.to_str().unwrap();
     let (r, w) = guarded_pair();
     let result = r
@@ -2160,4 +2160,389 @@ async fn a_custom_max_lines_sets_the_page_the_guard_sees() {
     let w = WriteFileTool::new().with_read_log(log);
     read(&r, serde_json::json!({"path": path})).await;
     write(&w, path, "x").await.unwrap();
+}
+
+// --- One file, several calls at once ---
+
+/// The loop runs a response's tool calls concurrently. Two edits of one file
+/// both read it, then both write it: without a lock per file the last write
+/// wins and the other edit is lost — while both calls report success.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn parallel_edits_of_one_file_all_land() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("many.txt");
+    let lines: String = (0..32).map(|i| format!("<{i}>\n")).collect();
+    std::fs::write(&path, &lines).unwrap();
+    let path = path.to_str().unwrap().to_owned();
+    // The same file spelled another way is the same file.
+    std::fs::create_dir(dir.path().join("sub")).unwrap();
+    let other = dir.path().join("sub/../many.txt");
+    let other = other.to_str().unwrap().to_owned();
+    // One tool per call, as separate agents (sub-agents) would have.
+    let tools: Vec<EditFileTool> = (0..32).map(|_| EditFileTool::new()).collect();
+    let calls = tools.iter().enumerate().map(|(i, tool)| {
+        tool.execute(
+            serde_json::json!({
+                "path": if i % 2 == 0 { &path } else { &other },
+                "old_text": format!("<{i}>\n"),
+                "new_text": format!("<edited {i}>\n"),
+            }),
+            ctx("edit_file"),
+        )
+    });
+    for result in futures::future::join_all(calls).await {
+        result.unwrap();
+    }
+    let after = std::fs::read_to_string(&path).unwrap();
+    let lost: Vec<usize> = (0..32)
+        .filter(|i| !after.contains(&format!("<edited {i}>\n")))
+        .collect();
+    assert!(lost.is_empty(), "edits lost: {lost:?}\n{after}");
+}
+
+/// A write and an edit of one file at once: the edit applies to the file the
+/// write produced, or the write replaces the edited file — never an edit of
+/// the old content written over the new.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_write_and_an_edit_of_one_file_do_not_interleave() {
+    for _ in 0..20 {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("f.txt");
+        std::fs::write(&path, "keep <a>\n").unwrap();
+        let path = path.to_str().unwrap().to_owned();
+        let write = WriteFileTool::new();
+        let edit = EditFileTool::new();
+        let (w, e) = tokio::join!(
+            write.execute(
+                serde_json::json!({"path": path, "content": "new <a>\n"}),
+                ctx("write_file"),
+            ),
+            edit.execute(
+                serde_json::json!({"path": path, "old_text": "<a>", "new_text": "<b>"}),
+                ctx("edit_file"),
+            ),
+        );
+        w.unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+        match e {
+            // The edit ran second, on the written file; or first, and the
+            // write replaced it.
+            Ok(_) => assert!(after == "new <b>\n" || after == "new <a>\n", "{after:?}"),
+            Err(e) => panic!("{e}"),
+        }
+        assert_ne!(
+            after, "keep <b>\n",
+            "an edit of the old file overwrote the write"
+        );
+    }
+}
+
+// --- Images a provider will take ---
+//
+// An image block a provider rejects stays in the history and fails every
+// later request too, so `read_file` sends only what all of them accept.
+
+/// A PNG of `w`×`h` (the header is all a reader of its size looks at).
+fn png(w: u32, h: u32) -> Vec<u8> {
+    let mut b = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    b.extend([0, 0, 0, 13]);
+    b.extend(b"IHDR");
+    b.extend(w.to_be_bytes());
+    b.extend(h.to_be_bytes());
+    b.extend([8, 2, 0, 0, 0, 0, 0, 0, 0]);
+    b.extend([0, 0, 0, 0]);
+    b.extend(b"IEND");
+    b.extend([0xAE, 0x42, 0x60, 0x82]);
+    b
+}
+
+/// A baseline JPEG of `w`×`h`: SOI, a JFIF segment, SOF0, EOI.
+fn jpeg(w: u16, h: u16) -> Vec<u8> {
+    let mut b = vec![0xFF, 0xD8];
+    b.extend([0xFF, 0xE0, 0x00, 0x10]);
+    b.extend(b"JFIF\0");
+    b.extend([1, 1, 0, 0, 1, 0, 1, 0, 0]);
+    b.extend([0xFF, 0xC0, 0x00, 0x11, 0x08]);
+    b.extend(h.to_be_bytes());
+    b.extend(w.to_be_bytes());
+    b.extend([3, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1]);
+    b.extend([0xFF, 0xD9]);
+    b
+}
+
+async fn read_image(name: &str, bytes: &[u8]) -> Result<ToolResult, ToolError> {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join(name);
+    std::fs::write(&path, bytes).unwrap();
+    ReadFileTool::new()
+        .execute(
+            serde_json::json!({"path": path.to_str().unwrap()}),
+            ctx("read_file"),
+        )
+        .await
+}
+
+fn image_type(result: &ToolResult) -> &str {
+    match &result.content[0] {
+        Content::Image { mime_type, .. } => mime_type,
+        other => panic!("expected an image, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn an_image_is_typed_by_its_content_not_its_name() {
+    // A JPEG saved as .png: sent as image/png, a provider refuses it.
+    let result = read_image("photo.png", &jpeg(10, 10)).await.unwrap();
+    assert_eq!(image_type(&result), "image/jpeg");
+    let result = read_image("shot.jpg", &png(10, 10)).await.unwrap();
+    assert_eq!(image_type(&result), "image/png");
+}
+
+/// A WebP of `w`×`h`: `kind` is `VP8 ` (lossy), `VP8L` or `VP8X`.
+fn webp(kind: &[u8; 4], w: u32, h: u32) -> Vec<u8> {
+    let mut b = b"RIFF\0\0\0\0WEBP".to_vec();
+    b.extend(kind);
+    b.extend([0; 4]);
+    match kind {
+        b"VP8 " => {
+            b.extend([0, 0, 0, 0x9D, 0x01, 0x2A]);
+            b.extend((w as u16).to_le_bytes());
+            b.extend((h as u16).to_le_bytes());
+        }
+        b"VP8L" => {
+            b.push(0x2F);
+            b.extend(((w - 1) | ((h - 1) << 14)).to_le_bytes());
+        }
+        _ => {
+            b.extend([0; 4]);
+            b.extend(&(w - 1).to_le_bytes()[..3]);
+            b.extend(&(h - 1).to_le_bytes()[..3]);
+        }
+    }
+    b
+}
+
+#[tokio::test]
+async fn webp_sizes_are_read_in_all_three_forms() {
+    for kind in [b"VP8 ", b"VP8L", b"VP8X"] {
+        let ok = read_image("a.webp", &webp(kind, 20, 10)).await.unwrap();
+        assert_eq!(image_type(&ok), "image/webp");
+        let err = read_image("a.webp", &webp(kind, 9000, 10))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("9000×10"), "{kind:?}: {err}");
+    }
+    // The extended form's sizes are 24-bit.
+    let err = read_image("a.webp", &webp(b"VP8X", 70000, 10))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("70000×10"), "{err}");
+    // The lossless form stores width - 1: 8001 is refused, 8000 sent.
+    assert!(read_image("a.webp", &webp(b"VP8L", 8001, 1)).await.is_err());
+    assert!(read_image("a.webp", &webp(b"VP8L", 8000, 1)).await.is_ok());
+}
+
+/// A camera JPEG: Exif (APP1), padding, a Huffman table (`FF C4`, which is
+/// not a frame), a fill byte and a marker with no length, then the frame
+/// (`sof`: SOF2 is progressive).
+fn camera_jpeg(sof: u8, precision: u8, w: u16, h: u16) -> Vec<u8> {
+    let mut b = vec![0xFF, 0xD8];
+    b.extend([0xFF, 0xE1, 0x00, 0x0A]);
+    b.extend(b"Exif\0\0\x4D\x4D");
+    b.extend([0x00, 0x00]);
+    b.extend([0xFF, 0xC4, 0x00, 0x04, 0x00, 0x00]);
+    b.extend([0xFF, 0xFF, 0x01]);
+    b.extend([0xFF, sof, 0x00, 0x11, precision]);
+    b.extend(h.to_be_bytes());
+    b.extend(w.to_be_bytes());
+    b.extend([3, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1]);
+    b.extend([0xFF, 0xD9]);
+    b
+}
+
+#[tokio::test]
+async fn a_camera_jpeg_is_measured_past_its_other_segments() {
+    let ok = read_image("p.jpg", &camera_jpeg(0xC2, 8, 4000, 3000))
+        .await
+        .unwrap();
+    assert_eq!(image_type(&ok), "image/jpeg");
+    // Width and height are not swapped.
+    let err = read_image("p.jpg", &camera_jpeg(0xC2, 8, 9000, 100))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("9000×100"), "{err}");
+}
+
+#[tokio::test]
+async fn a_jpeg_decoders_seldom_read_is_refused() {
+    // Lossless (SOF3), hierarchical (SOF5), arithmetic-coded (SOF9), and a
+    // 12-bit baseline frame.
+    for (sof, precision) in [(0xC3, 8), (0xC5, 8), (0xC9, 8), (0xC1, 12)] {
+        let err = read_image("p.jpg", &camera_jpeg(sof, precision, 10, 10))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("may not decode"),
+            "{sof:#x}/{precision}: {err}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_side_limit_is_8000_px_and_a_zero_side_is_refused() {
+    assert!(read_image("a.png", &png(8000, 8000)).await.is_ok());
+    let err = read_image("a.png", &png(8001, 1))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("8001×1"), "{err}");
+    let err = read_image("a.png", &png(0, 10))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("no width or height"), "{err}");
+}
+
+#[tokio::test]
+async fn an_image_cut_off_before_its_size_is_refused() {
+    let err = read_image("a.png", &png(10, 10)[..18])
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("cannot read the image's size"), "{err}");
+    let jpeg = camera_jpeg(0xC0, 8, 10, 10);
+    let err = read_image("a.jpg", &jpeg[..jpeg.len() - 14])
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("cannot read the image's size"), "{err}");
+}
+
+#[tokio::test]
+async fn image_extensions_are_matched_in_any_case() {
+    assert_eq!(
+        image_type(&read_image("A.PNG", &png(4, 4)).await.unwrap()),
+        "image/png"
+    );
+    let err = read_image("A.BMP", b"BM..").await.unwrap_err().to_string();
+    assert!(err.contains("BMP images are not sent"), "{err}");
+}
+
+#[tokio::test]
+async fn a_large_file_that_is_not_an_image_says_so() {
+    let mut text = b"not an image at all\n".to_vec();
+    text.resize(4 * 1024 * 1024, b'x');
+    let err = read_image("big.png", &text).await.unwrap_err().to_string();
+    assert!(err.contains("not a PNG, JPEG or WebP image"), "{err}");
+}
+
+#[tokio::test]
+async fn formats_providers_refuse_are_not_sent() {
+    // GIF: Gemini does not list it, OpenAI takes only still ones.
+    for name in ["a.gif", "a.bmp", "a.tiff", "a.heic", "a.avif"] {
+        let err = read_image(name, b"GIF89a....")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("PNG, JPEG or WebP"), "{name}: {err}");
+    }
+}
+
+#[tokio::test]
+async fn a_file_named_as_an_image_that_is_not_one_is_refused() {
+    let err = read_image("notes.png", b"just some text\n")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("not a PNG, JPEG or WebP image"), "{err}");
+}
+
+#[tokio::test]
+async fn an_image_larger_than_providers_take_is_refused() {
+    let mut big = png(100, 100);
+    big.resize(4 * 1024 * 1024, 0);
+    let err = read_image("big.png", &big).await.unwrap_err().to_string();
+    assert!(err.contains("too large"), "{err}");
+
+    let wide = png(9000, 100);
+    let err = read_image("wide.png", &wide).await.unwrap_err().to_string();
+    assert!(err.contains("9000×100"), "{err}");
+}
+
+#[tokio::test]
+async fn the_image_size_limit_is_a_knob() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("big.png");
+    let mut big = png(100, 100);
+    big.resize(4 * 1024 * 1024, 0);
+    std::fs::write(&path, &big).unwrap();
+    let tool = ReadFileTool::new().with_max_image_bytes(8 * 1024 * 1024);
+    let result = tool
+        .execute(
+            serde_json::json!({"path": path.to_str().unwrap()}),
+            ctx("read_file"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(image_type(&result), "image/png");
+}
+
+#[tokio::test]
+async fn an_animated_webp_is_refused() {
+    let mut animated = webp(b"VP8X", 20, 10);
+    animated[20] |= 0x02;
+    let err = read_image("a.webp", &animated)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("animated WebP"), "{err}");
+}
+
+/// A large camera JPEG whose metadata runs past the bytes read of a file too
+/// large to send is "too large", not "damaged".
+#[tokio::test]
+async fn a_large_camera_jpeg_with_long_metadata_is_too_large() {
+    let mut b = vec![0xFF, 0xD8];
+    for _ in 0..2 {
+        b.extend([0xFF, 0xE1, 0xFF, 0xFF]);
+        b.extend(std::iter::repeat_n(0u8, 0xFFFF - 2));
+    }
+    b.extend(&camera_jpeg(0xC0, 8, 4000, 3000)[2..]);
+    b.resize(4_200_000, 0);
+    let err = read_image("big.jpg", &b).await.unwrap_err().to_string();
+    assert!(err.contains("image too large (4.2 MB"), "{err}");
+    assert!(err.contains("up to 3.75 MB"), "{err}");
+}
+
+#[tokio::test]
+async fn a_large_file_of_a_refused_format_says_its_format() {
+    let mut gif = b"GIF89a".to_vec();
+    gif.resize(4_200_000, 0);
+    let err = read_image("big.gif", &gif).await.unwrap_err().to_string();
+    assert!(err.contains("GIF images are not sent"), "{err}");
+}
+
+#[tokio::test]
+async fn an_image_of_exactly_the_limit_is_sent() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("x.png");
+    let mut bytes = png(10, 10);
+    bytes.resize(1000, 0);
+    std::fs::write(&path, &bytes).unwrap();
+    let read = |max| {
+        let path = path.to_str().unwrap().to_owned();
+        async move {
+            ReadFileTool::new()
+                .with_max_image_bytes(max)
+                .execute(serde_json::json!({"path": path}), ctx("read_file"))
+                .await
+        }
+    };
+    assert!(read(1000).await.is_ok());
+    let err = read(999).await.unwrap_err().to_string();
+    assert!(err.contains("too large"), "{err}");
 }

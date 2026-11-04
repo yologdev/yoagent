@@ -29,6 +29,10 @@ examine_globs = [
     "src/provider/prices/global.rs",
     # SigV4 signing for Bedrock: a wrong byte is a rejected request or a leak.
     "src/provider/sigv4.rs",
+    # read_file / write_file: the partial-read guard, the per-file lock and
+    # the image header checks (a wrong offset sends an image a provider
+    # refuses, which fails every later request).
+    "src/tools/file.rs",
     # Not `prices/fetch.rs`: it is opt-in (never fetched implicitly), and a
     # mis-mapped fetch is caught by `tests/price_audit.rs` against models.dev.
 ]

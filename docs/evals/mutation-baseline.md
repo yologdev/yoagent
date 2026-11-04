@@ -425,7 +425,7 @@ passes without it. The ones worth knowing about:
   hid it); the headroom growth average over several turns; the calibration
   anchor; all four usage fields in the token limit; `after_turn` gets the
   turn's usage; run endings without a final answer; `on_stop` not asked about
-  a cut-off answer; tool-call deltas forwarded; batched and sequential steering
+  a cut-off answer (since #423 it is asked, and the tests pin that instead); tool-call deltas forwarded; batched and sequential steering
   skip only the calls after the steer.
 - **`provider/model.rs`**: `ContextTier::is_configured` with one rate set;
   a suffixed Claude major followed by a digit token; OpenRouter's
@@ -462,6 +462,16 @@ are at `a03fc35`:
   rollback warning prints.
 - `agent_loop.rs:2406` `<` → `<=` in `execute_tool_calls`: the slice is empty
   at equality.
+
+## `src/tools/file.rs` joins the scope (#423)
+
+The partial-read guard, the per-file lock and the image header checks. Known
+equivalent mutants there, not worth a test:
+
+- `hold_file`: `retain(|_, held| held.strong_count() > 0)` → `>= 0` keeps
+  dead entries; it only grows the map, and nothing can observe it.
+- `ImageKind::sniff`: `bytes.len() >= 12` → `> 12` differs only for a
+  12-byte file, which is refused either way (not a WebP, or no size).
 
 ## Reading a scheduled run
 

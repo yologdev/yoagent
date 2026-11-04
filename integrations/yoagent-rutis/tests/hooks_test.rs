@@ -435,6 +435,45 @@ async fn on_stop_continues_the_run_until_the_verifier_accepts() {
     root.shutdown().await.unwrap();
 }
 
+/// An answer cut off at the output limit reaches `on_stop` with stop reason
+/// `Length`,
+/// so a verifier can send the model back to finish it.
+#[tokio::test(flavor = "multi_thread")]
+async fn on_stop_sees_an_answer_cut_off_at_the_output_limit() {
+    let (root, bridge) = setup();
+    let stops = Arc::new(Mutex::new(Vec::new()));
+    let verifier = root.plugin(plugin(handler("verifier").with_on_stop({
+        let stops = stops.clone();
+        move |stop| {
+            stops
+                .lock()
+                .unwrap()
+                .push((stop.answer.clone(), stop.stop_reason.clone()));
+            if stop.stop_reason == yoagent::StopReason::Length {
+                StopDecision::Continue("finish your answer".into())
+            } else {
+                StopDecision::Accept
+            }
+        }
+    })));
+    wait_active(&verifier).await;
+    let (agent, seen) = agent(vec![
+        yoagent::provider::mock::MockResponse::TextCutOff("half an ans".into()),
+        text("the whole answer"),
+    ]);
+    let mut agent = agent.with_extension(bridge.extension());
+    run(&mut agent, "go").await;
+    assert_eq!(
+        stops.lock().unwrap().clone(),
+        vec![
+            ("half an ans".to_string(), yoagent::StopReason::Length),
+            ("the whole answer".to_string(), yoagent::StopReason::Stop)
+        ]
+    );
+    assert_eq!(seen.lock().unwrap().len(), 2);
+    root.shutdown().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn an_on_stop_failure_fails_a_required_run_and_is_skipped_otherwise() {
     for required in [false, true] {

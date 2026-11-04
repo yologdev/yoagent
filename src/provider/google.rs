@@ -283,7 +283,16 @@ pub(crate) async fn parse_stream(
                                     if stop_reason != StopReason::ToolUse {
                                         stop_reason = match reason.as_str() {
                                             "STOP" => StopReason::Stop,
-                                            "MAX_TOKENS" | "RECITATION" => StopReason::Length,
+                                            "MAX_TOKENS" => StopReason::Length,
+                                            // Stopped for reciting its sources: not cut
+                                            // off (asking it to go on returns the same).
+                                            "RECITATION" => {
+                                                warn!("Gemini stopped the response for recitation (finishReason=RECITATION)");
+                                                error_message = Some(
+                                                    "Response stopped by Gemini for reciting its sources (finishReason: RECITATION)".into(),
+                                                );
+                                                StopReason::Refusal
+                                            }
                                             // A tool call Gemini could not produce or
                                             // was not allowed to make: a failed turn,
                                             // with Gemini's own explanation when given.

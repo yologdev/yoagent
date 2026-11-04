@@ -1876,14 +1876,17 @@ async fn check_stop(
     stop_continues: &mut usize,
 ) -> Option<AgentMessage> {
     use crate::extension::{Failure, StopContext, StopGate, EXTENSION_MESSAGE_PREFIX};
-    // Only a finished answer is judged: not a cut-off (`Length`), a failure,
-    // or a run that ended on a marker.
+    // An answer is judged, finished or cut off at the output limit
+    // (`Length`: a verifier that skipped it let a truncated answer end the
+    // run as if finished); not a failure, a refusal, or a run that ended on a
+    // marker.
     let answer = match context.messages.last() {
-        Some(AgentMessage::Llm(m @ Message::Assistant { stop_reason, .. }))
-            if *stop_reason == StopReason::Stop =>
-        {
-            m.clone()
-        }
+        Some(AgentMessage::Llm(
+            m @ Message::Assistant {
+                stop_reason: StopReason::Stop | StopReason::Length,
+                ..
+            },
+        )) => m.clone(),
         _ => return None,
     };
     let stop = StopContext::new(&answer, &context.messages, *stop_continues);

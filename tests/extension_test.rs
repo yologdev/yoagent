@@ -3068,8 +3068,8 @@ impl StreamProvider for CutOff {
     }
 }
 
-/// `on_stop` is not called for an answer cut off at the output limit; a
-/// failure recorded on it still fails a required run.
+/// A failure recorded by the time the final answer is cut off at the output
+/// limit fails a required run.
 #[tokio::test]
 async fn take_failure_is_asked_when_the_final_answer_is_cut_off() {
     let mut agent = Agent::from_provider(CutOff, ModelConfig::mock())
@@ -3278,27 +3278,92 @@ async fn a_continue_cancelled_before_its_first_request_ends_cancelled() {
     assert_eq!(*ends.lock().unwrap(), vec!["Cancelled"]);
 }
 
-/// `on_stop` judges only a finished answer (`Stop`): an answer cut off at
-/// the output limit is not offered to it, so it cannot continue the run.
+/// An answer cut off at the output limit is judged too: a verifier that
+/// skipped it let a truncated answer end the run as if it were finished.
 #[tokio::test]
-async fn on_stop_is_not_asked_about_a_cut_off_answer() {
+async fn on_stop_judges_an_answer_cut_off_at_the_output_limit() {
     let log = Arc::new(Mutex::new(Vec::new()));
-    let hooks = Hooks {
-        continue_with: Some("keep going"),
-        log: Some(log.clone()),
-        ..Default::default()
-    };
-    let mut agent =
-        Agent::from_provider(CutOff, ModelConfig::mock()).with_extension(ext("judge", hooks));
+    let (agent, requests) = scripted(vec![
+        MockResponse::TextCutOff("half an ans".into()),
+        text("the whole answer"),
+    ]);
+    let mut agent = agent.with_max_stop_continues(1).with_extension(ext(
+        "verify",
+        Hooks {
+            continue_with: Some("finish your answer"),
+            log: Some(log.clone()),
+            ..Default::default()
+        },
+    ));
     let events = run(&mut agent, "go").await;
-    assert_eq!(final_assistant(&events).0, StopReason::Length);
-    let log = log.lock().unwrap().clone();
-    assert!(
-        !log.iter().any(|entry| entry.starts_with("on_stop")),
-        "{log:?}"
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        2,
+        "the verifier continued the run"
     );
-    assert!(
-        log.iter().any(|entry| entry.starts_with("finish")),
-        "{log:?}"
+    let stops = log
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|l| l.starts_with("on_stop"))
+        .count();
+    assert_eq!(stops, 2);
+    assert_eq!(final_assistant(&events).0, StopReason::Stop);
+    assert!(turns_paired(&events));
+}
+
+/// A required verifier that never accepts fails a run whose last answer was
+/// cut off, as it fails one whose answer finished.
+#[tokio::test]
+async fn a_required_verifier_fails_a_run_cut_off_at_the_output_limit() {
+    let (agent, _) = scripted(vec![
+        MockResponse::TextCutOff("a".into()),
+        MockResponse::TextCutOff("b".into()),
+    ]);
+    let mut agent = agent.with_max_stop_continues(1).with_extension(
+        ext(
+            "verify",
+            Hooks {
+                continue_with: Some("check again"),
+                ..Default::default()
+            },
+        )
+        .required(),
+    );
+    let events = run(&mut agent, "go").await;
+    let (stop, error) = final_assistant(&events);
+    assert_eq!(stop, StopReason::Error);
+    assert!(error.unwrap().contains("verify"));
+}
+
+/// What `on_stop` was shown, answer by answer.
+#[derive(Clone, Default)]
+struct SeenStops(Arc<Mutex<Vec<StopReason>>>);
+
+#[async_trait::async_trait]
+impl RunHooks for SeenStops {
+    async fn on_stop(&mut self, stop: &StopContext<'_>) -> StopDecision {
+        let Message::Assistant { stop_reason, .. } = stop.answer else {
+            panic!("on_stop is shown an assistant message");
+        };
+        self.0.lock().unwrap().push(stop_reason.clone());
+        if *stop_reason == StopReason::Length {
+            StopDecision::Continue("finish it".into())
+        } else {
+            StopDecision::Accept
+        }
+    }
+}
+
+/// `on_stop` tells a cut-off answer from a finished one by its stop reason.
+#[tokio::test]
+async fn on_stop_sees_the_cut_off_answers_stop_reason() {
+    let seen = SeenStops::default();
+    let (agent, _) = scripted(vec![MockResponse::TextCutOff("ha".into()), text("done")]);
+    let mut agent = agent.with_extension(ClonedHooks::new("seen", seen.clone()));
+    run(&mut agent, "go").await;
+    assert_eq!(
+        *seen.0.lock().unwrap(),
+        vec![StopReason::Length, StopReason::Stop]
     );
 }
