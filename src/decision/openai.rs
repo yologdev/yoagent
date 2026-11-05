@@ -35,7 +35,7 @@ use super::answer::{Answer, ChoiceAnswer, DecisionUsage, Evaluation, NoulAnswer,
 use super::backend::{Capabilities, DecisionBackend};
 use super::error::DecisionError;
 use super::question::{Question, QuestionKind, Request};
-use super::systemone::{post_json_billed, with_retries};
+use super::systemone::{client_of, new_client, post_json_billed, with_retries, HttpClient};
 use super::{add_billed, billed_only};
 use crate::retry::RetryConfig;
 use serde_json::{json, Map, Value};
@@ -69,7 +69,7 @@ enum Key {
 /// not OpenAI's; override them with [`with_capabilities`](Self::with_capabilities).
 #[derive(Clone)]
 pub struct OpenAiDecisionBackend {
-    client: super::systemone::HttpClient,
+    client: HttpClient,
     base_url: String,
     key: Key,
     retry: RetryConfig,
@@ -103,7 +103,7 @@ impl OpenAiDecisionBackend {
     /// `OPENAI_API_KEY` at call time.
     pub fn new() -> Self {
         Self {
-            client: super::systemone::new_client(),
+            client: new_client(),
             base_url: OPENAI_BASE_URL.into(),
             key: Key::Env(OPENAI_API_KEY_ENV.into()),
             retry: RetryConfig::default(),
@@ -221,7 +221,7 @@ impl OpenAiDecisionBackend {
     ) -> Result<Evaluation, DecisionError> {
         let (key, var) = self.key()?;
         let value = post_json_billed(
-            super::systemone::client_of(&self.client)?,
+            client_of(&self.client)?,
             &self.endpoint_url(),
             Some(&key),
             body,

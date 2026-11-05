@@ -61,7 +61,8 @@ pub enum DecisionError {
     /// never a value.
     #[error("decision model API key missing: set {0}")]
     MissingApiKey(String),
-    /// A custom backend's own failure, in its words.
+    /// A backend's own failure, in its words: a custom backend's, or a
+    /// built-in one whose HTTP client could not be built.
     #[error("decision backend error: {message}")]
     #[non_exhaustive]
     Backend {

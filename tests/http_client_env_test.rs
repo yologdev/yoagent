@@ -4,9 +4,12 @@
 //! task down (yoyo-evolve#1138). It is an error naming the variable now.
 //!
 //! Its own binary: it sets a process-wide variable before any client is
-//! built. On Linux the TLS setup reads `SSL_CERT_FILE` (rustls-native-certs)
-//! and the error is required; elsewhere the platform's store is used, and
-//! only "no panic" is checked.
+//! built. On Linux and other non-Apple Unix, reqwest's TLS (rustls with
+//! rustls-platform-verifier) loads its CA roots through rustls-native-certs
+//! when the client is built, reading `SSL_CERT_FILE` / `SSL_CERT_DIR`; the
+//! error is required on Linux. Elsewhere the platform's store is used, and
+//! only "no panic" is checked. If reqwest's default trust store changes, the
+//! Linux check fails visibly rather than passing for the wrong reason.
 
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -63,22 +66,34 @@ async fn a_ca_setting_that_loads_nothing_is_an_error_not_a_panic() {
 
     #[cfg(feature = "decision")]
     {
-        use yoagent::decision::{DecisionError, DecisionModel, Question};
-        // Built without a panic; the failure comes back from a request.
-        let model = DecisionModel::local(base);
-        let err = model
-            .evaluate(
-                serde_json::json!({"x": 1}),
-                vec![("q".into(), Question::noul("is x one?"))],
+        use yoagent::decision::{DecisionError, DecisionModel, OpenAiDecisionBackend, Question};
+        // Each built-in backend: built without a panic, the failure comes
+        // back from a request. The OpenAI backend gets a key, or it would
+        // stop at the missing key first.
+        let models = [
+            DecisionModel::local(base),
+            DecisionModel::logprobs(base, "m"),
+            DecisionModel::from_openai_backend(
+                OpenAiDecisionBackend::new().with_base_url(base),
+                "m",
             )
-            .await
-            .expect_err("nothing listens");
-        if cfg!(target_os = "linux") {
-            assert!(
-                matches!(&err, DecisionError::Backend { message, .. } if message.contains("SSL_CERT_FILE")),
-                "{err:?}"
-            );
-            assert!(!err.is_retryable());
+            .with_api_key("sk-test"),
+        ];
+        for model in models {
+            let err = model
+                .evaluate(
+                    serde_json::json!({"x": 1}),
+                    vec![("q".into(), Question::noul("is x one?"))],
+                )
+                .await
+                .expect_err("nothing listens");
+            if cfg!(target_os = "linux") {
+                assert!(
+                    matches!(&err, DecisionError::Backend { message, .. } if message.contains("SSL_CERT_FILE")),
+                    "{err:?}"
+                );
+                assert!(!err.is_retryable());
+            }
         }
     }
 }

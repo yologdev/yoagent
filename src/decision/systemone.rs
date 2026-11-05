@@ -68,14 +68,23 @@ enum Key {
 pub(crate) type HttpClient = Result<reqwest::Client, Arc<reqwest::Error>>;
 
 pub(crate) fn new_client() -> HttpClient {
-    reqwest::Client::builder().build().map_err(Arc::new)
+    reqwest::Client::builder().build().map_err(|e| {
+        // Seen at startup, not only at the first evaluation.
+        tracing::warn!(
+            "decision backend: {}",
+            crate::provider::client_build_error_text(&e)
+        );
+        Arc::new(e)
+    })
 }
 
-/// The client, or why it could not be built (not retried).
+/// The client, or why it could not be built (not retried). The message
+/// carries the whole cause chain, so no `source` is attached (a chain
+/// printer would repeat it).
 pub(crate) fn client_of(client: &HttpClient) -> Result<&reqwest::Client, DecisionError> {
     client.as_ref().map_err(|e| DecisionError::Backend {
         message: crate::provider::client_build_error_text(e),
-        source: Some(Arc::clone(e) as Arc<dyn std::error::Error + Send + Sync>),
+        source: None,
     })
 }
 

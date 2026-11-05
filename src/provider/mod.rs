@@ -225,20 +225,26 @@ mod merge_same_role_tests {
     }
 }
 
-/// Why the HTTP client could not be built, with its causes and the usual
-/// culprit named: a CA setting (`SSL_CERT_FILE` / `SSL_CERT_DIR`) that
-/// loads no certificates.
+/// An error and its causes, each after a `: `.
+pub(crate) fn with_causes(e: &(dyn std::error::Error + 'static)) -> String {
+    std::iter::successors(Some(e), |c| c.source())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(": ")
+}
+
+/// Why the HTTP client could not be built, with its causes and what usually
+/// fixes it. On Linux and other non-Apple Unix, TLS loads its CA roots when
+/// the client is built (rustls-platform-verifier, through
+/// rustls-native-certs): `SSL_CERT_FILE` / `SSL_CERT_DIR` naming nothing
+/// that loads, or a host with no CA bundle at all, fails there.
 pub(crate) fn client_build_error_text(e: &reqwest::Error) -> String {
-    let mut text = e.to_string();
-    let mut source = std::error::Error::source(e);
-    while let Some(cause) = source {
-        text.push_str(": ");
-        text.push_str(&cause.to_string());
-        source = cause.source();
-    }
     format!(
-        "cannot build the HTTP client ({text}). If SSL_CERT_FILE or SSL_CERT_DIR is set, \
-         it must name PEM certificates that load."
+        "cannot build the HTTP client ({}). Usually the CA certificates: SSL_CERT_FILE / \
+         SSL_CERT_DIR, if set, must name PEM certificates (a file, or directories of them) \
+         that load; if neither is set, install the system's CA bundle (e.g. \
+         ca-certificates) or point SSL_CERT_FILE at one.",
+        with_causes(e)
     )
 }
 
