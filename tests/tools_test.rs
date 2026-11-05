@@ -1364,21 +1364,68 @@ async fn a_background_job_that_keeps_printing_survives_the_call() {
 /// #342: a timeout that fires during that grace does not turn a finished
 /// command into a timed-out one, nor kill the job it left running.
 #[cfg(unix)]
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_timeout_during_the_read_grace_keeps_a_finished_command() {
     let dir = tempfile::tempdir().unwrap();
     let pid_file = dir.path().join("pid");
-    let result = BashTool::new()
-        // Inside the 1 s grace, with room for `bash` to start on a busy runner.
-        .with_timeout(std::time::Duration::from_millis(900))
-        .execute(
-            serde_json::json!({
-                "command": format!("sleep 30 & echo $! > {}; echo hi", pid_file.display())
-            }),
-            ctx("bash"),
-        )
-        .await
-        .unwrap();
+    let shell_pid_file = dir.path().join("shell-pid");
+    let command = format!(
+        "sleep 30 & echo $! > {}; echo $$ > {}; echo hi",
+        pid_file.display(),
+        shell_pid_file.display()
+    );
+    let clock = tokio::time::Instant::now();
+    let run = tokio::spawn(async move {
+        BashTool::new()
+            .with_timeout(std::time::Duration::from_millis(900))
+            .execute(serde_json::json!({"command": command}), ctx("bash"))
+            .await
+    });
+    struct Cleanup {
+        run: tokio::task::AbortHandle,
+        pid_file: std::path::PathBuf,
+    }
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            self.run.abort();
+            if let Ok(pid) = std::fs::read_to_string(&self.pid_file) {
+                let _ = std::process::Command::new("kill")
+                    .arg(pid.trim())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+        }
+    }
+    let _cleanup = Cleanup {
+        run: run.abort_handle(),
+        pid_file: pid_file.clone(),
+    };
+    let started = std::time::Instant::now();
+    loop {
+        if let Ok(pid) = std::fs::read_to_string(&shell_pid_file) {
+            // Require a reaped shell, not just a zombie: execute has observed
+            // its status before entering the read grace.
+            if !pid.trim().is_empty()
+                && !std::process::Command::new("kill")
+                    .args(["-0", pid.trim()])
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .unwrap()
+                    .success()
+            {
+                break;
+            }
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        // Keep a task runnable so Tokio cannot auto-advance past the timeout
+        // while the real process is starting or waiting to be reaped.
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(clock.elapsed(), std::time::Duration::ZERO);
+    assert!(!run.is_finished(), "the read grace must still be pending");
+    tokio::time::advance(std::time::Duration::from_millis(900)).await;
+    let result = run.await.unwrap().unwrap();
+    assert_eq!(clock.elapsed(), std::time::Duration::from_millis(900));
     assert_eq!(result.details["exit_code"], 0);
     assert_eq!(result.details["output_still_open"], true);
     let text = match &result.content[0] {
@@ -1388,10 +1435,6 @@ async fn a_timeout_during_the_read_grace_keeps_a_finished_command() {
     assert!(text.contains("hi") && text.contains("NOTE:"), "{text}");
     let pid = background_pid(&pid_file).await;
     assert!(alive(&pid), "the job is left running");
-    std::process::Command::new("kill")
-        .arg(&pid)
-        .status()
-        .unwrap();
 }
 
 /// #341: a FIFO, a device or a directory is refused before any read, write
