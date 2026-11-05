@@ -225,6 +225,39 @@ mod merge_same_role_tests {
     }
 }
 
+/// An error and its causes, each after a `: `.
+pub(crate) fn with_causes(e: &(dyn std::error::Error + 'static)) -> String {
+    std::iter::successors(Some(e), |c| c.source())
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(": ")
+}
+
+/// Why the HTTP client could not be built, with its causes and what usually
+/// fixes it. On Linux and other non-Apple Unix, TLS loads its CA roots when
+/// the client is built (rustls-platform-verifier, through
+/// rustls-native-certs): `SSL_CERT_FILE` / `SSL_CERT_DIR` naming nothing
+/// that loads, or a host with no CA bundle at all, fails there.
+pub(crate) fn client_build_error_text(e: &reqwest::Error) -> String {
+    format!(
+        "cannot build the HTTP client ({}). Usually the CA certificates: SSL_CERT_FILE / \
+         SSL_CERT_DIR, if set, must name PEM certificates (a file, or directories of them) \
+         that load; if neither is set, install the system's CA bundle (e.g. \
+         ca-certificates) or point SSL_CERT_FILE at one.",
+        with_causes(e)
+    )
+}
+
+/// The HTTP client for one provider request. `reqwest::Client::new()`
+/// panics when the client cannot be built (a CA bundle that loads no
+/// certificates), which took down the task running the agent; this is an
+/// error instead, not retried.
+pub(crate) fn http_client() -> Result<reqwest::Client, ProviderError> {
+    reqwest::Client::builder()
+        .build()
+        .map_err(|e| ProviderError::Other(client_build_error_text(&e)))
+}
+
 /// What a model without image input is sent in place of an image.
 pub(crate) const IMAGE_NOT_SENT: &str =
     "[An image was here; this model takes no image input, so it was not sent.]";

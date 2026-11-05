@@ -66,7 +66,7 @@ impl StreamProvider for GoogleVertexProvider {
         // Build request body same as Google (same content format)
         let body = build_vertex_request_body(&config);
 
-        let client = reqwest::Client::new();
+        let client = super::http_client()?;
         let mut request = client
             .post(&vertex_url)
             .header("content-type", "application/json");

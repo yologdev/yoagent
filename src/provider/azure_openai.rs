@@ -66,7 +66,7 @@ impl StreamProvider for AzureOpenAiProvider {
             body["model"], endpoint.url
         );
 
-        let client = reqwest::Client::new();
+        let client = super::http_client()?;
         let mut request = client
             .post(&endpoint.url)
             .header("content-type", "application/json");

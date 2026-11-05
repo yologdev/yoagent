@@ -84,7 +84,7 @@ impl StreamProvider for GoogleProvider {
         let body = build_request_body(&config);
         debug!("Google GenAI request: model={}", config.model);
 
-        let client = reqwest::Client::new();
+        let client = super::http_client()?;
         let mut request = client.post(&url).header("content-type", "application/json");
         if let Some(key) = key {
             request = request.header("x-goog-api-key", key);

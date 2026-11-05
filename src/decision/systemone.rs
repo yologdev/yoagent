@@ -15,7 +15,7 @@ use super::question::{Question, QuestionKind, Request};
 use super::{add_billed, billed_only};
 use crate::retry::RetryConfig;
 use serde_json::Value;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 pub(crate) const TYPESAFE_BASE_URL: &str = "https://api.typesafe.ai";
@@ -61,6 +61,33 @@ enum Key {
     Env(Vec<String>),
 }
 
+/// A decision backend's HTTP client, as it was built. Building one fails when
+/// TLS cannot be set up (a CA setting that loads no certificates);
+/// `reqwest::Client::new()` panicked then, at construction. The failure is
+/// kept and returned by every request instead.
+pub(crate) type HttpClient = Result<reqwest::Client, Arc<reqwest::Error>>;
+
+pub(crate) fn new_client() -> HttpClient {
+    reqwest::Client::builder().build().map_err(|e| {
+        // Seen at startup, not only at the first evaluation.
+        tracing::warn!(
+            "decision backend: {}",
+            crate::provider::client_build_error_text(&e)
+        );
+        Arc::new(e)
+    })
+}
+
+/// The client, or why it could not be built (not retried). The message
+/// carries the whole cause chain, so no `source` is attached (a chain
+/// printer would repeat it).
+pub(crate) fn client_of(client: &HttpClient) -> Result<&reqwest::Client, DecisionError> {
+    client.as_ref().map_err(|e| DecisionError::Backend {
+        message: crate::provider::client_build_error_text(e),
+        source: None,
+    })
+}
+
 /// An HTTP client for the SystemOne API.
 ///
 /// Cheap to clone. Keys named by environment variable are read on every
@@ -68,7 +95,7 @@ enum Key {
 /// `Debug` output or errors.
 #[derive(Clone)]
 pub struct SystemOneBackend {
-    client: reqwest::Client,
+    client: HttpClient,
     endpoint: Endpoint,
     key: Key,
     retry: RetryConfig,
@@ -107,7 +134,7 @@ impl SystemOneBackend {
     /// self-hosted server, or [`with_capabilities`](Self::with_capabilities).
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: new_client(),
             endpoint: Endpoint::Fixed(base_url.into()),
             key: Key::None,
             retry: RetryConfig::default(),
@@ -290,7 +317,7 @@ impl SystemOneBackend {
     ) -> Result<Evaluation, DecisionError> {
         let key = self.key()?;
         let value = post_json_billed(
-            &self.client,
+            client_of(&self.client)?,
             &self.endpoint_url(),
             key.as_ref().map(|(k, _)| k.as_str()),
             body,

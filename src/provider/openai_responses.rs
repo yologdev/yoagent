@@ -47,7 +47,7 @@ impl StreamProvider for OpenAiResponsesProvider {
             config.model, url
         );
 
-        let client = reqwest::Client::new();
+        let client = super::http_client()?;
         let mut request = client
             .post(&url)
             .header("content-type", "application/json")

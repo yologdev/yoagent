@@ -4,6 +4,10 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+- **No panic when the HTTP client cannot be built** (asked for by yoyo-evolve, its #1138). Every provider built its client with `reqwest::Client::new()`, which panics when TLS cannot be set up — on Linux and other non-Apple Unix, `SSL_CERT_FILE` / `SSL_CERT_DIR` naming nothing that loads (an empty, missing or non-PEM file, an empty directory), or a host with no CA bundle ("No CA certificates were loaded from the system") — killing the task running the agent; the decision backends (`SystemOneBackend`, `OpenAiDecisionBackend`, `LogprobBackend`, so every `DecisionModel` preset) did the same in their constructors. Now a provider request returns `ProviderError::Other` (not retried): "cannot build the HTTP client (…). Usually the CA certificates: SSL_CERT_FILE / SSL_CERT_DIR, if set, must name PEM certificates (a file, or directories of them) that load; if neither is set, install the system's CA bundle (e.g. ca-certificates) or point SSL_CERT_FILE at one." A decision backend builds without a panic, logs that at `warn!`, and returns it as `DecisionError::Backend` (not retried) from each request. MCP, OpenAPI and the price fetch already returned an error. A test scans `src/` so a panicking `Client::new()` cannot come back.
+
 ## yoagent-rutis 0.13.0 (2026-11-04)
 
 yoagent-rutis only; requires yoagent 0.27 (was 0.26), rutis 0.20 and Rust 1.88. Plugins' `on_stop` now also sees an answer cut off at the output limit, and the `Stop` event carries `stop_reason` (`Stop::stop_reason`; JSON `"stop"` / `"length"`, the vocabulary `finish`'s `stop_reason` uses), so a verifier can tell a truncated answer from a finished one and send the model back to finish it. `Stop` is `#[non_exhaustive]`, so the field is additive. Released with **yoagent-workers 0.4.0**, a requirement bump to yoagent 0.27 and nothing else.

@@ -6,7 +6,7 @@ use super::answer::{Answer, ChoiceAnswer, DecisionUsage, Evaluation, NoulAnswer,
 use super::backend::{Capabilities, DecisionBackend};
 use super::error::DecisionError;
 use super::question::{Question, QuestionKind, Request};
-use super::systemone::{post_json_billed, with_retries};
+use super::systemone::{client_of, new_client, post_json_billed, with_retries, HttpClient};
 use super::{add_billed, billed_only};
 use crate::retry::RetryConfig;
 use serde_json::{json, Map, Value};
@@ -102,7 +102,7 @@ const KINDS: &[QuestionKind] = &[
 /// [`with_temperature`](Self::with_temperature).
 #[derive(Clone)]
 pub struct LogprobBackend {
-    client: reqwest::Client,
+    client: HttpClient,
     base_url: String,
     key: Option<String>,
     retry: RetryConfig,
@@ -137,7 +137,7 @@ impl LogprobBackend {
         let base_url = base_url.into();
         let local = is_loopback_url(&base_url);
         Self {
-            client: reqwest::Client::new(),
+            client: new_client(),
             base_url,
             key: None,
             retry: RetryConfig::default(),
@@ -306,9 +306,10 @@ impl LogprobBackend {
         let body = serde_json::to_vec(&body)
             .map_err(|e| DecisionError::Invalid(format!("request does not serialize: {e}")))?;
         let url = self.endpoint_url();
+        let client = client_of(&self.client)?;
         let value = with_retries(&self.retry, || {
             post_json_billed(
-                &self.client,
+                client,
                 &url,
                 self.key.as_deref().map(str::trim),
                 &body,

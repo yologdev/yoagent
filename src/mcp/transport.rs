@@ -1340,15 +1340,11 @@ struct Sent {
 /// names the request's URL; that is dropped (see [`url_origin`]).
 fn http_error(context: &str, e: reqwest::Error) -> McpError {
     let e = e.without_url();
-    let mut text = e.to_string();
-    if e.is_redirect() {
-        let mut source = std::error::Error::source(&e);
-        while let Some(cause) = source {
-            text.push_str(": ");
-            text.push_str(&cause.to_string());
-            source = cause.source();
-        }
-    }
+    let text = if e.is_redirect() {
+        crate::provider::with_causes(&e)
+    } else {
+        e.to_string()
+    };
     McpError::Transport(format!("{context}: {text}"))
 }
 
