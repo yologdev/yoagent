@@ -107,7 +107,7 @@ impl StreamProvider for BedrockProvider {
             sigv4::amz_date_now,
         )?;
 
-        let request = reqwest::Client::new()
+        let request = super::http_client()?
             .post(parsed_url)
             .headers(headers)
             .body(body);

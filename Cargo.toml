@@ -99,6 +99,10 @@ name = "sub_agent"
 required-features = ["native"]
 
 [[test]]
+name = "http_client_env_test"
+required-features = ["native"]
+
+[[test]]
 name = "tools_test"
 required-features = ["native"]
 

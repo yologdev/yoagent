@@ -126,7 +126,7 @@ impl StreamProvider for AnthropicProvider {
             "Anthropic request: model={}, url={}, oauth={}",
             config.model, url, is_oauth
         );
-        let client = reqwest::Client::new();
+        let client = super::http_client()?;
         let mut builder = client
             .post(&url)
             .header("anthropic-version", API_VERSION)

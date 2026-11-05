@@ -225,6 +225,33 @@ mod merge_same_role_tests {
     }
 }
 
+/// Why the HTTP client could not be built, with its causes and the usual
+/// culprit named: a CA setting (`SSL_CERT_FILE` / `SSL_CERT_DIR`) that
+/// loads no certificates.
+pub(crate) fn client_build_error_text(e: &reqwest::Error) -> String {
+    let mut text = e.to_string();
+    let mut source = std::error::Error::source(e);
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    format!(
+        "cannot build the HTTP client ({text}). If SSL_CERT_FILE or SSL_CERT_DIR is set, \
+         it must name PEM certificates that load."
+    )
+}
+
+/// The HTTP client for one provider request. `reqwest::Client::new()`
+/// panics when the client cannot be built (a CA bundle that loads no
+/// certificates), which took down the task running the agent; this is an
+/// error instead, not retried.
+pub(crate) fn http_client() -> Result<reqwest::Client, ProviderError> {
+    reqwest::Client::builder()
+        .build()
+        .map_err(|e| ProviderError::Other(client_build_error_text(&e)))
+}
+
 /// What a model without image input is sent in place of an image.
 pub(crate) const IMAGE_NOT_SENT: &str =
     "[An image was here; this model takes no image input, so it was not sent.]";

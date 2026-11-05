@@ -102,7 +102,7 @@ const KINDS: &[QuestionKind] = &[
 /// [`with_temperature`](Self::with_temperature).
 #[derive(Clone)]
 pub struct LogprobBackend {
-    client: reqwest::Client,
+    client: super::systemone::HttpClient,
     base_url: String,
     key: Option<String>,
     retry: RetryConfig,
@@ -137,7 +137,7 @@ impl LogprobBackend {
         let base_url = base_url.into();
         let local = is_loopback_url(&base_url);
         Self {
-            client: reqwest::Client::new(),
+            client: super::systemone::new_client(),
             base_url,
             key: None,
             retry: RetryConfig::default(),
@@ -306,9 +306,10 @@ impl LogprobBackend {
         let body = serde_json::to_vec(&body)
             .map_err(|e| DecisionError::Invalid(format!("request does not serialize: {e}")))?;
         let url = self.endpoint_url();
+        let client = super::systemone::client_of(&self.client)?;
         let value = with_retries(&self.retry, || {
             post_json_billed(
-                &self.client,
+                client,
                 &url,
                 self.key.as_deref().map(str::trim),
                 &body,

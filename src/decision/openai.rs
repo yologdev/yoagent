@@ -69,7 +69,7 @@ enum Key {
 /// not OpenAI's; override them with [`with_capabilities`](Self::with_capabilities).
 #[derive(Clone)]
 pub struct OpenAiDecisionBackend {
-    client: reqwest::Client,
+    client: super::systemone::HttpClient,
     base_url: String,
     key: Key,
     retry: RetryConfig,
@@ -103,7 +103,7 @@ impl OpenAiDecisionBackend {
     /// `OPENAI_API_KEY` at call time.
     pub fn new() -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: super::systemone::new_client(),
             base_url: OPENAI_BASE_URL.into(),
             key: Key::Env(OPENAI_API_KEY_ENV.into()),
             retry: RetryConfig::default(),
@@ -221,7 +221,7 @@ impl OpenAiDecisionBackend {
     ) -> Result<Evaluation, DecisionError> {
         let (key, var) = self.key()?;
         let value = post_json_billed(
-            &self.client,
+            super::systemone::client_of(&self.client)?,
             &self.endpoint_url(),
             Some(&key),
             body,
