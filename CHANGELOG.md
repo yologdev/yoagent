@@ -4,7 +4,9 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.27.1 (2026-11-05)
+
+A fix: no panic when the HTTP client cannot be built. yoagent-rutis (0.13.0) and yoagent-workers (0.4.0) are unchanged.
 
 - **No panic when the HTTP client cannot be built** (asked for by yoyo-evolve, its #1138). Every provider built its client with `reqwest::Client::new()`, which panics when TLS cannot be set up — on Linux and other non-Apple Unix, `SSL_CERT_FILE` / `SSL_CERT_DIR` naming nothing that loads (an empty, missing or non-PEM file, an empty directory), or a host with no CA bundle ("No CA certificates were loaded from the system") — killing the task running the agent; the decision backends (`SystemOneBackend`, `OpenAiDecisionBackend`, `LogprobBackend`, so every `DecisionModel` preset) did the same in their constructors. Now a provider request returns `ProviderError::Other` (not retried): "cannot build the HTTP client (…). Usually the CA certificates: SSL_CERT_FILE / SSL_CERT_DIR, if set, must name PEM certificates (a file, or directories of them) that load; if neither is set, install the system's CA bundle (e.g. ca-certificates) or point SSL_CERT_FILE at one." A decision backend builds without a panic, logs that at `warn!`, and returns it as `DecisionError::Backend` (not retried) from each request. MCP, OpenAPI and the price fetch already returned an error. A test scans `src/` so a panicking `Client::new()` cannot come back.
 
