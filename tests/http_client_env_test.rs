@@ -34,7 +34,11 @@ async fn a_ca_setting_that_loads_nothing_is_an_error_not_a_panic() {
     std::fs::write(&empty, "").unwrap();
     // SAFETY: this binary has one test, and nothing else reads the
     // environment while it runs.
-    unsafe { std::env::set_var("SSL_CERT_FILE", &empty) };
+    unsafe {
+        std::env::set_var("SSL_CERT_FILE", &empty);
+        // A directory would add its certificates to the file's.
+        std::env::remove_var("SSL_CERT_DIR");
+    }
     // Nothing listens there: where the platform store is used, the request
     // fails as a network error, which is fine too.
     let base = "http://127.0.0.1:9";
