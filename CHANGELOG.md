@@ -4,10 +4,6 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
-
-- Make the bash read-grace timeout regression wait for the shell to exit before advancing a paused test clock, so slow process startup does not turn it into a command-timeout test (#413).
-
 ## yoagent-rutis 0.13.0 (2026-11-04)
 
 yoagent-rutis only; requires yoagent 0.27 (was 0.26), rutis 0.20 and Rust 1.88. Plugins' `on_stop` now also sees an answer cut off at the output limit, and the `Stop` event carries `stop_reason` (`Stop::stop_reason`; JSON `"stop"` / `"length"`, the vocabulary `finish`'s `stop_reason` uses), so a verifier can tell a truncated answer from a finished one and send the model back to finish it. `Stop` is `#[non_exhaustive]`, so the field is additive. Released with **yoagent-workers 0.4.0**, a requirement bump to yoagent 0.27 and nothing else.
