@@ -49,6 +49,16 @@ let agent = Agent::from_config(config);
 - **Unpriced** (`cost: None`). Bedrock bills its own rates, and regional and
   geographic profiles (`us.`, `eu.`, …) and in-Region calls carry a 10% premium
   over `global.` ones; set `config.cost` yourself if you want cost reporting.
+  `ModelConfig::bedrock_anthropic_id(id)` gives the Anthropic id behind a Bedrock
+  id (`"us.anthropic.claude-sonnet-4-6"` → `"claude-sonnet-4-6"`, by the
+  preset's own rules; only Claude models with a preset are mapped), so you can
+  look Anthropic's rates up and apply your Bedrock rule:
+
+  ```rust
+  let id = ModelConfig::bedrock_anthropic_id("us.anthropic.claude-sonnet-4-6").unwrap();
+  let base = ModelConfig::preset("anthropic", &id).and_then(|c| c.cost); // after prices::enable_bundled()
+  // config.cost = base.map(|c| /* your Bedrock premium */ c);
+  ```
 - **Thinking.** This provider sends budget-based thinking
   (`additionalModelRequestFields.thinking`) for every `ThinkingLevel` but
   `Off` (the default). Claude Sonnet 5.5, Opus 5.5, Haiku 5.5 and Fable 5.1

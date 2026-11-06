@@ -2276,15 +2276,51 @@ impl ModelConfig {
             .map(|(_, _, preset)| preset())
     }
 
-    /// A Claude preset on Amazon Bedrock (see [`preset`](Self::preset)).
-    fn bedrock_preset(id: &str) -> Option<ModelConfig> {
+    /// The Anthropic model id behind a Bedrock model id or cross-Region
+    /// inference profile id — the id [`preset("bedrock", ..)`](Self::preset)
+    /// resolves, by the same rules (prefixes `global`, `us`, `us-gov`, `eu`,
+    /// `apac`, `jp`, `au`, `ca`, `in`; Bedrock's spelling of Haiku 4.5), or
+    /// `None` where that finds nothing. Only Claude models with a yoagent
+    /// preset are mapped (Bedrock ids are listed as AWS's model cards spell
+    /// them; others are added when verified).
+    ///
+    /// For pricing Bedrock yourself: the Bedrock preset is unpriced, because
+    /// Bedrock bills its own rates — regional and geographic profiles and
+    /// in-Region calls bill 10% more than `global` ones — so look the
+    /// Anthropic rates up by this id and apply your own Bedrock rule.
+    ///
+    /// ```
+    /// # use yoagent::provider::ModelConfig;
+    /// assert_eq!(
+    ///     ModelConfig::bedrock_anthropic_id("us.anthropic.claude-sonnet-4-6").as_deref(),
+    ///     Some("claude-sonnet-4-6")
+    /// );
+    /// assert_eq!(
+    ///     ModelConfig::bedrock_anthropic_id("anthropic.claude-haiku-4-5-20251001-v1:0").as_deref(),
+    ///     Some("claude-haiku-4-5")
+    /// );
+    /// assert_eq!(ModelConfig::bedrock_anthropic_id("xx.anthropic.claude-sonnet-4-6"), None);
+    ///
+    /// // The vendor's rates (after `prices::enable_bundled()` or a live source).
+    /// let id = ModelConfig::bedrock_anthropic_id("eu.anthropic.claude-sonnet-4-6").unwrap();
+    /// let _rates = ModelConfig::preset("anthropic", &id).and_then(|c| c.cost);
+    /// ```
+    pub fn bedrock_anthropic_id(id: &str) -> Option<String> {
         let model = match id.split_once('.') {
             Some((prefix, rest)) if BEDROCK_PROFILE_PREFIXES.contains(&prefix) => rest,
             _ => id,
         };
         let model = model.strip_prefix("anthropic.")?;
-        let (_, anthropic_id) = BEDROCK_CLAUDE_IDS.iter().find(|(b, _)| *b == model)?;
-        let vendor = Self::named_preset("anthropic", anthropic_id)?;
+        BEDROCK_CLAUDE_IDS
+            .iter()
+            .find(|(b, _)| *b == model)
+            .map(|(_, anthropic_id)| (*anthropic_id).to_owned())
+    }
+
+    /// A Claude preset on Amazon Bedrock (see [`preset`](Self::preset)).
+    fn bedrock_preset(id: &str) -> Option<ModelConfig> {
+        let anthropic_id = Self::bedrock_anthropic_id(id)?;
+        let vendor = Self::named_preset("anthropic", &anthropic_id)?;
         Some(Self {
             id: id.to_owned(),
             api: ApiProtocol::BedrockConverseStream,
@@ -3270,6 +3306,40 @@ mod tests {
     }
 
     #[test]
+    fn bedrock_anthropic_id_names_the_anthropic_model() {
+        for prefix in [
+            "", "global.", "us.", "us-gov.", "eu.", "apac.", "jp.", "au.", "ca.", "in.",
+        ] {
+            let id = format!("{prefix}anthropic.claude-sonnet-4-6");
+            assert_eq!(
+                ModelConfig::bedrock_anthropic_id(&id).as_deref(),
+                Some("claude-sonnet-4-6"),
+                "{id}"
+            );
+        }
+        // Bedrock's own spelling of Haiku 4.5, without a profile.
+        assert_eq!(
+            ModelConfig::bedrock_anthropic_id("anthropic.claude-haiku-4-5-20251001-v1:0")
+                .as_deref(),
+            Some("claude-haiku-4-5")
+        );
+        // Every Bedrock id the preset knows: the Anthropic id is the preset's.
+        for (bedrock, anthropic) in BEDROCK_CLAUDE_IDS {
+            let id = format!("global.anthropic.{bedrock}");
+            assert_eq!(
+                ModelConfig::bedrock_anthropic_id(&id).as_deref(),
+                Some(*anthropic),
+                "{id}"
+            );
+            assert!(ModelConfig::preset("bedrock", &id).is_some(), "{id}");
+            assert!(
+                ModelConfig::preset("anthropic", anthropic).is_some(),
+                "{anthropic}"
+            );
+        }
+    }
+
+    #[test]
     fn bedrock_preset_refuses_near_misses() {
         for id in [
             "",
@@ -3301,6 +3371,7 @@ mod tests {
             "openai.gpt-oss-120b-1:0",
         ] {
             assert!(ModelConfig::preset("bedrock", id).is_none(), "{id:?}");
+            assert_eq!(ModelConfig::bedrock_anthropic_id(id), None, "{id:?}");
         }
         // Only the provider name `bedrock` reads Bedrock ids.
         assert!(ModelConfig::preset("aws-bedrock", "us.anthropic.claude-sonnet-4-6").is_none());
