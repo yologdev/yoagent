@@ -51,7 +51,9 @@ Use a preset when the provider is listed here. Use a custom `ModelConfig` when y
 | `ModelConfig::local(base_url, model_id)` | Local compatible server | `OpenAiCompletions` | caller provided | 128K | 4,096 |
 | `ModelConfig::custom(api, provider, base_url, model_id, name)` | Any (Azure, Bedrock, Vertex, gateways) | caller provided | caller provided | 128K | 16,000 |
 
-The generic constructors (`google(id, name)`, `xai`, `mistral`, …) assume conservative limits; for a model with a named preset, use the preset — it carries the model's real context window and output limit (a generic `ModelConfig::xai("grok-4.7", ..)` compacts at 131K and stops replies at 4,096 tokens). The constructors do not validate model IDs. They send the `id` you pass through to the provider, which lets you use newly released model IDs before yoagent updates its examples.
+The generic constructors (`google(id, name)`, `xai`, `mistral`, …) assume conservative limits unless the price table states the model's (below); for a model with a named preset, use the preset — it carries the model's real context window and output limit (a generic `ModelConfig::xai("grok-4.7", ..)` compacts at 131K and stops replies at 4,096 tokens). The constructors do not validate model IDs. They send the `id` you pass through to the provider, which lets you use newly released model IDs before yoagent updates its examples.
+
+**Limits from the price table.** A model with no named preset can still have its real limits: when its entry in the price data (`src/provider/prices.json`, or a user or fetched table — see [Model Pricing](../concepts/pricing.md#limits)) states `context_window` and `max_output`, the generic constructor uses them — the context window, and `max_tokens` as half of `max_output`, at most 64,000 (the presets' rule). The bundled snapshot's limits apply whether or not pricing is enabled. `ModelConfig::anthropic("claude-opus-4-6", ..)` gets 1M / 64K this way; so does `ModelConfig::preset("openrouter", "anthropic/claude-opus-4.6")`. A preset's own limits win.
 
 When such a config becomes an agent's (`Agent::from_config` / `from_provider` / `set_model`, `SubAgentTool`'s constructors) with both limits still at the generic constructor's defaults and no preset of those limits for that provider and id, yoagent logs one `warn!` per model per process saying the limits are guesses, and pointing at `ModelConfig::preset(..)` when one exists. Setting `context_window` or `max_tokens` (or using the preset) silences it. Only configs a first-party generic constructor built, still at its base URL, are checked: gateways and custom endpoints (`openai_compat`, `custom`, a changed `base_url`, `anthropic` with an id not starting `claude-`) and local servers are not, whatever their `provider` string. The deprecated `Agent::new` + `with_model_config` path does not check.
 
@@ -90,8 +92,9 @@ flag):
   the vendor preset's limits and `cost: None` (a gateway). The model is the
   vendor's id as OpenRouter lists it, which for Claude writes the version
   with a dot: `anthropic/claude-sonnet-4.6`, `anthropic/claude-opus-5`,
-  `openai/gpt-6-sol`, `x-ai/grok-4.7`. The dashed Anthropic spelling and
-  variants such as `:batch` find nothing.
+  `openai/gpt-6-sol`, `x-ai/grok-4.7`. A vendor model with no preset whose
+  limits the price table states is found too (`anthropic/claude-opus-4.6`).
+  The dashed Anthropic spelling and variants such as `:batch` find nothing.
 - `ModelConfig::generic(provider, id)` — the provider's generic constructor
   (`anthropic`, `openai`, `google`, `xai`, `groq`, `deepseek`, `mistral`,
   `zai`, `minimax`, `qwen`, `meta`), **never a preset**: the context window

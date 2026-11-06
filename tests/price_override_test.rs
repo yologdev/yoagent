@@ -571,3 +571,27 @@ fn a_miss_under_a_user_table_alone_is_warned_once_per_model() {
     assert!(config.cost.is_none());
     assert!(warns.is_empty(), "{warns:?}");
 }
+
+/// Limits follow the layers like prices: a user table's limits win over the
+/// bundled snapshot's; an entry without limits leaves the snapshot's.
+#[test]
+fn a_user_table_s_limits_win_over_the_snapshot_s() {
+    let _guard = exclusive();
+    assert_eq!(
+        ModelConfig::anthropic("claude-opus-4-6", "x").context_window,
+        1_000_000
+    );
+    let _ = global::install_override(table(
+        r#"{"schema": 1, "providers": {"anthropic": {
+            "claude-opus-4-6": {"input": 5, "output": 25, "context_window": 500000, "max_output": 20000},
+            "claude-opus-4-7": {"input": 5, "output": 25}}}}"#,
+    ));
+    let overridden = ModelConfig::anthropic("claude-opus-4-6", "x");
+    assert_eq!(
+        (overridden.context_window, overridden.max_tokens),
+        (500_000, 10_000)
+    );
+    let kept = ModelConfig::anthropic("claude-opus-4-7", "x");
+    assert_eq!((kept.context_window, kept.max_tokens), (1_000_000, 64_000));
+    global::clear_override();
+}

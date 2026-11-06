@@ -619,6 +619,37 @@ pub(crate) fn resolved_cost(provider: &str, id: &str) -> Option<CostConfig> {
     cost
 }
 
+/// The `(context_window, max_output)` a first-party constructor gets for
+/// `(provider, id)`: the table in effect's entry when it states limits (a
+/// user or fetched table, or the snapshot when enabled), else the bundled
+/// snapshot's — limits apply whether or not pricing is enabled.
+pub(crate) fn resolved_limits(provider: &str, id: &str) -> Option<(u32, u32)> {
+    let in_effect = read_layers()
+        .resolved
+        .entry(provider, id)
+        .and_then(super::PriceEntry::limits);
+    in_effect.or_else(|| {
+        super::builtin_ref()
+            .entry(provider, id)
+            .and_then(super::PriceEntry::limits)
+    })
+}
+
+/// Every id of `provider` whose limits [`resolved_limits`] finds: the table
+/// in effect's and the bundled snapshot's, sorted, without duplicates.
+pub(crate) fn ids_with_limits(provider: &str) -> Vec<String> {
+    let in_effect = read_layers().resolved.clone();
+    let mut ids: Vec<String> = [&in_effect, super::builtin_ref()]
+        .into_iter()
+        .flat_map(|table| table.iter())
+        .filter(|(p, _, entry)| *p == provider && entry.limits().is_some())
+        .map(|(_, id, _)| id.to_string())
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
 /// Whether this is the first unpriced lookup of `(provider, id)` warned
 /// about by [`resolved_cost`].
 fn first_miss(provider: &str, id: &str) -> bool {

@@ -177,6 +177,38 @@ println!("{}", combined.to_json());                   // back to the same format
 `PriceError` is `Clone` and `#[non_exhaustive]`. `Json`, `Io` and `Http`
 errors name the file or URL they came from.
 
+## Limits
+
+An entry may also state the model's limits, as a pair:
+
+```json
+"claude-opus-4-6": {
+  "input": 5.0, "output": 25.0, "cache_read": 0.5, "cache_write": 6.25,
+  "context_window": 1000000, "max_output": 128000,
+  "source": "https://platform.claude.com/docs/en/models/opus-4-6/overview",
+  "verified": "2026-11-06"
+}
+```
+
+A first-party constructor uses them for a model with **no named preset**:
+the context window, and `max_tokens` as half of `max_output`, at most 64,000
+(the presets' rule). So a model gets its real limits from one data row
+instead of a new constructor and a release.
+
+- **The bundled snapshot's limits always apply**, whether or not pricing is
+  enabled: a wrong limit costs no more than the generic guess it replaces.
+  Prices stay opt-in.
+- A user table (`install_override`, `YOAGENT_PRICES`) or a fetched one wins
+  over the snapshot, entry by entry; an entry without limits leaves the
+  snapshot's. models.dev's `limit.context` / `limit.output` are mapped when
+  they make sense (above 0, output no larger than the context).
+- A named preset's own limits win over all of these. Limits are read when a
+  config is built; `reprice` leaves them alone.
+- Validation: both or neither, above 0, `max_output` no larger than
+  `context_window`. They do not change what is billed, so they did not bump
+  `schema`; an older release reading this crate's published file ignores
+  them.
+
 ## Which constructors are priced
 
 Constructors look `(provider, id)` up in the process-wide table **when the

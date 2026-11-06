@@ -297,8 +297,12 @@ async fn fetches_models_dev_format_from_a_url() {
         // Same mapping, but entries name the URL they came from.
         let mut expected = PriceTable::new();
         for (p, m, e) in PriceTable::from_models_dev_json(MODELS_DEV).unwrap().iter() {
-            let entry =
+            let mut entry =
                 yoagent::provider::PriceEntry::new(e.cost.clone()).with_source(source.url());
+            // models.dev's limits come along.
+            if let Some((context, output)) = e.limits() {
+                entry = entry.with_limits(context, output);
+            }
             expected.insert(p, m, entry).unwrap();
         }
         expected

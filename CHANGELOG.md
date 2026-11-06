@@ -4,6 +4,11 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+- **Model limits as data** (asked for by yoyo-evolve, its #1141). A price-table entry may state the model's `context_window` and `max_output`; a first-party constructor uses them for a model with **no named preset** — the context window, and `max_tokens` as half of `max_output`, at most 64,000 (the presets' rule) — so such a model is no longer left on the provider's generic defaults and the "limits are guesses" warning. **The bundled snapshot's limits always apply, whether or not pricing is enabled** (prices stay opt-in); a user or fetched table's limits win over the snapshot's, and a named preset's own limits win over both. models.dev's `limit.context` / `limit.output` are mapped. `ModelConfig::preset("openrouter", "vendor/model")` also finds a vendor model the table gives limits. `PriceEntry` gains `context_window` / `max_output` (`with_limits`, `limits()`; `#[non_exhaustive]`, so additive); not a billing field, so no `schema` bump. Adding a model's limits is now one verified data row, not a constructor and a release.
+- **Claude Opus 4.7, 4.6 and 4.5** (legacy, still served): entries with limits and prices from each model's page and the pricing page — 1M / 128K, 1M / 128K, 200K / 64K; $5 / $25, cache read $0.50, 5-minute cache write $6.25 — so `ModelConfig::anthropic("claude-opus-4-6", ..)` gets 1M context and 64K `max_tokens`, and `preset("openrouter", "anthropic/claude-opus-4.6")` resolves. Not added: Claude Opus 4.1 (retired 2026-08-05) and Sonnet 4.5 (retiring 2026-11-30), per Anthropic's deprecations page.
+
 ## 0.27.1 (2026-11-05)
 
 A fix: no panic when the HTTP client cannot be built. yoagent-rutis (0.13.0) and yoagent-workers (0.4.0) are unchanged.
