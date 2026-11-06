@@ -5,7 +5,7 @@ description: Use when building, extending or upgrading an agent on the yoagent R
 
 # yoagent: which feature for which job
 
-Written for **yoagent 0.27.1** (and yoagent-rutis 0.13.0); the recipes
+Written for **yoagent 0.27.2** (and yoagent-rutis 0.13.0); the recipes
 below are compiled by `tests/skill_test.rs`, line for line. Check what you
 build against: `cargo tree -p yoagent` or `Cargo.lock`. If you are on an
 older version, read [What changed](#what-changed) first.
@@ -281,6 +281,13 @@ UI, model layer, agents) rather than add agent tools.
 
 Newest first; the full list is `CHANGELOG.md`.
 
+- **0.27.2** — additive. Model limits are data: a price-table entry may
+  carry `context_window` / `max_output` (`PriceEntry::with_limits`), and a
+  first-party constructor uses them for a model with no named preset — the
+  bundled snapshot's limits apply even with pricing off (prices stay
+  opt-in). Claude Opus 4.7 / 4.6 / 4.5 rows. `ModelConfig::bedrock_anthropic_id`
+  maps a Bedrock id to the Anthropic id behind it, so a host can price
+  Bedrock usage with its own rule.
 - **0.27.1** — no panic when the HTTP client cannot be built: a CA
   setting that loads nothing (`SSL_CERT_FILE` / `SSL_CERT_DIR` on Linux
   and other non-Apple Unix), or a host with no CA bundle, is a

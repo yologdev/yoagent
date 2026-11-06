@@ -362,6 +362,8 @@ fn prose_names() {
     let _ = yoagent::tools::default_tools;
     let _ = yoagent::session::Session::new;
     let _ = ModelConfig::preset;
+    let _ = ModelConfig::bedrock_anthropic_id;
+    let _ = |e: yoagent::provider::prices::PriceEntry| e.with_limits(1, 1);
     let _ = |c: ModelConfig| c.with_image_input(false);
     #[cfg(feature = "native")]
     let _ = |t: yoagent::tools::ReadFileTool| t.with_max_image_bytes(1);
