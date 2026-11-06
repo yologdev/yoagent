@@ -385,9 +385,12 @@ impl SubAgentTool {
         self
     }
 
-    /// Set the sampling temperature for the sub-agent. Note: the newest
-    /// reasoning models (e.g. Claude Fable 5 / Opus 4.7+) reject sampling
-    /// parameters — leave unset for those.
+    /// Set the sampling temperature for the sub-agent. It is not sent to a
+    /// model whose [`ModelConfig::sampling_params`] is off — a Claude model
+    /// from 4.7 on (Fable, Opus 4.7+, Sonnet 5, Haiku 5.5, …) rejects it
+    /// with a 400. The flag is read from the sub-agent's `ModelConfig`; with
+    /// none (`SubAgentTool::new` without `with_model_config`), the
+    /// temperature is sent as given.
     pub fn with_temperature(mut self, temperature: f32) -> Self {
         self.temperature = Some(temperature);
         self
