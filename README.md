@@ -13,9 +13,9 @@
 [![][license-shield]][license-link]
 [![][deepwiki-shield]][deepwiki-link]
 
-**The agent loop for Rust.** Stream from any of 7 LLM protocols, run tools, loop until done.
+**The agent loop for Rust.** Stream from any LLM protocol, run tools and extensions, loop until done.
 
-[A loop library, not an agent](https://yologdev.github.io/yoagent/design-philosophy.html): it powers [yoyo](https://github.com/yologdev/yoyo-evolve), a coding agent evolving its own source since March 2026, and runs from a laptop to a Cloudflare Worker.
+[A loop library, not an agent](https://yologdev.github.io/yoagent/design-philosophy.html): it powers [yoyo](https://github.com/yologdev/yoyo-evolve), a coding agent evolving its own source since March 2026. Your agent ships as one native binary, or builds for wasm32 to run in a Cloudflare Worker.
 
 </div>
 
@@ -243,15 +243,15 @@ Built something on yoagent? [Open a PR](CONTRIBUTING.md) and add it here — we'
 
 | | | |
 |---|---|---|
-| **The loop** | Full event stream; parallel, sequential or batched tools; steering and follow-ups; execution limits; retry with backoff and jitter | [Agent loop](https://yologdev.github.io/yoagent/concepts/agent-loop.html) · [Events](https://yologdev.github.io/yoagent/concepts/messages-events.html) · [Retry](https://yologdev.github.io/yoagent/concepts/retry.html) |
-| **Extensions** | One plug-in contract for the run; `Budget`; the older hooks (`ToolMiddleware`, input filters, `TurnHook`, callbacks) still work | [Extensions](https://yologdev.github.io/yoagent/concepts/extensions.html) · [Callbacks](https://yologdev.github.io/yoagent/concepts/callbacks.html) |
-| **Providers** | 7 native protocols reaching 20+ providers; thinking controls; prompt-cache hints; one context-overflow classifier | [Providers](https://yologdev.github.io/yoagent/providers/overview.html) · [Prompt caching](https://yologdev.github.io/yoagent/concepts/prompt-caching.html) |
-| **Tools** | `bash`, file read/write/edit, `list_files`, `search`; custom tools via one trait; MCP over stdio or HTTP; OpenAPI specs; `ToolSource`s (per run, and mid-run when they change — MCP `list_changed` included) | [Tools](https://yologdev.github.io/yoagent/concepts/tools.html) · [MCP](https://yologdev.github.io/yoagent/guides/mcp.html) · [OpenAPI](https://yologdev.github.io/yoagent/guides/openapi.html) |
+| **The loop** | Full event stream; parallel, sequential or batched tools; steering and follow-ups; execution limits; retry with backoff and jitter; unanswered tool calls closed | [Agent loop](https://yologdev.github.io/yoagent/concepts/agent-loop.html) · [Events](https://yologdev.github.io/yoagent/concepts/messages-events.html) · [Retry](https://yologdev.github.io/yoagent/concepts/retry.html) |
+| **Extensions** | One plug-in contract for the run; `on_stop` sees cut-off answers too; `Budget`; the older hooks (`ToolMiddleware`, input filters, `TurnHook`, callbacks) still work | [Extensions](https://yologdev.github.io/yoagent/concepts/extensions.html) · [Callbacks](https://yologdev.github.io/yoagent/concepts/callbacks.html) |
+| **Providers** | 7 native protocols reaching 20+ providers, or your own `StreamProvider`; thinking controls; prompt-cache hints; one context-overflow classifier; images sent the way each protocol takes them, or a text note with `image_input` off | [Providers](https://yologdev.github.io/yoagent/providers/overview.html) · [Prompt caching](https://yologdev.github.io/yoagent/concepts/prompt-caching.html) |
+| **Tools** | `bash`, file read/write/edit, `list_files`, `search`; custom tools via one trait; MCP over stdio or HTTP; OpenAPI specs; `ToolSource`s (refreshed mid-run, MCP `list_changed` included); per-file locking, images checked before sending, no overwrite after a partial read (`ReadLog`, on in `default_tools()`) | [Tools](https://yologdev.github.io/yoagent/concepts/tools.html) · [MCP](https://yologdev.github.io/yoagent/guides/mcp.html) · [OpenAPI](https://yologdev.github.io/yoagent/guides/openapi.html) |
 | **Sub-agents** | Child loops with their own model and tools; large artifacts passed by reference; spend rolled up | [Sub-agents](https://yologdev.github.io/yoagent/concepts/sub-agents.html) |
 | **Context** | Usage-calibrated tracking, tiered compaction, optional `LlmCompaction`, loop detection | [Context management](https://yologdev.github.io/yoagent/concepts/context-management.html) |
 | **Sessions, skills, structured output** | Branching session trees with JSONL; AgentSkills `SKILL.md`; typed `prompt_structured::<T>()` | [Sessions](https://yologdev.github.io/yoagent/concepts/session-trees.html) · [Skills](https://yologdev.github.io/yoagent/concepts/skills.html) · [Structured outputs](https://yologdev.github.io/yoagent/concepts/structured-outputs.html) |
 | **Decision models** (`decision`) | Typed yes/no, one-of-N and score judgments in a few hundred ms (Jev, Clef, OpenAI Decisions, any logprobs server); a tool gate and an input guard | [Decision models](https://yologdev.github.io/yoagent/concepts/decision-models.html) |
-| **Cost and telemetry** | Opt-in pricing (nothing priced by default); `SessionStats` per run incl. sub-agents; `tracing` spans with tokens and cost | [Pricing](https://yologdev.github.io/yoagent/concepts/pricing.html) · [Telemetry](https://yologdev.github.io/yoagent/concepts/telemetry.html) |
+| **Cost and telemetry** | Opt-in pricing (nothing priced by default); model limits from the same table, applied even with pricing off; `SessionStats` per run incl. sub-agents; `tracing` spans with tokens and cost | [Pricing](https://yologdev.github.io/yoagent/concepts/pricing.html) · [Telemetry](https://yologdev.github.io/yoagent/concepts/telemetry.html) |
 | **Recording** (`gasp`) | serde on every core type; runs recorded into a [GASP](https://github.com/yologdev/gasp) repo, plugin logs too (opt-in) | [Persistence](https://yologdev.github.io/yoagent/concepts/persistence.html) · [GASP](https://yologdev.github.io/yoagent/concepts/gasp.html) |
 | **WebAssembly** | `--no-default-features` for `wasm32-unknown-unknown`, e.g. Cloudflare Workers | [WebAssembly & Workers](https://yologdev.github.io/yoagent/guides/wasm-workers.html) |
 

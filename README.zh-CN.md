@@ -13,9 +13,9 @@
 [![][license-shield]][license-link]
 [![][deepwiki-shield]][deepwiki-link]
 
-**Rust 的 agent 循环。** 从 7 种 LLM 协议中任选其一流式输出，执行工具，循环直到完成。
+**Rust 的 agent 循环。** 从任意 LLM 协议流式输出，执行工具和扩展，循环直到完成。
 
-[是循环库，不是 agent](https://yologdev.github.io/yoagent/design-philosophy.zh-CN.html)：它驱动着 [yoyo](https://github.com/yologdev/yoyo-evolve)——一个自 2026 年 3 月起不断演化自身源码的编程 agent。它可以从笔记本电脑一直跑到 Cloudflare Worker。
+[是循环库，不是 agent](https://yologdev.github.io/yoagent/design-philosophy.zh-CN.html)：它驱动着 [yoyo](https://github.com/yologdev/yoyo-evolve)——一个自 2026 年 3 月起不断演化自身源码的编程 agent。你的 agent 是一个原生二进制文件，也可以编译成 wasm32 跑在 Cloudflare Worker 里。
 
 </div>
 
@@ -200,15 +200,15 @@ yoagent 自己的预算、工具闸门和输入守卫也是这样构建的。六
 
 | | | |
 |---|---|---|
-| **循环** | 完整事件流；并行、顺序或分批执行工具；引导和后续消息；执行限制；带退避和抖动的重试 | [Agent 循环](https://yologdev.github.io/yoagent/concepts/agent-loop.html) · [事件](https://yologdev.github.io/yoagent/concepts/messages-events.html) · [重试](https://yologdev.github.io/yoagent/concepts/retry.html) |
-| **扩展** | 整个运行一份插件契约；`Budget`；旧的钩子（`ToolMiddleware`、输入过滤器、`TurnHook`、回调）仍然可用 | [扩展](https://yologdev.github.io/yoagent/concepts/extensions.html) · [回调](https://yologdev.github.io/yoagent/concepts/callbacks.html) |
-| **提供商** | 7 种原生协议覆盖 20 多家提供商；思考控制；缓存提示（cache hints）；统一的上下文溢出分类器 | [提供商](https://yologdev.github.io/yoagent/providers/overview.html) · [提示缓存](https://yologdev.github.io/yoagent/concepts/prompt-caching.html) |
-| **工具** | `bash`、文件读写和编辑、`list_files`、`search`；通过一个 trait 自定义工具；经 stdio 或 HTTP 的 MCP；OpenAPI 规范；每次运行的 `ToolSource` | [工具](https://yologdev.github.io/yoagent/concepts/tools.html) · [MCP](https://yologdev.github.io/yoagent/guides/mcp.html) · [OpenAPI](https://yologdev.github.io/yoagent/guides/openapi.html) |
+| **循环** | 完整事件流；并行、顺序或分批执行工具；引导和后续消息；执行限制；带退避和抖动的重试；补上未答复的工具调用 | [Agent 循环](https://yologdev.github.io/yoagent/concepts/agent-loop.html) · [事件](https://yologdev.github.io/yoagent/concepts/messages-events.html) · [重试](https://yologdev.github.io/yoagent/concepts/retry.html) |
+| **扩展** | 整个运行一份插件契约；`on_stop` 也检查被截断的回答；`Budget`；旧的钩子（`ToolMiddleware`、输入过滤器、`TurnHook`、回调）仍然可用 | [扩展](https://yologdev.github.io/yoagent/concepts/extensions.html) · [回调](https://yologdev.github.io/yoagent/concepts/callbacks.html) |
+| **提供商** | 7 种原生协议覆盖 20 多家提供商，或者你自己的 `StreamProvider`；思考控制；缓存提示（cache hints）；统一的上下文溢出分类器；图片按各协议接受的方式发送，关闭 `image_input` 时换成一条文字说明 | [提供商](https://yologdev.github.io/yoagent/providers/overview.html) · [提示缓存](https://yologdev.github.io/yoagent/concepts/prompt-caching.html) |
+| **工具** | `bash`、文件读写和编辑、`list_files`、`search`；通过一个 trait 自定义工具；经 stdio 或 HTTP 的 MCP；OpenAPI 规范；`ToolSource`（运行中也会刷新，包括 MCP 的 `list_changed`）；按文件加锁，图片发送前先检查，只读了一部分的文件不会被覆盖（`ReadLog`，`default_tools()` 默认启用） | [工具](https://yologdev.github.io/yoagent/concepts/tools.html) · [MCP](https://yologdev.github.io/yoagent/guides/mcp.html) · [OpenAPI](https://yologdev.github.io/yoagent/guides/openapi.html) |
 | **子 agent** | 拥有自己模型和工具的子循环；大件产物按引用传递；花费逐级汇总 | [子 agent](https://yologdev.github.io/yoagent/concepts/sub-agents.html) |
 | **上下文** | 按真实用量校准的跟踪、分级压缩、可选的 `LlmCompaction`、循环检测 | [上下文管理](https://yologdev.github.io/yoagent/concepts/context-management.html) |
 | **会话、skills、结构化输出** | 可分支的会话树，JSONL 存储；AgentSkills `SKILL.md`；类型化的 `prompt_structured::<T>()` | [会话](https://yologdev.github.io/yoagent/concepts/session-trees.html) · [Skills](https://yologdev.github.io/yoagent/concepts/skills.html) · [结构化输出](https://yologdev.github.io/yoagent/concepts/structured-outputs.html) |
 | **决策模型**（`decision`） | 几百毫秒内给出类型化的是/否、N 选一和打分判断（Jev、Clef、OpenAI Decisions、任意 logprobs 服务）；工具闸门和输入守卫 | [决策模型](https://yologdev.github.io/yoagent/concepts/decision-models.html) |
-| **成本和遥测** | 定价需主动启用（默认不定价）；每次运行的 `SessionStats`，含子 agent；带 token 和成本的 `tracing` span | [定价](https://yologdev.github.io/yoagent/concepts/pricing.html) · [遥测](https://yologdev.github.io/yoagent/concepts/telemetry.html) |
+| **成本和遥测** | 定价需主动启用（默认不定价）；模型限制来自同一张表，未启用定价也生效；每次运行的 `SessionStats`，含子 agent；带 token 和成本的 `tracing` span | [定价](https://yologdev.github.io/yoagent/concepts/pricing.html) · [遥测](https://yologdev.github.io/yoagent/concepts/telemetry.html) |
 | **记录**（`gasp`） | 所有核心类型都支持 serde；运行被记录到 [GASP](https://github.com/yologdev/gasp) 仓库，插件日志也可以（需主动启用） | [持久化](https://yologdev.github.io/yoagent/concepts/persistence.html) · [GASP](https://yologdev.github.io/yoagent/concepts/gasp.html) |
 | **WebAssembly** | 用 `--no-default-features` 构建 `wasm32-unknown-unknown`，例如 Cloudflare Workers | [WebAssembly 与 Workers](https://yologdev.github.io/yoagent/guides/wasm-workers.html) |
 

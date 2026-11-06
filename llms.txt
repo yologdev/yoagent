@@ -1,6 +1,6 @@
 # yoagent
 
-> The agent loop for Rust: stream from 7 LLM protocols, run tools, loop until done. A loop library, not an agent: everything that changes what the loop does goes through one contract, `Extension`. For agents building on it, start with the skill: skills/yoagent/SKILL.md (which feature for which job, tips and pitfalls, what changed per version).
+> The agent loop for Rust: stream from any LLM protocol, run tools and extensions, loop until done. A loop library, not an agent: everything that changes what the loop does goes through one contract, `Extension`. For agents building on it, start with the skill: skills/yoagent/SKILL.md (which feature for which job, tips and pitfalls, what changed per version).
 
 Book: https://yologdev.github.io/yoagent/ · API: https://docs.rs/yoagent · Source: https://github.com/yologdev/yoagent
 
