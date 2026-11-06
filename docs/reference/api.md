@@ -69,7 +69,7 @@ All return `Self` for chaining (unless noted as `Result`).
 | `with_api_key(key) -> Self` | Override the env-resolved API key |
 | `with_thinking(level: ThinkingLevel) -> Self` | Set thinking level (`Off`, `Minimal`, `Low`, `Medium`, `High`, `XHigh`, `Max`) |
 | `with_max_tokens(max: u32) -> Self` | Set max output tokens |
-| `with_temperature(t: f32) -> Self` | Set the sampling temperature (the newest reasoning models reject it) |
+| `with_temperature(t: f32) -> Self` | Set the sampling temperature (not sent when the model's `ModelConfig::sampling_params` is off — Claude 4.7 and later) |
 
 **Tools & Integrations**
 
@@ -238,7 +238,7 @@ All return `Self` for chaining.
 | `with_max_stop_continues(max: usize) -> Self` | How many times per run an extension's `on_stop` may continue it (default 3) |
 | `with_thinking(level: ThinkingLevel) -> Self` | Enable extended thinking |
 | `with_max_tokens(max: u32) -> Self` | Set max output tokens |
-| `with_temperature(t: f32) -> Self` | Set the sampling temperature |
+| `with_temperature(t: f32) -> Self` | Set the sampling temperature (not sent when the model's `ModelConfig::sampling_params` is off) |
 | `with_cache_config(config: CacheConfig) -> Self` | Prompt caching settings |
 | `with_tool_execution(strategy: ToolExecutionStrategy) -> Self` | Tool execution strategy (`Parallel`, `Sequential`, `Batched`) |
 | `with_retry_config(config: RetryConfig) -> Self` | Custom retry configuration |

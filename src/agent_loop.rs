@@ -2140,6 +2140,30 @@ async fn stream_assistant_response(
         crate::provider::images_as_text(&mut llm_messages);
     }
 
+    // A model that rejects sampling parameters is sent no temperature.
+    let refused_by = config
+        .model_config
+        .as_ref()
+        .filter(|mc| config.temperature.is_some() && !mc.sampling_params);
+    if let Some(mc) = refused_by {
+        if first_sampling_warning(&mc.id) {
+            tracing::warn!(
+                model = %mc.id,
+                temperature = ?config.temperature,
+                "temperature not sent: ModelConfig::sampling_params is off for this \
+                 model (Claude 4.7+ rejects it); if the model takes one, use \
+                 with_sampling_params(true)"
+            );
+        } else {
+            tracing::debug!(model = %mc.id, "temperature not sent: sampling_params is off");
+        }
+    }
+    let temperature = if refused_by.is_some() {
+        None
+    } else {
+        config.temperature
+    };
+
     // Build tool definitions
     let tool_defs: Vec<ToolDefinition> = crate::extension::tool_definitions(&context.tools);
 
@@ -2188,7 +2212,7 @@ async fn stream_assistant_response(
             thinking_level: config.thinking_level,
             api_key: config.api_key.clone(),
             max_tokens: config.max_tokens,
-            temperature: config.temperature,
+            temperature,
             model_config: config.model_config.clone(),
             cache_config: config.cache_config.clone(),
             output_schema: config.output_schema.clone(),
@@ -3266,4 +3290,17 @@ fn skip_tool_call(
     .ok();
 
     msg
+}
+
+/// Whether this is the first time the loop drops a temperature for model
+/// `id` in this process (see `ModelConfig::sampling_params`).
+fn first_sampling_warning(id: &str) -> bool {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static WARNED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    WARNED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(id.to_owned())
 }
