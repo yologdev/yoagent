@@ -192,7 +192,8 @@ An entry may also state the model's limits, as a pair:
 
 A first-party constructor uses them for a model with **no named preset**:
 the context window, and `max_tokens` as half of `max_output`, at most 64,000
-(the presets' rule). So a model gets its real limits from one data row
+(the presets' rule), but never below the provider's own default unless that
+exceeds `max_output`. So a model gets its real limits from one data row
 instead of a new constructor and a release.
 
 - **The bundled snapshot's limits always apply**, whether or not pricing is
@@ -205,7 +206,7 @@ instead of a new constructor and a release.
   Unlike prices, an entry without limits does not hide a lower layer's: it
   passes to the next. models.dev's `limit.context` / `limit.output` are
   mapped when they make sense (above 0, output no larger than the context);
-  others are dropped and named in the fetch report's `ignored_fields`.
+  others are dropped (the model keeps its price) and logged at `debug`.
 - A named preset's own limits win over all of these. Limits are read when a
   config is built; `reprice` leaves them alone.
 - Validation: both or neither, above 0, `max_output` no larger than

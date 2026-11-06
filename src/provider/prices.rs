@@ -60,13 +60,17 @@
 //!
 //! A first-party constructor that looks a price up also takes the entry's
 //! limits for its context window and `max_tokens` (half of `max_output`, at
-//! most 64,000), so a model with no preset is not left on the provider's
-//! generic defaults. Unlike prices, the **bundled snapshot's limits always
-//! apply**, opted in or not: a wrong limit costs no more than the generic
-//! guess it replaces. A user or fetched table's limits win over the
-//! snapshot's. A named preset's own limits win over both, and limits are read
-//! when a config is built ([`ModelConfig::reprice`](crate::provider::ModelConfig::reprice)
-//! leaves them alone).
+//! most 64,000, and never below the provider's own default unless that
+//! exceeds `max_output`), so a model with no preset is not left on the
+//! provider's generic defaults. Unlike prices, the **bundled snapshot's
+//! limits always apply**, opted in or not: a wrong limit costs no more than
+//! the generic guess it replaces. A user table's limits win over the
+//! snapshot's, and the snapshot's (checked against the vendor) over a fetched
+//! table's, which only fill models the snapshot does not list; an entry
+//! without limits passes to the next layer. A named preset sets its own
+//! limits after all of these, and limits are read when a config is built
+//! ([`ModelConfig::reprice`](crate::provider::ModelConfig::reprice) leaves
+//! them alone).
 //!
 //! # Format evolution
 //!
@@ -468,14 +472,15 @@ pub struct PriceEntry {
     /// that was checked. The price audit otherwise treats absence as drift.
     pub absent_upstream: Option<String>,
     /// The model's context window in tokens, when the entry states it.
-    /// First-party constructors use it for a model with no preset (see
-    /// [`ModelConfig::preset`](crate::provider::ModelConfig::preset)); the
+    /// First-party constructors apply it (a named
+    /// [preset](crate::provider::ModelConfig::preset) then sets its own); the
     /// bundled snapshot's limits apply whether or not pricing is enabled.
     /// Always set together with [`max_output`](Self::max_output).
     pub context_window: Option<u32>,
     /// The most output tokens the model writes in one response, when the
     /// entry states it. A constructor sets `max_tokens` to half of it, at
-    /// most 64,000 — the presets' rule.
+    /// most 64,000 — the presets' rule — and never below the provider's own
+    /// default unless that default exceeds this.
     pub max_output: Option<u32>,
 }
 
@@ -504,7 +509,7 @@ impl PriceEntry {
 
     /// The model's `(context_window, max_output)`, when the entry states
     /// both.
-    pub fn limits(&self) -> Option<(u32, u32)> {
+    pub(crate) fn limits(&self) -> Option<(u32, u32)> {
         Some((self.context_window?, self.max_output?))
     }
 
@@ -605,7 +610,8 @@ impl PriceEntry {
         }
         match (self.context_window, self.max_output) {
             (None, None) => {}
-            (Some(context), Some(output)) if context > 0 && output > 0 && output <= context => {}
+            // A positive output no larger than the context implies a positive context.
+            (Some(context), Some(output)) if output > 0 && output <= context => {}
             (context, output) => {
                 return Err(entry_err(format!(
                     "limits are context_window {context:?} and max_output {output:?}; state \

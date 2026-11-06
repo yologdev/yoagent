@@ -120,9 +120,8 @@ pub struct FetchReport {
     /// (always empty for this crate's format).
     pub skipped: Vec<SkippedModel>,
     /// Dotted paths of fields a lenient parse ignored
-    /// ([`PriceSource::YoagentMain`], or a cache file); for a models.dev
-    /// source, `provider/model/limit` for each model whose limits were not
-    /// usable (it keeps its price); always empty for strict sources.
+    /// ([`PriceSource::YoagentMain`], or a cache file); always empty for
+    /// strict and models.dev sources.
     pub ignored_fields: Vec<String>,
 }
 
@@ -388,7 +387,6 @@ impl PriceTable {
             .ok_or_else(|| models_dev_error("the document is not a JSON object".into()))?;
         let mut table = PriceTable::new();
         let mut skipped = Vec::new();
-        let mut ignored_fields = Vec::new();
         for (provider_key, provider) in providers {
             let Some(models) = provider.get("models").and_then(Value::as_object) else {
                 continue;
@@ -418,15 +416,16 @@ impl PriceTable {
                     }
                 };
                 let mut entry = PriceEntry::new(cost).with_source(source);
-                match models_dev_limits(info) {
-                    Some(Some((context, output))) => entry = entry.with_limits(context, output),
-                    Some(None) => {
-                        // Priced, but its limits are dropped: say which.
-                        let field = format!("{provider}/{model}/limit");
-                        tracing::debug!(field, "yoagent prices: models.dev limits not usable");
-                        ignored_fields.push(field);
+                if let Some(limit) = info.get("limit") {
+                    match models_dev_limits(limit) {
+                        Some((context, output)) => entry = entry.with_limits(context, output),
+                        // Priced, but its limits are dropped.
+                        None => tracing::debug!(
+                            provider,
+                            model = model.as_str(),
+                            "yoagent prices: models.dev limits not usable"
+                        ),
                     }
-                    None => {}
                 }
                 if let Err(e) = table.insert(provider, model.as_str(), entry) {
                     skip(e.to_string());
@@ -465,7 +464,7 @@ impl PriceTable {
         Ok(FetchReport {
             table,
             skipped,
-            ignored_fields,
+            ignored_fields: Vec::new(),
         })
     }
 
@@ -606,22 +605,16 @@ impl PriceTable {
     }
 }
 
-/// This crate's provider name for a models.dev provider key.
-/// A models.dev model's `limit.context` and `limit.output`: `None` when it
-/// lists no `limit`, `Some(None)` when they are not usable (missing, 0, out
-/// of range, the output above the context) — the model keeps its price
-/// without them — and `Some(Some(..))` otherwise.
-fn models_dev_limits(info: &Value) -> Option<Option<(u32, u32)>> {
-    let limit = info.get("limit")?;
+/// A models.dev model's `limit` object as `(context, output)`, when both
+/// are there and make sense (above 0, the output no larger than the
+/// context).
+fn models_dev_limits(limit: &Value) -> Option<(u32, u32)> {
     let read = |key: &str| u32::try_from(limit.get(key)?.as_u64()?).ok();
-    Some(match (read("context"), read("output")) {
-        (Some(context), Some(output)) if context > 0 && output > 0 && output <= context => {
-            Some((context, output))
-        }
-        _ => None,
-    })
+    let (context, output) = (read("context")?, read("output")?);
+    (output > 0 && output <= context).then_some((context, output))
 }
 
+/// This crate's provider name for a models.dev provider key.
 fn models_dev_provider(key: &str) -> &str {
     match key {
         "alibaba" => "qwen",
@@ -862,12 +855,9 @@ mod tests {
                 "no-limits": {"cost": {"input": 1, "output": 2}}
             }}
         });
-        let report = PriceTable::from_models_dev_value(&doc, MODELS_DEV_URL).unwrap();
-        assert_eq!(
-            report.ignored_fields,
-            ["anthropic/output-over-context/limit"]
-        );
-        let table = report.table;
+        let table = PriceTable::from_models_dev_value(&doc, MODELS_DEV_URL)
+            .unwrap()
+            .table;
         let limits = |id| table.entry("anthropic", id).unwrap().limits();
         assert_eq!(limits("with-limits"), Some((200_000, 64_000)));
         // Priced either way; limits only when they make sense.

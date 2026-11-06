@@ -587,9 +587,10 @@ fn a_user_table_s_limits_win_over_the_snapshot_s() {
             "claude-opus-4-7": {"input": 5, "output": 25}}}}"#,
     ));
     let overridden = ModelConfig::anthropic("claude-opus-4-6", "x");
+    // Half of 20K is 10K, but never below the provider's 16K default.
     assert_eq!(
         (overridden.context_window, overridden.max_tokens),
-        (500_000, 10_000)
+        (500_000, 16_000)
     );
     let kept = ModelConfig::anthropic("claude-opus-4-7", "x");
     assert_eq!((kept.context_window, kept.max_tokens), (1_000_000, 64_000));
@@ -680,5 +681,24 @@ fn the_limits_warning_tells_a_stale_config_from_a_listed_one() {
         !warns.iter().any(|w| w.contains("claude-default-sized")),
         "{warns:?}"
     );
+    global::clear_override();
+}
+
+/// OpenRouter resolves an Anthropic id whose limits only a user table
+/// states (dotted spelling), and not one the table prices without limits.
+#[test]
+fn openrouter_reads_anthropic_limits_from_a_user_table() {
+    let _guard = exclusive();
+    let _ = global::install_override(table(
+        r#"{"schema": 1, "providers": {"anthropic": {
+            "claude-user-9-1": {"input": 1, "output": 2, "context_window": 300000, "max_output": 40000},
+            "claude-priced-9-2": {"input": 1, "output": 2}}}}"#,
+    ));
+    let routed = ModelConfig::preset("openrouter", "anthropic/claude-user-9.1").unwrap();
+    assert_eq!(
+        (routed.context_window, routed.max_tokens),
+        (300_000, 20_000)
+    );
+    assert!(ModelConfig::preset("openrouter", "anthropic/claude-priced-9.2").is_none());
     global::clear_override();
 }

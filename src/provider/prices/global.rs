@@ -619,42 +619,43 @@ pub(crate) fn resolved_cost(provider: &str, id: &str) -> Option<CostConfig> {
     cost
 }
 
-/// The `(context_window, max_output)` a first-party constructor gets for
-/// `(provider, id)`, whether or not pricing is enabled: a user table's
-/// (`install_override`, `YOAGENT_PRICES`), else the bundled snapshot's
-/// (checked against the vendor), else a fetched table's — fetched limits
-/// only fill models the snapshot does not list, so an error upstream cannot
-/// replace a checked row. An entry without limits passes to the next.
-pub(crate) fn resolved_limits(provider: &str, id: &str) -> Option<(u32, u32)> {
-    let layers = read_layers();
-    let of = |table: &PriceTable| {
-        table
-            .entry(provider, id)
-            .and_then(super::PriceEntry::limits)
-    };
-    layers
-        .user
-        .as_ref()
-        .and_then(|user| of(&user.table))
-        .or_else(|| of(super::builtin_ref()))
-        .or_else(|| layers.fetched.as_ref().and_then(of))
-}
-
-/// Every id of `provider` whose limits [`resolved_limits`] finds, sorted,
-/// without duplicates.
-pub(crate) fn ids_with_limits(provider: &str) -> Vec<String> {
-    let layers = read_layers();
-    let mut ids: Vec<String> = [
+/// The tables limits are looked up in, in order: a user table's
+/// (`install_override`, `YOAGENT_PRICES`), the bundled snapshot's (checked
+/// against the vendor, applied whether or not pricing is enabled), then a
+/// fetched table's — fetched limits only fill models the snapshot does not
+/// list, so an error upstream cannot replace a checked row.
+fn limit_layers(layers: &Layers) -> impl Iterator<Item = &PriceTable> {
+    [
         layers.user.as_ref().map(|user| &user.table),
         Some(super::builtin_ref()),
         layers.fetched.as_ref(),
     ]
     .into_iter()
     .flatten()
-    .flat_map(|table| table.iter())
-    .filter(|(p, _, entry)| *p == provider && entry.limits().is_some())
-    .map(|(_, id, _)| id.to_string())
-    .collect();
+}
+
+/// The `(context_window, max_output)` a first-party constructor gets for
+/// `(provider, id)`: the first of [`limit_layers`] whose entry states them
+/// (an entry without limits passes to the next).
+pub(crate) fn resolved_limits(provider: &str, id: &str) -> Option<(u32, u32)> {
+    let layers = read_layers();
+    let found = limit_layers(&layers).find_map(|table| {
+        table
+            .entry(provider, id)
+            .and_then(super::PriceEntry::limits)
+    });
+    found
+}
+
+/// Every id of `provider` whose limits [`resolved_limits`] finds, sorted,
+/// without duplicates.
+pub(crate) fn ids_with_limits(provider: &str) -> Vec<String> {
+    let layers = read_layers();
+    let mut ids: Vec<String> = limit_layers(&layers)
+        .flat_map(|table| table.iter())
+        .filter(|(p, _, entry)| *p == provider && entry.limits().is_some())
+        .map(|(_, id, _)| id.to_string())
+        .collect();
     ids.sort();
     ids.dedup();
     ids

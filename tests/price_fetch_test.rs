@@ -300,7 +300,7 @@ async fn fetches_models_dev_format_from_a_url() {
             let mut entry =
                 yoagent::provider::PriceEntry::new(e.cost.clone()).with_source(source.url());
             // models.dev's limits come along.
-            if let Some((context, output)) = e.limits() {
+            if let (Some(context), Some(output)) = (e.context_window, e.max_output) {
                 entry = entry.with_limits(context, output);
             }
             expected.insert(p, m, entry).unwrap();
