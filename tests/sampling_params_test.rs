@@ -1,4 +1,4 @@
-//! `ModelConfig::sampling_params`: a model that rejects sampling parameters
+//! `ModelConfig::accepts_sampling_params`: a model that rejects sampling parameters
 //! (a Claude model from 4.7 on) is sent no temperature (yoyo-evolve#1146).
 
 use std::sync::{Arc, Mutex};
@@ -63,7 +63,7 @@ async fn a_model_that_takes_sampling_params_is_sent_the_temperature() {
 #[tokio::test]
 async fn the_flag_can_be_turned_off_for_any_model() {
     assert_eq!(
-        sent_temperature(ModelConfig::mock().with_sampling_params(false)).await,
+        sent_temperature(ModelConfig::mock().with_accepts_sampling_params(false)).await,
         None
     );
 }

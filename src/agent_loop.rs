@@ -2144,18 +2144,18 @@ async fn stream_assistant_response(
     let refused_by = config
         .model_config
         .as_ref()
-        .filter(|mc| config.temperature.is_some() && !mc.sampling_params);
+        .filter(|mc| config.temperature.is_some() && !mc.accepts_sampling_params);
     if let Some(mc) = refused_by {
         if first_sampling_warning(&mc.id) {
             tracing::warn!(
                 model = %mc.id,
                 temperature = ?config.temperature,
-                "temperature not sent: ModelConfig::sampling_params is off for this \
+                "temperature not sent: ModelConfig::accepts_sampling_params is off for this \
                  model (Claude 4.7+ rejects it); if the model takes one, use \
-                 with_sampling_params(true)"
+                 with_accepts_sampling_params(true)"
             );
         } else {
-            tracing::debug!(model = %mc.id, "temperature not sent: sampling_params is off");
+            tracing::debug!(model = %mc.id, "temperature not sent: accepts_sampling_params is off");
         }
     }
     let temperature = if refused_by.is_some() {
@@ -3293,7 +3293,7 @@ fn skip_tool_call(
 }
 
 /// Whether this is the first time the loop drops a temperature for model
-/// `id` in this process (see `ModelConfig::sampling_params`).
+/// `id` in this process (see `ModelConfig::accepts_sampling_params`).
 fn first_sampling_warning(id: &str) -> bool {
     use std::collections::HashSet;
     use std::sync::{Mutex, OnceLock};
