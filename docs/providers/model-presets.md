@@ -99,7 +99,7 @@ flag):
   (`anthropic`, `openai`, `google`, `xai`, `groq`, `deepseek`, `mistral`,
   `zai`, `minimax`, `qwen`, `meta`), **never a preset**: the context window
   and output limit are the provider's defaults from the table above, not the
-  model's. For `openai`, a reasoning id (anything but `gpt-3*`, `gpt-4*`,
+  model's — unless the price table states the model's limits (above). For `openai`, a reasoning id (anything but `gpt-3*`, `gpt-4*`,
   `chatgpt-*`, `*-chat*`) gets `openai_responses`. `None` for any other
   provider (gateways and local servers need a base URL).
 

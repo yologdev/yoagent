@@ -198,16 +198,24 @@ instead of a new constructor and a release.
 - **The bundled snapshot's limits always apply**, whether or not pricing is
   enabled: a wrong limit costs no more than the generic guess it replaces.
   Prices stay opt-in.
-- A user table (`install_override`, `YOAGENT_PRICES`) or a fetched one wins
-  over the snapshot, entry by entry; an entry without limits leaves the
-  snapshot's. models.dev's `limit.context` / `limit.output` are mapped when
-  they make sense (above 0, output no larger than the context).
+- **Precedence differs from prices:** a user table (`install_override`,
+  `YOAGENT_PRICES`) wins, then the bundled snapshot (checked against the
+  vendor), then a fetched table — fetched limits only fill models the
+  snapshot does not list, so an error upstream cannot replace a checked row.
+  Unlike prices, an entry without limits does not hide a lower layer's: it
+  passes to the next. models.dev's `limit.context` / `limit.output` are
+  mapped when they make sense (above 0, output no larger than the context);
+  others are dropped and named in the fetch report's `ignored_fields`.
 - A named preset's own limits win over all of these. Limits are read when a
   config is built; `reprice` leaves them alone.
 - Validation: both or neither, above 0, `max_output` no larger than
   `context_window`. They do not change what is billed, so they did not bump
-  `schema`; an older release reading this crate's published file ignores
-  them.
+  `schema`. An older release reads them like any metadata field it does
+  not know: a lenient source (this crate's published file via
+  `PriceSource::YoagentMain`, a cache) ignores them; a strict one
+  (`PriceSource::Url`, `YOAGENT_PRICES`, `from_path`) refuses the file with
+  `UnknownField` — copy only the fields that release knows into a
+  hand-kept file.
 
 ## Which constructors are priced
 

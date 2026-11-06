@@ -37,6 +37,13 @@ async fn nothing_is_priced_until_the_process_opts_in() {
         assert!(config.cost.is_none(), "{} is priced", config.id);
     }
     assert!(Budget::for_model(1.0, &ModelConfig::claude_sonnet_5()).is_none());
+    // Limits are not prices: the snapshot's apply with pricing off.
+    let unpriced = ModelConfig::anthropic("claude-opus-4-6", "x");
+    assert!(unpriced.cost.is_none());
+    assert_eq!(
+        (unpriced.context_window, unpriced.max_tokens),
+        (1_000_000, 64_000)
+    );
 
     // A run on a default-built preset reports its spend as unpriced.
     let early = ModelConfig::claude_sonnet_5();

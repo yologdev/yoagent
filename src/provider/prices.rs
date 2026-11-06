@@ -1234,10 +1234,17 @@ mod tests {
                 .limits(),
             None
         );
+        // The output may equal the context window.
+        assert!(PriceTable::from_json_str(&json(
+            r#", "context_window": 1000, "max_output": 1000"#
+        ))
+        .is_ok());
         for bad in [
             r#", "context_window": 200000"#,
             r#", "max_output": 64000"#,
             r#", "context_window": 0, "max_output": 0"#,
+            r#", "context_window": 0, "max_output": 100"#,
+            r#", "context_window": 100, "max_output": 0"#,
             r#", "context_window": 1000, "max_output": 2000"#,
         ] {
             let err = PriceTable::from_json_str(&json(bad))

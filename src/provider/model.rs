@@ -978,6 +978,13 @@ const OPENROUTER_VENDORS: &[(&str, &str)] = &[
 /// `-prime`, so the bare id would build a config for a model it rejects.
 const OPENROUTER_UNLISTED: &[&str] = &["qwen/qwen3.8-max"];
 
+/// A config's `(context_window, max_tokens)` from a model's
+/// `(context_window, max_output)` in the price table: `max_tokens` is half
+/// the model's most output, at most 64,000 — the presets' rule.
+fn config_limits((context_window, max_output): (u32, u32)) -> (u32, u32) {
+    (context_window, (max_output / 2).clamp(1, 64_000))
+}
+
 /// OpenRouter's spelling of an Anthropic model id: a trailing
 /// `-{major}-{minor}` is written `-{major}.{minor}` (`claude-sonnet-4-6` →
 /// `claude-sonnet-4.6`); an id without a minor version is unchanged.
@@ -1277,12 +1284,17 @@ impl ModelConfig {
             "{} looks prices up but is not in PRICED_PROVIDERS",
             self.provider
         );
+        // No model has an empty id: the provider's own defaults, nothing
+        // looked up (`has_default_limits` builds these).
+        if self.id.is_empty() {
+            return Self {
+                list_priced: true,
+                ..self
+            };
+        }
         let mut config = self.lookup_price();
-        if let Some((context_window, max_output)) =
-            super::prices::global::resolved_limits(&config.provider, &config.id)
-        {
-            config.context_window = context_window;
-            config.max_tokens = (max_output / 2).clamp(1, 64_000);
+        if let Some(limits) = super::prices::global::resolved_limits(&config.provider, &config.id) {
+            (config.context_window, config.max_tokens) = config_limits(limits);
         }
         config
     }
@@ -1425,8 +1437,9 @@ impl ModelConfig {
     /// id (a model behind a Messages-protocol gateway, say) gets no
     /// `AnthropicCompat`, so the provider's defaults apply: adaptive thinking
     /// and tool-forced structured outputs, which every gateway accepts. The
-    /// context window and output limit are generic (200K / 16K); for a
-    /// current model prefer its preset — [`claude_sonnet_5`](Self::claude_sonnet_5)
+    /// context window and output limit are generic (200K / 16K) unless the
+    /// price table states the model's (see [`prices`](super::prices#limits));
+    /// for a current model prefer its preset — [`claude_sonnet_5`](Self::claude_sonnet_5)
     /// and friends, or [`ModelConfig::preset`] by id — which sets those too. Pricing comes from the process-wide price
     /// table either way — none until the process opts in
     /// ([`prices`](crate::provider::prices)).
@@ -2222,8 +2235,8 @@ impl ModelConfig {
     ///
     /// let (provider, id) = "groq/openai/gpt-oss-120b".split_once('/').unwrap();
     /// let config = ModelConfig::preset(provider, id).or_else(|| {
-    ///     // No preset: the limits below are the provider's defaults, not
-    ///     // this model's. Say so to the user.
+    ///     // No preset: unless the price table lists the model, the limits
+    ///     // below are the provider's defaults, not this model's. Say so.
     ///     ModelConfig::generic(provider, id)
     /// });
     /// assert_eq!(config.unwrap().id, "openai/gpt-oss-120b");
@@ -2330,7 +2343,9 @@ impl ModelConfig {
     /// A config for `id` at a first-party `provider` from that provider's
     /// generic constructor, with `id` as the name — **never a preset**, so
     /// its context window and output limit are the provider's defaults, not
-    /// the model's (check [`preset`](Self::preset) first). The providers are
+    /// the model's, unless the price table states the model's limits (see
+    /// [`prices`](super::prices#limits); check [`preset`](Self::preset)
+    /// first). The providers are
     /// those in [`PRICED_PROVIDERS`](super::PRICED_PROVIDERS):
     /// [`anthropic`](Self::anthropic), `openai` (see below),
     /// [`google`](Self::google), [`xai`](Self::xai), [`groq`](Self::groq),
@@ -2375,11 +2390,12 @@ impl ModelConfig {
     }
 
     /// Whether this config's context window and output limit are exactly a
-    /// first-party provider's generic defaults (what
-    /// [`generic`](Self::generic), or for `openai` either of its two
-    /// constructors, gives this id) and no [`preset`](Self::preset) for
-    /// this provider and id has those limits: nobody looked the model's
-    /// real limits up.
+    /// first-party provider's own defaults (its generic constructor's, or
+    /// for `openai` either of its two constructors', before any table
+    /// lookup), and neither a [`preset`](Self::preset) for this provider and
+    /// id nor the price table's limits for it are those limits: nobody
+    /// looked the model's real limits up. A config built before the table
+    /// listed the model is still judged a guess.
     ///
     /// Only a config a first-party generic constructor built (the private
     /// `list_priced` marker), still at that constructor's `base_url`, is
@@ -2410,7 +2426,12 @@ impl ModelConfig {
             .iter()
             .any(|d| of(d) == limits && d.base_url == self.base_url)
             && Self::preset(&self.provider, &self.id).is_none_or(|p| of(&p) != limits)
-            && super::prices::global::resolved_limits(&self.provider, &self.id).is_none()
+            // Built from the table's limits (which may equal the defaults),
+            // not left on the guess. A config built before the table listed
+            // the model is still a guess.
+            && super::prices::global::resolved_limits(&self.provider, &self.id)
+                .map(config_limits)
+                != Some(limits)
     }
 
     /// Warn, once per provider and id in this process, when
@@ -2429,6 +2450,10 @@ impl ModelConfig {
         let (provider, model) = (self.provider.as_str(), self.id.as_str());
         let hint = if Self::preset(provider, model).is_some() {
             format!("ModelConfig::preset(\"{provider}\", \"{model}\") has the model's limits")
+        } else if super::prices::global::resolved_limits(provider, model).is_some() {
+            "the price table lists this model's limits now; build the config again to use \
+             them"
+                .into()
         } else {
             "set `context_window` and `max_tokens` on the ModelConfig to the model's own".into()
         };
@@ -3027,6 +3052,40 @@ mod tests {
         ("meta", "muse-spark-1.3"),
         ("meta", "muse-wonder-1.0"),
     ];
+
+    /// The presets' rule, at its edges: half the most output, at least 1,
+    /// at most 64K.
+    #[test]
+    fn table_limits_become_config_limits_by_the_presets_rule() {
+        assert_eq!(config_limits((200_000, 64_000)), (200_000, 32_000));
+        assert_eq!(config_limits((1_000_000, 300_000)), (1_000_000, 64_000));
+        assert_eq!(config_limits((10, 1)), (10, 1));
+    }
+
+    /// The provider's own defaults, nothing looked up: what
+    /// `has_default_limits` compares against.
+    #[test]
+    fn an_empty_id_is_left_on_the_provider_defaults() {
+        let config = ModelConfig::anthropic("", "");
+        assert_eq!(
+            (config.context_window, config.max_tokens),
+            (200_000, 16_000)
+        );
+        assert!(config.cost.is_none());
+    }
+
+    /// OpenRouter finds a vendor model the table gives limits, with them.
+    #[test]
+    fn openrouter_finds_a_model_the_table_gives_limits() {
+        let legacy = ModelConfig::preset("openrouter", "anthropic/claude-opus-4.6").unwrap();
+        assert_eq!(legacy.id, "anthropic/claude-opus-4.6");
+        assert_eq!(legacy.api, ApiProtocol::OpenAiCompletions);
+        assert_eq!(
+            (legacy.context_window, legacy.max_tokens),
+            (1_000_000, 64_000)
+        );
+        assert!(legacy.cost.is_none(), "a gateway bills its own rates");
+    }
 
     /// A model with no preset takes its limits from the price table — the
     /// bundled snapshot's whether or not pricing is enabled — and is then not

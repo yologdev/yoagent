@@ -595,3 +595,90 @@ fn a_user_table_s_limits_win_over_the_snapshot_s() {
     assert_eq!((kept.context_window, kept.max_tokens), (1_000_000, 64_000));
     global::clear_override();
 }
+
+/// The snapshot's checked limits win over a fetched table's; fetched limits
+/// fill a model the snapshot does not list.
+#[test]
+fn fetched_limits_fill_gaps_but_do_not_replace_checked_ones() {
+    let _guard = exclusive();
+    let _ = global::install_fetched(table(
+        r#"{"schema": 1, "providers": {"anthropic": {
+            "claude-opus-4-6": {"input": 5, "output": 25, "context_window": 200000, "max_output": 64000},
+            "claude-fetched-only": {"input": 1, "output": 2, "context_window": 300000, "max_output": 40000}}}}"#,
+    ));
+    let checked = ModelConfig::anthropic("claude-opus-4-6", "x");
+    assert_eq!(checked.context_window, 1_000_000);
+    let filled = ModelConfig::anthropic("claude-fetched-only", "x");
+    assert_eq!(
+        (filled.context_window, filled.max_tokens),
+        (300_000, 20_000)
+    );
+    global::clear_fetched();
+}
+
+/// Limits are read when a config is built; `reprice` leaves them alone.
+#[test]
+fn reprice_leaves_limits_alone() {
+    let _guard = exclusive();
+    let built = ModelConfig::anthropic("claude-opus-4-6", "x");
+    let _ = global::install_override(table(
+        r#"{"schema": 1, "providers": {"anthropic": {
+            "claude-opus-4-6": {"input": 5, "output": 25, "context_window": 500000, "max_output": 20000}}}}"#,
+    ));
+    let repriced = built.reprice();
+    assert_eq!(
+        (repriced.context_window, repriced.max_tokens),
+        (1_000_000, 64_000)
+    );
+    global::clear_override();
+}
+
+/// OpenRouter finds a non-Anthropic vendor's model the table gives limits.
+#[test]
+fn openrouter_finds_another_vendor_s_model_the_table_gives_limits() {
+    let _guard = exclusive();
+    assert!(ModelConfig::preset("openrouter", "openai/listed-only").is_none());
+    let _ = global::install_override(table(
+        r#"{"schema": 1, "providers": {"openai": {
+            "listed-only": {"input": 1, "output": 2, "context_window": 400000, "max_output": 100000}}}}"#,
+    ));
+    let routed = ModelConfig::preset("openrouter", "openai/listed-only").unwrap();
+    assert_eq!(routed.provider, "openrouter");
+    assert_eq!(
+        (routed.context_window, routed.max_tokens),
+        (400_000, 50_000)
+    );
+    global::clear_override();
+}
+
+/// The "limits are guesses" warning: a config built before the table
+/// listed its model still warns, with a hint to build it again; one built
+/// from table limits that happen to equal the defaults does not.
+#[test]
+fn the_limits_warning_tells_a_stale_config_from_a_listed_one() {
+    let _guard = exclusive();
+    let stale = ModelConfig::anthropic("claude-stale-config", "x");
+    let _ = global::install_override(table(
+        r#"{"schema": 1, "providers": {"anthropic": {
+            "claude-stale-config": {"input": 1, "output": 2, "context_window": 300000, "max_output": 40000},
+            "claude-default-sized": {"input": 1, "output": 2, "context_window": 200000, "max_output": 32000}}}}"#,
+    ));
+    let (_, warns) = warns_of(|| yoagent::Agent::from_config(stale));
+    assert!(
+        warns
+            .iter()
+            .any(|w| w.contains("claude-stale-config") && w.contains("build the config again")),
+        "{warns:?}"
+    );
+    let listed = ModelConfig::anthropic("claude-default-sized", "x");
+    assert_eq!(
+        (listed.context_window, listed.max_tokens),
+        (200_000, 16_000)
+    );
+    let (_, warns) = warns_of(|| yoagent::Agent::from_config(listed));
+    assert!(
+        !warns.iter().any(|w| w.contains("claude-default-sized")),
+        "{warns:?}"
+    );
+    global::clear_override();
+}
