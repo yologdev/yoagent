@@ -177,6 +177,47 @@ println!("{}", combined.to_json());                   // back to the same format
 `PriceError` is `Clone` and `#[non_exhaustive]`. `Json`, `Io` and `Http`
 errors name the file or URL they came from.
 
+## Limits
+
+An entry may also state the model's limits, as a pair:
+
+```json
+"claude-opus-4-6": {
+  "input": 5.0, "output": 25.0, "cache_read": 0.5, "cache_write": 6.25,
+  "context_window": 1000000, "max_output": 128000,
+  "source": "https://platform.claude.com/docs/en/models/opus-4-6/overview",
+  "verified": "2026-11-06"
+}
+```
+
+A first-party constructor uses them for a model with **no named preset**:
+the context window, and `max_tokens` as half of `max_output`, at most 64,000
+(the presets' rule), but never below the provider's own default unless that
+exceeds `max_output`. So a model gets its real limits from one data row
+instead of a new constructor and a release.
+
+- **The bundled snapshot's limits always apply**, whether or not pricing is
+  enabled: a wrong limit costs no more than the generic guess it replaces.
+  Prices stay opt-in.
+- **Precedence differs from prices:** a user table (`install_override`,
+  `YOAGENT_PRICES`) wins, then the bundled snapshot (checked against the
+  vendor), then a fetched table — fetched limits only fill models the
+  snapshot does not list, so an error upstream cannot replace a checked row.
+  Unlike prices, an entry without limits does not hide a lower layer's: it
+  passes to the next. models.dev's `limit.context` / `limit.output` are
+  mapped when they make sense (above 0, output no larger than the context);
+  others are dropped (the model keeps its price) and logged at `debug`.
+- A named preset's own limits win over all of these. Limits are read when a
+  config is built; `reprice` leaves them alone.
+- Validation: both or neither, above 0, `max_output` no larger than
+  `context_window`. They do not change what is billed, so they did not bump
+  `schema`. An older release reads them like any metadata field it does
+  not know: a lenient source (this crate's published file via
+  `PriceSource::YoagentMain`, a cache) ignores them; a strict one
+  (`PriceSource::Url`, `YOAGENT_PRICES`, `from_path`) refuses the file with
+  `UnknownField` — copy only the fields that release knows into a
+  hand-kept file.
+
 ## Which constructors are priced
 
 Constructors look `(provider, id)` up in the process-wide table **when the

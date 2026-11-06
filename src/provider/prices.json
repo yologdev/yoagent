@@ -29,6 +29,39 @@
         "source": "https://platform.claude.com/docs/en/about-claude/pricing",
         "verified": "2026-08-19"
       },
+      "claude-opus-4-5": {
+        "input": 5.0,
+        "output": 25.0,
+        "cache_read": 0.5,
+        "cache_write": 6.25,
+        "context_window": 200000,
+        "max_output": 64000,
+        "note": "Legacy, still available (snapshot claude-opus-4-5-20251101). Limits and rates from its model page; rates also match the pricing page. 5-minute cache write; the 1-hour write is $10. Verified against the raw page markup.",
+        "source": "https://platform.claude.com/docs/en/models/opus-4-5/overview",
+        "verified": "2026-11-06"
+      },
+      "claude-opus-4-6": {
+        "input": 5.0,
+        "output": 25.0,
+        "cache_read": 0.5,
+        "cache_write": 6.25,
+        "context_window": 1000000,
+        "max_output": 128000,
+        "note": "Legacy, still available. Limits and rates from its model page; rates also match the pricing page. 5-minute cache write; the 1-hour write is $10. No long-context tier: the full 1M window bills at these rates. Verified against the raw page markup.",
+        "source": "https://platform.claude.com/docs/en/models/opus-4-6/overview",
+        "verified": "2026-11-06"
+      },
+      "claude-opus-4-7": {
+        "input": 5.0,
+        "output": 25.0,
+        "cache_read": 0.5,
+        "cache_write": 6.25,
+        "context_window": 1000000,
+        "max_output": 128000,
+        "note": "Legacy, still available. Limits and rates from its model page; rates also match the pricing page. 5-minute cache write; the 1-hour write is $10. No long-context tier: the full 1M window bills at these rates. Verified against the raw page markup.",
+        "source": "https://platform.claude.com/docs/en/models/opus-4-7/overview",
+        "verified": "2026-11-06"
+      },
       "claude-opus-4-8": {
         "input": 5.0,
         "output": 25.0,

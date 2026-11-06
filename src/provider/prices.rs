@@ -52,8 +52,25 @@
 //! Rates are USD per million tokens. An entry may add `"tiers"` (context
 //! tiers: `above_prompt_tokens` plus the four rates, strictly ascending) and
 //! metadata (`note`, `source`, `verified` as `YYYY-MM-DD`,
-//! `cache_write_at_input`, `absent_upstream`). A cache rate that is omitted or
+//! `cache_write_at_input`, `absent_upstream`), and the model's **limits**
+//! (`context_window`, `max_output`, as a pair). A cache rate that is omitted or
 //! `0` bills at the band's input rate, as for [`CostConfig`].
+//!
+//! # Limits
+//!
+//! A first-party constructor that looks a price up also takes the entry's
+//! limits for its context window and `max_tokens` (half of `max_output`, at
+//! most 64,000, and never below the provider's own default unless that
+//! exceeds `max_output`), so a model with no preset is not left on the
+//! provider's generic defaults. Unlike prices, the **bundled snapshot's
+//! limits always apply**, opted in or not: a wrong limit costs no more than
+//! the generic guess it replaces. A user table's limits win over the
+//! snapshot's, and the snapshot's (checked against the vendor) over a fetched
+//! table's, which only fill models the snapshot does not list; an entry
+//! without limits passes to the next layer. A named preset sets its own
+//! limits after all of these, and limits are read when a config is built
+//! ([`ModelConfig::reprice`](crate::provider::ModelConfig::reprice) leaves
+//! them alone).
 //!
 //! # Format evolution
 //!
@@ -454,6 +471,17 @@ pub struct PriceEntry {
     /// Set only when models.dev genuinely lacks this model: why, and the date
     /// that was checked. The price audit otherwise treats absence as drift.
     pub absent_upstream: Option<String>,
+    /// The model's context window in tokens, when the entry states it.
+    /// First-party constructors apply it (a named
+    /// [preset](crate::provider::ModelConfig::preset) then sets its own); the
+    /// bundled snapshot's limits apply whether or not pricing is enabled.
+    /// Always set together with [`max_output`](Self::max_output).
+    pub context_window: Option<u32>,
+    /// The most output tokens the model writes in one response, when the
+    /// entry states it. A constructor sets `max_tokens` to half of it, at
+    /// most 64,000 — the presets' rule — and never below the provider's own
+    /// default unless that default exceeds this.
+    pub max_output: Option<u32>,
 }
 
 impl PriceEntry {
@@ -466,7 +494,23 @@ impl PriceEntry {
             source: None,
             verified: None,
             absent_upstream: None,
+            context_window: None,
+            max_output: None,
         }
+    }
+
+    /// Record the model's limits: its context window and its most output
+    /// tokens in one response (see [`context_window`](Self::context_window)).
+    pub fn with_limits(mut self, context_window: u32, max_output: u32) -> Self {
+        self.context_window = Some(context_window);
+        self.max_output = Some(max_output);
+        self
+    }
+
+    /// The model's `(context_window, max_output)`, when the entry states
+    /// both.
+    pub(crate) fn limits(&self) -> Option<(u32, u32)> {
+        Some((self.context_window?, self.max_output?))
     }
 
     /// Attach a caveat.
@@ -503,7 +547,9 @@ impl PriceEntry {
     /// Check this entry as it would be checked when stored under
     /// `(provider, model)`: non-empty ids, finite non-negative rates, tier
     /// thresholds above 0 and strictly ascending, a `YYYY-MM-DD` `verified`
-    /// date, and a `cache_write_at_input` flag the rates agree with.
+    /// date, a `cache_write_at_input` flag the rates agree with, and limits
+    /// (when stated) given as a pair, above 0, the output no larger than the
+    /// context window.
     /// [`PriceTable::insert`] and every parser call this.
     pub fn validate(&self, provider: &str, model: &str) -> Result<(), PriceError> {
         let entry_err = |reason: String| PriceError::InvalidEntry {
@@ -559,6 +605,17 @@ impl PriceEntry {
             if !is_iso_date(date) {
                 return Err(entry_err(format!(
                     "verified is {date:?}; expected a YYYY-MM-DD date"
+                )));
+            }
+        }
+        match (self.context_window, self.max_output) {
+            (None, None) => {}
+            // A positive output no larger than the context implies a positive context.
+            (Some(context), Some(output)) if output > 0 && output <= context => {}
+            (context, output) => {
+                return Err(entry_err(format!(
+                    "limits are context_window {context:?} and max_output {output:?}; state \
+                     both, above 0, with max_output no larger than context_window"
                 )));
             }
         }
@@ -993,6 +1050,8 @@ const ENTRY_FIELDS: &[&str] = &[
     "source",
     "verified",
     "absent_upstream",
+    "context_window",
+    "max_output",
 ];
 const TIER_FIELDS: &[&str] = &[
     "above_prompt_tokens",
@@ -1074,6 +1133,10 @@ struct EntryWire {
     verified: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     absent_upstream: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    context_window: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_output: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1112,6 +1175,8 @@ impl From<EntryWire> for PriceEntry {
             source: w.source,
             verified: w.verified,
             absent_upstream: w.absent_upstream,
+            context_window: w.context_window,
+            max_output: w.max_output,
         }
     }
 }
@@ -1140,6 +1205,8 @@ impl From<&PriceEntry> for EntryWire {
             source: e.source.clone(),
             verified: e.verified.clone(),
             absent_upstream: e.absent_upstream.clone(),
+            context_window: e.context_window,
+            max_output: e.max_output,
         }
     }
 }
@@ -1147,6 +1214,51 @@ impl From<&PriceEntry> for EntryWire {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn limits_round_trip_and_are_validated() {
+        let json = |limits: &str| {
+            format!(
+                r#"{{"schema": 1, "providers": {{"anthropic": {{"m": {{"input": 1, "output": 2{limits}}}}}}}}}"#
+            )
+        };
+        let table =
+            PriceTable::from_json_str(&json(r#", "context_window": 200000, "max_output": 64000"#))
+                .unwrap();
+        let entry = table.entry("anthropic", "m").unwrap();
+        assert_eq!(entry.limits(), Some((200_000, 64_000)));
+        let again = PriceTable::from_json_str(&table.to_json()).unwrap();
+        assert_eq!(
+            again.entry("anthropic", "m").unwrap().limits(),
+            Some((200_000, 64_000))
+        );
+        assert_eq!(
+            PriceTable::from_json_str(&json(""))
+                .unwrap()
+                .entry("anthropic", "m")
+                .unwrap()
+                .limits(),
+            None
+        );
+        // The output may equal the context window.
+        assert!(PriceTable::from_json_str(&json(
+            r#", "context_window": 1000, "max_output": 1000"#
+        ))
+        .is_ok());
+        for bad in [
+            r#", "context_window": 200000"#,
+            r#", "max_output": 64000"#,
+            r#", "context_window": 0, "max_output": 0"#,
+            r#", "context_window": 0, "max_output": 100"#,
+            r#", "context_window": 100, "max_output": 0"#,
+            r#", "context_window": 1000, "max_output": 2000"#,
+        ] {
+            let err = PriceTable::from_json_str(&json(bad))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("max_output"), "{bad}: {err}");
+        }
+    }
 
     fn one(entry: &str) -> String {
         format!(r#"{{"schema": 1, "providers": {{"p": {{"m": {entry}}}}}}}"#)
@@ -1338,6 +1450,8 @@ mod tests {
                     "source",
                     "verified",
                     "absent_upstream",
+                    "context_window",
+                    "max_output",
                 ],
                 &[
                     "above_prompt_tokens",
@@ -1389,6 +1503,8 @@ mod tests {
                         source: Some("s".into()),
                         verified: Some("2026-01-01".into()),
                         absent_upstream: Some("a".into()),
+                        context_window: Some(1000),
+                        max_output: Some(100),
                     },
                 )]),
             )]),

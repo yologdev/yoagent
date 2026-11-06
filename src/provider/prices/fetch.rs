@@ -415,7 +415,18 @@ impl PriceTable {
                         continue;
                     }
                 };
-                let entry = PriceEntry::new(cost).with_source(source);
+                let mut entry = PriceEntry::new(cost).with_source(source);
+                if let Some(limit) = info.get("limit") {
+                    match models_dev_limits(limit) {
+                        Some((context, output)) => entry = entry.with_limits(context, output),
+                        // Priced, but its limits are dropped.
+                        None => tracing::debug!(
+                            provider,
+                            model = model.as_str(),
+                            "yoagent prices: models.dev limits not usable"
+                        ),
+                    }
+                }
                 if let Err(e) = table.insert(provider, model.as_str(), entry) {
                     skip(e.to_string());
                 }
@@ -592,6 +603,15 @@ impl PriceTable {
             }
         }
     }
+}
+
+/// A models.dev model's `limit` object as `(context, output)`, when both
+/// are there and make sense (above 0, the output no larger than the
+/// context).
+fn models_dev_limits(limit: &Value) -> Option<(u32, u32)> {
+    let read = |key: &str| u32::try_from(limit.get(key)?.as_u64()?).ok();
+    let (context, output) = (read("context")?, read("output")?);
+    (output > 0 && output <= context).then_some((context, output))
 }
 
 /// This crate's provider name for a models.dev provider key.
@@ -822,6 +842,27 @@ mod tests {
 
     fn map(cost: serde_json::Value) -> Option<CostConfig> {
         map_models_dev_cost(&cost).ok()
+    }
+
+    #[test]
+    fn maps_models_dev_limits_and_keeps_the_price_without_bad_ones() {
+        let doc = serde_json::json!({
+            "anthropic": {"models": {
+                "with-limits": {"cost": {"input": 1, "output": 2},
+                                "limit": {"context": 200000, "output": 64000}},
+                "output-over-context": {"cost": {"input": 1, "output": 2},
+                                        "limit": {"context": 1000, "output": 2000}},
+                "no-limits": {"cost": {"input": 1, "output": 2}}
+            }}
+        });
+        let table = PriceTable::from_models_dev_value(&doc, MODELS_DEV_URL)
+            .unwrap()
+            .table;
+        let limits = |id| table.entry("anthropic", id).unwrap().limits();
+        assert_eq!(limits("with-limits"), Some((200_000, 64_000)));
+        // Priced either way; limits only when they make sense.
+        assert_eq!(limits("output-over-context"), None);
+        assert_eq!(limits("no-limits"), None);
     }
 
     #[test]
