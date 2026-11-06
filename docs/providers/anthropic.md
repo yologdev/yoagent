@@ -125,13 +125,13 @@ Claude models from 4.7 on — Opus 4.7 and 4.8, Opus 5 and 5.5, Sonnet 5 and
 5.5, Haiku 5.5, Fable — reject `temperature`, `top_p` and `top_k` with a
 400. `ModelConfig::anthropic`, the OpenCode gateways and every preset built
 on them (including `preset("bedrock", ..)` and `preset("openrouter", ..)`)
-turn `ModelConfig::sampling_params` off for such an id, and the agent loop
+turn `ModelConfig::accepts_sampling_params` off for such an id, and the agent loop
 then sends no temperature, whatever `with_temperature` says, logging that at
 `warn` the first time per model. The flag is set when the config is built:
 changing `id` afterwards does not recompute it, and a config persisted before
 0.27.3 loads with it on — rebuild it. Read the
 field to tell a user their temperature was dropped; set it with
-`with_sampling_params(false)` for another model that rejects it (any other
+`with_accepts_sampling_params(false)` for another model that rejects it (any other
 gateway — `openai_compat`, `local`, `ollama` — or a `custom` config is never
 inferred). Claude 4.6 and earlier (Haiku 4.5
 included) still take a temperature.
@@ -147,7 +147,7 @@ API rejects, with a 400:
   outputs, so `prompt_structured` works; nothing else in the crate forces a
   tool.
 - `temperature`, `top_p` or `top_k` other than the default. The preset's
-  `sampling_params` is off, so the agent loop sends no temperature.
+  `accepts_sampling_params` is off, so the agent loop sends no temperature.
 
 Thinking blocks are tied to the model and the conversation prefix. The
 provider sends them back unmodified, which the API requires, but switching a
