@@ -1,6 +1,6 @@
 # yoagent
 
-**The agent loop for Rust.** Stream from any of 7 LLM protocols, run tools, loop until done.
+**The agent loop for Rust.** Stream from any LLM protocol, run tools, extensions, loop until done.
 
 yoagent is a library for building LLM-powered agents that use tools. It provides the core loop —
 prompt the model, execute tool calls, feed results back — and gets out of your way.
