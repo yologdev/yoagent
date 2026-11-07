@@ -1085,8 +1085,8 @@ fn image_input_default() -> bool {
     true
 }
 
-/// `ModelConfig::sampling_params` when a persisted config has no such field.
-fn sampling_params_default() -> bool {
+/// `ModelConfig::accepts_sampling_params` for a persisted config without it.
+fn accepts_sampling_params_default() -> bool {
     true
 }
 
@@ -1217,8 +1217,8 @@ pub struct ModelConfig {
     /// `id` is changed afterwards, and a config persisted before this field
     /// existed loads with `true`: rebuild it, or set the flag. Read it to
     /// tell a user their temperature was dropped.
-    #[serde(default = "sampling_params_default")]
-    pub sampling_params: bool,
+    #[serde(default = "accepts_sampling_params_default")]
+    pub accepts_sampling_params: bool,
     /// Additional headers to send with requests.
     ///
     /// May carry credentials (`Authorization`, `x-api-key`). `Debug` prints
@@ -1274,7 +1274,7 @@ impl std::fmt::Debug for ModelConfig {
             .field("context_window", &self.context_window)
             .field("max_tokens", &self.max_tokens)
             .field("image_input", &self.image_input)
-            .field("sampling_params", &self.sampling_params)
+            .field("accepts_sampling_params", &self.accepts_sampling_params)
             .field("header_names", &headers)
             .finish_non_exhaustive()
     }
@@ -1388,10 +1388,10 @@ impl ModelConfig {
     }
 
     /// Whether the model takes sampling parameters (see
-    /// [`sampling_params`](Self::sampling_params)). Turn it off for a model
-    /// that rejects `temperature`, so the loop leaves it out.
-    pub fn with_sampling_params(mut self, on: bool) -> Self {
-        self.sampling_params = on;
+    /// [`accepts_sampling_params`](Self::accepts_sampling_params)). Turn it
+    /// off for a model that rejects `temperature`, so the loop leaves it out.
+    pub fn with_accepts_sampling_params(mut self, on: bool) -> Self {
+        self.accepts_sampling_params = on;
         self
     }
 
@@ -1467,7 +1467,7 @@ impl ModelConfig {
             cost: None,
             list_priced: false,
             image_input: true,
-            sampling_params: true,
+            accepts_sampling_params: true,
             headers: HashMap::new(),
             google: None,
             compat: None,
@@ -1494,7 +1494,7 @@ impl ModelConfig {
             .to_ascii_lowercase()
             .starts_with("claude-")
             .then(|| AnthropicCompat::for_claude_id(&id));
-        let sampling_params = takes_sampling_params(&id);
+        let accepts_sampling_params = takes_sampling_params(&id);
         Self {
             id,
             name: name.into(),
@@ -1507,7 +1507,7 @@ impl ModelConfig {
             cost: None, // set by `priced`
             list_priced: false,
             image_input: true,
-            sampling_params,
+            accepts_sampling_params,
             headers: HashMap::new(),
             google: None,
             anthropic: compat,
@@ -1591,8 +1591,9 @@ impl ModelConfig {
     ///   [`Agent::prompt_structured`](crate::Agent::prompt_structured) uses
     ///   `output_config.format` and never forces a tool.
     /// - `temperature` (and `top_p` / `top_k`) other than the default is
-    ///   rejected with a 400; [`sampling_params`](Self::sampling_params) is
-    ///   off, so the agent loop sends none.
+    ///   rejected with a 400;
+    ///   [`accepts_sampling_params`](Self::accepts_sampling_params) is off,
+    ///   so the agent loop sends none.
     /// - Thinking blocks are bound to the model and the conversation prefix:
     ///   editing earlier turns invalidates them, and switching a session to
     ///   or from this model with [`Agent::set_model`](crate::Agent::set_model)
@@ -1709,7 +1710,8 @@ impl ModelConfig {
     /// Adaptive thinking only: `budget_tokens` and `{"type": "disabled"}` are
     /// a 400, so `ThinkingLevel::Off` sends no thinking field and the model
     /// runs at its default effort (`high`). A non-default `temperature`,
-    /// `top_p` or `top_k` is a 400 too, so [`sampling_params`](Self::sampling_params) is off.
+    /// `top_p` or `top_k` is a 400 too, so
+    /// [`accepts_sampling_params`](Self::accepts_sampling_params) is off.
     ///
     /// Rates verified against <https://platform.claude.com/docs/en/about-claude/pricing>
     /// on 2026-10-18 ($2 / $10, cached $0.10, 5-minute cache write $2.50; no
@@ -1730,8 +1732,9 @@ impl ModelConfig {
     /// Adaptive thinking, unlike Haiku 4.5 (`budget_tokens` is a 400); its
     /// default effort is `medium`. `ThinkingLevel::Off` omits the thinking
     /// field, and Haiku 5.5 thinks at `medium` when it is absent (this crate
-    /// never sends `{"type": "disabled"}`). A non-default `temperature`, `top_p` or
-    /// `top_k` is a 400, so [`sampling_params`](Self::sampling_params) is off.
+    /// never sends `{"type": "disabled"}`). A non-default `temperature`,
+    /// `top_p` or `top_k` is a 400, so
+    /// [`accepts_sampling_params`](Self::accepts_sampling_params) is off.
     ///
     /// Rates verified against <https://platform.claude.com/docs/en/about-claude/pricing>
     /// on 2026-10-18: $0.10 / $0.50, cached $0.01, cache write $0.125; a
@@ -2576,7 +2579,7 @@ impl ModelConfig {
             cost: None, // set by `priced`
             list_priced: false,
             image_input: true,
-            sampling_params: true,
+            accepts_sampling_params: true,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -2639,7 +2642,7 @@ impl ModelConfig {
             cost: None, // set by `priced`
             list_priced: false,
             image_input: true,
-            sampling_params: true,
+            accepts_sampling_params: true,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -2663,7 +2666,7 @@ impl ModelConfig {
             cost: None,
             list_priced: false,
             image_input: true,
-            sampling_params: true,
+            accepts_sampling_params: true,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -2771,7 +2774,7 @@ impl ModelConfig {
                 None,
             )
         };
-        let sampling_params = takes_sampling_params(&id);
+        let accepts_sampling_params = takes_sampling_params(&id);
         Self {
             id: id.clone(),
             name: id,
@@ -2784,7 +2787,7 @@ impl ModelConfig {
             cost: None,
             list_priced: false,
             image_input: true,
-            sampling_params,
+            accepts_sampling_params,
             headers: HashMap::new(),
             google: None,
             compat,
@@ -2812,7 +2815,7 @@ impl ModelConfig {
             cost: None,
             list_priced: false,
             image_input: true,
-            sampling_params: true,
+            accepts_sampling_params: true,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -2837,7 +2840,7 @@ impl ModelConfig {
             cost: None,
             list_priced: false,
             image_input: true,
-            sampling_params: true,
+            accepts_sampling_params: true,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -2865,7 +2868,7 @@ impl ModelConfig {
             cost: None, // set by `priced`
             list_priced: false,
             image_input: true,
-            sampling_params: true,
+            accepts_sampling_params: true,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -2917,7 +2920,7 @@ impl ModelConfig {
             cost: None, // set by `priced`
             list_priced: false,
             image_input: true,
-            sampling_params: true,
+            accepts_sampling_params: true,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -2944,7 +2947,7 @@ impl ModelConfig {
             cost: None, // set by `priced`
             list_priced: false,
             image_input: true,
-            sampling_params: true,
+            accepts_sampling_params: true,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -2974,7 +2977,7 @@ impl ModelConfig {
             cost: None, // set by `priced`
             list_priced: false,
             image_input: true,
-            sampling_params: true,
+            accepts_sampling_params: true,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -3003,7 +3006,7 @@ impl ModelConfig {
             cost: None, // set by `priced`
             list_priced: false,
             image_input: true,
-            sampling_params: true,
+            accepts_sampling_params: true,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -3030,7 +3033,7 @@ impl ModelConfig {
             cost: None, // set by `priced`
             list_priced: false,
             image_input: true,
-            sampling_params: true,
+            accepts_sampling_params: true,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -3064,7 +3067,7 @@ impl ModelConfig {
             cost: None, // set by `priced`
             list_priced: false,
             image_input: true,
-            sampling_params: true,
+            accepts_sampling_params: true,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -3092,7 +3095,7 @@ impl ModelConfig {
             cost: None, // set by `priced`
             list_priced: false,
             image_input: true,
-            sampling_params: true,
+            accepts_sampling_params: true,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -3120,7 +3123,7 @@ impl ModelConfig {
             cost: None, // set by `priced`
             list_priced: false,
             image_input: true,
-            sampling_params: true,
+            accepts_sampling_params: true,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -4187,11 +4190,15 @@ mod tests {
         ] {
             assert_eq!(takes_sampling_params(id), takes, "{id}");
             assert_eq!(
-                ModelConfig::anthropic(id, id).sampling_params,
+                ModelConfig::anthropic(id, id).accepts_sampling_params,
                 takes,
                 "{id}"
             );
-            assert_eq!(ModelConfig::opencode_zen(id).sampling_params, takes, "{id}");
+            assert_eq!(
+                ModelConfig::opencode_zen(id).accepts_sampling_params,
+                takes,
+                "{id}"
+            );
         }
         // Presets inherit it, on Bedrock and OpenRouter too; other providers
         // keep sending a temperature.
@@ -4201,7 +4208,7 @@ mod tests {
             ModelConfig::preset("bedrock", "us.anthropic.claude-sonnet-5").unwrap(),
             ModelConfig::preset("openrouter", "anthropic/claude-sonnet-5").unwrap(),
         ] {
-            assert!(!config.sampling_params, "{}", config.id);
+            assert!(!config.accepts_sampling_params, "{}", config.id);
         }
         for config in [
             ModelConfig::claude_haiku_4_5(),
@@ -4211,12 +4218,12 @@ mod tests {
             ModelConfig::google("gemini-3.6-flash", "Gemini"),
             ModelConfig::mock(),
         ] {
-            assert!(config.sampling_params, "{}", config.id);
+            assert!(config.accepts_sampling_params, "{}", config.id);
         }
         assert!(
             !ModelConfig::mock()
-                .with_sampling_params(false)
-                .sampling_params
+                .with_accepts_sampling_params(false)
+                .accepts_sampling_params
         );
         // Every preset agrees with its id (a preset written as a literal
         // instead of `..Self::anthropic(..)` would otherwise send a
@@ -4226,14 +4233,14 @@ mod tests {
                 "anthropic" => takes_sampling_params(&config.id),
                 _ => true,
             };
-            assert_eq!(config.sampling_params, expected, "{}", config.id);
+            assert_eq!(config.accepts_sampling_params, expected, "{}", config.id);
         }
         for (bedrock_id, _) in BEDROCK_CLAUDE_IDS {
             let id = format!("anthropic.{bedrock_id}");
             let config = ModelConfig::preset("bedrock", &id).unwrap();
             let anthropic_id = ModelConfig::bedrock_anthropic_id(&id).unwrap();
             assert_eq!(
-                config.sampling_params,
+                config.accepts_sampling_params,
                 takes_sampling_params(&anthropic_id),
                 "{id}"
             );
@@ -4241,9 +4248,11 @@ mod tests {
         // Known limit: a config persisted before the field existed loads with
         // it on (serde cannot see the id); the docs say to rebuild it.
         let mut json = serde_json::to_value(ModelConfig::claude_opus_5_5()).unwrap();
-        json.as_object_mut().unwrap().remove("sampling_params");
+        json.as_object_mut()
+            .unwrap()
+            .remove("accepts_sampling_params");
         let back: ModelConfig = serde_json::from_value(json).unwrap();
-        assert!(back.sampling_params);
+        assert!(back.accepts_sampling_params);
     }
 
     #[test]
