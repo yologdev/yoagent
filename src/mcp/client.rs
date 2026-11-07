@@ -156,7 +156,7 @@ impl McpClient {
     /// List available tools from the server, following `nextCursor` through
     /// every page (the spec lets a server paginate `tools/list`; reading only
     /// the first page dropped the rest without a word). A cursor seen before,
-    /// or more than [`MAX_LIST_PAGES`] pages, is a protocol error rather than
+    /// or more than 1,000 pages, is a protocol error rather than
     /// an endless loop or a silently partial list.
     pub async fn list_tools(&self) -> Result<Vec<McpToolInfo>, McpError> {
         /// One page of `tools/list`.
@@ -328,8 +328,13 @@ impl Drop for CancelNotice {
         if tokio::runtime::Handle::try_current().is_err() {
             return;
         }
-        let transport = Arc::clone(&self.transport);
         let request_id = self.request_id;
+        // Take the transport now if it is free (the dropped call's own guard
+        // is already gone): left to the spawned task, the lock usually goes
+        // to the next queued call first, which holds it for its whole call
+        // and the notice times out. Busy now, wait for it within the limit.
+        let held = Arc::clone(&self.transport).try_lock_owned().ok();
+        let transport = Arc::clone(&self.transport);
         crate::rt::spawn(async move {
             let notice = JsonRpcNotification::new(
                 "notifications/cancelled",
@@ -339,7 +344,10 @@ impl Drop for CancelNotice {
                 })),
             );
             let sent = crate::rt::timeout(CANCEL_NOTICE_LIMIT, async {
-                transport.lock().await.notify(notice).await
+                match held {
+                    Some(transport) => transport.notify(notice).await,
+                    None => transport.lock().await.notify(notice).await,
+                }
             })
             .await;
             match sent {

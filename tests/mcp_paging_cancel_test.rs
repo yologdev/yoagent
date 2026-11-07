@@ -41,6 +41,12 @@ impl McpTransport for Server {
                 Some("page-3") => serde_json::json!({ "tools": [tool("c")] }),
                 Some(other) => panic!("unknown cursor {other}"),
             },
+            "tools/call"
+                if request.params.as_ref().and_then(|p| p.get("name"))
+                    == Some(&serde_json::json!("fast")) =>
+            {
+                serde_json::json!({ "content": [{ "type": "text", "text": "done" }] })
+            }
             "tools/call" => std::future::pending().await,
             other => panic!("unexpected {other}"),
         };
@@ -135,11 +141,13 @@ async fn a_dropped_call_tells_the_server_it_was_cancelled() {
 
 #[tokio::test]
 async fn an_answered_call_sends_no_cancellation() {
-    // tools/list answers; nothing is dropped, so no notice.
     let server = Server::default();
     let notifications = server.notifications.clone();
     let client = McpClient::from_transport(Box::new(server));
-    client.list_tools().await.unwrap();
+    client
+        .call_tool("fast", serde_json::json!({}))
+        .await
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(notifications.lock().unwrap().is_empty());
 }
