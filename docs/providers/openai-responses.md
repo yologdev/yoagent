@@ -108,8 +108,14 @@ config.compat = Some(compat);
 
 See the [`ThinkingLevel` table](../reference/configuration.md#thinkinglevel).
 
-`temperature` is rejected by GPT-6 while the effort is anything but `none`,
-and this crate never sends `none`: leave `StreamConfig::temperature` unset.
+`temperature` is rejected alongside any reasoning effort but `none` ("When
+reasoning effort is not `none`, remove `temperature`, `top_p`, and
+`top_logprobs`"), no GPT-6 model defaults to `none`, and this crate never
+sends `none`. So a config built for a GPT-6 id (the presets, `openai_responses`,
+`openai`, `generic`, OpenCode, OpenRouter) has `ModelConfig::accepts_sampling_params`
+off, and the agent loop sends no temperature. OpenAI's other reasoning models
+keep the flag on: if yours rejects a temperature, call
+`with_accepts_sampling_params(false)`.
 
 ## Encrypted reasoning
 

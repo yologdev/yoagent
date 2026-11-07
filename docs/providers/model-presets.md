@@ -157,7 +157,8 @@ it with a 400).
 The GPT-6 presets use the Responses API because Chat Completions does not
 support function calling with GPT-6 Astra, and allows it on Sol/Luna only at
 effort `none`. GPT-6 rejects `temperature` while the effort is not `none`, and
-this crate never sends `none` — leave `temperature` unset. The Responses
+this crate never sends `none`, so the presets turn `accepts_sampling_params`
+off and the agent loop sends no temperature. The Responses
 provider does not enforce `prompt_structured` schemas (it warns and ignores the
 schema), so structured outputs on the GPT-6 presets are not guaranteed to
 match. There is no bare `gpt-6` model id.
