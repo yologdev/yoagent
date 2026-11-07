@@ -293,10 +293,10 @@ const DEFAULT_INSTRUCTION: &str = "Summarize the conversation above as a handoff
 /// append; this bounds the pathological rest.
 const TRANSCRIPT_PER_BLOCK_BYTES: usize = 2_000;
 
-/// Cap on the bytes of a pinned message in the transcript: an earlier
-/// briefing (the default `max_summary_tokens` of 2,000 is about 8 KB, which
-/// the per-block cap would cut to a quarter on every recompaction) and the
-/// latest real user request.
+/// Cap on the bytes of each text block of a pinned message in the
+/// transcript: an earlier briefing (the default `max_summary_tokens` of
+/// 2,000 is about 8 KB, which the per-block cap would cut to a quarter on
+/// every recompaction) and the latest real user request.
 const TRANSCRIPT_PINNED_BYTES: usize = 32_000;
 
 /// Cap on the bytes of the whole transcript.
@@ -305,8 +305,9 @@ const TRANSCRIPT_PINNED_BYTES: usize = 32_000;
 /// the *main* model's budget, so a 1M-context session can hand a 200k-context
 /// summarizer far more than it can read — every request then fails on overflow
 /// and the strategy pays for nothing. Roughly 120k tokens at four bytes each,
-/// which fits the smallest model anyone routes this at. Checked per message, so
-/// the transcript may overshoot by at most one message's contribution.
+/// which fits the smallest model anyone routes this at. Unpinned messages never
+/// overshoot it; pinned ones (see [`serialize_transcript`]) are kept even past
+/// it, plus the omission markers.
 const TRANSCRIPT_TOTAL_BYTES: usize = 480_000;
 
 /// A span shorter than this is not worth a request or a cache break.
@@ -1419,14 +1420,20 @@ fn clip(text: &str, max: usize) -> &str {
 ///
 /// Two messages are pinned: an earlier briefing (a `SUMMARY_MARKER`
 /// message, which is what the next briefing has to carry forward) and the
-/// latest real user request (the task). Each is clipped at
-/// [`TRANSCRIPT_PINNED_BYTES`] rather than the per-block cap, and kept
-/// whatever the total. The rest fills the remaining budget newest first, so
-/// a cut drops the oldest messages and a marker stands where they were.
+/// latest real user request within the span. Each text block of a pinned
+/// message is clipped at [`TRANSCRIPT_PINNED_BYTES`] rather than the
+/// per-block cap, and pinned messages are kept whatever the total. The rest
+/// fills the remaining budget newest first, so a cut drops the oldest
+/// messages and a marker stands where they were.
 fn serialize_transcript(messages: &[AgentMessage]) -> String {
+    // The newest user message in the span with real text: not one the loop
+    // injected, not blank. An image-only message is passed over (its image
+    // reaches the summarizer as `[image omitted]` anyway), so the text
+    // request before it is the one pinned.
     let latest_ask = messages.iter().rposition(|m| {
         matches!(m, AgentMessage::Llm(Message::User { content, .. })
-            if content.iter().any(|c| matches!(c, Content::Text { text } if !is_loop_injected(text))))
+            if content.iter().any(|c| matches!(c, Content::Text { text }
+                if !text.trim().is_empty() && !is_loop_injected(text))))
     });
     let chunks: Vec<(String, bool)> = messages
         .iter()
@@ -1452,37 +1459,55 @@ fn serialize_transcript(messages: &[AgentMessage]) -> String {
         .sum();
     let mut room = TRANSCRIPT_TOTAL_BYTES.saturating_sub(pinned_bytes);
     let mut keep = vec![false; chunks.len()];
+    let mut full = false;
     for (i, (chunk, pinned)) in chunks.iter().enumerate().rev() {
         if *pinned {
             keep[i] = true;
-        } else if chunk.len() <= room {
+        } else if !full && chunk.len() <= room {
             room -= chunk.len();
             keep[i] = true;
         } else {
             // Newest first: once one does not fit, everything older is out
             // too (a hole in the middle would read as a continuous story).
-            room = 0;
+            full = true;
         }
     }
 
+    // An empty chunk (an extension message, an empty assistant turn) is
+    // neither shown nor counted: it never reaches the summarizer either way.
     let mut out = String::new();
-    let mut omitted = 0usize;
+    let (mut gap, mut total) = (0usize, 0usize);
+    let marker = |out: &mut String, n: usize| {
+        out.push_str(&format!(
+            "[... {n} earlier messages omitted: transcript size cap ...]\n"
+        ));
+    };
     for (i, (chunk, _)) in chunks.iter().enumerate() {
+        if chunk.is_empty() {
+            continue;
+        }
         if keep[i] {
-            if omitted > 0 {
-                tracing::warn!(
-                    "llm compaction: transcript hit the {TRANSCRIPT_TOTAL_BYTES}-byte cap; \
-                     {omitted} older messages left out of the summarized span"
-                );
-                out.push_str(&format!(
-                    "[... {omitted} earlier messages omitted: transcript size cap ...]\n"
-                ));
-                omitted = 0;
+            if gap > 0 {
+                marker(&mut out, gap);
+                gap = 0;
             }
             out.push_str(chunk);
         } else {
-            omitted += 1;
+            gap += 1;
+            total += 1;
         }
+    }
+    if gap > 0 {
+        // The newest messages themselves did not fit.
+        out.push_str(&format!(
+            "[... {gap} later messages omitted: transcript size cap ...]\n"
+        ));
+    }
+    if total > 0 {
+        tracing::warn!(
+            "llm compaction: transcript hit the {TRANSCRIPT_TOTAL_BYTES}-byte cap; \
+             {total} messages left out of the summarized span"
+        );
     }
     out
 }
@@ -2348,7 +2373,7 @@ mod tests {
         // A span far larger than any summarizer's window.
         let huge: Vec<AgentMessage> = (0..4_000).flat_map(|i| turn(i, 1_000)).collect();
         let transcript = serialize_transcript(&huge);
-        // The cap is checked per message, so one message may overshoot it.
+        // Unpinned messages never overshoot the cap; the slack is the marker.
         let ceiling = TRANSCRIPT_TOTAL_BYTES + 4 * TRANSCRIPT_PER_BLOCK_BYTES;
         assert!(
             transcript.len() <= ceiling,
@@ -2391,6 +2416,56 @@ mod tests {
             )
             .with_timestamp(i as u64),
         )
+    }
+
+    #[test]
+    fn empty_messages_do_not_split_the_omitted_region() {
+        // Extension messages and empty assistant turns serialize to nothing:
+        // they must not break one gap into several markers.
+        let empty_turn = AgentMessage::Llm(Message::assistant(
+            vec![],
+            StopReason::Error,
+            "mock",
+            "mock",
+            Usage::default(),
+        ));
+        let mut span = Vec::new();
+        for i in 0..4_000 {
+            span.extend(turn(i, 1_000));
+            span.push(empty_turn.clone());
+            span.push(AgentMessage::Custom(CustomMessage::new(
+                "note",
+                serde_json::json!({}),
+            )));
+        }
+        let transcript = serialize_transcript(&span);
+        assert_eq!(
+            transcript.matches("messages omitted").count(),
+            1,
+            "one gap, one marker"
+        );
+    }
+
+    #[test]
+    fn newest_messages_that_do_not_fit_are_reported_too() {
+        // The newest message alone is over the cap: dropped, but said so.
+        let blocks: Vec<Content> = (0..300)
+            .map(|i| Content::Text {
+                text: format!("{i}{}", "z".repeat(2_000)),
+            })
+            .collect();
+        let span = vec![AgentMessage::Llm(Message::assistant(
+            blocks,
+            StopReason::Stop,
+            "mock",
+            "mock",
+            Usage::default(),
+        ))];
+        let transcript = serialize_transcript(&span);
+        assert!(
+            transcript.contains("1 later messages omitted"),
+            "{transcript}"
+        );
     }
 
     #[test]
