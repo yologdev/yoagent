@@ -718,7 +718,15 @@ impl AgentTool for ReadFileTool {
         let effective_limit = limit.unwrap_or(self.max_lines);
         let first = offset.map_or(0, |off| off - 1);
         let (start, end, total, lines) = if metadata.len() as usize > self.max_bytes {
-            read_page(&io_path, path, first, effective_limit, self.max_bytes).await?
+            read_page(
+                &io_path,
+                path,
+                first,
+                effective_limit,
+                self.max_bytes,
+                &ctx.cancel,
+            )
+            .await?
         } else {
             let content = tokio::fs::read_to_string(&io_path)
                 .await
@@ -773,40 +781,56 @@ impl AgentTool for ReadFileTool {
 /// truncated one, and a reader never sees a half-written file. (Writing in
 /// place truncated first: a failure part-way lost the original.)
 ///
-/// What an in-place write kept is kept: a symlink is followed, so its target
-/// is replaced and the link stays; an existing file's permissions are copied
-/// to the replacement. A directory where no new file can be created falls
-/// back to writing in place. A rename gives the file a new inode, so a hard
-/// link to the old one keeps the old content.
+/// What an in-place write did is kept:
+/// - a file that could not be written in place (read-only, another user's) is
+///   refused, not replaced — a rename needs only the directory's permission;
+/// - a symlink is followed: its target is replaced and the link stays; a
+///   dangling one is written through in place, creating its target;
+/// - the file's mode is kept, and on Unix its owner and group (best effort);
+///   the temp file is created with that mode, so new content is never more
+///   readable than the old;
+/// - a directory where no file can be created, or a rename it refuses (a
+///   sticky directory), falls back to writing in place.
+///
+/// A rename gives the file a new inode: a hard link to the old one keeps the
+/// old content, and ACLs and extended attributes are not carried over.
 pub(crate) async fn write_atomic(io_path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     use tokio::io::AsyncWriteExt;
-    // Through a symlink to the file it names (a missing file: as given).
+    let link = tokio::fs::symlink_metadata(io_path)
+        .await
+        .is_ok_and(|m| m.file_type().is_symlink());
     let target = match tokio::fs::canonicalize(io_path).await {
         Ok(resolved) => resolved,
+        // A dangling symlink: write through it, creating what it names.
+        Err(_) if link => return tokio::fs::write(io_path, bytes).await,
         Err(_) => io_path.to_path_buf(),
     };
+    let existing = tokio::fs::metadata(&target).await.ok();
+    if existing.is_some() {
+        // Replace only what could be written in place.
+        tokio::fs::OpenOptions::new()
+            .write(true)
+            .open(&target)
+            .await?;
+    }
     let dir = match target.parent() {
         Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
         _ => std::path::PathBuf::from("."),
     };
-    let name = target
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.subsec_nanos());
-    let temp = dir.join(format!(
-        ".{name}.yoagent-{}-{nonce}.tmp",
-        std::process::id()
-    ));
+    // Not derived from the file's name: a long one would make it too long.
+    let temp = dir.join(format!(".yoagent-{}-{nonce}.tmp", std::process::id()));
 
-    let mut file = match tokio::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp)
-        .await
-    {
+    let mut options = tokio::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    if let Some(meta) = &existing {
+        use std::os::unix::fs::PermissionsExt;
+        options.mode(meta.permissions().mode() & 0o7777);
+    }
+    let mut file = match options.open(&temp).await {
         Ok(f) => f,
         // No new file can go here (a read-only directory holding a writable
         // file): write in place, as before.
@@ -818,11 +842,30 @@ pub(crate) async fn write_atomic(io_path: &std::path::Path, bytes: &[u8]) -> std
     let written = async {
         file.write_all(bytes).await?;
         file.sync_all().await?;
+        #[cfg(unix)]
+        if let Some(meta) = &existing {
+            use std::os::unix::fs::MetadataExt;
+            let std_file = file.into_std().await;
+            // Best effort: only root can give a file to another user.
+            let _ = std::os::unix::fs::fchown(&std_file, Some(meta.uid()), Some(meta.gid()));
+        } else {
+            drop(file);
+        }
+        #[cfg(not(unix))]
         drop(file);
-        if let Ok(meta) = tokio::fs::metadata(&target).await {
+        if let Some(meta) = &existing {
+            // Exact mode: the create was narrowed by the umask.
             tokio::fs::set_permissions(&temp, meta.permissions()).await?;
         }
-        tokio::fs::rename(&temp, &target).await
+        match tokio::fs::rename(&temp, &target).await {
+            // A sticky directory refuses to replace another user's file the
+            // process may still write: write in place, as before.
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                let _ = tokio::fs::remove_file(&temp).await;
+                tokio::fs::write(&target, bytes).await
+            }
+            other => other,
+        }
     }
     .await;
     if written.is_err() {
@@ -831,41 +874,102 @@ pub(crate) async fn write_atomic(io_path: &std::path::Path, bytes: &[u8]) -> std
     written
 }
 
-/// Lines `[first, first + limit)` of a file too large to load whole, read as
-/// a stream, with the file's line count: `(start, end, total, lines)` as the
-/// in-memory path computes them. The page stops early once it holds
-/// `max_bytes` (a minified file's few lines can be huge), which the header's
-/// `end` then shows.
+/// Lines `[first, first + limit)` of a file too large to load whole, with the
+/// file's line count: `(start, end, total, lines)` as the in-memory path
+/// computes them. Read in fixed chunks, so memory stays bounded whatever the
+/// file: lines before the page are only counted, a kept line is cut at
+/// `max_bytes` (a minified file can be one huge line), and the page stops
+/// once it holds `max_bytes`, which the header's `end` then shows. Checks
+/// `cancel` as it goes (counting the lines reads the whole file).
 async fn read_page(
     io_path: &std::path::Path,
     path: &str,
     first: usize,
     limit: usize,
     max_bytes: usize,
+    cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<(usize, usize, usize, Vec<String>), ToolError> {
-    use tokio::io::AsyncBufReadExt;
-    let file = tokio::fs::File::open(io_path)
-        .await
-        .map_err(|e| ToolError::Failed(format!("Cannot read {}: {}", path, e)))?;
-    let mut reader = tokio::io::BufReader::new(file).lines();
-    let (mut total, mut bytes) = (0usize, 0usize);
-    let mut lines = Vec::new();
+    use tokio::io::AsyncReadExt;
+    let fail = |e: std::io::Error| ToolError::Failed(format!("Cannot read {}: {}", path, e));
+    let mut file = tokio::fs::File::open(io_path).await.map_err(fail)?;
+    let mut buf = vec![0u8; 64 * 1024];
+    let (mut line_no, mut bytes) = (0usize, 0usize);
+    let mut lines: Vec<String> = Vec::new();
     let mut full = false;
-    while let Some(line) = reader
-        .next_line()
-        .await
-        .map_err(|e| ToolError::Failed(format!("Cannot read {}: {}", path, e)))?
-    {
-        if total >= first && !full && lines.len() < limit {
-            if bytes + line.len() > max_bytes && !lines.is_empty() {
+    let (mut cur, mut cur_cut, mut open) = (Vec::new(), false, false);
+
+    // End the current line: keep it if it is in the page and fits.
+    let mut finish = |cur: &mut Vec<u8>, cut: &mut bool, line_no: usize| -> Result<(), ToolError> {
+        let collecting = line_no >= first && !full && lines.len() < limit;
+        if collecting {
+            if cur.last() == Some(&b'\r') && !*cut {
+                cur.pop();
+            }
+            if !lines.is_empty() && bytes + cur.len() > max_bytes {
                 full = true;
             } else {
-                bytes += line.len();
-                lines.push(line);
+                let text = if *cut {
+                    format!(
+                        "{} … (line cut at {max_bytes} bytes)",
+                        String::from_utf8_lossy(cur)
+                    )
+                } else {
+                    String::from_utf8(std::mem::take(cur)).map_err(|_| {
+                        ToolError::Failed(format!(
+                            "Cannot read {path}: line {} is not valid UTF-8",
+                            line_no + 1
+                        ))
+                    })?
+                };
+                bytes += text.len();
+                lines.push(text);
             }
         }
-        total += 1;
+        cur.clear();
+        *cut = false;
+        Ok(())
+    };
+    let mut chunks = 0usize;
+    loop {
+        if chunks % 64 == 0 && cancel.is_cancelled() {
+            return Err(ToolError::Cancelled);
+        }
+        chunks += 1;
+        let n = file.read(&mut buf).await.map_err(fail)?;
+        if n == 0 {
+            break;
+        }
+        let mut data = &buf[..n];
+        while !data.is_empty() {
+            let wanted = line_no >= first && line_no < first.saturating_add(limit);
+            let (piece, ends) = match data.iter().position(|&b| b == b'\n') {
+                Some(i) => (&data[..i], Some(i + 1)),
+                None => (data, None),
+            };
+            if wanted {
+                let room = max_bytes.saturating_sub(cur.len());
+                cur.extend_from_slice(&piece[..piece.len().min(room)]);
+                cur_cut |= piece.len() > room;
+            }
+            match ends {
+                Some(next) => {
+                    finish(&mut cur, &mut cur_cut, line_no)?;
+                    line_no += 1;
+                    open = false;
+                    data = &data[next..];
+                }
+                None => {
+                    open = true;
+                    data = &[];
+                }
+            }
+        }
     }
+    if open {
+        finish(&mut cur, &mut cur_cut, line_no)?;
+        line_no += 1;
+    }
+    let total = line_no;
     let start = first.min(total);
     Ok((start, start + lines.len(), total, lines))
 }

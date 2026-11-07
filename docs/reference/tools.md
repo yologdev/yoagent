@@ -34,7 +34,10 @@ guardrails against typos, not a security control.
 By default a command inherits the agent's whole environment, including any `*_API_KEY`. Set
 `env_allowlist` to pass only the listed variables (plus `PATH`, `HOME`, `PWD` if present).
 
-Output beyond `max_output_bytes` is drained and discarded, so memory stays bounded. A timeout
+Past `max_output_bytes`, each stream keeps its first half and its last half, with
+`... (output truncated: N bytes omitted) ...` between them; the rest is drained and discarded,
+so memory stays bounded and a long log keeps its end (where a build or test verdict is). Before
+0.27.5 only the start was kept. A timeout
 returns an error carrying the output so far. On Unix a timeout or cancel kills the whole process
 group (pipeline stages, `&&` lists, background jobs; only a process that starts its own session
 escapes); elsewhere it kills the `bash` process only.
@@ -101,6 +104,12 @@ path, so `..` and symlinks (dangling ones included) cannot escape, and the tool 
 the checked path (see `PathSandbox`). Before 0.24.2 a `..` after a missing directory, or a
 dangling symlink, could get past the check.
 
+A file over `max_bytes` is refused when the call gives no `offset`/`limit`; with them it is
+read a page at a time, streamed in fixed chunks, so memory stays bounded: lines before the page
+are only counted (the header gives the true total), a kept line is cut at `max_bytes`
+(`… (line cut at N bytes)`), and the page stops once it holds `max_bytes`. Before 0.27.5 such a
+file was refused even with `offset`/`limit`.
+
 `read_file`, `write_file` and `edit_file` refuse a path that is not a regular file (after
 following symlinks): a FIFO, a device, a socket or a directory. Before 0.25.8 a FIFO passed the
 size check (its length reads 0) and the read blocked until something wrote to it, and a device
@@ -113,6 +122,16 @@ Write content to a file. Creates parent directories automatically.
 - **Name**: `write_file`
 - **Parameters**: `path` (required), `content` (required)
 - **Configuration**: `allowed_paths: Vec<String>`, `read_log: Option<ReadLog>`
+
+`write_file` and `edit_file` replace a file whole: they write a temp file in the same directory,
+flush it to disk and rename it over the target, so a crash, a full disk or a write error leaves
+the old file intact and a reader never sees a half-written one (before 0.27.5 they wrote in
+place, truncating first). What an in-place write did is kept: a file that cannot be written in
+place (read-only, another user's) is refused, a symlink is followed (a dangling one is written
+through, creating its target), the file's mode is kept — and on Unix its owner and group, best
+effort — and a directory where no file can be created, or a sticky directory that refuses the
+rename, falls back to writing in place. The rename gives the file a new inode: a hard link to the
+old one keeps the old content, and ACLs and extended attributes are not carried over.
 
 With a `ReadLog` shared with `read_file` (`with_read_log(log)` on both; `default_tools()` does
 this), `write_file` refuses to overwrite an existing file that this agent has read only in part,

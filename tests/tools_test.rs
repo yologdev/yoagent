@@ -2780,3 +2780,97 @@ extern "C" {
     #[link_name = "geteuid"]
     fn libc_geteuid() -> u32;
 }
+
+/// The atomic swap refuses what an in-place write could not do: a read-only
+/// file is not replaced (a rename needs only the directory's permission).
+#[cfg(unix)]
+#[tokio::test]
+async fn atomic_writes_refuse_a_read_only_file() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc_geteuid() } == 0 {
+        return; // root writes anything
+    }
+    let tmp = tempfile::TempDir::new().unwrap();
+    let path = tmp.path().join("locked.txt");
+    std::fs::write(&path, "keep\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let p = path.to_str().unwrap();
+    assert!(WriteFileTool::new()
+        .execute(
+            serde_json::json!({ "path": p, "content": "x\n" }),
+            ctx("write_file")
+        )
+        .await
+        .is_err());
+    assert!(EditFileTool::new()
+        .execute(
+            serde_json::json!({ "path": p, "old_text": "keep", "new_text": "x" }),
+            ctx("edit_file")
+        )
+        .await
+        .is_err());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep\n");
+}
+
+/// A dangling symlink is written through (its target created), not replaced
+/// by a regular file; a private file's mode is kept.
+#[cfg(unix)]
+#[tokio::test]
+async fn atomic_writes_follow_a_dangling_link_and_keep_a_private_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let missing = tmp.path().join("missing.txt");
+    let link = tmp.path().join("dangling.txt");
+    std::os::unix::fs::symlink(&missing, &link).unwrap();
+    WriteFileTool::new()
+        .execute(
+            serde_json::json!({ "path": link.to_str().unwrap(), "content": "made\n" }),
+            ctx("write_file"),
+        )
+        .await
+        .unwrap();
+    assert!(std::fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(std::fs::read_to_string(&missing).unwrap(), "made\n");
+
+    let secret = tmp.path().join(".env");
+    std::fs::write(&secret, "A=1\n").unwrap();
+    std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
+    WriteFileTool::new()
+        .execute(
+            serde_json::json!({ "path": secret.to_str().unwrap(), "content": "A=2\n" }),
+            ctx("write_file"),
+        )
+        .await
+        .unwrap();
+    let mode = std::fs::metadata(&secret).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600);
+}
+
+/// A page of a file that is one huge line is bounded: the line is cut at
+/// `max_bytes`, not loaded and returned whole.
+#[tokio::test]
+async fn read_file_bounds_a_page_of_one_huge_line() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let path = tmp.path().join("bundle.min.js");
+    std::fs::write(&path, "x".repeat(3 * 1024 * 1024)).unwrap();
+    let result = ReadFileTool::new()
+        .execute(
+            serde_json::json!({ "path": path.to_str().unwrap(), "offset": 1, "limit": 5 }),
+            ctx("read_file"),
+        )
+        .await
+        .unwrap();
+    let Content::Text { text } = &result.content[0] else {
+        panic!("expected text")
+    };
+    assert!(text.len() < 1024 * 1024 + 200, "{} bytes", text.len());
+    assert!(text.contains("line cut at"), "{}", &text[..100]);
+    assert!(
+        text.starts_with("[1 lines]") || text.starts_with("[Lines 1-1 of 1"),
+        "{}",
+        &text[..60]
+    );
+}
