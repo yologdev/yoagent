@@ -153,13 +153,43 @@ impl McpClient {
         Ok(result.server_info)
     }
 
-    /// List available tools from the server.
+    /// List available tools from the server, following `nextCursor` through
+    /// every page (the spec lets a server paginate `tools/list`; reading only
+    /// the first page dropped the rest without a word). A cursor seen before,
+    /// or more than [`MAX_LIST_PAGES`] pages, is a protocol error rather than
+    /// an endless loop or a silently partial list.
     pub async fn list_tools(&self) -> Result<Vec<McpToolInfo>, McpError> {
-        let request = JsonRpcRequest::new("tools/list", Some(serde_json::json!({})));
-        let response = self.send_request(request).await?;
-
-        let result: ToolsListResult = serde_json::from_value(response)?;
-        Ok(result.tools)
+        /// One page of `tools/list`.
+        #[derive(serde::Deserialize)]
+        struct Page {
+            tools: Vec<McpToolInfo>,
+            #[serde(default, rename = "nextCursor")]
+            next_cursor: Option<String>,
+        }
+        let mut tools = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut cursor: Option<String> = None;
+        for _ in 0..MAX_LIST_PAGES {
+            let params = match &cursor {
+                Some(c) => serde_json::json!({ "cursor": c }),
+                None => serde_json::json!({}),
+            };
+            let request = JsonRpcRequest::new("tools/list", Some(params));
+            let page: Page = serde_json::from_value(self.send_request(request).await?)?;
+            tools.extend(page.tools);
+            match page.next_cursor.filter(|c| !c.is_empty()) {
+                None => return Ok(tools),
+                Some(next) if !seen.insert(next.clone()) => {
+                    return Err(McpError::Protocol(format!(
+                        "tools/list repeated the cursor {next:?}; stopping instead of looping"
+                    )));
+                }
+                Some(next) => cursor = Some(next),
+            }
+        }
+        Err(McpError::Protocol(format!(
+            "tools/list returned more than {MAX_LIST_PAGES} pages"
+        )))
     }
 
     /// Call a tool on the server.
@@ -174,9 +204,17 @@ impl McpClient {
         });
 
         let request = JsonRpcRequest::new("tools/call", Some(params));
-        let response = self.send_request(request).await?;
+        // Dropped before the answer (cancelled, or timed out): tell the
+        // server, so it can stop the work (the spec's `notifications/cancelled`).
+        let mut notice = CancelNotice {
+            transport: Arc::clone(&self.transport),
+            request_id: request.id,
+            armed: true,
+        };
+        let response = self.send_request(request).await;
+        notice.armed = false;
 
-        let result: McpToolCallResult = serde_json::from_value(response)?;
+        let result: McpToolCallResult = serde_json::from_value(response?)?;
         Ok(result)
     }
 
@@ -260,6 +298,58 @@ impl McpClient {
         response
             .result
             .ok_or_else(|| McpError::Protocol("Response has neither result nor error".into()))
+    }
+}
+
+/// Most `tools/list` pages [`McpClient::list_tools`] follows.
+const MAX_LIST_PAGES: usize = 1_000;
+
+/// How long the spawned `notifications/cancelled` may take: a custom
+/// transport's default `notify` sends it as a request and waits for an answer
+/// that never comes, and another call may hold the transport.
+const CANCEL_NOTICE_LIMIT: Duration = Duration::from_secs(5);
+
+/// Sends `notifications/cancelled` for `request_id` when dropped while armed:
+/// the `tools/call` future was dropped before its answer arrived.
+struct CancelNotice {
+    transport: Arc<Mutex<Box<dyn McpTransport>>>,
+    request_id: u64,
+    armed: bool,
+}
+
+impl Drop for CancelNotice {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        // Natively a spawn needs a Tokio runtime; without one there is
+        // nowhere to send from, and the server simply finishes the call.
+        #[cfg(not(target_arch = "wasm32"))]
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        let transport = Arc::clone(&self.transport);
+        let request_id = self.request_id;
+        crate::rt::spawn(async move {
+            let notice = JsonRpcNotification::new(
+                "notifications/cancelled",
+                Some(serde_json::json!({
+                    "requestId": request_id,
+                    "reason": "the client stopped waiting (cancelled or timed out)",
+                })),
+            );
+            let sent = crate::rt::timeout(CANCEL_NOTICE_LIMIT, async {
+                transport.lock().await.notify(notice).await
+            })
+            .await;
+            match sent {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => tracing::debug!("MCP: notifications/cancelled not sent: {e}"),
+                Err(_) => tracing::debug!(
+                    "MCP: notifications/cancelled not sent within {CANCEL_NOTICE_LIMIT:?}"
+                ),
+            }
+        });
     }
 }
 

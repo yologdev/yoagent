@@ -4,6 +4,11 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+- **MCP `tools/list` follows every page.** `McpClient::list_tools` sent one request and never read `nextCursor`, so a server that paginates its tools lost every tool after the first page — for `with_mcp_server_*` and `McpToolSource` alike, without a warning. It now follows the cursor to the end; a repeated cursor, or more than 1,000 pages, is an `McpError::Protocol` instead of a loop or a silently partial list. (Found comparing against octet.)
+- **A cancelled MCP call tells the server.** A `tools/call` dropped before its answer (the run cancelled, or the call timeout hit) now sends one best-effort `notifications/cancelled` with its `requestId`, as the spec asks, so the server can stop the work; before, it carried on and only its late answer was discarded. Sent from a spawned task within 5 s (a custom transport's default `notify` waits for an answer that never comes); a failure is logged at `debug`.
+
 ## 0.27.4 (2026-11-07)
 
 A fix: no `temperature` for GPT-6. yoagent-rutis (0.13.0) and yoagent-workers (0.4.0) are unchanged.
