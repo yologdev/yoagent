@@ -363,6 +363,7 @@ fn prose_names() {
     let _ = yoagent::session::Session::new;
     let _ = ModelConfig::preset;
     let _ = ModelConfig::bedrock_anthropic_id;
+    let _ = |c: ModelConfig| c.with_accepts_sampling_params(false);
     let _ = |e: yoagent::provider::prices::PriceEntry| e.with_limits(1, 1);
     let _ = |c: ModelConfig| c.with_image_input(false);
     #[cfg(feature = "native")]
