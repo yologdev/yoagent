@@ -4,7 +4,9 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.27.4 (2026-11-07)
+
+A fix: no `temperature` for GPT-6. yoagent-rutis (0.13.0) and yoagent-workers (0.4.0) are unchanged.
 
 - **No `temperature` for GPT-6.** OpenAI's latest-model guide: "When reasoning effort is not `none`, remove `temperature`, `top_p`, and `top_logprobs`". No GPT-6 model defaults to `none` (Astra and 6.1 Sol do not support it), and yoagent never sends `none` — `ThinkingLevel::Off` sends no effort, leaving the default — so `with_temperature` on GPT-6 failed every request (its preset docs said not to set one). `ModelConfig::openai` and `openai_responses` now set `accepts_sampling_params` from the id, like `anthropic` and the OpenCode gateways, and a GPT-6 id (`gpt-6…`, after any `vendor/` prefix) turns it off: the GPT-6 presets, `generic("openai", ..)`, OpenCode and OpenRouter configs for one included, so the agent loop leaves the temperature out. OpenAI's other reasoning models keep the flag on (their default effort may be `none`); set it with `with_accepts_sampling_params(false)` if yours rejects one.
 
