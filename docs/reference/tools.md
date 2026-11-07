@@ -107,7 +107,7 @@ dangling symlink, could get past the check.
 A file over `max_bytes` is refused when the call gives no `offset`/`limit`; with them it is
 read a page at a time, streamed in fixed chunks, so memory stays bounded: lines before the page
 are only counted (the header gives the true total), a kept line is cut at `max_bytes`
-(`… (line cut at N bytes)`), and the page stops once it holds `max_bytes`. Before 0.27.5 such a
+(`… (line cut at N bytes)`, and the header names it), and the page stops once it holds `max_bytes`, counting each line's number. A cut line is never recorded as read: with a `ReadLog`, `write_file` keeps refusing to replace that file whole. Before 0.27.5 such a
 file was refused even with `offset`/`limit`.
 
 `read_file`, `write_file` and `edit_file` refuse a path that is not a regular file (after
@@ -128,8 +128,8 @@ flush it to disk and rename it over the target, so a crash, a full disk or a wri
 the old file intact and a reader never sees a half-written one (before 0.27.5 they wrote in
 place, truncating first). What an in-place write did is kept: a file that cannot be written in
 place (read-only, another user's) is refused, a symlink is followed (a dangling one is written
-through, creating its target), the file's mode is kept — and on Unix its owner and group, best
-effort — and a directory where no file can be created, or a sticky directory that refuses the
+through, creating its target), the file's mode is kept — and on Unix its owner and group (a file the process cannot give
+back to its owner, another user's, is written in place instead) — and a directory where no file can be created, or a sticky directory that refuses the
 rename, falls back to writing in place. The rename gives the file a new inode: a hard link to the
 old one keeps the old content, and ACLs and extended attributes are not carried over.
 

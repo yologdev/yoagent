@@ -2869,8 +2869,62 @@ async fn read_file_bounds_a_page_of_one_huge_line() {
     assert!(text.len() < 1024 * 1024 + 200, "{} bytes", text.len());
     assert!(text.contains("line cut at"), "{}", &text[..100]);
     assert!(
-        text.starts_with("[1 lines]") || text.starts_with("[Lines 1-1 of 1"),
+        text.starts_with("[Lines 1-1 of 1 — line 1 longer than"),
         "{}",
-        &text[..60]
+        &text[..80]
+    );
+}
+
+/// A line shown cut was not read: write_file must not then replace the file
+/// whole, whatever pages follow.
+#[tokio::test]
+async fn a_cut_line_keeps_the_partial_read_guard() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let path = tmp.path().join("bundle.min.js");
+    std::fs::write(&path, "x".repeat(3 * 1024 * 1024)).unwrap();
+    let log = ReadLog::new();
+    let read = ReadFileTool::new().with_read_log(log.clone());
+    let write = WriteFileTool::new().with_read_log(log);
+    let p = path.to_str().unwrap();
+    read.execute(
+        serde_json::json!({ "path": p, "offset": 1, "limit": 5 }),
+        ctx("read_file"),
+    )
+    .await
+    .unwrap();
+    let err = write
+        .execute(
+            serde_json::json!({ "path": p, "content": "x\n" }),
+            ctx("write_file"),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("Refusing to overwrite"), "{err}");
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 3 * 1024 * 1024);
+}
+
+/// Many empty lines with a huge limit stay within the page budget: each
+/// line's number counts.
+#[tokio::test]
+async fn a_page_of_empty_lines_is_bounded() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let path = tmp.path().join("blank.txt");
+    std::fs::write(&path, "\n".repeat(3 * 1024 * 1024)).unwrap();
+    let result = ReadFileTool::new()
+        .execute(
+            serde_json::json!({ "path": path.to_str().unwrap(), "offset": 1, "limit": 1_000_000_000u64 }),
+            ctx("read_file"),
+        )
+        .await
+        .unwrap();
+    let Content::Text { text } = &result.content[0] else {
+        panic!("expected text")
+    };
+    assert!(text.len() < 2 * 1024 * 1024, "{} bytes", text.len());
+    assert!(
+        text.contains(&format!("of {}", 3 * 1024 * 1024)),
+        "{}",
+        &text[..80]
     );
 }

@@ -503,6 +503,49 @@ impl ReadLog {
         }
     }
 
+    /// Lines `page` of a `total`-line file were shown, but lines `cut` among
+    /// them only in part (longer than `read_file` returns). The cut lines are
+    /// never recorded as read, so the file stays `Partial` however many pages
+    /// follow: the model has not seen all of it, and `write_file` must not
+    /// replace it whole.
+    fn record_cut(
+        &self,
+        key: PathBuf,
+        page: (usize, usize),
+        cut: &[usize],
+        total: usize,
+        stamp: FileStamp,
+    ) {
+        {
+            let mut entries = self.entries();
+            match entries.get(&key) {
+                // The agent's own write of this version: it knows it whole.
+                Some(Known::Full(known)) if *known == stamp => return,
+                Some(Known::Partial(read)) if read.stamp == stamp && read.total == total => {}
+                _ => {
+                    entries.insert(
+                        key.clone(),
+                        Known::Partial(PartialRead {
+                            ranges: Vec::new(),
+                            total,
+                            stamp: stamp.clone(),
+                        }),
+                    );
+                }
+            }
+        }
+        let mut from = page.0;
+        for &line in cut {
+            if line > from {
+                self.record_page(key.clone(), (from, line - 1), total, stamp.clone());
+            }
+            from = line + 1;
+        }
+        if from <= page.1 {
+            self.record_page(key, (from, page.1), total, stamp);
+        }
+    }
+
     /// The refusal for overwriting the existing file at `key` (spelled `path`
     /// for the model), or `None` when the write may go ahead.
     fn overwrite_refusal(
@@ -520,7 +563,11 @@ impl ReadLog {
             .iter()
             .map(|(a, b)| format!("{a}-{b}"))
             .collect();
-        let seen = format!("only lines {}", ranges.join(", "));
+        let seen = if ranges.is_empty() {
+            "only part".to_string()
+        } else {
+            format!("only lines {}", ranges.join(", "))
+        };
         let changed = if read.stamp == FileStamp::of(current) {
             ""
         } else {
@@ -717,7 +764,7 @@ impl AgentTool for ReadFileTool {
         // visible and the agent can page with offset/limit.
         let effective_limit = limit.unwrap_or(self.max_lines);
         let first = offset.map_or(0, |off| off - 1);
-        let (start, end, total, lines) = if metadata.len() as usize > self.max_bytes {
+        let (start, end, total, lines, cut) = if metadata.len() as usize > self.max_bytes {
             read_page(
                 &io_path,
                 path,
@@ -736,7 +783,7 @@ impl AgentTool for ReadFileTool {
             let start = first.min(total);
             let end = start.saturating_add(effective_limit).min(total);
             let lines = all[start..end].iter().map(|l| l.to_string()).collect();
-            (start, end, total, lines)
+            (start, end, total, lines, Vec::new())
         };
 
         // Always show line numbers — helps agent reference exact lines for edit_file
@@ -746,16 +793,32 @@ impl AgentTool for ReadFileTool {
             .map(|(i, line)| format!("{:>4} | {}", start + i + 1, line))
             .collect();
 
-        let partial = start > 0 || end < total;
+        // A cut line was shown only in part: the read is partial, whatever
+        // the range, and the guard never counts that line as read.
+        let partial = start > 0 || end < total || !cut.is_empty();
         if let Some((log, key)) = logged {
-            if partial {
+            if !cut.is_empty() {
+                let stamp = FileStamp::of(&metadata);
+                log.record_cut(key, (start + 1, end), &cut, total, stamp);
+            } else if partial {
                 log.record_page(key, (start + 1, end), total, FileStamp::of(&metadata));
             } else {
                 log.record_full(&key, Some(FileStamp::of(&metadata)));
             }
         }
 
-        let header = if partial {
+        let header = if !cut.is_empty() {
+            let cut: Vec<String> = cut.iter().map(|n| n.to_string()).collect();
+            format!(
+                "[Lines {}-{} of {} — line {} longer than {} bytes, shown cut; change it with \
+                 edit_file]",
+                start + 1,
+                end,
+                total,
+                cut.join(", "),
+                self.max_bytes
+            )
+        } else if partial {
             format!(
                 "[Lines {}-{} of {} — use offset/limit to read the rest]",
                 start + 1,
@@ -786,7 +849,9 @@ impl AgentTool for ReadFileTool {
 ///   refused, not replaced — a rename needs only the directory's permission;
 /// - a symlink is followed: its target is replaced and the link stays; a
 ///   dangling one is written through in place, creating its target;
-/// - the file's mode is kept, and on Unix its owner and group (best effort);
+/// - the file's mode is kept, and on Unix its owner and group (a file the
+///   process cannot give back to its owner — another user's — is written in
+///   place instead);
 ///   the temp file is created with that mode, so new content is never more
 ///   readable than the old;
 /// - a directory where no file can be created, or a rename it refuses (a
@@ -817,11 +882,12 @@ pub(crate) async fn write_atomic(io_path: &std::path::Path, bytes: &[u8]) -> std
         Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
         _ => std::path::PathBuf::from("."),
     };
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.subsec_nanos());
+    // Unique within the process (writes to different files of one directory
+    // run concurrently; a clock reading can repeat), and across processes.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // Not derived from the file's name: a long one would make it too long.
-    let temp = dir.join(format!(".yoagent-{}-{nonce}.tmp", std::process::id()));
+    let temp = dir.join(format!(".yoagent-{}-{n}.tmp", std::process::id()));
 
     let mut options = tokio::fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -846,8 +912,15 @@ pub(crate) async fn write_atomic(io_path: &std::path::Path, bytes: &[u8]) -> std
         if let Some(meta) = &existing {
             use std::os::unix::fs::MetadataExt;
             let std_file = file.into_std().await;
-            // Best effort: only root can give a file to another user.
-            let _ = std::os::unix::fs::fchown(&std_file, Some(meta.uid()), Some(meta.gid()));
+            // The replacement must keep the file's owner and group. Only root
+            // can give a file to another user, so a process writing someone
+            // else's file (through group or other bits) cannot: it writes in
+            // place instead, as the probe showed it may.
+            if std::os::unix::fs::fchown(&std_file, Some(meta.uid()), Some(meta.gid())).is_err() {
+                drop(std_file);
+                let _ = tokio::fs::remove_file(&temp).await;
+                return tokio::fs::write(&target, bytes).await;
+            }
         } else {
             drop(file);
         }
@@ -879,7 +952,8 @@ pub(crate) async fn write_atomic(io_path: &std::path::Path, bytes: &[u8]) -> std
 /// computes them. Read in fixed chunks, so memory stays bounded whatever the
 /// file: lines before the page are only counted, a kept line is cut at
 /// `max_bytes` (a minified file can be one huge line), and the page stops
-/// once it holds `max_bytes`, which the header's `end` then shows. Checks
+/// once it holds `max_bytes`, which the header's `end` then shows. The cut
+/// lines' numbers come last (see `ReadLog::record_cut`). Checks
 /// `cancel` as it goes (counting the lines reads the whole file).
 async fn read_page(
     io_path: &std::path::Path,
@@ -888,13 +962,14 @@ async fn read_page(
     limit: usize,
     max_bytes: usize,
     cancel: &tokio_util::sync::CancellationToken,
-) -> Result<(usize, usize, usize, Vec<String>), ToolError> {
+) -> Result<(usize, usize, usize, Vec<String>, Vec<usize>), ToolError> {
     use tokio::io::AsyncReadExt;
     let fail = |e: std::io::Error| ToolError::Failed(format!("Cannot read {}: {}", path, e));
     let mut file = tokio::fs::File::open(io_path).await.map_err(fail)?;
     let mut buf = vec![0u8; 64 * 1024];
     let (mut line_no, mut bytes) = (0usize, 0usize);
     let mut lines: Vec<String> = Vec::new();
+    let mut cut_lines: Vec<usize> = Vec::new();
     let mut full = false;
     let (mut cur, mut cur_cut, mut open) = (Vec::new(), false, false);
 
@@ -921,7 +996,12 @@ async fn read_page(
                         ))
                     })?
                 };
-                bytes += text.len();
+                // The line-number prefix counts too, so many short or empty
+                // lines cannot outgrow the page.
+                bytes += text.len() + LINE_PREFIX_BYTES;
+                if *cut {
+                    cut_lines.push(line_no + 1);
+                }
                 lines.push(text);
             }
         }
@@ -971,8 +1051,11 @@ async fn read_page(
     }
     let total = line_no;
     let start = first.min(total);
-    Ok((start, start + lines.len(), total, lines))
+    Ok((start, start + lines.len(), total, lines, cut_lines))
 }
+
+/// What a line's `"{:>4} | "` prefix adds, at least.
+const LINE_PREFIX_BYTES: usize = 7;
 
 // ---------------------------------------------------------------------------
 
