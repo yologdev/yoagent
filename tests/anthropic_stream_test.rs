@@ -1478,3 +1478,63 @@ async fn unknown_block_types_are_skipped_without_shifting_later_blocks() {
         "a skipped block's deltas are covered by its own warning: {captured:?}"
     );
 }
+
+/// The usage a stream body reports, read back from the assistant message.
+async fn usage_of(body: &'static str) -> (Usage, StopReason) {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
+        .mount(&server)
+        .await;
+    let message = run_stream(stream_config(&server.uri(), None))
+        .await
+        .expect("stream should succeed");
+    let Message::Assistant {
+        usage, stop_reason, ..
+    } = message
+    else {
+        panic!("expected assistant message");
+    };
+    (usage, stop_reason)
+}
+
+#[tokio::test]
+async fn a_null_cache_counter_does_not_zero_the_usage() {
+    // A `null` counter (the API types allow it) used to fail the whole
+    // message_start, so the input count was lost without a word.
+    let (usage, stop) = usage_of(
+        "event: message_start\n\
+         data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1200,\"cache_read_input_tokens\":null,\"cache_creation_input_tokens\":null}}}\n\n\
+         event: message_delta\n\
+         data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":7,\"cache_read_input_tokens\":null}}\n\n\
+         event: message_stop\n\
+         data: {\"type\":\"message_stop\"}\n\n",
+    )
+    .await;
+    assert_eq!(usage.input, 1200);
+    assert_eq!(usage.output, 7);
+    assert_eq!(
+        stop,
+        StopReason::Stop,
+        "the delta's stop_reason must survive its nulls"
+    );
+}
+
+#[tokio::test]
+async fn message_delta_restating_input_and_cache_counts_is_read() {
+    // message_delta's usage is cumulative: a count it restates wins.
+    let (usage, _) = usage_of(
+        "event: message_start\n\
+         data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":0}}}\n\n\
+         event: message_delta\n\
+         data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":900,\"cache_read_input_tokens\":4000,\"cache_creation_input_tokens\":300,\"output_tokens\":5}}\n\n\
+         event: message_stop\n\
+         data: {\"type\":\"message_stop\"}\n\n",
+    )
+    .await;
+    assert_eq!(
+        (usage.input, usage.cache_read, usage.cache_write),
+        (900, 4000, 300)
+    );
+}

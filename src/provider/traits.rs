@@ -400,7 +400,7 @@ pub fn classify_sse_error_event(message: &str) -> ProviderError {
     if is_rate_limit_payload(message) {
         tracing::warn!(payload = %truncate_body(message), "in-stream rate limit or overload");
         ProviderError::RateLimited {
-            retry_after_ms: None,
+            retry_after_ms: wait_named_in(message),
         }
     } else if is_context_overflow_message(message) {
         ProviderError::ContextOverflow {
@@ -409,6 +409,42 @@ pub fn classify_sse_error_event(message: &str) -> ProviderError {
     } else {
         ProviderError::Api(message.to_string())
     }
+}
+
+/// The wait a rate-limit message names, in ms: OpenAI's ends "Please try
+/// again in 2.3s" (also `120ms`, `1m30s`). An in-stream error has no
+/// `retry-after` header, so without this the retry fell back to the default
+/// backoff and could spend its attempts before the limit reset.
+fn wait_named_in(message: &str) -> Option<u64> {
+    const PHRASE: &str = "try again in ";
+    let lower = message.to_ascii_lowercase();
+    let mut rest = &lower[lower.find(PHRASE)? + PHRASE.len()..];
+    let mut total_ms = 0f64;
+    let mut parsed = false;
+    loop {
+        let digits = rest
+            .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+            .unwrap_or(rest.len());
+        let Ok(n) = rest[..digits].parse::<f64>() else {
+            break;
+        };
+        rest = &rest[digits..];
+        let (unit_ms, len) = if rest.starts_with("ms") {
+            (1.0, 2)
+        } else if rest.starts_with('s') {
+            (1_000.0, 1)
+        } else if rest.starts_with('m') {
+            (60_000.0, 1)
+        } else if rest.starts_with('h') {
+            (3_600_000.0, 1)
+        } else {
+            break;
+        };
+        total_ms += n * unit_ms;
+        parsed = true;
+        rest = &rest[len..];
+    }
+    (parsed && total_ms.is_finite()).then(|| total_ms.round() as u64)
 }
 
 /// Error `type` / `code` / `status` values that mean "rate limited or out of
@@ -531,6 +567,33 @@ fn is_context_overflow(status: u16, message: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_in_stream_rate_limit_carries_the_wait_it_names() {
+        let event = |msg: &str| {
+            serde_json::json!({
+                "type": "error",
+                "error": { "code": "rate_limit_exceeded", "message": msg }
+            })
+            .to_string()
+        };
+        for (msg, want) in [
+            (
+                "Rate limit reached for gpt-6 on TPM. Please try again in 2.3s. Visit …",
+                Some(2_300),
+            ),
+            ("Please try again in 120ms.", Some(120)),
+            ("Please try again in 1m30s.", Some(90_000)),
+            ("Rate limit reached. Please retry later.", None),
+        ] {
+            match classify_sse_error_event(&event(msg)) {
+                ProviderError::RateLimited { retry_after_ms } => {
+                    assert_eq!(retry_after_ms, want, "{msg}")
+                }
+                other => panic!("{msg}: {other:?}"),
+            }
+        }
+    }
 
     fn headers_with_retry_after(value: &str) -> reqwest::header::HeaderMap {
         let mut h = reqwest::header::HeaderMap::new();
