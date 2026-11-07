@@ -293,6 +293,12 @@ const DEFAULT_INSTRUCTION: &str = "Summarize the conversation above as a handoff
 /// append; this bounds the pathological rest.
 const TRANSCRIPT_PER_BLOCK_BYTES: usize = 2_000;
 
+/// Cap on the bytes of a pinned message in the transcript: an earlier
+/// briefing (the default `max_summary_tokens` of 2,000 is about 8 KB, which
+/// the per-block cap would cut to a quarter on every recompaction) and the
+/// latest real user request.
+const TRANSCRIPT_PINNED_BYTES: usize = 32_000;
+
 /// Cap on the bytes of the whole transcript.
 ///
 /// Per-block bounding is not enough on its own: the summarized span scales with
@@ -1410,66 +1416,124 @@ fn clip(text: &str, max: usize) -> &str {
 /// summarization request. Bounded per content block *and* in total; tool
 /// arguments and results are included in clipped form — identifiers matter,
 /// repetition does not.
+///
+/// Two messages are pinned: an earlier briefing (a `SUMMARY_MARKER`
+/// message, which is what the next briefing has to carry forward) and the
+/// latest real user request (the task). Each is clipped at
+/// [`TRANSCRIPT_PINNED_BYTES`] rather than the per-block cap, and kept
+/// whatever the total. The rest fills the remaining budget newest first, so
+/// a cut drops the oldest messages and a marker stands where they were.
 fn serialize_transcript(messages: &[AgentMessage]) -> String {
-    let mut out = String::new();
-    for msg in messages {
-        if out.len() >= TRANSCRIPT_TOTAL_BYTES {
-            // Oldest-first, so what survives is the most recent context. The
-            // alternative is a request the summarizer cannot read at all.
-            tracing::warn!(
-                "llm compaction: transcript hit the {TRANSCRIPT_TOTAL_BYTES}-byte cap;                  summarizing only the most recent part of the span"
-            );
-            out.push_str("[... earlier messages omitted: transcript size cap ...]\n");
-            break;
+    let latest_ask = messages.iter().rposition(|m| {
+        matches!(m, AgentMessage::Llm(Message::User { content, .. })
+            if content.iter().any(|c| matches!(c, Content::Text { text } if !is_loop_injected(text))))
+    });
+    let chunks: Vec<(String, bool)> = messages
+        .iter()
+        .enumerate()
+        .map(|(i, msg)| {
+            let briefing = matches!(msg, AgentMessage::Llm(Message::User { content, .. })
+                if content.iter().any(|c| matches!(c, Content::Text { text }
+                    if text.starts_with(SUMMARY_MARKER))));
+            let pinned = briefing || Some(i) == latest_ask;
+            let cap = if pinned {
+                TRANSCRIPT_PINNED_BYTES
+            } else {
+                TRANSCRIPT_PER_BLOCK_BYTES
+            };
+            (serialize_message(msg, cap), pinned)
+        })
+        .collect();
+
+    let pinned_bytes: usize = chunks
+        .iter()
+        .filter(|(_, p)| *p)
+        .map(|(c, _)| c.len())
+        .sum();
+    let mut room = TRANSCRIPT_TOTAL_BYTES.saturating_sub(pinned_bytes);
+    let mut keep = vec![false; chunks.len()];
+    for (i, (chunk, pinned)) in chunks.iter().enumerate().rev() {
+        if *pinned {
+            keep[i] = true;
+        } else if chunk.len() <= room {
+            room -= chunk.len();
+            keep[i] = true;
+        } else {
+            // Newest first: once one does not fit, everything older is out
+            // too (a hole in the middle would read as a continuous story).
+            room = 0;
         }
-        let AgentMessage::Llm(message) = msg else {
-            continue; // Extension messages never reach the LLM anyway.
-        };
-        match message {
-            Message::User { content, .. } => {
-                for c in content {
-                    match c {
-                        Content::Text { text } => {
-                            out.push_str("User: ");
-                            out.push_str(clip(text, TRANSCRIPT_PER_BLOCK_BYTES));
-                            out.push('\n');
-                        }
-                        // Undisclosed lossiness would be worse: let the
-                        // briefing note that an attachment existed.
-                        Content::Image { .. } => out.push_str("[image omitted]\n"),
-                        _ => {}
+    }
+
+    let mut out = String::new();
+    let mut omitted = 0usize;
+    for (i, (chunk, _)) in chunks.iter().enumerate() {
+        if keep[i] {
+            if omitted > 0 {
+                tracing::warn!(
+                    "llm compaction: transcript hit the {TRANSCRIPT_TOTAL_BYTES}-byte cap; \
+                     {omitted} older messages left out of the summarized span"
+                );
+                out.push_str(&format!(
+                    "[... {omitted} earlier messages omitted: transcript size cap ...]\n"
+                ));
+                omitted = 0;
+            }
+            out.push_str(chunk);
+        } else {
+            omitted += 1;
+        }
+    }
+    out
+}
+
+/// One message of the transcript, each text block clipped at `cap` bytes.
+fn serialize_message(msg: &AgentMessage, cap: usize) -> String {
+    let mut out = String::new();
+    let AgentMessage::Llm(message) = msg else {
+        return out; // Extension messages never reach the LLM anyway.
+    };
+    match message {
+        Message::User { content, .. } => {
+            for c in content {
+                match c {
+                    Content::Text { text } => {
+                        out.push_str("User: ");
+                        out.push_str(clip(text, cap));
+                        out.push('\n');
                     }
+                    // Undisclosed lossiness would be worse: let the
+                    // briefing note that an attachment existed.
+                    Content::Image { .. } => out.push_str("[image omitted]\n"),
+                    _ => {}
                 }
             }
-            Message::Assistant { content, .. } => {
-                for c in content {
-                    match c {
-                        Content::Text { text } => {
-                            out.push_str("Assistant: ");
-                            out.push_str(clip(text, TRANSCRIPT_PER_BLOCK_BYTES));
-                            out.push('\n');
-                        }
-                        Content::ToolCall {
-                            name, arguments, ..
-                        } => {
-                            let args = arguments.to_string();
-                            out.push_str(&format!("[tool call] {name}({})\n", clip(&args, 300)));
-                        }
-                        Content::Thinking { .. } => out.push_str("[thinking omitted]\n"),
-                        _ => {}
+        }
+        Message::Assistant { content, .. } => {
+            for c in content {
+                match c {
+                    Content::Text { text } => {
+                        out.push_str("Assistant: ");
+                        out.push_str(clip(text, cap));
+                        out.push('\n');
                     }
+                    Content::ToolCall {
+                        name, arguments, ..
+                    } => {
+                        let args = arguments.to_string();
+                        out.push_str(&format!("[tool call] {name}({})\n", clip(&args, 300)));
+                    }
+                    Content::Thinking { .. } => out.push_str("[thinking omitted]\n"),
+                    _ => {}
                 }
             }
-            Message::ToolResult {
-                tool_name, content, ..
-            } => {
-                for c in content {
-                    if let Content::Text { text } = c {
-                        out.push_str(&format!(
-                            "[tool result: {tool_name}] {}\n",
-                            clip(text, TRANSCRIPT_PER_BLOCK_BYTES)
-                        ));
-                    }
+        }
+        Message::ToolResult {
+            tool_name, content, ..
+        } => {
+            for c in content {
+                if let Content::Text { text } = c {
+                    out.push_str(&format!("[tool result: {tool_name}] {}\n", clip(text, cap)));
                 }
             }
         }
@@ -2292,6 +2356,62 @@ mod tests {
             transcript.len()
         );
         assert!(transcript.contains("transcript size cap"));
+    }
+
+    #[test]
+    fn the_transcript_cap_keeps_the_newest_messages() {
+        let huge: Vec<AgentMessage> = (0..4_000).flat_map(|i| turn(i, 1_000)).collect();
+        let transcript = serialize_transcript(&huge);
+        assert!(
+            transcript.contains("assistant reply 3999:"),
+            "the newest turn must survive the cap"
+        );
+        assert!(
+            !transcript.contains("user message 0:"),
+            "the oldest turn is the one to drop"
+        );
+        // The marker stands where the omitted messages were: before the rest.
+        let marker = transcript.find("earlier messages omitted").expect("marker");
+        let newest = transcript.find("assistant reply 3999:").unwrap();
+        assert!(marker < newest);
+    }
+
+    /// Assistant-only filler: no user message, so the request stays the
+    /// latest real one.
+    fn work(i: usize, bulk: usize) -> AgentMessage {
+        AgentMessage::Llm(
+            Message::assistant(
+                vec![Content::Text {
+                    text: format!("working {i}: {}", "w".repeat(bulk)),
+                }],
+                StopReason::Stop,
+                "mock",
+                "mock",
+                Usage::default(),
+            )
+            .with_timestamp(i as u64),
+        )
+    }
+
+    #[test]
+    fn an_earlier_briefing_reaches_the_summarizer_whole() {
+        let briefing = format!("{SUMMARY_MARKER}\n\n{}END-OF-BRIEFING", "b".repeat(8_000));
+        let mut span = vec![AgentMessage::Llm(Message::user(briefing))];
+        span.extend((0..1_000).map(|i| work(i, 1_000)));
+        let transcript = serialize_transcript(&span);
+        assert!(
+            transcript.contains("END-OF-BRIEFING"),
+            "the previous briefing must be neither clipped nor dropped by the cap"
+        );
+    }
+
+    #[test]
+    fn the_latest_request_reaches_the_summarizer_whole() {
+        let ask = format!("please do this: {}END-OF-ASK", "a".repeat(10_000));
+        let mut span = vec![AgentMessage::Llm(Message::user(ask))];
+        span.extend((0..1_000).map(|i| work(i, 1_000)));
+        let transcript = serialize_transcript(&span);
+        assert!(transcript.contains("END-OF-ASK"));
     }
 
     #[tokio::test(flavor = "multi_thread")]
