@@ -603,10 +603,11 @@ fn build_request_body(config: &StreamConfig, is_oauth: bool) -> serde_json::Valu
     // Prompt caching — place cache_control breakpoints based on CacheConfig.
     //
     // Anthropic caches the full prefix (tools → system → messages) up to each
-    // breakpoint. We use up to 3 breakpoints:
+    // breakpoint. We use up to 4 breakpoints (Anthropic's limit):
     //   1. System prompt (stable across turns)
     //   2. Last tool definition (tools rarely change)
     //   3. Second-to-last message (conversation history grows, cache the prefix)
+    //   4. A bridge after a large tool batch (see `bridge_breakpoint`)
     //
     // When caching is disabled or strategy is Disabled, no markers are added.
     // -----------------------------------------------------------------------
@@ -643,12 +644,14 @@ fn build_request_body(config: &StreamConfig, is_oauth: bool) -> serde_json::Valu
             }
         }
         // Breakpoint 4, the bridge. Anthropic looks back only about 20
-        // content blocks from a breakpoint for an earlier cache entry, and the
-        // previous request's history breakpoint sat where it ended: just
-        // before the newest assistant message. A response with many parallel
-        // tool calls (each call a block, each result its own message) moves
-        // breakpoint 3 past that reach, so every turn re-wrote the whole
-        // history. A breakpoint at the previous request's end keeps it read.
+        // content blocks from a breakpoint for an earlier cache entry. The
+        // previous request's history breakpoint sat on its second-to-last
+        // message, one message before where it ended (just before the newest
+        // assistant message). A response with many parallel tool calls (each
+        // call a block, each result its own message) moves breakpoint 3 past
+        // that reach, so every turn re-wrote the whole history. A breakpoint
+        // on the previous request's last message reaches its entry one
+        // message back, and keeps it read.
         if let Some(main) = main {
             if let Some(bridge) = bridge_breakpoint(&messages, main) {
                 if let Some(block) = messages[bridge]["content"]
@@ -926,15 +929,16 @@ fn is_empty_text(block: &serde_json::Value) -> bool {
 }
 
 /// Where the bridge breakpoint goes: the message just before the newest
-/// assistant message (where the previous request ended), when the blocks
-/// from there to the main breakpoint at `main` are [`BRIDGE_DISTANCE`] or
-/// more. `None` when no bridge is needed or there is nothing to put it on.
+/// assistant message (the previous request's last message, one past its
+/// history breakpoint), when the blocks from it to the main breakpoint at
+/// `main` are [`BRIDGE_DISTANCE`] or more. `None` when no bridge is needed or
+/// there is nothing to put it on.
 fn bridge_breakpoint(messages: &[serde_json::Value], main: usize) -> Option<usize> {
     let newest_assistant = messages[..=main]
         .iter()
         .rposition(|m| m["role"] == "assistant")?;
     let bridge = newest_assistant.checked_sub(1)?;
-    let blocks: usize = messages[bridge + 1..=main]
+    let blocks: usize = messages[bridge..=main]
         .iter()
         .map(|m| m["content"].as_array().map_or(0, Vec::len))
         .sum();

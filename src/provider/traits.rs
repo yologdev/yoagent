@@ -395,7 +395,9 @@ pub(crate) fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<
 /// **before** the overflow phrases —
 /// the same order as the HTTP path, for the same reason. Otherwise the text
 /// is checked for known context-overflow patterns. Used by providers that
-/// receive `"error"` events in the SSE stream.
+/// receive `"error"` events in the SSE stream. A rate limit's
+/// `retry_after_ms` is the wait its message names, if any (see
+/// `wait_named_in`).
 pub fn classify_sse_error_event(message: &str) -> ProviderError {
     if is_rate_limit_payload(message) {
         tracing::warn!(payload = %truncate_body(message), "in-stream rate limit or overload");
@@ -415,6 +417,10 @@ pub fn classify_sse_error_event(message: &str) -> ProviderError {
 /// again in 2.3s" (also `120ms`, `1m30s`). An in-stream error has no
 /// `retry-after` header, so without this the retry fell back to the default
 /// backoff and could spend its attempts before the limit reset.
+///
+/// A wait under one second is not reported: it would replace the backoff
+/// (which starts at a second by default) and could spend every retry within
+/// a second; the backoff waits at least that long anyway.
 fn wait_named_in(message: &str) -> Option<u64> {
     const PHRASE: &str = "try again in ";
     let lower = message.to_ascii_lowercase();
@@ -444,7 +450,7 @@ fn wait_named_in(message: &str) -> Option<u64> {
         parsed = true;
         rest = &rest[len..];
     }
-    (parsed && total_ms.is_finite()).then(|| total_ms.round() as u64)
+    (parsed && total_ms.is_finite() && total_ms >= 1_000.0).then(|| total_ms.round() as u64)
 }
 
 /// Error `type` / `code` / `status` values that mean "rate limited or out of
@@ -582,7 +588,9 @@ mod tests {
                 "Rate limit reached for gpt-6 on TPM. Please try again in 2.3s. Visit …",
                 Some(2_300),
             ),
-            ("Please try again in 120ms.", Some(120)),
+            // Under a second: the backoff covers it.
+            ("Please try again in 120ms.", None),
+            ("Please try again in 0s.", None),
             ("Please try again in 1m30s.", Some(90_000)),
             ("Rate limit reached. Please retry later.", None),
         ] {
