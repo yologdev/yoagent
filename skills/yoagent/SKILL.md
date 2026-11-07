@@ -5,7 +5,7 @@ description: Use when building, extending or upgrading an agent on the yoagent R
 
 # yoagent: which feature for which job
 
-Written for **yoagent 0.27.3** (and yoagent-rutis 0.13.0); the recipes
+Written for **yoagent 0.27.4** (and yoagent-rutis 0.13.0); the recipes
 below are compiled by `tests/skill_test.rs`, line for line. Check what you
 build against: `cargo tree -p yoagent` or `Cargo.lock`. If you are on an
 older version, read [What changed](#what-changed) first.
@@ -281,6 +281,10 @@ UI, model layer, agents) rather than add agent tools.
 
 Newest first; the full list is `CHANGELOG.md`.
 
+- **0.27.4** — no `temperature` for GPT-6 either: it rejects one unless
+  the effort is `none`, which no GPT-6 defaults to and yoagent never sends,
+  so `openai` / `openai_responses` (and the presets, `generic`, OpenCode,
+  OpenRouter) turn `accepts_sampling_params` off for a `gpt-6…` id.
 - **0.27.3** — no `temperature` for a model that rejects it: Claude from
   4.7 on 400s on sampling parameters, so `ModelConfig::accepts_sampling_params`
   (inferred off for those ids by `anthropic` / OpenCode and their presets)
