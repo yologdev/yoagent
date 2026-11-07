@@ -452,8 +452,8 @@ impl Agent {
 
     /// Set the sampling temperature. It is not sent to a model whose
     /// [`ModelConfig::accepts_sampling_params`] is off — a Claude model from
-    /// 4.7 on (Fable, Opus 4.7+, Sonnet 5, Haiku 5.5, …) rejects it with a
-    /// 400. The flag is read from the run's `ModelConfig`; with none
+    /// 4.7 on (Fable, Opus 4.7+, Sonnet 5, Haiku 5.5, …) or a GPT-6 model
+    /// rejects it with a 400. The flag is read from the run's `ModelConfig`; with none
     /// (`Agent::new` without `with_model_config`), the temperature is sent
     /// as given.
     pub fn with_temperature(mut self, temperature: f32) -> Self {

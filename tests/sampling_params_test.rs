@@ -52,6 +52,14 @@ async fn a_claude_model_from_4_7_is_sent_no_temperature() {
 }
 
 #[tokio::test]
+async fn a_gpt_6_model_is_sent_no_temperature() {
+    // Its default reasoning effort rejects one, and `ThinkingLevel::Off`
+    // leaves that default in place.
+    assert_eq!(sent_temperature(ModelConfig::gpt_6_luna()).await, None);
+    assert_eq!(sent_temperature(ModelConfig::gpt_6_1_sol()).await, None);
+}
+
+#[tokio::test]
 async fn a_model_that_takes_sampling_params_is_sent_the_temperature() {
     assert_eq!(
         sent_temperature(ModelConfig::claude_haiku_4_5()).await,

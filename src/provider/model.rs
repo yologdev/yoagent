@@ -1091,12 +1091,20 @@ fn accepts_sampling_params_default() -> bool {
 }
 
 /// Whether the model `id` takes sampling parameters (`temperature`, `top_p`,
-/// `top_k`): `false` for a Claude id from 4.7 on, which rejects them with a
-/// 400 ("Sampling parameters removed" in Anthropic's Opus 5.5 migration
-/// guide, for code coming from Opus 4.6 and earlier); `true` for anything
-/// else, including an id with no Claude version.
+/// `top_k`) as this crate calls it. `false` for:
+/// - a Claude id from 4.7 on, which rejects them with a 400 ("Sampling
+///   parameters removed" in Anthropic's Opus 5.5 migration guide, for code
+///   coming from Opus 4.6 and earlier);
+/// - a GPT-6 id (`gpt-6…`, after any `vendor/` prefix): OpenAI's
+///   latest-model guide says "When reasoning effort is not `none`, remove
+///   `temperature`, `top_p`, and `top_logprobs`", no GPT-6 model defaults to
+///   `none` (Astra and 6.1 Sol do not support it), and this crate never
+///   sends `none` — `ThinkingLevel::Off` sends no effort, leaving the default.
+///
+/// `true` for anything else, including an id with no Claude version.
 pub(crate) fn takes_sampling_params(id: &str) -> bool {
-    !matches!(claude_version(id), Some(v) if v >= (4, 7))
+    let model = id.rsplit('/').next().unwrap_or(id).to_ascii_lowercase();
+    !(model.starts_with("gpt-6") || matches!(claude_version(id), Some(v) if v >= (4, 7)))
 }
 
 /// Full model configuration. Knows everything needed to make API calls.
@@ -1202,17 +1210,21 @@ pub struct ModelConfig {
     #[serde(default = "image_input_default")]
     pub image_input: bool,
     /// The model takes sampling parameters (default `true`); `false` means it
-    /// never does (a rule that depends on the request, such as GPT-6's
-    /// "only at reasoning effort `none`", is not this flag). Off, the agent
+    /// takes none in any request this crate sends it. Off, the agent
     /// loop sends no `temperature` (the only one yoagent sets), whatever
     /// `Agent::with_temperature` / `SubAgentTool::with_temperature` say,
     /// logging that at `warn` the first time per model and at `debug` after
     /// (a provider's `stream` called directly is unaffected).
-    /// [`anthropic`](Self::anthropic) and the OpenCode gateways turn it off
-    /// for a Claude id from 4.7 on, which rejects a request carrying one with
-    /// a 400, and so do the presets built on them, including those
-    /// [`preset`](Self::preset) builds for `"bedrock"` and `"openrouter"`;
-    /// any other gateway or `custom` config keeps `true` — set it yourself.
+    /// [`anthropic`](Self::anthropic), [`openai`](Self::openai),
+    /// [`openai_responses`](Self::openai_responses) and the OpenCode gateways
+    /// turn it off from the id for a model that rejects one with a 400: a
+    /// Claude model from 4.7 on, and a GPT-6 model (it takes one only at
+    /// reasoning effort `none`; none defaults to that, and this crate never
+    /// sends it). So do the presets built on them, including those
+    /// [`preset`](Self::preset) builds for `"bedrock"` and `"openrouter"`.
+    /// Any other gateway or `custom` config keeps `true` — set it yourself —
+    /// as do OpenAI's other reasoning models, whose default effort may be
+    /// `none`.
     /// It is set from the id when the config is built, not recomputed when
     /// `id` is changed afterwards, and a config persisted before this field
     /// existed loads with `true`: rebuild it, or set the flag. Read it to
@@ -1807,8 +1819,10 @@ impl ModelConfig {
     /// reasoning. `Minimal` is sent as `low` (GPT-6 has no `minimal`).
     ///
     /// **`temperature` is rejected** while reasoning effort is anything but
-    /// `none` ("remove temperature, top_p, and top_logprobs"), and Astra
-    /// cannot run at `none` — do not set a temperature with this preset.
+    /// `none` ("When reasoning effort is not `none`, remove `temperature`,
+    /// `top_p`, and `top_logprobs`"), and Astra cannot run at `none`:
+    /// [`accepts_sampling_params`](Self::accepts_sampling_params) is off, so the agent loop
+    /// sends no temperature.
     ///
     /// **Structured outputs are not enforced:** the Responses provider warns
     /// and ignores [`Agent::prompt_structured`](crate::Agent::prompt_structured)'s
@@ -1835,9 +1849,10 @@ impl ModelConfig {
     /// does not send `none`.
     ///
     /// **`temperature` is rejected** unless the effort is `none`: "When
-    /// reasoning effort is not none, remove temperature, top_p, and
-    /// top_logprobs." Since this crate never sends `none`, do not set a
-    /// temperature with this preset.
+    /// reasoning effort is not `none`, remove `temperature`, `top_p`, and
+    /// `top_logprobs`." This crate never sends `none`, so
+    /// [`accepts_sampling_params`](Self::accepts_sampling_params) is off and the agent loop
+    /// sends no temperature.
     ///
     /// **Structured outputs are not enforced:** the Responses provider warns
     /// and ignores [`Agent::prompt_structured`](crate::Agent::prompt_structured)'s
@@ -1861,7 +1876,8 @@ impl ModelConfig {
     /// Reasoning effort: `none`/`low`/`medium` (default)/`high`/`xhigh`/`max`,
     /// ceiling [`ReasoningEffortCeiling::Max`]; `ThinkingLevel::Off` omits the
     /// effort (the model's default, `medium`). **`temperature` is rejected**
-    /// unless the effort is `none`, which this crate never sends.
+    /// unless the effort is `none`, which this crate never sends, so
+    /// [`accepts_sampling_params`](Self::accepts_sampling_params) is off.
     ///
     /// **Structured outputs are not enforced:** the Responses provider warns
     /// and ignores [`Agent::prompt_structured`](crate::Agent::prompt_structured)'s
@@ -1886,7 +1902,8 @@ impl ModelConfig {
     /// Reasoning effort: `low`/`medium` (default)/`high`/`xhigh`/`max`,
     /// ceiling [`ReasoningEffortCeiling::Max`]; `none` and `minimal` are not
     /// supported, so `Minimal` is sent as `low` and `ThinkingLevel::Off`
-    /// omits the effort (the model's default). Do not set a `temperature`.
+    /// omits the effort (the model's default). A `temperature` is rejected,
+    /// so [`accepts_sampling_params`](Self::accepts_sampling_params) is off.
     ///
     /// **Structured outputs are not enforced:** the Responses provider warns
     /// and ignores [`Agent::prompt_structured`](crate::Agent::prompt_structured)'s
@@ -1911,7 +1928,8 @@ impl ModelConfig {
     /// ceiling [`ReasoningEffortCeiling::Max`]; unlike
     /// [`gpt_6_1_sol`](Self::gpt_6_1_sol) it accepts `none`, which this crate
     /// never sends — `ThinkingLevel::Off` omits the effort (the model's
-    /// default). Do not set a `temperature`.
+    /// default). A `temperature` is rejected at that default, so
+    /// [`accepts_sampling_params`](Self::accepts_sampling_params) is off.
     ///
     /// **Structured outputs are not enforced:** the Responses provider warns
     /// and ignores [`Agent::prompt_structured`](crate::Agent::prompt_structured)'s
@@ -2567,8 +2585,10 @@ impl ModelConfig {
     /// constructor still talks Chat Completions, where OpenAI restricts
     /// function calling for those models.
     pub fn openai(id: impl Into<String>, name: impl Into<String>) -> Self {
+        let id = id.into();
+        let accepts_sampling_params = takes_sampling_params(&id);
         Self {
-            id: id.into(),
+            id,
             name: name.into(),
             api: ApiProtocol::OpenAiCompletions,
             provider: "openai".into(),
@@ -2579,7 +2599,7 @@ impl ModelConfig {
             cost: None, // set by `priced`
             list_priced: false,
             image_input: true,
-            accepts_sampling_params: true,
+            accepts_sampling_params,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -2630,6 +2650,7 @@ impl ModelConfig {
     pub fn openai_responses(id: impl Into<String>, name: impl Into<String>) -> Self {
         let id = id.into();
         let reasoning = openai_id_is_reasoning(&id);
+        let accepts_sampling_params = takes_sampling_params(&id);
         Self {
             id,
             name: name.into(),
@@ -2642,7 +2663,7 @@ impl ModelConfig {
             cost: None, // set by `priced`
             list_priced: false,
             image_input: true,
-            accepts_sampling_params: true,
+            accepts_sampling_params,
             headers: HashMap::new(),
             google: None,
             anthropic: None,
@@ -4184,22 +4205,36 @@ mod tests {
             // A date is not a minor version: 4.0.
             ("claude-sonnet-4-20250514", true),
             // No Claude version: today's behaviour.
-            ("gpt-6-luna", true),
             ("MiniMax-M2", true),
             ("anthropic.claude-opus-4-7", true),
+            // GPT-6: no model defaults to effort `none`, which a temperature
+            // needs, and this crate never sends `none`.
+            ("gpt-6-luna", false),
+            ("gpt-6.1-sol", false),
+            ("GPT-6-Astra", false),
+            ("openai/gpt-6-sol", false),
+            // Other OpenAI models keep it (not established for the 5.x
+            // reasoning models).
+            ("gpt-5.5", true),
+            ("gpt-4.1", true),
+            ("o4-mini", true),
         ] {
             assert_eq!(takes_sampling_params(id), takes, "{id}");
-            assert_eq!(
-                ModelConfig::anthropic(id, id).accepts_sampling_params,
-                takes,
-                "{id}"
-            );
-            assert_eq!(
-                ModelConfig::opencode_zen(id).accepts_sampling_params,
-                takes,
-                "{id}"
-            );
+            for config in [
+                ModelConfig::anthropic(id, id),
+                ModelConfig::opencode_zen(id),
+                ModelConfig::openai(id, id),
+                ModelConfig::openai_responses(id, id),
+            ] {
+                assert_eq!(config.accepts_sampling_params, takes, "{id}");
+            }
         }
+        // GPT-6 on OpenRouter inherits it from the vendor preset.
+        assert!(
+            !ModelConfig::preset("openrouter", "openai/gpt-6-luna")
+                .unwrap()
+                .accepts_sampling_params
+        );
         // Presets inherit it, on Bedrock and OpenRouter too; other providers
         // keep sending a temperature.
         for config in [
@@ -4230,7 +4265,7 @@ mod tests {
         // temperature to a model that rejects it).
         for config in ModelConfig::presets() {
             let expected = match config.provider.as_str() {
-                "anthropic" => takes_sampling_params(&config.id),
+                "anthropic" | "openai" => takes_sampling_params(&config.id),
                 _ => true,
             };
             assert_eq!(config.accepts_sampling_params, expected, "{}", config.id);

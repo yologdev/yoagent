@@ -69,7 +69,7 @@ All return `Self` for chaining (unless noted as `Result`).
 | `with_api_key(key) -> Self` | Override the env-resolved API key |
 | `with_thinking(level: ThinkingLevel) -> Self` | Set thinking level (`Off`, `Minimal`, `Low`, `Medium`, `High`, `XHigh`, `Max`) |
 | `with_max_tokens(max: u32) -> Self` | Set max output tokens |
-| `with_temperature(t: f32) -> Self` | Set the sampling temperature (not sent when the model's `ModelConfig::accepts_sampling_params` is off — Claude 4.7 and later) |
+| `with_temperature(t: f32) -> Self` | Set the sampling temperature (not sent when the model's `ModelConfig::accepts_sampling_params` is off — Claude 4.7 and later, GPT-6) |
 
 **Tools & Integrations**
 
