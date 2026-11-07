@@ -808,14 +808,24 @@ impl AgentTool for ReadFileTool {
         }
 
         let header = if !cut.is_empty() {
-            let cut: Vec<String> = cut.iter().map(|n| n.to_string()).collect();
+            let lines: Vec<String> = cut.iter().map(|n| n.to_string()).collect();
+            let (noun, them) = if cut.len() == 1 {
+                ("line", "it")
+            } else {
+                ("lines", "them")
+            };
+            let rest = if start > 0 || end < total {
+                "; use offset/limit to read the rest"
+            } else {
+                ""
+            };
             format!(
-                "[Lines {}-{} of {} — line {} longer than {} bytes, shown cut; change it with \
-                 edit_file]",
+                "[Lines {}-{} of {} — {noun} {} longer than {} bytes, shown cut (change {them} \
+                 with edit_file){rest}]",
                 start + 1,
                 end,
                 total,
-                cut.join(", "),
+                lines.join(", "),
                 self.max_bytes
             )
         } else if partial {
@@ -885,9 +895,9 @@ pub(crate) async fn write_atomic(io_path: &std::path::Path, bytes: &[u8]) -> std
     // Unique within the process (writes to different files of one directory
     // run concurrently; a clock reading can repeat), and across processes.
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    // Not derived from the file's name: a long one would make it too long.
-    let temp = dir.join(format!(".yoagent-{}-{n}.tmp", std::process::id()));
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
 
     let mut options = tokio::fs::OpenOptions::new();
     options.write(true).create_new(true);
@@ -896,14 +906,26 @@ pub(crate) async fn write_atomic(io_path: &std::path::Path, bytes: &[u8]) -> std
         use std::os::unix::fs::PermissionsExt;
         options.mode(meta.permissions().mode() & 0o7777);
     }
-    let mut file = match options.open(&temp).await {
-        Ok(f) => f,
-        // No new file can go here (a read-only directory holding a writable
-        // file): write in place, as before.
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            return tokio::fs::write(&target, bytes).await;
+    let mut attempts = 0;
+    let (temp, mut file) = loop {
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Not derived from the file's name: a long one would make it too
+        // long. The clock separates processes that reuse a pid (a container
+        // restarting as pid 1 beside a temp file a killed run left).
+        let temp = dir.join(format!(".yoagent-{}-{nanos}-{n}.tmp", std::process::id()));
+        match options.open(&temp).await {
+            Ok(f) => break (temp, f),
+            // No new file can go here (a read-only directory holding a
+            // writable file): write in place, as before.
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                return tokio::fs::write(&target, bytes).await;
+            }
+            // A leftover of a killed run: take the next name.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && attempts < 16 => {
+                attempts += 1;
+            }
+            Err(e) => return Err(e),
         }
-        Err(e) => return Err(e),
     };
     let written = async {
         file.write_all(bytes).await?;
