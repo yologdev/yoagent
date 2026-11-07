@@ -194,9 +194,13 @@ impl AgentTool for BashTool {
 
         // Keep credentials out of model-authored commands when configured.
         if let Some(ref allow) = self.env_allowlist {
-            let keep: Vec<(String, String)> = std::env::vars()
+            // `vars_os`: `vars()` panics on any variable that is not valid
+            // Unicode, which made every call fail in such an environment.
+            let keep: Vec<(std::ffi::OsString, std::ffi::OsString)> = std::env::vars_os()
                 .filter(|(k, _)| {
-                    allow.iter().any(|a| a == k) || matches!(k.as_str(), "PATH" | "HOME" | "PWD")
+                    k.to_str().is_some_and(|k| {
+                        allow.iter().any(|a| a == k) || matches!(k, "PATH" | "HOME" | "PWD")
+                    })
                 })
                 .collect();
             cmd.env_clear();
@@ -441,23 +445,31 @@ impl Drop for GroupKill {
     }
 }
 
-/// One output stream: the bytes kept, whether more were discarded, and a
-/// read error if the stream ended on one.
+/// One output stream: its first and last bytes within the cap, how many in
+/// between were discarded, and a read error if the stream ended on one.
+///
+/// Keeping only the start lost what matters most in a long build or test log:
+/// the verdict comes last. So the cap is split, half for the head and half for
+/// a rolling tail.
 #[derive(Default)]
 struct Capture {
-    bytes: Vec<u8>,
-    cut: bool,
+    head: Vec<u8>,
+    tail: std::collections::VecDeque<u8>,
+    omitted: u64,
     read_error: Option<String>,
 }
 
 impl Capture {
-    /// Read `from` to the end, keeping at most `cap` bytes; the rest is
-    /// drained and discarded so the child never blocks on a full pipe.
+    /// Read `from` to the end, keeping at most `cap` bytes (the first half and
+    /// the last half); the rest is drained and discarded so the child never
+    /// blocks on a full pipe.
     async fn read<R>(&mut self, mut from: R, cap: usize)
     where
         R: tokio::io::AsyncRead + Unpin,
     {
         use tokio::io::AsyncReadExt;
+        let head_cap = cap / 2;
+        let tail_cap = cap - head_cap;
         let mut chunk = [0u8; 8192];
         loop {
             match from.read(&mut chunk).await {
@@ -467,30 +479,56 @@ impl Capture {
                     return;
                 }
                 Ok(n) => {
-                    let room = cap.saturating_sub(self.bytes.len());
-                    self.bytes.extend_from_slice(&chunk[..n.min(room)]);
-                    self.cut |= n > room;
+                    let mut data = &chunk[..n];
+                    let take = head_cap.saturating_sub(self.head.len()).min(data.len());
+                    self.head.extend_from_slice(&data[..take]);
+                    data = &data[take..];
+                    if data.len() >= tail_cap {
+                        self.omitted += (self.tail.len() + data.len() - tail_cap) as u64;
+                        self.tail.clear();
+                        self.tail.extend(&data[data.len() - tail_cap..]);
+                    } else {
+                        self.tail.extend(data);
+                        let excess = self.tail.len().saturating_sub(tail_cap);
+                        self.tail.drain(..excess);
+                        self.omitted += excess as u64;
+                    }
                 }
             }
         }
     }
 
-    /// The text, with a note when bytes were discarded or reading failed.
-    /// Bytes are cut before decoding, so a multi-byte character split by the
-    /// cap becomes U+FFFD, never a panic. With `strip`, ANSI escapes are
-    /// removed after decoding (they are ASCII, so the lossy decode never
-    /// alters one) and before the notes are added; a sequence the cap cut
+    fn cut(&self) -> bool {
+        self.omitted > 0
+    }
+
+    /// The text, with a note where bytes were discarded and when reading
+    /// failed. Bytes are cut before decoding, so a multi-byte character split
+    /// by the cut becomes U+FFFD, never a panic. With `strip`, ANSI escapes
+    /// are removed after decoding (they are ASCII, so the lossy decode never
+    /// alters one) and before the notes are added; a sequence the cut left
     /// short is dropped like a whole one.
     fn text(&self, strip: bool) -> String {
-        let decoded = String::from_utf8_lossy(&self.bytes);
-        let mut s = if strip {
-            strip_ansi(&decoded)
-        } else {
-            decoded.into_owned()
+        let render = |bytes: &[u8]| {
+            let decoded = String::from_utf8_lossy(bytes);
+            if strip {
+                strip_ansi(&decoded)
+            } else {
+                decoded.into_owned()
+            }
         };
-        if self.cut {
-            s.push_str("\n... (output truncated)");
-        }
+        let (tail_a, tail_b) = self.tail.as_slices();
+        let mut s = if self.cut() {
+            let tail = [tail_a, tail_b].concat();
+            format!(
+                "{}\n... (output truncated: {} bytes omitted) ...\n{}",
+                render(&self.head),
+                self.omitted,
+                render(&tail)
+            )
+        } else {
+            render(&[self.head.as_slice(), tail_a, tail_b].concat())
+        };
         if let Some(e) = &self.read_error {
             s.push_str(&format!("\n... (output incomplete: read error: {e})"));
         }
@@ -498,7 +536,7 @@ impl Capture {
     }
 
     fn is_empty(&self) -> bool {
-        self.bytes.is_empty() && !self.cut && self.read_error.is_none()
+        self.head.is_empty() && self.tail.is_empty() && !self.cut() && self.read_error.is_none()
     }
 }
 

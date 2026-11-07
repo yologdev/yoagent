@@ -696,39 +696,43 @@ impl AgentTool for ReadFileTool {
             });
         }
 
-        // Text files: check size limit and apply line offset/limit
-        if metadata.len() as usize > self.max_bytes {
+        let offset = params["offset"].as_u64().map(|v| v.max(1) as usize);
+        let limit = params["limit"].as_u64().map(|v| v as usize);
+        let paged = offset.is_some() || limit.is_some();
+
+        // Text files: check size limit and apply line offset/limit. A file
+        // over the limit can still be read a page at a time (the error says
+        // so): it is streamed, keeping only the requested lines.
+        if metadata.len() as usize > self.max_bytes && !paged {
             return Err(ToolError::Failed(format!(
-                "File too large ({} bytes, max {}). Use offset/limit for partial reads.",
+                "File too large ({} bytes, max {}). Read it in pages with offset/limit \
+                 (e.g. offset 1, limit 500).",
                 metadata.len(),
                 self.max_bytes
             )));
         }
 
-        let content = tokio::fs::read_to_string(&io_path)
-            .await
-            .map_err(|e| ToolError::Failed(format!("Cannot read {}: {}", path, e)))?;
-
-        let offset = params["offset"].as_u64().map(|v| v.max(1) as usize);
-        let limit = params["limit"].as_u64().map(|v| v as usize);
-
-        // Always show line numbers — helps agent reference exact lines for edit_file
-        let lines: Vec<&str> = content.lines().collect();
-        let total = lines.len();
-
         // No explicit limit falls back to `max_lines` rather than the whole
         // file. The header below reports the true total, so a partial read is
         // visible and the agent can page with offset/limit.
         let effective_limit = limit.unwrap_or(self.max_lines);
-        let (start, end) = match offset {
-            Some(off) => {
-                let s = (off - 1).min(total);
-                (s, s.saturating_add(effective_limit).min(total))
-            }
-            None => (0, effective_limit.min(total)),
+        let first = offset.map_or(0, |off| off - 1);
+        let (start, end, total, lines) = if metadata.len() as usize > self.max_bytes {
+            read_page(&io_path, path, first, effective_limit, self.max_bytes).await?
+        } else {
+            let content = tokio::fs::read_to_string(&io_path)
+                .await
+                .map_err(|e| ToolError::Failed(format!("Cannot read {}: {}", path, e)))?;
+            let all: Vec<&str> = content.lines().collect();
+            let total = all.len();
+            let start = first.min(total);
+            let end = start.saturating_add(effective_limit).min(total);
+            let lines = all[start..end].iter().map(|l| l.to_string()).collect();
+            (start, end, total, lines)
         };
 
-        let numbered: Vec<String> = lines[start..end]
+        // Always show line numbers — helps agent reference exact lines for edit_file
+        let numbered: Vec<String> = lines
             .iter()
             .enumerate()
             .map(|(i, line)| format!("{:>4} | {}", start + i + 1, line))
@@ -761,6 +765,109 @@ impl AgentTool for ReadFileTool {
             details: serde_json::json!({ "path": path }),
         })
     }
+}
+
+/// Replace `io_path`'s content with `bytes` whole: write a temp file in the
+/// same directory, flush it to disk, and rename it over the target. A crash, a
+/// full disk or a write error then leaves the old file intact instead of a
+/// truncated one, and a reader never sees a half-written file. (Writing in
+/// place truncated first: a failure part-way lost the original.)
+///
+/// What an in-place write kept is kept: a symlink is followed, so its target
+/// is replaced and the link stays; an existing file's permissions are copied
+/// to the replacement. A directory where no new file can be created falls
+/// back to writing in place. A rename gives the file a new inode, so a hard
+/// link to the old one keeps the old content.
+pub(crate) async fn write_atomic(io_path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use tokio::io::AsyncWriteExt;
+    // Through a symlink to the file it names (a missing file: as given).
+    let target = match tokio::fs::canonicalize(io_path).await {
+        Ok(resolved) => resolved,
+        Err(_) => io_path.to_path_buf(),
+    };
+    let dir = match target.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+        _ => std::path::PathBuf::from("."),
+    };
+    let name = target
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    let temp = dir.join(format!(
+        ".{name}.yoagent-{}-{nonce}.tmp",
+        std::process::id()
+    ));
+
+    let mut file = match tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)
+        .await
+    {
+        Ok(f) => f,
+        // No new file can go here (a read-only directory holding a writable
+        // file): write in place, as before.
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            return tokio::fs::write(&target, bytes).await;
+        }
+        Err(e) => return Err(e),
+    };
+    let written = async {
+        file.write_all(bytes).await?;
+        file.sync_all().await?;
+        drop(file);
+        if let Ok(meta) = tokio::fs::metadata(&target).await {
+            tokio::fs::set_permissions(&temp, meta.permissions()).await?;
+        }
+        tokio::fs::rename(&temp, &target).await
+    }
+    .await;
+    if written.is_err() {
+        let _ = tokio::fs::remove_file(&temp).await;
+    }
+    written
+}
+
+/// Lines `[first, first + limit)` of a file too large to load whole, read as
+/// a stream, with the file's line count: `(start, end, total, lines)` as the
+/// in-memory path computes them. The page stops early once it holds
+/// `max_bytes` (a minified file's few lines can be huge), which the header's
+/// `end` then shows.
+async fn read_page(
+    io_path: &std::path::Path,
+    path: &str,
+    first: usize,
+    limit: usize,
+    max_bytes: usize,
+) -> Result<(usize, usize, usize, Vec<String>), ToolError> {
+    use tokio::io::AsyncBufReadExt;
+    let file = tokio::fs::File::open(io_path)
+        .await
+        .map_err(|e| ToolError::Failed(format!("Cannot read {}: {}", path, e)))?;
+    let mut reader = tokio::io::BufReader::new(file).lines();
+    let (mut total, mut bytes) = (0usize, 0usize);
+    let mut lines = Vec::new();
+    let mut full = false;
+    while let Some(line) = reader
+        .next_line()
+        .await
+        .map_err(|e| ToolError::Failed(format!("Cannot read {}: {}", path, e)))?
+    {
+        if total >= first && !full && lines.len() < limit {
+            if bytes + line.len() > max_bytes && !lines.is_empty() {
+                full = true;
+            } else {
+                bytes += line.len();
+                lines.push(line);
+            }
+        }
+        total += 1;
+    }
+    let start = first.min(total);
+    Ok((start, start + lines.len(), total, lines))
 }
 
 // ---------------------------------------------------------------------------
@@ -880,7 +987,7 @@ impl AgentTool for WriteFileTool {
             }
         }
 
-        tokio::fs::write(&io_path, content)
+        write_atomic(&io_path, content.as_bytes())
             .await
             .map_err(|e| ToolError::Failed(format!("Cannot write {}: {}", path, e)))?;
         // The agent wrote every line: it knows the whole file now.

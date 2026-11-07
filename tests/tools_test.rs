@@ -76,7 +76,9 @@ async fn test_bash_timeout() {
 #[tokio::test]
 async fn test_bash_truncation_inside_a_multibyte_character() {
     let mut tool = BashTool::new();
-    tool.max_output_bytes = 4; // "日" is 3 bytes: the cut lands inside "本"
+    // 9 bytes, cap 7: the head keeps "日" (3 bytes), the tail the last 4 —
+    // the final byte of "本", cut mid-character, and "語".
+    tool.max_output_bytes = 7;
     let result = tool
         .execute(
             serde_json::json!({"command": "printf '日本語'"}),
@@ -88,7 +90,11 @@ async fn test_bash_truncation_inside_a_multibyte_character() {
         panic!("expected text")
     };
     assert!(text.starts_with("Exit code: 0\n日"), "{text}");
-    assert!(text.contains("(output truncated)"), "{text}");
+    assert!(
+        text.contains("(output truncated: 2 bytes omitted)"),
+        "{text}"
+    );
+    assert!(text.ends_with("\u{FFFD}語"), "{text}");
 }
 
 /// Output beyond the cap is drained, not kept, and the command completes.
@@ -108,7 +114,32 @@ async fn test_bash_large_output_is_capped() {
         panic!("expected text")
     };
     assert!(text.len() < 1100, "{} bytes kept", text.len());
-    assert!(text.contains("(output truncated)"));
+    assert!(text.contains("(output truncated"));
+}
+
+/// Past the cap, the end of the output is kept as well as the start: a build
+/// or test log's verdict comes last.
+#[tokio::test]
+async fn test_bash_long_output_keeps_its_end() {
+    let mut tool = BashTool::new().with_timeout(std::time::Duration::from_secs(10));
+    tool.max_output_bytes = 1000;
+    let result = tool
+        .execute(
+            serde_json::json!({"command": "seq 1 100000; echo 'error: the verdict'"}),
+            ctx("bash"),
+        )
+        .await
+        .unwrap();
+    let Content::Text { text } = &result.content[0] else {
+        panic!("expected text")
+    };
+    assert!(text.starts_with("Exit code: 0\n1\n2\n"), "{text}");
+    assert!(
+        text.ends_with("error: the verdict\n"),
+        "the end must survive: {text}"
+    );
+    assert!(text.contains("bytes omitted"), "{text}");
+    assert!(text.len() < 1200, "{} bytes kept", text.len());
 }
 
 /// A timeout returns what the command printed so far, and kills it.
@@ -152,7 +183,7 @@ async fn test_bash_stderr_flood_is_drained_and_capped() {
         "{}",
         &text[..text.len().min(200)]
     );
-    assert!(text.ends_with("(output truncated)"), "stderr is cut");
+    assert!(text.contains("(output truncated"), "stderr is cut");
 }
 
 /// A timeout that hit the cap still says the output was cut.
@@ -169,7 +200,7 @@ async fn test_bash_timeout_keeps_the_truncation_note() {
         .unwrap_err()
         .to_string();
     assert!(err.contains("timed out"), "{err}");
-    assert!(err.contains("(output truncated)"), "{err}");
+    assert!(err.contains("(output truncated"), "{err}");
 }
 
 /// Cancelling mid-run kills the command.
@@ -1603,7 +1634,9 @@ async fn test_bash_strips_ansi_escapes() {
 #[tokio::test]
 async fn test_bash_strips_an_escape_cut_by_the_cap() {
     let mut tool = BashTool::new();
-    tool.max_output_bytes = 6; // "ok" + ESC "[1;3" of ESC "[1;31m"
+    // 12 bytes, cap 6: the head keeps "ok" + ESC (the cut sequence), the
+    // tail "red".
+    tool.max_output_bytes = 6;
     let result = tool
         .execute(
             serde_json::json!({"command": r"printf 'ok\033[1;31mred'"}),
@@ -1614,7 +1647,10 @@ async fn test_bash_strips_an_escape_cut_by_the_cap() {
     let Content::Text { text } = &result.content[0] else {
         panic!("expected text")
     };
-    assert_eq!(text, "Exit code: 0\nok\n... (output truncated)", "{text:?}");
+    assert_eq!(
+        text, "Exit code: 0\nok\n... (output truncated: 6 bytes omitted) ...\nred",
+        "{text:?}"
+    );
 }
 
 /// A model writes `\n`; in a CRLF file the edit still applies, and every
@@ -2588,4 +2624,159 @@ async fn an_image_of_exactly_the_limit_is_sent() {
     assert!(read(1000).await.is_ok());
     let err = read(999).await.unwrap_err().to_string();
     assert!(err.contains("too large"), "{err}");
+}
+
+/// A file over `max_bytes` can be read in pages: the size error says to use
+/// offset/limit, so offset/limit has to work.
+#[tokio::test]
+async fn read_file_pages_through_a_file_over_the_size_limit() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let path = tmp.path().join("big.txt");
+    let body: String = (1..=200_000).map(|i| format!("line {i}\n")).collect();
+    std::fs::write(&path, &body).unwrap();
+    assert!(body.len() > 1024 * 1024);
+    let tool = ReadFileTool::new();
+    let path = path.to_str().unwrap();
+
+    let err = tool
+        .execute(serde_json::json!({ "path": path }), ctx("read_file"))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("offset/limit"), "{err}");
+
+    let result = tool
+        .execute(
+            serde_json::json!({ "path": path, "offset": 150_000, "limit": 3 }),
+            ctx("read_file"),
+        )
+        .await
+        .expect("a page of a large file reads");
+    let Content::Text { text } = &result.content[0] else {
+        panic!("expected text")
+    };
+    assert!(text.starts_with("[Lines 150000-150002 of 200000"), "{text}");
+    assert!(text.contains("150000 | line 150000"), "{text}");
+    assert!(text.contains("150002 | line 150002"), "{text}");
+    assert!(!text.contains("line 150003"), "{text}");
+}
+
+/// A file that is not UTF-8 is not "missing": the error must not steer the
+/// model to overwrite it with write_file.
+#[tokio::test]
+async fn edit_file_on_a_non_utf8_file_does_not_suggest_write_file() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let path = tmp.path().join("latin1.txt");
+    std::fs::write(&path, b"caf\xe9\n").unwrap();
+    let err = EditFileTool::new()
+        .execute(
+            serde_json::json!({
+                "path": path.to_str().unwrap(),
+                "old_text": "caf",
+                "new_text": "cafe",
+            }),
+            ctx("edit_file"),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(!err.contains("write_file"), "{err}");
+    assert!(err.contains("UTF-8"), "{err}");
+    assert_eq!(std::fs::read(&path).unwrap(), b"caf\xe9\n", "not modified");
+}
+
+/// write_file and edit_file replace a file whole (temp file + rename): a
+/// reader that opened it before sees the complete old content, never a
+/// truncated or half-written one — the same guarantee a crash or a full disk
+/// mid-write gets.
+#[cfg(unix)]
+#[tokio::test]
+async fn writes_replace_the_file_whole() {
+    use std::io::Read;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let path = tmp.path().join("doc.txt");
+    let old = "old content\n".repeat(1000);
+    std::fs::write(&path, &old).unwrap();
+    let p = path.to_str().unwrap();
+
+    let mut before = std::fs::File::open(&path).unwrap();
+    WriteFileTool::new()
+        .execute(
+            serde_json::json!({ "path": p, "content": "new\n" }),
+            ctx("write_file"),
+        )
+        .await
+        .unwrap();
+    let mut seen = String::new();
+    before.read_to_string(&mut seen).unwrap();
+    assert_eq!(seen, old, "write_file rewrote the file in place");
+
+    let mut before = std::fs::File::open(&path).unwrap();
+    EditFileTool::new()
+        .execute(
+            serde_json::json!({ "path": p, "old_text": "new", "new_text": "newer" }),
+            ctx("edit_file"),
+        )
+        .await
+        .unwrap();
+    let mut seen = String::new();
+    before.read_to_string(&mut seen).unwrap();
+    assert_eq!(seen, "new\n", "edit_file rewrote the file in place");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "newer\n");
+}
+
+/// The swap keeps what an in-place write kept: a symlink stays a symlink
+/// (its target is replaced), the file's permissions are kept, no temp file
+/// is left behind, and a directory that refuses new files still lets an
+/// existing writable file be written.
+#[cfg(unix)]
+#[tokio::test]
+async fn atomic_writes_keep_links_permissions_and_work_in_a_locked_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::TempDir::new().unwrap();
+    let target = tmp.path().join("real.txt");
+    let link = tmp.path().join("link.txt");
+    std::fs::write(&target, "a\n").unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    WriteFileTool::new()
+        .execute(
+            serde_json::json!({ "path": link.to_str().unwrap(), "content": "b\n" }),
+            ctx("write_file"),
+        )
+        .await
+        .unwrap();
+    assert!(std::fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "b\n");
+    let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o640);
+    let names: Vec<String> = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names.len(), 2, "a temp file was left behind: {names:?}");
+
+    // A directory where no file can be created (root ignores the bits).
+    if unsafe { libc_geteuid() } != 0 {
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+        let result = WriteFileTool::new()
+            .execute(
+                serde_json::json!({ "path": target.to_str().unwrap(), "content": "c\n" }),
+                ctx("write_file"),
+            )
+            .await;
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        result.expect("an existing writable file in a locked directory");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "c\n");
+    }
+}
+
+#[cfg(unix)]
+extern "C" {
+    #[link_name = "geteuid"]
+    fn libc_geteuid() -> u32;
 }

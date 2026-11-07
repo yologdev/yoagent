@@ -4,6 +4,14 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+- **`bash` keeps the end of long output.** Past `max_output_bytes` (256 KB) it kept only the start and drained the rest, so a long build or test log lost its verdict, which comes last. The cap is now split between the first half and the last half of each stream, with `... (output truncated: N bytes omitted) ...` between them; output under the cap is unchanged. (Found comparing against octet.)
+- **`write_file` and `edit_file` replace a file whole.** They wrote in place, truncating first, so a crash, a full disk or a write error part-way left the file truncated and the original lost. They now write a temp file in the same directory, sync it and rename it over the target: the old content stays intact until the new one is complete, and a reader never sees a half-written file. A symlink is followed (its target is replaced, the link stays), the file's permissions are kept, and a directory where no new file can be created falls back to writing in place. A hard link to the old file keeps the old content.
+- **`read_file` pages through files over its size limit.** A file over `max_bytes` (1 MB) was refused before `offset`/`limit` were read, though the error said to use them. With `offset` or `limit` it is now streamed, keeping only the requested lines (the page still bounded by `max_bytes`), and the header gives the true line count.
+- **`edit_file` no longer suggests `write_file` for a file it cannot read.** Any read failure said "Use write_file to create new files", which steered the model into overwriting a non-UTF-8 file. Only a missing file says so now; a non-UTF-8 one says edit_file edits UTF-8 text only and the file was not modified.
+- **`bash`'s environment allow-list survives a non-Unicode variable.** It used `std::env::vars()`, which panics on any variable that is not valid Unicode — every call failed (or, called outside the agent loop, panicked) in such an environment. It now reads `vars_os`.
+
 ## 0.27.4 (2026-11-07)
 
 A fix: no `temperature` for GPT-6. yoagent-rutis (0.13.0) and yoagent-workers (0.4.0) are unchanged.
