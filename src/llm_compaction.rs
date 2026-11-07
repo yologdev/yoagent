@@ -960,9 +960,9 @@ impl LlmCompaction {
             config
         });
         // `temperature` is left at the `StreamConfig::new` default of `None`:
-        // this request bypasses the agent loop, so `ModelConfig::accepts_sampling_params`
-        // is not applied here, and Claude 4.7+ rejects sampling parameters
-        // outright.
+        // this request bypasses the agent loop, so
+        // `ModelConfig::accepts_sampling_params` is not applied here, and
+        // Claude 4.7+ rejects sampling parameters outright.
         debug_assert!(stream_config.temperature.is_none());
         // One-shot request; nothing to reuse.
         stream_config.cache_config = CacheConfig {

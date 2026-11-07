@@ -1085,7 +1085,7 @@ fn image_input_default() -> bool {
     true
 }
 
-/// `ModelConfig::accepts_sampling_params` when a persisted config has no such field.
+/// `ModelConfig::accepts_sampling_params` for a persisted config without it.
 fn accepts_sampling_params_default() -> bool {
     true
 }
@@ -1388,8 +1388,8 @@ impl ModelConfig {
     }
 
     /// Whether the model takes sampling parameters (see
-    /// [`accepts_sampling_params`](Self::accepts_sampling_params)). Turn it off for a model
-    /// that rejects `temperature`, so the loop leaves it out.
+    /// [`accepts_sampling_params`](Self::accepts_sampling_params)). Turn it
+    /// off for a model that rejects `temperature`, so the loop leaves it out.
     pub fn with_accepts_sampling_params(mut self, on: bool) -> Self {
         self.accepts_sampling_params = on;
         self
@@ -1591,8 +1591,9 @@ impl ModelConfig {
     ///   [`Agent::prompt_structured`](crate::Agent::prompt_structured) uses
     ///   `output_config.format` and never forces a tool.
     /// - `temperature` (and `top_p` / `top_k`) other than the default is
-    ///   rejected with a 400; [`accepts_sampling_params`](Self::accepts_sampling_params) is
-    ///   off, so the agent loop sends none.
+    ///   rejected with a 400;
+    ///   [`accepts_sampling_params`](Self::accepts_sampling_params) is off,
+    ///   so the agent loop sends none.
     /// - Thinking blocks are bound to the model and the conversation prefix:
     ///   editing earlier turns invalidates them, and switching a session to
     ///   or from this model with [`Agent::set_model`](crate::Agent::set_model)
@@ -1709,7 +1710,8 @@ impl ModelConfig {
     /// Adaptive thinking only: `budget_tokens` and `{"type": "disabled"}` are
     /// a 400, so `ThinkingLevel::Off` sends no thinking field and the model
     /// runs at its default effort (`high`). A non-default `temperature`,
-    /// `top_p` or `top_k` is a 400 too, so [`accepts_sampling_params`](Self::accepts_sampling_params) is off.
+    /// `top_p` or `top_k` is a 400 too, so
+    /// [`accepts_sampling_params`](Self::accepts_sampling_params) is off.
     ///
     /// Rates verified against <https://platform.claude.com/docs/en/about-claude/pricing>
     /// on 2026-10-18 ($2 / $10, cached $0.10, 5-minute cache write $2.50; no
@@ -1730,8 +1732,9 @@ impl ModelConfig {
     /// Adaptive thinking, unlike Haiku 4.5 (`budget_tokens` is a 400); its
     /// default effort is `medium`. `ThinkingLevel::Off` omits the thinking
     /// field, and Haiku 5.5 thinks at `medium` when it is absent (this crate
-    /// never sends `{"type": "disabled"}`). A non-default `temperature`, `top_p` or
-    /// `top_k` is a 400, so [`accepts_sampling_params`](Self::accepts_sampling_params) is off.
+    /// never sends `{"type": "disabled"}`). A non-default `temperature`,
+    /// `top_p` or `top_k` is a 400, so
+    /// [`accepts_sampling_params`](Self::accepts_sampling_params) is off.
     ///
     /// Rates verified against <https://platform.claude.com/docs/en/about-claude/pricing>
     /// on 2026-10-18: $0.10 / $0.50, cached $0.01, cache write $0.125; a

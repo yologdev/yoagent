@@ -386,9 +386,9 @@ impl SubAgentTool {
     }
 
     /// Set the sampling temperature for the sub-agent. It is not sent to a
-    /// model whose [`ModelConfig::accepts_sampling_params`] is off — a Claude model
-    /// from 4.7 on (Fable, Opus 4.7+, Sonnet 5, Haiku 5.5, …) rejects it
-    /// with a 400. The flag is read from the sub-agent's `ModelConfig`; with
+    /// model whose [`ModelConfig::accepts_sampling_params`] is off — a
+    /// Claude model from 4.7 on (Fable, Opus 4.7+, Sonnet 5, Haiku 5.5, …)
+    /// rejects it with a 400. The flag is read from the sub-agent's `ModelConfig`; with
     /// none (`SubAgentTool::new` without `with_model_config`), the
     /// temperature is sent as given.
     pub fn with_temperature(mut self, temperature: f32) -> Self {
