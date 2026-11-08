@@ -103,10 +103,19 @@ impl AgentTool for EditFileTool {
             crate::tools::file::require_regular_file(&metadata, path)?;
         }
         let content = tokio::fs::read_to_string(&io_path).await.map_err(|e| {
-            ToolError::Failed(format!(
-                "Cannot read {}: {}. Use write_file to create new files.",
-                path, e
-            ))
+            ToolError::Failed(match e.kind() {
+                // Only a missing file is one to create; any other failure
+                // must not steer the model into overwriting what is there.
+                std::io::ErrorKind::NotFound => format!(
+                    "Cannot read {}: {}. Use write_file to create new files.",
+                    path, e
+                ),
+                std::io::ErrorKind::InvalidData => format!(
+                    "{path} is not valid UTF-8 text; edit_file edits UTF-8 text only. \
+                     The file was not modified."
+                ),
+                _ => format!("Cannot read {}: {}. The file was not modified.", path, e),
+            })
         })?;
 
         // Find the old text: as given, else with its line breaks spelled
@@ -163,7 +172,7 @@ impl AgentTool for EditFileTool {
         // Perform the replacement
         let new_content = content.replacen(old_text, new_text, 1);
 
-        tokio::fs::write(&io_path, &new_content)
+        crate::tools::file::write_atomic(&io_path, new_content.as_bytes())
             .await
             .map_err(|e| ToolError::Failed(format!("Cannot write {}: {}", path, e)))?;
 
