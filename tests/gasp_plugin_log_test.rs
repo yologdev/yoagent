@@ -86,6 +86,7 @@ async fn plugin_log_lines_are_recorded_on_their_runs() {
         MockProvider::new(vec![
             MockResponse::Text("one".into()),
             MockResponse::Text("two".into()),
+            MockResponse::Text("three".into()),
         ]),
         ModelConfig::mock(),
     )
@@ -101,7 +102,11 @@ async fn plugin_log_lines_are_recorded_on_their_runs() {
     let (tx2, handle2) = recorder.recording_sender("second", None);
     drop(keep_open);
     let run1 = handle1.await.unwrap().unwrap().expect("run 1 recorded");
+    // Run 3 reuses run 2's sender: a recording is one run, so its plugin
+    // line is not recorded into run 2's finished record.
+    let tx3 = tx2.clone();
     agent.prompt_with_sender("second", tx2).await;
+    agent.prompt_with_sender("third", tx3).await;
     let run2 = handle2.await.unwrap().unwrap().expect("run 2 recorded");
 
     let all = events(dir.path());

@@ -29,6 +29,16 @@ pub enum QueueMode {
 /// run's spend.
 type RunReturn = (Vec<Box<dyn AgentTool>>, Vec<AgentMessage>, SessionStats);
 
+/// A change to the agent's tools or history made while a run was out: the
+/// run hands both back when it is joined, so the change is applied then, on
+/// top of what it handed back.
+enum PendingEdit {
+    Tools(Vec<Box<dyn AgentTool>>),
+    Clear,
+    Append(AgentMessage),
+    Replace(Vec<AgentMessage>),
+}
+
 /// The main Agent. Owns state, tools, and provider.
 pub struct Agent {
     // State
@@ -113,6 +123,8 @@ pub struct Agent {
 
     // Pending completion from a spawned agent loop
     pending_completion: Option<JoinHandle<RunReturn>>,
+    /// Changes made while that run was out, applied when it is joined.
+    pending_edits: Vec<PendingEdit>,
 
     // Everything this agent's runs spent since construction or `reset`: its
     // own turns plus, in `sub_agents`, what they delegated. Accumulated from
@@ -379,6 +391,7 @@ impl Agent {
             cancel: None,
             is_streaming: false,
             pending_completion: None,
+            pending_edits: Vec::new(),
             spend: SessionStats::default(),
         }
     }
@@ -940,29 +953,26 @@ impl Agent {
         self.is_streaming
     }
 
-    /// Replace the agent's tools. Like the other history and tool setters,
-    /// it takes back a run that has already ended first, so the change is
-    /// not overwritten by that run's join; during a run still going it
-    /// warns — the run's state replaces the change when it is joined, so
-    /// `finish()` first.
+    /// Replace the agent's tools. Like the other tool and history setters,
+    /// this applies to the agent's state even while a run is out (started,
+    /// not yet joined by `finish()` or the next run): the run hands its tools
+    /// and history back when joined, and the change is applied on top of
+    /// them then, in the order made. Until then [`messages`](Self::messages)
+    /// shows the history as it was when the run started.
     pub fn set_tools(&mut self, tools: Vec<Box<dyn AgentTool>>) {
-        self.settle_ended_run("set_tools");
-        self.tools = tools;
+        self.edit(PendingEdit::Tools(tools));
     }
 
     pub fn clear_messages(&mut self) {
-        self.settle_ended_run("clear_messages");
-        self.messages.clear();
+        self.edit(PendingEdit::Clear);
     }
 
     pub fn append_message(&mut self, msg: AgentMessage) {
-        self.settle_ended_run("append_message");
-        self.messages.push(msg);
+        self.edit(PendingEdit::Append(msg));
     }
 
     pub fn replace_messages(&mut self, msgs: Vec<AgentMessage>) {
-        self.settle_ended_run("replace_messages");
-        self.messages = msgs;
+        self.edit(PendingEdit::Replace(msgs));
     }
 
     pub fn save_messages(&self) -> Result<String, serde_json::Error> {
@@ -971,8 +981,7 @@ impl Agent {
 
     pub fn restore_messages(&mut self, json: &str) -> Result<(), serde_json::Error> {
         let msgs: Vec<AgentMessage> = serde_json::from_str(json)?;
-        self.settle_ended_run("restore_messages");
-        self.messages = msgs;
+        self.edit(PendingEdit::Replace(msgs));
         Ok(())
     }
 
@@ -1090,6 +1099,12 @@ impl Agent {
             match joined {
                 Ok((tools, _messages, _stats)) => self.tools = tools,
                 Err(e) => tracing::error!("Agent loop task failed: {}", e),
+            }
+        }
+        // Tools set during the run still apply; its history goes anyway.
+        for edit in std::mem::take(&mut self.pending_edits) {
+            if let PendingEdit::Tools(tools) = edit {
+                self.tools = tools;
             }
         }
         self.messages.clear();
@@ -1459,7 +1474,7 @@ impl Agent {
         self.pending_completion = None;
         self.is_streaming = false;
         self.cancel = None;
-        match joined {
+        let failed = match joined {
             Ok((tools, messages, stats)) => {
                 self.tools = tools;
                 self.messages = messages;
@@ -1467,28 +1482,39 @@ impl Agent {
                 None
             }
             Err(e) => Some(e),
+        };
+        for edit in std::mem::take(&mut self.pending_edits) {
+            self.apply(edit);
         }
+        failed
     }
 
-    /// Before a setter changes tools or history: a run whose task has ended
-    /// (its events drained, `finish()` not yet called) is taken back now,
-    /// without waiting, so the change applies to the restored state rather
-    /// than being overwritten when the run is joined later. A run still
-    /// going cannot be: warn that the change will be replaced.
-    fn settle_ended_run(&mut self, change: &str) {
-        let Some(handle) = self.pending_completion.as_mut() else {
-            return;
-        };
-        match futures::FutureExt::now_or_never(&mut *handle) {
-            Some(joined) => {
-                if let Some(e) = self.take_back(joined) {
-                    tracing::error!("Agent loop task failed: {}", e);
+    /// Apply `edit` now, or — while a run is out — when that run is joined.
+    /// A run whose task has already ended is taken back first, without
+    /// waiting, so the change shows at once.
+    fn edit(&mut self, edit: PendingEdit) {
+        if let Some(handle) = self.pending_completion.as_mut() {
+            match futures::FutureExt::now_or_never(&mut *handle) {
+                Some(joined) => {
+                    if let Some(e) = self.take_back(joined) {
+                        tracing::error!("Agent loop task failed: {}", e);
+                    }
+                }
+                None => {
+                    self.pending_edits.push(edit);
+                    return;
                 }
             }
-            None => tracing::warn!(
-                "Agent::{change} during a run: the run's tools and history replace this \
-                 change when it is joined; await finish() first"
-            ),
+        }
+        self.apply(edit);
+    }
+
+    fn apply(&mut self, edit: PendingEdit) {
+        match edit {
+            PendingEdit::Tools(tools) => self.tools = tools,
+            PendingEdit::Clear => self.messages.clear(),
+            PendingEdit::Append(msg) => self.messages.push(msg),
+            PendingEdit::Replace(msgs) => self.messages = msgs,
         }
     }
 

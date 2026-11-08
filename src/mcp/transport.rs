@@ -1462,7 +1462,9 @@ impl HttpTransport {
     /// Per the spec, a 404 on a request carrying a session means the server
     /// dropped it. Keeping the dead id would make every later request fail
     /// identically, with an error that reads like a bad URL — so it is cleared
-    /// and named. `None` when `status` is not a 404 or no session was held.
+    /// and named. `None` when `status` is not a 404, when the request carried
+    /// no session (`sent`), or when the current session is not the one it
+    /// carried (a newer one is kept).
     async fn expired_session(
         &self,
         status: reqwest::StatusCode,

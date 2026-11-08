@@ -165,7 +165,17 @@ impl Extension for GaspRunLink {
             .unwrap_or_else(|e| e.into_inner())
             .as_mut()
         {
-            open.runs.insert(run.run_id.to_string());
+            // A recording is one run: its first, and the runs it delegates
+            // (with this as a tree extension). A later top-level run — a
+            // sender reused for another prompt — is not linked, so its plugin
+            // lines are never routed into this finished record.
+            let ours = open.runs.is_empty()
+                || run
+                    .parent_run_id
+                    .is_some_and(|parent| open.runs.contains(parent));
+            if ours {
+                open.runs.insert(run.run_id.to_string());
+            }
         }
         Ok(Box::new(LinkedRun))
     }
@@ -540,7 +550,9 @@ async fn consume(
                 None => break,
             },
             Some(line) = logs.rx.recv() => {
-                if recording_error.is_none() {
+                // After the run finished a line is another run's (a reused
+                // sender) or would land after `run.finished`: not this one's.
+                if recording_error.is_none() && !tracking.finished {
                     if tracking.started {
                         if let Err(e) = logs.record(&summarize, &tracking.run_id, line).await {
                             recording_error = Some(e);
@@ -618,7 +630,7 @@ async fn consume(
         }
     }
     while let Ok(line) = logs.rx.try_recv() {
-        if recording_error.is_some() || !tracking.started {
+        if recording_error.is_some() || !tracking.started || tracking.finished {
             break;
         }
         if let Err(e) = logs.record(&summarize, &tracking.run_id, line).await {

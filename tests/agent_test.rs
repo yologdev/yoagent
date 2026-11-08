@@ -1958,19 +1958,9 @@ async fn agent_max_retry_after_fails_a_long_wait_without_retrying() {
     );
 }
 
-/// A change made after a run's events are drained but before `finish()` is
-/// kept: the ended run is taken back first, instead of its join later
-/// overwriting the change.
-#[tokio::test]
-async fn a_change_after_draining_a_run_is_not_overwritten_by_its_join() {
-    let mut agent = Agent::from_provider(MockProvider::texts(vec!["answer"]), ModelConfig::mock());
-    let mut rx = agent.prompt("question").await;
-    while rx.recv().await.is_some() {}
-    // The task has ended (its sender is gone); `finish()` was not called.
-    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    agent.append_message(AgentMessage::Llm(Message::user("added after")));
-    agent.finish().await;
-    let texts: Vec<String> = agent
+/// The user texts of the agent's history.
+fn user_texts(agent: &Agent) -> Vec<String> {
+    agent
         .messages()
         .iter()
         .filter_map(|m| match m {
@@ -1980,7 +1970,30 @@ async fn a_change_after_draining_a_run_is_not_overwritten_by_its_join() {
             },
             _ => None,
         })
-        .collect();
-    assert_eq!(texts, vec!["question", "added after"], "{texts:?}");
-    assert_eq!(agent.messages().len(), 3, "the run's answer is kept too");
+        .collect()
+}
+
+/// A change made while a run is out — its events drained or not, its task
+/// finished or not — is applied on top of what the run hands back, not
+/// overwritten by the join. Multi-threaded and without a sleep: the run's
+/// task can still be finishing when its events end.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_change_while_a_run_is_out_is_not_overwritten_by_its_join() {
+    for drain_first in [true, false] {
+        let mut agent =
+            Agent::from_provider(MockProvider::texts(vec!["answer"]), ModelConfig::mock());
+        let mut rx = agent.prompt("question").await;
+        if drain_first {
+            while rx.recv().await.is_some() {}
+        }
+        agent.append_message(AgentMessage::Llm(Message::user("added after")));
+        while rx.recv().await.is_some() {}
+        agent.finish().await;
+        assert_eq!(
+            user_texts(&agent),
+            vec!["question", "added after"],
+            "drain_first={drain_first}"
+        );
+        assert_eq!(agent.messages().len(), 3, "the run's answer is kept too");
+    }
 }
