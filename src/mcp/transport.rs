@@ -624,6 +624,28 @@ fn kill_group(group: &std::sync::Mutex<Option<u32>>, child: &mut Child, command:
     let _ = (group, pid);
 }
 
+/// Whether the server process has already exited. With its own group the
+/// leader is only looked at, never collected (its pid is the group's id,
+/// which must stay ours until the group is killed); otherwise `try_wait`,
+/// whose status tokio keeps for later reads. A process tokio has already
+/// collected (`id()` is `None`) has exited; a leader `waitid` cannot see
+/// (not ours any more, or SIGCHLD ignored) is asked through `try_wait`.
+#[cfg(feature = "native")]
+fn exited_already(group: &std::sync::Mutex<Option<u32>>, child: &mut Child) -> bool {
+    let Some(pid) = child.id() else {
+        return true;
+    };
+    #[cfg(unix)]
+    if group.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+        if let Some(exited) = leader_state(pid) {
+            return exited;
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (group, pid);
+    matches!(child.try_wait(), Ok(Some(_)))
+}
+
 /// The leader `pid` as `waitid` sees it without collecting it (`WNOWAIT`):
 /// `Some(true)` exited (a zombie, its pid still held), `Some(false)`
 /// running, `None` not ours (collected, or reaped unseen under an ignored
@@ -968,12 +990,17 @@ impl McpTransport for StdioTransport {
     }
 
     async fn close(&self) -> Result<(), McpError> {
-        self.ended
-            .closed_by_host
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let mut child = self.child.lock().await;
+        // A server that had already exited (crashed, say) is reported as
+        // that, not as closed by the host: a host restarts a crashed server
+        // and not a closed one, and nothing may have looked before `close`.
+        if !exited_already(&self.group, &mut child) {
+            self.ended
+                .closed_by_host
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         // Kill the server and reap it. An error here means it had already
         // exited, which is what close wants anyway: logged, not returned.
-        let mut child = self.child.lock().await;
         self.kill_group(&mut child);
         if let Err(e) = child.kill().await {
             debug!("MCP server '{}': kill on close: {e}", self.command);
@@ -1441,14 +1468,29 @@ impl HttpTransport {
 
     /// Per the spec, a 404 on a request carrying a session means the server
     /// dropped it. Keeping the dead id would make every later request fail
-    /// identically, with an error that reads like a bad URL — so it is cleared
-    /// and named. `None` when `status` is not a 404 or no session was held.
-    async fn expired_session(&self, status: reqwest::StatusCode, method: &str) -> Option<McpError> {
+    /// identically, with an error that reads like a bad URL — so the current
+    /// session, if it is the one the request carried, is cleared and named. `None` when `status` is not a 404, when the request carried
+    /// no session (`sent`), or when the current session is not the one it
+    /// carried (a newer one is kept).
+    async fn expired_session(
+        &self,
+        status: reqwest::StatusCode,
+        method: &str,
+        sent: Option<&str>,
+    ) -> Option<McpError> {
         if status != reqwest::StatusCode::NOT_FOUND {
             return None;
         }
-        // The id is not logged: the server treats it as a bearer of the session.
-        self.session_id.lock().await.take()?;
+        // Only the session this request carried has expired: a newer one (a
+        // re-initialize while this request was in flight) is kept, and a
+        // request sent without one says nothing about sessions. The id is not
+        // logged: the server treats it as a bearer of the session.
+        let mut current = self.session_id.lock().await;
+        if sent.is_none() || current.as_deref() != sent {
+            return None;
+        }
+        current.take();
+        drop(current);
         warn!("MCP session was rejected (HTTP 404 on '{method}'); reconnect to start a new one");
         Some(McpError::http(
             404,
@@ -2110,7 +2152,10 @@ impl McpTransport for HttpTransport {
 
         let status = sent.resp.status();
         if !status.is_success() {
-            if let Some(expired) = self.expired_session(status, &method).await {
+            if let Some(expired) = self
+                .expired_session(status, &method, session.as_deref())
+                .await
+            {
                 return Err(expired);
             }
             return Err(self.status_error(sent, &format!("'{method}'")).await);
@@ -2172,7 +2217,10 @@ impl McpTransport for HttpTransport {
         let status = sent.resp.status();
         if status.is_success() {
             Ok(())
-        } else if let Some(expired) = self.expired_session(status, &method).await {
+        } else if let Some(expired) = self
+            .expired_session(status, &method, session.as_deref())
+            .await
+        {
             Err(expired)
         } else {
             Err(self
@@ -2227,6 +2275,32 @@ impl McpTransport for HttpTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A 404 ends only the session the request carried: a newer one stays,
+    /// and a request sent without one clears nothing.
+    #[tokio::test]
+    async fn a_404_clears_only_the_session_it_was_sent_with() {
+        let t = HttpTransport::new("http://127.0.0.1:9/mcp").unwrap();
+        let not_found = reqwest::StatusCode::NOT_FOUND;
+
+        *t.session_id.lock().await = Some("new".into());
+        assert!(t
+            .expired_session(not_found, "tools/call", Some("old"))
+            .await
+            .is_none());
+        assert_eq!(t.session_id.lock().await.as_deref(), Some("new"));
+        assert!(t
+            .expired_session(not_found, "tools/call", None)
+            .await
+            .is_none());
+        assert_eq!(t.session_id.lock().await.as_deref(), Some("new"));
+
+        assert!(t
+            .expired_session(not_found, "tools/call", Some("new"))
+            .await
+            .is_some());
+        assert_eq!(t.session_id.lock().await.as_deref(), None);
+    }
 
     #[test]
     fn credential_values_are_listed_whole_and_after_their_scheme() {

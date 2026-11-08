@@ -80,6 +80,7 @@ yours to wire:
 use yoagent::context::{compact_messages, ContextConfig};
 
 if overflowed {
+    agent.finish().await; // the failed run's history, not the one before it
     let config = ContextConfig::from_context_window(200_000);
     let mut history = agent.messages().to_vec();
     history.pop(); // drop the error message: continue_loop() cannot resume from an assistant message

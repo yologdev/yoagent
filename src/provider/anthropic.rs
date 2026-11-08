@@ -350,7 +350,7 @@ impl StreamProvider for AnthropicProvider {
                                                     match resolve_tool_arguments(&partial) {
                                                         Some(parsed) => *arguments = parsed,
                                                         None => warn!(
-                                                            "tool call `{}` has malformed JSON arguments: {}",
+                                                            "tool call `{}` has arguments that are not a JSON object (malformed, or another JSON value): {}",
                                                             name,
                                                             truncate_for_error(&partial)
                                                         ),
@@ -1118,9 +1118,10 @@ struct AnthropicMessageDeltaInner {
 
 /// Resolve a tool call's accumulated `input_json_delta` text into arguments.
 ///
-/// `None` means malformed, and the caller leaves the `__partial_json` sentinel
-/// in place so the post-stream sweep fails the turn rather than running the
-/// tool on its defaults.
+/// `None` means not runnable — not JSON, or JSON that is not an object (an
+/// array, a string, a number, a bool) — and the caller leaves the
+/// `__partial_json` sentinel in place so the post-stream sweep fails the turn
+/// rather than running the tool on its defaults. `null` is no arguments: `{}`.
 ///
 /// An **empty** accumulator is not malformed. A tool with no parameters has no
 /// JSON to stream, and Anthropic still emits an `input_json_delta` carrying
@@ -1131,7 +1132,13 @@ fn resolve_tool_arguments(partial: &str) -> Option<serde_json::Value> {
     if partial.trim().is_empty() {
         return Some(serde_json::Value::Object(Default::default()));
     }
-    serde_json::from_str(partial).ok()
+    // An object, as every provider requires (`tool_args::parse_tool_arguments`):
+    // `null` is no arguments; anything else is not runnable.
+    match serde_json::from_str(partial).ok()? {
+        serde_json::Value::Null => Some(serde_json::Value::Object(Default::default())),
+        v @ serde_json::Value::Object(_) => Some(v),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -2076,6 +2083,17 @@ mod no_arg_tool_calls {
                 Some(serde_json::json!({})),
                 "a no-parameter tool streams no JSON; {partial:?} must resolve to {{}}"
             );
+        }
+    }
+
+    /// A tool's input is an object. `null` is read as no arguments, as every
+    /// other provider reads it; any other non-object (an array, a string —
+    /// e.g. double-encoded) is not runnable, like malformed JSON.
+    #[test]
+    fn arguments_that_are_not_an_object_are_not_runnable() {
+        assert_eq!(resolve_tool_arguments("null"), Some(serde_json::json!({})));
+        for partial in ["[1]", r#""{\"path\":\"/\"}""#, "42", "true"] {
+            assert_eq!(resolve_tool_arguments(partial), None, "{partial}");
         }
     }
 

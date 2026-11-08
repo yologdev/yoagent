@@ -556,6 +556,23 @@ async fn a_closed_server_reads_as_closed() {
     assert!(why.contains("was closed (`close`)"), "{why}");
 }
 
+/// A server that crashed before the host closed it reads as crashed, even
+/// when nothing looked before `close`: a host restarts a crashed server, not
+/// a closed one.
+#[tokio::test]
+async fn a_server_that_crashed_before_close_reads_as_exited() {
+    let client = connect(QUITTING_SERVER).await.unwrap();
+    let err = client
+        .call_tool("quit", serde_json::json!({}))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("Connection closed"), "{err}");
+    client.close().await.unwrap();
+    let why = wait_exited(&client).await;
+    assert!(why.contains("exited with"), "{why}");
+    assert!(!why.contains("was closed"), "{why}");
+}
+
 /// `McpToolSource`: a server that exits is withdrawn — its generation moves,
 /// and it gives no tools from then on (not the last good list, whose tools
 /// would only fail).
@@ -1256,4 +1273,27 @@ while read -r line; do :; done
         .await
         .unwrap();
     assert_eq!(seen(agent).await, "home=");
+}
+
+/// Answers the handshake, then exits on its own with status 5 — a crash
+/// with no call in flight.
+const CRASHES_IDLE: &str = r#"
+read -r line; id=$(id_of "$line")
+echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"crasher\",\"version\":\"1\"}}}"
+read -r note
+exit 5
+"#;
+
+/// An idle server that crashed, then closed with nothing looked at before:
+/// read as its exit, in the host's group and in its own.
+#[tokio::test]
+async fn an_idle_crash_closed_unseen_reads_as_exited() {
+    for group in [false, true] {
+        let client = connect_with(CRASHES_IDLE, group).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        client.close().await.unwrap();
+        let why = wait_exited(&client).await;
+        assert!(why.contains("exited with"), "group={group}: {why}");
+        assert!(!why.contains("was closed"), "group={group}: {why}");
+    }
 }

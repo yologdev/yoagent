@@ -165,7 +165,26 @@ impl Extension for GaspRunLink {
             .unwrap_or_else(|e| e.into_inner())
             .as_mut()
         {
-            open.runs.insert(run.run_id.to_string());
+            // A recording is one run: its first top-level run, and the runs
+            // that one delegates (with this as a tree extension). A later
+            // top-level run — a sender reused for another prompt — is not
+            // linked, so its plugin lines never reach this finished record;
+            // nor is a delegated run of another recording's run, which must
+            // not take the first slot. (An agent built with `delegated_from`
+            // links only through its parent's run.)
+            let ours = match run.parent_run_id {
+                None => open.runs.is_empty(),
+                Some(parent) => open.runs.contains(parent),
+            };
+            if ours {
+                open.runs.insert(run.run_id.to_string());
+            } else {
+                tracing::debug!(
+                    run_id = run.run_id,
+                    "GASP: run not linked to the open recording (not its first top-level run, \
+                     nor delegated by a linked one); its plugin lines are not recorded"
+                );
+            }
         }
         Ok(Box::new(LinkedRun))
     }
@@ -390,7 +409,9 @@ impl GaspRecorder {
     /// the run they belong to: install it on the agent
     /// ([`Agent::with_extension`](crate::Agent::with_extension); as a tree
     /// extension, delegated runs' lines are recorded on the same run). It
-    /// only learns each run's id; it has no other effect.
+    /// links the recording's first top-level run, and the runs that run
+    /// delegates, and has no other effect: start the recorded run first, and
+    /// use one `recording_sender` per run.
     pub fn extension(&self) -> GaspRunLink {
         GaspRunLink {
             route: self.route.clone(),
@@ -497,6 +518,33 @@ struct RunTracking {
     finished: bool,
     turn: usize,
     outcome: String,
+    /// Events after the run ended were seen (and dropped) once: warned.
+    reuse_warned: bool,
+    /// A second AgentStart arrived before this run's AgentEnd (a sender
+    /// reused after a run that never ended): everything after it belongs to
+    /// another run and is dropped, like after `finished`.
+    rejecting: bool,
+    /// Plugin log lines dropped because the run had ended.
+    dropped_lines: usize,
+}
+
+impl RunTracking {
+    /// No more of this run's events or lines are coming: it ended, or
+    /// another run started on its sender.
+    fn closed(&self) -> bool {
+        self.finished || self.rejecting
+    }
+
+    /// Note a plugin line dropped after the run closed; warn at the first.
+    fn drop_line(&mut self) {
+        self.dropped_lines += 1;
+        if self.dropped_lines == 1 {
+            tracing::warn!(
+                "GASP: plugin log lines after this recording's run ended are not recorded; \
+                 use one recording_sender per run"
+            );
+        }
+    }
 }
 
 /// Map the event stream onto the GASP sink. Runs in its own task; ends when
@@ -521,6 +569,9 @@ async fn consume(
         finished: false,
         turn: 0,
         outcome: "interrupted".to_string(),
+        reuse_warned: false,
+        rejecting: false,
+        dropped_lines: 0,
     };
     let mut recording_error: Option<StateError> = None;
     // An error `MessageEnd` waits for the next event: a `ProviderRetry` right
@@ -537,7 +588,11 @@ async fn consume(
                 None => break,
             },
             Some(line) = logs.rx.recv() => {
-                if recording_error.is_none() {
+                // After the run closed a line is another run's (a reused
+                // sender) or would land after `run.finished`: not this one's.
+                if tracking.closed() {
+                    tracking.drop_line();
+                } else if recording_error.is_none() {
                     if tracking.started {
                         if let Err(e) = logs.record(&summarize, &tracking.run_id, line).await {
                             recording_error = Some(e);
@@ -573,6 +628,7 @@ async fn consume(
         // Lines already queued when the run ends are recorded before its end,
         // so they stay inside the run (correlated with it) in the log.
         if tracking.started
+            && !tracking.closed()
             && recording_error.is_none()
             && due.iter().any(|e| matches!(e, AgentEvent::AgentEnd { .. }))
         {
@@ -615,6 +671,10 @@ async fn consume(
         }
     }
     while let Ok(line) = logs.rx.try_recv() {
+        if tracking.closed() {
+            tracking.drop_line();
+            continue;
+        }
         if recording_error.is_some() || !tracking.started {
             break;
         }
@@ -675,6 +735,23 @@ async fn record_event(
     tracking: &mut RunTracking,
     event: &AgentEvent,
 ) -> Result<(), StateError> {
+    // One recording is one run. A sender reused for another prompt sends a
+    // second AgentStart and that run's events after this one's AgentEnd:
+    // writing them would reopen a finished run (or change its outcome after
+    // `run.finished`). Use a fresh `recording_sender` per run.
+    if tracking.started && !tracking.finished && matches!(event, AgentEvent::AgentStart) {
+        tracking.rejecting = true;
+    }
+    if tracking.closed() {
+        if !tracking.reuse_warned {
+            tracking.reuse_warned = true;
+            tracing::warn!(
+                "GASP: events after this recording's run ended are not recorded; \
+                 use one recording_sender per run"
+            );
+        }
+        return Ok(());
+    }
     match event {
         AgentEvent::AgentStart => {
             sink.on_run_started(YoAgentRunStarted {
@@ -920,6 +997,53 @@ fn outcome_for(stop_reason: &StopReason) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{args_fingerprint, summarize};
+
+    /// Which runs a recording links for plugin lines: its first top-level
+    /// run and what that run delegates — not a later top-level run, and not
+    /// a run another recording's run delegated (which must not take the
+    /// first slot from the recorded run).
+    #[tokio::test]
+    async fn a_recording_links_its_first_run_and_its_delegations_only() {
+        use super::{GaspRunLink, OpenRoute, Route};
+        use crate::extension::{Extension, RunContext};
+        use std::collections::HashSet;
+        use std::sync::{Arc, Mutex};
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let route: Route = Arc::new(Mutex::new(Some(OpenRoute {
+            runs: HashSet::new(),
+            tx,
+        })));
+        let link = GaspRunLink {
+            route: route.clone(),
+        };
+        let cancel = tokio_util::sync::CancellationToken::new();
+        for (id, parent) in [
+            // Another recording's run delegates first: not ours, and it does
+            // not take the slot.
+            ("elsewhere-child", Some("elsewhere")),
+            ("recorded", None),
+            ("recorded-child", Some("recorded")),
+            ("grandchild", Some("recorded-child")),
+            ("reused-sender-run", None),
+        ] {
+            let mut run = RunContext::new(id, &[], &cancel);
+            if let Some(parent) = parent {
+                run = run.with_delegated_by(parent, "call-1");
+            }
+            let _ = link.start_run(&run).await;
+        }
+        let mut runs: Vec<String> = route
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .runs
+            .iter()
+            .cloned()
+            .collect();
+        runs.sort();
+        assert_eq!(runs, vec!["grandchild", "recorded", "recorded-child"]);
+    }
 
     #[test]
     fn fingerprint_is_stable_and_tool_scoped() {

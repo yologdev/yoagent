@@ -235,7 +235,8 @@ an SSE-framed response, whether or not they then close the stream:
   later request, and released with a `DELETE` on `McpClient::close()`. Servers
   that reject `DELETE` are tolerated — teardown is best-effort. A `404` on a
   session-bearing request clears the session and reports that it expired, so a
-  caller can rebuild the client.
+  caller can rebuild the client (if it is still the current session: a newer
+  one, from a re-initialize while the request was in flight, is kept).
 - `202 Accepted` (or `204`) with an empty body — how a notification is
   acknowledged — is a success, not a parse failure. Any *other* empty 2xx is
   reported as an error, since it usually means a proxy answered instead of the
@@ -328,7 +329,8 @@ same. It also
 reports a server whose output closed while a wrapper process lives on, one
 that no longer reads its input (a write to it failed), and one that cannot be
 waited on. A server stopped with `close()` reads as
-"was closed", not as a crash, so a restart policy can tell the two apart.
+"was closed", not as a crash, so a restart policy can tell the two apart —
+unless it had already exited before `close()`, which reads as that exit.
 
 An `McpToolSource` uses it on its own: a server that exits is seen at the next
 turn and its tools are withdrawn (logged once, naming the server and its

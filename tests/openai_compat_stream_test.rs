@@ -579,3 +579,37 @@ async fn finish_reason_error_alone_is_an_error() {
     let err = run_stream(stream_config(&server.uri())).await.unwrap_err();
     assert!(err.to_string().contains("finish_reason"), "{err}");
 }
+
+/// A stream whose tool calls start at index 1 (some gateways count from 1)
+/// produces only that call: the untouched slot before it is not emitted as a
+/// call with no id and no name, which would break the next request.
+#[tokio::test]
+async fn a_tool_call_index_that_skips_a_slot_emits_no_empty_call() {
+    let server = MockServer::start().await;
+    let body = format!(
+        "{}{}{}",
+        chunk(
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_1","type":"function","function":{"name":"search","arguments":"{}"}}]}}]}"#
+        ),
+        chunk(r#"{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#),
+        "data: [DONE]\n\n",
+    );
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
+        .mount(&server)
+        .await;
+    let message = run_stream(stream_config(&server.uri()))
+        .await
+        .expect("stream should complete");
+    let Message::Assistant { content, .. } = &message else {
+        panic!("expected assistant message");
+    };
+    let calls: Vec<(&str, &str)> = content
+        .iter()
+        .filter_map(|c| match c {
+            Content::ToolCall { id, name, .. } => Some((id.as_str(), name.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(calls, vec![("call_1", "search")]);
+}

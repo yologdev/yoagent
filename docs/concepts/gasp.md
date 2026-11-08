@@ -61,7 +61,7 @@ fresh clone is a complete, conformant agent. If recording fails mid-run
 (disk, lease, git), recording stops and the error surfaces via the returned
 handle — **always await it** — while event forwarding to your UI continues
 uninterrupted. GASP repos are single-writer: don't share one repo between
-live workers, and record one run at a time.
+live workers, and record one run at a time (one `recording_sender` per run: a second run on the same sender is not recorded).
 
 ## Plugin logs (opt-in)
 
@@ -73,10 +73,10 @@ use tracing_subscriber::layer::SubscriberExt;
 tracing::subscriber::set_global_default(
     tracing_subscriber::registry().with(recorder.plugin_log_layer()),
 )?;
-let agent = agent.with_extension(recorder.extension()); // learns each run's id
+let agent = agent.with_extension(recorder.extension()); // links the recorded run
 ```
 
-`tracing-subscriber` 0.3 must be a dependency of your own crate (the layer implements its `Layer` trait). The layer forwards lines of the target `yoagent_rutis::plugin` (`gasp::PLUGIN_LOG_TARGET`) whose `run_id` is one of this recorder's runs — another agent's plugins in the same process never land here, and a line without a run stays in your logs only. Each line goes through the summarizer, like tool output, and is recorded as an `observation.created` on the run. Installed with `with_tree_extension`, delegated runs' lines are recorded on the same run. Record every run of an agent that has the extension: a run started *without* a recording while one is open is attributed to that recording.
+`tracing-subscriber` 0.3 must be a dependency of your own crate (the layer implements its `Layer` trait). The layer forwards lines of the target `yoagent_rutis::plugin` (`gasp::PLUGIN_LOG_TARGET`) whose `run_id` is one of this recorder's runs — another agent's plugins in the same process never land here, and a line without a run stays in your logs only. Each line goes through the summarizer, like tool output, and is recorded as an `observation.created` on the run. Installed with `with_tree_extension`, delegated runs' lines are recorded on the same run. Each recording links one run: the first top-level run started after `recording_sender` (and the runs it delegates). Start the recorded run first — an unrecorded run started in between takes that slot, and the recorded run's plugin lines are then not recorded — and use a fresh `recording_sender` per run: events and lines after its `AgentEnd` are dropped with a warning.
 
 ## Tested conformance
 
