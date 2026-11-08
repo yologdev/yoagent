@@ -265,8 +265,8 @@ fn default_convert_to_llm(messages: &[AgentMessage]) -> Vec<Message> {
 /// Start an agent loop with new prompt messages.
 /// Prefix of the message the loop appends when it stops a run itself.
 ///
-/// A run stopped by a limit or by loop detection ends with a `Message::User`
-/// carrying this prefix. The last *assistant* message still reports whatever
+/// A run stopped by a limit, loop detection, `on_before_turn`, an extension's
+/// `Stop` or a cancel ends with a `Message::User` carrying this prefix. The last *assistant* message still reports whatever
 /// stop reason it had — `ToolUse` for a loop abort — so a consumer inspecting
 /// only assistant messages cannot tell a stopped run from a finished one.
 /// `SubAgentTool` uses this to avoid reporting an aborted delegation as a

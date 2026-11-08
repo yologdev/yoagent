@@ -6,7 +6,7 @@ yoagent provides three lifecycle callbacks that let you observe and control the 
 
 ### `before_turn`
 
-Called before each LLM call. Receives the current message history and the turn number (0-indexed). Return `false` to end the run: no assistant message is produced for that turn, and `AgentEnd` still fires.
+Called before each LLM call. Receives the current message history and the turn number (0-indexed). Return `false` to end the run: no assistant message is produced for that turn; a `[Agent stopped: on_before_turn ended the run]` user message is appended (so the run's outcome is `Stopped`, and a sub-agent ended this way reports a partial result), and `AgentEnd` still fires.
 
 ```rust
 let agent = Agent::from_config(ModelConfig::anthropic("claude-sonnet-5", "Claude Sonnet 5"))
@@ -205,7 +205,7 @@ config.on_error = Some(Arc::new(|err| eprintln!("{}", err)));
 Loop iteration:
   1. Inject pending messages (steering/follow-up)
   2. Check execution limits
-  3. before_turn(messages, turn_number)  <-- return false to abort
+  3. before_turn(messages, turn_number)  <-- return false to stop (marker appended)
   4. Compact context
   5. Stream LLM response (a retryable error closes the attempt with
      MessageEnd(Error) + ProviderRetry, waits, and re-requests; turn hooks
