@@ -953,7 +953,7 @@ async fn a_block_or_failure_after_a_function_call_is_not_a_tool_turn() {
 }
 
 /// A call that follows a blocked prompt does not turn the refusal back into
-/// a tool turn.
+/// a tool turn, nor does a STOP after it.
 #[tokio::test]
 async fn a_call_after_a_blocked_prompt_stays_refused() {
     let server = MockServer::start().await;
@@ -963,6 +963,7 @@ async fn a_call_after_a_blocked_prompt_stays_refused() {
             sse(&[
                 r#"{"promptFeedback":{"blockReason":"SAFETY"}}"#,
                 r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"rm","args":{}}}],"role":"model"},"index":0}]}"#,
+                r#"{"candidates":[{"content":{"parts":[],"role":"model"},"finishReason":"STOP","index":0}]}"#,
             ]),
             "text/event-stream",
         ))

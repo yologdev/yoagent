@@ -565,7 +565,8 @@ async fn a_scoped_stash_entry_is_evictable() {
 
 /// The same on disk: a scoped stash file is evictable too. The file name
 /// encodes the scope separator, so classifying the name instead of the key
-/// left scoped stashes unevictable and wedged the sub-agent.
+/// left scoped stashes unevictable: every write succeeded and the directory
+/// grew past its cap.
 #[cfg(feature = "native")]
 #[tokio::test]
 async fn a_scoped_stash_file_is_evictable() {
@@ -578,7 +579,7 @@ async fn a_scoped_stash_file_is_evictable() {
     for i in 0..20 {
         sub.set(&format!("tool-out-tc{i}-aaaa-b0"), "q".repeat(100))
             .await
-            .unwrap_or_else(|e| panic!("scoped stash write {i} failed — sub-agent wedged: {e}"));
+            .unwrap_or_else(|e| panic!("scoped stash write {i} failed: {e}"));
     }
     assert!(state.get("plan").await.is_some());
     let bytes: u64 = std::fs::read_dir(dir.path())

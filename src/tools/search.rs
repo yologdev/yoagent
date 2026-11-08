@@ -9,7 +9,7 @@ use tokio::process::Command;
 pub struct SearchTool {
     /// Root directory to search in
     pub root: Option<String>,
-    /// Max results to return
+    /// Max results to return (at least 1: a 0 is read as 1)
     pub max_results: usize,
     /// Timeout
     pub timeout: Duration,

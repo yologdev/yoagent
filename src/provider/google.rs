@@ -334,9 +334,20 @@ pub(crate) async fn parse_stream(
                                                 StopReason::Stop
                                             }
                                         };
-                                        let keeps_calls = stop_reason == StopReason::ToolUse
-                                            && matches!(mapped, StopReason::Stop | StopReason::Length);
-                                        if !keeps_calls {
+                                        let benign =
+                                            matches!(mapped, StopReason::Stop | StopReason::Length);
+                                        // A tool turn keeps its calls on a benign
+                                        // finish; a blocked prompt or a failure stays
+                                        // what it was (a STOP after it must not make
+                                        // its calls runnable).
+                                        let keeps = benign
+                                            && matches!(
+                                                stop_reason,
+                                                StopReason::ToolUse
+                                                    | StopReason::Refusal
+                                                    | StopReason::Error
+                                            );
+                                        if !keeps {
                                             stop_reason = mapped;
                                         }
                                     }
