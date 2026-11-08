@@ -1997,3 +1997,175 @@ async fn a_change_while_a_run_is_out_is_not_overwritten_by_its_join() {
         assert_eq!(agent.messages().len(), 3, "the run's answer is kept too");
     }
 }
+
+/// Waits until released: holds a run out so a test can change the agent
+/// while it is certainly still going.
+struct Hold(Arc<tokio::sync::Notify>);
+
+#[async_trait::async_trait]
+impl AgentTool for Hold {
+    fn name(&self) -> &str {
+        "hold"
+    }
+    fn label(&self) -> &str {
+        "hold"
+    }
+    fn description(&self) -> &str {
+        "Waits until released."
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    async fn execute(
+        &self,
+        _: serde_json::Value,
+        ctx: ToolContext,
+    ) -> Result<ToolResult, ToolError> {
+        tokio::select! {
+            _ = self.0.notified() => {}
+            _ = ctx.cancel.cancelled() => return Err(ToolError::Cancelled),
+        }
+        Ok(ToolResult {
+            content: vec![Content::Text {
+                text: "held".into(),
+            }],
+            details: serde_json::Value::Null,
+        })
+    }
+}
+
+/// Answers "marked": present only if a queued `set_tools` took effect.
+struct Marker;
+
+#[async_trait::async_trait]
+impl AgentTool for Marker {
+    fn name(&self) -> &str {
+        "marker"
+    }
+    fn label(&self) -> &str {
+        "marker"
+    }
+    fn description(&self) -> &str {
+        "Marks."
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object"})
+    }
+    async fn execute(&self, _: serde_json::Value, _: ToolContext) -> Result<ToolResult, ToolError> {
+        Ok(ToolResult {
+            content: vec![Content::Text {
+                text: "marked".into(),
+            }],
+            details: serde_json::Value::Null,
+        })
+    }
+}
+
+fn call(name: &str) -> MockResponse {
+    MockResponse::ToolCalls(vec![MockToolCall {
+        name: name.into(),
+        arguments: serde_json::json!({}),
+        provider_metadata: None,
+    }])
+}
+
+/// Run until a tool starts, so the run is certainly out.
+async fn until_tool_starts(rx: &mut tokio::sync::mpsc::UnboundedReceiver<AgentEvent>) {
+    while let Some(e) = rx.recv().await {
+        if matches!(e, AgentEvent::ToolExecutionStart { .. }) {
+            return;
+        }
+    }
+    panic!("no tool started");
+}
+
+/// Changes made while a run is certainly still going are queued and applied
+/// on top of what it hands back, in order: tools replaced, history replaced
+/// (the run's output with it), then appended to. Until the join, the history
+/// reads as the run started.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn changes_during_a_held_run_apply_when_it_is_joined() {
+    let release = Arc::new(tokio::sync::Notify::new());
+    let mut agent = Agent::from_provider(
+        MockProvider::new(vec![
+            call("hold"),
+            MockResponse::Text("done".into()),
+            call("marker"),
+            MockResponse::Text("end".into()),
+        ]),
+        ModelConfig::mock(),
+    )
+    .with_tools(vec![Box::new(Hold(release.clone()))]);
+    let mut rx = agent.prompt("go").await;
+    until_tool_starts(&mut rx).await;
+
+    assert!(agent.messages().is_empty(), "history as the run started");
+    agent.set_tools(vec![Box::new(Marker)]);
+    agent.append_message(AgentMessage::Llm(Message::user("dropped")));
+    agent.replace_messages(vec![AgentMessage::Llm(Message::user("replaced"))]);
+    agent.append_message(AgentMessage::Llm(Message::user("appended")));
+    assert!(agent.messages().is_empty(), "queued, not applied yet");
+
+    release.notify_one();
+    while rx.recv().await.is_some() {}
+    agent.finish().await;
+    assert_eq!(user_texts(&agent), vec!["replaced", "appended"]);
+
+    // The queued tool list replaced the run's: `marker` runs.
+    let mut rx = agent.prompt("again").await;
+    let mut marker_ok = None;
+    while let Some(e) = rx.recv().await {
+        if let AgentEvent::ToolExecutionEnd {
+            tool_name,
+            is_error,
+            ..
+        } = e
+        {
+            if tool_name == "marker" {
+                marker_ok = Some(!is_error);
+            }
+        }
+    }
+    agent.finish().await;
+    assert_eq!(marker_ok, Some(true));
+}
+
+/// `reset` during a held run keeps a queued tool change and drops queued
+/// history changes (it clears the history anyway).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reset_keeps_a_queued_tool_change_and_drops_history_changes() {
+    let release = Arc::new(tokio::sync::Notify::new());
+    let mut agent = Agent::from_provider(
+        MockProvider::new(vec![
+            call("hold"),
+            call("marker"),
+            MockResponse::Text("end".into()),
+        ]),
+        ModelConfig::mock(),
+    )
+    .with_tools(vec![Box::new(Hold(release.clone()))]);
+    let mut rx = agent.prompt("go").await;
+    until_tool_starts(&mut rx).await;
+    agent.set_tools(vec![Box::new(Marker)]);
+    agent.append_message(AgentMessage::Llm(Message::user("gone")));
+    // Not released: `reset` cancels the held run.
+    agent.reset().await;
+    assert!(agent.messages().is_empty());
+
+    let mut rx = agent.prompt("again").await;
+    let mut marker_ok = None;
+    while let Some(e) = rx.recv().await {
+        if let AgentEvent::ToolExecutionEnd {
+            tool_name,
+            is_error,
+            ..
+        } = e
+        {
+            if tool_name == "marker" {
+                marker_ok = Some(!is_error);
+            }
+        }
+    }
+    agent.finish().await;
+    assert_eq!(marker_ok, Some(true));
+}

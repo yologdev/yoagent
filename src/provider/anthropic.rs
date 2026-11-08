@@ -350,7 +350,7 @@ impl StreamProvider for AnthropicProvider {
                                                     match resolve_tool_arguments(&partial) {
                                                         Some(parsed) => *arguments = parsed,
                                                         None => warn!(
-                                                            "tool call `{}` has malformed JSON arguments: {}",
+                                                            "tool call `{}` has arguments that are not a JSON object (malformed, or another JSON value): {}",
                                                             name,
                                                             truncate_for_error(&partial)
                                                         ),
@@ -1118,9 +1118,10 @@ struct AnthropicMessageDeltaInner {
 
 /// Resolve a tool call's accumulated `input_json_delta` text into arguments.
 ///
-/// `None` means malformed, and the caller leaves the `__partial_json` sentinel
-/// in place so the post-stream sweep fails the turn rather than running the
-/// tool on its defaults.
+/// `None` means not runnable — not JSON, or JSON that is not an object (an
+/// array, a string, a number, a bool) — and the caller leaves the
+/// `__partial_json` sentinel in place so the post-stream sweep fails the turn
+/// rather than running the tool on its defaults. `null` is no arguments: `{}`.
 ///
 /// An **empty** accumulator is not malformed. A tool with no parameters has no
 /// JSON to stream, and Anthropic still emits an `input_json_delta` carrying

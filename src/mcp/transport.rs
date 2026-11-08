@@ -627,15 +627,22 @@ fn kill_group(group: &std::sync::Mutex<Option<u32>>, child: &mut Child, command:
 /// Whether the server process has already exited. With its own group the
 /// leader is only looked at, never collected (its pid is the group's id,
 /// which must stay ours until the group is killed); otherwise `try_wait`,
-/// whose status tokio keeps for later reads.
+/// whose status tokio keeps for later reads. A process tokio has already
+/// collected (`id()` is `None`) has exited; a leader `waitid` cannot see
+/// (not ours any more, or SIGCHLD ignored) is asked through `try_wait`.
 #[cfg(feature = "native")]
 fn exited_already(group: &std::sync::Mutex<Option<u32>>, child: &mut Child) -> bool {
+    let Some(pid) = child.id() else {
+        return true;
+    };
     #[cfg(unix)]
     if group.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
-        return child.id().and_then(leader_state).unwrap_or(false);
+        if let Some(exited) = leader_state(pid) {
+            return exited;
+        }
     }
     #[cfg(not(unix))]
-    let _ = group;
+    let _ = (group, pid);
     matches!(child.try_wait(), Ok(Some(_)))
 }
 
@@ -1461,8 +1468,8 @@ impl HttpTransport {
 
     /// Per the spec, a 404 on a request carrying a session means the server
     /// dropped it. Keeping the dead id would make every later request fail
-    /// identically, with an error that reads like a bad URL — so it is cleared
-    /// and named. `None` when `status` is not a 404, when the request carried
+    /// identically, with an error that reads like a bad URL — so the current
+    /// session, if it is the one the request carried, is cleared and named. `None` when `status` is not a 404, when the request carried
     /// no session (`sent`), or when the current session is not the one it
     /// carried (a newer one is kept).
     async fn expired_session(

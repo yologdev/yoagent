@@ -1042,3 +1042,41 @@ async fn events_after_the_run_finished_are_not_recorded() {
         "{kinds:?}"
     );
 }
+
+/// A run that never ended (no AgentEnd), then another run on the same
+/// sender: the second run's model calls are not written into the first's
+/// record, which closes as interrupted.
+#[tokio::test]
+async fn a_run_started_before_the_last_ended_is_not_recorded_into_it() {
+    ensure_git_identity();
+    let dir = tempfile::tempdir().unwrap();
+    let recorder = GaspRecorder::init(
+        dir.path(),
+        "test-agent",
+        "w1",
+        GoalRef::New {
+            title: "unended".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let (tx, handle) = recorder.recording_sender("unended", None);
+    // The first run starts and never ends (its agent was dropped mid-run).
+    tx.send(AgentEvent::AgentStart).unwrap();
+    let mut agent = Agent::from_provider(MockProvider::texts(vec!["second"]), ModelConfig::mock());
+    agent.prompt_with_sender("two", tx.clone()).await;
+    drop(tx);
+    handle.await.unwrap().unwrap();
+
+    let kinds = event_kinds(dir.path());
+    let count = |k: &str| kinds.iter().filter(|x| *x == k).count();
+    assert_eq!(count("run.started"), 1, "{kinds:?}");
+    assert_eq!(count("model.called"), 0, "{kinds:?}");
+    let last_finish = std::fs::read_to_string(dir.path().join("state/events.jsonl"))
+        .unwrap()
+        .lines()
+        .rfind(|l| l.contains("run.finished"))
+        .unwrap()
+        .to_string();
+    assert!(last_finish.contains("interrupted"), "{last_finish}");
+}

@@ -1274,3 +1274,26 @@ while read -r line; do :; done
         .unwrap();
     assert_eq!(seen(agent).await, "home=");
 }
+
+/// Answers the handshake, then exits on its own with status 5 — a crash
+/// with no call in flight.
+const CRASHES_IDLE: &str = r#"
+read -r line; id=$(id_of "$line")
+echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"crasher\",\"version\":\"1\"}}}"
+read -r note
+exit 5
+"#;
+
+/// An idle server that crashed, then closed with nothing looked at before:
+/// read as its exit, in the host's group and in its own.
+#[tokio::test]
+async fn an_idle_crash_closed_unseen_reads_as_exited() {
+    for group in [false, true] {
+        let client = connect_with(CRASHES_IDLE, group).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        client.close().await.unwrap();
+        let why = wait_exited(&client).await;
+        assert!(why.contains("exited with"), "group={group}: {why}");
+        assert!(!why.contains("was closed"), "group={group}: {why}");
+    }
+}

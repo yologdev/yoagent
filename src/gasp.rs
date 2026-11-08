@@ -178,6 +178,12 @@ impl Extension for GaspRunLink {
             };
             if ours {
                 open.runs.insert(run.run_id.to_string());
+            } else {
+                tracing::debug!(
+                    run_id = run.run_id,
+                    "GASP: run not linked to the open recording (not its first top-level run, \
+                     nor delegated by a linked one); its plugin lines are not recorded"
+                );
             }
         }
         Ok(Box::new(LinkedRun))
@@ -403,7 +409,9 @@ impl GaspRecorder {
     /// the run they belong to: install it on the agent
     /// ([`Agent::with_extension`](crate::Agent::with_extension); as a tree
     /// extension, delegated runs' lines are recorded on the same run). It
-    /// only learns each run's id; it has no other effect.
+    /// links the recording's first top-level run, and the runs that run
+    /// delegates, and has no other effect: start the recorded run first, and
+    /// use one `recording_sender` per run.
     pub fn extension(&self) -> GaspRunLink {
         GaspRunLink {
             route: self.route.clone(),
@@ -512,6 +520,31 @@ struct RunTracking {
     outcome: String,
     /// Events after the run ended were seen (and dropped) once: warned.
     reuse_warned: bool,
+    /// A second AgentStart arrived before this run's AgentEnd (a sender
+    /// reused after a run that never ended): everything after it belongs to
+    /// another run and is dropped, like after `finished`.
+    rejecting: bool,
+    /// Plugin log lines dropped because the run had ended.
+    dropped_lines: usize,
+}
+
+impl RunTracking {
+    /// No more of this run's events or lines are coming: it ended, or
+    /// another run started on its sender.
+    fn closed(&self) -> bool {
+        self.finished || self.rejecting
+    }
+
+    /// Note a plugin line dropped after the run closed; warn at the first.
+    fn drop_line(&mut self) {
+        self.dropped_lines += 1;
+        if self.dropped_lines == 1 {
+            tracing::warn!(
+                "GASP: plugin log lines after this recording's run ended are not recorded; \
+                 use one recording_sender per run"
+            );
+        }
+    }
 }
 
 /// Map the event stream onto the GASP sink. Runs in its own task; ends when
@@ -537,6 +570,8 @@ async fn consume(
         turn: 0,
         outcome: "interrupted".to_string(),
         reuse_warned: false,
+        rejecting: false,
+        dropped_lines: 0,
     };
     let mut recording_error: Option<StateError> = None;
     // An error `MessageEnd` waits for the next event: a `ProviderRetry` right
@@ -553,9 +588,11 @@ async fn consume(
                 None => break,
             },
             Some(line) = logs.rx.recv() => {
-                // After the run finished a line is another run's (a reused
+                // After the run closed a line is another run's (a reused
                 // sender) or would land after `run.finished`: not this one's.
-                if recording_error.is_none() && !tracking.finished {
+                if tracking.closed() {
+                    tracking.drop_line();
+                } else if recording_error.is_none() {
                     if tracking.started {
                         if let Err(e) = logs.record(&summarize, &tracking.run_id, line).await {
                             recording_error = Some(e);
@@ -591,6 +628,7 @@ async fn consume(
         // Lines already queued when the run ends are recorded before its end,
         // so they stay inside the run (correlated with it) in the log.
         if tracking.started
+            && !tracking.closed()
             && recording_error.is_none()
             && due.iter().any(|e| matches!(e, AgentEvent::AgentEnd { .. }))
         {
@@ -633,7 +671,11 @@ async fn consume(
         }
     }
     while let Ok(line) = logs.rx.try_recv() {
-        if recording_error.is_some() || !tracking.started || tracking.finished {
+        if tracking.closed() {
+            tracking.drop_line();
+            continue;
+        }
+        if recording_error.is_some() || !tracking.started {
             break;
         }
         if let Err(e) = logs.record(&summarize, &tracking.run_id, line).await {
@@ -697,7 +739,10 @@ async fn record_event(
     // second AgentStart and that run's events after this one's AgentEnd:
     // writing them would reopen a finished run (or change its outcome after
     // `run.finished`). Use a fresh `recording_sender` per run.
-    if tracking.finished || (tracking.started && matches!(event, AgentEvent::AgentStart)) {
+    if tracking.started && !tracking.finished && matches!(event, AgentEvent::AgentStart) {
+        tracking.rejecting = true;
+    }
+    if tracking.closed() {
         if !tracking.reuse_warned {
             tracking.reuse_warned = true;
             tracing::warn!(

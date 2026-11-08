@@ -443,9 +443,9 @@ impl SseBuffer {
     /// Pop the next complete SSE event and return its `data:` payload (empty
     /// string when the event carries no data line). Handles both `\n\n` and
     /// `\r\n\r\n` event separators, splitting at whichever occurs first.
-    /// Returns `None` until a complete event is buffered. An event's `data:`
-    /// lines are joined with newlines, as SSE specifies; invalid UTF-8 in
-    /// them decodes lossily.
+    /// Returns `None` until a complete event is buffered. An event's lines
+    /// starting `data: ` are joined with newlines (SSE's multi-line data);
+    /// invalid UTF-8 in them decodes lossily.
     fn next_data(&mut self) -> Option<String> {
         let from = self.searched.saturating_sub(3);
         let found = (from..self.bytes.len()).find_map(|i| {
@@ -929,6 +929,16 @@ struct GoogleUsageMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An event's `data: ` lines are joined with newlines, as SSE specifies
+    /// for multi-line data; reading only the first dropped the rest.
+    #[test]
+    fn an_events_data_lines_are_joined() {
+        let mut buf = SseBuffer::default();
+        buf.push(b"data: {\"a\":\ndata: 1}\n\n");
+        assert_eq!(buf.next_data().as_deref(), Some("{\"a\":\n1}"));
+        assert_eq!(buf.next_data(), None);
+    }
     use crate::provider::{GoogleCompat, ModelConfig};
 
     /// A model turn whose only content is thinking (not replayed), or the

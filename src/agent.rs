@@ -29,14 +29,43 @@ pub enum QueueMode {
 /// run's spend.
 type RunReturn = (Vec<Box<dyn AgentTool>>, Vec<AgentMessage>, SessionStats);
 
-/// A change to the agent's tools or history made while a run was out: the
-/// run hands both back when it is joined, so the change is applied then, on
-/// top of what it handed back.
+/// A change to the agent's tools or history.
 enum PendingEdit {
     Tools(Vec<Box<dyn AgentTool>>),
-    Clear,
     Append(AgentMessage),
     Replace(Vec<AgentMessage>),
+}
+
+/// A spawned run not yet joined, with the changes made while it was out:
+/// the run hands its tools and history back when joined, and the changes are
+/// applied on top then. Together, so changes cannot outlive their run.
+struct PendingRun {
+    handle: JoinHandle<RunReturn>,
+    edits: Edits,
+}
+
+/// The changes made while a run was out, folded as they come: the last tool
+/// list and the last history replacement win, and messages appended after
+/// that replacement follow it. Tool and history changes are independent, so
+/// this is what replaying them in order would give.
+#[derive(Default)]
+struct Edits {
+    tools: Option<Vec<Box<dyn AgentTool>>>,
+    history: Option<Vec<AgentMessage>>,
+    appended: Vec<AgentMessage>,
+}
+
+impl Edits {
+    fn add(&mut self, edit: PendingEdit) {
+        match edit {
+            PendingEdit::Tools(tools) => self.tools = Some(tools),
+            PendingEdit::Replace(msgs) => {
+                self.history = Some(msgs);
+                self.appended.clear();
+            }
+            PendingEdit::Append(msg) => self.appended.push(msg),
+        }
+    }
 }
 
 /// The main Agent. Owns state, tools, and provider.
@@ -122,9 +151,7 @@ pub struct Agent {
     is_streaming: bool,
 
     // Pending completion from a spawned agent loop
-    pending_completion: Option<JoinHandle<RunReturn>>,
-    /// Changes made while that run was out, applied when it is joined.
-    pending_edits: Vec<PendingEdit>,
+    pending_completion: Option<PendingRun>,
 
     // Everything this agent's runs spent since construction or `reset`: its
     // own turns plus, in `sub_agents`, what they delegated. Accumulated from
@@ -391,7 +418,6 @@ impl Agent {
             cancel: None,
             is_streaming: false,
             pending_completion: None,
-            pending_edits: Vec::new(),
             spend: SessionStats::default(),
         }
     }
@@ -425,7 +451,9 @@ impl Agent {
     }
 
     pub fn with_tools(mut self, tools: Vec<Box<dyn AgentTool>>) -> Self {
-        self.tools = tools;
+        // Through the same path as `set_tools`, so a run still out cannot
+        // overwrite it when joined.
+        self.edit(PendingEdit::Tools(tools));
         self
     }
 
@@ -596,7 +624,8 @@ impl Agent {
     }
 
     pub fn with_messages(mut self, msgs: Vec<AgentMessage>) -> Self {
-        self.messages = msgs;
+        // As `replace_messages`.
+        self.edit(PendingEdit::Replace(msgs));
         self
     }
 
@@ -963,10 +992,14 @@ impl Agent {
         self.edit(PendingEdit::Tools(tools));
     }
 
+    /// Clear the history; during a run, as [`set_tools`](Self::set_tools)
+    /// describes.
     pub fn clear_messages(&mut self) {
-        self.edit(PendingEdit::Clear);
+        self.edit(PendingEdit::Replace(Vec::new()));
     }
 
+    /// Append a message; during a run it follows the run's output, as
+    /// [`set_tools`](Self::set_tools) describes.
     pub fn append_message(&mut self, msg: AgentMessage) {
         self.edit(PendingEdit::Append(msg));
     }
@@ -980,10 +1013,16 @@ impl Agent {
         self.edit(PendingEdit::Replace(msgs));
     }
 
+    /// The history as JSON. During a run (not yet joined) it is the history
+    /// as the run started, without the run's output or changes made since:
+    /// `finish()` first.
     pub fn save_messages(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(&self.messages)
     }
 
+    /// Replace the history from JSON. During a run, as
+    /// [`replace_messages`](Self::replace_messages): it replaces the run's
+    /// output too — `finish()` first.
     pub fn restore_messages(&mut self, json: &str) -> Result<(), serde_json::Error> {
         let msgs: Vec<AgentMessage> = serde_json::from_str(json)?;
         self.edit(PendingEdit::Replace(msgs));
@@ -1096,19 +1135,18 @@ impl Agent {
         if let Some(ref cancel) = self.cancel {
             cancel.cancel();
         }
-        if let Some(handle) = self.pending_completion.as_mut() {
+        if let Some(run) = self.pending_completion.as_mut() {
             // Await the cancelled task to recover tools. Taken only once
             // joined, so a dropped `reset` loses nothing.
-            let joined = handle.await;
-            self.pending_completion = None;
+            let joined = (&mut run.handle).await;
+            let run = self.pending_completion.take().expect("checked above");
             match joined {
                 Ok((tools, _messages, _stats)) => self.tools = tools,
                 Err(e) => tracing::error!("Agent loop task failed: {}", e),
             }
-        }
-        // Tools set during the run still apply; its history goes anyway.
-        for edit in std::mem::take(&mut self.pending_edits) {
-            if let PendingEdit::Tools(tools) = edit {
+            // A tool change made during the run still applies; its history
+            // changes go with the history.
+            if let Some(tools) = run.edits.tools {
                 self.tools = tools;
             }
         }
@@ -1156,6 +1194,10 @@ impl Agent {
         // never stored on the agent, so a dropped/timed-out future cannot
         // leave the agent stuck in schema-forcing mode.
         let schema = crate::provider::OutputSchema::new("structured_output", schema);
+        // An earlier run not yet joined (and its queued changes) would move
+        // the history after this point: join it first, so the scan below
+        // sees only this call's messages.
+        self.finish().await;
         let history_len = self.messages.len();
 
         let msg = AgentMessage::Llm(Message::user(text));
@@ -1318,7 +1360,10 @@ impl Agent {
             .with_current_subscriber(),
         );
 
-        self.pending_completion = Some(handle);
+        self.pending_completion = Some(PendingRun {
+            handle,
+            edits: Edits::default(),
+        });
     }
 
     /// Wait for the run just started, for the `*_with_sender` methods. If
@@ -1461,13 +1506,14 @@ impl Agent {
 
     /// Join the pending run, if any, and take its state back. Returns the
     /// task's error when it panicked or was aborted; the agent's tools went
-    /// with it, so the agent then has none.
+    /// with it, so it then has none unless a `set_tools` was made during the
+    /// run.
     async fn join_pending(&mut self) -> Option<crate::rt::JoinError> {
         // Await the handle in place and take it only once the run has ended,
         // so dropping this future mid-wait doesn't lose the run (and with it
         // the agent's tools and history).
-        let handle = self.pending_completion.as_mut()?;
-        let joined = handle.await;
+        let run = self.pending_completion.as_mut()?;
+        let joined = (&mut run.handle).await;
         self.take_back(joined)
     }
 
@@ -1476,7 +1522,11 @@ impl Agent {
         &mut self,
         joined: Result<RunReturn, crate::rt::JoinError>,
     ) -> Option<crate::rt::JoinError> {
-        self.pending_completion = None;
+        let edits = self
+            .pending_completion
+            .take()
+            .map(|run| run.edits)
+            .unwrap_or_default();
         self.is_streaming = false;
         self.cancel = None;
         let failed = match joined {
@@ -1488,9 +1538,13 @@ impl Agent {
             }
             Err(e) => Some(e),
         };
-        for edit in std::mem::take(&mut self.pending_edits) {
-            self.apply(edit);
+        if let Some(tools) = edits.tools {
+            self.tools = tools;
         }
+        if let Some(history) = edits.history {
+            self.messages = history;
+        }
+        self.messages.extend(edits.appended);
         failed
     }
 
@@ -1498,26 +1552,21 @@ impl Agent {
     /// A run whose task has already ended is taken back first, without
     /// waiting, so the change shows at once.
     fn edit(&mut self, edit: PendingEdit) {
-        if let Some(handle) = self.pending_completion.as_mut() {
-            match futures::FutureExt::now_or_never(&mut *handle) {
+        if let Some(run) = self.pending_completion.as_mut() {
+            match futures::FutureExt::now_or_never(&mut run.handle) {
                 Some(joined) => {
                     if let Some(e) = self.take_back(joined) {
                         tracing::error!("Agent loop task failed: {}", e);
                     }
                 }
                 None => {
-                    self.pending_edits.push(edit);
+                    run.edits.add(edit);
                     return;
                 }
             }
         }
-        self.apply(edit);
-    }
-
-    fn apply(&mut self, edit: PendingEdit) {
         match edit {
             PendingEdit::Tools(tools) => self.tools = tools,
-            PendingEdit::Clear => self.messages.clear(),
             PendingEdit::Append(msg) => self.messages.push(msg),
             PendingEdit::Replace(msgs) => self.messages = msgs,
         }
@@ -1806,7 +1855,7 @@ impl Drop for Agent {
         if let Some(ref cancel) = self.cancel {
             cancel.cancel();
         }
-        if let Some(handle) = self.pending_completion.take() {
+        if let Some(PendingRun { handle, .. }) = self.pending_completion.take() {
             if self.is_streaming && !handle.is_finished() {
                 tracing::warn!(
                     "Agent dropped mid-run; aborting the loop. The event receiver will \
