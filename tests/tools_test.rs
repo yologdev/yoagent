@@ -405,6 +405,24 @@ async fn test_search_pattern() {
     let _ = std::fs::remove_dir_all(tmp_dir);
 }
 
+/// `max_results: 0` must not read as "No matches" while matches exist.
+#[tokio::test]
+async fn test_search_with_a_zero_cap_does_not_hide_matches() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("a.txt"), "hello world\nhello again\n").unwrap();
+    let mut tool = SearchTool::new().with_root(tmp.path().to_str().unwrap());
+    tool.max_results = 0;
+    let result = tool
+        .execute(serde_json::json!({"pattern": "hello"}), ctx("search"))
+        .await
+        .unwrap();
+    let Content::Text { text } = &result.content[0] else {
+        panic!("expected text")
+    };
+    assert!(!text.contains("No matches"), "{text}");
+    assert!(text.contains("hello"), "{text}");
+}
+
 #[tokio::test]
 async fn test_search_no_matches() {
     let tmp_dir = std::env::temp_dir().join("yoagent-test-search-empty");

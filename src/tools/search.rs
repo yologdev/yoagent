@@ -9,7 +9,7 @@ use tokio::process::Command;
 pub struct SearchTool {
     /// Root directory to search in
     pub root: Option<String>,
-    /// Max results to return
+    /// Max results to return (at least 1: a 0 is read as 1)
     pub max_results: usize,
     /// Timeout
     pub timeout: Duration,
@@ -142,7 +142,9 @@ impl AgentTool for SearchTool {
         cmd.kill_on_drop(true);
 
         let timeout = self.timeout;
-        let max = self.max_results;
+        // At least one: a cap of 0 stopped at the first match with nothing
+        // kept, and the call then answered "No matches".
+        let max = self.max_results.max(1);
 
         let mut child = cmd
             .spawn()

@@ -563,6 +563,35 @@ async fn a_scoped_stash_entry_is_evictable() {
     );
 }
 
+/// The same on disk: a scoped stash file is evictable too. The file name
+/// encodes the scope separator, so classifying the name instead of the key
+/// left scoped stashes unevictable: every write succeeded and the directory
+/// grew past its cap.
+#[cfg(feature = "native")]
+#[tokio::test]
+async fn a_scoped_stash_file_is_evictable() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let backend = yoagent::shared_state::FileBackend::with_max_bytes(dir.path(), 500);
+    let state = SharedState::with_backend(backend);
+    let sub = state.scoped("worker-1");
+
+    state.set("plan", "q".repeat(80)).await.unwrap();
+    for i in 0..20 {
+        sub.set(&format!("tool-out-tc{i}-aaaa-b0"), "q".repeat(100))
+            .await
+            .unwrap_or_else(|e| panic!("scoped stash write {i} failed: {e}"));
+    }
+    assert!(state.get("plan").await.is_some());
+    let bytes: u64 = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().metadata().unwrap().len())
+        .sum();
+    assert!(
+        bytes <= 500,
+        "the store kept {bytes} bytes over its 500-byte cap"
+    );
+}
+
 /// A store full of caller keys reports capacity rather than destroying them.
 #[tokio::test]
 async fn a_store_of_caller_keys_refuses_rather_than_evicting() {

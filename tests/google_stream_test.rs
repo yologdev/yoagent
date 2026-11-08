@@ -914,3 +914,64 @@ async fn vertex_gets_gemini_refusals_and_network_errors() {
         "{err:?}"
     );
 }
+
+/// A function call in a response Gemini then blocked or failed is not a
+/// runnable tool turn: the finishReason wins over the call, as on Bedrock.
+/// (A plain STOP after a call stays ToolUse.)
+#[tokio::test]
+async fn a_block_or_failure_after_a_function_call_is_not_a_tool_turn() {
+    for (reason, want) in [
+        ("SAFETY", StopReason::Refusal),
+        ("PROHIBITED_CONTENT", StopReason::Refusal),
+        ("MALFORMED_FUNCTION_CALL", StopReason::Error),
+        ("TOO_MANY_TOOL_CALLS", StopReason::Error),
+        ("STOP", StopReason::ToolUse),
+        ("MAX_TOKENS", StopReason::ToolUse),
+    ] {
+        let server = MockServer::start().await;
+        let call = r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"rm","args":{"path":"/"}}}],"role":"model"},"index":0}]}"#;
+        let end = format!(
+            r#"{{"candidates":[{{"content":{{"parts":[],"role":"model"}},"finishReason":"{reason}","index":0}}]}}"#
+        );
+        Mock::given(method("POST"))
+            .and(path(format!(
+                "/v1beta/models/{}:streamGenerateContent",
+                MODEL
+            )))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(sse(&[call, end.as_str()]), "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+        let message = run_stream(stream_config(&server.uri(), vec![Message::user("go")])).await;
+        let Message::Assistant { stop_reason, .. } = &message else {
+            panic!("expected assistant")
+        };
+        assert_eq!(*stop_reason, want, "finishReason {reason}");
+    }
+}
+
+/// A call that follows a blocked prompt does not turn the refusal back into
+/// a tool turn, nor does a STOP after it.
+#[tokio::test]
+async fn a_call_after_a_blocked_prompt_stays_refused() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(format!("/v1beta/models/{}:streamGenerateContent", MODEL)))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            sse(&[
+                r#"{"promptFeedback":{"blockReason":"SAFETY"}}"#,
+                r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"rm","args":{}}}],"role":"model"},"index":0}]}"#,
+                r#"{"candidates":[{"content":{"parts":[],"role":"model"},"finishReason":"STOP","index":0}]}"#,
+            ]),
+            "text/event-stream",
+        ))
+        .mount(&server)
+        .await;
+    let message = run_stream(stream_config(&server.uri(), vec![Message::user("go")])).await;
+    let Message::Assistant { stop_reason, .. } = &message else {
+        panic!("expected assistant")
+    };
+    assert_eq!(*stop_reason, StopReason::Refusal);
+}

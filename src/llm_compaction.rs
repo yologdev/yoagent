@@ -866,16 +866,17 @@ impl LlmCompaction {
     fn warn_losing_race_once(&self) {
         {
             let mut state = lock(&self.state);
-            state.fallbacks = state.fallbacks.saturating_add(1);
-            if state.fallbacks < FALLBACKS_BEFORE_WARNING || state.warned.losing_race {
-                return;
-            }
             // Nothing has been spawned, so nothing is being paid for — this is
             // the inert configuration, which `warn_inert_once` already reports
             // with the *opposite* trigger_ratio advice. Claiming a cost here
             // would be false and would contradict that message in the same
-            // session.
+            // session. Nor is such a fallback a lost race: counting it would
+            // let one real miss after the first request complete a streak.
             if !state.ever_spawned {
+                return;
+            }
+            state.fallbacks = state.fallbacks.saturating_add(1);
+            if state.fallbacks < FALLBACKS_BEFORE_WARNING || state.warned.losing_race {
                 return;
             }
             state.warned.losing_race = true;
@@ -2535,7 +2536,11 @@ mod tests {
 
         // The summarizer always fails, so no briefing is ever ready and every
         // compaction takes the deterministic path — the condition the warning
-        // exists to report.
+        // exists to report. The first one falls back before any request exists
+        // (it spawns the first), so it is not a lost race and does not count.
+        let _ = strategy.compact(history(30, 400), &cfg);
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        assert_eq!(lock(&strategy.state).fallbacks, 0);
         for expected in 1..FALLBACKS_BEFORE_WARNING {
             let _ = strategy.compact(history(30, 400), &cfg);
             // Let the spawned request fail and release the slot, so the next
@@ -3168,6 +3173,23 @@ mod losing_race_warning {
             !lock(&s.state).warned.losing_race,
             "with nothing ever spawned there is no spend to report, however long \
              the deterministic streak runs"
+        );
+    }
+
+    /// Fallbacks before the first request (history still too short to
+    /// summarize) are not lost races: once a request is in play, one miss
+    /// must not complete a streak they started.
+    #[test]
+    fn fallbacks_before_the_first_request_do_not_count_toward_the_warning() {
+        let s = LlmCompaction::from_config(crate::provider::ModelConfig::mock());
+        for _ in 0..FALLBACKS_BEFORE_WARNING * 2 {
+            s.warn_losing_race_once();
+        }
+        lock(&s.state).ever_spawned = true;
+        s.warn_losing_race_once();
+        assert!(
+            !lock(&s.state).warned.losing_race,
+            "one lost race after the first request is not a streak"
         );
     }
 
