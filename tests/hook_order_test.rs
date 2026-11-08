@@ -1170,8 +1170,10 @@ async fn stopped_by_on_before_turn() {
         event:TurnEnd tool_results=1
         event:TurnStart
         on_before_turn 1
+        event:MessageStart user "[Agent stopped: on_before_turn ended the run]"
+        event:MessageEnd user "[Agent stopped: on_before_turn ended the run]"
         event:TurnEnd tool_results=0
-        event:AgentEnd [user, assistant/ToolUse, toolResult/error=false]
+        event:AgentEnd [user, assistant/ToolUse, toolResult/error=false, user "[Agent stopped: on_before_turn ended the run]"]
         "#,
     );
 }

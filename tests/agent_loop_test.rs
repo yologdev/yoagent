@@ -5797,3 +5797,60 @@ async fn max_retry_after_applies_after_an_earlier_retry() {
     let error = error_message.as_deref().unwrap();
     assert!(error.contains("asked to wait 3600.0s"), "{error}");
 }
+
+/// An abort for repetition answers the stuck response's calls with "Not
+/// executed" results; those reach the event stream like every other
+/// unexecuted call, so a transcript rebuilt from events has no unanswered
+/// call and the turn's TurnEnd carries them.
+#[tokio::test]
+async fn a_loop_abort_reports_its_unexecuted_results_as_events() {
+    let events = run_with_limits(
+        repeat_call(12, serde_json::json!({"q": "same"})),
+        yoagent::context::ExecutionLimits::default()
+            .with_max_consecutive_identical_tool_calls(Some(3)),
+    )
+    .await;
+    assert!(loop_events(&events).iter().any(|(_, _, aborted)| *aborted));
+
+    // Every tool call the assistant made has an ending and a result message.
+    let mut calls = Vec::new();
+    let (mut ended, mut answered) = (Vec::new(), Vec::new());
+    for e in &events {
+        match e {
+            AgentEvent::MessageEnd {
+                message: AgentMessage::Llm(Message::Assistant { content, .. }),
+            } => {
+                for c in content {
+                    if let Content::ToolCall { id, .. } = c {
+                        calls.push(id.clone());
+                    }
+                }
+            }
+            AgentEvent::MessageEnd {
+                message: AgentMessage::Llm(Message::ToolResult { tool_call_id, .. }),
+            } => answered.push(tool_call_id.clone()),
+            AgentEvent::ToolExecutionEnd { tool_call_id, .. } => ended.push(tool_call_id.clone()),
+            _ => {}
+        }
+    }
+    // The mock reuses call ids across turns, so compare counts: one ending
+    // and one result message per call made.
+    assert_eq!(ended.len(), calls.len(), "a call has no ToolExecutionEnd");
+    assert_eq!(
+        answered.len(),
+        calls.len(),
+        "a call has no result MessageEnd"
+    );
+    let last_turn = events
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            AgentEvent::TurnEnd { tool_results, .. } => Some(tool_results.len()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        last_turn > 0,
+        "the aborted turn's TurnEnd lists its results"
+    );
+}
