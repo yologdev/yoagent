@@ -272,16 +272,24 @@ pub(crate) async fn parse_stream(
                                                 name: fc.name.clone(),
                                             });
                                             let _ = tx.send(StreamEvent::ToolCallEnd { content_index: idx });
-                                            stop_reason = StopReason::ToolUse;
+                                            // A blocked prompt stays refused
+                                            // whatever follows it.
+                                            if !matches!(stop_reason, StopReason::Refusal | StopReason::Error) {
+                                                stop_reason = StopReason::ToolUse;
+                                            }
                                         }
                                     }
                                 }
                                 if let Some(reason) = &candidate.finish_reason {
                                     finished = true;
-                                    // Don't override ToolUse -- Gemini returns "STOP"
-                                    // even when it emits function calls
-                                    if stop_reason != StopReason::ToolUse {
-                                        stop_reason = match reason.as_str() {
+                                    // Gemini returns "STOP" (or "MAX_TOKENS")
+                                    // even when it emitted function calls: those
+                                    // keep ToolUse. A block or a failure does
+                                    // not — the calls of a response Gemini
+                                    // refused or could not produce are never
+                                    // run (as on Bedrock).
+                                    {
+                                        let mapped = match reason.as_str() {
                                             "STOP" => StopReason::Stop,
                                             "MAX_TOKENS" => StopReason::Length,
                                             // Stopped for reciting its sources: not cut
@@ -326,6 +334,11 @@ pub(crate) async fn parse_stream(
                                                 StopReason::Stop
                                             }
                                         };
+                                        let keeps_calls = stop_reason == StopReason::ToolUse
+                                            && matches!(mapped, StopReason::Stop | StopReason::Length);
+                                        if !keeps_calls {
+                                            stop_reason = mapped;
+                                        }
                                     }
                                 }
                             }

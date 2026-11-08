@@ -320,7 +320,13 @@ impl FileBackend {
         // later with no error path anywhere. The total still counts every file,
         // so caller keys constrain the budget without being destroyed by it;
         // when only they remain the write reports capacity instead.
-        for (_, name, path, len) in entries.into_iter().filter(|(_, n, _, _)| is_stash_key(n)) {
+        // Classify the key, not its file name: the name encodes the scope
+        // separator (`%1F`), so a scoped stash would read as caller-owned and
+        // never be evicted — the store then grew past its cap.
+        for (_, name, path, len) in entries
+            .into_iter()
+            .filter(|(_, n, _, _)| is_stash_key(&Self::path_to_key(n)))
+        {
             if total as usize <= self.max_bytes {
                 break;
             }
