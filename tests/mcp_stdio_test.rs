@@ -44,10 +44,16 @@ printf '\377 not utf-8\n' >&2
 head -c 200000 /dev/zero | tr '\0' x >&2
 echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"fetched\"},{\"type\":\"resource\",\"resource\":{\"uri\":\"file:///a.txt\",\"text\":\"body\"}}]}}"
 
-# Call 2: not answered in time (the client times out)...
+# Call 2: not answered in time (the client times out, and tells the server
+# with notifications/cancelled naming the call)...
 read -r line; late=$(id_of "$line")
+read -r line
+case "$line" in
+  *'"method":"notifications/cancelled"'*'"requestId":'"$late"[,}]*) read -r line;;
+  *) echo "expected the cancellation of call $late, got: $line" >&2; exit 1;;
+esac
 # Call 3: ...its answer arrives late, ahead of call 3's own.
-read -r line; id=$(id_of "$line")
+id=$(id_of "$line")
 echo "{\"jsonrpc\":\"2.0\",\"id\":$late,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"too late\"}]}}"
 echo "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"third\"}]}}"
 
