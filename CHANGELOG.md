@@ -4,6 +4,10 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+- **`LlmCompaction` summarizes the right part of a long span.** Past the transcript's 480 KB cap it kept the **oldest** messages and dropped the newest, while its comment, warning and marker said the opposite; the marker sat at the end. It now fills the cap newest first, with the marker where the omitted messages were. An earlier briefing (the previous summary, at the start of the next span) was clipped to the 2,000-byte per-block cap on every recompaction — about a quarter of a default 2,000-token summary — and the latest real user request was clipped the same way. Both are now pinned — the briefing, and the latest real user request within the summarized span: each text block clipped at 32 KB instead, and kept whatever the total — so the summarizer sees what was already summarized and the request that drove the span. Messages that serialize to nothing (extension messages, empty assistant turns) no longer split the omitted region, one warning per compaction gives the total, and newest messages that do not fit are reported too. (Found comparing against octet.)
+
 ## 0.27.4 (2026-11-07)
 
 A fix: no `temperature` for GPT-6. yoagent-rutis (0.13.0) and yoagent-workers (0.4.0) are unchanged.
