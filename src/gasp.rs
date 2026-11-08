@@ -165,14 +165,17 @@ impl Extension for GaspRunLink {
             .unwrap_or_else(|e| e.into_inner())
             .as_mut()
         {
-            // A recording is one run: its first, and the runs it delegates
-            // (with this as a tree extension). A later top-level run — a
-            // sender reused for another prompt — is not linked, so its plugin
-            // lines are never routed into this finished record.
-            let ours = open.runs.is_empty()
-                || run
-                    .parent_run_id
-                    .is_some_and(|parent| open.runs.contains(parent));
+            // A recording is one run: its first top-level run, and the runs
+            // that one delegates (with this as a tree extension). A later
+            // top-level run — a sender reused for another prompt — is not
+            // linked, so its plugin lines never reach this finished record;
+            // nor is a delegated run of another recording's run, which must
+            // not take the first slot. (An agent built with `delegated_from`
+            // links only through its parent's run.)
+            let ours = match run.parent_run_id {
+                None => open.runs.is_empty(),
+                Some(parent) => open.runs.contains(parent),
+            };
             if ours {
                 open.runs.insert(run.run_id.to_string());
             }
@@ -949,6 +952,53 @@ fn outcome_for(stop_reason: &StopReason) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{args_fingerprint, summarize};
+
+    /// Which runs a recording links for plugin lines: its first top-level
+    /// run and what that run delegates — not a later top-level run, and not
+    /// a run another recording's run delegated (which must not take the
+    /// first slot from the recorded run).
+    #[tokio::test]
+    async fn a_recording_links_its_first_run_and_its_delegations_only() {
+        use super::{GaspRunLink, OpenRoute, Route};
+        use crate::extension::{Extension, RunContext};
+        use std::collections::HashSet;
+        use std::sync::{Arc, Mutex};
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let route: Route = Arc::new(Mutex::new(Some(OpenRoute {
+            runs: HashSet::new(),
+            tx,
+        })));
+        let link = GaspRunLink {
+            route: route.clone(),
+        };
+        let cancel = tokio_util::sync::CancellationToken::new();
+        for (id, parent) in [
+            // Another recording's run delegates first: not ours, and it does
+            // not take the slot.
+            ("elsewhere-child", Some("elsewhere")),
+            ("recorded", None),
+            ("recorded-child", Some("recorded")),
+            ("grandchild", Some("recorded-child")),
+            ("reused-sender-run", None),
+        ] {
+            let mut run = RunContext::new(id, &[], &cancel);
+            if let Some(parent) = parent {
+                run = run.with_delegated_by(parent, "call-1");
+            }
+            let _ = link.start_run(&run).await;
+        }
+        let mut runs: Vec<String> = route
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .runs
+            .iter()
+            .cloned()
+            .collect();
+        runs.sort();
+        assert_eq!(runs, vec!["grandchild", "recorded", "recorded-child"]);
+    }
 
     #[test]
     fn fingerprint_is_stable_and_tool_scoped() {

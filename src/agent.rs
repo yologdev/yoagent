@@ -971,6 +971,11 @@ impl Agent {
         self.edit(PendingEdit::Append(msg));
     }
 
+    /// Replace the history. While a run is out this applies after the run
+    /// is joined and replaces its output too — a copy of
+    /// [`messages`](Self::messages) taken during the run is the history as
+    /// it started — so use [`append_message`](Self::append_message), or
+    /// `finish()` first.
     pub fn replace_messages(&mut self, msgs: Vec<AgentMessage>) {
         self.edit(PendingEdit::Replace(msgs));
     }
