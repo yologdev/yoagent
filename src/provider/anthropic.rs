@@ -1,5 +1,6 @@
 //! Anthropic Claude provider (Messages API with streaming)
 
+use super::openai_compat::null_as_zero;
 use super::tool_args::UNPARSED_ARGUMENTS_KEY;
 use super::traits::*;
 use crate::provider::ApiProtocol;
@@ -387,6 +388,18 @@ impl StreamProvider for AnthropicProvider {
                                         // overwrite the output tokens with 0.
                                         if let Some(delta_usage) = data.usage {
                                             usage.output = delta_usage.output_tokens;
+                                            // Its counts are cumulative: a
+                                            // non-zero restatement wins (zero
+                                            // is indistinguishable from absent).
+                                            for (count, total) in [
+                                                (delta_usage.input_tokens, &mut usage.input),
+                                                (delta_usage.cache_read_input_tokens, &mut usage.cache_read),
+                                                (delta_usage.cache_creation_input_tokens, &mut usage.cache_write),
+                                            ] {
+                                                if count > 0 {
+                                                    *total = count;
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -590,10 +603,11 @@ fn build_request_body(config: &StreamConfig, is_oauth: bool) -> serde_json::Valu
     // Prompt caching — place cache_control breakpoints based on CacheConfig.
     //
     // Anthropic caches the full prefix (tools → system → messages) up to each
-    // breakpoint. We use up to 3 breakpoints:
+    // breakpoint. We use up to 4 breakpoints (Anthropic's limit):
     //   1. System prompt (stable across turns)
     //   2. Last tool definition (tools rarely change)
     //   3. Second-to-last message (conversation history grows, cache the prefix)
+    //   4. A bridge after a large tool batch (see `bridge_breakpoint`)
     //
     // When caching is disabled or strategy is Disabled, no markers are added.
     // -----------------------------------------------------------------------
@@ -617,20 +631,34 @@ fn build_request_body(config: &StreamConfig, is_oauth: bool) -> serde_json::Valu
     // Breakpoint 3: scan backwards from second-to-last message to find one with
     // non-empty content to place the cache breakpoint on
     if caching_enabled && cache_messages && messages.len() >= 2 {
+        let mut main = None;
         for idx in (0..messages.len() - 1).rev() {
             if let Some(content) = messages[idx]["content"].as_array_mut() {
                 if let Some(last_block) = content.last_mut() {
-                    let is_empty_text = last_block.get("type").and_then(|t| t.as_str())
-                        == Some("text")
-                        && last_block
-                            .get("text")
-                            .and_then(|t| t.as_str())
-                            .unwrap_or("")
-                            .is_empty();
-                    if !is_empty_text {
+                    if !is_empty_text(last_block) {
                         last_block["cache_control"] = serde_json::json!({"type": "ephemeral"});
+                        main = Some(idx);
                         break;
                     }
+                }
+            }
+        }
+        // Breakpoint 4, the bridge. Anthropic looks back only about 20
+        // content blocks from a breakpoint for an earlier cache entry. The
+        // previous request's history breakpoint sat on its second-to-last
+        // message, one message before where it ended (just before the newest
+        // assistant message). A response with many parallel tool calls (each
+        // call a block, each result its own message) moves breakpoint 3 past
+        // that reach, so every turn re-wrote the whole history. A breakpoint
+        // on the previous request's last message reaches its entry one
+        // message back, and keeps it read.
+        if let Some(main) = main {
+            if let Some(bridge) = bridge_breakpoint(&messages, main) {
+                if let Some(block) = messages[bridge]["content"]
+                    .as_array_mut()
+                    .and_then(|c| c.last_mut())
+                {
+                    block["cache_control"] = serde_json::json!({"type": "ephemeral"});
                 }
             }
         }
@@ -885,15 +913,52 @@ struct AnthropicMessageInfo {
     usage: AnthropicUsage,
 }
 
+/// Content blocks from the bridge to the main breakpoint past which the
+/// previous request's cache entry may be out of reach (Anthropic documents
+/// about 20; a margin below that costs at most one small cache write).
+const BRIDGE_DISTANCE: usize = 16;
+
+/// A text block with nothing in it: no breakpoint goes there.
+fn is_empty_text(block: &serde_json::Value) -> bool {
+    block.get("type").and_then(|t| t.as_str()) == Some("text")
+        && block
+            .get("text")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .is_empty()
+}
+
+/// Where the bridge breakpoint goes: the message just before the newest
+/// assistant message (the previous request's last message, one past its
+/// history breakpoint), when the blocks from it to the main breakpoint at
+/// `main` are [`BRIDGE_DISTANCE`] or more. `None` when no bridge is needed or
+/// there is nothing to put it on.
+fn bridge_breakpoint(messages: &[serde_json::Value], main: usize) -> Option<usize> {
+    let newest_assistant = messages[..=main]
+        .iter()
+        .rposition(|m| m["role"] == "assistant")?;
+    let bridge = newest_assistant.checked_sub(1)?;
+    let blocks: usize = messages[bridge..=main]
+        .iter()
+        .map(|m| m["content"].as_array().map_or(0, Vec::len))
+        .sum();
+    let last = messages[bridge]["content"].as_array()?.last()?;
+    (blocks >= BRIDGE_DISTANCE && !is_empty_text(last)).then_some(bridge)
+}
+
+/// Every count tolerates `null` as well as a missing key (the API types make
+/// them nullable): a plain `u64` failed the whole event on `null`, and the
+/// event was then skipped without a word — usage read as 0, and a
+/// message_delta's stop_reason was lost with it.
 #[derive(Deserialize, Default)]
 struct AnthropicUsage {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_zero")]
     input_tokens: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_zero")]
     output_tokens: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_zero")]
     cache_read_input_tokens: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_zero")]
     cache_creation_input_tokens: u64,
 }
 
@@ -1115,6 +1180,89 @@ mod tests {
             cache_config: cache,
             output_schema: None,
         }
+    }
+
+    /// A turn of `calls` parallel tool calls: the assistant message and one
+    /// result message per call.
+    fn tool_turn(turn: usize, calls: usize) -> Vec<Message> {
+        let ids: Vec<String> = (0..calls).map(|c| format!("t{turn}c{c}")).collect();
+        let mut out = vec![Message::assistant(
+            ids.iter()
+                .map(|id| Content::ToolCall {
+                    id: id.clone(),
+                    name: "read_file".into(),
+                    arguments: serde_json::json!({ "path": id }),
+                    provider_metadata: None,
+                })
+                .collect(),
+            StopReason::ToolUse,
+            "claude",
+            "anthropic",
+            Usage::default(),
+        )];
+        out.extend(ids.iter().map(|id| Message::ToolResult {
+            tool_call_id: id.clone(),
+            tool_name: "read_file".into(),
+            content: vec![Content::Text { text: "ok".into() }],
+            is_error: false,
+            timestamp: 0,
+        }));
+        out
+    }
+
+    /// Indices of the messages carrying a `cache_control` breakpoint.
+    fn message_breakpoints(body: &serde_json::Value) -> Vec<usize> {
+        body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| {
+                m["content"]
+                    .as_array()
+                    .is_some_and(|c| c.iter().any(|b| b.get("cache_control").is_some()))
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    fn tool_history(calls: usize) -> StreamConfig {
+        let mut config = make_config(CacheConfig::default());
+        config.messages = vec![Message::user("go")];
+        config.messages.extend(tool_turn(0, calls));
+        config.messages.extend(tool_turn(1, calls));
+        config
+    }
+
+    #[test]
+    fn a_large_tool_batch_keeps_the_previous_breakpoint_reachable() {
+        // Anthropic looks back about 20 blocks from a breakpoint for an
+        // earlier cache entry. Twelve parallel calls put the new breakpoint
+        // ~24 blocks past the previous request's, so a bridge breakpoint
+        // must sit where that request ended: just before the newest
+        // assistant message.
+        let config = tool_history(12);
+        let body = build_request_body(&config, false);
+        let msgs = body["messages"].as_array().unwrap();
+        let newest_assistant = msgs.iter().rposition(|m| m["role"] == "assistant").unwrap();
+        let points = message_breakpoints(&body);
+        assert!(
+            points.contains(&(newest_assistant - 1)),
+            "bridge breakpoint missing: {points:?} (newest assistant at {newest_assistant})"
+        );
+        assert!(
+            points.contains(&(msgs.len() - 2)),
+            "main breakpoint: {points:?}"
+        );
+        // System + last tool + main + bridge: Anthropic's limit is 4.
+        let all = body.to_string().matches("cache_control").count();
+        assert!(all <= 4, "{all} breakpoints");
+    }
+
+    #[test]
+    fn a_small_tool_batch_needs_no_bridge() {
+        let body = build_request_body(&tool_history(2), false);
+        assert_eq!(message_breakpoints(&body).len(), 1);
     }
 
     #[test]
