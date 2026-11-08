@@ -556,6 +556,23 @@ async fn a_closed_server_reads_as_closed() {
     assert!(why.contains("was closed (`close`)"), "{why}");
 }
 
+/// A server that crashed before the host closed it reads as crashed, even
+/// when nothing looked before `close`: a host restarts a crashed server, not
+/// a closed one.
+#[tokio::test]
+async fn a_server_that_crashed_before_close_reads_as_exited() {
+    let client = connect(QUITTING_SERVER).await.unwrap();
+    let err = client
+        .call_tool("quit", serde_json::json!({}))
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("Connection closed"), "{err}");
+    client.close().await.unwrap();
+    let why = wait_exited(&client).await;
+    assert!(why.contains("exited with"), "{why}");
+    assert!(!why.contains("was closed"), "{why}");
+}
+
 /// `McpToolSource`: a server that exits is withdrawn — its generation moves,
 /// and it gives no tools from then on (not the last good list, whose tools
 /// would only fail).

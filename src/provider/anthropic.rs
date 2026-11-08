@@ -1131,7 +1131,13 @@ fn resolve_tool_arguments(partial: &str) -> Option<serde_json::Value> {
     if partial.trim().is_empty() {
         return Some(serde_json::Value::Object(Default::default()));
     }
-    serde_json::from_str(partial).ok()
+    // An object, as every provider requires (`tool_args::parse_tool_arguments`):
+    // `null` is no arguments; anything else is not runnable.
+    match serde_json::from_str(partial).ok()? {
+        serde_json::Value::Null => Some(serde_json::Value::Object(Default::default())),
+        v @ serde_json::Value::Object(_) => Some(v),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -2076,6 +2082,17 @@ mod no_arg_tool_calls {
                 Some(serde_json::json!({})),
                 "a no-parameter tool streams no JSON; {partial:?} must resolve to {{}}"
             );
+        }
+    }
+
+    /// A tool's input is an object. `null` is read as no arguments, as every
+    /// other provider reads it; any other non-object (an array, a string —
+    /// e.g. double-encoded) is not runnable, like malformed JSON.
+    #[test]
+    fn arguments_that_are_not_an_object_are_not_runnable() {
+        assert_eq!(resolve_tool_arguments("null"), Some(serde_json::json!({})));
+        for partial in ["[1]", r#""{\"path\":\"/\"}""#, "42", "true"] {
+            assert_eq!(resolve_tool_arguments(partial), None, "{partial}");
         }
     }
 

@@ -25,6 +25,10 @@ pub enum QueueMode {
     All,
 }
 
+/// What a run's task hands back: the agent's tools, its history, and the
+/// run's spend.
+type RunReturn = (Vec<Box<dyn AgentTool>>, Vec<AgentMessage>, SessionStats);
+
 /// The main Agent. Owns state, tools, and provider.
 pub struct Agent {
     // State
@@ -108,9 +112,7 @@ pub struct Agent {
     is_streaming: bool,
 
     // Pending completion from a spawned agent loop
-    #[allow(clippy::type_complexity)]
-    pending_completion:
-        Option<JoinHandle<(Vec<Box<dyn AgentTool>>, Vec<AgentMessage>, SessionStats)>>,
+    pending_completion: Option<JoinHandle<RunReturn>>,
 
     // Everything this agent's runs spent since construction or `reset`: its
     // own turns plus, in `sub_agents`, what they delegated. Accumulated from
@@ -938,19 +940,28 @@ impl Agent {
         self.is_streaming
     }
 
+    /// Replace the agent's tools. Like the other history and tool setters,
+    /// it takes back a run that has already ended first, so the change is
+    /// not overwritten by that run's join; during a run still going it
+    /// warns — the run's state replaces the change when it is joined, so
+    /// `finish()` first.
     pub fn set_tools(&mut self, tools: Vec<Box<dyn AgentTool>>) {
+        self.settle_ended_run("set_tools");
         self.tools = tools;
     }
 
     pub fn clear_messages(&mut self) {
+        self.settle_ended_run("clear_messages");
         self.messages.clear();
     }
 
     pub fn append_message(&mut self, msg: AgentMessage) {
+        self.settle_ended_run("append_message");
         self.messages.push(msg);
     }
 
     pub fn replace_messages(&mut self, msgs: Vec<AgentMessage>) {
+        self.settle_ended_run("replace_messages");
         self.messages = msgs;
     }
 
@@ -960,6 +971,7 @@ impl Agent {
 
     pub fn restore_messages(&mut self, json: &str) -> Result<(), serde_json::Error> {
         let msgs: Vec<AgentMessage> = serde_json::from_str(json)?;
+        self.settle_ended_run("restore_messages");
         self.messages = msgs;
         Ok(())
     }
@@ -1436,6 +1448,14 @@ impl Agent {
         // the agent's tools and history).
         let handle = self.pending_completion.as_mut()?;
         let joined = handle.await;
+        self.take_back(joined)
+    }
+
+    /// Take a joined run's state back: its tools, history and spend.
+    fn take_back(
+        &mut self,
+        joined: Result<RunReturn, crate::rt::JoinError>,
+    ) -> Option<crate::rt::JoinError> {
         self.pending_completion = None;
         self.is_streaming = false;
         self.cancel = None;
@@ -1447,6 +1467,28 @@ impl Agent {
                 None
             }
             Err(e) => Some(e),
+        }
+    }
+
+    /// Before a setter changes tools or history: a run whose task has ended
+    /// (its events drained, `finish()` not yet called) is taken back now,
+    /// without waiting, so the change applies to the restored state rather
+    /// than being overwritten when the run is joined later. A run still
+    /// going cannot be: warn that the change will be replaced.
+    fn settle_ended_run(&mut self, change: &str) {
+        let Some(handle) = self.pending_completion.as_mut() else {
+            return;
+        };
+        match futures::FutureExt::now_or_never(&mut *handle) {
+            Some(joined) => {
+                if let Some(e) = self.take_back(joined) {
+                    tracing::error!("Agent loop task failed: {}", e);
+                }
+            }
+            None => tracing::warn!(
+                "Agent::{change} during a run: the run's tools and history replace this \
+                 change when it is joined; await finish() first"
+            ),
         }
     }
 

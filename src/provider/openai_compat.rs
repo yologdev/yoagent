@@ -233,8 +233,13 @@ impl StreamProvider for OpenAiCompatProvider {
             }
         }
 
-        // Finalize tool calls
-        for buf in &tool_call_buffers {
+        // Finalize tool calls. A slot no delta ever touched (an index the
+        // stream skipped — some gateways count from 1) is not a call: emitted,
+        // it would carry no id or name and break the next request.
+        for buf in tool_call_buffers
+            .iter()
+            .filter(|b| !(b.id.is_empty() && b.name.is_empty() && b.arguments.is_empty()))
+        {
             let args = finalize_tool_arguments(&buf.name, &buf.arguments);
             content.push(Content::ToolCall {
                 provider_metadata: None,

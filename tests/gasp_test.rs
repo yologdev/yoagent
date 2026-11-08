@@ -1000,3 +1000,45 @@ async fn a_final_error_is_recorded_however_the_stream_ends() {
         assert_eq!(outcome, "error", "end = {end}");
     }
 }
+
+/// A recording is one run: events after its AgentEnd (a sender reused for a
+/// second prompt) and a second AgentStart are not written into it, so the
+/// recorded run cannot change after `run.finished`.
+#[tokio::test]
+async fn events_after_the_run_finished_are_not_recorded() {
+    ensure_git_identity();
+    let dir = tempfile::tempdir().unwrap();
+    let recorder = GaspRecorder::init(
+        dir.path(),
+        "test-agent",
+        "w1",
+        GoalRef::New {
+            title: "one run".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let (tx, handle) = recorder.recording_sender("once", None);
+    // Two prompts through one sender: the second run's events arrive after
+    // the first run's AgentEnd.
+    let mut agent = Agent::from_provider(
+        MockProvider::texts(vec!["first", "second"]),
+        ModelConfig::mock(),
+    );
+    agent.prompt_with_sender("one", tx.clone()).await;
+    agent.prompt_with_sender("two", tx.clone()).await;
+    drop(tx);
+    handle.await.unwrap().unwrap();
+
+    let kinds = event_kinds(dir.path());
+    let count = |k: &str| kinds.iter().filter(|x| *x == k).count();
+    assert_eq!(count("run.started"), 1, "{kinds:?}");
+    assert_eq!(count("run.finished"), 1, "{kinds:?}");
+    let finished_at = kinds.iter().position(|k| k == "run.finished").unwrap();
+    assert!(
+        kinds[finished_at + 1..]
+            .iter()
+            .all(|k| !k.starts_with("model.")),
+        "{kinds:?}"
+    );
+}

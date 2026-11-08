@@ -975,3 +975,37 @@ async fn a_call_after_a_blocked_prompt_stays_refused() {
     };
     assert_eq!(*stop_reason, StopReason::Refusal);
 }
+
+/// A final event the body ends without its blank line (a proxy may strip it)
+/// is still processed: the complete response is kept, not read as cut short
+/// and retried (billed twice).
+#[tokio::test]
+async fn a_last_event_without_its_blank_line_is_kept() {
+    let server = MockServer::start().await;
+    let body = concat!(
+        "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Hi\"}],\"role\":\"model\"},\"index\":0}]}\r\n\r\n",
+        "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\" there\"}],\"role\":\"model\"},\"finishReason\":\"STOP\",\"index\":0}]}"
+    );
+    Mock::given(method("POST"))
+        .and(path(format!(
+            "/v1beta/models/{}:streamGenerateContent",
+            MODEL
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
+        .mount(&server)
+        .await;
+    let message = run_stream(stream_config(&server.uri(), vec![Message::user("go")])).await;
+    let Message::Assistant {
+        stop_reason,
+        content,
+        ..
+    } = &message
+    else {
+        panic!("expected assistant")
+    };
+    assert_eq!(*stop_reason, StopReason::Stop);
+    assert!(
+        matches!(&content[0], Content::Text { text } if text == "Hi there"),
+        "{content:?}"
+    );
+}

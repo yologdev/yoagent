@@ -1957,3 +1957,30 @@ async fn agent_max_retry_after_fails_a_long_wait_without_retrying() {
         "{error_message:?}"
     );
 }
+
+/// A change made after a run's events are drained but before `finish()` is
+/// kept: the ended run is taken back first, instead of its join later
+/// overwriting the change.
+#[tokio::test]
+async fn a_change_after_draining_a_run_is_not_overwritten_by_its_join() {
+    let mut agent = Agent::from_provider(MockProvider::texts(vec!["answer"]), ModelConfig::mock());
+    let mut rx = agent.prompt("question").await;
+    while rx.recv().await.is_some() {}
+    // The task has ended (its sender is gone); `finish()` was not called.
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    agent.append_message(AgentMessage::Llm(Message::user("added after")));
+    agent.finish().await;
+    let texts: Vec<String> = agent
+        .messages()
+        .iter()
+        .filter_map(|m| match m {
+            AgentMessage::Llm(Message::User { content, .. }) => match content.first() {
+                Some(Content::Text { text }) => Some(text.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, vec!["question", "added after"], "{texts:?}");
+    assert_eq!(agent.messages().len(), 3, "the run's answer is kept too");
+}

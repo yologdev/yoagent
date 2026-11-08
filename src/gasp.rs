@@ -497,6 +497,8 @@ struct RunTracking {
     finished: bool,
     turn: usize,
     outcome: String,
+    /// Events after the run ended were seen (and dropped) once: warned.
+    reuse_warned: bool,
 }
 
 /// Map the event stream onto the GASP sink. Runs in its own task; ends when
@@ -521,6 +523,7 @@ async fn consume(
         finished: false,
         turn: 0,
         outcome: "interrupted".to_string(),
+        reuse_warned: false,
     };
     let mut recording_error: Option<StateError> = None;
     // An error `MessageEnd` waits for the next event: a `ProviderRetry` right
@@ -675,6 +678,20 @@ async fn record_event(
     tracking: &mut RunTracking,
     event: &AgentEvent,
 ) -> Result<(), StateError> {
+    // One recording is one run. A sender reused for another prompt sends a
+    // second AgentStart and that run's events after this one's AgentEnd:
+    // writing them would reopen a finished run (or change its outcome after
+    // `run.finished`). Use a fresh `recording_sender` per run.
+    if tracking.finished || (tracking.started && matches!(event, AgentEvent::AgentStart)) {
+        if !tracking.reuse_warned {
+            tracking.reuse_warned = true;
+            tracing::warn!(
+                "GASP: events after this recording's run ended are not recorded; \
+                 use one recording_sender per run"
+            );
+        }
+        return Ok(());
+    }
     match event {
         AgentEvent::AgentStart => {
             sink.on_run_started(YoAgentRunStarted {
