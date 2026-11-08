@@ -3233,20 +3233,26 @@ async fn finish_reports_endings_without_a_final_answer() {
         let seen = seen.lock().unwrap().clone();
         seen
     }
-    // `on_before_turn` ends the run before its first request: the prompt is
-    // the last message, and nothing was cancelled.
+    // `on_before_turn` ends the run before its first request: a stop, with
+    // its marker, not a completed answer.
     let (a, requests) = scripted(vec![text("never")]);
     let a = a.on_before_turn(|_, _| false);
-    assert_eq!(finished(a).await, vec!["Completed stop=None"]);
+    assert_eq!(
+        finished(a).await,
+        vec![r#"Stopped "[Agent stopped: on_before_turn ended the run]" stop=None"#]
+    );
     assert!(requests.lock().unwrap().is_empty());
 
-    // ... or after a tool turn: a tool result is the last message.
+    // ... or after a tool turn.
     let (a, requests) = scripted(vec![
         call("echo", serde_json::json!({"text": "x"})),
         text("never"),
     ]);
     let a = a.on_before_turn(|_, turn| turn == 0);
-    assert_eq!(finished(a).await, vec!["Completed stop=Some(ToolUse)"]);
+    assert_eq!(
+        finished(a).await,
+        vec![r#"Stopped "[Agent stopped: on_before_turn ended the run]" stop=Some(ToolUse)"#]
+    );
     assert_eq!(requests.lock().unwrap().len(), 1);
 
     // The provider reports a cancel of its own: the turn is aborted, not

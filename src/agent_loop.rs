@@ -317,6 +317,7 @@ fn push_stop_marker(
     .ok();
     context.messages.push(marker.clone());
     new_messages.push(marker);
+    note_stop_marker(new_messages.len() - 1);
 }
 
 /// Append the steering or follow-up messages taken from their queues to the
@@ -391,6 +392,15 @@ struct LoopScope {
     /// The same decision and compaction spend, piece by piece with each
     /// piece's own price, for the run's extensions (`Budget`).
     spend: Option<Arc<crate::extension::RunSpend>>,
+    /// Where in the run's new messages the loop put its latest stop marker:
+    /// how a run's ending is told from a user message that only *reads*
+    /// like one (`[Agent stopped: …`).
+    stop_marker: Option<usize>,
+}
+
+/// Note that the loop put a stop marker at `index` of the run's new messages.
+fn note_stop_marker(index: usize) {
+    let _ = LOOP_SCOPE.try_with(|cell| cell.borrow_mut().stop_marker = Some(index));
 }
 
 tokio::task_local! {
@@ -437,6 +447,8 @@ pub(crate) fn record_compaction(f: impl FnOnce(&mut CompactionSpend)) -> bool {
 struct ScopeSpend {
     decision: DecisionStats,
     compaction: CompactionSpend,
+    /// The loop's latest stop marker, as an index into the new messages.
+    stop_marker: Option<usize>,
 }
 
 impl ScopeSpend {
@@ -494,6 +506,7 @@ async fn with_loop_scope<T>(
                 ScopeSpend {
                     decision: std::mem::take(&mut scope.decision),
                     compaction: std::mem::take(&mut scope.compaction),
+                    stop_marker: scope.stop_marker,
                 }
             });
             (out, recorded)
@@ -778,7 +791,8 @@ pub(crate) async fn agent_loop_with_stats(
     };
     recorded.fold_into(&mut stats);
 
-    exts.finish(&run_outcome(&new_messages, &cancel)).await;
+    exts.finish(&run_outcome(&new_messages, recorded.stop_marker, &cancel))
+        .await;
     // What extensions recorded, through their `finish` included.
     stats.extensions.merge(&exts.spend().close_extensions());
     tx.send(AgentEvent::AgentEnd {
@@ -917,6 +931,7 @@ fn fail_run(
 /// How a run ended, from its new messages.
 fn run_outcome(
     new_messages: &[AgentMessage],
+    stop_marker: Option<usize>,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> crate::extension::RunOutcome {
     use crate::extension::{failed_extension, RunEnd, RunOutcome};
@@ -924,10 +939,13 @@ fn run_outcome(
         AgentMessage::Llm(Message::Assistant { stop_reason, .. }) => Some(stop_reason.clone()),
         _ => None,
     });
+    // Only a marker the loop put there ends the run as stopped: a prompt or
+    // steering message that merely starts like one is the user's text.
+    let marked = stop_marker.is_some_and(|i| i + 1 == new_messages.len());
     let end = match new_messages.last() {
         // A stop marker ends the run: a limit, loop detection, a cancel
         // between turns, `on_before_turn`, an extension's `Stop`.
-        Some(AgentMessage::Llm(Message::User { content, .. })) => match content.first() {
+        Some(AgentMessage::Llm(Message::User { content, .. })) if marked => match content.first() {
             Some(Content::Text { text }) if text == CANCELLED_MARKER => RunEnd::Cancelled,
             Some(Content::Text { text }) if text.starts_with(AGENT_STOPPED_PREFIX) => {
                 RunEnd::Stopped {
@@ -1209,7 +1227,7 @@ pub(crate) async fn agent_loop_continue_with_stats(
         .ok();
     }
 
-    let mut stats = {
+    let (mut stats, stop_marker) = {
         let (mut stats, recorded) = with_loop_scope(
             Vec::new(),
             exts.spend(),
@@ -1225,10 +1243,11 @@ pub(crate) async fn agent_loop_continue_with_stats(
         )
         .await;
         recorded.fold_into(&mut stats);
-        stats
+        (stats, recorded.stop_marker)
     };
 
-    exts.finish(&run_outcome(&new_messages, &cancel)).await;
+    exts.finish(&run_outcome(&new_messages, stop_marker, &cancel))
+        .await;
     // What extensions recorded, through their `finish` included.
     stats.extensions.merge(&exts.spend().close_extensions());
     tx.send(AgentEvent::AgentEnd {
@@ -1348,6 +1367,15 @@ async fn run_loop(
             // before_turn callback — abort if it returns false
             if let Some(ref before_turn) = config.before_turn {
                 if !before_turn(&context.messages, turn_number) {
+                    // A marker like every other stop, so the run reads as
+                    // stopped (a sub-agent reports a partial result), not as
+                    // a completed answer.
+                    push_stop_marker(
+                        format!("{AGENT_STOPPED_PREFIX} on_before_turn ended the run]"),
+                        tx,
+                        context,
+                        new_messages,
+                    );
                     close_turn(tx, context);
                     return stats;
                 }
@@ -1720,21 +1748,24 @@ async fn run_loop(
                             // transcript is one every provider rejects and the
                             // agent is unusable for any later prompt. Synthesize
                             // one error result per outstanding call.
-                            for (id, name, _) in &tool_calls {
-                                let denied = Message::ToolResult {
-                                    tool_call_id: id.clone(),
-                                    tool_name: name.clone(),
-                                    content: vec![Content::Text {
-                                        text: "Not executed: the run was stopped for repeating \
-                                               this call with identical arguments."
-                                            .into(),
-                                    }],
-                                    is_error: true,
-                                    timestamp: now_ms(),
-                                };
-                                let am: AgentMessage = denied.into();
+                            // Through the same events as every other
+                            // unexecuted call, so a transcript rebuilt from
+                            // events has no unanswered call either.
+                            let mut denied_results = Vec::new();
+                            for (id, name, args) in &tool_calls {
+                                let (denied, _) = unexecuted_tool_call(
+                                    id,
+                                    name,
+                                    args,
+                                    "Not executed: the run was stopped for repeating this \
+                                     call with identical arguments."
+                                        .into(),
+                                    tx,
+                                );
+                                let am: AgentMessage = denied.clone().into();
                                 context.messages.push(am.clone());
                                 new_messages.push(am);
+                                denied_results.push(denied);
                             }
                             tx.send(AgentEvent::MessageStart {
                                 message: stop.clone(),
@@ -1746,6 +1777,7 @@ async fn run_loop(
                             .ok();
                             context.messages.push(stop.clone());
                             new_messages.push(stop);
+                            note_stop_marker(new_messages.len() - 1);
                             // Match every other abort path in this function:
                             // callers tracking usage must not miss this turn,
                             // and a UI pairing TurnStart/TurnEnd must not be
@@ -1759,7 +1791,7 @@ async fn run_loop(
                             }
                             tx.send(AgentEvent::TurnEnd {
                                 message: agent_msg,
-                                tool_results: Vec::new(),
+                                tool_results: denied_results,
                             })
                             .ok();
                             return stats;
@@ -3303,4 +3335,53 @@ fn first_sampling_warning(id: &str) -> bool {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(id.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::extension::RunEnd;
+    use tokio_util::sync::CancellationToken;
+
+    fn user(text: &str) -> AgentMessage {
+        AgentMessage::Llm(Message::user(text))
+    }
+
+    #[test]
+    fn a_user_message_that_reads_like_a_marker_does_not_stop_the_run() {
+        let messages = vec![user("[Agent stopped: just my text]")];
+        let outcome = run_outcome(&messages, None, &CancellationToken::new());
+        assert!(
+            matches!(outcome.end(), RunEnd::Completed),
+            "{:?}",
+            outcome.end()
+        );
+        // Cancelled before any answer: a cancel, not a stop.
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let outcome = run_outcome(&messages, None, &cancel);
+        assert!(
+            matches!(outcome.end(), RunEnd::Cancelled),
+            "{:?}",
+            outcome.end()
+        );
+    }
+
+    #[test]
+    fn the_marker_the_loop_put_last_stops_the_run() {
+        let messages = vec![user("go"), user("[Agent stopped: max turns]")];
+        let outcome = run_outcome(&messages, Some(1), &CancellationToken::new());
+        assert!(
+            matches!(outcome.end(), RunEnd::Stopped { .. }),
+            "{:?}",
+            outcome.end()
+        );
+        // A marker the loop put earlier, then something else: not this end.
+        let outcome = run_outcome(&messages, Some(0), &CancellationToken::new());
+        assert!(
+            matches!(outcome.end(), RunEnd::Completed),
+            "{:?}",
+            outcome.end()
+        );
+    }
 }
