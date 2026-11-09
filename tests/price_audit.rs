@@ -143,7 +143,6 @@ struct Preset {
 ///
 /// So the acknowledgement names the keys and the rates it was made against, and
 /// both directions are assertions.
-#[allow(dead_code)]
 struct FlatRateGap {
     /// Cost keys this gap covers. Any *other* unknown key is drift.
     keys: &'static [&'static str],
@@ -962,8 +961,8 @@ fn the_audit_logic_runs_offline_against_the_fixture() {
     );
     // Unlisted cache_write accepted by the allowance: gpt-5.5 base and tier,
     // Muse Spark 1.2 and 1.3, Muse Wonder 1.0, and the three DeepSeek
-    // entries; and Mistral Large 4's, Qwen3.8-Omni-Flash's, Gemini 3.6 Flash's
-    // Gemini 3.1 Pro's (base and tier), and Gemini 3.5 Flash-Lite's, 3.1
+    // entries; and Mistral Large 4's, Qwen3.8-Omni-Flash's, Gemini 3.6 Flash's,
+    // Gemini 3.1 Pro's (base and tier), Gemini 3.5 Flash-Lite's, 3.1
     // Flash-Lite's and 3 Flash Preview's, unset on both sides.
     assert_eq!(o.absent, 16);
     // Mistral Large 4's launch sale is over: compared at models.dev's own

@@ -146,7 +146,7 @@ fn models_dev_fixture_maps_into_our_schema() {
         .cost("openrouter", "perplexity/sonar-deep-research")
         .is_none());
     assert!(t.cost("poe", "cerebras/qwen3-32b-cs").is_none());
-    assert_eq!(t.len(), 18);
+    assert_eq!(t.len(), 21);
 
     // Against the built-in data: every overlapping model agrees as billed
     // (gpt-5.5's implicit cache_write equals its explicit input-rate one), so
@@ -206,7 +206,7 @@ fn a_changed_models_dev_envelope_is_an_error_not_an_empty_table() {
 fn the_models_dev_report_says_what_was_skipped_and_why() {
     let _g = exclusive();
     let report = PriceTable::from_models_dev_json_report(MODELS_DEV).unwrap();
-    assert_eq!(report.table.len(), 18);
+    assert_eq!(report.table.len(), 21);
     let reason = |p: &str, m: &str| {
         report
             .skipped
@@ -444,7 +444,7 @@ async fn an_expired_cache_is_refetched_and_rewritten() {
         "{:?}",
         got.origin
     );
-    assert_eq!(got.table.len(), 18);
+    assert_eq!(got.table.len(), 21);
     // The models.dev skip list reaches the caller.
     assert_eq!(got.skipped.len(), 5);
     // The cache now holds the mapped table and serves it, fresh.

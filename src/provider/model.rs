@@ -1030,8 +1030,8 @@ pub struct GoogleCompat {
     ///
     /// [`ThinkingLevel::Off`] sends no `thinkingConfig` whichever field is
     /// chosen. On Gemini 3 that does **not** disable thinking: the model runs
-    /// at its own default level (3.1 Pro `HIGH`, 3.5–3.8 Flash `MEDIUM`,
-    /// Flash-Lite `MINIMAL`). Use [`ThinkingLevel::Minimal`] to ask for the
+    /// at its own default level (3.1 Pro and 3 Flash `HIGH`, 3.5–3.8 Flash
+    /// `MEDIUM`, Flash-Lite `MINIMAL`). Use [`ThinkingLevel::Minimal`] to ask for the
     /// least thinking.
     ///
     /// [`ThinkingLevel::Off`]: crate::types::ThinkingLevel::Off
@@ -2046,7 +2046,10 @@ impl ModelConfig {
     /// Gemini 3.1 Flash-Lite (stable). 1,048,576-token context, 65,536 max
     /// output.
     ///
-    /// `thinkingLevel` `minimal`/`low`/`medium`/`high`.
+    /// `thinkingLevel` `minimal`/`low`/`medium`/`high`, as for every 3.x
+    /// Flash-Lite: Google's thinking table lists neither this model nor its
+    /// default level. `ThinkingLevel::Off` sends no `thinkingConfig`, so the
+    /// model runs at that default.
     ///
     /// Priced per Google's pricing page (read 2026-11-09): $0.25 / $1.50,
     /// cached $0.025 for text, image and video input. Audio input bills

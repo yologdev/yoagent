@@ -356,9 +356,10 @@ fn presets_lists_every_pinned_preset() {
 }
 
 /// Every Gemini 3+ text model on Google's models page (read 2026-11-09) resolves
-/// through `ModelConfig::preset` with the page's token limits — 1,048,576
-/// input, 65,536 output for all of them — so a host need not keep its own
-/// limits table.
+/// through `ModelConfig::preset` with the page's token limits — a
+/// 1,048,576-token context and 65,536 output (Gemini 4 Argon's default cap;
+/// its long decode is not used) for all of them — so a host need not keep its
+/// own limits table.
 #[test]
 fn every_current_gemini_3_text_model_has_a_preset_with_its_limits() {
     for id in [
