@@ -4,7 +4,9 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.27.7 (2026-11-09)
+
+One preset, no breaking changes. yoagent-rutis (0.13.0) and yoagent-workers (0.4.0) are unchanged.
 
 - **A preset for Gemini 2.5 Flash-Lite.** `ModelConfig::gemini_2_5_flash_lite()`, and `ModelConfig::preset("google", "gemini-2.5-flash-lite")`, give it Google's limits (1,048,576 context, 65,536 output) instead of the generic constructor's guess, and its price: $0.10 / $0.40, cached $0.01 for text, image and video. Audio input bills three times that, so it is under-counted (see its `note`). Google does not deprecate this model (it "remains available through the API until further notice"), unlike 2.5 Flash and 2.5 Pro, which still have no preset.
 

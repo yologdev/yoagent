@@ -5,7 +5,7 @@ description: Use when building, extending or upgrading an agent on the yoagent R
 
 # yoagent: which feature for which job
 
-Written for **yoagent 0.27.6** (and yoagent-rutis 0.13.0); the recipes
+Written for **yoagent 0.27.7** (and yoagent-rutis 0.13.0); the recipes
 below are compiled by `tests/skill_test.rs`, line for line. Check what you
 build against: `cargo tree -p yoagent` or `Cargo.lock`. If you are on an
 older version, read [What changed](#what-changed) first.
@@ -281,6 +281,8 @@ UI, model layer, agents) rather than add agent tools.
 
 Newest first; the full list is `CHANGELOG.md`.
 
+- **0.27.7** — preset `gemini_2_5_flash_lite()` (1,048,576 / 65,536; the one
+  2.5 text model Google does not deprecate).
 - **0.27.6** — presets `gemini_3_5_flash_lite()`, `gemini_3_1_flash_lite()`,
   `gemini_3_flash_preview()`: `ModelConfig::preset("google", id)` now covers
   every current Gemini 3+ text model with Google's limits (1,048,576 /
