@@ -167,6 +167,21 @@ fn pinned() -> Vec<(&'static str, ModelConfig, CostConfig)> {
             read_only(1.5, 7.5, 0.15),
         ),
         (
+            "gemini_3_5_flash_lite",
+            ModelConfig::gemini_3_5_flash_lite(),
+            read_only(0.3, 2.5, 0.03),
+        ),
+        (
+            "gemini_3_1_flash_lite",
+            ModelConfig::gemini_3_1_flash_lite(),
+            read_only(0.25, 1.5, 0.025),
+        ),
+        (
+            "gemini_3_flash_preview",
+            ModelConfig::gemini_3_flash_preview(),
+            read_only(0.5, 3.0, 0.05),
+        ),
+        (
             "gemini_3_1_pro_preview",
             ModelConfig::gemini_3_1_pro_preview(),
             read_only(2.0, 12.0, 0.2)
@@ -211,9 +226,13 @@ fn expected_max_tokens(name: &str) -> u32 {
         | "meta(muse-wonder-1.0)" => 131_072,
         "claude_sonnet_5_5" | "claude_sonnet_4_6" | "claude_haiku_5_5" | "gpt_6_1_sol"
         | "gpt_6_1_terra" | "grok_4_7" => 64_000,
-        "gemini_4_argon" | "gemini_3_8_flash" | "gemini_3_6_flash" | "gemini_3_1_pro_preview" => {
-            65_536
-        }
+        "gemini_4_argon"
+        | "gemini_3_8_flash"
+        | "gemini_3_6_flash"
+        | "gemini_3_5_flash_lite"
+        | "gemini_3_1_flash_lite"
+        | "gemini_3_flash_preview"
+        | "gemini_3_1_pro_preview" => 65_536,
         "mistral_large_4" => 32_768,
         "glm_5_3" | "glm_5_3_flash" | "glm_5_3_flashx" => 128_000,
         "qwen_3_8_max" | "qwen_3_8_flash" | "qwen_3_8_omni_flash" => 131_072,
@@ -231,6 +250,9 @@ fn expected_context_window(name: &str) -> u32 {
         "gemini_4_argon"
         | "gemini_3_8_flash"
         | "gemini_3_6_flash"
+        | "gemini_3_5_flash_lite"
+        | "gemini_3_1_flash_lite"
+        | "gemini_3_flash_preview"
         | "gemini_3_1_pro_preview"
         | "meta(muse-spark-1.1)"
         | "meta(muse-spark-1.2)"
@@ -276,6 +298,9 @@ fn always_thinking_presets_are_marked_reasoning() {
         ModelConfig::gemini_4_argon(),
         ModelConfig::gemini_3_8_flash(),
         ModelConfig::gemini_3_6_flash(),
+        ModelConfig::gemini_3_5_flash_lite(),
+        ModelConfig::gemini_3_1_flash_lite(),
+        ModelConfig::gemini_3_flash_preview(),
         ModelConfig::gemini_3_1_pro_preview(),
         ModelConfig::grok_4_7(),
         ModelConfig::glm_5_3(),
@@ -328,4 +353,30 @@ fn presets_lists_every_pinned_preset() {
     pinned.sort();
     listed.sort();
     assert_eq!(listed, pinned);
+}
+
+/// Every Gemini 3+ text model on Google's models page (read 2026-11-09) resolves
+/// through `ModelConfig::preset` with the page's token limits — 1,048,576
+/// input, 65,536 output for all of them — so a host need not keep its own
+/// limits table.
+#[test]
+fn every_current_gemini_3_text_model_has_a_preset_with_its_limits() {
+    for id in [
+        "gemini-4-argon",
+        "gemini-3.8-flash",
+        "gemini-3.6-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3.1-flash-lite",
+        "gemini-3.1-pro-preview",
+        "gemini-3-flash-preview",
+    ] {
+        let config = ModelConfig::preset("google", id).unwrap_or_else(|| panic!("{id}: no preset"));
+        assert_eq!(config.id, id);
+        assert_eq!(
+            (config.context_window, config.max_tokens),
+            (1_048_576, 65_536),
+            "{id}: limits differ from Google's models page"
+        );
+        assert!(config.reasoning, "{id}: thinks by default");
+    }
 }

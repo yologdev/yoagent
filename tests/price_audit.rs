@@ -143,9 +143,6 @@ struct Preset {
 ///
 /// So the acknowledgement names the keys and the rates it was made against, and
 /// both directions are assertions.
-///
-/// No entry records one today: `gpt-5.5`, the only one that ever did, is now
-/// tiered and compared tier by tier. Kept for the next genuine disagreement.
 #[allow(dead_code)]
 struct FlatRateGap {
     /// Cost keys this gap covers. Any *other* unknown key is drift.
@@ -166,6 +163,13 @@ const DEEPSEEK_REASONING: &str =
 const GEMINI_AUDIO: &str =
     "models.dev's `input_audio` rate equals the text `input` rate (both at the \
      introductory price): audio input bills like text, so the flat rate holds.";
+
+/// Gemini lists a higher audio-input rate than its text-input rate.
+const GEMINI_AUDIO_HIGHER: &str =
+    "models.dev's `input_audio` rate is twice the text `input` rate, as on \
+     Google's pricing page: a flat rate cannot carry both, so the crate \
+     carries the text rate and under-counts audio input (see the entry's \
+     `note`).";
 
 /// Recorded gaps, as `(provider, model, gap)`.
 const FLAT_RATE_GAPS: &[(&str, &str, FlatRateGap)] = &[
@@ -194,6 +198,24 @@ const FLAT_RATE_GAPS: &[(&str, &str, FlatRateGap)] = &[
             keys: &["input_audio"],
             rates: &[("/input_audio", 0.75), ("/input", 0.75)],
             why: GEMINI_AUDIO,
+        },
+    ),
+    (
+        "google",
+        "gemini-3.1-flash-lite",
+        FlatRateGap {
+            keys: &["input_audio"],
+            rates: &[("/input_audio", 0.5), ("/input", 0.25)],
+            why: GEMINI_AUDIO_HIGHER,
+        },
+    ),
+    (
+        "google",
+        "gemini-3-flash-preview",
+        FlatRateGap {
+            keys: &["input_audio"],
+            rates: &[("/input_audio", 1.0), ("/input", 0.5)],
+            why: GEMINI_AUDIO_HIGHER,
         },
     ),
     (
@@ -343,6 +365,9 @@ fn every_priced_preset_is_an_audited_entry() {
         ModelConfig::claude_sonnet_4_6(),
         ModelConfig::gemini_3_6_flash(),
         ModelConfig::gemini_3_1_pro_preview(),
+        ModelConfig::gemini_3_5_flash_lite(),
+        ModelConfig::gemini_3_1_flash_lite(),
+        ModelConfig::gemini_3_flash_preview(),
     ] {
         let entry = table
             .entry(&config.provider, &config.id)
@@ -912,6 +937,9 @@ fn the_audit_logic_runs_offline_against_the_fixture() {
         "claude-sonnet-4-6",
         "gemini-3.6-flash",
         "gemini-3.1-pro-preview",
+        "gemini-3.5-flash-lite",
+        "gemini-3.1-flash-lite",
+        "gemini-3-flash-preview",
     ] {
         assert!(
             names.contains(&covered),
@@ -935,8 +963,9 @@ fn the_audit_logic_runs_offline_against_the_fixture() {
     // Unlisted cache_write accepted by the allowance: gpt-5.5 base and tier,
     // Muse Spark 1.2 and 1.3, Muse Wonder 1.0, and the three DeepSeek
     // entries; and Mistral Large 4's, Qwen3.8-Omni-Flash's, Gemini 3.6 Flash's
-    // and Gemini 3.1 Pro's (base and tier), unset on both sides.
-    assert_eq!(o.absent, 13);
+    // Gemini 3.1 Pro's (base and tier), and Gemini 3.5 Flash-Lite's, 3.1
+    // Flash-Lite's and 3 Flash Preview's, unset on both sides.
+    assert_eq!(o.absent, 16);
     // Mistral Large 4's launch sale is over: compared at models.dev's own
     // rate, with no promotion note.
     assert!(

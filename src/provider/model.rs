@@ -2024,6 +2024,66 @@ impl ModelConfig {
         }
     }
 
+    /// Gemini 3.5 Flash-Lite, Google's cost-efficient model for high-volume
+    /// agentic tasks (stable). 1,048,576-token context, 65,536 max output.
+    ///
+    /// `thinkingLevel` `minimal` (default)/`low`/`medium`/`high`;
+    /// `ThinkingLevel::Off` sends no `thinkingConfig`, so the model runs at
+    /// `minimal`.
+    ///
+    /// Priced per Google's pricing page (read 2026-11-09): $0.30 / $2.50,
+    /// cached $0.03, one input rate for text, image, video and audio.
+    /// Context-cache storage is not modelled. See [`CostConfig`].
+    pub fn gemini_3_5_flash_lite() -> Self {
+        Self {
+            reasoning: true,
+            context_window: 1_048_576,
+            max_tokens: 65_536,
+            ..Self::google("gemini-3.5-flash-lite", "Gemini 3.5 Flash-Lite")
+        }
+    }
+
+    /// Gemini 3.1 Flash-Lite (stable). 1,048,576-token context, 65,536 max
+    /// output.
+    ///
+    /// `thinkingLevel` `minimal`/`low`/`medium`/`high`.
+    ///
+    /// Priced per Google's pricing page (read 2026-11-09): $0.25 / $1.50,
+    /// cached $0.025 for text, image and video input. Audio input bills
+    /// twice that ($0.50, cached $0.05), which a flat [`CostConfig`] cannot
+    /// express, so audio input is under-counted. Context-cache storage is not
+    /// modelled.
+    pub fn gemini_3_1_flash_lite() -> Self {
+        Self {
+            reasoning: true,
+            context_window: 1_048_576,
+            max_tokens: 65_536,
+            ..Self::google("gemini-3.1-flash-lite", "Gemini 3.1 Flash-Lite")
+        }
+    }
+
+    /// Gemini 3 Flash (preview, `gemini-3-flash-preview`), Google's legacy
+    /// Flash model. 1,048,576-token context, 65,536 max output. A preview
+    /// model: Google may change or retire it at short notice.
+    ///
+    /// `thinkingLevel` `minimal`/`low`/`medium`/`high` (default);
+    /// `ThinkingLevel::Off` sends no `thinkingConfig`, so the model thinks at
+    /// `high`.
+    ///
+    /// Priced per Google's pricing page (read 2026-11-09): $0.50 / $3,
+    /// cached $0.05 for text, image and video input. Audio input bills twice
+    /// that ($1, cached $0.10), which a flat [`CostConfig`] cannot express,
+    /// so audio input is under-counted. Context-cache storage is not
+    /// modelled.
+    pub fn gemini_3_flash_preview() -> Self {
+        Self {
+            reasoning: true,
+            context_window: 1_048_576,
+            max_tokens: 65_536,
+            ..Self::google("gemini-3-flash-preview", "Gemini 3 Flash Preview")
+        }
+    }
+
     /// Gemini 3.1 Pro (preview, `gemini-3.1-pro-preview`). 1,048,576-token
     /// context, 65,536 max output. A preview model: Google may change or
     /// retire it at short notice.
@@ -2236,6 +2296,21 @@ impl ModelConfig {
         ("google", "gemini-4-argon", Self::gemini_4_argon),
         ("google", "gemini-3.8-flash", Self::gemini_3_8_flash),
         ("google", "gemini-3.6-flash", Self::gemini_3_6_flash),
+        (
+            "google",
+            "gemini-3.5-flash-lite",
+            Self::gemini_3_5_flash_lite,
+        ),
+        (
+            "google",
+            "gemini-3.1-flash-lite",
+            Self::gemini_3_1_flash_lite,
+        ),
+        (
+            "google",
+            "gemini-3-flash-preview",
+            Self::gemini_3_flash_preview,
+        ),
         (
             "google",
             "gemini-3.1-pro-preview",
@@ -3300,7 +3375,7 @@ mod tests {
                 config.id
             );
         }
-        assert_eq!(keys.len(), 28);
+        assert_eq!(keys.len(), 31);
     }
 
     #[test]
