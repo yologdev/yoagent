@@ -365,6 +365,14 @@
         "source": "https://ai.google.dev/gemini-api/docs/pricing",
         "verified": "2026-11-09"
       },
+      "gemini-2.5-flash-lite": {
+        "input": 0.1,
+        "output": 0.4,
+        "cache_read": 0.01,
+        "note": "Text, image and video rates. Audio input bills $0.30 (cached $0.03), which a flat rate cannot express: audio input is under-counted. Context-cache storage ($1.00 per 1M tokens per hour) is not modelled.",
+        "source": "https://ai.google.dev/gemini-api/docs/pricing",
+        "verified": "2026-11-09"
+      },
       "gemini-3.1-pro-preview": {
         "input": 2.0,
         "output": 12.0,

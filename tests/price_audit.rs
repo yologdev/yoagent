@@ -165,7 +165,7 @@ const GEMINI_AUDIO: &str =
 
 /// Gemini lists a higher audio-input rate than its text-input rate.
 const GEMINI_AUDIO_HIGHER: &str =
-    "models.dev's `input_audio` rate is twice the text `input` rate, as on \
+    "models.dev's `input_audio` rate is above the text `input` rate, as on \
      Google's pricing page: a flat rate cannot carry both, so the crate \
      carries the text rate and under-counts audio input (see the entry's \
      `note`).";
@@ -205,6 +205,15 @@ const FLAT_RATE_GAPS: &[(&str, &str, FlatRateGap)] = &[
         FlatRateGap {
             keys: &["input_audio"],
             rates: &[("/input_audio", 0.5), ("/input", 0.25)],
+            why: GEMINI_AUDIO_HIGHER,
+        },
+    ),
+    (
+        "google",
+        "gemini-2.5-flash-lite",
+        FlatRateGap {
+            keys: &["input_audio"],
+            rates: &[("/input_audio", 0.3), ("/input", 0.1)],
             why: GEMINI_AUDIO_HIGHER,
         },
     ),
@@ -367,6 +376,7 @@ fn every_priced_preset_is_an_audited_entry() {
         ModelConfig::gemini_3_5_flash_lite(),
         ModelConfig::gemini_3_1_flash_lite(),
         ModelConfig::gemini_3_flash_preview(),
+        ModelConfig::gemini_2_5_flash_lite(),
     ] {
         let entry = table
             .entry(&config.provider, &config.id)
@@ -939,6 +949,7 @@ fn the_audit_logic_runs_offline_against_the_fixture() {
         "gemini-3.5-flash-lite",
         "gemini-3.1-flash-lite",
         "gemini-3-flash-preview",
+        "gemini-2.5-flash-lite",
     ] {
         assert!(
             names.contains(&covered),
@@ -963,8 +974,9 @@ fn the_audit_logic_runs_offline_against_the_fixture() {
     // Muse Spark 1.2 and 1.3, Muse Wonder 1.0, and the three DeepSeek
     // entries; and Mistral Large 4's, Qwen3.8-Omni-Flash's, Gemini 3.6 Flash's,
     // Gemini 3.1 Pro's (base and tier), Gemini 3.5 Flash-Lite's, 3.1
-    // Flash-Lite's and 3 Flash Preview's, unset on both sides.
-    assert_eq!(o.absent, 16);
+    // Flash-Lite's, 3 Flash Preview's and 2.5 Flash-Lite's, unset on both
+    // sides.
+    assert_eq!(o.absent, 17);
     // Mistral Large 4's launch sale is over: compared at models.dev's own
     // rate, with no promotion note.
     assert!(
