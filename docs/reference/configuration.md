@@ -216,7 +216,7 @@ the process-wide price table — **empty until the process opts in** with
 `prices::enable_live(..)`; see [Model Pricing](../concepts/pricing.md#enabling-pricing).
 `None` means **pricing unknown**, not free. Once opted in, the named presets (`claude_*`,
 `gpt_5_5`, `gpt_6_astra` / `gpt_6_sol` / `gpt_6_1_sol` / `gpt_6_1_terra` / `gpt_6_luna`,
-`gemini_4_argon`, `gemini_3_8_flash`, `gemini_3_6_flash`, `gemini_3_1_pro_preview`, `grok_4_7`, `mistral_large_4`, `glm_5_3` /
+`gemini_4_argon`, `gemini_3_8_flash`, `gemini_3_6_flash`, `gemini_3_5_flash_lite`, `gemini_3_1_flash_lite`, `gemini_3_flash_preview`, `gemini_3_1_pro_preview`, `grok_4_7`, `mistral_large_4`, `glm_5_3` /
 `glm_5_3_flash` / `glm_5_3_flashx`, `qwen_3_8_max` / `qwen_3_8_flash` /
 `qwen_3_8_omni_flash`) are all priced; the
 generic first-party constructors (`anthropic`, `openai`, `openai_responses`,

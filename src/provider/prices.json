@@ -331,7 +331,7 @@
         "cache_read": 0.15,
         "note": "Regular price. Google bills an introductory $0.75 / $3.75 / $0.075 through 2026-12-31: until then costs read twice the bill (an upper bound, so a Budget stops early, never late). Context-cache storage ($1.00 per 1M tokens per hour) is not modelled.",
         "source": "https://ai.google.dev/gemini-api/docs/pricing",
-        "verified": "2026-10-18"
+        "verified": "2026-11-09"
       },
       "gemini-3.6-flash": {
         "input": 1.5,
@@ -339,7 +339,31 @@
         "cache_read": 0.15,
         "note": "Regular price, from 2027-01-01. Google bills $0.75 / $3.75 / $0.075 through 2026-12-31: until then costs read twice the bill (an upper bound, so a Budget stops early, never late). Context-cache storage ($1.00 per 1M tokens per hour) is not modelled.",
         "source": "https://ai.google.dev/gemini-api/docs/pricing",
-        "verified": "2026-11-03"
+        "verified": "2026-11-09"
+      },
+      "gemini-3.5-flash-lite": {
+        "input": 0.3,
+        "output": 2.5,
+        "cache_read": 0.03,
+        "note": "One input rate for text, image, video and audio. Context-cache storage ($1.00 per 1M tokens per hour) is not modelled.",
+        "source": "https://ai.google.dev/gemini-api/docs/pricing",
+        "verified": "2026-11-09"
+      },
+      "gemini-3.1-flash-lite": {
+        "input": 0.25,
+        "output": 1.5,
+        "cache_read": 0.025,
+        "note": "Text, image and video rates. Audio input bills $0.50 (cached $0.05), which a flat rate cannot express: audio input is under-counted. Context-cache storage ($1.00 per 1M tokens per hour) is not modelled.",
+        "source": "https://ai.google.dev/gemini-api/docs/pricing",
+        "verified": "2026-11-09"
+      },
+      "gemini-3-flash-preview": {
+        "input": 0.5,
+        "output": 3.0,
+        "cache_read": 0.05,
+        "note": "Text, image and video rates. Audio input bills $1.00 (cached $0.10), which a flat rate cannot express: audio input is under-counted. Context-cache storage ($1.00 per 1M tokens per hour) is not modelled.",
+        "source": "https://ai.google.dev/gemini-api/docs/pricing",
+        "verified": "2026-11-09"
       },
       "gemini-3.1-pro-preview": {
         "input": 2.0,
@@ -355,7 +379,7 @@
         ],
         "note": "Prompts over 200,000 tokens bill at the second rates (Google: '<= 200k tokens' / '> 200k tokens'). Context-cache storage ($4.50 per 1M tokens per hour) is not modelled.",
         "source": "https://ai.google.dev/gemini-api/docs/pricing",
-        "verified": "2026-11-03"
+        "verified": "2026-11-09"
       },
       "gemini-4-argon": {
         "input": 4.0,
@@ -363,7 +387,7 @@
         "cache_read": 0.2,
         "note": "Regular price. Google bills an introductory $2 / $10 / $0.10 through 2026-11-30: until then costs read twice the bill (an upper bound, so a Budget stops early, never late). No context tier.",
         "source": "https://ai.google.dev/gemini-api/docs/pricing",
-        "verified": "2026-10-18"
+        "verified": "2026-11-09"
       }
     },
     "mistral": {

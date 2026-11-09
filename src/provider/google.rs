@@ -652,7 +652,8 @@ fn gemini_thinking_level(level: ThinkingLevel, rungs: GeminiRungs) -> &'static s
 ///
 /// `ThinkingLevel::Off` omits `thinkingConfig` on every model. On Gemini 3
 /// that does **not** disable thinking — the model runs at its own default
-/// level (3.1 Pro `HIGH`, 3.5–3.8 Flash `MEDIUM`, Flash-Lite `MINIMAL`);
+/// level (3.1 Pro and 3 Flash `HIGH`, 3.5–3.8 Flash `MEDIUM`, Flash-Lite
+/// `MINIMAL`);
 /// `ThinkingLevel::Minimal` is the way to ask for the least thinking.
 ///
 /// [`GoogleCompat::thinking_level`]: super::GoogleCompat::thinking_level

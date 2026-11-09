@@ -448,6 +448,53 @@
       "cache_read": 0.4
      }
     }
+   },
+   "gemini-3.5-flash-lite": {
+    "id": "gemini-3.5-flash-lite",
+    "name": "Gemini 3.5 Flash Lite",
+    "reasoning": true,
+    "tool_call": true,
+    "limit": {
+     "context": 1048576,
+     "output": 65536
+    },
+    "cost": {
+     "input": 0.3,
+     "output": 2.5,
+     "cache_read": 0.03
+    }
+   },
+   "gemini-3.1-flash-lite": {
+    "id": "gemini-3.1-flash-lite",
+    "name": "Gemini 3.1 Flash Lite",
+    "reasoning": true,
+    "tool_call": true,
+    "limit": {
+     "context": 1048576,
+     "output": 65536
+    },
+    "cost": {
+     "input": 0.25,
+     "output": 1.5,
+     "cache_read": 0.025,
+     "input_audio": 0.5
+    }
+   },
+   "gemini-3-flash-preview": {
+    "id": "gemini-3-flash-preview",
+    "name": "Gemini 3 Flash Preview",
+    "reasoning": true,
+    "tool_call": true,
+    "limit": {
+     "context": 1048576,
+     "output": 65536
+    },
+    "cost": {
+     "input": 0.5,
+     "output": 3,
+     "cache_read": 0.05,
+     "input_audio": 1
+    }
    }
   }
  },

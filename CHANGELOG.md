@@ -4,6 +4,10 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+- **Presets for every current Gemini text model.** `ModelConfig::gemini_3_5_flash_lite()`, `gemini_3_1_flash_lite()` and `gemini_3_flash_preview()` join the existing Gemini presets, so `ModelConfig::preset("google", id)` now returns every current Gemini 3 and later text model on Google's models page (read 2026-11-09) with its limits: 1,048,576 context and 65,536 output for all seven (Gemini 4 Argon's default cap; its long decode is not used). The Gemini 2.5 models (2.5 Flash and Pro, which Google routes to newer models from 2026-12-01, and 2.5 Flash-Lite) still have no preset. Prices from Google's pricing page: 3.5 Flash-Lite $0.30 / $2.50 (cached $0.03), 3.1 Flash-Lite $0.25 / $1.50 ($0.025), 3 Flash Preview $0.50 / $3 ($0.05). The last two bill audio input at twice the text rate, which a flat rate cannot carry, so their audio input is under-counted (see each `note`). The existing four presets were checked against the same pages and need no change (their `verified` dates move to 2026-11-09).
+
 ## 0.27.5 (2026-11-08)
 
 Fixes, no breaking changes: built-in tools (atomic writes, long `bash` output keeps its end, paged reads of large files), `LlmCompaction`'s transcript, MCP (paged tool lists, cancellation notices, session and exit reporting), provider streams (Anthropic cache bridge and usage, Gemini blocks and final events, OpenAI-compatible tool slots), the agent loop's stop markers and events, `Agent` changes made during a run, GASP recording one run, and `FileBackend` eviction. yoagent-rutis (0.13.0) and yoagent-workers (0.4.0) are unchanged.
