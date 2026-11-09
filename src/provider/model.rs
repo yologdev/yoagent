@@ -2087,6 +2087,30 @@ impl ModelConfig {
         }
     }
 
+    /// Gemini 2.5 Flash-Lite. 1,048,576-token context, 65,536 max output.
+    /// Google does not deprecate it ("remains available through the API until
+    /// further notice", deprecations page, read 2026-11-09), but limits 2.5
+    /// access to users who have used it before; new work should prefer
+    /// [`gemini_3_5_flash_lite`](Self::gemini_3_5_flash_lite).
+    ///
+    /// A Gemini 2.x model: yoagent sends `thinkingBudget` (generateContent
+    /// rejects `thinkingLevel` before Gemini 3), and thinking is off unless a
+    /// [`ThinkingLevel`] other than `Off` asks for it.
+    ///
+    /// Priced per Google's pricing page (read 2026-11-09): $0.10 / $0.40,
+    /// cached $0.01 for text, image and video input. Audio input bills three
+    /// times that ($0.30, cached $0.03), which a flat [`CostConfig`] cannot
+    /// express, so audio input is under-counted. Context-cache storage is not
+    /// modelled.
+    pub fn gemini_2_5_flash_lite() -> Self {
+        Self {
+            reasoning: true,
+            context_window: 1_048_576,
+            max_tokens: 65_536,
+            ..Self::google("gemini-2.5-flash-lite", "Gemini 2.5 Flash-Lite")
+        }
+    }
+
     /// Gemini 3.1 Pro (preview, `gemini-3.1-pro-preview`). 1,048,576-token
     /// context, 65,536 max output. A preview model: Google may change or
     /// retire it at short notice.
@@ -2313,6 +2337,11 @@ impl ModelConfig {
             "google",
             "gemini-3-flash-preview",
             Self::gemini_3_flash_preview,
+        ),
+        (
+            "google",
+            "gemini-2.5-flash-lite",
+            Self::gemini_2_5_flash_lite,
         ),
         (
             "google",
@@ -3378,7 +3407,7 @@ mod tests {
                 config.id
             );
         }
-        assert_eq!(keys.len(), 31);
+        assert_eq!(keys.len(), 32);
     }
 
     #[test]

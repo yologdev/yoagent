@@ -495,6 +495,22 @@
      "cache_read": 0.05,
      "input_audio": 1
     }
+   },
+   "gemini-2.5-flash-lite": {
+    "id": "gemini-2.5-flash-lite",
+    "name": "Gemini 2.5 Flash-Lite",
+    "reasoning": true,
+    "tool_call": true,
+    "limit": {
+     "context": 1048576,
+     "output": 65536
+    },
+    "cost": {
+     "input": 0.1,
+     "output": 0.4,
+     "cache_read": 0.01,
+     "input_audio": 0.3
+    }
    }
   }
  },

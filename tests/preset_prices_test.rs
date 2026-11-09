@@ -182,6 +182,11 @@ fn pinned() -> Vec<(&'static str, ModelConfig, CostConfig)> {
             read_only(0.5, 3.0, 0.05),
         ),
         (
+            "gemini_2_5_flash_lite",
+            ModelConfig::gemini_2_5_flash_lite(),
+            read_only(0.1, 0.4, 0.01),
+        ),
+        (
             "gemini_3_1_pro_preview",
             ModelConfig::gemini_3_1_pro_preview(),
             read_only(2.0, 12.0, 0.2)
@@ -232,6 +237,7 @@ fn expected_max_tokens(name: &str) -> u32 {
         | "gemini_3_5_flash_lite"
         | "gemini_3_1_flash_lite"
         | "gemini_3_flash_preview"
+        | "gemini_2_5_flash_lite"
         | "gemini_3_1_pro_preview" => 65_536,
         "mistral_large_4" => 32_768,
         "glm_5_3" | "glm_5_3_flash" | "glm_5_3_flashx" => 128_000,
@@ -253,6 +259,7 @@ fn expected_context_window(name: &str) -> u32 {
         | "gemini_3_5_flash_lite"
         | "gemini_3_1_flash_lite"
         | "gemini_3_flash_preview"
+        | "gemini_2_5_flash_lite"
         | "gemini_3_1_pro_preview"
         | "meta(muse-spark-1.1)"
         | "meta(muse-spark-1.2)"
@@ -355,13 +362,14 @@ fn presets_lists_every_pinned_preset() {
     assert_eq!(listed, pinned);
 }
 
-/// Every Gemini 3+ text model on Google's models page (read 2026-11-09) resolves
+/// Every Gemini 3+ text model on Google's models page (read 2026-11-09), and
+/// Gemini 2.5 Flash-Lite (the one 2.5 text model Google does not deprecate), resolves
 /// through `ModelConfig::preset` with the page's token limits — a
 /// 1,048,576-token context and 65,536 output (Gemini 4 Argon's default cap;
 /// its long decode is not used) for all of them — so a host need not keep its
 /// own limits table.
 #[test]
-fn every_current_gemini_3_text_model_has_a_preset_with_its_limits() {
+fn every_current_gemini_text_model_has_a_preset_with_its_limits() {
     for id in [
         "gemini-4-argon",
         "gemini-3.8-flash",
@@ -370,6 +378,7 @@ fn every_current_gemini_3_text_model_has_a_preset_with_its_limits() {
         "gemini-3.1-flash-lite",
         "gemini-3.1-pro-preview",
         "gemini-3-flash-preview",
+        "gemini-2.5-flash-lite",
     ] {
         let config = ModelConfig::preset("google", id).unwrap_or_else(|| panic!("{id}: no preset"));
         assert_eq!(config.id, id);
@@ -378,6 +387,6 @@ fn every_current_gemini_3_text_model_has_a_preset_with_its_limits() {
             (1_048_576, 65_536),
             "{id}: limits differ from Google's models page"
         );
-        assert!(config.reasoning, "{id}: thinks by default");
+        assert!(config.reasoning, "{id}: takes a thinking setting");
     }
 }
