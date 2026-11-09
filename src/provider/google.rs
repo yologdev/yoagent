@@ -1647,6 +1647,7 @@ mod tests {
             "gemini-3-pro-image",
             "gemini-3.8-flash-tts",
             "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
         ] {
             let mut config = StreamConfig::new(model, "k");
             config.messages = vec![Message::user("hi")];
