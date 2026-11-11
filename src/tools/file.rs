@@ -311,30 +311,71 @@ pub(crate) fn require_regular_file(
 /// call must not act.
 ///
 /// [`PathSandbox::check`]: crate::tools::PathSandbox::check
+#[derive(Hash, Eq, PartialEq)]
+enum FileLockKey {
+    ResolvedPath(PathBuf),
+    #[cfg(unix)]
+    Inode {
+        device: u64,
+        inode: u64,
+    },
+}
+
+/// On Unix, hard links have distinct resolved paths but address one file.
+/// Hold both the resolved-path lock and the inode lock: atomic replacement
+/// changes the inode while an operation still holds its original path lock.
+fn file_inode_key(path: &Path) -> Option<FileLockKey> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let Ok(metadata) = std::fs::metadata(path) {
+            if metadata.is_file() {
+                return Some(FileLockKey::Inode {
+                    device: metadata.dev(),
+                    inode: metadata.ino(),
+                });
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    None
+}
+
 pub(crate) async fn hold_file(
     key: &Path,
     cancel: &tokio_util::sync::CancellationToken,
-) -> Result<tokio::sync::OwnedMutexGuard<()>, ToolError> {
+) -> Result<Vec<tokio::sync::OwnedMutexGuard<()>>, ToolError> {
     use std::sync::{OnceLock, Weak};
-    type Locks = HashMap<PathBuf, Weak<tokio::sync::Mutex<()>>>;
+    type Locks = HashMap<FileLockKey, Weak<tokio::sync::Mutex<()>>>;
     static LOCKS: OnceLock<Mutex<Locks>> = OnceLock::new();
-    let lock = {
+    // Always acquire the path lock first, then the optional inode lock.
+    // This fixed order prevents cycles between callers using hard-link aliases.
+    let keys =
+        std::iter::once(FileLockKey::ResolvedPath(key.to_path_buf())).chain(file_inode_key(key));
+    let locks = {
         let mut locks = LOCKS
             .get_or_init(Default::default)
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         // Entries nobody holds or waits for any more are dropped here.
         locks.retain(|_, held| held.strong_count() > 0);
-        match locks.get(key).and_then(Weak::upgrade) {
-            Some(lock) => lock,
-            None => {
-                let lock = Arc::new(tokio::sync::Mutex::new(()));
-                locks.insert(key.to_path_buf(), Arc::downgrade(&lock));
-                lock
-            }
-        }
+        keys.map(
+            |lock_key| match locks.get(&lock_key).and_then(Weak::upgrade) {
+                Some(lock) => lock,
+                None => {
+                    let lock = Arc::new(tokio::sync::Mutex::new(()));
+                    locks.insert(lock_key, Arc::downgrade(&lock));
+                    lock
+                }
+            },
+        )
+        .collect::<Vec<_>>()
     };
-    let held = lock.lock_owned().await;
+    let mut held = Vec::with_capacity(locks.len());
+    for lock in locks {
+        held.push(lock.lock_owned().await);
+    }
     if cancel.is_cancelled() {
         return Err(ToolError::Cancelled);
     }
@@ -1248,5 +1289,58 @@ mod tests {
         drop(held);
         assert!(matches!(write.await.unwrap(), Err(ToolError::Cancelled)));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "before");
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hard_link_aliases_share_the_same_file_mutex() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let first_path = dir.path().join("a.txt");
+        let alias_path = dir.path().join("b.txt");
+        let unrelated_path = dir.path().join("c.txt");
+        std::fs::write(&first_path, "original").unwrap();
+        std::fs::hard_link(&first_path, &alias_path).unwrap();
+        std::fs::write(&unrelated_path, "unrelated").unwrap();
+        let sandbox = crate::tools::PathSandbox::default();
+        let key_a = sandbox.check(first_path.to_str().unwrap()).unwrap();
+        let key_b = sandbox.check(alias_path.to_str().unwrap()).unwrap();
+        let key_c = sandbox.check(unrelated_path.to_str().unwrap()).unwrap();
+        assert_ne!(key_a, key_b, "hard links have distinct canonical paths");
+        let cancel = CancellationToken::new();
+        let first_guard = hold_file(&key_a, &cancel).await.unwrap();
+        let alias_wait = hold_file(&key_b, &cancel);
+        tokio::pin!(alias_wait);
+        assert!(
+            futures::poll!(alias_wait.as_mut()).is_pending(),
+            "a hard-link alias must wait on the same file mutex"
+        );
+        let unrelated_guard = hold_file(&key_c, &cancel).await.unwrap();
+        drop(unrelated_guard);
+        drop(first_guard);
+        let alias_guard = alias_wait.await.unwrap();
+        drop(alias_guard);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn replacing_a_file_does_not_bypass_its_held_path_mutex() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("a.txt");
+        let replacement = dir.path().join("replacement.txt");
+        std::fs::write(&path, "old").unwrap();
+        let key = crate::tools::PathSandbox::default()
+            .check(path.to_str().unwrap())
+            .unwrap();
+        let cancel = CancellationToken::new();
+        let first_guard = hold_file(&key, &cancel).await.unwrap();
+        std::fs::write(&replacement, "new").unwrap();
+        std::fs::rename(&replacement, &path).unwrap();
+        let second = hold_file(&key, &cancel);
+        tokio::pin!(second);
+        assert!(
+            futures::poll!(second.as_mut()).is_pending(),
+            "a replaced inode must not bypass the original path lock"
+        );
+        drop(first_guard);
+        drop(second.await.unwrap());
     }
 }

@@ -4,6 +4,10 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+- **File-tool coordination across hard links.** Unix aliases to one regular file now share an inode lock while each path also retains its lock across atomic replacement. A distinct file remains concurrent; absent files keep path-based coordination. This is process-local and does not lock other processes.
+
 ## 0.27.7 (2026-11-09)
 
 One preset, no breaking changes. yoagent-rutis (0.13.0) and yoagent-workers (0.4.0) are unchanged.
