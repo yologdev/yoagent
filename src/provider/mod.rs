@@ -325,7 +325,9 @@ pub(crate) fn send_error(provider: &str, e: reqwest::Error) -> ProviderError {
     } else if e.is_redirect() {
         ProviderError::Other(format!("{provider}: {}", with_causes(&e)))
     } else {
-        ProviderError::Network(e.to_string())
+        // With its causes: without the URL, "error sending request" alone
+        // would not say whether DNS, the connection or TLS failed.
+        ProviderError::Network(with_causes(&e))
     }
 }
 
