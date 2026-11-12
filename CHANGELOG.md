@@ -4,6 +4,10 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
+## Unreleased
+
+- **Provider requests no longer follow a redirect to another host.** A provider answering with a 307 or 308 to another origin had the whole request re-sent there: the prompt every time, and the key too from Anthropic (`x-api-key`) and Azure (`api-key`), since the HTTP client strips only `Authorization`-style headers on such a hop. It was re-sent on every retry as well. Every provider and decision backend now follows redirects only within the request's own origin (scheme, host and port), as the MCP HTTP transport already did by default. A redirect elsewhere fails the request at once with an error naming the other origin, and is not retried. Native targets only: on wasm32 the host's `fetch` follows redirects itself.
+
 ## 0.27.7 (2026-11-09)
 
 One preset, no breaking changes. yoagent-rutis (0.13.0) and yoagent-workers (0.4.0) are unchanged.

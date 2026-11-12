@@ -67,8 +67,17 @@ enum Key {
 /// kept and returned by every request instead.
 pub(crate) type HttpClient = Result<reqwest::Client, Arc<reqwest::Error>>;
 
+///
+/// Redirects are followed only within the request's origin, as the
+/// providers' ([`crate::provider::same_origin_redirects`]): another host
+/// would receive the state and the key.
 pub(crate) fn new_client() -> HttpClient {
-    reqwest::Client::builder().build().map_err(|e| {
+    let builder = reqwest::Client::builder();
+    #[cfg(not(target_arch = "wasm32"))]
+    let builder = builder.redirect(crate::provider::same_origin_redirects(
+        "refused, so the request and its key do not go there",
+    ));
+    builder.build().map_err(|e| {
         // Seen at startup, not only at the first evaluation.
         tracing::warn!(
             "decision backend: {}",
@@ -517,6 +526,10 @@ pub(crate) async fn post_json(
         // never succeed: not a transport failure to retry.
         if e.is_builder() {
             DecisionError::Invalid(format!("the request could not be built: {e}"))
+        } else if e.is_redirect() {
+            // Refused by the policy above: not retried.
+            let e = e.without_url();
+            DecisionError::backend_with_source(crate::provider::with_causes(&e), e)
         } else {
             DecisionError::transport_with_source(e.to_string(), e)
         }

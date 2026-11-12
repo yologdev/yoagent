@@ -79,7 +79,7 @@ impl StreamProvider for GoogleVertexProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| ProviderError::Network(e.to_string()))?;
+            .map_err(|e| super::send_error("Vertex AI", e))?;
 
         if !response.status().is_success() {
             let status = response.status();

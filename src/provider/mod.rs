@@ -252,10 +252,81 @@ pub(crate) fn client_build_error_text(e: &reqwest::Error) -> String {
 /// panics when the client cannot be built (a CA bundle that loads no
 /// certificates), which took down the task running the agent; this is an
 /// error instead, not retried.
+///
+/// Redirects are followed only within the request's own origin
+/// ([`same_origin_redirects`]). reqwest's default follows any redirect and,
+/// on a cross-origin hop, strips only `Authorization`, `Cookie` and
+/// `Proxy-Authorization`: a 307/308 to another host received the prompt
+/// and, from Anthropic's `x-api-key` and Azure's `api-key`, the key
+/// (yoyo-evolve#1181). wasm32 has no redirect policy; the host's `fetch`
+/// follows redirects itself.
 pub(crate) fn http_client() -> Result<reqwest::Client, ProviderError> {
-    reqwest::Client::builder()
+    let builder = reqwest::Client::builder();
+    #[cfg(not(target_arch = "wasm32"))]
+    let builder = builder.redirect(same_origin_redirects(
+        "refused, so the request and its key do not go there",
+    ));
+    builder
         .build()
         .map_err(|e| ProviderError::Other(client_build_error_text(&e)))
+}
+
+/// A redirect policy following redirects only to the first URL's origin
+/// (scheme, host and port: `https` to `http` is another origin), up to 10.
+/// Any other is an error naming the target's origin, then `refused`
+/// (what refusing it protects). Shared by the providers, the decision
+/// backends and the MCP HTTP transport's default.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn same_origin_redirects(refused: &'static str) -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt.previous().len() > 10 {
+            return attempt.error(RedirectRefused("more than 10 redirects".into()));
+        }
+        let Some(origin) = attempt.previous().first().map(|from| from.origin()) else {
+            return attempt.follow();
+        };
+        if attempt.url().origin() == origin {
+            attempt.follow()
+        } else {
+            let to = attempt.url().origin().ascii_serialization();
+            let from = origin.ascii_serialization();
+            attempt.error(RedirectRefused(format!(
+                "the server redirected to {to}, outside {from}; {refused}"
+            )))
+        }
+    })
+}
+
+/// Why a redirect was not followed (the source of reqwest's redirect error).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+pub(crate) struct RedirectRefused(pub(crate) String);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::fmt::Display for RedirectRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::error::Error for RedirectRefused {}
+
+/// A provider request's `send()` failure. A request reqwest could not build
+/// (a malformed URL) or a redirect refused by [`same_origin_redirects`] is
+/// [`ProviderError::Other`]: retrying cannot fix it, and a refused redirect
+/// retried would knock on the same door again. Anything else is
+/// [`ProviderError::Network`], retried. The text leaves out the request's
+/// URL, which may carry a key (Gemini's once did).
+pub(crate) fn send_error(provider: &str, e: reqwest::Error) -> ProviderError {
+    let e = e.without_url();
+    if e.is_builder() {
+        ProviderError::Other(format!("could not build the {provider} request: {e}"))
+    } else if e.is_redirect() {
+        ProviderError::Other(format!("{provider}: {}", with_causes(&e)))
+    } else {
+        ProviderError::Network(e.to_string())
+    }
 }
 
 /// What a model without image input is sent in place of an image.
