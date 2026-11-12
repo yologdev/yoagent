@@ -326,7 +326,8 @@ impl ProviderError {
 ///
 /// - `InvalidStatusCode` — reads the response body and classifies via
 ///   [`ProviderError::classify()`] (context overflow, rate limit, auth, etc.).
-/// - `Transport` — maps to [`ProviderError::Network`] (retryable).
+/// - `Transport` — maps to [`ProviderError::Network`] (retryable), except a
+///   redirect the client refused (another origin): [`ProviderError::Other`].
 /// - `StreamEnded` — the HTTP body ended *legally* (terminal chunk, exact
 ///   `Content-Length`, or a close-framed response) but the SSE payload carried
 ///   no terminator. Note this is **not** the connection-reset case: a mid-body
@@ -361,6 +362,11 @@ pub async fn classify_eventsource_error(error: reqwest_eventsource::Error) -> Pr
                 ),
                 retry_after_ms,
             )
+        }
+        // A redirect refused by the client's policy is not a network fault:
+        // retrying it would only be refused again.
+        reqwest_eventsource::Error::Transport(e) if e.is_redirect() => {
+            ProviderError::Other(super::with_causes(&e.without_url()))
         }
         reqwest_eventsource::Error::Transport(e) => ProviderError::Network(format!("{:?}", e)),
         reqwest_eventsource::Error::StreamEnded => ProviderError::Network(

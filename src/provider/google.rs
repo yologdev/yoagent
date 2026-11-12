@@ -100,7 +100,7 @@ impl StreamProvider for GoogleProvider {
             .json(&body)
             .send()
             .await
-            .map_err(|e| ProviderError::Network(e.to_string()))?;
+            .map_err(|e| super::send_error("Google", e))?;
 
         if !response.status().is_success() {
             let status = response.status();

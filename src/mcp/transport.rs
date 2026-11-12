@@ -1047,42 +1047,15 @@ fn redirect_policy(redirects: Redirects) -> reqwest::redirect::Policy {
                 "the server redirected (to {to}); redirects are off (HttpTransport::with_redirects)"
             )))
         }),
-        Redirects::SameOrigin => Policy::custom(|attempt| {
-            if attempt.previous().len() > 10 {
-                return attempt.error(RedirectRefused("more than 10 redirects".into()));
-            }
-            let Some(origin) = attempt.previous().first().map(|from| from.origin()) else {
-                return attempt.follow();
-            };
-            if attempt.url().origin() == origin {
-                attempt.follow()
-            } else {
-                let to = url_origin(attempt.url());
-                let from = origin.ascii_serialization();
-                attempt.error(RedirectRefused(format!(
-                    "the server redirected to {to}, outside {from}; refused, so the \
-                     transport's headers do not go there (HttpTransport::with_redirects)"
-                )))
-            }
-        }),
+        Redirects::SameOrigin => crate::provider::same_origin_redirects(
+            "refused, so the transport's headers do not go there (HttpTransport::with_redirects)",
+        ),
         Redirects::Any => Policy::limited(10),
     }
 }
 
-/// Why a redirect was not followed.
 #[cfg(not(target_arch = "wasm32"))]
-#[derive(Debug)]
-struct RedirectRefused(String);
-
-#[cfg(not(target_arch = "wasm32"))]
-impl std::fmt::Display for RedirectRefused {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl std::error::Error for RedirectRefused {}
+use crate::provider::RedirectRefused;
 
 /// Where a URL points, and nothing that may be a credential: its scheme,
 /// host and port. The path (some services put a key in it), query, fragment

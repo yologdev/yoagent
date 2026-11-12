@@ -504,14 +504,9 @@ fn header_value(value: &str, name: &str, sensitive: bool) -> Result<HeaderValue,
     Ok(v)
 }
 
-/// A `send()` failure. A request reqwest could not even build is a
-/// configuration error, not a retryable network failure.
+/// A `send()` failure ([`super::send_error`]).
 fn send_error(e: reqwest::Error) -> ProviderError {
-    if e.is_builder() {
-        ProviderError::Other(format!("could not build the Bedrock request: {e}"))
-    } else {
-        ProviderError::Network(e.to_string())
-    }
+    super::send_error("Bedrock", e)
 }
 
 /// The SigV4 headers (`x-amz-date`, `x-amz-security-token` with a session
