@@ -67,15 +67,16 @@ enum Key {
 /// kept and returned by every request instead.
 pub(crate) type HttpClient = Result<reqwest::Client, Arc<reqwest::Error>>;
 
-///
-/// Redirects are followed only within the request's origin, as the
-/// providers' ([`crate::provider::same_origin_redirects`]): another host
-/// would receive the state and the key.
+/// A decision backend's [`HttpClient`]. Redirects are followed only within
+/// the request's origin, as the providers' clients do
+/// ([`crate::provider::same_origin_redirects`]): another host would receive
+/// the request (its state and questions). The key goes in `Authorization`,
+/// which reqwest already drops on such a hop.
 pub(crate) fn new_client() -> HttpClient {
     let builder = reqwest::Client::builder();
     #[cfg(not(target_arch = "wasm32"))]
     let builder = builder.redirect(crate::provider::same_origin_redirects(
-        "refused, so the request and its key do not go there",
+        "refused, so the request does not go there",
     ));
     builder.build().map_err(|e| {
         // Seen at startup, not only at the first evaluation.
@@ -528,8 +529,9 @@ pub(crate) async fn post_json(
             DecisionError::Invalid(format!("the request could not be built: {e}"))
         } else if e.is_redirect() {
             // Refused by the policy above: not retried.
-            let e = e.without_url();
-            DecisionError::backend_with_source(crate::provider::with_causes(&e), e)
+            // The whole reason in the message (callers print that), so
+            // no source: it would print it twice.
+            DecisionError::backend(crate::provider::with_causes(&e.without_url()))
         } else {
             DecisionError::transport_with_source(e.to_string(), e)
         }

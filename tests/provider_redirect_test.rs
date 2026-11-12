@@ -177,3 +177,33 @@ async fn a_decision_backend_does_not_follow_a_redirect_to_another_origin() {
     assert!(elsewhere.received_requests().await.unwrap().is_empty());
     assert_eq!(first.received_requests().await.unwrap().len(), 1);
 }
+
+/// A same-origin redirect loop ends after 10 hops with an error: the custom
+/// policy has no cap of its own, and a provider request no timeout, so a
+/// broken cap would hang the agent.
+#[tokio::test]
+async fn a_same_origin_redirect_loop_stops_after_ten_hops() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/messages"))
+        .respond_with(ResponseTemplate::new(307).insert_header("location", "/messages"))
+        .mount(&server)
+        .await;
+    let err = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        send(
+            &AnthropicProvider,
+            ApiProtocol::AnthropicMessages,
+            server.uri(),
+        ),
+    )
+    .await
+    .expect("the loop ended")
+    .expect_err("never answered");
+    assert!(
+        matches!(&err, ProviderError::Other(m) if m.contains("more than 10 redirects")),
+        "{err:?}"
+    );
+    // The first request and 10 followed hops.
+    assert_eq!(server.received_requests().await.unwrap().len(), 11);
+}

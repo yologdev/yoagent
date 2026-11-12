@@ -256,8 +256,10 @@ pub(crate) fn client_build_error_text(e: &reqwest::Error) -> String {
 /// Redirects are followed only within the request's own origin
 /// ([`same_origin_redirects`]). reqwest's default follows any redirect and,
 /// on a cross-origin hop, strips only `Authorization`, `Cookie` and
-/// `Proxy-Authorization`: a 307/308 to another host received the prompt
-/// and, from Anthropic's `x-api-key` and Azure's `api-key`, the key
+/// `Proxy-Authorization`. Another host received every other header — the
+/// key in Anthropic's `x-api-key`, Azure's `api-key`, Gemini's
+/// `x-goog-api-key`, Bedrock's `x-amz-security-token`, any in
+/// `ModelConfig::headers` — and, on a 307/308, the prompt too
 /// (yoyo-evolve#1181). wasm32 has no redirect policy; the host's `fetch`
 /// follows redirects itself.
 pub(crate) fn http_client() -> Result<reqwest::Client, ProviderError> {
@@ -316,18 +318,24 @@ impl std::error::Error for RedirectRefused {}
 /// (a malformed URL) or a redirect refused by [`same_origin_redirects`] is
 /// [`ProviderError::Other`]: retrying cannot fix it, and a refused redirect
 /// retried would knock on the same door again. Anything else is
-/// [`ProviderError::Network`], retried. The text leaves out the request's
-/// URL, which may carry a key (Gemini's once did).
+/// [`ProviderError::Network`], retried. The text names the request's
+/// origin but leaves out the rest of its URL, which may carry a key
+/// (Gemini's once did).
 pub(crate) fn send_error(provider: &str, e: reqwest::Error) -> ProviderError {
+    // The origin names the host that failed; the rest of the URL is left out.
+    let at = e
+        .url()
+        .map(|u| format!(" ({})", u.origin().ascii_serialization()))
+        .unwrap_or_default();
     let e = e.without_url();
     if e.is_builder() {
-        ProviderError::Other(format!("could not build the {provider} request: {e}"))
+        ProviderError::Other(format!("could not build the {provider} request{at}: {e}"))
     } else if e.is_redirect() {
         ProviderError::Other(format!("{provider}: {}", with_causes(&e)))
     } else {
-        // With its causes: without the URL, "error sending request" alone
-        // would not say whether DNS, the connection or TLS failed.
-        ProviderError::Network(with_causes(&e))
+        // With its causes: "error sending request" alone would not say
+        // whether DNS, the connection or TLS failed.
+        ProviderError::Network(format!("{provider}{at}: {}", with_causes(&e)))
     }
 }
 
