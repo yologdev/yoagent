@@ -4,7 +4,9 @@ All notable changes to `yoagent` are documented here. The format loosely
 follows [Keep a Changelog](https://keepachangelog.com/), and the project
 adheres to [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## 0.27.8 (2026-11-12)
+
+One security fix, no breaking changes. yoagent-rutis (0.13.0) and yoagent-workers (0.4.0) are unchanged.
 
 - **Provider requests no longer follow a redirect to another host.** A provider answering with a redirect to another origin had the request re-sent there with every header except `Authorization`, `Cookie` and `Proxy-Authorization`. That carried the key from Anthropic (`x-api-key`), Azure (`api-key`), Gemini (`x-goog-api-key`), Bedrock's session token (`x-amz-security-token`) and any credential in `ModelConfig::headers`. A 307 or 308 carried the whole prompt too. It was re-sent on every retry as well. A decision backend's redirected request carried its state and questions; its key, sent as `Authorization`, did not go. Every provider and decision backend now follows redirects only within the request's own origin (scheme, host and port), as the MCP HTTP transport already did by default. A redirect elsewhere fails the request at once with an error naming the other origin, and is not retried. Native targets only: on wasm32 the host's `fetch` follows redirects itself.
 
