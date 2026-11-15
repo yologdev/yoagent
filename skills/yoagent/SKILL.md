@@ -5,7 +5,7 @@ description: Use when building, extending or upgrading an agent on the yoagent R
 
 # yoagent: which feature for which job
 
-Written for **yoagent 0.27.8** (and yoagent-rutis 0.13.0); the recipes
+Written for **yoagent 0.27.9** (and yoagent-rutis 0.13.0); the recipes
 below are compiled by `tests/skill_test.rs`, line for line. Check what you
 build against: `cargo tree -p yoagent` or `Cargo.lock`. If you are on an
 older version, read [What changed](#what-changed) first.
@@ -281,6 +281,10 @@ UI, model layer, agents) rather than add agent tools.
 
 Newest first; the full list is `CHANGELOG.md`.
 
+- **0.27.9** — Bedrock with thinking on always sends `maxTokens` above the
+  budget: the request's `max_tokens`, else the model config's, else 8,192,
+  raised to budget + 1,024 when it does not exceed it (as the Anthropic
+  provider does). A preset's `max_tokens` is now sent with thinking on.
 - **0.27.8** — security fix: provider and decision-backend requests follow
   redirects only within their own origin. A redirect to another host fails
   (`ProviderError::Other`, not retried) instead of re-sending the prompt and
