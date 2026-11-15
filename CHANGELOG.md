@@ -6,7 +6,7 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## Unreleased
 
-- **Bedrock with thinking on always sends `maxTokens` above the thinking budget.** Anthropic requires `budget_tokens < max_tokens`, but the Bedrock provider sent `inferenceConfig.maxTokens` only when the request set one, and never raised it. With no `max_tokens`, or one at or below the budget (8,192 at `High`), the request was invalid or relied on Bedrock's default. It now does what the first-party Anthropic path does: the request's `max_tokens`, else the model config's, raised to `budget + 1024` when it does not exceed the budget. With thinking off nothing changes (yoyo-evolve#1198).
+- **Bedrock with thinking on always sends `maxTokens` above the thinking budget.** Anthropic requires `budget_tokens < max_tokens`, but the Bedrock provider sent `inferenceConfig.maxTokens` only when the request set one, and never raised it. With no `max_tokens`, or one at or below the budget (8,192 at `High`), the request was invalid or relied on Bedrock's default. It now applies the first-party Anthropic rule: the request's `max_tokens`, else the model config's, else 8,192, raised to `budget + 1024` when it does not exceed the budget. A preset's `max_tokens` (e.g. 64,000) is now sent with thinking on, and Bedrock reserves it against the account's tokens-per-minute quota while the request runs; set a smaller `max_tokens` if that throttles you. With thinking off nothing changes (yoyo-evolve#1198).
 
 ## 0.27.8 (2026-11-12)
 

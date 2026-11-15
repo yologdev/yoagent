@@ -79,7 +79,7 @@ Legacy budgets: `Minimal`/`Low` 1,024 (the API minimum), `Medium` 2,048,
 `High` 8,192, `XHigh` 16,384, `Max` 30,720. On this provider `max_tokens` is
 automatically raised to budget + 1,024 when needed (`Max` stops at 30,720 so
 that budget + 1,024 still fits Opus 4/4.1's 32,000-token output ceiling).
-Bedrock uses the same budgets and raises `maxTokens` the same way.
+Bedrock uses the same budgets and the same `max_tokens` rule (with thinking on).
 
 Thinking content is streamed as `Content::Thinking` with a cryptographic `signature` for verification.
 

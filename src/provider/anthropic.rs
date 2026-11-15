@@ -548,7 +548,7 @@ impl StreamProvider for AnthropicProvider {
 // Anthropic API request/response types
 // ---------------------------------------------------------------------------
 
-fn build_request_body(config: &StreamConfig, is_oauth: bool) -> serde_json::Value {
+pub(super) fn build_request_body(config: &StreamConfig, is_oauth: bool) -> serde_json::Value {
     let mut messages: Vec<serde_json::Value> = Vec::new();
 
     for msg in &config.messages {

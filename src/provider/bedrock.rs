@@ -1258,10 +1258,10 @@ fn bedrock_thinking_budget(level: ThinkingLevel) -> u32 {
 /// `inferenceConfig.maxTokens` to send. Without thinking, only an explicit
 /// request value is sent (Bedrock applies its own default otherwise). With
 /// thinking, Anthropic requires `budget_tokens < max_tokens`, and an omitted
-/// `maxTokens` is not reliably the model's maximum, so — as on the
-/// first-party path — the request value, else the model's configured
-/// `max_tokens`, is sent, raised to `budget + 1024` when it does not exceed
-/// the budget (yoyo-evolve#1198).
+/// `maxTokens` is not reliably the model's maximum, so the first-party rule
+/// applies: the request value, else the model's configured `max_tokens`,
+/// else 8,192, raised to `budget + 1024` when it does not exceed the budget
+/// (yoyo-evolve#1198).
 fn bedrock_max_tokens(config: &StreamConfig) -> Option<u32> {
     if config.thinking_level == ThinkingLevel::Off {
         return config.max_tokens;
@@ -1269,17 +1269,16 @@ fn bedrock_max_tokens(config: &StreamConfig) -> Option<u32> {
     let budget = bedrock_thinking_budget(config.thinking_level);
     let max = config
         .max_tokens
-        .or(config.model_config.as_ref().map(|mc| mc.max_tokens));
-    match max {
-        Some(max) if max > budget => Some(max),
-        _ => {
-            tracing::debug!(
-                "Raising Bedrock maxTokens from {max:?} to {} to exceed the thinking budget",
-                budget + 1024
-            );
-            Some(budget + 1024)
-        }
+        .or(config.model_config.as_ref().map(|mc| mc.max_tokens))
+        .unwrap_or(8192);
+    if max > budget {
+        return Some(max);
     }
+    tracing::debug!(
+        "Raising Bedrock maxTokens from {max} to {} to exceed the thinking budget",
+        budget + 1024
+    );
+    Some(budget + 1024)
 }
 
 fn build_bedrock_body(config: &StreamConfig) -> serde_json::Value {
@@ -1773,6 +1772,70 @@ mod tests {
         let mut max = base(None, None);
         max.thinking_level = ThinkingLevel::Max;
         assert_eq!(sent(max), 30_720 + 1024);
+    }
+
+    /// The rule itself, read from one body, at every thinking level and
+    /// around each budget — and the same value the first-party Anthropic
+    /// path sends for a budget-thinking model, so the two copies cannot drift.
+    #[test]
+    fn every_level_sends_max_tokens_above_its_budget_as_anthropic_does() {
+        for level in [
+            ThinkingLevel::Minimal,
+            ThinkingLevel::Low,
+            ThinkingLevel::Medium,
+            ThinkingLevel::High,
+            ThinkingLevel::XHigh,
+            ThinkingLevel::Max,
+        ] {
+            let b = bedrock_thinking_budget(level);
+            for max in [
+                None,
+                Some(1),
+                Some(b - 1),
+                Some(b),
+                Some(b + 1),
+                Some(64_000),
+            ] {
+                let config = StreamConfig {
+                    model: "claude-sonnet-4-20250514".into(),
+                    system_prompt: "".into(),
+                    messages: vec![Message::user("hi")],
+                    tools: vec![],
+                    thinking_level: level,
+                    api_key: "a:b".into(),
+                    max_tokens: max,
+                    temperature: None,
+                    // Budget thinking on the Anthropic side (its default is
+                    // adaptive); a model max of 4,096 is above some budgets
+                    // and below others. Bedrock ignores the compat setting.
+                    model_config: Some({
+                        let mut mc = crate::provider::ModelConfig::mock();
+                        mc.max_tokens = 4096;
+                        mc.anthropic = Some(crate::provider::AnthropicCompat::legacy());
+                        mc
+                    }),
+                    cache_config: CacheConfig::default(),
+                    output_schema: None,
+                };
+                let body = build_bedrock_body(&config);
+                let sent = body["inferenceConfig"]["maxTokens"].as_u64().unwrap();
+                let budget = body["additionalModelRequestFields"]["thinking"]["budget_tokens"]
+                    .as_u64()
+                    .unwrap();
+                assert!(sent > budget, "{level:?} {max:?}: {sent} <= {budget}");
+                let anthropic = super::super::anthropic::build_request_body(&config, false);
+                assert_eq!(
+                    anthropic["thinking"]["budget_tokens"].as_u64(),
+                    Some(budget),
+                    "{level:?}"
+                );
+                assert_eq!(
+                    anthropic["max_tokens"].as_u64(),
+                    Some(sent),
+                    "{level:?} {max:?}"
+                );
+            }
+        }
     }
 
     #[test]
