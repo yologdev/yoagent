@@ -210,8 +210,13 @@ Bedrock uses its own content block format:
 
 `ThinkingLevel` is sent as Anthropic's legacy budget-based thinking
 (`additionalModelRequestFields.thinking.budget_tokens`); budgets per level are in
-the [`ThinkingLevel` table](../reference/configuration.md#thinkinglevel). Bedrock does not raise `maxTokens` above the
-budget, so set `max_tokens` higher yourself (for `Max`, above 30,720). Claude
+the [`ThinkingLevel` table](../reference/configuration.md#thinkinglevel). With thinking on,
+`maxTokens` is always sent: the request's `max_tokens`, else the model config's,
+else 8,192, raised to budget + 1,024 when it does not exceed the budget (as the
+Anthropic provider does). A preset's `max_tokens` (e.g. 64,000) is therefore sent
+too, and Bedrock reserves it against your account's tokens-per-minute quota
+while each request runs; if that throttles concurrent requests, set a smaller
+`max_tokens` (it is still raised above the budget). Claude
 4.7+ models (Opus 4.7/4.8 and the generation after; see the
 [Anthropic provider page](anthropic.md#thinking)) reject budget-based thinking,
 so thinking is not usable with them on this provider yet.

@@ -395,6 +395,34 @@ async fn run_agent(first: Vec<u8>, rest: Vec<u8>) -> (Vec<Value>, Vec<AgentMessa
     (ran, agent.messages().to_vec(), server)
 }
 
+/// yoyo-evolve#1198: with thinking on, the agent's request carries
+/// `maxTokens` above the budget — the model config's 16,000 as is, and an
+/// agent-level `max_tokens` at or below the budget raised to budget + 1,024.
+#[tokio::test]
+async fn thinking_requests_carry_max_tokens_above_the_budget() {
+    for (agent_max, sent) in [(None, 16_000), (Some(4096), 8192 + 1024)] {
+        let server = serve(text_response("ok")).await;
+        let mut config = model_config(&server.uri());
+        config.max_tokens = 16_000;
+        let mut agent = Agent::from_provider(BedrockProvider, config)
+            .with_api_key("test-bedrock-api-key")
+            .with_thinking(ThinkingLevel::High);
+        if let Some(max) = agent_max {
+            agent = agent.with_max_tokens(max);
+        }
+        let mut rx = agent.prompt("hi").await;
+        while rx.recv().await.is_some() {}
+        agent.finish().await;
+        let requests = server.received_requests().await.unwrap();
+        let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(
+            body["additionalModelRequestFields"]["thinking"]["budget_tokens"],
+            8192
+        );
+        assert_eq!(body["inferenceConfig"]["maxTokens"], sent, "{agent_max:?}");
+    }
+}
+
 fn tool_results(messages: &[AgentMessage]) -> Vec<(bool, String)> {
     messages
         .iter()

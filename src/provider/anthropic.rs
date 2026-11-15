@@ -548,7 +548,7 @@ impl StreamProvider for AnthropicProvider {
 // Anthropic API request/response types
 // ---------------------------------------------------------------------------
 
-fn build_request_body(config: &StreamConfig, is_oauth: bool) -> serde_json::Value {
+pub(super) fn build_request_body(config: &StreamConfig, is_oauth: bool) -> serde_json::Value {
     let mut messages: Vec<serde_json::Value> = Vec::new();
 
     for msg in &config.messages {
@@ -831,8 +831,7 @@ fn build_request_body(config: &StreamConfig, is_oauth: bool) -> serde_json::Valu
 /// `max_tokens` to `budget + 1024` when it is too small, and the smallest
 /// output ceiling among budget-thinking models is Opus 4/4.1's 32,000 — so
 /// 30,720 + 1,024 still fits where 32,768 + 1,024 would be rejected. Also used
-/// by Bedrock, which does **not** raise `maxTokens`: Bedrock callers must set
-/// `max_tokens` above the budget themselves (for `Max`, above 30,720).
+/// by Bedrock, which raises `maxTokens` the same way.
 pub(crate) fn legacy_thinking_budget(level: ThinkingLevel) -> u32 {
     match level {
         ThinkingLevel::Off => 0,
